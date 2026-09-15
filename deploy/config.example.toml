@@ -1,0 +1,69 @@
+[paths]
+library   = "/library"
+derived   = "/derived"
+archive   = "/archive"
+inbox     = "/inbox"
+playlists = "/playlists"
+data      = "/data"
+
+[layout]
+multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02} {title}"
+single_disc = "{category}/{albumartist}/{album}/{track:02} {title}"
+unsorted    = "_Unsorted/{albumartist}/{album}/{track:02} {title}"
+
+[rip]
+device = "/dev/sr0"
+drive_offset = "auto"           # auto | 整数
+retry_on_mismatch = 2
+prefer_ctdb = true
+
+[encode]
+derived_codec = "opus"
+derived_bitrate = 128
+flac_compression = 8
+
+[replaygain]
+reference_lufs = -18.0          # 内部表現。Opus のみ書き出し時に -23 へ変換
+write_tags = true
+
+[normalize]
+wav_to_flac = true
+flac_verify_on_import = true
+flac_fix_missing_md5 = true
+flac_recompress_all = false     # 圧縮レベル統一のための一括再エンコードはしない
+
+[scan]
+deep_interval_days = 30         # tag_hash / audio_md5 を全件再計算する deep scan の間隔。0 で自動実行なし
+
+[gc]
+retention_days = 30             # missing_since / 退避 WAV / Derived 孤児を物理削除するまでの日数
+
+[auth]                          # 認証は常に有効（無効化する設定は無い）
+                                # 初期パスワードは環境変数 SPINDLE_INITIAL_PASSWORD（初回起動時のみ）
+session_days = 30
+trusted_cidrs = []              # 例: ["192.168.1.0/24"]。stream / artwork / tracks/:id / playlist export だけ認証スキップ
+trusted_proxies = []            # ここからの X-Forwarded-* だけを信用する
+
+[backup]
+interval_hours = 24
+retention_generations = 14
+
+[export]
+autoexport_debounce_sec = 30
+fb2k_prefix = "\\\\TRUENAS\\music\\"
+
+[musicbrainz]
+user_agent = "spindle/0.1 (contact@example.com)"
+rate_limit_per_sec = 1
+
+[ytmusic]
+enabled = true
+rules = "rules/ytmusic.toml"
+
+[bin]
+ffmpeg = "ffmpeg"
+flac = "flac"
+opusenc = "opusenc"
+cdparanoia = "cd-paranoia"
+cdrdao = "cdrdao"
+ytdlp = "yt-dlp"

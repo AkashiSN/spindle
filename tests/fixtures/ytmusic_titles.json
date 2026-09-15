@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "ytmusic のタイトルパーサ移植用フィクスチャ。",
+    "Python 版と Rust 版の両方がこのファイルを読み、同じ結果になることを確認する。",
+    "AkashiSN/ytmusic の既存テスト 83 件をここへ移すこと（P3-1 の最初の作業）。",
+    "expected に null を書いた項目は「その要素を抽出しない」ことを意味する。"
+  ],
+  "cases": [
+    {
+      "input": "【MV】曲名 / アーティスト名",
+      "channel": "example-channel",
+      "expected": { "title": "曲名", "artist": "アーティスト名", "kind": "mv" }
+    },
+    {
+      "input": "アーティスト名 - 曲名 (Official Music Video)",
+      "channel": "example-channel",
+      "expected": { "title": "曲名", "artist": "アーティスト名", "kind": "mv" }
+    },
+    {
+      "input": "曲名",
+      "channel": "example-channel",
+      "expected": { "title": "曲名", "artist": null, "kind": null }
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+services:
+  spindle:
+    image: ghcr.io/akashisn/spindle:latest
+    devices:
+      - /dev/sr0:/dev/sr0
+      - /dev/sg0:/dev/sg0          # SG_IO に必要
+    group_add:
+      - "24"                       # host の cdrom グループ GID
+    device_cgroup_rules:
+      - 'b 11:* rmw'               # sr (block)
+      - 'c 21:* rmw'               # sg (char)
+    user: "1000:1000"              # 既存ライブラリの所有者に合わせること
+    volumes:
+      - /mnt/tank/media/Library:/library
+      - /mnt/tank/media/Derived:/derived
+      - /mnt/tank/media/Archive:/archive
+      - /mnt/tank/media/Inbox:/inbox
+      - /mnt/tank/media/Playlists:/playlists
+      - /mnt/tank/apps/spindle:/data
+    environment:
+      # 初回起動時のみ読まれ、argon2id でハッシュして DB に保存される。以後は無視。
+      # 既定値は置かない: 与えなければ compose が起動を拒む（既知パスワードでの初期化を防ぐ）。
+      # 設定後はこの行を消してよい（平文が compose に残るのを避ける）
+      - SPINDLE_INITIAL_PASSWORD=${SPINDLE_INITIAL_PASSWORD:?初回起動の管理パスワードを設定してください}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

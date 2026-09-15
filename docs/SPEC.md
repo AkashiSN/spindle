@@ -1,0 +1,1349 @@
+# spindle — 設計仕様
+
+> ステータス: ドラフト v0.2 / 主要な設計判断は確定済み
+>
+> CD を積むスピンドルから。バイナリ名・コマンド名も `spindle`。
+
+---
+
+## 1. 目的とスコープ
+
+TrueNAS 上で動作する単一コンテナのWebアプリケーション。CDリッピング、メディアライブラリ管理、
+メタデータ一括編集、ReplayGain、プレイリスト管理、簡易再生を提供する。
+Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic` を統合する。
+
+### 非目標
+
+- 高度な再生機能（ギャップレス、DSP チェーン、クロスフェード、ASIO/WASAPI 相当）
+- マルチユーザ、権限管理、公開インターネットへの露出
+- モバイルアプリ（ブラウザで足りる）
+- 音楽配信サーバ（Subsonic API 互換等）— **非対応で確定。**
+  Android へは Derived + m3u8 のファイル同期を継続する
+- DSD / SACD ISO の取り扱い
+
+### 規模想定
+
+- 総容量 300GB、1〜6万トラック
+- 単一ユーザ、LAN 内アクセスのみ
+- 常時稼働（NAS）
+
+---
+
+## 2. 用語
+
+| 用語 | 定義 |
+|---|---|
+| Library | 唯一の正となるメディアツリー。1トラック=1ファイル |
+| Derived | Library から生成される配布用 Opus。破棄・再生成可能 |
+| Archive | アプリが再生成できない生データ（YouTube webm 等）。追記のみ |
+| 配布ビュー (delivery) | 可逆なら Derived、非可逆なら Library を指す解決規則 |
+| Category | パス最上位階層。統制語彙。GENRE タグとは別概念 |
+| master | そのトラックについて手元にある最高品質のファイル（= Library の実体） |
+
+---
+
+## 3. 基本原則
+
+1. **ファイルが正、DBはキャッシュ。** DB を消してもファイルから再構築できること。
+   ただし以下は DB にしか存在しないため個別にバックアップする:
+   プレイリスト / 編集履歴 / 検証結果 / ジョブ履歴
+2. **パスは識別子ではない。** リネームは日常操作。同一性は inode と audio_md5 で解決する
+3. **音声とタグを分けて版管理する。** タグ編集で再エンコードを起こさないため
+4. **すべての破壊的操作はバッチ単位で巻き戻せる。** ZFS スナップショットは最後の砦であり、
+   一括編集の取り消しには粒度が粗すぎる
+5. **外部からの変更を前提とする。** SMB 経由で foobar2000 や他プレイヤーが同じファイルを
+   触る。アプリはファイルを排他ロックせず、再スキャンで調停する
+6. **ジョブは冪等。** コンテナ再起動、電源断、途中キャンセルから安全に再開できること
+
+---
+
+## 4. アーキテクチャ
+
+```
+┌─────────────────────────────────────────────────┐
+│  Browser (React SPA, rust-embed で同梱)          │
+└───────────────┬─────────────────────────────────┘
+                │ REST + SSE
+┌───────────────▼─────────────────────────────────┐
+│  axum HTTP server                               │
+│   ├── API handlers                              │
+│   ├── streaming (Range / on-the-fly transcode)  │
+│   └── SSE event bus                             │
+├─────────────────────────────────────────────────┤
+│  Job scheduler (tokio)                          │
+│   ├── queue: rip(並列1) / scan / rg /           │
+│   │          transcode / tagwrite / verify /    │
+│   │          normalize / thumbnail              │
+│   └── recovery on startup                       │
+├─────────────────────────────────────────────────┤
+│  Domain                                         │
+│   scanner / tagger / pathgen / rg /             │
+│   cdrom / accuraterip / musicbrainz / parser    │
+├─────────────────────────────────────────────────┤
+│  SQLite (WAL)          外部プロセス:             │
+│                        cd-paranoia / ffmpeg /   │
+│                        yt-dlp                   │
+└─────────────────────────────────────────────────┘
+```
+
+### 技術スタック
+
+| 領域 | 選定 | 備考 |
+|---|---|---|
+| 言語 | Rust (edition 2021+) | タグ書き込み・EBU R128・デコードが揃う唯一の現実解 |
+| HTTP | axum + tokio + tower-http | |
+| DB | rusqlite (bundled) + FTS5 | 書き込みは単一コネクション、読み込みはプール |
+| タグ | lofty | FLAC / Opus / MP4 / WAV を一貫 API |
+| デコード | symphonia | FLAC/ALAC/AAC/WAV。**Opus 非対応 → ffmpeg 経由** |
+| ラウドネス | ebur128 | libebur128 の純 Rust 移植 |
+| 正規表現 | fancy-regex | 後方参照・先読みが必要（ytmusic パーサ） |
+| HTTP client | reqwest | MusicBrainz / CTDB |
+| FFT | rustfft | 偽ハイレゾ検出（P3、任意） |
+| ファイル操作 | rustix | `openat2(RESOLVE_BENEATH \| RESOLVE_NO_SYMLINKS)`、dirfd 基準の open / rename |
+| フロント | React + TypeScript + TanStack Table/Virtual | |
+| 外部バイナリ | cd-paranoia, cdrdao, ffmpeg, yt-dlp, flac | コンテナイメージに同梱 |
+
+---
+
+## 5. ライブラリレイアウト
+
+```
+/mnt/tank/media/
+├── Library/                           [dataset] snapshot: 毎日 + 編集前
+│   └── <Category>/<AlbumArtist>/<Album>/
+│       ├── 1-01 Title.flac
+│       ├── cover.jpg
+│       ├── disc.cue                   CD リップ時のみ
+│       ├── disc.toc                   CD リップ時のみ
+│       ├── rip.log                    自前リップ時のみ
+│       └── verify.log                 遡及照合を行った場合
+├── Derived/                           [dataset] snapshot: なし
+│   └── <Category>/<AlbumArtist>/<Album>/1-01 Title.opus
+├── Archive/                           [dataset] snapshot: 週次
+│   └── <Category>/<AlbumArtist>/<Album>/Title.webm
+├── Inbox/                             [dataset] snapshot: なし
+│   └── （承認前の一時領域。ハイレゾ購入分などをここへ置く）
+└── Playlists/m3u8/
+
+/mnt/tank/apps/spindle/               [dataset] snapshot: 毎日
+├── spindle.db                        SQLite
+├── backup/                            VACUUM INTO による日次バックアップ
+├── thumbs/                            ハッシュアドレスのサムネイルキャッシュ
+├── tmp/                               リップ・変換の作業領域
+└── config.toml
+```
+
+### パステンプレート
+
+```toml
+[layout]
+multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02} {title}"
+single_disc = "{category}/{albumartist}/{album}/{track:02} {title}"
+unsorted    = "_Unsorted/{albumartist}/{album}/{track:02} {title}"
+```
+
+- 階層は Artist ではなく **AlbumArtist**。コンピレーションは `Various Artists`
+- マルチディスクはサブフォルダを作らず `1-01` 前置き（アルバム = 1ディレクトリを維持）
+- 発売年はパスに含めない。DATE / ORIGINALDATE タグは必ず保持する
+- パス衝突時のみ自動降格: `{album}` → `{album} ({year})` → `{album} ({edition})`
+- **衝突 = マージではない。** 配置前に MusicBrainz Release ID または DiscID で
+  同一リリース判定を行い、異なる場合は必ず別ディレクトリにする
+
+### ファイル名正規化
+
+ytmusic の foo_fileops 互換置換テーブルを継承し、以下を追加:
+
+```
+~ → ～   * → ＊   ∕ → ／   : → ：   > → ＞   < → ＜   ? → ？
+Ø → O   À → A   ô → o   è → e   é → e   ë → e   ゔ → う
+```
+
+- タグ値は NFC 正規化のみ（原文字を保持）、ファイル名にのみ置換テーブルを適用
+- SMB 制約: 末尾のドット・スペース禁止、予約名 (CON, PRN, AUX, NUL, COM1-9, LPT1-9) 回避
+- Android 側 exFAT 制約: パス長上限、`|` `"` 禁止
+- **各コンポーネント**は 255 バイト以下（ZFS / SMB の上限。パス全体の上限ではない）。
+  パス全体は Windows / Android 互換のため **240 文字（UTF-16 単位）**を上限とし、
+  超える場合はタイトル部を省略記号付きで切り詰める
+
+### パスの表現と境界
+
+DB・API・テンプレート展開・プレイリスト出力で扱うパスはすべて **root（Library / Derived /
+Archive / Inbox / Playlists のいずれか）からの相対パス**で、次を満たす文字列だけを受け付ける。
+満たさない入力は API では 400、スキャンでは「対象外」としてログに出す。
+
+- 区切りは `/`。先頭 `/` なし、空コンポーネントなし、`.` / `..` コンポーネントなし、
+  NUL なし、`\` を含まない
+- 各コンポーネントは §「ファイル名正規化」の SMB / exFAT 制約を満たす
+- 比較用に `casefold(NFD(path))` を **canonical key** として別列（`rel_path_key` /
+  `rel_dir_key`、Archive の `archived_files.rel_path_key` も同様）に持ち UNIQUE にする。
+  ZFS は `insensitive` + `formD` なので、SQLite の BINARY 比較で別と見えるパスが同じ
+  ファイルを指し得る。衝突判定・リネームの一意性・2 段階更新の一時パスはすべて key 側で
+  行う。表示は原文のまま
+- この key は **spindle 側の保守的な同値規則**であり、OpenZFS の `u8_textprep` と同一とは
+  言い切れない（ß、トルコ語の I、合字、Unicode バージョン差）。DB の key はあくまで
+  事前判定で、**最終的な衝突判定はファイルシステムに任せる**: 作成は `O_EXCL`、rename は
+  `RENAME_NOREPLACE` を使い、失敗したら衝突として扱う。導入時に対象 TrueNAS 上で
+  代表ケースの corpus を作成して両者の差を確認するテストを P0-5 に置く
+
+ファイルを開くときは**パス文字列を結合して open しない**。root の dirfd を起点に
+`openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`（`rustix`）で開く。canonicalize
+してから prefix を比較する方式は symlink の差し替え（TOCTOU）を防げない（D-31）。
+本番は Linux 5.6+ を前提とし、`openat2` が使えなければ**起動時に失敗**する（fail-fast）。
+非 Linux の開発機では実ファイルを触る結合テストを skip し、Linux の CI で走らせる。
+`canonicalize` + prefix 比較へのフォールバックは設けない。
+
+- スキャナは symlink を**辿らない**（ディレクトリもファイルも）。見つけたら対象外として
+  一覧に出す。hardlink（`nlink > 1`）は inode も md5 も同一性に使わず、`rel_path_key` だけで
+  解決して警告バッジを出す（D-26）
+- SMB / exFAT 制約に反する名前（禁止文字・末尾ドット/スペース・予約名）は**スキャナが
+  対象外にする**。したがって移行前の preflight でもブロッカーにする（§14、P0-14）
+- 書き込みの一時ファイルは**対象と同じディレクトリ**に `.spindle-tmp-<random>` で
+  `O_EXCL` 作成し、fsync → rename。取り残された `.spindle-tmp-*` はスキャンが回収する
+- 外部コマンドは `sh -c` を使わず引数配列で起動する。パスは対応するツールでは `--` の後、
+  非対応なら `./` を前置して先頭 `-` を無害化する。可能ならファイルを開いて
+  stdin / stdout で渡す。タイムアウト・終了コード検査・stderr のログ出力・
+  プロセスグループごとの kill を必須にする（規約）
+
+### Category
+
+- **パス決定に使う `category` と、ファイルに書く `GENRE` タグは別フィールド**
+  - GENRE は多値を取り得るがパスは単一値
+  - MusicBrainz 由来のジャンル文字列は表記揺れが激しい
+  - ジャンルは後から変わる。パス直結だと数千ファイルが動く
+- `categories` テーブルで統制語彙として管理、`genre_category_map` で自動推定
+- 語彙にマッチしないものは `_Unsorted/` に配置し、取り込みを止めない
+- ytmusic 由来のレーベル軸カテゴリ（神椿Studio 等）も同じ語彙表に混在させてよい
+
+---
+
+## 6. データモデル
+
+`db/migrations/0001_init.sql` を参照。主要な設計判断のみ以下に記す。
+
+### 同一性解決の優先順位
+
+1. `(dev, inode)` — 外部の rename や in-place のタグ書き換えでは inode は変わらない。
+   spindle 自身の tagwrite（tmp + rename、§7.5）は inode を変えるので、成功トランザクションで
+   DB を追随させる
+2. `audio_md5` — FLAC は STREAMINFO に非圧縮音声の MD5 を持つ。タグ変更で不変。
+   ALAC/WAV はデコードして算出。非可逆は算出しない（識別子としては使わない）
+3. `rel_path_key` 一致
+4. いずれも当たらなければ新規トラック
+
+**どの識別子も「トラック実体の一意 ID」ではない**ので、各段で候補を検証する（D-30）。
+そのために走査は**多相**で行い、判定は inventory 全体が揃ってから下す（§7.1）:
+
+| 段 | 候補の採用条件 | 外れる例 |
+|---|---|---|
+| inode | inventory 内でその `(dev, inode)` を持つパスが **1 つだけ**（2 つ以上なら hardlink とみなし、全候補で inode 段を無効化）、候補行が未 claim、`nlink = 1`、かつ `size` か `mtime_ns` のどちらかが一致。両方違えば `audio_md5` を計算して一致を要求 | inode 再利用（削除後に別ファイルが同じ inode を得る）、hardlink |
+| audio_md5 | 候補が**ちょうど 1 行**で、その行の `rel_path_key` が **inventory 全体に存在しない**（= 移動元が消えている。走査途中の未訪問ではなく、全 stat が終わった後に判定する） | コピー元が残っている、ベスト盤との重複、無音トラック |
+| rel_path_key | 候補が未 claim | — |
+
+- claim は `scan_runs.id` 単位（`tracks.seen_run_id`）。`seen_at` は時刻で、claim 判定には使わない
+  （epoch 秒では同秒の再実行と区別できない）
+- 複数のパスが同じ候補行を取り合ったら `rel_path_key` の昇順で先のものが取り、後は次の段へ落ちる。
+  順序が固定なので並列に stat しても結果は決定的
+- audio_md5 の候補が複数、または元パスが inventory にまだ存在する場合は**移動ではなく新規トラック**
+  として登録する。自動マージはしない。同一 `audio_md5` の active 行が 2 つ以上あるものは
+  `duplicate_groups` ビューに現れ、UI がバッジと一覧で示す（D-29）
+- `nlink > 1`、または inventory 内で同じ inode を複数パスが持つファイルは **inode 段と md5 段を飛ばし
+  `rel_path_key` だけで解決**し、警告バッジを出す。移行時は preflight のブロッカー（D-26）
+- **復活**: どの段で採用されても、候補行に `missing_since` があれば NULL に戻す
+- **missing の確定**: `scan_runs.state = 'completed'`（root を開けて walk がエラーなく完了）の finalize
+  でだけ、その run で claim されなかった active 行に `missing_since` を立てる。途中失敗・キャンセルの
+  run では立てない（SMB 一時切断で全曲が missing になる事故を防ぐ）
+
+### 変更検出と版の遷移
+
+音声の同一性を見るフィンガープリントは形式で分ける:
+
+| 形式 | 音声フィンガープリント | 用途 |
+|---|---|---|
+| FLAC | STREAMINFO の MD5（`audio_md5`） | 同一性（移動検出）と音声版 |
+| ALAC / WAV | デコードした PCM の MD5（`audio_md5`） | 同上 |
+| 非可逆（opus / aac / mp3 / ogg） | エンコード済みパケット列の SHA-256（`audio_fp`。demux のみ、デコードしない） | **音声版のみ**。同一性には使わない |
+
+| 観測 | 判定 | 版 |
+|---|---|---|
+| `(dev, inode, size, mtime_ns, ctime_ns)` すべて一致 | 変更なし | `seen_at` / `seen_run_id` のみ |
+| いずれか変化 → タグを読み `tag_hash` を再計算、音声フィンガープリントを再計算 | どちらも同じ | 版は動かさない |
+| 〃 | `tag_hash` のみ変化 | `tag_version++` |
+| 〃 | 音声フィンガープリントのみ変化 | `audio_version++` |
+| 〃 | 両方変化 | 両方 `++` |
+| spindle 自身の tagwrite / rename / RG 書き込み / MD5 補填（§7.9） | 音声は不変と**既知** | フィンガープリントを再計算せず `audio_version` 据え置き（tagwrite は `tag_version++` 済み） |
+
+非可逆のタグ書き換えはコンテナサイズを普通に変えるので、`size` の変化を音声の変化と
+みなしてはならない（不変条件 3）。パケット列のハッシュは demux だけで済み、外部変更が
+あったファイルにしか走らない。
+
+`ctime_ns` を含めるのは、mtime を保存して書き戻すタグツールや `cp -p` を検出するため。
+ZFS のスナップショット rollback は ctime も戻すので検出できない。これは **deep scan**
+（全ファイルの `tag_hash` と音声フィンガープリントを再計算。`[scan].deep_interval_days` 既定 30 日、
+UI から手動実行可）で吸収する。rollback を行ったら deep scan を手動で回すこと（運用手順）。
+
+`tag_version` は「同じ値の書き直し」で進めない。tagwrite の再実行や外部ツールによる
+同値の再保存で Derived の追随が空回りしないため。
+
+### 出自の3属性（直交）
+
+| 属性 | 値 |
+|---|---|
+| `source_type` | cd_rip / download / youtube / unknown |
+| `lossless` | コーデックから自動判定 |
+| `verification` | verified_ar / verified_ctdb / mismatch / **unverifiable** / not_attempted |
+
+`unverifiable` はハイレゾ・配信音源など TOC が存在しない音源。
+「未検証」とは意味が異なるため UI でも別バッジとする。
+
+### 版管理
+
+- `audio_version`: 音声バイト列が変わったら ++ → Derived 再エンコードが必要
+- `tag_version`: タグのみ変更で ++ → Derived はタグ上書きのみ
+
+`derived_files` に生成時の両版番号を記録し、差分で必要な処理を判定する。
+数千件の一括タグ編集後に再エンコードが走らないための中核機構。
+
+配布ビュー `delivery` は Derived の存在だけでなく**版の一致**を見る:
+
+| 状態 | 配布するもの |
+|---|---|
+| `src_audio_version = audio_version` かつ `src_tag_version = tag_version` | Derived |
+| 音声版は一致、タグ版のみ不一致 | Derived（`stale_tags = 1`。タグ上書きジョブが追随する） |
+| 音声版が不一致（再エンコード待ち） | **Library 原本へフォールバック** |
+
+音声が古い Derived を配ると、修復・差し替え前の音声を正常品として配ることになる。
+タグだけ古い場合に原本へ落とさないのは、容量の大きい可逆を配布してしまうため。
+
+### 全文検索（FTS5）
+
+`tracks_fts` は external content 方式（`content='tracks'`）。索引対象の
+`title / artist_display / album / albumartist` は**すべて `tracks` に実在する列**で
+なければならない（列値の取得と `rebuild` が content 表を直接読むため）。
+このため `tracks.album` を `albums.album` の複製キャッシュとして持ち、トリガで同期する。
+FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_at` 更新のたびに
+削除・再挿入が走ると、スキャンの最速パスが FTS 書き込みで律速される。
+
+### 論理削除
+
+`missing_since` による論理削除。SMB 一時切断やスキャン中のマウント欠落で行を物理削除すると、
+プレイリストと編集履歴が巻き添えになる。既定 30 日経過後に GC。
+
+### ReplayGain の内部表現
+
+- 内部は **RG 2.0 / -18 LUFS 基準の dB 値**で一元管理
+- 書き出し時にフォーマットごとへ変換:
+  - Opus: `R128_TRACK_GAIN` / `R128_ALBUM_GAIN`（Q7.8 固定小数、**-23 LUFS 基準**）
+  - FLAC / Ogg: `REPLAYGAIN_TRACK_GAIN` 等の Vorbis Comment
+  - MP4 (AAC/ALAC): RG 互換タグ
+- Opus への変換式（`G18` = 内部の dB 値 = `-18 - 測定 LUFS`）:
+  `R128 値 = round((G18 - 5.0) * 256)`、符号付き 16bit に飽和（-32768..32767）。
+  基準が 5 dB 低いので**必ず減算**する。テストベクトル: 測定 -18 LUFS → `G18 = 0`
+  → `R128 = -1280`。測定 -23 LUFS → `G18 = +5` → `R128 = 0`。
+  `OpusHead` の output gain は 0 のまま触らない（合成すると再解析時に二重に掛かる）
+- `rg_scanned_at` と `rg_written_at` を分離。数万件のスキャン後に書き込みが中断しても
+  再スキャンなしで書き込みのみ再開できる
+- album gain は `album_id` 単位。**2ch 以外は album 集計から除外**
+
+---
+
+## 7. パイプライン
+
+### 7.1 スキャン
+
+走査は 4 相。同一性の判定は inventory 全体が揃ってから行う（走査途中では「移動元が消えた」
+を判定できない）。DB への書き込みは最終相で単一 writer トランザクションにまとめる。
+
+```
+scan_runs に行を作る（state='running'）
+Phase 1  inventory:  walk(Library) を並列に stat（symlink は辿らず一覧へ）。
+                     (rel_path_key, dev, inode, nlink, size, mtime_ns, ctime_ns) をメモリに固定
+Phase 2  candidates: inventory の各エントリと既存行の候補を、inode → audio_md5 → rel_path_key の
+                     順で列挙（§6 の採用条件。md5 段の「移動元が消えている」は inventory 全体で判定）
+Phase 3  claim:      rel_path_key 昇順で決定的に採用。取り合いに負けたエントリは次の段へ。
+                     変更ありのエントリはここでタグ読込・フィンガープリント計算（並列）
+Phase 4  commit:     1 トランザクションで
+                       a. 採用行の rel_path / rel_path_key を「予約済み一時 key」へ全件移す
+                       b. 最終値へ全件移す（swap rename A↔B や循環でも UNIQUE を踏まない）
+                       c. 物理属性・タグ・版・seen_run_id・復活（missing_since=NULL）を反映
+                       d. 新規行の挿入
+                       e. album 照合（下記）。album の rel_dir も同じ 2 段階で更新
+                       f. state='completed' なら、この run で claim されなかった active 行に
+                          missing_since を立てる。failed / cancelled では立てない
+                     FTS はトリガで追随
+```
+
+**アルバムの照合**（ディレクトリ rename で album id を失わないため。D-32）:
+
+```
+ディレクトリ D に今回見つかったトラック集合 T(D) について
+  1. T(D) の行が直前まで属していた album を数える
+  2. mb_release_id / discid が一致する既存 album が**ちょうど 1 つ**で、その旧 rel_dir が
+     inventory に無ければそれ（複数一致なら自動では寄せない → 3 へ）
+  3. なければ、T(D) の過半数が属していた album A で、A の旧 rel_dir が inventory に無いもの
+     → A.rel_dir を D に書き換える（id 維持。verifications / artwork が残る）
+  4. どれにも当たらなければ新規 album
+分割（一部だけ別ディレクトリへ）: 移った側は新規 album、残った側は id 維持
+統合（2 ディレクトリが 1 つに）: 最多の album が id を維持、他は構成 0 になり
+  albums.missing_since を立てる（行は消さない。GC が回収）
+```
+
+- 初回フルスキャンは並列度 = CPU コア数。以降は最速パス（§6）で大半を飛ばす
+- 外部（foobar2000 等）による書き換えを検出したら DB を上書きする。
+  **ファイルが常に勝つ**（原則1）
+- **例外: ファイル反映待ちのトラック（`edit_ops.result = 'pending'` がある）は、
+  pending の op が所有する論理フィールドを再評価しない。** 一括編集は DB を先に更新し、
+  ファイルへの反映は非同期なので（§7.5）、この窓で「ファイルが勝つ」を適用すると
+  編集が DB から巻き戻され、後続の tagwrite と食い違う。
+  ただし**物理的な所在は pending 中も常に追随する**: `(dev, inode)` で見つけた
+  ファイルの `rel_path` / `size` / `mtime_ns` / `ctime_ns` は更新する。外部 rename は inode も
+  mtime も変えないので、これを止めると tagwrite が旧パスを開けなくなる。
+  抑止するのは `tags` op ならタグとキャッシュ列・`tag_version`、`rename` op なら
+  `rel_path`（外部 rename と衝突したら op を `skipped_conflict` にする）だけ。
+  外部 rename の**宛先が別の行（missing 行を含む）に占有されていた**場合は、Phase 4 で
+  その行の missing 確定と key の入れ替えを同じトランザクションで行う
+- 走査対象は Library のみ。Derived / Archive はスキャンしない
+
+### 7.2 CD 取り込み
+
+```
+[ディスク検出]  CDROM_DRIVE_STATUS ioctl を 2 秒間隔ポーリング
+   ↓            （udev がコンテナに届かないため）
+[TOC 取得]      cdrdao read-toc / SG_IO READ TOC
+   ↓
+[ID 算出]       MusicBrainz DiscID / AccurateRip id1,id2 / FreeDB ID
+   ↓            すべて TOC からの整数演算。libdiscid FFI 不要
+[メタデータ照会] MusicBrainz → 候補提示 → ユーザ確認・手動補正
+   ↓            ※同人・VTuber・インディーズ国内盤は MusicBrainz 未登録が常態。
+   ↓              照会結果ゼロでもウィザードが完走できることを必須要件とする。
+   ↓              トラックリスト貼り付け（通販ページ等からのテキストを行解析して
+   ↓              トラック番号・タイトル・アーティストへ割り付け）を一級の入力経路とする
+   ↓
+[オフセット決定] INQUIRY でドライブ型番取得 → 同梱オフセット表を引く
+   ↓            UI に必ず表示。手動上書き可
+[吸い出し]      cd-paranoia '1-' - で全ディスクを1本の PCM として取得
+   ↓            ※トラック単位で吸うとオフセット補正が境界をまたげない
+[オフセット適用 → トラック分割]
+   ↓
+[CRC 計算]      ARv1 / ARv2 / CTDB CRC32
+   ↓            先頭トラック冒頭・末尾トラック終端の除外規則を厳守
+[照合]          CTDB を主、AccurateRip を補助
+   ↓
+[エンコード]    FLAC (master) を Library へ。tmp の PCM は検証完了まで保持
+   ↓
+[ログ出力]      rip.log / disc.cue / disc.toc をアルバムディレクトリへ
+   ↓
+[後続ジョブ投入] rg → transcode(Derived) → thumbnail
+```
+
+不一致時の既定動作: 自動再リップ（最大2回）→ CTDB 修復データ適用 →
+それでも不一致なら `mismatch` フラグ付きで取り込み、UI で要確認表示。
+
+**ドライブは物理的に1台なので rip キューの並列度は 1 に固定する。**
+
+### 7.3 遡及照合（ログなし既存 FLAC）
+
+CUETools の "verify from files" 相当。
+
+```
+アルバム全トラックが揃っているか確認
+  → 各トラックのサンプル数から TOC 再構成
+     offset = 150 + Σ(前トラックのセクタ数)
+  → AccurateRip DiscID / MusicBrainz DiscID を算出
+  → CRC 計算 → CTDB / AccurateRip 照会
+  → verify.log 出力（rip.log とは別物）
+```
+
+適用条件:
+
+- **44.1kHz / 16bit / 2ch のみ。** ハイレゾは対象外
+- 各トラックのサンプル数が **588 の倍数**（1セクタ）であること。
+  端数があれば CD 由来でないか加工済みと判定してスキップ
+- 一致 → `verified_ctdb` に昇格
+- **不一致は不良を意味しない。** ドライブオフセット差、ギャップ処理差、隠しトラック、
+  データトラックの存在で普通に外れる。`mismatch` は「要確認」として扱い、
+  警告色で表示しない
+
+### 7.4 WAV 正規化
+
+```
+WAV 検出
+  → デコードして PCM MD5 算出
+  → flac -8 でエンコード（tmp → fsync → Library へ rename）
+  → 生成 FLAC の STREAMINFO MD5 と突き合わせ
+     ├ 一致   → 元 WAV を Archive/ の同じ相対パスへ move、
+     │          edit_ops(kind='archive') に from/to を記録、
+     │          archived_files に台帳（eligible_after = now + retention）を追加、
+     │          original_codec='wav', normalized_at 記録
+     └ 不一致 → 中止、エラー報告、WAV を残す（生成した FLAC は捨てる）
+```
+
+WAV は RIFF INFO / ID3 のどちらを使うかがソフトごとに異なり、ReplayGain タグの
+互換性も低い。可逆変換なので情報は失われない。読み込み互換のため WAV の再生・
+取り込み自体は引き続きサポートする。
+
+**元 WAV は即時削除しない。** 物理削除はユーザデータ全般と同じく GC ジョブのみが行う
+（禁止事項）。退避した WAV は `archived_files`（state='held'）を台帳として GC が
+`eligible_after` 経過後に回収し state='deleted' にする。それまでは履歴の巻き戻しで
+Library へ戻せる（state='restored'。FLAC の方を Archive へ移す）。
+編集履歴は revert / redo で状態が動くので GC の台帳には使わない。
+Archive の「追記のみ」の例外はこの GC だけ。
+
+PCM MD5 の一致が保証するのは**音声サンプルの同一性だけ**で、WAV の RIFF INFO /
+ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成できない。保持期間後に
+コンテナを不可逆に捨てるのは意図した決定（D-10）。
+
+### 7.5 タグ書き込み（編集バッチ）
+
+```
+編集バッチ確定
+  → プレビュー（dry-run）。サーバは selection のスナップショット（対象 track_id と各行の
+    tag_version / 事前条件）を作り selection_token を返す（§9、D-33）
+  → 適用は selection_token の集合だけを対象にする。preview 後にスキャンで増えた行は含まれない
+  → 対象トラックに pending の op があれば 409 で拒否（件数と track_id を返す）。
+    `skip_pending: true` なら該当トラックを除外して続行（UI の「除外して適用」）
+  → 1 トランザクションで:
+       edit_batches(state='prepared')
+       edit_ops(result='pending')  … トラック 1 本につき 1 op。事前条件
+                                    (expected_dev / inode / size / mtime_ns / ctime_ns /
+                                     tag_hash / rel_path) を記録
+       edits                      … op 配下にフィールドごとの旧値・新値（JSON）
+       → DB（track_tags / キャッシュ列）を新値へ更新、tag_version をトラックごとに 1 回 ++
+       → track 単位の tagwrite ジョブを投入（edit_batch_id で紐づけ）
+  → 各 tagwrite ジョブ（並列 4）:  バッチを state='applying' に
+       rel_path で open → その FD の fstat で dev/inode/size/mtime_ns/ctime_ns を確認、
+       同じ FD からタグを読んで tag_hash を確認
+         ├ いずれか不一致 → result='skipped_conflict'。ファイルは触らない。
+         │                  同一トランザクションでその FD の内容から DB を戻す（下記「overlay の解消」）
+         ├ rel_path のみ不一致（外部 rename。inode で新パスを特定できた）
+         │     → 新パスの rel_path_key が他の行に占有されていなければ tags op は追随して続行。
+         │       占有されていれば skipped_conflict。rename op は常に skipped_conflict
+         └ 一致 → その FD の親ディレクトリに tmp を O_EXCL で作成 → 内容をコピー →
+                  op 配下の全フィールドを lofty で書き換え → fsync → rename →
+                  同一トランザクションで (dev, inode, size, mtime_ns, ctime_ns, tag_hash) 更新、
+                  op を result='applied'
+  → 全 op が終端になったらバッチを集計: applied / partial / failed / cancelled
+  → Derived のタグ上書きジョブを投入（tag_version の差分で判定）
+```
+
+- **ファイル反映の単位は op（トラック）。** フィールドごとに tmp+rename すると
+  1 件目で inode が変わり 2 件目以降の事前条件が必ず外れる。同一トラックの全差分を
+  1 回の書き込みで反映し、`tag_version` はトラックごと・バッチごとに 1 回だけ進める。
+  結果（`result`）は op にだけ持ち、**フィールド単位の部分適用はしない**
+  （1 フィールドでも事前条件に合わなければ op 全体が conflict）
+- **事前条件に `ctime_ns` と `tag_hash` を含める。** inode も mtime も保ったままの in-place
+  更新（`touch -r` を伴うタグツール）は dev/inode/mtime では見えない
+- **DB 先行更新 + pending 記録**を採る。DB の値は「確定した真実」ではなく
+  **書き込み意図のオーバーレイ**で、ファイル反映が終わるまで暫定。UI は pending を
+  バッジで見せる。DB を失うと未反映の意図も失われる（ファイルは旧値のまま残るので
+  データは壊れない）。DB を後から確定する案は、6 万件の一括編集で UI が数分間
+  古いままになるため却下（D-24）
+- **overlay の解消**: op が `applied` 以外の終端（skipped_conflict / failed / cancelled）に
+  なるときは、**同じトランザクションで**そのトラックの DB 値をファイルの現在値に戻す
+  （タグ・キャッシュ列・`tag_hash`・物理属性）。次回スキャン任せにしない。`tag_version` は
+  既に進んでいるので据え置く（Derived の追随ジョブはファイルの現在値で書くだけなので無害）
+- **pending 中の再編集は 409 で拒否する。** `edit_ops(track_id) WHERE result='pending'` の
+  UNIQUE で DB 側でも保証する。後続バッチが先行 intent を統合する方式（`superseded`）は
+  予約のみで P0 では実装しない
+- **tmp + rename を採用**する。電源断でファイルが壊れないことを優先。
+  代償として inode が変わるので、書き込み成功時に必ず DB を追随させる
+- **リカバリ**: 起動時に `prepared` / `applying` のバッチについて、`pending` の op に
+  対応する track ジョブを再投入する（dedup で二重にはならない）。クラッシュ前に
+  rename まで済んでいた op は inode 不一致になるので、ファイルのタグを読み
+  **全フィールドが新値と一致すれば `applied` として確定**、そうでなければ
+  `skipped_conflict`（overlay の解消を伴う）。同じジョブを何度再実行しても結果は変わらない
+- **stale ジョブ**: tagwrite の `dedup_key` は `tagwrite:<track_id>:<tag_version>`。
+  409 により pending 中の再編集は起きないので、通常は stale にならない。
+  それでも payload の版 < 現在値なら no-op で `done` にする（防御）
+- **キャンセル**: バッチ単位。子ジョブに `cancel_requested_at` を立て、未着手の op は
+  `failed`（error='cancelled'、overlay の解消を伴う）、進行中の op は完了を待つ。全 op が
+  終端になったらバッチを `cancelled` に。applied になった op はそのまま残り、revert で戻せる
+- **巻き戻し**（§9 `/api/history/:batch/revert`）:
+  - 対象は**終端状態**（applied / partial / failed / cancelled）のバッチのみ。
+    `prepared` / `applying` はまずキャンセルする
+  - 対象 op 集合 = 元バッチで `applied` になった op − 既存の逆バッチ（`reverts_batch_id` = 元）で
+    既に `applied` になっている op。**この集合が空なら 409 `already_reverted`**
+  - 各 op について**全フィールドの現在値が元バッチの `new_value` と一致する場合だけ**
+    `old_value` へ戻す（op 単位。1 フィールドでも違えば `skipped_conflict`）。
+    一致しないものは外部変更または後続バッチの変更なので UI に件数を出す
+  - 元バッチの `reverted_at` は、**逆バッチが終端になり、対象集合が全件 `applied` になったとき**
+    だけ立てる。逆バッチが partial なら立てず、再度 revert すると残りだけが対象になる
+  - やり直し（redo）= 逆バッチを revert する。同じ規則で処理される
+  - 巻き戻しも通常のバッチなので、対象トラックに pending があれば 409
+- リネーム（P0-11）と論理削除も同じ機構に乗せる（`kind = rename / delete`）。
+  巻き戻しの対象は tag に限らない。**一括リネームは coordinator が 2 phase で行う**:
+  phase 1 で全 op の source を予約済み一時名へ退避（ファイルと DB key の両方）、phase 2 で
+  `ordinal` 順に最終名へ置く。swap / 循環はこれで解ける。phase 境界でのクラッシュは
+  一時名に残ったファイルを `edit_ops` から復元する
+
+### 7.6 Derived 生成
+
+| 項目 | 規則 |
+|---|---|
+| 対象 | Library 内の可逆のみ（flac / alac / wav）。opus / aac / mp3 は対象外 |
+| 出力 | Opus 128kbps VBR（`--vbr`, signal=music）。可逆200GBで約25GB |
+| パス | Library と完全ミラー（拡張子のみ `.opus`） |
+| RG | 再解析しない。Library 側の解析値を `R128_*` へ変換して埋める |
+| 判定 | `audio_version` 差分 → 再エンコード / `tag_version` 差分のみ → タグ上書き |
+| 追随 | Library の移動・削除に追随。孤児は GC ジョブで回収 |
+| マルチch | 既定で対象外。トラック単位で `-ac 2` ダウンミックスをオプトイン可 |
+
+非可逆音源は Derived を作らず原本をそのまま配布する（多重劣化の回避）。
+容量逼迫時のみ、トラック単位で `force_transcode` を手動指定可能。
+ただし **元が 256kbps 以上の場合のみ許可**する。
+
+### 7.7 ytmusic 統合
+
+| 元モジュール | 移行先 | 備考 |
+|---|---|---|
+| `parser.py` (17パターン) | Rust / fancy-regex | 正規表現は TOML に外出しし、ルールエンジン化 |
+| `models.py` 正規化 | Rust | 置換テーブルをそのまま TOML 化 |
+| `tagger.py` (mutagen) | lofty | |
+| `audio.py` R128 | ebur128 | ffmpeg loudnorm より高精度 |
+| `organizer.py` / `playlist.py` | Rust | m3u8 生成は継続 |
+| `downloader.py` | Rust（yt-dlp を subprocess） | |
+| `sync.py` (ADB) | **移植しない** | NAS に端末を繋ぐ運用が不自然。Syncthing / SMB へ |
+
+移行の安全策として、**83 件のパーサテストケースを先に JSON フィクスチャへ切り出し**、
+Python 版と Rust 版の両方から同じファイルを読ませて差分を取る。
+`config.toml` のチャンネル定義スキーマは互換を維持する。
+
+### 7.8 Inbox 取り込み
+
+取り込み対象ディレクトリを増やす方式は採らない。外部ディレクトリを直接
+スキャン対象にすると、そのツリーのパス規約とタグ品質がそのまま Library に
+混入するため。Inbox をステージングとして挟む。
+
+```
+Inbox/ に配置（ポーリング検出）
+  → ステージング: タグ解析、コーデック判定、アルバム単位でグルーピング
+  → 承認キュー:   UI で category / albumartist / album を確認・補正
+  →               ※メタデータ不足のまま Library に入れない
+  → 配置:         テンプレート展開 → Library へ move
+  → 後続ジョブ:   normalize(WAV) → rg → transcode → thumbnail
+```
+
+承認キューを挟むことが要点で、これがないと `_Unsorted` が際限なく育つ。
+
+### 7.9 FLAC 健全性チェック（移行時 + 任意）
+
+```
+flac -t で検証
+  ├ STREAMINFO MD5 が未設定（全ゼロ） → 再エンコードして補填
+  │    一部の古いエンコーダや配信由来の FLAC で実際に起きる。
+  │    未設定だと同一性解決の第 2 手段が使えず、遡及照合も不可能
+  ├ デコードエラー → 要対応としてフラグ
+  └ 正常 → そのまま
+```
+
+**圧縮レベルを揃えるための一括再エンコードは行わない。**
+`flac -8` は圧縮率だけの違いでデコード結果は完全に同一であり、削減は
+概ね 0.5〜1.5%。対価として 200GB を書き直すことになり、ZFS スナップショットが
+旧ブロックを掴むため保持期間中は実効使用量が倍増する。
+`flac -8` は新規生成物（CD リップ、WAV 正規化）にのみ適用する。
+
+MD5 補填のための再エンコードでは `audio_version` を据え置く
+（音声内容が変わらないため Derived の再生成は不要）。inode と mtime は変わるので
+DB の追随は必要。
+
+---
+
+## 8. ジョブシステム
+
+| type | 並列度 | 冪等キー |
+|---|---|---|
+| `scan` | 1 | 固定 |
+| `rip` | **1**（物理ドライブ1台） | discid |
+| `verify` | 2 | album_id |
+| `rg` | CPU コア数 | album_id |
+| `transcode` | CPU コア数 - 1 | track_id + audio_version |
+| `tagwrite` | 4 | track_id + tag_version（`edit_batch_id` でバッチに紐づく） |
+| `rename` | 1 | track_id（2 段階更新の順序を守るため直列） |
+| `normalize` | 2 | track_id |
+| `thumbnail` | 4 | artwork_id |
+| `flaccheck` | CPU コア数 | track_id |
+| `inbox` | 1 | 固定 |
+| `gc` | 1 | 固定 |
+| `backup` | 1 | 固定 |
+
+- 起動時リカバリ: `running` を `queued` へ戻し、`track_locks` を**全件削除**する
+  （ロックはプロセス生存中しか意味を持たない）。単一インスタンス前提。同じ DB を
+  複数プロセスで開くことは想定しない（compose で replicas を増やさない）
+- `dedup_key` は **`queued` / `running` の間だけ**一意（partial unique index）。
+  列 UNIQUE にすると `done` / `failed` 後に同じキー（`scan` の固定キー、同 version の
+  手動再試行）を永久に投入できない。キーは `type` を含めて構成する
+  （`tagwrite:<track_id>:<tag_version>` 等）
+- 失敗は `attempts` をインクリメントし、`run_after` に次回時刻を書いて指数バックオフ
+  （再起動を跨いでも待ち時間が保たれる）。`attempts >= max_attempts` で `failed`
+- キャンセルは `cancel_requested_at` を立てる協調方式。ハンドラは進捗更新のたびに
+  確認して自発的に止め、`cancelled` へ遷移する。外部プロセス（ffmpeg 等）は
+  子プロセスグループごと kill し、tmp の成果物を消す
+- 進捗は SSE で配信。DB にも永続化してリロードに耐える
+- 同一トラックに対する競合ジョブは `dedup_key` と track 単位の
+  advisory lock テーブルで直列化。複数トラックを掴むジョブ（album 単位の `rg` 等）は
+  `track_id` 昇順に取得し、1 つでも取れなければ全解放して再キュー（デッドロック回避）
+- 版を持つジョブ（`tagwrite` / `transcode`）は開始直前に payload の版と現在値を比較し、
+  古ければ no-op で `done`（§7.5 stale ジョブ）
+- **編集バッチは coordinator + track ジョブ。** `tagwrite` / `rename` ジョブは track 単位で
+  投入し `jobs.edit_batch_id` でバッチに紐づける。バッチ自体はジョブではなく、
+  終端状態は子ジョブ・op の結果から集計する（最後に終端になった子ジョブが集計する）。
+  起動時リカバリ・キャンセルはバッチ配下の子ジョブに対して行う
+
+---
+
+## 9. HTTP API
+
+```
+GET    /api/tracks?filter=&sort=&cursor=&limit=   カーソルページング
+GET    /api/tracks/:id
+PATCH  /api/tracks/batch                          一括編集（dry_run フラグ）
+POST   /api/tracks/batch/preview                  変更プレビュー
+POST   /api/rename/preview                        テンプレート適用結果
+POST   /api/rename/apply
+
+GET    /api/albums / :id
+GET    /api/categories, POST /api/categories
+GET    /api/search?q=                             FTS5 trigram
+
+GET    /api/stream/:id                            Range 対応。原本
+GET    /api/stream/:id?transcode=opus             オンザフライ変換
+GET    /api/artwork/:hash?size=                   サムネイル
+
+GET    /api/playlists, POST, PATCH, DELETE
+POST   /api/playlists/:id/preview                 スマートルールの評価結果
+POST   /api/playlists/:id/export?profile=         プロファイル指定で書き出し
+GET    /api/playlists/:id/fb2k_query              foobar Autoplaylist 用クエリ
+GET    /api/export-profiles, POST, PATCH, DELETE
+
+POST   /api/auth/login, POST /api/auth/logout
+GET    /api/auth/session
+
+GET    /api/cd/status                             ディスク有無・TOC
+POST   /api/cd/lookup                             MusicBrainz 照会
+POST   /api/cd/rip                                リップ開始
+POST   /api/cd/eject
+
+GET    /api/jobs, POST /api/jobs/:id/cancel, POST /api/jobs/:id/retry
+GET    /api/events                                SSE: ジョブ進捗・ライブラリ変更
+
+GET    /api/history, POST /api/history/:batch/revert
+                                                  巻き戻しは新バッチとして記録（§7.5）。
+                                                  終端状態のバッチのみ。pending 衝突・二重 revert は 409
+POST   /api/history/:batch/cancel                 反映中バッチのキャンセル
+```
+
+- 一括編集は必ず preview → apply の 2 段階
+- SSE は単一チャネル。イベント種別で多重化
+
+### レスポンス形（UI が依存するもの）
+
+```jsonc
+// GET /api/tracks?filter=...&sort=title&cursor=...&limit=100
+{ "items": [ { "id": 1, "title": "...", "artist_display": "...", "album": "...", "albumartist": "...",
+               "track_no": 1, "disc_no": 1, "date": "2024", "category": "J-Pop",
+               "duration_ms": 280000, "codec": "flac", "lossless": true,
+               "verification": "verified_ctdb", "rg_scanned_at": 1, "rg_written_at": 1,
+               "derived": { "codec": "opus", "stale_tags": false },   // または null
+               "pending_batch_id": 42,                                // または null
+               "conflict_batch_id": 41,                               // または null
+               "duplicate_group": "a1b2…",                            // audio_md5 hex または null
+               "hardlink": false, "missing_since": null,
+               "rel_path": "J-Pop/…/01 ….flac" } ],
+  "next_cursor": "…", "total": 61234 }
+
+// 選択は 2 形。Ctrl+A はフィルタ形で送る（ID 列挙にしない）
+// { "ids": [1, 2, 3] }  または  { "filter": "<選択時点のフィルタ式>", "exclude_ids": [7] }
+// フィルタ形は「選択した時点のフィルタ」を immutable に保持する（表示中のフィルタとは別物）
+
+// POST /api/tracks/batch/preview   { "selection": {...}, "ops": [...] }
+//   サーバは selection を解決して対象 track_id と各行の tag_version / 事前条件を
+//   スナップショットに保存し、selection_token（TTL 15 分）を返す（D-33）
+{ "selection_token": "…", "count": 1207,
+  "changed": 1180, "unchanged": 24, "pending_excluded": 3,
+  "items": [ { "id": 1, "changes": { "TITLE": { "old": ["…"], "new": ["…"] } } } ] }
+
+// PATCH /api/tracks/batch   { "selection_token", "ops", "description", "skip_pending": false }
+//   対象は token のスナップショット集合だけ。preview 後にスキャンで増えた行は含まれない。
+//   スナップショット時と tag_version が変わった行は skipped_conflict になる
+//   201 { "batch_id": 42, "affected": 1180 }
+//   409 { "error": "pending", "track_ids": [ … ], "count": 3 }   // skip_pending=true で除外して続行
+//   409 { "error": "preview_stale" }                             // token 期限切れ・ops 不一致
+
+// GET /api/history
+{ "items": [ { "id": 42, "created_at": 1, "description": "…", "kind": "tags",
+               "state": "partial", "affected": 312, "applied": 309, "conflict": 3, "failed": 0,
+               "reverts_batch_id": null, "reverted_by": 39, "finished_at": 1 } ] }
+// GET /api/history/:id  → 上 + "ops": [ { "track_id", "kind", "result", "error",
+//                                        "edits": { "TITLE": { "old": [...], "new": [...] } } } ]
+// POST /api/history/:id/revert  → 201 { "batch_id": 43 }
+//                               → 409 { "error": "not_terminal" | "already_reverted" | "pending" }
+// POST /api/history/:id/cancel  → 202
+
+// GET /api/jobs
+{ "items": [ { "id", "type", "state", "progress", "done", "total", "attempts", "last_error",
+               "run_after", "edit_batch_id", "created_at", "started_at" } ],
+  "summary": { "running": 3, "queued": 12, "pending_ops": 1204, "failed": 0 } }
+
+// SSE /api/events   event 種別: job | batch | library
+//   job:     { "id", "state", "progress", "done", "total" }
+//   batch:   { "id", "state", "applied", "conflict", "failed" }
+//   library: { "scan_run_id", "kind": "ids", "track_ids": [ … ] }   // 変更が 200 行以下
+//            { "scan_run_id", "kind": "bulk" }                     // それ以上。ページを無効化
+```
+
+`library` イベントを受けたクライアントは、**表示中のページ（クエリ + カーソル）を無効化して
+再取得**する。行の差し替えだけでは、変更行がフィルタに出入りしたりソートキーが変わったり
+カーソル境界を跨いだときに集合と順序が壊れる。`ids` のときは表示中に含まれる id があれば
+再取得、`bulk` は無条件に再取得。選択（`selection`）はイベントで変えない。
+
+`pending_batch_id` / `conflict_batch_id` / `duplicate_group` / `hardlink` は一覧の
+バッジ列（§12.2）が直接使う。`GET /api/tracks` は 1 クエリで返せるよう、
+`edit_ops` の pending と `duplicate_groups` を LEFT JOIN で引く。
+
+### 認証
+
+LAN 限定でも必須とする。攻撃者対策というより事故対策で、この API は 300GB の
+ライブラリをリネーム・削除・タグ上書きできる。認証がないと、別タブのスクリプト、
+家族の端末、うっかり有効にしたポートフォワードがそのまま破壊的操作に届く。
+
+- 単一パスワード。argon2id でハッシュして DB に保存
+- **初期パスワードは環境変数 `SPINDLE_INITIAL_PASSWORD`** で与える（D-28）。DB に
+  パスワードが無い初回起動でハッシュ化して保存し、以後は無視する。環境変数も DB も
+  無い場合は**ロックモード**で起動し、SPA の配信を含めて `/health` 以外は 503 で
+  短い JSON（設定手順）を返す。`/health` は `{"status":"locked"}` を返して機械可読にする。
+  「先着で設定できる初回セットアップ画面」は置かない。compose のサンプルは
+  `${SPINDLE_INITIAL_PASSWORD:?...}` 形式で、値を与えないと起動できないようにする
+- セッション Cookie（HttpOnly / SameSite=Lax / TLS 時のみ Secure）。Cookie 値はランダム
+  32 バイトで、DB には **SHA-256 のみ**保存（`sessions.token_hash`）。失敗ログインは
+  IP 単位でレート制限
+- **変更系リクエスト（POST / PATCH / DELETE）の CSRF 検証**: `Origin` ヘッダが**あれば**
+  scheme / host / port が自分自身と完全一致することを必須にする。`Origin` が無い場合だけ
+  `Sec-Fetch-Site` が `same-origin` / `none` であることを要求し、それも無ければ拒否する。
+  **`Host` の一致は判定に使わない**（クロスサイト POST でも Host は送信先になるため防御に
+  ならない）。reverse proxy 越しの外部 origin は `trusted_proxies` からの `X-Forwarded-Host` /
+  `X-Forwarded-Proto` だけで構成する
+- CORS は全面禁止（SPA は同一オリジンで配信するため不要）
+- `trusted_cidrs` からの接続は **route allowlist だけ認証をスキップ**する（D-27）:
+  `GET /api/stream/:id`、`GET /api/artwork/:hash`、`GET /api/tracks/:id`（限定フィールド）、
+  `GET /api/playlists/:id/export`。それ以外（一覧・検索・SSE・history・jobs・設定・session）は
+  CIDR 内でもセッション必須。変更系は当然セッション必須。用途は他プレイヤーや curl からの
+  ストリーム参照であり、履歴やジョブのエラー文（パスを含む）を LAN 全体に見せる理由はない。
+  判定に使うのは接続元 socket のアドレスで、`X-Forwarded-For` は `trusted_proxies` に列挙した
+  proxy からのものだけ採用する
+- `/health` 以外の全ルート（SSE / stream / artwork 含む）が同じ認証ミドルウェアを通る
+- Subsonic 非対応が確定したため、salt+md5 方式との併存を考慮する必要はない
+
+---
+
+## 10. プレイリストとエクスポート
+
+### スマートプレイリスト DSL
+
+foobar2000 風の文法を採用し、`pest` でパースして AST(JSON) を DB に保存、
+実行時にパラメータ化 SQL へ変換する。生 SQL を保存しないのは、スキーマ変更で
+全ルールが壊れることと、インジェクション面を抱え込むことを避けるため。
+
+```
+%albumartist% IS ヰ世界情緒 AND %verification% IS verified_ctdb
+  AND NOT %category% IS _Unsorted
+ORDER BY %date% DESC LIMIT 100
+```
+
+- 演算子: `IS` / `HAS`(部分一致) / `GREATER` / `LESS` / `MATCHES`(正規表現) /
+  `MISSING` / `PRESENT`
+- 論理: `AND` / `OR` / `NOT` / 括弧
+- 拡張フィールド: `verification` `lossless` `codec` `samplerate` `bitdepth`
+  `channels` `category` `added` `duration` `has_derived` `missing`
+- 独自拡張（foobar に無い）: `MATCHES` / `LIMIT` / `ORDER BY random`
+- SQL 生成はホワイトリスト列へのマッピング。任意タグは
+  `EXISTS (SELECT 1 FROM track_tags ...)` に展開。値は全てバインドパラメータ
+
+### エクスポート形式
+
+| 出力先 | 形式 | 内容 |
+|---|---|---|
+| foobar（静的） | `.m3u8` | 評価結果のトラック一覧。UTF-8 / BOM なし |
+| foobar（動的） | `.txt` / クリップボード | **クエリ文字列**。Autoplaylist 作成時に貼る |
+| Android | `.m3u8` | 配布ビュー（Derived 優先）で解決したパス |
+| 汎用 | `.pls` | 任意 |
+
+`.fpl` は非対応。非公開のバイナリ形式で foobar 1.x と 2.x で構造が異なり、
+書き損じると foobar 側の状態を壊す。
+
+### foobar クエリへの変換
+
+1. **フィールド名の写像。** foobar はスペース区切り: `ALBUMARTIST` → `%album artist%`、
+   `TRACKNUMBER` → `%tracknumber%`。写像表を持つ
+2. **`ORDER BY` は分離。** foobar の Autoplaylist はソートをクエリに書かず、
+   別欄のタイトルフォーマット文字列で指定する。「クエリ」「ソートパターン」の
+   2 本を出力する
+3. **`LIMIT` と `random` は変換不能。** 出力にコメントで明示する
+
+`HAS` の語境界の扱いなど演算子の細部は foobar のバージョン差があるため、
+実装時に実機で一度突き合わせること。
+
+### パスマッピング（エクスポートプロファイル）
+
+NAS 上の `/library/...` をそのまま書いても foobar からは開けない。
+出力先ごとにプロファイルを持つ（`export_profiles` テーブル）。
+
+| プロファイル | source | path_style | prefix | sep |
+|---|---|---|---|---|
+| `foobar` | master (Library) | absolute | `\\TRUENAS\music\` | `\` |
+| `android` | delivery (Derived 優先) | relative | — | `/` |
+| `internal` | master | relative | — | `/` |
+
+`Playlists/m3u8/` は `Library/` の兄弟なので、相対パスは `../../Library/...` で
+正しく解決される。スマートプレイリストはライブラリ変更をトリガに、
+デバウンス（既定 30 秒）を挟んで自動再エクスポートする。
+
+---
+
+## 11. 再生とトランスコード
+
+| コーデック | ブラウザ | 方針 |
+|---|---|---|
+| FLAC | Chrome / Firefox / Safari 対応 | 直送 |
+| Opus | Chrome / Firefox 対応、Safari は限定的 | 直送、Safari のみ変換 |
+| AAC (m4a) | 全対応 | 直送 |
+| WAV | 全対応 | 直送（サイズ大） |
+| **ALAC** | **Safari のみ** | **既定で Opus へ変換** |
+| ハイレゾ FLAC | 再生可だが帯域大 | クライアント設定で変換可 |
+
+- ffmpeg を `stdout` パイプで起動し、chunked で返す
+- シーク時は該当位置から ffmpeg を再起動（`-ss` 指定）
+- 変換結果はキャッシュしない（Derived と役割が重複するため）
+- クライアント能力は起動時に `canPlayType()` で判定してサーバへ通知
+
+---
+
+## 12. UI
+
+デスクトップブラウザ専用。ダークモード・レスポンシブ・アニメーションは対象外。
+キーボードは Ctrl+A / Delete / Enter / Esc のみ。
+
+### 12.1 骨格（3 ペイン + 下部バー）
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ spindle   [検索 ______________]   一覧 | アルバム | CD | ジョブ | 履歴 | 設定 │ ← 上部ナビ
+├────────────┬────────────────────────────────────────────────┬────────────────┤
+│ ツリー      │ トラック一覧（仮想スクロール）                     │ 右パネル        │
+│ ▾ Category │ ☐ │#│Title      │Artist │Album   │▲▼ … │バッジ │ ┌ 一括編集 ────┐│
+│   ▾ J-Pop  │ ☑ │1│…          │…      │…       │      │ ✔ RG  │ │ 選択 1,204 件 ││
+│     ▸ 藍井 │ ☑ │2│…          │…      │…       │      │ ⏳    │ │ TITLE ← 置換 ││
+│     ▸ …    │ ☐ │3│…          │…      │…       │      │ ⚠ dup │ │ ALBUMARTIST  ││
+│ ▸ Game     │ … (6 万行)                                       │ │  ← %artist%  ││
+│            │                                                │ │ [プレビュー]  ││
+│ プレイリスト │                                                │ │ [適用]        ││
+│  ♪ 通勤    │                                                │ └──────────────┘│
+│  ⚙ 未検証  │                                                │ ┌ 選択の詳細 ─┐│
+│            │                                                │ │ 共通タグ /   ││
+│ フィルタ    │                                                │ │ 差異あり     ││
+│  未検証    │                                                │ └──────────────┘│
+│  重複      │                                                │                │
+│  missing   │                                                │                │
+│  反映待ち  │                                                │                │
+├────────────┴────────────────────────────────────────────────┴────────────────┤
+│ ▶ ‖ ──●────── 03:12 / 04:40  RG:on 🔊   │ 実行中 3 · 反映待ち 1,204 · 失敗 0 │ ← 再生 + ステータス
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **上部ナビ**: 画面の切替。「一覧」がホーム
+- **左サイドバー**: 3 区画（ツリー / プレイリスト / フィルタ）。どれを選んでも
+  **中心の表の集合を差し替えるだけ**で、列・ソート・選択の仕組みは共通
+  - ツリー: Category → AlbumArtist → Album
+  - プレイリスト: 手動 / スマート。表からドラッグで追加
+  - フィルタ（固定）: 未検証 / 重複 / missing / RG なし / 反映待ち / conflict / hardlink
+- **右パネル**: 2 タブ（一括編集 / 選択の詳細）。折りたたみ可、幅は永続化
+- **下部バー**: 左が再生（再生・停止・シーク・音量・RG 適用切替）、右がジョブ要約
+  「実行中 N · 反映待ち M · 失敗 K」。右側クリックでジョブ画面へ
+
+### 12.2 トラック一覧
+
+**列**（既定。順・幅・表示は localStorage に永続化）:
+選択 / # / Title / Artist / Album / AlbumArtist / Date / Category / 長さ / Codec / バッジ /
+rel_path（既定非表示）
+
+**バッジ列**（1 セルに複数アイコン、ホバーで文言）:
+
+| バッジ | 条件 | 出典 |
+|---|---|---|
+| 検証 | `verification` の 5 値をアイコン色で区別。`unverifiable` は「未検証」と別の見え方 | tracks |
+| 可逆 / 非可逆 | `lossless` | tracks |
+| RG | `rg_scanned_at` の有無。書き込み未反映（`rg_written_at < rg_scanned_at`）は半透明 | tracks |
+| Derived | `derived_files` あり。`stale_tags` は点付き | delivery |
+| 反映待ち ⏳ | `edit_ops.result = 'pending'` がある | edit_ops |
+| conflict ⚠ | このトラックの**最新の op**（`edit_ops` を `id DESC` で 1 件）が `skipped_conflict` | edit_ops |
+| 重複 | `duplicate_groups` に属する | view |
+| hardlink | `nlink > 1` | tracks |
+| missing | `missing_since` あり。行全体をグレー | tracks |
+
+**選択**: クリック / Shift 範囲 / Ctrl 追加 / Ctrl+A（フィルタ結果全件）。
+全件選択は ID 列挙ではなく**選択した時点のフィルタ式**をサーバに渡す（`selection.filter`）。
+選択は immutable で、その後に表示フィルタやソートを変えても**選択集合は変わらない**
+（表示中の行と選択集合が食い違うことはあり、右パネルは選択集合の件数を出す）。
+プレビューでサーバが集合をスナップショットし（`selection_token`）、適用はその集合だけに
+効く。右パネル頭に「選択 N 件（うち反映待ち M 件）」、表の上に「表示 K 件」。
+
+**反映待ちの行**は編集不可。右パネルの [適用] は「M 件を除外して適用 / 待つ」の 2 択に
+なる（API の 409 をここで吸収する）。
+
+**インライン編集**: セルをダブルクリック → 1 件のバッチとして同じ経路（プレビュー省略）。
+
+### 12.3 右パネル: 一括編集
+
+```
+操作リスト（上から順に適用）
+  1. TITLE        正規表現置換   /\s*\(Official.*\)$//
+  2. ALBUMARTIST  フィールド参照 %artist%
+  3. TRACKNUMBER  連番          開始 1、現在のソート順に
+  4. COMMENT      削除
+  [+ 操作を追加]
+[プレビュー]  → 表の該当セルに 旧値→新値 の差分表示。変更なしは薄く。
+                頭に「変更 1,180 / 変更なし 24 / 反映待ちで除外 3」
+[適用]        → 説明文（任意）→ バッチ作成 → 下部バーの反映待ちが動く
+```
+
+操作: 固定値代入 / フィールド参照（`%albumartist%`）/ 正規表現置換 / トラック番号連番 /
+タグ削除。プレビューは `POST /api/tracks/batch/preview` の結果を表に重ねる。別表は開かない。
+操作リストは選択を変えても残る（同じ操作を別の集合へ繰り返し適用できる）。
+
+### 12.4 編集履歴
+
+```
+#42  09-16 14:03  "Official を除去"      tags    1,204 件   applied              [巻き戻す]
+#41  09-16 13:50  "アーティスト統一"      tags      312 件   partial (conflict 3)  [巻き戻す] [conflict を見る]
+#40  09-16 13:20  "リネーム J-Pop/…"     rename    980 件   applying 640/980      [キャンセル]
+#39  09-15 …       (#38 の巻き戻し)      tags       50 件   applied   ↩ #38       [巻き戻す(=やり直し)]
+#38  09-15 …       "…"                   tags       50 件   applied   reverted     —
+```
+
+- 行を開くと op 一覧（トラック / result / error）。conflict の op は「ファイルを再読込した」旨と
+  現在値を表示
+- [巻き戻す] は終端状態のみ有効。`reverted_at` 済みは無効化して「#39 で戻し済み」と表示
+- 巻き戻しも新バッチなので同じ一覧に現れる（`reverts_batch_id` を ↩ で表示）
+- [キャンセル] は `prepared` / `applying` のみ
+
+### 12.5 ジョブ
+
+種別ごとの並列度と待ち行列、実行中の進捗（`done / total`）、失敗の `last_error` と
+[再試行] / [キャンセル]。編集バッチ由来のジョブは `edit_batch_id` で履歴画面へリンク。
+SSE `/api/events` で更新し、リロードしても DB の値で復元する。
+
+### 12.6 その他の画面（骨格のみ）
+
+- **アルバム**（P1）: サムネイルグリッド → クリックで表を `album_id` に絞る（一覧へ戻る）
+- **CD**（P2）: ウィザード。検出 → 候補選択 / 手入力 / トラックリスト貼り付け →
+  オフセット確認 → 進捗。照会ゼロ件でも完走できる
+- **設定**: `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
+  退避 WAV（`archived_files`）の一覧と復元
+
+---
+
+## 13. 設定
+
+```toml
+[paths]
+library  = "/library"
+derived  = "/derived"
+archive  = "/archive"
+inbox    = "/inbox"
+playlists = "/playlists"
+data     = "/data"
+
+[layout]
+multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02} {title}"
+single_disc = "{category}/{albumartist}/{album}/{track:02} {title}"
+unsorted    = "_Unsorted/{albumartist}/{album}/{track:02} {title}"
+
+[rip]
+device = "/dev/sr0"
+drive_offset = "auto"          # auto | 整数
+retry_on_mismatch = 2
+prefer_ctdb = true
+
+[encode]
+derived_codec = "opus"
+derived_bitrate = 128
+flac_compression = 8
+
+[replaygain]
+reference_lufs = -18.0         # 内部表現。書き出し時に変換
+write_tags = true
+
+[normalize]
+wav_to_flac = true
+flac_verify_on_import = true
+flac_fix_missing_md5 = true
+flac_recompress_all = false   # 圧縮レベル統一のための一括再エンコードは行わない
+
+[scan]
+deep_interval_days = 30        # deep scan（tag_hash / audio_md5 全再計算）の間隔。0 で自動実行なし
+
+[gc]
+retention_days = 30            # 物理削除までの猶予（missing_since / 退避 WAV / Derived 孤児）
+
+[auth]                         # 認証は常に有効。無効化する設定は置かない。
+                               # パスワードハッシュは DB の auth 表に持つ。
+                               # 初期値は環境変数 SPINDLE_INITIAL_PASSWORD（初回起動時のみ読む）
+session_days = 30
+trusted_cidrs = []             # 例: ["192.168.1.0/24"]。stream / artwork / tracks/:id / playlist export のみ認証スキップ
+trusted_proxies = []           # ここに列挙した proxy からの X-Forwarded-* だけを信用する
+
+[backup]
+interval_hours = 24
+retention_generations = 14
+
+[export]
+autoexport_debounce_sec = 30
+fb2k_prefix = "\\\\TRUENAS\\music\\"
+
+[musicbrainz]
+user_agent = "spindle/0.1 (contact)"
+rate_limit_per_sec = 1
+
+[ytmusic]
+enabled = true
+rules = "rules/ytmusic.toml"   # 17パターンの外出し
+
+[bin]                          # 外部バイナリ。パスで上書き可
+ffmpeg = "ffmpeg"
+flac = "flac"
+opusenc = "opusenc"
+cdparanoia = "cd-paranoia"     # libcdio 版（Debian パッケージ cd-paranoia）
+cdrdao = "cdrdao"
+ytdlp = "yt-dlp"
+```
+
+実体は `deploy/config.example.toml`。両者は一致させる。
+
+---
+
+## 14. デプロイ
+
+### TrueNAS Custom App (compose)
+
+```yaml
+services:
+  spindle:
+    image: ghcr.io/akashisn/spindle:latest
+    devices:
+      - /dev/sr0:/dev/sr0
+      - /dev/sg0:/dev/sg0        # SG_IO に必要
+    group_add:
+      - "24"                     # host の cdrom グループ GID
+    device_cgroup_rules:
+      - 'b 11:* rmw'             # sr (block)
+      - 'c 21:* rmw'             # sg (char)
+    user: "1000:1000"            # 既存ライブラリの所有者に合わせる
+    volumes:
+      - /mnt/tank/media/Library:/library
+      - /mnt/tank/media/Derived:/derived
+      - /mnt/tank/media/Archive:/archive
+      - /mnt/tank/media/Inbox:/inbox
+      - /mnt/tank/media/Playlists:/playlists
+      - /mnt/tank/apps/spindle:/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+```
+
+**注意点:**
+
+- USB 接続だとデバイス再列挙でノード番号が変わり得る（sr0 → sr1）。
+  `/dev/disk/by-id/...` を指すか、SATA 接続を推奨
+- UID/GID が既存ライブラリの所有者と一致しないとタグ書き込みが全滅する
+- udev はコンテナに届かないため、ディスク挿入検知はポーリング
+
+### ZFS データセット
+
+```bash
+zfs create tank/media
+
+# 作成時のみ指定可能なプロパティ（後から変更不可）
+COMMON="-o casesensitivity=insensitive -o normalization=formD"
+# normalization を設定すると utf8only=on が強制される
+
+zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off tank/media/Library
+zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off tank/media/Derived
+zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off tank/media/Archive
+zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off tank/media/Inbox
+zfs create -o recordsize=16K -o compression=lz4 -o atime=off tank/apps/spindle
+```
+
+| dataset | recordsize | snapshot | 備考 |
+|---|---|---|---|
+| Library | 1M | 毎日 + 一括編集前 | 唯一の正 |
+| Derived | 1M | なし | 再生成可能。レプリケーション対象外 |
+| Archive | 1M | 週次 | 追記のみ |
+| Inbox | 1M | なし | 承認前の一時領域 |
+| apps/spindle | 16K | 毎日 | SQLite。ページサイズに合わせる |
+
+**`casesensitivity` と `normalization` はデータセット作成時のみ指定可能で、
+後から変更できない。** このためライブラリは既存データセットの rename ではなく、
+新規作成 + ファイルコピーで移行する（下記）。
+
+- `casesensitivity=insensitive`: Windows の foobar2000 が `Cover.jpg` を、
+  spindle が `cover.jpg` を作る事故を ZFS 層で潰す。spindle は自身の生成パスの
+  一意性は保証できるが、他クライアントが作るファイルまでは制御できない
+- `normalization=formD`: 日本語の濁点・半濁点には NFC（`が` 1 文字）と
+  NFD（`か` + 結合濁点）の 2 表現がある。macOS 由来のパスは NFD になりがちで、
+  正規化なしだと「見た目が同じで別ファイル」が発生する。目視では気づけない
+
+Inbox は Library と別データセットなので move は実コピーになるが、
+1 回あたりアルバム 1 枚（数百 MB〜数 GB）なので実用上の問題はない。
+
+### 移行手順
+
+**前提: Library と同容量の空きが必要**（一時的に 2 倍を消費する）。
+
+```bash
+# 1. 旧ライブラリを固定してから作業する
+zfs set readonly=on tank/music
+zfs snapshot tank/music@pre-migration
+
+# 2. 事前チェック（コピー前に必ず実行。判定は scripts/preflight.py の一本に集約）
+#    insensitive / formD の衝突、不正 UTF-8、255 バイト超、symlink / hardlink、
+#    SMB 禁止名、読めないパス、コピー先の容量不足はすべてブロッカー（exit 1）
+python3 scripts/preflight.py /mnt/tank/music --dest /mnt/tank/media --plan rename.sh
+
+# 3. コピー（zfs send/recv は不可。作成時プロパティが継承されてしまうため）
+rsync -aHX --info=progress2 /mnt/tank/music/Opus/     /mnt/tank/media/Library/
+rsync -aHX --info=progress2 /mnt/tank/music/Original/ /mnt/tank/media/Archive/
+rsync -aHX --info=progress2 /mnt/tank/music/Playlists/ /mnt/tank/media/Playlists/
+
+# 4. 検証（チェックサム比較。差分が出なければ成功）
+rsync -aHXn --checksum --itemize-changes /mnt/tank/music/Opus/ /mnt/tank/media/Library/
+
+# 5. 所有者をコンテナの実行 UID/GID に合わせる
+chown -R 1000:1000 /mnt/tank/media
+
+# 6. spindle 初回スキャン完了と全曲の目視確認までは tank/music を破棄しない
+```
+
+**ACL は rsync で引き継げない。** TrueNAS の SMB データセットは NFSv4 ACL を
+使うが、`rsync -A` が扱うのは POSIX ACL であり互換がない。コピー後に
+TrueNAS の ACL エディタで新データセットにプリセットを適用し直すこと。
+
+旧データセットの破棄は、P0 のスキャンが完走し、トラック数が一致し、
+数日間の運用で問題が出ないことを確認してから。
+
+### 環境変数
+
+| 変数 | 用途 |
+|---|---|
+| `SPINDLE_CONFIG` | `config.toml` のパス（既定 `/data/config.toml`） |
+| `SPINDLE_INITIAL_PASSWORD` | 初回起動時の管理パスワード。DB にパスワードが無いときだけ読み、argon2id で保存して以後は無視する。未設定かつ DB にも無ければロックモード（`/health` 以外 503） |
+
+### バックアップ
+
+- SQLite は `backup` ジョブが `VACUUM INTO` でバックアップ（WAL 中の安全なコピー手段。
+  `[backup].interval_hours` 既定 24）。tmp に書いて fsync → rename → **親ディレクトリも fsync**
+  してから世代 GC。容量不足なら中断してエラーを残す
+- 保持世代は `[backup].retention_generations`（既定 14）。`apps/spindle` データセットの
+  スナップショットと二重化
+- 復元: コンテナ停止 → `spindle.db` を差し替え → 起動。起動時スキャンがファイルとの
+  差分を吸収する。未反映だった編集意図（pending）は失われるが、ファイルは旧値のまま
+  なので壊れない。復元ドリルを P0-13 の受け入れに含める
+- DB は「キャッシュ」だが、プレイリスト / 編集履歴 / 検証結果 / ジョブ履歴は DB にしか
+  ない（§3）。バックアップは任意ではない
+
+---
+
+## 15. Rust モジュール構成
+
+```
+src/
+├── main.rs
+├── config.rs
+├── db/
+│   ├── mod.rs           コネクション管理（write 単一 / read プール）
+│   ├── migrations/      連番 SQL
+│   ├── tracks.rs  albums.rs  playlists.rs  jobs.rs  history.rs
+├── domain/
+│   ├── identity.rs      inode / audio_md5 による同一性解決
+│   ├── pathgen.rs       テンプレート展開・正規化・衝突回避
+│   ├── tags.rs          lofty ラッパ、正規化、多値処理
+│   ├── replaygain.rs    ebur128、フォーマット別変換
+│   └── category.rs      統制語彙、GENRE 写像
+├── media/
+│   ├── decode.rs        symphonia / ffmpeg フォールバック
+│   ├── encode.rs        flac / opus
+│   └── artwork.rs       抽出・埋め込み・サムネイル
+├── cd/
+│   ├── device.rs        ioctl / SG_IO / ポーリング
+│   ├── toc.rs           TOC パース、各種 DiscID 算出
+│   ├── rip.rs           cd-paranoia、オフセット、分割
+│   ├── accuraterip.rs   ARv1/v2 CRC、オフセット表
+│   └── ctdb.rs          CRC32、照会、修復
+├── import/
+│   ├── scanner.rs
+│   ├── normalize.rs     WAV → FLAC
+│   └── ytmusic/         parser.rs（ルール TOML）、downloader.rs
+├── jobs/
+│   ├── queue.rs  worker.rs  recovery.rs
+│   └── handlers/
+├── playlist/
+│   ├── dsl.rs           pest 文法 → AST
+│   ├── compile.rs       AST → パラメータ化 SQL
+│   ├── fb2k.rs          AST → foobar クエリ + ソートパターン
+│   └── export.rs        m3u8 / pls / パスマッピング
+├── api/
+│   ├── routes.rs  tracks.rs  stream.rs  cd.rs  events.rs
+│   ├── auth.rs          argon2id / セッション Cookie
+└── web/                 SPA を rust-embed で同梱
+```
+
+---
+
+## 16. 実装順
+
+| フェーズ | 内容 | 完了条件 |
+|---|---|---|
+| **P0** | データセット構築、移行、スキャナ、DB、表 UI、タグ一括編集、リネーム、編集履歴 | 既存ライブラリ全曲が表に出て、一括編集と巻き戻しができる |
+| **P1** | ReplayGain、アートワーク、WAV 正規化、プレイリスト（m3u8 出力）、再生、Derived 生成・追随、GC | foobar2000 を開かずに日常運用が回る |
+| **P2** | CD 取り込み（TOC → MB → rip → AR/CTDB → エンコード）、遡及照合 | 新規 CD が検証付きで取り込め、既存 FLAC が格付けされる |
+| **P3** | ytmusic 移植、ダウンロード後の Derived 投入、偽ハイレゾ検出 | ytmusic CLI を廃止できる |
+
+P0 を先に置くのは、リップの出口（タグ付け・配置・RG）がすべて P0 の成果物であり、
+先に作った方が結果的に早いため。
+
+---
+
+## 17. 決定済み事項と残課題
+
+### 決定済み
+
+| 項目 | 決定 | 根拠 |
+|---|---|---|
+| 名称 | **spindle** | CD を積むスピンドル。バイナリ名として扱いやすい |
+| ライブラリ構造 | 役割別 3 層（Library / Derived / Archive） | フォーマット別だと CD の FLAC が保管物かつ再生対象で破綻する |
+| Category 軸 | ジャンル別・統制語彙 | GENRE タグとは別フィールド |
+| アルバム名 | `{album}` のみ、衝突時のみ年を付与 | |
+| Derived | 可逆のみ変換 + 配布ビュー解決 | 非可逆の多重劣化を回避 |
+| ビットレート | Opus 128k VBR | 再生成可能なので低リスクな決定 |
+| WAV | FLAC へ正規化（MD5 照合付き）。元 WAV は Archive へ退避し GC 待ち | タグ・RG の互換性が低いため。即時削除は禁止事項と矛盾 |
+| ジョブ dedup | `queued`/`running` の間だけ一意 | 列 UNIQUE だと完了後に同キーを再投入できない |
+| 一括編集 | DB 先行更新 + `edit_ops.pending`（トラック単位）、pending 中の再編集は 409、スキャナは pending の論理値を巻き戻さない | ファイル反映待ちの窓で「ファイルが正」と衝突する |
+| 配布ビュー | 音声版一致の Derived のみ。音声が古ければ原本へ | 再エンコード待ちの古い音声を配らない |
+| スキャン | 4 相（inventory → 候補 → claim → commit）、`scan_runs` で claim、missing は completed でのみ | 走査途中では「移動元の消失」を判定できない |
+| 一括編集の対象 | preview 時のスナップショット（`selection_token`） | 見ていない行を破壊的操作の対象にしない |
+| 認証スキップ | `trusted_cidrs` は route allowlist のみ、CSRF は Origin 完全一致 | 全 GET 開放は履歴・パスが漏れる。Host は防御にならない |
+| 記法 | foobar 風 DSL → AST → SQL | 生 SQL 保存はスキーマ変更で壊れる |
+| 認証 | 単一パスワード + セッション Cookie | 事故対策。破壊的 API を裸で置かない |
+| Subsonic | 非対応 | ファイル同期を継続。認証も argon2 単独で閉じる |
+| メタデータ | MusicBrainz + 手入力の一級市民化 | 同人・VTuber 盤は未登録が常態 |
+| マルチch | Derived 対象外・album RG 除外、個別オプトイン | |
+| FLAC 再圧縮 | 一括再エンコードはしない。MD5 未設定のみ補填 | 削減 1% 未満に対し 200GB の書き直しとスナップショット肥大 |
+| インポート | Inbox + 承認キュー方式 | 外部ツリーを直接スキャンすると規約とタグ品質が混入する |
+| SMB | `casesensitivity=insensitive` / `normalization=formD` | 他クライアントが作るファイルと NFC/NFD 混在の事故を ZFS 層で潰す |
+| 移行方式 | 新規データセット作成 + rsync コピー | 上記 2 プロパティは作成時のみ指定可能 |
+
+### 残課題
+
+- [ ] Discogs / VGMdb 連携（P3 以降の任意。国内盤カタログ番号とアートワーク補完）
+- [ ] `.fpl` 書き出し（P4 の任意。バイナリ形式の解析コストに見合うか要判断）
+- [ ] `HAS` 等の演算子の foobar 実機との挙動突き合わせ（実装時）
+- [ ] 偽ハイレゾ検出のしきい値設計（P3）
+- [ ] 移行後の NFSv4 ACL 再適用（rsync では引き継げない）
+- [ ] Inbox のポーリング間隔（inotify はコンテナ越しに不安定なため既定はポーリング）
