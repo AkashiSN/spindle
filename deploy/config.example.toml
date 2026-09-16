@@ -1,3 +1,6 @@
+[server]
+listen = "0.0.0.0:8080"         # 待ち受けアドレス。省略時はこの値。ポート公開は compose 側で行う
+
 [paths]
 library   = "/library"
 derived   = "/derived"

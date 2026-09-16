@@ -1,0 +1,38 @@
+[package]
+name = "spindle"
+version = "0.1.0"
+edition = "2021"
+description = "TrueNAS 上で動く単一コンテナの音楽ライブラリ管理アプリ"
+license = "MIT"
+publish = false
+
+[workspace]
+members = []
+
+[lib]
+name = "spindle"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spindle"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+ipnet = { version = "2.12.2", features = ["serde"] }
+mime_guess = "2.0.5"
+rust-embed = { version = "8.12.0", features = ["include-exclude"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["full"] }
+toml = "1.1.6"
+tower-http = { version = "0.7.1", features = ["fs", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }

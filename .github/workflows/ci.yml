@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web:
+    name: web (lint / typecheck / build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run lint
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 1
+
+  rust:
+    name: rust (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  docker:
+    name: docker build + /health
+    runs-on: ubuntu-latest
+    needs: [web, rust]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          load: true
+          tags: spindle:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: コンテナを起動して /health と同梱 SPA を確認
+        run: |
+          set -eu
+          root=$(mktemp -d)
+          for d in library derived archive inbox playlists data; do mkdir -p "$root/$d"; done
+          cp deploy/config.example.toml "$root/data/config.toml"
+          chmod -R a+rwX "$root"
+          docker run -d --name spindle-ci \
+            -u 1000:1000 \
+            -v "$root/library:/library" -v "$root/derived:/derived" -v "$root/archive:/archive" \
+            -v "$root/inbox:/inbox" -v "$root/playlists:/playlists" -v "$root/data:/data" \
+            -p 18080:8080 spindle:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/health; then echo; ok=1; break; fi
+            sleep 1
+          done
+          docker logs spindle-ci
+          test "${ok:-0}" = 1
+          # 同梱 SPA: index.html、それが参照する hashed asset、クライアントルート、/api の JSON 404
+          index=$(mktemp)
+          curl -fsS -o "$index" -w '%{content_type}\n' http://127.0.0.1:18080/ | grep -q '^text/html'
+          asset=$(grep -o '/assets/[^"]*\.js' "$index" | head -n1)
+          test -n "$asset"
+          curl -fsS -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:18080$asset" | grep -q 'javascript'
+          curl -fsS -o /dev/null -w '%{content_type}\n' http://127.0.0.1:18080/some/client/route | grep -q '^text/html'
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/api/nope)" = 404
+          docker rm -f spindle-ci

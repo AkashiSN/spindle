@@ -1043,6 +1043,9 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
 ## 13. 設定
 
 ```toml
+[server]
+listen = "0.0.0.0:8080"        # 待ち受けアドレス。省略時はこの値。ポート公開は compose 側で行う
+
 [paths]
 library  = "/library"
 derived  = "/derived"
@@ -1099,7 +1102,7 @@ autoexport_debounce_sec = 30
 fb2k_prefix = "\\\\TRUENAS\\music\\"
 
 [musicbrainz]
-user_agent = "spindle/0.1 (contact)"
+user_agent = "spindle/0.1 (contact@example.com)"
 rate_limit_per_sec = 1
 
 [ytmusic]
@@ -1255,10 +1258,11 @@ TrueNAS の ACL エディタで新データセットにプリセットを適用�
 ```
 src/
 ├── main.rs
-├── config.rs
+├── config.rs            config.toml の読み込みと検証（D-34）
+├── logging.rs           tracing の初期化
 ├── db/
 │   ├── mod.rs           コネクション管理（write 単一 / read プール）
-│   ├── migrations/      連番 SQL
+│   ├── migrations.rs    リポジトリ直下 db/migrations/*.sql の埋め込みと適用
 │   ├── tracks.rs  albums.rs  playlists.rs  jobs.rs  history.rs
 ├── domain/
 │   ├── identity.rs      inode / audio_md5 による同一性解決

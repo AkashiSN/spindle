@@ -9,7 +9,7 @@ RUN npm run build
 # ---- server ----
 FROM rust:1-bookworm AS build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
 # rust-embed / include_str! でバイナリへ埋め込むものは build context に入れる
 COPY db/migrations/ db/migrations/

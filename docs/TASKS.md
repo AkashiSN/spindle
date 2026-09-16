@@ -16,11 +16,11 @@
 
 ### P0-1 プロジェクト初期化
 
-- [ ] Cargo ワークスペース、`web/` に Vite + React + TypeScript
-- [ ] `tracing` によるログ、`config.toml` の読み込みと検証
-- [ ] `axum` でヘルスチェックを返す
-- [ ] `db/migrations/` をバイナリへ埋め込む（Dockerfile の COPY 範囲に含める）
-- [ ] `cargo clippy -- -D warnings` が通る CI
+- [x] Cargo ワークスペース、`web/` に Vite + React + TypeScript
+- [x] `tracing` によるログ、`config.toml` の読み込みと検証
+- [x] `axum` でヘルスチェックを返す
+- [x] `db/migrations/` をバイナリへ埋め込む（Dockerfile の COPY 範囲に含める）
+- [x] `cargo clippy -- -D warnings` が通る CI
 
 受け入れ: `docker build` が通り、コンテナが起動して `/health` が 200 を返す。
 

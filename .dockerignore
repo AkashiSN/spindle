@@ -1,0 +1,9 @@
+# docker build のコンテキストから除外する。Dockerfile が COPY するのは
+# Cargo.toml / Cargo.lock / build.rs / src / db/migrations / web（node_modules 除く）
+target/
+web/node_modules/
+web/dist/
+.git/
+*.db
+*.db-wal
+*.db-shm
