@@ -59,7 +59,7 @@ jobs:
           tags: spindle:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: コンテナを起動して /health・ロックモード・ログイン・同梱 SPA を確認
+      - name: コンテナを起動して /health・ロックモード・ログイン・ジョブ API・同梱 SPA を確認
         run: |
           set -eu
           root=$(mktemp -d)
@@ -98,6 +98,11 @@ jobs:
             -d '{"password":"ci-password"}' http://127.0.0.1:18080/api/auth/login)" = 200
           grep -q spindle_session "$jar"
           test "$(code -b "$jar" http://127.0.0.1:18080/api/auth/session)" = 200
+          # ジョブ API: 未認証 401、セッションで一覧 + summary、SSE は text/event-stream、存在しない id は 404
+          test "$(code http://127.0.0.1:18080/api/jobs)" = 401
+          curl -fsS -b "$jar" http://127.0.0.1:18080/api/jobs | grep -q '"summary"'
+          curl -sS -b "$jar" -m 2 -o /dev/null -w '%{content_type}\n' http://127.0.0.1:18080/api/events | grep -q '^text/event-stream'
+          test "$(code -b "$jar" -X POST -H 'Origin: http://127.0.0.1:18080' http://127.0.0.1:18080/api/jobs/424242/cancel)" = 404
           test "$(code -b "$jar" -X POST -H 'Origin: http://evil.example' http://127.0.0.1:18080/api/auth/logout)" = 403
           test "$(code -b "$jar" -X POST -H 'Origin: http://127.0.0.1:18080' http://127.0.0.1:18080/api/auth/logout)" = 204
 

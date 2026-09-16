@@ -7,6 +7,7 @@ use tracing::info;
 
 use spindle::api::{self, auth, AppState};
 use spindle::db::{migrations, Db};
+use spindle::jobs::{self, Registry};
 use spindle::{config::Config, logging};
 
 /// `SPINDLE_CONFIG` 未設定時の設定ファイルパス（SPEC §14 環境変数）
@@ -49,8 +50,31 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("認証の初期化に失敗")?;
 
+    // 起動時リカバリ: running → queued、track_locks 全削除（SPEC §8）。ワーカー起動より前
+    let recovered = jobs::recovery::run(&db)
+        .await
+        .context("ジョブのリカバリに失敗")?;
+    info!(
+        requeued = recovered.requeued,
+        locks_cleared = recovered.locks_cleared,
+        "ジョブをリカバリした"
+    );
+
     let listen = config.server.listen;
     let state = AppState::new(Arc::new(config), db, mode);
+
+    // 停止シグナルは共有 token を倒す。HTTP サーバ・ワーカー・SSE ストリームが同時に止まる
+    // （SSE を先に閉じないと axum の graceful shutdown が接続の終了を待ち続ける）
+    let shutdown = state.shutdown.clone();
+    tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            shutdown_signal().await;
+            shutdown.cancel();
+        }
+    });
+    // ハンドラは各タスクで登録する（scan は P0-6、tagwrite / rename は P0-9 …）
+    let worker = state.jobs.start(Registry::new(), shutdown.clone());
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("待ち受けに失敗: {listen}"))?;
@@ -60,9 +84,11 @@ async fn main() -> anyhow::Result<()> {
         listener,
         api::router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown.clone().cancelled_owned())
     .await
     .context("HTTP サーバが異常終了")?;
+    // ワーカーは新規 claim を止め、実行中は破棄済み（次回起動のリカバリで queued に戻る）
+    let _ = worker.await;
     info!("停止した");
     Ok(())
 }

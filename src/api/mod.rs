@@ -2,7 +2,9 @@
 
 pub mod auth;
 pub mod error;
+pub mod events;
 pub mod health;
+pub mod jobs;
 pub mod spa;
 mod state;
 
@@ -19,6 +21,10 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/session", get(auth::session))
+        .route("/jobs", get(jobs::list))
+        .route("/jobs/{id}/cancel", post(jobs::cancel))
+        .route("/jobs/{id}/retry", post(jobs::retry))
+        .route("/events", get(events::stream))
         .fallback(api_not_found);
 
     let protected = Router::new()

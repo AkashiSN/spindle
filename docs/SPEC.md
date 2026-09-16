@@ -782,12 +782,18 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 { "items": [ { "id", "type", "state", "progress", "done", "total", "attempts", "last_error",
                "run_after", "edit_batch_id", "created_at", "started_at" } ],
   "summary": { "running": 3, "queued": 12, "pending_ops": 1204, "failed": 0 } }
+// POST /api/jobs/:id/cancel  → 202（queued は即 cancelled、running は cancel_requested_at を立てる）
+//                            → 404 | 409 { "error": "not_cancellable" }   // 既に終端
+// POST /api/jobs/:id/retry   → 202（failed / cancelled を attempts=0 で queued に戻す）
+//                            → 404 | 409 { "error": "not_retryable" | "duplicate" }   // D-36
 
-// SSE /api/events   event 種別: job | batch | library
+// SSE /api/events   event 種別: job | batch | library | resync
 //   job:     { "id", "state", "progress", "done", "total" }
 //   batch:   { "id", "state", "applied", "conflict", "failed" }
 //   library: { "scan_run_id", "kind": "ids", "track_ids": [ … ] }   // 変更が 200 行以下
 //            { "scan_run_id", "kind": "bulk" }                     // それ以上。ページを無効化
+//   resync:  { "skipped": n }   // サーバ側で取りこぼした。一覧（jobs / history / 表示ページ）を再取得
+//   クライアントは SSE を開いてから一覧を取得する（逆順だと開く前のイベントを失う。D-36）
 ```
 
 `library` イベントを受けたクライアントは、**表示中のページ（クエリ + カーソル）を無効化して

@@ -4,4 +4,5 @@
 pub mod api;
 pub mod config;
 pub mod db;
+pub mod jobs;
 pub mod logging;

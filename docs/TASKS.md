@@ -63,17 +63,17 @@ Host だけが一致する（Origin が別）POST が 403 になることをテ�
 
 ### P0-4 ジョブシステム
 
-- [ ] キュー、型別の並列度、`dedup_key` による二重投入防止
+- [x] キュー、型別の並列度、`dedup_key` による二重投入防止
       （`queued` / `running` の間だけ一意。`done` 後は同キーを再投入できる）
-- [ ] 起動時リカバリ: `running` → `queued`、`track_locks` 全削除
-- [ ] 指数バックオフ（`run_after` に永続化）、`max_attempts` 超過で `failed`
-- [ ] 協調キャンセル（`cancel_requested_at`）、外部プロセスの子グループ kill と tmp 掃除
-- [ ] 進捗の SSE 配信と DB 永続化
-- [ ] `GET /api/jobs`（`summary` 込み）、`POST /api/jobs/:id/cancel` / `retry`。
+- [x] 起動時リカバリ: `running` → `queued`、`track_locks` 全削除
+- [x] 指数バックオフ（`run_after` に永続化）、`max_attempts` 超過で `failed`
+- [x] 協調キャンセル（`cancel_requested_at`）、外部プロセスの子グループ kill と tmp 掃除
+- [x] 進捗の SSE 配信と DB 永続化
+- [x] `GET /api/jobs`（`summary` 込み）、`POST /api/jobs/:id/cancel` / `retry`。
       ジョブ画面（SPEC §12.5）は P0-8 の骨格に載せる
-- [ ] `track_locks` による同一トラックの直列化。複数ロックは `track_id` 昇順取得、
+- [x] `track_locks` による同一トラックの直列化。複数ロックは `track_id` 昇順取得、
       取れなければ全解放して再キュー
-- [ ] 版付きジョブの stale 判定（payload の版 < 現在値なら no-op で `done`）
+- [x] 版付きジョブの stale 判定（payload の版 < 現在値なら no-op で `done`）
 
 受け入れ: 実行中にプロセスを kill → 再起動で中断ジョブが再開され、ロック表が空になる。
 同じジョブを二重投入しても 1 つしか走らない。完了後に同キーで再投入できる。
