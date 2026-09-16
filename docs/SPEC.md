@@ -1293,8 +1293,9 @@ src/
 │   ├── fb2k.rs          AST → foobar クエリ + ソートパターン
 │   └── export.rs        m3u8 / pls / パスマッピング
 ├── api/
-│   ├── routes.rs  tracks.rs  stream.rs  cd.rs  events.rs
-│   ├── auth.rs          argon2id / セッション Cookie
+│   ├── mod.rs  tracks.rs  stream.rs  cd.rs  events.rs
+│   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
+│   ├── state.rs  error.rs   AppState、`{ "error": code }` 応答
 └── web/                 SPA を rust-embed で同梱
 ```
 

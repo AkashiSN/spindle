@@ -1,15 +1,20 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
 use tracing::info;
 
+use spindle::api::{self, auth, AppState};
 use spindle::db::{migrations, Db};
-use spindle::{api, config::Config, logging};
+use spindle::{config::Config, logging};
 
 /// `SPINDLE_CONFIG` 未設定時の設定ファイルパス（SPEC §14 環境変数）
 const DEFAULT_CONFIG_PATH: &str = "/data/config.toml";
 /// `[paths].data` 直下の DB ファイル名（SPEC §5）
 const DB_FILE_NAME: &str = "spindle.db";
+/// 初回起動時の管理パスワード（SPEC §14 環境変数、D-28）
+const INITIAL_PASSWORD_ENV: &str = "SPINDLE_INITIAL_PASSWORD";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,17 +40,29 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("スキーマ版の読み取りに失敗")?;
     info!(db = %db_path.display(), schema_version = ?version, "DB を開いた");
-    // ルータへの受け渡し（AppState）は認証と一緒に P0-3 で入れる。ここでは寿命だけ持つ
-    let _db = db;
+    let db = Arc::new(db);
 
-    let listener = tokio::net::TcpListener::bind(config.server.listen)
+    // 初期パスワードは DB に無い初回起動だけ読む（D-28）。読んだ後は環境から消す
+    let initial_password = std::env::var(INITIAL_PASSWORD_ENV).ok();
+    std::env::remove_var(INITIAL_PASSWORD_ENV);
+    let mode = auth::bootstrap(&db, initial_password)
         .await
-        .with_context(|| format!("待ち受けに失敗: {}", config.server.listen))?;
-    info!(listen = %config.server.listen, "HTTP サーバを開始");
-    axum::serve(listener, api::router())
-        .with_graceful_shutdown(shutdown_signal())
+        .context("認証の初期化に失敗")?;
+
+    let listen = config.server.listen;
+    let state = AppState::new(Arc::new(config), db, mode);
+    let listener = tokio::net::TcpListener::bind(listen)
         .await
-        .context("HTTP サーバが異常終了")?;
+        .with_context(|| format!("待ち受けに失敗: {listen}"))?;
+    info!(%listen, ?mode, "HTTP サーバを開始");
+    // 接続元アドレスを ConnectInfo で渡す（trusted_cidrs / trusted_proxies / レート制限の判定に使う）
+    axum::serve(
+        listener,
+        api::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("HTTP サーバが異常終了")?;
     info!("停止した");
     Ok(())
 }

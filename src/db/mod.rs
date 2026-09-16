@@ -36,6 +36,8 @@ pub enum DbError {
     NotWal { path: PathBuf, actual: String },
     #[error("DB スレッドが異常終了した: {0}")]
     Join(#[from] tokio::task::JoinError),
+    #[error("{0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;

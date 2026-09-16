@@ -59,30 +59,59 @@ jobs:
           tags: spindle:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: コンテナを起動して /health と同梱 SPA を確認
+      - name: コンテナを起動して /health・ロックモード・ログイン・同梱 SPA を確認
         run: |
           set -eu
           root=$(mktemp -d)
           for d in library derived archive inbox playlists data; do mkdir -p "$root/$d"; done
           cp deploy/config.example.toml "$root/data/config.toml"
           chmod -R a+rwX "$root"
-          docker run -d --name spindle-ci \
-            -u 1000:1000 \
-            -v "$root/library:/library" -v "$root/derived:/derived" -v "$root/archive:/archive" \
-            -v "$root/inbox:/inbox" -v "$root/playlists:/playlists" -v "$root/data:/data" \
-            -p 18080:8080 spindle:ci
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18080/health; then echo; ok=1; break; fi
-            sleep 1
-          done
-          docker logs spindle-ci
-          test "${ok:-0}" = 1
-          # 同梱 SPA: index.html、それが参照する hashed asset、クライアントルート、/api の JSON 404
+          run_container() {
+            docker run -d --name spindle-ci "$@" \
+              -u 1000:1000 \
+              -v "$root/library:/library" -v "$root/derived:/derived" -v "$root/archive:/archive" \
+              -v "$root/inbox:/inbox" -v "$root/playlists:/playlists" -v "$root/data:/data" \
+              -p 18080:8080 spindle:ci
+            ok=0
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:18080/health; then echo; ok=1; break; fi
+              sleep 1
+            done
+            docker logs spindle-ci
+            test "$ok" = 1
+          }
+          code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
+
+          # 1. パスワード未設定 → ロックモード: /health は locked、SPA を含め他は 503
+          run_container
+          curl -fsS http://127.0.0.1:18080/health | grep -q '"status":"locked"'
+          test "$(code http://127.0.0.1:18080/)" = 503
+          test "$(code http://127.0.0.1:18080/api/tracks)" = 503
+          docker rm -f spindle-ci
+
+          # 2. 初期パスワードを与えて起動 → 未認証 401、ログイン → セッションで 200、CSRF 403
+          run_container -e SPINDLE_INITIAL_PASSWORD=ci-password
+          curl -fsS http://127.0.0.1:18080/health | grep -q '"status":"ok"'
+          test "$(code http://127.0.0.1:18080/api/auth/session)" = 401
+          jar=$(mktemp)
+          test "$(code -c "$jar" -H 'Sec-Fetch-Site: none' -H 'Content-Type: application/json' \
+            -d '{"password":"ci-password"}' http://127.0.0.1:18080/api/auth/login)" = 200
+          grep -q spindle_session "$jar"
+          test "$(code -b "$jar" http://127.0.0.1:18080/api/auth/session)" = 200
+          test "$(code -b "$jar" -X POST -H 'Origin: http://evil.example' http://127.0.0.1:18080/api/auth/logout)" = 403
+          test "$(code -b "$jar" -X POST -H 'Origin: http://127.0.0.1:18080' http://127.0.0.1:18080/api/auth/logout)" = 204
+
+          # 3. 同梱 SPA: index.html、それが参照する hashed asset、クライアントルート、/api の JSON 404
           index=$(mktemp)
           curl -fsS -o "$index" -w '%{content_type}\n' http://127.0.0.1:18080/ | grep -q '^text/html'
           asset=$(grep -o '/assets/[^"]*\.js' "$index" | head -n1)
           test -n "$asset"
           curl -fsS -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:18080$asset" | grep -q 'javascript'
           curl -fsS -o /dev/null -w '%{content_type}\n' http://127.0.0.1:18080/some/client/route | grep -q '^text/html'
-          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/api/nope)" = 404
+          test "$(code -b "$jar" http://127.0.0.1:18080/api/nope)" = 401
+          docker rm -f spindle-ci
+
+          # 4. 再起動: 環境変数なしでも DB のパスワードでロックされない
+          run_container
+          curl -fsS http://127.0.0.1:18080/health | grep -q '"status":"ok"'
           docker rm -f spindle-ci

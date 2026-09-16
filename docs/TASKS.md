@@ -44,14 +44,14 @@ CHECK 制約で不正な列挙値（`state='bogus'` 等）が拒否される。
 
 ### P0-3 認証
 
-- [ ] `SPINDLE_INITIAL_PASSWORD` を初回起動時のみ読んで argon2id で DB へ。無ければロックモード
-- [ ] セッション Cookie（HttpOnly / SameSite=Lax）、トークンは DB にハッシュ保存、期限切れ掃除
-- [ ] 変更系リクエストの CSRF 検証: `Origin` があれば完全一致必須、無ければ `Sec-Fetch-Site`。
+- [x] `SPINDLE_INITIAL_PASSWORD` を初回起動時のみ読んで argon2id で DB へ。無ければロックモード
+- [x] セッション Cookie（HttpOnly / SameSite=Lax）、トークンは DB にハッシュ保存、期限切れ掃除
+- [x] 変更系リクエストの CSRF 検証: `Origin` があれば完全一致必須、無ければ `Sec-Fetch-Site`。
       **`Host` は使わない。** ログイン失敗の IP 単位レート制限
-- [ ] `trusted_cidrs` は route allowlist（stream / artwork / tracks/:id / playlist export）のみ
+- [x] `trusted_cidrs` は route allowlist（stream / artwork / tracks/:id / playlist export）のみ
       認証スキップ。判定は socket アドレス、`X-Forwarded-*` は `trusted_proxies` からのみ
-- [ ] ロックモード: SPA 配信を含め `/health` 以外 503、`/health` は `{"status":"locked"}`
-- [ ] `/health` 以外の全ルート（SSE / stream / artwork 含む）を同じミドルウェア配下に置く
+- [x] ロックモード: SPA 配信を含め `/health` 以外 503、`/health` は `{"status":"locked"}`
+- [x] `/health` 以外の全ルート（SSE / stream / artwork 含む）を同じミドルウェア配下に置く
 
 受け入れ: 未認証で API を叩くと 401。CORS プリフライトが通らない。
 trusted CIDR から stream は通り、一覧 GET と POST は 401。

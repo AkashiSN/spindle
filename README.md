@@ -23,4 +23,12 @@ CD リッピング（AccurateRip / CTDB 照合付き）、メタデータ一括�
 
 ## 現在の状態
 
-P0-2（DB 層とマイグレーション）まで完了。`docs/TASKS.md` の P0-3 から続ける。
+P0-3（認証）まで完了。`docs/TASKS.md` の P0-4 から続ける。
+
+## 起動
+
+`SPINDLE_CONFIG`（既定 `/data/config.toml`）で設定を指す。初回起動では環境変数
+`SPINDLE_INITIAL_PASSWORD` を読んで argon2id で DB に保存し、以後は無視する。
+環境変数も DB もパスワードが無いとロックモード（`/health` が `{"status":"locked"}`、
+それ以外は 503）で起動する。**初期化が済んだら compose から `SPINDLE_INITIAL_PASSWORD` の
+行を消してよい**（平文を残さないため。消しても DB のパスワードで起動する）。
