@@ -668,3 +668,83 @@ Derived の再エンコードと重複検出の両方が空回りするため。
 増える方向）。SQLite の `COLLATE NOCASE`（D-31）。パケット列のハッシュに長さを前置する案
 （packetization 差で値が変わる）。`bits_per_sample` が無い ALAC をバッファ幅（32 ビット）で
 ハッシュする案（FLAC と一致しなくなる）。
+
+---
+
+## D-38 スキャナの固定値と境界
+
+**決定**: 仕様（SPEC §7.1 / §6）が定めていない値と境界を次のとおり固定する。設定には出さない。
+
+- **スキャンの起動経路**は `POST /api/scan`（`{"kind": "incremental" | "deep"}`、dedup key は固定の
+  `scan`）と、**起動時に incremental を 1 件投入**する（停止中の外部変更を拾う。既に queued /
+  running なら dedup で何もしない）。incremental は、完了した deep scan が
+  `[scan].deep_interval_days` より古い（または一度も無い）とき deep に**昇格**する。`0` なら
+  昇格しない。deep は全既存行を「変更あり」として扱い、`tag_hash` と音声フィンガープリントを
+  再計算する。**実差分があれば版を進める**（deep は stat に見えない変更 — ZFS rollback など —
+  を拾うためのもので、「再計算だから据え置く」ではない）
+- 走査対象は拡張子で決める（flac / opus / m4a・mp4・aac / mp3 / wav / ogg・oga / wv / ape /
+  aiff・aif）。`.` で始まるファイルは黙って飛ばす（macOS の `._x`）。symlink と、SMB / exFAT
+  制約に反する名前（`RelPath` が拒否するもの、UTF-8 でない名前）は**対象外として一覧に出す**。
+  対象外のディレクトリは配下ごと飛ばす。walk の途中でディレクトリを読めなければ run は
+  `failed`（`completed` は「root を開けて walk がエラーなく完了」なので、途中欠落を missing に
+  しない）。音声として読めないファイル（壊れた FLAC 等）は `errors` に数え、既存行なら物理属性
+  だけ更新し、新規なら登録しない。run 自体は `completed` にする
+- **`.spindle-tmp-*` の回収**は mtime が 1 時間より古いものだけ（並走中の tagwrite の tmp を
+  消さないための猶予）
+- **`artist_display`** は多値 ARTIST を `", "` で連結（foobar2000 の `%artist%` と同じ見え方）。
+  `albumartist` キャッシュ列は ALBUMARTIST が無ければ ARTIST の先頭値で代用する。`track_no` /
+  `disc_no` は先頭の整数（`"3/12"` → 3）
+- **`category_id` の推定**（album 単位）: 先頭ディレクトリ名が `categories.name` と canonical key で
+  一致すればそれ → 構成トラックの GENRE を `genre_category_map` で引く → どちらも無ければ NULL
+  （`_Unsorted` への配置はパス生成側 P0-11 の判断）。album のメタデータ（albumartist / album /
+  date / original_date / mb_release_id / discid / disc_count）は構成トラックの**最頻値**
+  （同数なら文字列順で先）。`edition` は P0-6 では設定しない
+- **album 照合の候補順**は MBID / DiscID が 1 件一致 → 構成トラックの過半数が直前まで属していた
+  album → そのディレクトリに既にある album → 新規。既存 album を別のディレクトリへ寄せてよいのは
+  「旧 rel_dir が inventory に無い」か「**旧 rel_dir の現在の構成の過半数が別の album に属して
+  いる**」ときで、後者が 2 ディレクトリの swap を id 維持で解く鍵になる（仕様の「旧 rel_dir が
+  inventory に無ければ」の字義どおりだと swap は両方新規になる）。ディレクトリを別の album に
+  明け渡した album が誰にも claim されなかったときは `rel_dir` を予約 key（`\0displaced:<id>`）へ
+  退避して UNIQUE を避け、構成 0 なので finalize で missing になる。変更のないディレクトリ
+  （最速パスだけ）は照合を省く
+- パスの 2 段階更新の一時 key は `\0track:<id>` / `\0album:<id>`（NUL は `RelPath` が拒否するので
+  実 key と衝突しない）。外部 rename の**宛先 key を今回 claim されなかった別の行**（missing 行を
+  含む）が占有していれば、同じトランザクションでその行の key を `\0vacated:<id>` へ明け渡させる。
+  行は残り、finalize で missing になる（SPEC §7.1）。inventory 内で canonical key が重複する
+  ファイル（case-sensitive な FS で大小文字だけ違う 2 ファイル）は後から見つかった方を対象外
+  （`DuplicateKey`）にして UNIQUE を踏まない
+- **pending op は commit トランザクションの中で読み直す。** Phase 2 のスナップショットは長い
+  Phase 3 の間に編集バッチ（DB 先行更新 + pending）に追い越され得るので、スナップショットの
+  値で判断すると編集意図をファイル値で巻き戻す（D-24 違反）。さらに **rel_path と物理属性が
+  スナップショットから変わっている行（tagwrite の tmp + rename や rename ジョブが Phase 3 中に
+  完了した）は、今回の inventory と読み取りが古いので何も適用せず `seen` だけ更新する**
+  （`overtaken` として報告。次回スキャンで整合する）。追い越された行は album 照合の
+  ディレクトリ集計にも入れない（所在も所属も DB の現在値が正しい）。scan は track_locks を
+  取らないので tagwrite / rename と並走する前提
+- pending の rename op があるトラックの `rel_path` は op が所有する（overlay で先に変わっていて
+  よい）。外部移動の判定は DB の `rel_path` ではなく **`edit_ops.expected_rel_path`（記録時点の
+  物理パス）** と inventory のパスを key で比べ、違えば `skipped_conflict`。同じなら物理属性と
+  タグ（rename op はタグを所有しない）は通常どおり追随する
+- 音声の変化は同種のフィンガープリントの差に加え、**種類が変わった**（同じパスで ALAC ⇔ AAC
+  など可逆 ⇔ 非可逆の差し替え）ときも `audio_version` を進める。旧値が片方しか無いので同種比較
+  では見えない
+- root 直下へ移ったトラックは `album_id` / `album` を NULL にする（album = ディレクトリ。root は
+  album を持たない）
+- pending の `tags` op があるトラックはタグ・キャッシュ列・`tag_hash`・`tag_version` を触らない。
+  pending の `rename` op があるトラックで外部 rename を検出したら `rel_path` を据え置き、op を
+  `skipped_conflict`（error に新パス）にする。物理属性はどちらも追随する（D-24）
+- Phase 3（タグ読込 + フィンガープリント）の並列度は CPU コア数（`available_parallelism`）。
+  進捗は Phase 3 の件数で報告し、DB への永続化は `JobContext::progress` の間引きに任せる
+- **性能の参照値**（`tests/scanner.rs::perf_10k_synthetic_tree`、`--release`、1 万件 = FLAC 8 割 /
+  Opus 2 割 / アルバム 12 曲、2 回目は warm cache）: 2026-09-16、TrueNAS ホスト（AMD Ryzen 5 7600、
+  12 論理コア、`/tmp` = tmpfs、DB も tmpfs）で **1 回目 2.87 秒（new=10000）、2 回目 0.15 秒
+  （unchanged=10000）**。ZFS 上の実ライブラリでは 1 回目はタグ読込の I/O が支配的になるが、
+  2 回目は stat だけなので同程度に収まる想定
+
+**理由**: 起動時スキャンは「DB はキャッシュ」の原則の実装で、停止中の外部変更を UI を開く前に
+拾う。tmp の猶予 1 時間は tagwrite が 1 ファイルに要する時間の上限を大きく超える値で、短すぎて
+書き込み中の tmp を消す事故を避ける。swap の扱いを字義より広げたのは、「パスは識別子ではない」
+を album にも適用する D-32 の意図に沿うため。
+
+**却下**: ffmpeg で全ファイルの音声属性を取る案（lofty の properties で足りる。外部プロセス
+1 万回は遅い）。`.spindle-tmp-*` を無条件に回収する案（並走する tagwrite の tmp を消す）。

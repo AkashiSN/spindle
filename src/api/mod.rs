@@ -5,6 +5,7 @@ pub mod error;
 pub mod events;
 pub mod health;
 pub mod jobs;
+pub mod scan;
 pub mod spa;
 mod state;
 
@@ -25,6 +26,7 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/{id}/cancel", post(jobs::cancel))
         .route("/jobs/{id}/retry", post(jobs::retry))
         .route("/events", get(events::stream))
+        .route("/scan", post(scan::start))
         .fallback(api_not_found);
 
     let protected = Router::new()

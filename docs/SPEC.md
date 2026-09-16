@@ -723,6 +723,8 @@ POST   /api/cd/rip                                リップ開始
 POST   /api/cd/eject
 
 GET    /api/jobs, POST /api/jobs/:id/cancel, POST /api/jobs/:id/retry
+POST   /api/scan                                  {"kind": "incremental" | "deep"}。scan ジョブを投入
+                                                  （202 + job_id。queued / running があれば 409 duplicate）
 GET    /api/events                                SSE: ジョブ進捗・ライブラリ変更
 
 GET    /api/history, POST /api/history/:batch/revert

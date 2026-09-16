@@ -3,10 +3,8 @@
 //! DB に用意してから**実バイナリを起動**し、起動時リカバリの結果を確認する。SSE を接続した
 //! まま SIGTERM を送っても所定時間内に終了することも見る（SSE がサーバの停止を塞がない）。
 //!
-//! 「ワーカーが実行中のプロセスを kill → 再起動でハンドラが再開する」ところまでは
-//! ここでは検証しない（本体バイナリにはまだハンドラが無い）。再キューされた queued を
-//! ワーカーが拾って完走する経路は tests/jobs.rs の
-//! `recovery_requeues_running_jobs_and_clears_locks` が同一プロセス内で検証する。
+//! 中断していた `scan` ジョブは queued に戻された後、本体の scan ハンドラ（P0-6）が拾って
+//! 完走する（= 「kill → 再起動で再開」の起動側）。起動時スキャンの投入は dedup で二重にならない。
 //!
 //! HTTP は生の TCP で喋る（依存を増やさない。/health と SSE のヘッダだけ読めればよい）
 
@@ -229,7 +227,25 @@ fn startup_recovers_interrupted_state_in_db_and_sigterm_finishes_with_open_sse()
         conn.query_row("SELECT state FROM jobs WHERE id = ?1", [id], |r| r.get(0))
             .unwrap()
     };
-    assert_eq!(state(1), "queued", "中断ジョブは queued に戻る");
+    // 中断ジョブは queued に戻り、scan ハンドラが拾って完走する
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while state(1) != "done" {
+        assert!(
+            ["queued", "running", "done"].contains(&state(1).as_str()),
+            "中断ジョブは queued → running → done を辿る（現在 {}）",
+            state(1)
+        );
+        assert!(Instant::now() < deadline, "再開した scan が完走しない");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let completed_runs: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM scan_runs WHERE state = 'completed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(completed_runs >= 1, "再開した scan が scan_runs を残す");
     assert_eq!(
         state(2),
         "cancelled",

@@ -6,9 +6,9 @@
 //! （CI には ffmpeg を入れる）。
 
 use std::fs::File;
-use std::io::{Cursor, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::Cursor;
+
+mod common;
 
 use md5::{Digest, Md5};
 
@@ -18,83 +18,7 @@ use spindle::media::fingerprint::{
 
 // ---------------------------------------------------------------- 生成ヘルパ
 
-/// 1 秒のステレオ正弦波。左右で周波数を変える
-fn pcm_samples(seed: u32) -> Vec<i32> {
-    let rate = 44_100usize;
-    let mut out = Vec::with_capacity(rate * 2);
-    for i in 0..rate {
-        let t = i as f64 / rate as f64;
-        let l = ((t * 440.0 * std::f64::consts::TAU).sin() * 20_000.0) as i32;
-        let r = ((t * (660.0 + seed as f64) * std::f64::consts::TAU).sin() * 18_000.0) as i32;
-        out.push(l);
-        out.push(r);
-    }
-    out
-}
-
-/// FLAC の STREAMINFO MD5 と同じ流儀（LE インターリーブ、bps ぶんのバイト）で並べたバイト列
-fn pack_pcm(samples: &[i32], bits: u32) -> Vec<u8> {
-    let bytes = (bits / 8) as usize;
-    let mut out = Vec::with_capacity(samples.len() * bytes);
-    for s in samples {
-        out.extend_from_slice(&s.to_le_bytes()[..bytes]);
-    }
-    out
-}
-
-fn write_wav(path: &Path, samples: &[i32], bits: u32) {
-    let data = pack_pcm(samples, bits);
-    let channels = 2u16;
-    let rate = 44_100u32;
-    let block_align = channels * (bits / 8) as u16;
-    let mut f = File::create(path).unwrap();
-    f.write_all(b"RIFF").unwrap();
-    f.write_all(&(36 + data.len() as u32).to_le_bytes())
-        .unwrap();
-    f.write_all(b"WAVEfmt ").unwrap();
-    f.write_all(&16u32.to_le_bytes()).unwrap();
-    f.write_all(&1u16.to_le_bytes()).unwrap(); // PCM
-    f.write_all(&channels.to_le_bytes()).unwrap();
-    f.write_all(&rate.to_le_bytes()).unwrap();
-    f.write_all(&(rate * block_align as u32).to_le_bytes())
-        .unwrap();
-    f.write_all(&block_align.to_le_bytes()).unwrap();
-    f.write_all(&(bits as u16).to_le_bytes()).unwrap();
-    f.write_all(b"data").unwrap();
-    f.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
-    f.write_all(&data).unwrap();
-}
-
-fn ffmpeg() -> Option<PathBuf> {
-    let p = Command::new("ffmpeg").arg("-version").output().ok()?;
-    p.status.success().then(|| PathBuf::from("ffmpeg"))
-}
-
-/// `ffmpeg -i src <args> dst`。ffmpeg が無ければ None
-fn encode(src: &Path, dst: &Path, args: &[&str]) -> Option<()> {
-    let ffmpeg = ffmpeg()?;
-    let st = Command::new(ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(src)
-        .args(args)
-        .arg(dst)
-        .status()
-        .unwrap();
-    assert!(st.success(), "ffmpeg {args:?} failed");
-    Some(())
-}
-
-macro_rules! require_ffmpeg {
-    ($e:expr) => {
-        match $e {
-            Some(v) => v,
-            None => {
-                eprintln!("ffmpeg が無いので skip");
-                return;
-            }
-        }
-    };
-}
+use common::{encode, pack_pcm, pcm_samples, write_wav};
 
 /// 手組みの最小 FLAC（fLaC マーカー + STREAMINFO のみ）。`md5` を埋める
 fn minimal_flac(md5: [u8; 16]) -> Vec<u8> {
@@ -222,25 +146,6 @@ fn alac_24bit_shares_audio_md5_with_flac() {
 
 // ---------------------------------------------------------------- 非可逆のパケット列
 
-fn retag_with_lofty(path: &Path) {
-    use lofty::config::WriteOptions;
-    use lofty::file::TaggedFileExt;
-    use lofty::tag::{Accessor, ItemKey, TagExt};
-
-    let mut tagged = lofty::read_from_path(path).unwrap();
-    let tag = match tagged.primary_tag_mut() {
-        Some(t) => t,
-        None => {
-            let ty = tagged.primary_tag_type();
-            tagged.insert_tag(lofty::tag::Tag::new(ty));
-            tagged.primary_tag_mut().unwrap()
-        }
-    };
-    tag.set_title("書き換え後のタイトル".to_owned());
-    tag.insert_text(ItemKey::Comment, "x".repeat(4096));
-    tag.save_to_path(path, WriteOptions::default()).unwrap();
-}
-
 fn assert_packet_fp_survives_retag(ext: &str, args: &[&str]) {
     let dir = tempfile::tempdir().unwrap();
     let wav = dir.path().join("a.wav");
@@ -250,7 +155,11 @@ fn assert_packet_fp_survives_retag(ext: &str, args: &[&str]) {
 
     let before = packet_fp(File::open(&dst).unwrap(), Some(ext)).unwrap();
     let size_before = std::fs::metadata(&dst).unwrap().len();
-    retag_with_lofty(&dst);
+    common::retag(&dst, |tag| {
+        use lofty::tag::{Accessor, ItemKey};
+        tag.set_title("書き換え後のタイトル".to_owned());
+        tag.insert_text(ItemKey::Comment, "x".repeat(4096));
+    });
     let size_after = std::fs::metadata(&dst).unwrap().len();
     assert_ne!(
         size_before, size_after,

@@ -8,7 +8,9 @@ use tracing::info;
 use spindle::api::{self, auth, AppState};
 use spindle::db::{migrations, Db};
 use spindle::fsroot::Roots;
-use spindle::jobs::{self, Registry};
+use spindle::import::scanner::Scanner;
+use spindle::jobs::handlers::scan::{self, ScanHandler};
+use spindle::jobs::{self, EnqueueResult, JobType, Registry};
 use spindle::{config::Config, logging};
 
 /// `SPINDLE_CONFIG` 未設定時の設定ファイルパス（SPEC §14 環境変数）
@@ -29,7 +31,8 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("設定の読み込みに失敗: {}", config_path.display()))?;
     info!(config = %config_path.display(), library = %config.paths.library.display(), "設定を読み込んだ");
     // 全 root を dirfd で開く。openat2 が無い（Linux 5.6 未満）ならここで止まる（D-31）
-    let _roots = Roots::open(&config.paths).context("ライブラリの root を開けない")?;
+    let roots = Roots::open(&config.paths).context("ライブラリの root を開けない")?;
+    let library_root = Arc::new(roots.library);
 
     let db_path = config.paths.data.join(DB_FILE_NAME);
     let db = {
@@ -76,8 +79,26 @@ async fn main() -> anyhow::Result<()> {
             shutdown.cancel();
         }
     });
-    // ハンドラは各タスクで登録する（scan は P0-6、tagwrite / rename は P0-9 …）
-    let worker = state.jobs.start(Registry::new(), shutdown.clone());
+    // ハンドラは各タスクで登録する（tagwrite / rename は P0-9 …）
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    let scanner = Arc::new(Scanner::new(Arc::clone(&state.db), library_root, cpus));
+    let mut registry = Registry::new();
+    registry.register(
+        JobType::Scan,
+        Arc::new(ScanHandler::new(
+            scanner,
+            state.config.scan.deep_interval_days,
+        )),
+    );
+    let worker = state.jobs.start(registry, shutdown.clone());
+    // 起動時に 1 回 incremental を投入する（停止中の外部変更を拾う。D-38）
+    match scan::enqueue_scan(&state.jobs, "incremental").await {
+        Ok(EnqueueResult::Inserted(id)) => info!(job_id = id, "起動時スキャンを投入した"),
+        Ok(EnqueueResult::Duplicate(id)) => info!(job_id = id, "スキャンは既に投入済み"),
+        Err(e) => tracing::warn!(error = %e, "起動時スキャンを投入できない"),
+    }
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("待ち受けに失敗: {listen}"))?;

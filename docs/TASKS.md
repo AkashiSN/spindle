@@ -119,24 +119,24 @@ Host だけが一致する（Origin が別）POST が 403 になることをテ�
 
 ### P0-6 スキャナ
 
-- [ ] **4 相スキャン**（SPEC §7.1）: inventory 固定 → 候補生成 → 決定的 claim →
+- [x] **4 相スキャン**（SPEC §7.1）: inventory 固定 → 候補生成 → 決定的 claim →
       単一トランザクション commit。`scan_runs` 行と `tracks.seen_run_id` で claim を管理
-- [ ] `Library/` の再帰走査（symlink は辿らず一覧に出す。SMB 禁止名は対象外として一覧に出す）。
+- [x] `Library/` の再帰走査（symlink は辿らず一覧に出す。SMB 禁止名は対象外として一覧に出す）。
       `(dev, inode, size, mtime_ns, ctime_ns)` 変化なしなら `seen_at` / `seen_run_id` 更新のみ
-- [ ] タグ読み取り（`lofty`）、`track_tags` への格納、キャッシュ列（`album` 含む）の更新。
+- [x] タグ読み取り（`lofty`）、`track_tags` への格納、キャッシュ列（`album` 含む）の更新。
       **版は `tag_hash` / 音声フィンガープリントの実差分があるときだけ進める**（SPEC §6 遷移表）
-- [ ] path / key の更新は予約済み一時 key 経由の 2 段階（swap / 循環）
-- [ ] `missing_since` は run が `completed` の finalize でだけ立てる。再発見した行は復活
-- [ ] アルバム（= ディレクトリ）の再構成。**ディレクトリ rename で album id を維持**
+- [x] path / key の更新は予約済み一時 key 経由の 2 段階（swap / 循環）
+- [x] `missing_since` は run が `completed` の finalize でだけ立てる。再発見した行は復活
+- [x] アルバム（= ディレクトリ）の再構成。**ディレクトリ rename で album id を維持**
       （MBID / DiscID が 1 件一致 → 構成トラック過半数の順。候補複数なら寄せない。SPEC §7.1）、
       構成 0 の album は `missing_since`。`categories` の自動推定
-- [ ] deep scan（全件の `tag_hash` と可逆の `audio_md5` を再計算）。`[scan].deep_interval_days` と手動
-- [ ] 取り残された `.spindle-tmp-*` の回収
-- [ ] 走査で見つからない行に `missing_since` を立てる
-- [ ] **`edit_ops.result = 'pending'` のあるトラックは、その op が所有する論理フィールドを
+- [x] deep scan（全件の `tag_hash` と可逆の `audio_md5` を再計算）。`[scan].deep_interval_days` と手動
+- [x] 取り残された `.spindle-tmp-*` の回収
+- [x] 走査で見つからない行に `missing_since` を立てる
+- [x] **`edit_ops.result = 'pending'` のあるトラックは、その op が所有する論理フィールドを
       再評価しない。** 物理的な所在（`rel_path` / `size` / `mtime_ns`）は pending 中も追随する
-- [ ] 並列度 = CPU コア数。進捗を SSE で配信
-- [ ] FTS5 の同期（トリガ経由。`seen_at` 更新で FTS 書き込みが走らないこと）
+- [x] 並列度 = CPU コア数。進捗を SSE で配信
+- [x] FTS5 の同期（トリガ経由。`seen_at` 更新で FTS 書き込みが走らないこと）
 
 受け入れ: 1 万件規模の合成ツリーで完走し、2 回目の走査が 1 回目より大幅に速い。
 ファイルを外部で移動 → 再走査で重複が増えないこと。
@@ -146,7 +146,8 @@ mtime を保存して上書き（`touch -r`）したファイルの変更を検�
 走査を途中で kill（`failed`）しても `missing_since` が立たない。
 missing だった行を同じパスに戻すと復活する。
 性能の測定条件を固定する: 合成ツリー 1 万件（FLAC 8 割 / Opus 2 割、アルバム 12 曲）、
-2 回目は warm cache、対象 NAS または CI の参照マシンを明記。
+2 回目は warm cache、対象 NAS または CI の参照マシンを明記
+（`tests/scanner.rs` の `perf_10k_synthetic_tree`（`#[ignore]`、`--release`）。結果は D-38）。
 
 依存: P0-4, P0-5
 

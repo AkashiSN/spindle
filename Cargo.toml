@@ -27,6 +27,7 @@ futures-core = "0.3.34"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
 ipnet = { version = "2.12.2", features = ["serde"] }
+lofty = "0.25.2"
 md-5 = "0.11.0"
 mime_guess = "2.0.5"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
