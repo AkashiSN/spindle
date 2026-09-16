@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let listen = config.server.listen;
-    let state = AppState::new(Arc::new(config), db, mode);
+    let mut state = AppState::new(Arc::new(config), db, mode);
 
     // 停止シグナルは共有 token を倒す。HTTP サーバ・ワーカー・SSE ストリームが同時に止まる
     // （SSE を先に閉じないと axum の graceful shutdown が接続の終了を待ち続ける）
@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&library_root),
         Arc::clone(&state.jobs),
     ));
+    state = state.with_editor(Arc::clone(&editor));
     let edit_recovered = editor
         .recover()
         .await

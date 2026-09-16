@@ -1,11 +1,13 @@
 // 右パネル（SPEC §12.1 / §12.3）: 2 タブ（一括編集 / 選択の詳細）。折りたたみ可、幅は永続化。
-// 一括編集の操作リストとプレビューは P0-10。ここでは選択の要約と骨格だけ
+// 一括編集の操作リスト・プレビュー・適用は BatchEditPanel（状態は hooks/useBatchEdit）
 
 import { useEffect, useRef } from 'react'
 import type { TrackRow } from '../api/types'
+import type { BatchEdit } from '../hooks/useBatchEdit'
 import { formatCount } from '../lib/format'
 import type { Selection } from '../lib/selection'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
+import { BatchEditPanel } from './BatchEditPanel'
 
 export type SelectionSummary = {
   /** 選択件数。filter 形でサーバの件数がまだ無ければ null */
@@ -23,11 +25,13 @@ export function RightPanel({
   selection,
   summary,
   selectedRows,
+  edit,
 }: {
   selection: Selection
   summary: SelectionSummary
   /** 読み込み済みの選択行（詳細タブの共通値に使う。filter 形は表示中の一部だけ） */
   selectedRows: TrackRow[]
+  edit: BatchEdit
 }) {
   const [collapsed, setCollapsed] = useLocalStorageState<boolean>(
     'panel.collapsed',
@@ -120,16 +124,7 @@ export function RightPanel({
       </div>
       {tab === 'edit' ? (
         <div className="panel-body">
-          <p className="muted small">
-            操作リスト（固定値 / フィールド参照 / 正規表現置換 / 連番 / 削除）とプレビュー・適用は
-            P0-10 で載せる。選択は表示フィルタやソートを変えても変わらない。
-          </p>
-          <button type="button" disabled>
-            プレビュー
-          </button>{' '}
-          <button type="button" disabled>
-            適用
-          </button>
+          <BatchEditPanel edit={edit} hasSelection={selection.kind !== 'none'} />
         </div>
       ) : (
         <div className="panel-body">

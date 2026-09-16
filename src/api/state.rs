@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::db::Db;
 use crate::domain::selection::SelectionStore;
+use crate::edit::Editor;
 use crate::jobs::Jobs;
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +21,9 @@ pub struct AppState {
     pub selection: Arc<SelectionStore>,
     /// プロセス停止の合図。シグナルハンドラが倒し、HTTP サーバ・ワーカー・SSE が同時に見る
     pub shutdown: CancellationToken,
+    /// 編集バッチの coordinator（P0-9）。ライブラリ root を要するので `with_editor` で後から載せる。
+    /// 無いと一括編集の API は 503
+    pub editor: Option<Arc<Editor>>,
 }
 
 impl AppState {
@@ -32,6 +36,12 @@ impl AppState {
             jobs,
             selection: Arc::new(SelectionStore::default()),
             shutdown: CancellationToken::new(),
+            editor: None,
         }
+    }
+
+    pub fn with_editor(mut self, editor: Arc<Editor>) -> Self {
+        self.editor = Some(editor);
+        self
     }
 }

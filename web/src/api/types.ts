@@ -106,3 +106,17 @@ export type LibraryEvent =
 export type ResyncEvent = { skipped: number }
 
 export type ErrorBody = { error: string; message?: string }
+
+// 一括編集（SPEC §9、P0-10）
+export type TagChange = { old: string[] | null; new: string[] | null }
+export type PreviewItem = { id: number; changes: Record<string, TagChange> }
+export type PreviewResponse = {
+  selection_token: string
+  count: number
+  changed: number
+  unchanged: number
+  pending_excluded: number
+  items: PreviewItem[]
+}
+export type ApplyResponse = { batch_id: number; affected: number }
+export type PendingConflict = { error: 'pending'; count: number; track_ids: number[] }

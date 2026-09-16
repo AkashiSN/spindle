@@ -53,14 +53,19 @@ pub struct NewTagOp {
 }
 
 /// `prepare_tags` の結果
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Prepared {
     pub batch_id: i64,
-    /// 記録した op 数（実際に値が変わるトラック）
+    /// 記録した op 数（値が変わるトラック + preview 後に版が進んで conflict になったトラック）
     pub affected: usize,
     /// 全フィールドが現在値と同じで op にならなかったトラック数
     pub unchanged: usize,
+    /// preview 後に版が進んでいたので `skipped_conflict` で記録した op 数
+    pub conflict: usize,
     pub job_ids: Vec<i64>,
+    /// 記録の時点で終端になった（全件 conflict）ときの batch イベント
+    #[serde(skip)]
+    pub event: Option<BatchEvent>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -295,6 +300,40 @@ impl Editor {
         description: Option<&str>,
         ops: Vec<NewTagOp>,
     ) -> Result<Prepared, EditError> {
+        let targets: Vec<PlanTarget> = ops
+            .iter()
+            .enumerate()
+            .map(|(index, o)| PlanTarget {
+                track_id: o.track_id,
+                expected_tag_version: None,
+                index,
+                expected: None,
+            })
+            .collect();
+        let by_track: std::collections::HashMap<i64, Vec<TagChange>> =
+            ops.into_iter().map(|o| (o.track_id, o.changes)).collect();
+        let eval: Arc<Evaluator> = Arc::new(move |t: &PlanTarget, current: &TagSet| {
+            let changes = by_track.get(&t.track_id).cloned().unwrap_or_default();
+            Ok(with_replaced(
+                current,
+                changes.iter().map(|c| {
+                    let c = c.normalized();
+                    (c.key, c.values.unwrap_or_default())
+                }),
+            ))
+        });
+        self.prepare_tags_with(description, targets, eval).await
+    }
+
+    /// 対象と評価器からタグ編集バッチを記録する（`prepare_tags` の一般形。API の apply が
+    /// `domain::tagops::apply_ops` を評価器にして使う）。`expected_tag_version` が現在値と
+    /// 違う対象は `skipped_conflict` の op として記録だけする
+    pub async fn prepare_tags_with(
+        &self,
+        description: Option<&str>,
+        targets: Vec<PlanTarget>,
+        eval: Arc<Evaluator>,
+    ) -> Result<Prepared, EditError> {
         let description = description.map(str::to_owned);
         let prepared = self
             .db
@@ -302,12 +341,16 @@ impl Editor {
                 Ok(prepare_tags_tx(
                     c,
                     description.as_deref(),
-                    &ops,
+                    &targets,
+                    &*eval,
                     now_epoch(),
                 ))
             })
             .await??;
         self.jobs.notify_enqueued(&prepared.job_ids).await;
+        if let Some(ev) = &prepared.event {
+            self.jobs.publish(Event::Batch(ev.clone()));
+        }
         Ok(prepared)
     }
 
@@ -341,15 +384,19 @@ impl Editor {
         };
 
         let batch_id = op.batch_id;
-        let (outcome, event) = self
+        let (outcome, event, followup_jobs) = self
             .db
             .write(move |c| {
                 let tx = c.transaction()?;
                 let now = now_epoch();
+                let mut followup_jobs: Vec<i64> = Vec::new();
                 let outcome = match staged {
                     Staged::Written(fs) | Staged::AlreadyMatches(fs) => {
                         history::finish_op(&tx, op.id, OpResult::Applied, None, job_id, now)?;
                         sync_track_to_file(&tx, op.track_id, &fs)?;
+                        if let Some(id) = enqueue_derived_retag(&tx, op.track_id, now)? {
+                            followup_jobs.push(id);
+                        }
                         OpOutcome::Applied
                     }
                     Staged::Conflict { reason, current } => {
@@ -384,9 +431,10 @@ impl Editor {
                     None => None,
                 };
                 tx.commit()?;
-                Ok((outcome, event))
+                Ok((outcome, event, followup_jobs))
             })
             .await?;
+        self.jobs.notify_enqueued(&followup_jobs).await;
         if let Some(ev) = event {
             tracing::info!(batch_id, state = %ev.state, applied = ev.applied, conflict = ev.conflict, failed = ev.failed, "編集バッチが終端になった");
             self.jobs.publish(Event::Batch(ev));
@@ -674,6 +722,25 @@ impl Editor {
 
 // ---------------------------------------------------------------- prepare（同期）
 
+/// バッチの対象 1 件（[`Editor::prepare_tags_with`] の入力）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanTarget {
+    pub track_id: i64,
+    /// preview 時の `tag_version`。現在値と違えば op を `skipped_conflict` で記録し、DB も版も
+    /// 触らない（SPEC §9「スナップショット時と tag_version が変わった行は skipped_conflict」）
+    pub expected_tag_version: Option<i64>,
+    /// 連番などの位置（選択集合をソートしたときの 0 始まり）。evaluator に渡す
+    pub index: usize,
+    /// preview 時の事前条件（D-33 の snapshot）。あれば apply 時の DB 値ではなくこれを op に記録し、
+    /// preview の後の外部変更（音声の差し替え等）を tagwrite の事前条件確認で conflict にする。
+    /// 無ければ記録時点の DB 値
+    pub expected: Option<Precondition>,
+}
+
+/// 現在のタグ集合から新しいタグ集合を作る評価器（`domain::tagops::apply_ops` など）。
+/// 返り値が現在値と同じ（差分なし）なら op にならない
+pub type Evaluator = dyn Fn(&PlanTarget, &TagSet) -> Result<TagSet, String> + Send + Sync;
+
 struct PlannedOp {
     track_id: i64,
     expected: Precondition,
@@ -682,15 +749,47 @@ struct PlannedOp {
     new_set: TagSet,
 }
 
-/// [`Editor::prepare_tags`] のトランザクション本体
+/// preview 後に版が進んでいた対象（op を conflict で記録する）
+struct ConflictTarget {
+    track_id: i64,
+    expected: Precondition,
+    error: String,
+}
+
+/// 現在値との差分（キー → (旧 JSON, 新 JSON)）
+fn diff_sets(
+    current: &TagSet,
+    new: &TagSet,
+) -> Vec<(String, serde_json::Value, serde_json::Value)> {
+    let mut keys: Vec<&str> = current
+        .items()
+        .iter()
+        .chain(new.items().iter())
+        .map(|(k, _)| k.as_str())
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut out = Vec::new();
+    for key in keys {
+        let old: Vec<String> = current.values(key).map(str::to_owned).collect();
+        let new_v: Vec<String> = new.values(key).map(str::to_owned).collect();
+        if old != new_v {
+            out.push((key.to_owned(), values_json(&old), values_json(&new_v)));
+        }
+    }
+    out
+}
+
+/// [`Editor::prepare_tags_with`] のトランザクション本体
 fn prepare_tags_tx(
     conn: &mut Connection,
     description: Option<&str>,
-    ops: &[NewTagOp],
+    targets: &[PlanTarget],
+    eval: &Evaluator,
     now: i64,
 ) -> Result<Prepared, EditError> {
     let tx = conn.transaction()?;
-    let mut ids: Vec<i64> = ops.iter().map(|o| o.track_id).collect();
+    let mut ids: Vec<i64> = targets.iter().map(|t| t.track_id).collect();
     ids.sort_unstable();
     if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
         return Err(EditError::DuplicateTrack(w[0]));
@@ -701,52 +800,57 @@ fn prepare_tags_tx(
     }
 
     let mut planned: Vec<PlannedOp> = Vec::new();
+    let mut conflicts: Vec<ConflictTarget> = Vec::new();
     let mut unchanged = 0;
-    for op in ops {
-        let expected = history::precondition_of_track(&tx, op.track_id)?
-            .ok_or(EditError::TrackNotFound(op.track_id))?;
-        let tag_version = history::track_tag_version(&tx, op.track_id)?
-            .ok_or(EditError::TrackNotFound(op.track_id))?;
-        let current = history::load_track_tags(&tx, op.track_id)?;
-        let mut changes = Vec::new();
-        let mut replaced: Vec<(String, Vec<String>)> = Vec::new();
-        for change in &op.changes {
-            let change = change.normalized();
-            let old: Vec<String> = current.values(&change.key).map(str::to_owned).collect();
-            let new = change.values.unwrap_or_default();
-            if old == new {
+    for target in targets {
+        let current_pre = history::precondition_of_track(&tx, target.track_id)?
+            .ok_or(EditError::TrackNotFound(target.track_id))?;
+        let expected = target.expected.clone().unwrap_or(current_pre);
+        let tag_version = history::track_tag_version(&tx, target.track_id)?
+            .ok_or(EditError::TrackNotFound(target.track_id))?;
+        if let Some(v) = target.expected_tag_version {
+            if v != tag_version {
+                conflicts.push(ConflictTarget {
+                    track_id: target.track_id,
+                    expected,
+                    error: format!("プレビューの後に変更された（tag_version {v} → {tag_version}）"),
+                });
                 continue;
             }
-            changes.push((change.key.clone(), values_json(&old), values_json(&new)));
-            replaced.push((change.key, new));
         }
+        let current = history::load_track_tags(&tx, target.track_id)?;
+        let new_set = eval(target, &current).map_err(EditError::Internal)?;
+        let changes = diff_sets(&current, &new_set);
         if changes.is_empty() {
             unchanged += 1;
             continue;
         }
         planned.push(PlannedOp {
-            track_id: op.track_id,
+            track_id: target.track_id,
             expected,
             tag_version: tag_version + 1,
             changes,
-            new_set: with_replaced(&current, replaced),
+            new_set,
         });
     }
-    if planned.is_empty() {
+    if planned.is_empty() && conflicts.is_empty() {
         return Err(EditError::NoChanges);
     }
 
-    let batch_id = history::insert_batch(&tx, description, planned.len() as i64, None, now)?;
+    let affected = planned.len() + conflicts.len();
+    let batch_id = history::insert_batch(&tx, description, affected as i64, None, now)?;
     let mut job_ids = Vec::with_capacity(planned.len());
-    for (ordinal, p) in planned.iter().enumerate() {
+    let mut ordinal = 0i64;
+    for p in &planned {
         let op_id = history::insert_op(
             &tx,
             batch_id,
-            ordinal as i64,
+            ordinal,
             p.track_id,
             OpKind::Tags,
             &p.expected,
         )?;
+        ordinal += 1;
         for (key, old, new) in &p.changes {
             history::insert_edit(&tx, op_id, key, old, new)?;
         }
@@ -765,18 +869,46 @@ fn prepare_tags_tx(
         history::set_op_job(&tx, op_id, job_id)?;
         job_ids.push(job_id);
     }
+    // preview 後に版が進んだ行は conflict として記録だけする（DB も版も触らない）
+    for c in &conflicts {
+        let op_id = history::insert_op(
+            &tx,
+            batch_id,
+            ordinal,
+            c.track_id,
+            OpKind::Tags,
+            &c.expected,
+        )?;
+        ordinal += 1;
+        history::finish_op(
+            &tx,
+            op_id,
+            OpResult::SkippedConflict,
+            Some(&c.error),
+            None,
+            now,
+        )?;
+    }
+    // 全件 conflict なら pending が無いので、ここで終端にする
+    let event = match history::aggregate_batch(&tx, batch_id, now)? {
+        Some(state) => Some(batch_event(&tx, batch_id, state)?),
+        None => None,
+    };
     tx.commit()?;
     tracing::info!(
         batch_id,
-        affected = planned.len(),
+        affected,
+        conflict = conflicts.len(),
         unchanged,
         "編集バッチを記録した"
     );
     Ok(Prepared {
         batch_id,
-        affected: planned.len(),
+        affected,
         unchanged,
+        conflict: conflicts.len(),
         job_ids,
+        event,
     })
 }
 
@@ -993,6 +1125,46 @@ fn same_stat(a: &fsroot::Stat, b: &fsroot::Stat) -> bool {
         && a.size == b.size
         && a.mtime_ns == b.mtime_ns
         && a.ctime_ns == b.ctime_ns
+}
+
+// ---------------------------------------------------------------- Derived の追随
+
+/// applied になったトラックに Derived があり、その `src_tag_version` が現在の `tag_version` より
+/// 古ければタグ上書きジョブを投入する（SPEC §7.6「tag_version 差分のみ → タグ上書き」、D-42）。
+/// 種別は `transcode`（payload `kind = "retag"`、dedup key は `transcode:<track_id>:<audio_version>`）。
+/// ハンドラは P1-10。Derived が無ければ何もしない
+fn enqueue_derived_retag(
+    tx: &Connection,
+    track_id: i64,
+    now: i64,
+) -> crate::db::Result<Option<i64>> {
+    use rusqlite::OptionalExtension as _;
+    let stale: Option<(i64, i64)> = tx
+        .query_row(
+            "SELECT t.audio_version, t.tag_version FROM tracks t
+             JOIN derived_files d ON d.track_id = t.id
+             WHERE t.id = ?1 AND d.src_tag_version <> t.tag_version",
+            [track_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((audio_version, tag_version)) = stale else {
+        return Ok(None);
+    };
+    let job = NewJob::new(
+        JobType::Transcode,
+        serde_json::json!({
+            "track_id": track_id,
+            "audio_version": audio_version,
+            "tag_version": tag_version,
+            "kind": "retag",
+        }),
+    )
+    .dedup_key(format!("transcode:{track_id}:{audio_version}"));
+    Ok(match dbjobs::enqueue(tx, &job, now)? {
+        dbjobs::EnqueueResult::Inserted(id) => Some(id),
+        dbjobs::EnqueueResult::Duplicate(_) => None,
+    })
 }
 
 // ---------------------------------------------------------------- DB の追随と overlay の解消

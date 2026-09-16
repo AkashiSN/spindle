@@ -241,19 +241,21 @@ cancel / conflict になった op のトラックが、その直後にファイ�
 
 ### P0-10 タグ一括編集
 
-- [ ] 操作: 固定値代入 / フィールド参照（`%albumartist%`）/ 正規表現置換 /
-      トラック番号連番 / タグ削除
-- [ ] 右パネル「一括編集」タブ: 操作リストの組み立て、プレビュー結果を表のセルに差分表示
+- [x] 操作: 固定値代入 / フィールド参照（`%albumartist%`）/ 正規表現置換 /
+      トラック番号連番 / タグ削除（`domain::tagops`。JSON 形は SPEC §9、D-42）
+- [x] 右パネル「一括編集」タブ: 操作リストの組み立て、プレビュー結果を表のセルに差分表示
       （旧→新、変更なしは薄く）、操作リストは選択を変えても残る
-- [ ] インライン編集（セルのダブルクリック → 1 件バッチ、プレビュー省略）
-- [ ] `POST /api/tracks/batch/preview` による dry-run（`changed / unchanged / pending_excluded`）
-- [ ] 対象に pending の op があれば 409（件数と track_id を返す）。`skip_pending` で除外して続行。
+      （`web/src/components/BatchEditPanel.tsx`、`hooks/useBatchEdit.ts`、`lib/tagops.ts` / `lib/preview.ts`）
+- [x] インライン編集（セルのダブルクリック → 1 件バッチ、プレビュー省略）
+- [x] `POST /api/tracks/batch/preview` による dry-run（`changed / unchanged / pending_excluded`）
+- [x] 対象に pending の op があれば 409（件数と track_id を返す）。`skip_pending` で除外して続行。
       UI は「M 件を除外して適用 / 待つ」の 2 択
-- [ ] 1 トランザクションで `edit_ops` / `edits` 記録 → DB 更新 → track 単位の `tagwrite`
-      ジョブ投入（`jobs.edit_batch_id` で紐づけ）
-- [ ] ファイル書き込みは tmp + fsync + rename。**成功時に `(dev, inode, mtime_ns)` を更新**
-- [ ] 書き込み前に事前条件を再確認し、外部変更があればスキップして報告
-- [ ] `tag_version` の差分で Derived タグ上書きジョブを投入（`derived_files` が無ければ no-op）
+- [x] 1 トランザクションで `edit_ops` / `edits` 記録 → DB 更新 → track 単位の `tagwrite`
+      ジョブ投入（`jobs.edit_batch_id` で紐づけ）（`Editor::prepare_tags_with`）
+- [x] ファイル書き込みは tmp + fsync + rename。**成功時に `(dev, inode, mtime_ns)` を更新**（P0-9）
+- [x] 書き込み前に事前条件を再確認し、外部変更があればスキップして報告（P0-9）
+- [x] `tag_version` の差分で Derived タグ上書きジョブを投入（`derived_files` が無ければ no-op。
+      `transcode` の `kind = "retag"`。ハンドラは P1-10。D-42）
 
 受け入れ: 1000 件の一括編集後、再スキャンで重複が発生しない。
 外部で書き換えたファイルが上書きされない。

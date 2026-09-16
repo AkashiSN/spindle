@@ -91,6 +91,8 @@ pub struct Snapshot {
 struct Entry {
     snapshot: Snapshot,
     expires_at: Instant,
+    /// apply が処理中（claim 済み）。二重 apply を防ぎ、409 なら release で戻す
+    claimed: bool,
 }
 
 /// token → スナップショット。TTL 15 分、上限 `MAX_SNAPSHOTS`
@@ -137,9 +139,38 @@ impl SelectionStore {
             Entry {
                 snapshot,
                 expires_at: now + self.ttl,
+                claimed: false,
             },
         );
         Ok(token)
+    }
+
+    /// apply のために token を**占有**する（消さない）。既に占有中・期限切れ・不明なら None。
+    /// 成功（201）なら [`finish`](Self::finish) で消し、409 なら [`release`](Self::release) で
+    /// 戻す（SPEC §9「409 では token を消費しない」と「並行 apply は 1 つだけ通る」の両立）
+    pub fn claim(&self, token: &str) -> Option<Snapshot> {
+        let now = Instant::now();
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let e = map.get_mut(token)?;
+        if e.expires_at <= now || e.claimed {
+            return None;
+        }
+        e.claimed = true;
+        Some(e.snapshot.clone())
+    }
+
+    /// claim を解く（409 でやり直せるようにする）
+    pub fn release(&self, token: &str) {
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(e) = map.get_mut(token) {
+            e.claimed = false;
+        }
+    }
+
+    /// 消費する（201 の後）
+    pub fn finish(&self, token: &str) {
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(token);
     }
 
     /// 期限内なら参照する（消さない。件数表示や preview の再表示に使う）
@@ -278,6 +309,58 @@ mod tests {
                 std::thread::spawn(move || {
                     barrier.wait();
                     store.take(&token).is_some()
+                })
+            })
+            .collect();
+        let wins = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(wins, 1);
+    }
+
+    #[test]
+    fn claim_is_exclusive_and_release_returns_the_token() {
+        let store = SelectionStore::default();
+        let snap = Snapshot {
+            rows: vec![row(1)],
+            ops: serde_json::json!([]),
+        };
+        let token = store.insert(snap.clone()).unwrap();
+        // claim 中は二重に claim できない（並行 apply は 1 つだけ通る）
+        assert_eq!(store.claim(&token), Some(snap.clone()));
+        assert_eq!(store.claim(&token), None);
+        assert!(store.get(&token).is_some(), "claim 中も参照はできる");
+        // 409 で release すると同じ token でやり直せる
+        store.release(&token);
+        assert_eq!(store.claim(&token), Some(snap.clone()));
+        // 201 で finish すると消える
+        store.finish(&token);
+        assert_eq!(store.claim(&token), None);
+        assert!(store.get(&token).is_none());
+        store.release(&token); // 消えた後の release は何もしない
+        assert!(store.get(&token).is_none());
+    }
+
+    #[test]
+    fn concurrent_claims_of_one_token_succeed_exactly_once() {
+        let store = std::sync::Arc::new(SelectionStore::default());
+        let token = store
+            .insert(Snapshot {
+                rows: vec![row(1)],
+                ops: serde_json::json!([]),
+            })
+            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                let token = token.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.claim(&token).is_some()
                 })
             })
             .collect();

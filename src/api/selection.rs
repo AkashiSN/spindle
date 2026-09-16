@@ -62,8 +62,21 @@ pub fn lookup(store: &Arc<SelectionStore>, token: &str) -> Option<Snapshot> {
     store.get(token)
 }
 
-/// token の集合を**消費**する。apply はこちらを使う（同じ token の並行 apply は 1 つだけ通る）。
-/// 期限切れ・不明なら None（API は 409 `preview_stale`）
+/// token の集合を**消費**する。期限切れ・不明なら None（API は 409 `preview_stale`）
 pub fn take(store: &Arc<SelectionStore>, token: &str) -> Option<Snapshot> {
     store.take(token)
+}
+
+/// apply の間 token を占有する（並行 apply は 1 つだけ通る）。201 なら `finish`、409 なら
+/// `release`（同じ token でやり直せる）
+pub fn claim(store: &Arc<SelectionStore>, token: &str) -> Option<Snapshot> {
+    store.claim(token)
+}
+
+pub fn release(store: &Arc<SelectionStore>, token: &str) {
+    store.release(token)
+}
+
+pub fn finish(store: &Arc<SelectionStore>, token: &str) {
+    store.finish(token)
 }

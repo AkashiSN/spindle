@@ -475,3 +475,51 @@ fn fts_rebuild_and_integrity_check_succeed() {
     )
     .unwrap();
 }
+
+/// 読み取りプールのコネクションで明示トランザクションを張ると、その間に書き手が commit しても
+/// 同じスナップショットを見続ける（WAL）。preview が selection・pending・タグを一世代で読む前提
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_transaction_sees_one_snapshot_across_a_concurrent_commit() {
+    use std::sync::{mpsc, Arc};
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(spindle::db::Db::open(&dir.path().join("t.db")).unwrap());
+    db.write(|c| {
+        c.execute("INSERT INTO categories (name) VALUES ('before')", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let reader = {
+        let db = Arc::clone(&db);
+        tokio::spawn(async move {
+            db.read(move |c| {
+                let tx = c.unchecked_transaction()?;
+                let first: String =
+                    tx.query_row("SELECT name FROM categories WHERE id = 1", [], |r| r.get(0))?;
+                started_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                let second: String =
+                    tx.query_row("SELECT name FROM categories WHERE id = 1", [], |r| r.get(0))?;
+                Ok((first, second))
+            })
+            .await
+        })
+    };
+    started_rx.recv().unwrap();
+    db.write(|c| {
+        c.execute("UPDATE categories SET name = 'after' WHERE id = 1", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    go_tx.send(()).unwrap();
+    let (first, second) = reader.await.unwrap().unwrap();
+    assert_eq!((first.as_str(), second.as_str()), ("before", "before"));
+    let now: String = db
+        .read(|c| Ok(c.query_row("SELECT name FROM categories WHERE id = 1", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(now, "after");
+}

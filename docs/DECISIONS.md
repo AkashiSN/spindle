@@ -972,3 +972,66 @@ token を DB に保存する案（短期状態に永続化は過剰。P0-9 の `
 片方だけ直す事故が起きる）。キャンセルで op を記録値へ戻す案（pending 中の外部変更を DB が
 見失い、物理属性が一致したままだと次回スキャンも拾わない）。pending のまま失敗し続ける op を
 残す案（そのトラックが永久に 409 になる）。
+
+---
+
+## D-42 タグ一括編集の固定値と境界
+
+**決定**: 仕様（SPEC §9 / §12.3）が定めていない値と境界を次のとおり固定する。設定には出さない。
+
+- **操作の JSON 形**は SPEC §9 のとおり（`set` / `ref` / `replace` / `number` / `delete`）。キーは
+  大文字化・値は NFC に正規化してから評価する。`PICTURE` は対象外（アートワークは P1-3）。
+  操作は 1〜64 件。`set` の空（空文字・空配列）は削除と同義。`ref` の `%key%` は同じトラックの
+  **先頭値**で展開し、無ければ空（結果が空なら削除）。`replace` は各値に全一致置換で `$1` が使え、
+  空になった値は落ちる。正規表現は `fancy-regex`（先読み・後方参照可）でバックトラック上限
+  100,000。`number` は `start + 位置`、`pad` 桁で 0 埋め（0〜6。範囲外は 400）
+- **評価は preview と apply で同じ純粋関数**（`domain::tagops::apply_ops`）を、DB の `track_tags`
+  に対して行う（ファイルは読まない。DB はファイルのキャッシュで、同じ `tag_version` なら同じ
+  タグ集合）。apply は snapshot の各行に対して**再評価**し、現在値との差分だけを `edits` にする。
+  preview 後に `tag_version` が進んだ行は評価せず `skipped_conflict` の op として記録だけする
+  （`affected` に含む。DB も版も触らない）。**op の事前条件は preview 時の snapshot の値**
+  （dev / inode / size / mtime_ns / ctime_ns / tag_hash / rel_path。D-33）で、apply 時の DB 値では
+  ない。preview の後にタグはそのままで音声だけ差し替えられた（`tag_version` は据え置き）ファイルは
+  tagwrite の事前条件確認が conflict にし、外部 rename の追随は D-41 の規則（rel_path 差 + ctime
+  のみ）に乗る
+- **preview は selection の解決・pending・各行のタグを 1 つの読み取りトランザクション**で読む
+  （WAL のスナップショット）。途中でスキャンが commit しても、token の `tag_version` と表示した
+  差分の世代が行ごとに混ざらない
+- **連番の位置は「解決した selection を要求の `sort` で並べたときの位置」**で、反映待ちの行も
+  位置を消費する（preview と apply で番号がずれない）。`sort` は一覧と同じ文字列で、省略時は
+  既定ソート。preview の `items` は値が変わる行だけ返す（6 万件全部の差分を運ばない。変更なしは
+  件数だけ）。反映待ちの行は評価せず `pending_excluded` に数える
+- **apply は token を処理の間だけ占有する**（`SelectionStore::claim`）。同じ token の並行 apply は
+  占有中なので `preview_stale`。409（`pending` / `preview_stale`（ops 不一致）/ `no_changes`）では
+  `release` して同じ token でやり直せるようにし、201 で `finish`（消費）する。pending の事前確認と
+  Editor の再確認（同じトランザクション）の間に別バッチが入っても、Editor の `Pending` を同じ
+  409 に変換して token を残す。ops の照合は正規化後の canonical JSON の完全一致。token 不明・
+  期限切れは `preview_stale`
+- **`no_changes`**: snapshot 全行が変更なし（または反映待ちで除外）のときは 409。バッチは作らない
+- **Derived の追随**は applied になった op のトランザクションで、`derived_files` の
+  `src_tag_version` が現在の `tag_version` と違うときだけ `transcode` ジョブ
+  （payload `{ track_id, audio_version, tag_version, kind: "retag" }`、dedup key
+  `transcode:<track_id>:<audio_version>`）を投入する。P0 では `derived_files` が空なので何も
+  起きない。ハンドラと `kind` の解釈は P1-10 が決める（`retag` = タグ上書きだけ、既定 = 再エンコード）
+- **UI**: 操作リストは `useBatchEdit` が持ち、選択を変えても残る。プレビュー結果は
+  「選択・操作・ソート」の組（`previewKey`）に紐づき、どれかが変わると古くなる（表の差分は消え、
+  [適用] はプレビューし直すまで押せない）。差分は表の列 → タグキーの写像（Title / Artist /
+  Album / AlbumArtist / Date / #）があるセルにだけ 旧→新 で重ね、選択集合にあって変更の無い行は
+  薄く描く。`pending` の 409 は「M 件を除外して適用 / 待つ」で、この確認もプレビューの key に
+  紐づく（選択・操作・ソートを変えたら消える）。`preview_stale` はプレビューのやり直しを促す。**インライン編集**はダブルクリックしたセルの列を `set` 1 件の操作にして
+  同じ preview → apply を続けて呼ぶ（ユーザにはプレビューを見せない）。`#` 列は `2-03` 形式で
+  DISCNUMBER + TRACKNUMBER、それ以外は TRACKNUMBER だけ。反映待ちの行はダブルクリックしても
+  開かない。Artist 列の多値は `, ` で連結表示されているので、インライン編集では 1 値になる
+  （多値は一括編集の `set` に配列で渡す。UI の入力は 1 値）
+- **`tracks.album`（albums の複製）は編集で変わらない**（D-41）。ALBUM を編集した行の Album 列は
+  次回スキャン後に追随する
+
+**理由**: 評価をサーバの純粋関数に閉じることで、preview に見せた値と apply で書く値が一致し、
+クライアントは表示だけを持てばよい。再評価にしたのは、preview 結果（数万行 × 変更）を token に
+抱えて apply まで持ち歩くより、`tag_version` が同じなら同じ結果になる性質を使う方が単純で、
+版が進んだ行の検出（conflict）も同じ比較で済むため。連番が反映待ちの行を飛ばさないのは、
+preview で見た番号と apply の番号を一致させるため（飛ばすと「除外して適用」で全部ずれる）。
+
+**却下**: クライアントで操作を評価して新値を送る案（正規表現の方言が JS と Rust で違い、
+preview と apply の一致を保証できない）。preview の全行差分を返す案（6 万行で数十 MB）。
+409 で token を消費する案（「除外して適用」のたびに preview からやり直しになる）。

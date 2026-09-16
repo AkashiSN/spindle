@@ -18,10 +18,11 @@ import {
   type ColumnSizingState,
   type ColumnVisibilityState,
 } from '@tanstack/react-table'
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
 import type { TrackRow } from '../api/types'
 import type { Sort, SortKey } from '../lib/filter'
 import { formatDuration, formatTrackNo } from '../lib/format'
+import { cellDiff, COLUMN_TAG, formatValues, type PreviewState } from '../lib/preview'
 import type { ClickModifiers, Selection, VisibleOrder } from '../lib/selection'
 import { isSelected } from '../lib/selection'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
@@ -130,10 +131,51 @@ export type TrackTableProps = {
   onClearSelection: () => void
   /** 表示中の末尾 index（無効化時に取り直す件数の目安） */
   onRangeChange: (endIndex: number) => void
+  /** 有効なプレビュー。該当セルに 旧→新 を重ね、選択中で変更なしの行は薄く描く（SPEC §12.3） */
+  preview: PreviewState | null
+  /** セルのダブルクリック編集（1 件バッチ）。失敗の理由を返す */
+  onInlineEdit: (id: number, columnId: string, value: string) => Promise<string | null>
+}
+
+/** インライン編集中のセル */
+type Editing = { id: number; columnId: string; value: string; error: string | null }
+
+/** 編集できる列の現在値（入力の初期値） */
+function editableValue(track: TrackRow, columnId: string): string | null {
+  switch (columnId) {
+    case 'title':
+      return track.title ?? ''
+    case 'artist':
+      return track.artist_display ?? ''
+    case 'album':
+      return track.album ?? ''
+    case 'albumartist':
+      return track.albumartist ?? ''
+    case 'date':
+      return track.date ?? ''
+    case 'no':
+      return formatTrackNo(track.disc_no, track.track_no)
+    default:
+      return null
+  }
 }
 
 export function TrackTable(props: TrackTableProps) {
-  const { rows, total, ensure, sort, onSort, selection, highlightFilterSelection } = props
+  const { rows, total, ensure, sort, onSort, selection, highlightFilterSelection, preview, onInlineEdit } = props
+  const [editing, setEditing] = useState<Editing | null>(null)
+  const commitEdit = useCallback(
+    async (e: Editing) => {
+      const err = await onInlineEdit(e.id, e.columnId, e.value)
+      if (err) setEditing((cur) => (cur && cur.id === e.id ? { ...cur, error: err } : cur))
+      else setEditing(null)
+    },
+    [onInlineEdit],
+  )
+  const onEditKey = (ev: KeyboardEvent<HTMLInputElement>, e: Editing) => {
+    ev.stopPropagation()
+    if (ev.key === 'Enter') void commitEdit(e)
+    else if (ev.key === 'Escape') setEditing(null)
+  }
   const [columnVisibility, setColumnVisibility] = useLocalStorageState<ColumnVisibilityState>(
     'columns.visibility',
     DEFAULT_VISIBILITY,
@@ -329,11 +371,17 @@ export function TrackTable(props: TrackTableProps) {
               }
               const row = tableRows[item.index - first]
               const selected = showFilterHighlight && isSelected(selection, track.id)
+              const previewChanged = preview?.changesById.has(track.id) ?? false
+              // プレビュー中: 選択集合にあるのに変更が無い行は薄く（SPEC §12.3）。filter 形は表示
+              // フィルタが選択時と同じときだけ集合の内外を判定できる（D-40）
+              const previewUnchanged =
+                preview != null && !previewChanged && showFilterHighlight && isSelected(selection, track.id)
               const cls = [
                 'tr',
                 selected ? 'selected' : '',
                 track.pending_batch_id != null ? 'pending' : '',
                 track.missing_since != null ? 'missing' : '',
+                previewUnchanged ? 'preview-unchanged' : '',
               ]
                 .filter(Boolean)
                 .join(' ')
@@ -362,16 +410,47 @@ export function TrackTable(props: TrackTableProps) {
                               onChange={() => {}}
                             />
                           </div>
+                        ) : editing && editing.id === track.id && editing.columnId === cell.column.id ? (
+                          <div key={cell.id} className="td td-editing" style={{ width: cell.column.getSize() }}>
+                            <input
+                              autoFocus
+                              value={editing.value}
+                              aria-invalid={editing.error != null}
+                              title={editing.error ?? 'Enter で適用、Esc で取り消し'}
+                              onChange={(ev) => setEditing({ ...editing, value: ev.target.value, error: null })}
+                              onKeyDown={(ev) => onEditKey(ev, editing)}
+                              onBlur={() => setEditing(null)}
+                              onClick={(ev) => ev.stopPropagation()}
+                            />
+                          </div>
                         ) : (
                           <div
                             key={cell.id}
-                            className={`td td-${cell.column.id}`}
+                            className={`td td-${cell.column.id}${COLUMN_TAG[cell.column.id] ? ' editable' : ''}`}
                             style={{ width: cell.column.getSize() }}
                             title={
                               typeof cell.getValue() === 'string' ? (cell.getValue() as string) : undefined
                             }
+                            onDoubleClick={(ev) => {
+                              // 反映待ちの行は編集不可（SPEC §12.2）
+                              if (track.pending_batch_id != null) return
+                              const v = editableValue(track, cell.column.id)
+                              if (v == null) return
+                              ev.stopPropagation()
+                              setEditing({ id: track.id, columnId: cell.column.id, value: v, error: null })
+                            }}
                           >
-                            <table.FlexRender cell={cell} />
+                            {(() => {
+                              const diff = cellDiff(preview, track.id, cell.column.id)
+                              if (!diff) return <table.FlexRender cell={cell} />
+                              return (
+                                <span className="diff" title={`${formatValues(diff.old)} → ${formatValues(diff.new)}`}>
+                                  <s>{formatValues(diff.old) || '（空）'}</s>
+                                  <span className="arrow">→</span>
+                                  <span className="new">{formatValues(diff.new) || '（空）'}</span>
+                                </span>
+                              )
+                            })()}
                           </div>
                         ),
                       )

@@ -580,3 +580,106 @@ table.kv tr.differs td {
   font-size: 18px;
   margin: 0 0 8px;
 }
+
+/* ---------------------------------------------------------------- 一括編集（P0-10） */
+
+.batch-edit .op-list {
+  list-style: none;
+  margin: 4px 0 8px;
+  padding: 0;
+}
+.batch-edit .op {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin-bottom: 6px;
+}
+.batch-edit .op-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.batch-edit .op-index {
+  color: var(--muted);
+}
+.batch-edit .op-kind {
+  font-weight: 600;
+}
+.batch-edit .op-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.batch-edit .op-fields input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.batch-edit .op-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.batch-edit .op-inline label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.batch-edit .op-inline input {
+  width: 64px;
+}
+.batch-edit .op-add {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.batch-edit .op-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.batch-edit .op-actions input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.batch-edit .preview-counts {
+  font-size: 12px;
+}
+.batch-edit .pending-prompt {
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 6px;
+}
+.batch-edit .pending-prompt p {
+  margin: 0 0 6px;
+}
+button.primary {
+  font-weight: 600;
+}
+
+.tr.preview-unchanged .td {
+  opacity: 0.45;
+}
+.td .diff s {
+  color: var(--muted);
+}
+.td .diff .arrow {
+  margin: 0 4px;
+  color: var(--muted);
+}
+.td .diff .new {
+  color: var(--accent);
+  font-weight: 600;
+}
+.td.editable {
+  cursor: text;
+}
+.td.td-editing input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 22px;
+  padding: 0 4px;
+}
+.td.td-editing input[aria-invalid='true'] {
+  border-color: #d33;
+}

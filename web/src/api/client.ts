@@ -56,3 +56,31 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   })
 }
+
+export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  return apiFetch<T>(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+/** 409 の本文（`pending` の track_ids など）を取り出す */
+export async function parseErrorBody<T>(path: string, init: RequestInit): Promise<{ ok: true; body: T } | { ok: false; status: number; body: unknown }> {
+  const res = await fetch(path, {
+    credentials: 'same-origin',
+    ...init,
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+  })
+  if (res.status === 401) {
+    for (const l of unauthorizedListeners) l()
+  }
+  let body: unknown = null
+  try {
+    body = await res.json()
+  } catch {
+    // 本文なし
+  }
+  if (res.ok) return { ok: true, body: body as T }
+  return { ok: false, status: res.status, body }
+}

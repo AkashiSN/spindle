@@ -16,6 +16,7 @@ import { Sidebar, type Scope } from './components/Sidebar'
 import { TopNav } from './components/TopNav'
 import { TrackTable } from './components/TrackTable'
 import { useAlbums } from './hooks/useAlbums'
+import { useBatchEdit } from './hooks/useBatchEdit'
 import { useEvents } from './hooks/useEvents'
 import { useJobSummary } from './hooks/useJobSummary'
 import { useTracks } from './hooks/useTracks'
@@ -24,6 +25,7 @@ import type { View } from './lib/views'
 import {
   DEFAULT_SORT,
   filterToParam,
+  sortToParam,
   toggleSort,
   type Filter,
   type Sort,
@@ -217,6 +219,14 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     return { count: 0, pending: 0 }
   }, [selection, selectionTotal, selectedRows, pendingInFilter, tracks.byId])
 
+  // ---------------------------------------------------------------- 一括編集
+
+  const edit = useBatchEdit(selection, sortToParam(sort))
+  const handleInlineEdit = useCallback(
+    (id: number, columnId: string, value: string) => edit.applyInline(id, columnId, value),
+    [edit],
+  )
+
   // ---------------------------------------------------------------- 表示
 
   const handleSort = useCallback((key: SortKey) => setSort((s) => toggleSort(s, key)), [])
@@ -255,6 +265,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             onSelectAll={handleSelectAll}
             onClearSelection={clearSelection}
             onRangeChange={handleRange}
+            preview={edit.preview}
+            onInlineEdit={handleInlineEdit}
           />
         ) : view === 'albums' ? (
           <Placeholder title="アルバム" note="サムネイルグリッドは P1。ツリーのアルバムをクリックすると一覧が絞られる" />
@@ -268,7 +280,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           <Placeholder title="設定" note="config.toml の閲覧、再スキャン / deep scan / GC dry-run は後続タスクで" />
         )}
       </main>
-      <RightPanel selection={selection} summary={summary} selectedRows={selectedRows} />
+      <RightPanel selection={selection} summary={summary} selectedRows={selectedRows} edit={edit} />
       <BottomBar summary={jobs.summary} connected={connected} onJobsClick={() => setView('jobs')} />
     </div>
   )

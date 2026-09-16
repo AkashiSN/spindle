@@ -2,6 +2,7 @@
 
 pub mod albums;
 pub mod auth;
+pub mod batch;
 pub mod error;
 pub mod events;
 pub mod health;
@@ -14,7 +15,7 @@ pub mod tracks;
 
 use axum::http::StatusCode;
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{middleware, Router};
 
 pub use state::AppState;
@@ -27,6 +28,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/session", get(auth::session))
         .route("/tracks", get(tracks::list))
         .route("/tracks/{id}", get(tracks::get))
+        .route("/tracks/batch", patch(batch::apply))
+        .route("/tracks/batch/preview", post(batch::preview))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))

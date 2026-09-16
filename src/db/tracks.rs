@@ -398,18 +398,32 @@ fn read_snapshot(r: &Row) -> rusqlite::Result<SnapshotRow> {
 /// フィルタ形は ID を列挙せず SQL で解決し、`exclude_ids` だけをバインドする。
 /// 存在しない id は黙って落ちる。結果は id 昇順
 pub fn resolve_selection(conn: &Connection, sel: &Selection) -> Result<Vec<SnapshotRow>> {
+    resolve_selection_sorted(conn, sel, None)
+}
+
+/// [`resolve_selection`] の並び順付き。`sort` があれば一覧と同じ順（連番の位置に使う）、
+/// 無ければ id 昇順
+pub fn resolve_selection_sorted(
+    conn: &Connection,
+    sel: &Selection,
+    sort: Option<Sort>,
+) -> Result<Vec<SnapshotRow>> {
+    let order = match sort {
+        Some(s) => order_by(s),
+        None => "ORDER BY t.id".to_owned(),
+    };
     match sel {
         Selection::Ids(ids) => {
-            // 大量の id を IN に並べず、JSON 配列 1 本を json_each で展開して JOIN する
+            // 大量の id を IN に並べず、JSON 配列 1 本を json_each で展開して JOIN する。
+            // 同じ id が 2 回あっても 1 行にする
             let json = serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_owned());
             let sql = format!(
-                "SELECT {SNAPSHOT_COLUMNS} FROM json_each(?) j JOIN tracks t ON t.id = j.value ORDER BY t.id"
+                "SELECT {SNAPSHOT_COLUMNS} FROM tracks t
+                 WHERE t.id IN (SELECT value FROM json_each(?)) {order}"
             );
             let mut stmt = conn.prepare_cached(&sql)?;
             let rows = stmt.query_map([json], read_snapshot)?;
-            let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-            rows.dedup_by_key(|r| r.id);
-            Ok(rows)
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         }
         Selection::Filter {
             filter,
@@ -424,7 +438,7 @@ pub fn resolve_selection(conn: &Connection, sel: &Selection) -> Result<Vec<Snaps
                 );
             }
             let sql = format!(
-                "SELECT {SNAPSHOT_COLUMNS} FROM tracks t WHERE {} ORDER BY t.id",
+                "SELECT {SNAPSHOT_COLUMNS} FROM tracks t WHERE {} {order}",
                 w.sql()
             );
             let mut stmt = conn.prepare(&sql)?;

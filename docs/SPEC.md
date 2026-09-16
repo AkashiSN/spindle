@@ -780,9 +780,16 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 // { "ids": [1, 2, 3] }  または  { "filter": "<選択時点のフィルタ式>", "exclude_ids": [7] }
 // フィルタ形は「選択した時点のフィルタ」を immutable に保持する（表示中のフィルタとは別物）
 
-// POST /api/tracks/batch/preview   { "selection": {...}, "ops": [...] }
+// POST /api/tracks/batch/preview   { "selection": {...}, "ops": [...], "sort": "title" }
 //   サーバは selection を解決して対象 track_id と各行の tag_version / 事前条件を
-//   スナップショットに保存し、selection_token（TTL 15 分）を返す（D-33）
+//   スナップショットに保存し、selection_token（TTL 15 分）を返す（D-33）。
+//   ops は上から順に適用する操作の配列（D-42）:
+//     { "op": "set",     "key": "TITLE",       "value": "…" | ["…", "…"] }   // 空は削除
+//     { "op": "ref",     "key": "ALBUMARTIST", "template": "%artist%" }      // 先頭値で展開
+//     { "op": "replace", "key": "TITLE",       "pattern": "…", "replacement": "$1" }
+//     { "op": "number",  "key": "TRACKNUMBER", "start": 1, "pad": 0 }        // sort 順に連番
+//     { "op": "delete",  "key": "COMMENT" }
+//   items は値が変わる行だけ。反映待ちの行は評価せず pending_excluded に数える
 { "selection_token": "…", "count": 1207,
   "changed": 1180, "unchanged": 24, "pending_excluded": 3,
   "items": [ { "id": 1, "changes": { "TITLE": { "old": ["…"], "new": ["…"] } } } ] }
@@ -793,6 +800,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //   201 { "batch_id": 42, "affected": 1180 }
 //   409 { "error": "pending", "track_ids": [ … ], "count": 3 }   // skip_pending=true で除外して続行
 //   409 { "error": "preview_stale" }                             // token 期限切れ・ops 不一致
+//   409 { "error": "no_changes" }                                // 値が変わる行が無い
+//   409 の応答では token を消費しない（同じ token でやり直せる）。201 で消費する
 
 // GET /api/history
 { "items": [ { "id": 42, "created_at": 1, "description": "…", "kind": "tags",
