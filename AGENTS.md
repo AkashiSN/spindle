@@ -126,8 +126,9 @@ cargo build && cargo test
 cargo clippy -- -D warnings
 cargo fmt --check
 
-cd web && npm install && npm run dev      # フロント単体
-cd web && npm run build                   # 同梱用ビルド
+cd web && npm install && npm run dev      # フロント単体（API は SPINDLE_BACKEND へ中継。既定 127.0.0.1:8080）
+cd web && npm run build                   # 同梱用ビルド（tsc -b + vite）
+cd web && npx vitest run && npm run lint  # 純粋ロジックのテストと oxlint
 
 python3 scripts/preflight.py /mnt/tank/music --dest /mnt/tank/media
 docker build -f deploy/Dockerfile -t spindle .

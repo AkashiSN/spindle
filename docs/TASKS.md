@@ -182,21 +182,26 @@ preview 後にスキャンで行が増えても apply の対象が増えない�
 
 ### P0-8 表 UI（SPEC §12）
 
-- [ ] 3 ペイン骨格: 上部ナビ / 左サイドバー（ツリー・プレイリスト・固定フィルタ）/ 表 /
-      右パネル（折りたたみ・幅永続化）/ 下部バー（ジョブ要約。再生は P1-9）
-- [ ] TanStack Table + Virtual による仮想スクロール
-- [ ] 列の表示切替・並べ替え・幅の永続化（localStorage）
-- [ ] 範囲選択（Shift / Ctrl）、Ctrl+A はフィルタ形 selection。**選択は immutable**（選択時の
+- [x] 3 ペイン骨格: 上部ナビ / 左サイドバー（ツリー・プレイリスト・固定フィルタ）/ 表 /
+      右パネル（折りたたみ・幅永続化）/ 下部バー（ジョブ要約。再生は P1-9）。ログイン画面と
+      401 → ログインへの復帰、他画面は骨格のプレースホルダ
+- [x] TanStack Table + Virtual による仮想スクロール（行はカーソル順に積み、表には窓だけ渡す。D-40）
+- [x] 列の表示切替・並べ替え（ヘッダのドラッグ）・幅の永続化（localStorage）
+- [x] 範囲選択（Shift / Ctrl）、Ctrl+A はフィルタ形 selection。**選択は immutable**（選択時の
       フィルタを保持。表示フィルタを変えても集合は変わらない）。選択件数・反映待ち件数・表示件数
-- [ ] バッジ列（検証 / 可逆 / RG / Derived+stale / 反映待ち / conflict / 重複 / hardlink / missing）
-- [ ] 反映待ちの行はグレーで編集不可
-- [ ] SSE `library` イベントで表示中ページを無効化・再取得（`ids` は該当時のみ、`bulk` は無条件）、
+- [x] バッジ列（検証 / 可逆 / RG / Derived+stale / 反映待ち / conflict / 重複 / hardlink / missing）
+- [x] 反映待ちの行はグレーで編集不可（`aria-disabled`。編集 UI 自体は P0-10）
+- [x] SSE `library` イベントで表示中ページを無効化・再取得（`ids` は該当時のみ、`bulk` は無条件）、
       `job` / `batch` で下部バーを更新。選択はイベントで変えない
-- [ ] conflict バッジは「最新 op が skipped_conflict」で判定
+- [x] conflict バッジは「最新 op が skipped_conflict」で判定（サーバの `conflict_batch_id` をそのまま使う）
 
 受け入れ: 6 万行でスクロールが 60fps を保つ（Chrome 最新安定版、参照マシン、DevTools の
 Performance で 5 秒間のフレーム落ちを計測）。選択状態がソート変更後も維持される。
 ツリー・プレイリスト・フィルタのどれを選んでも同じ表コンポーネントが集合を差し替えるだけ。
+計測: 2026-09-16、TrueNAS ホスト（Ryzen 5 7600）の headless Chromium で 6 万件、5 秒の連続スクロールで
+60.2 fps・20ms 超のフレーム 0。ソート変更・Ctrl+A・表示フィルタ変更後の選択維持と、スキャンによる
+SSE 再取得を同じセッションで確認。詳細と Chrome 安定版での再計測の扱いは D-40。
+純粋ロジックは `cd web && npx vitest run`（20 件）
 
 依存: P0-7
 
