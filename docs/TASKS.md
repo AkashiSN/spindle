@@ -389,6 +389,17 @@ DB にしか存在しないもの（編集履歴 / プレイリスト / 検証�
 
 完了条件: **foobar2000 を開かずに日常運用が回る。**
 
+着手順の目安（依存関係と P0-14 の状況から。2026-09-17 時点）:
+P1-4（ALAC 7,572 本の FLAC 化。D-45 で決めた方針で、Archive 退避の台帳と GC の前提）→
+P1-1 / P1-2（FLAC 化後に一括で RG）→ P1-10（旧 Opus を捨てたので Derived が空。P1-8 の前提）→
+P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P1-8 / P1-11 / P1-5。
+実データでの検証は P0-14 のリハーサル環境（`ssh truenas`、`/root/spindle-migration/`、
+`/mnt/ssd/media/Library` 9,098 トラック）で行う。`ssd/musics` は正なので触らない。
+
+- [ ] **P1-0** 初回 deep scan の高速化（P0-14 の後続課題。リリース時の再移行でも効く）:
+      `Scanner` Phase 2 の直列 `audio_md5` を、既存行が md5 で突き合わせを要するときだけ計算するか
+      Phase 3 の並列読みへ回す。Phase 2 中も進捗を出す。`symphonia` / `lofty` のファイルごとの
+      WARN を既定フィルタで落とす（ALAC 7,572 本で 75 分 → 並列度分だけ短縮が目安）
 - [ ] **P1-1** ReplayGain スキャン（`ebur128`、album は `album_id` 単位、
       2ch 以外は集計から除外）
 - [ ] **P1-2** RG タグ書き込み（Opus のみ -23 LUFS 基準の Q7.8:
