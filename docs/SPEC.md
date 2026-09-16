@@ -108,7 +108,7 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 ## 5. ライブラリレイアウト
 
 ```
-/mnt/tank/media/
+/mnt/ssd/media/                        （実機のプールは ssd / hdd。D-45）
 ├── Library/                           [dataset] snapshot: 毎日 + 編集前
 │   └── <Category>/<AlbumArtist>/<Album>/
 │       ├── 1-01 Title.flac
@@ -119,13 +119,14 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 │       └── verify.log                 遡及照合を行った場合
 ├── Derived/                           [dataset] snapshot: なし
 │   └── <Category>/<AlbumArtist>/<Album>/1-01 Title.opus
-├── Archive/                           [dataset] snapshot: 週次
+├── Archive/  → /mnt/hdd/media/Archive [dataset, hdd] snapshot: 週次
 │   └── <Category>/<AlbumArtist>/<Album>/Title.webm
+│       （FLAC 正規化で退避した WAV / ALAC / AIFF もここ。GC まで保持）
 ├── Inbox/                             [dataset] snapshot: なし
 │   └── （承認前の一時領域。ハイレゾ購入分などをここへ置く）
 └── Playlists/m3u8/
 
-/mnt/tank/apps/spindle/               [dataset] snapshot: 毎日
+/mnt/ssd/apps/spindle/                [dataset] snapshot: 毎日
 ├── spindle.db                        SQLite
 ├── backup/                            VACUUM INTO による日次バックアップ
 ├── thumbs/                            ハッシュアドレスのサムネイルキャッシュ
@@ -470,26 +471,31 @@ CUETools の "verify from files" 相当。
   データトラックの存在で普通に外れる。`mismatch` は「要確認」として扱い、
   警告色で表示しない
 
-### 7.4 WAV 正規化
+### 7.4 ロスレス正規化（WAV / ALAC / AIFF → FLAC）
+
+Library のロスレスは FLAC に統一する（D-45）。移行で取り込んだ ALAC も、取り込まれた WAV /
+AIFF も、同じ機構で FLAC にする。
 
 ```
-WAV 検出
+WAV / ALAC / AIFF 検出
   → デコードして PCM MD5 算出
-  → flac -8 でエンコード（tmp → fsync → Library へ rename）
+  → flac -8 でエンコード（tmp → fsync → Library へ rename）。タグは lofty で移す
   → 生成 FLAC の STREAMINFO MD5 と突き合わせ
-     ├ 一致   → 元 WAV を Archive/ の同じ相対パスへ move、
+     ├ 一致   → 元ファイルを Archive/ の同じ相対パスへ move、
      │          edit_ops(kind='archive') に from/to を記録、
      │          archived_files に台帳（eligible_after = now + retention）を追加、
-     │          original_codec='wav', normalized_at 記録
-     └ 不一致 → 中止、エラー報告、WAV を残す（生成した FLAC は捨てる）
+     │          original_codec（'wav' | 'alac' | 'aiff'）、normalized_at 記録。
+     │          audio_md5 は同じ PCM なので変わらず、audio_version も上げない（Derived は据え置き）
+     └ 不一致 → 中止、エラー報告、元ファイルを残す（生成した FLAC は捨てる）
 ```
 
 WAV は RIFF INFO / ID3 のどちらを使うかがソフトごとに異なり、ReplayGain タグの
-互換性も低い。可逆変換なので情報は失われない。読み込み互換のため WAV の再生・
+互換性も低い。ALAC（MP4 ilst）は複数値タグが弱く、Safari 以外のブラウザで再生できない。
+可逆変換なので情報は失われない。読み込み互換のため WAV / ALAC / AIFF の再生・
 取り込み自体は引き続きサポートする。
 
-**元 WAV は即時削除しない。** 物理削除はユーザデータ全般と同じく GC ジョブのみが行う
-（禁止事項）。退避した WAV は `archived_files`（state='held'）を台帳として GC が
+**元ファイルは即時削除しない。** 物理削除はユーザデータ全般と同じく GC ジョブのみが行う
+（禁止事項）。退避した元ファイルは `archived_files`（state='held'）を台帳として GC が
 `eligible_after` 経過後に回収し state='deleted' にする。それまでは履歴の巻き戻しで
 Library へ戻せる（state='restored'。FLAC の方を Archive へ移す）。
 編集履歴は revert / redo で状態が動くので GC の台帳には使わない。
@@ -1224,12 +1230,12 @@ services:
       - 'c 21:* rmw'             # sg (char)
     user: "1000:1000"            # 既存ライブラリの所有者に合わせる
     volumes:
-      - /mnt/tank/media/Library:/library
-      - /mnt/tank/media/Derived:/derived
-      - /mnt/tank/media/Archive:/archive
-      - /mnt/tank/media/Inbox:/inbox
-      - /mnt/tank/media/Playlists:/playlists
-      - /mnt/tank/apps/spindle:/data
+      - /mnt/ssd/media/Library:/library
+      - /mnt/ssd/media/Derived:/derived
+      - /mnt/hdd/media/Archive:/archive
+      - /mnt/ssd/media/Inbox:/inbox
+      - /mnt/ssd/media/Playlists:/playlists
+      - /mnt/ssd/apps/spindle:/data
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -1245,30 +1251,27 @@ services:
 ### ZFS データセット
 
 ```bash
-zfs create tank/media
-
-# 作成時のみ指定可能なプロパティ（後から変更不可）
-COMMON="-o casesensitivity=insensitive -o normalization=formD"
-# normalization を設定すると utf8only=on が強制される
-
-zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off tank/media/Library
-zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off tank/media/Derived
-zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off tank/media/Archive
-zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off tank/media/Inbox
-zfs create -o recordsize=16K -o compression=lz4 -o atime=off tank/apps/spindle
+COMMON="-o casesensitivity=insensitive -o normalization=formD"   # 作成時のみ指定可能。utf8only=on が強制される
+zfs create ssd/media
+zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off ssd/media/Library
+zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off ssd/media/Derived
+zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off ssd/media/Inbox
+zfs create hdd/media
+zfs create $COMMON -o recordsize=1M -o compression=lz4 -o atime=off hdd/media/Archive
+zfs create -o recordsize=16K -o compression=lz4 -o atime=off ssd/apps/spindle
 ```
 
 | dataset | recordsize | snapshot | 備考 |
 |---|---|---|---|
-| Library | 1M | 毎日 + 一括編集前 | 唯一の正 |
-| Derived | 1M | なし | 再生成可能。レプリケーション対象外 |
-| Archive | 1M | 週次 | 追記のみ |
-| Inbox | 1M | なし | 承認前の一時領域 |
-| apps/spindle | 16K | 毎日 | SQLite。ページサイズに合わせる |
+| ssd/media/Library | 1M | 毎日 + 一括編集前 | 唯一の正 |
+| ssd/media/Derived | 1M | なし | 再生成可能。レプリケーション対象外 |
+| hdd/media/Archive | 1M | 週次 | 追記のみ。FLAC 正規化で退避するロスレスの受け皿（D-45） |
+| ssd/media/Inbox | 1M | なし | 承認前の一時領域 |
+| ssd/apps/spindle | 16K | 毎日 | SQLite。ページサイズに合わせる |
 
 **`casesensitivity` と `normalization` はデータセット作成時のみ指定可能で、
 後から変更できない。** このためライブラリは既存データセットの rename ではなく、
-新規作成 + ファイルコピーで移行する（下記）。
+新規作成 + ファイルコピーで移行する（D-19）。
 
 - `casesensitivity=insensitive`: Windows の foobar2000 が `Cover.jpg` を、
   spindle が `cover.jpg` を作る事故を ZFS 層で潰す。spindle は自身の生成パスの
@@ -1279,41 +1282,22 @@ zfs create -o recordsize=16K -o compression=lz4 -o atime=off tank/apps/spindle
 
 Inbox は Library と別データセットなので move は実コピーになるが、
 1 回あたりアルバム 1 枚（数百 MB〜数 GB）なので実用上の問題はない。
+Archive は別プールなので退避も実コピー（追記のみで速度は要らない）。
 
 ### 移行手順
 
-**前提: Library と同容量の空きが必要**（一時的に 2 倍を消費する）。
+手順は `docs/MIGRATION.md`、振り分けの判断は D-45。要点:
 
-```bash
-# 1. 旧ライブラリを固定してから作業する
-zfs set readonly=on tank/music
-zfs snapshot tank/music@pre-migration
-
-# 2. 事前チェック（コピー前に必ず実行。判定は scripts/preflight.py の一本に集約）
-#    insensitive / formD の衝突、不正 UTF-8、255 バイト超、symlink / hardlink、
-#    SMB 禁止名、読めないパス、コピー先の容量不足はすべてブロッカー（exit 1）
-python3 scripts/preflight.py /mnt/tank/music --dest /mnt/tank/media --plan rename.sh
-
-# 3. コピー（zfs send/recv は不可。作成時プロパティが継承されてしまうため）
-rsync -aHX --info=progress2 /mnt/tank/music/Opus/     /mnt/tank/media/Library/
-rsync -aHX --info=progress2 /mnt/tank/music/Original/ /mnt/tank/media/Archive/
-rsync -aHX --info=progress2 /mnt/tank/music/Playlists/ /mnt/tank/media/Playlists/
-
-# 4. 検証（チェックサム比較。差分が出なければ成功）
-rsync -aHXn --checksum --itemize-changes /mnt/tank/music/Opus/ /mnt/tank/media/Library/
-
-# 5. 所有者をコンテナの実行 UID/GID に合わせる
-chown -R 1000:1000 /mnt/tank/media
-
-# 6. spindle 初回スキャン完了と全曲の目視確認までは tank/music を破棄しない
-```
-
-**ACL は rsync で引き継げない。** TrueNAS の SMB データセットは NFSv4 ACL を
-使うが、`rsync -A` が扱うのは POSIX ACL であり互換がない。コピー後に
-TrueNAS の ACL エディタで新データセットにプリセットを適用し直すこと。
-
-旧データセットの破棄は、P0 のスキャンが完走し、トラック数が一致し、
-数日間の運用で問題が出ないことを確認してから。
+- 事前チェックは `scripts/preflight.py`（衝突 / 不正 UTF-8 / 255 バイト超 / symlink / hardlink /
+  SMB 禁止名 / 容量）、振り分けは `scripts/migrate_plan.py`（`Opus/` と `Original/` の 1:1 対応を
+  原本の形式で Library / Archive に割り、`rsync --files-from` の一覧を出す）。手書きの find / awk は
+  置かない
+- 旧 `Original/` の ALAC が Library の master（後で FLAC 正規化）、webm 由来は `.opus` が master で
+  webm は Archive、旧 `Opus/` のロスレス由来分は移さず Derived を再生成する
+- `zfs send/recv` は不可（作成時プロパティが継承される）。**ACL は rsync で引き継げない**
+  （NFSv4 ACL と `rsync -A` の POSIX ACL は互換がない）ので TrueNAS の ACL エディタで適用し直す
+- 旧データセットは `readonly=on` にして残し、初回スキャンが完走してトラック数が一致し、
+  数日間の運用で問題が出ないことを確認してから破棄する
 
 ### 環境変数
 

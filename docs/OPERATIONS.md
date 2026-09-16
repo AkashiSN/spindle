@@ -35,8 +35,8 @@ DB（`/data/spindle.db`）は原則キャッシュで、ファイルから再構
 変更を取りこぼすので使わない。
 
 ```bash
-sqlite3 /mnt/tank/apps/spindle/spindle.db \
-  "VACUUM INTO '/mnt/tank/apps/spindle/backup/manual-$(date -u +%Y%m%dT%H%M%SZ).db'"
+sqlite3 /mnt/ssd/apps/spindle/spindle.db \
+  "VACUUM INTO '/mnt/ssd/apps/spindle/backup/manual-$(date -u +%Y%m%dT%H%M%SZ).db'"
 ```
 
 ## 復元
@@ -45,7 +45,7 @@ sqlite3 /mnt/tank/apps/spindle/spindle.db \
 持ち続けて書き込みが行方不明になる。
 
 ```bash
-cd /mnt/tank/apps/spindle
+cd /mnt/ssd/apps/spindle
 docker compose -f /path/to/compose.yaml stop spindle
 
 # 1. 壊れた DB を退避（WAL / SHM も一緒に。残すと差し替えた DB に古い WAL が適用される）

@@ -21,10 +21,11 @@ CD リッピング（AccurateRip / CTDB 照合付き）、メタデータ一括�
 | `docs/OPERATIONS.md` | 運用手順。バックアップと復元 |
 | `db/migrations/0001_init.sql` | 初期スキーマ（SQLite 3.46 で適用・FTS 動作を検証済み） |
 | `scripts/preflight.py` | 移行前チェック（標準ライブラリのみ） |
+| `scripts/migrate_plan.py` | 移行の振り分け計画。`rsync --files-from` の一覧を生成（標準ライブラリのみ） |
 
 ## 現在の状態
 
-P0-3（認証）まで完了。`docs/TASKS.md` の P0-4 から続ける。
+P0 完了（P0-14 で実機へ移行のリハーサル済み。9,098 トラック。`ssd/musics` が引き続き正で、リリース時に再移行する）。`docs/TASKS.md` の P1 から続ける。移行中に見つかった後続課題は TASKS の P0-14 末尾。
 
 ## 起動
 

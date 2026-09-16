@@ -348,14 +348,38 @@ DB にしか存在しないもの（編集履歴 / プレイリスト / 検証�
 
 ### P0-14 移行の実施
 
-- [ ] `scripts/preflight.py` でブロッカーを解消（hardlink・symlink・衝突・不正 UTF-8・255 バイト超）
-- [ ] データセット作成 → rsync → 検証 → ACL 適用（`docs/MIGRATION.md`）
-- [ ] 初回スキャンを完走させ、`--audio-only` マニフェストの行数とトラック数を突き合わせる
-- [ ] 旧 `Opus/` と `Original/` の標本数件で Opus ストリームが同一（remux）であることを確認し、
-      「Library の .opus が master」という前提を固定する
+- [x] `scripts/preflight.py` でブロッカーを解消（hardlink・symlink・衝突・不正 UTF-8・255 バイト超）。
+      実機 `ssd/musics` は `Opus/` `Original/` とも exit 0（ブロッカーなし、全 NFC）
+- [x] 実機の構成を確認し、振り分けを決めて `docs/DECISIONS.md` D-45 に記録
+      （`Original/` は大半が ALAC ロスレス → Library の master。`AAC/` は移さない。
+      Archive は `hdd`。Library のロスレスは後で FLAC に統一）
+- [x] `scripts/migrate_plan.py`: `Opus/` と `Original/` の 1:1 対応から `rsync --files-from` の一覧を
+      生成（Library 音声 9,098、Archive 1,514、unmatched 0）
+- [x] データセット作成 → rsync → 検証（2026-09-16。checksum 差分 0）。**この移行はリハーサル**で、
+      spindle 完成まで `ssd/musics` が正。リリース時に `ssd/media` 等を作り直して再移行する
+      （MIGRATION.md §5）。ACL プリセットと定期スナップショットの設定はその時に行う
+- [x] 初回スキャンを完走させ、`--audio-only` マニフェストの行数（= `summary.json` の
+      `library_audio_total`）とトラック数を突き合わせる（9,098 = 9,098 = 9,098。errors 0、
+      duplicate 10 は A ver / B ver・アルバムとシングルの同一 PCM で正当）
+- [x] webm 由来の標本 5 件で `Archive/` の webm と `Library/` の `.opus` の Opus パケット列
+      MD5（`ffmpeg -c copy -f data`）が一致。「webm 由来は Library の .opus が master」を固定
+- [x] バックアップ 1 世代（`spindle-20260916T150022Z.db`）、一括編集 1 件（COMMENT 付与）と
+      巻き戻しが applied。ファイルも元に戻った
 
-受け入れ: 旧ライブラリの音声ファイル数と DB のトラック数が一致する。
+受け入れ: 旧ライブラリの音声ファイル数（振り分け後）と DB のトラック数が一致する。
 バックアップが 1 世代以上取れている。移行後に 1 件の一括編集と巻き戻しが通る。
+
+移行中に見つかった後続課題（P0-14 の範囲外。優先度は要判断）:
+
+- 初回 deep scan が遅い。`Scanner` の Phase 2（同一性解決）が `audio_md5` を 1 スレッドで直列に
+  計算し、Phase 3 の並列読みはそのキャッシュを使うだけ。空の DB では md5 で突き合わせる既存行が
+  無いので Phase 2 では計算せず Phase 3 に回せる（ALAC 7,572 本で約 75 分 → 並列度分だけ短縮）
+- Phase 2 の間は進捗（done / total）が出ない。UI では 1 時間以上「running」のまま見える
+- `symphonia` が 1 ファイルごとに INFO / WARN（`skipped 4 bytes of junk`、`stream is seekable`）を
+  出す。既定のログフィルタで `symphonia=error` に落とす
+- ホストに `/dev/sr0` が無いと `deploy/compose.yaml` の `devices` で起動に失敗する。CD ドライブは
+  P2 まで無いので、移行時は devices を外した compose（`/root/spindle-migration/compose.yaml`）で
+  起動した。P2 で `devices` を optional にするか、compose を 2 段にする
 
 依存: P0-12, P0-13
 
@@ -372,9 +396,10 @@ DB にしか存在しないもの（編集履歴 / プレイリスト / 検証�
       単体テストに置く。`rg_scanned_at` と `rg_written_at` を分離）
 - [ ] **P1-3** アートワーク（埋め込み / `cover.jpg` 両対応、抽出・一括差し替え、
       WebP サムネイル生成とキャッシュ。アルバムグリッド画面 → クリックで表を `album_id` に絞る）
-- [ ] **P1-4** WAV → FLAC 正規化（変換前後の PCM MD5 照合。不一致なら中止。
-      一致時は元 WAV を `Archive/` へ move し `edit_ops(kind='archive')` と `archived_files`
-      台帳に記録。**即時削除しない**）
+- [ ] **P1-4** ロスレス → FLAC 正規化（WAV / ALAC / AIFF。D-45。変換前後の PCM MD5 照合。
+      不一致なら中止。一致時は元ファイルを `Archive/` へ move し `edit_ops(kind='archive')` と
+      `archived_files` 台帳に記録。**即時削除しない**。`audio_version` は据え置き。
+      移行で取り込んだ ALAC 7,572 本が主対象）
 - [ ] **P1-5** FLAC 健全性チェック（`flac -t`、MD5 未設定の補填。
       補填時は `audio_version` 据え置き）
 - [ ] **P1-6** プレイリスト（手動、並べ替え、m3u8 書き出し）

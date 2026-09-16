@@ -7,10 +7,10 @@ casesensitivity=insensitive / normalization=formD / utf8only=on の
 条件を検出する。
 
   usage:
-    ./preflight.py /mnt/tank/music
-    ./preflight.py /mnt/tank/music --dest /mnt/tank/media --plan rename.sh
-    ./preflight.py /mnt/tank/music --manifest before.tsv --full
-    ./preflight.py /mnt/tank/music/Opus --manifest before.tsv --audio-only
+    ./preflight.py /mnt/ssd/musics/Opus
+    ./preflight.py /mnt/ssd/musics/Opus --dest /mnt/ssd --plan rename.sh
+    ./preflight.py /mnt/ssd/musics/Original --manifest before.tsv --full
+    ./preflight.py /mnt/ssd/media/Library --manifest after.tsv --audio-only
 
   exit code:
     0  ブロッカーなし（移行して良い）

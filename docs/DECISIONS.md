@@ -1172,3 +1172,64 @@ redo を同じ式で扱うため。
 
 **却下**: 逆バッチを専用の状態機械にする案（同じ規則を二重に持つ）。元バッチの `reverted_at` を redo で
 消す案（履歴の事実が書き換わり「#N で戻し済み」の表示が揺れる）。
+
+---
+
+## D-45 移行の振り分けと Library のロスレス形式（実機合わせ）
+
+**決定**:
+
+- **実機**: プールは `tank` ではなく `ssd`（NVMe、928G）と `hdd`（43.6T）。旧ライブラリは
+  `ssd/musics`（342G、既に `insensitive` + `formD` + `utf8only=on`）で、最上位は `Opus/`
+  `Original/` `AAC/`。`Playlists/` は `Opus/Playlists` と `Original/Playlists` の中にある
+- **`Original/` は「生データ」ではなく大半がロスレス master**。内訳は ALAC 7,572（うち 24/96 が 4）、
+  webm 1,512（YouTube 生データ）、mp3 14、AIFF 2（同名の ALAC あり）。`Opus/` はその 1:1 の
+  非可逆版。`AAC/` は iTunes 用に FDK-AAC 256k + ReplayGain 適用済みで音声を書き換えた配布物
+- **振り分け**（`scripts/migrate_plan.py` が一覧を生成し、`docs/MIGRATION.md` の rsync が使う）:
+
+  | Original の原本 | Library（master） | Derived | Archive | 捨てる |
+  |---|---|---|---|---|
+  | ALAC | `.m4a` そのまま | 再生成（旧 `.opus` は移さない） | — | — |
+  | webm | 対応する `Opus/*.opus`（remux） | — | `.webm` | — |
+  | mp3 | `.mp3`（非可逆原本） | — | — | 対応する `.opus`（非可逆→非可逆） |
+  | AIFF + 同名 ALAC | ALAC（整数 PCM） | — | `.aiff` | — |
+  | `AAC/`、`.exclude` / `.noimage`、`.fpl` / `gen.sh` | — | — | — | 移さない |
+
+  Library の音声は 9,098 本。Hi-Res の 24/96（`Album/Hi-Res/01.m4a`）とアルバム直下の 16/44 は
+  `audio_md5` が違う別トラックとして両方 Library に入れる（整理は表 UI で後から）。
+  プレイリストは `Opus/Playlists/*.m3u8`（28 本）だけを `Playlists/m3u8/` へ
+- **Library のロスレスは FLAC に統一する。** 移行時は ALAC のまま取り込み、変換は spindle の
+  ジョブで行う: P1-4 の WAV → FLAC 正規化を「ロスレス → FLAC 正規化」（WAV / ALAC / AIFF）に
+  広げ、PCM MD5 照合 → 一致時のみ元ファイルを `Archive/` へ退避 → 台帳 → 30 日後 GC の同じ機構に
+  乗せる。`audio_md5` は同じ PCM なら形式に依らず一致する（D-37）ので同一性は保たれ、
+  `audio_version` は上げない（Derived の再生成は起きない）
+- **Apple 向け（ALAC / AAC）は Derived に置かず、将来のエクスポート・同期プロファイルで
+  オンザフライ変換する。** D-9（Derived は Opus のみ）は変えない
+- **データセットの置き場**: `ssd/media/{Library,Derived,Inbox}` と `ssd/apps/spindle` は SSD、
+  **`Archive` は `hdd/media/Archive`**（`/mnt/hdd/media/Archive`）
+- **DSD**（現状 0 本）: 買ったら原本 `.dsf` / `.dff` は Archive、Library には PCM 変換した FLAC
+  （24/176.4 または 24/88.2）を master として置く。DSD → PCM は不可逆なので Archive の原本は
+  消さない。FLAC は PCM 専用で DSD を格納できない
+
+**理由**:
+
+- SPEC の master の定義は「手元にある最高品質 = Library の実体」。`Original/` を丸ごと Archive に
+  送る旧手順では 7,572 曲のロスレスが再生も編集もできない場所に埋もれ、非可逆の Opus が master に
+  なる。D-1 の役割別構成をそのまま適用すれば、ロスレスが Library、生データ（webm）が Archive、
+  Opus は Derived になる
+- FLAC を選ぶのは、ブラウザ再生が全種で直送できる（ALAC は Safari 以外で毎回 Opus 変換、§11）、
+  Vorbis comment で複数値タグが素直（旧 `AAC/Readme.md` の「`; ` を `、` に置換」は MP4 ilst の
+  制約の回避策だった）、STREAMINFO の MD5 で `flac -t` の健全性検査ができる（P1-5）、CD リップ
+  （P2）と WAV 正規化（P1-4）も FLAC なので Library のロスレスが 1 形式になる、から
+- 移行前に ffmpeg で一括変換しないのは、ilst → Vorbis comment のタグ移し替え（複数値・ディスク
+  番号・コンピレーション・アートワーク）が不完全で 7,572 曲の検品ができないこと、変換後は
+  旧ツリーとの rsync checksum 照合が効かなくなること。ジョブなら lofty でタグを移し、失敗すれば
+  戻せる
+- Archive を hdd に置くのは、FLAC 化のとき 220G の ALAC が Archive へ退避され、SSD だけだと
+  一時的に 520G を超えて空き（435G）に収まらないため。Archive は追記のみで速度が要らない
+- 旧 `Opus/` を Derived に流用しないのは、旧パスがテンプレート（`01 Title` 形式）と一致せず、
+  `derived_files` に紐づかない孤児として GC 対象になるだけだから。再生成は CPU 時間だけで済む
+
+**却下**: ALAC のまま Library に残す（Safari 以外の再生が全件変換、複数値タグの制約が続く）。
+`AAC/` を Archive に置く（音声を書き換えた非可逆で原本性が無い）。`Original/Playlists` の fpl を
+移す（foobar 専用。P1-6 の取り込みでパスは書き換えるので m3u8 だけで足りる）。

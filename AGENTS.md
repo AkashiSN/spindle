@@ -130,7 +130,8 @@ cd web && npm install && npm run dev      # フロント単体（API は SPINDLE
 cd web && npm run build                   # 同梱用ビルド（tsc -b + vite）
 cd web && npx vitest run && npm run lint  # 純粋ロジックのテストと oxlint
 
-python3 scripts/preflight.py /mnt/tank/music --dest /mnt/tank/media
+python3 scripts/preflight.py /mnt/ssd/musics/Opus --dest /mnt/ssd     # 移行前チェック
+python3 scripts/migrate_plan.py /mnt/ssd/musics --out /tmp/plan        # 振り分け一覧
 docker build -f deploy/Dockerfile -t spindle .
 ```
 
