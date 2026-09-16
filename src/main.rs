@@ -3,10 +3,13 @@ use std::path::PathBuf;
 use anyhow::Context;
 use tracing::info;
 
-use spindle::{api, config::Config, db::migrations, logging};
+use spindle::db::{migrations, Db};
+use spindle::{api, config::Config, logging};
 
 /// `SPINDLE_CONFIG` 未設定時の設定ファイルパス（SPEC §14 環境変数）
 const DEFAULT_CONFIG_PATH: &str = "/data/config.toml";
+/// `[paths].data` 直下の DB ファイル名（SPEC §5）
+const DB_FILE_NAME: &str = "spindle.db";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,12 +22,21 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("設定の読み込みに失敗: {}", config_path.display()))?;
     info!(config = %config_path.display(), library = %config.paths.library.display(), "設定を読み込んだ");
 
-    let migrations = migrations::embedded().context("埋め込みマイグレーションの検証に失敗")?;
-    info!(
-        count = migrations.len(),
-        latest = migrations.last().map(|m| m.version),
-        "マイグレーションを確認した"
-    );
+    let db_path = config.paths.data.join(DB_FILE_NAME);
+    let db = {
+        let path = db_path.clone();
+        tokio::task::spawn_blocking(move || Db::open(&path))
+            .await
+            .context("DB を開くタスクが異常終了")?
+            .with_context(|| format!("DB を開けない: {}", db_path.display()))?
+    };
+    let version = db
+        .read(|conn| Ok(migrations::current_version(conn)?))
+        .await
+        .context("スキーマ版の読み取りに失敗")?;
+    info!(db = %db_path.display(), schema_version = ?version, "DB を開いた");
+    // ルータへの受け渡し（AppState）は認証と一緒に P0-3 で入れる。ここでは寿命だけ持つ
+    let _db = db;
 
     let listener = tokio::net::TcpListener::bind(config.server.listen)
         .await

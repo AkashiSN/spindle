@@ -26,13 +26,13 @@
 
 ### P0-2 DB 層とマイグレーション
 
-- [ ] `db/migrations/*.sql` を連番で適用する仕組み、`schema_version` 管理。
+- [x] `db/migrations/*.sql` を連番で適用する仕組み、`schema_version` 管理。
       **1 ファイル = 1 トランザクション**で適用する
-- [ ] コネクション初期化で `journal_mode=WAL` / `synchronous=NORMAL` / `foreign_keys=ON` を
+- [x] コネクション初期化で `journal_mode=WAL` / `synchronous=NORMAL` / `foreign_keys=ON` を
       **トランザクション外**で設定する（SQL ファイルには PRAGMA を書かない）
-- [ ] 書き込み単一コネクション + 読み取りプール、`spawn_blocking` でのラップ
-- [ ] `:memory:` にマイグレーションを流すテストヘルパ
-- [ ] FTS5 の挙動テスト: insert / 索引列 update / delete / `albums.album` 改名 →
+- [x] 書き込み単一コネクション + 読み取りプール、`spawn_blocking` でのラップ
+- [x] `:memory:` にマイグレーションを流すテストヘルパ
+- [x] FTS5 の挙動テスト: insert / 索引列 update / delete / `albums.album` 改名 →
       `tracks.album` 同期 → 旧語で引けず新語で引ける / `rebuild` / `integrity-check`
 
 受け入れ: `0001_init.sql` が**トランザクション内で**適用でき、再起動しても二重適用されない。

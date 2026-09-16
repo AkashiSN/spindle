@@ -2,8 +2,11 @@
 //!
 //! ファイル名は `NNNN_name.sql`（4 桁ゼロ埋め、1 始まり）。既存ファイルは書き換えず、
 //! スキーマ変更は必ず新しい連番ファイルを追加する（CLAUDE.md 禁止事項）。
-//! 適用（`schema_version` 管理・1 ファイル = 1 トランザクション）は P0-2
+//! 適用は [`apply`]: `schema_version` の最大値より新しいファイルだけを、
+//! **1 ファイル = 1 トランザクション**で流す。PRAGMA は SQL に書かない（コネクション初期化で
+//! トランザクション外から設定する。`super::init_connection`）
 
+use rusqlite::{Connection, OptionalExtension};
 use rust_embed::Embed;
 
 #[derive(Embed)]
@@ -30,6 +33,18 @@ pub enum MigrationError {
     Gap { expected: u32, found: String },
     #[error("マイグレーションが 1 件もない")]
     Empty,
+    #[error(
+        "DB のスキーマ版 {db} がバイナリの最新 {latest} より新しい（古いバイナリで開いている）"
+    )]
+    Newer { db: u32, latest: u32 },
+    #[error("マイグレーション {version:04} の適用に失敗: {source}")]
+    Sql {
+        version: u32,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("schema_version の読み取りに失敗: {0}")]
+    Version(#[source] rusqlite::Error),
 }
 
 /// `NNNN_name.sql` を `(version, name)` に分解する。規則に合わなければ `None`
@@ -79,4 +94,68 @@ pub fn embedded() -> Result<Vec<Migration>, MigrationError> {
         }
     }
     Ok(list)
+}
+
+/// 適用済みの最大版。`schema_version` 表が無ければ `None`（空 DB）
+pub fn current_version(conn: &Connection) -> Result<Option<u32>, MigrationError> {
+    let has_table: bool = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )
+        .map_err(MigrationError::Version)?;
+    if !has_table {
+        return Ok(None);
+    }
+    conn.query_row("SELECT max(version) FROM schema_version", [], |r| {
+        r.get::<_, Option<u32>>(0)
+    })
+    .optional()
+    .map(|v| v.flatten())
+    .map_err(MigrationError::Version)
+}
+
+/// 埋め込みマイグレーションのうち未適用のものを適用し、適用した版の一覧を返す
+pub fn apply(conn: &mut Connection) -> Result<Vec<u32>, MigrationError> {
+    let list = embedded()?;
+    apply_list(conn, &list)
+}
+
+/// `list`（版順）のうち `current_version` より新しいものを 1 ファイル = 1 トランザクションで適用する。
+/// DB の版がリストの最新より新しければ何もせずエラー（古いバイナリで新しい DB を触らない）
+pub fn apply_list(conn: &mut Connection, list: &[Migration]) -> Result<Vec<u32>, MigrationError> {
+    let current = current_version(conn)?.unwrap_or(0);
+    let latest = list.last().map(|m| m.version).unwrap_or(0);
+    if current > latest {
+        return Err(MigrationError::Newer {
+            db: current,
+            latest,
+        });
+    }
+    let mut applied = Vec::new();
+    for m in list.iter().filter(|m| m.version > current) {
+        let tx = conn.transaction().map_err(|source| MigrationError::Sql {
+            version: m.version,
+            source,
+        })?;
+        tx.execute_batch(&m.sql)
+            .and_then(|_| {
+                tx.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
+                    (m.version, super::now_epoch()),
+                )
+                .map(|_| ())
+            })
+            .map_err(|source| MigrationError::Sql {
+                version: m.version,
+                source,
+            })?;
+        tx.commit().map_err(|source| MigrationError::Sql {
+            version: m.version,
+            source,
+        })?;
+        applied.push(m.version);
+    }
+    Ok(applied)
 }
