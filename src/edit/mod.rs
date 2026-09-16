@@ -23,6 +23,7 @@
 //! 戻すのは、その後ファイルが外部で変わっていればスキャンが差分として拾い直せるようにするため
 
 mod rename;
+mod revert;
 
 use std::io::{Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,7 @@ pub use rename::{
     in_progress_keys, rename_dedup_key, temp_rel_path, PlannedRename, RenameHook, RenameOutcome,
     RenameStep, RenameTarget,
 };
+pub use revert::RevertError;
 
 /// 1 トラックへのタグ変更（`prepare_tags` の入力）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,6 +318,7 @@ impl Editor {
                 expected_tag_version: None,
                 index,
                 expected: None,
+                conflict: None,
             })
             .collect();
         let by_track: std::collections::HashMap<i64, Vec<TagChange>> =
@@ -351,6 +354,7 @@ impl Editor {
                     description.as_deref(),
                     &targets,
                     &*eval,
+                    None,
                     now_epoch(),
                 ))
             })
@@ -783,6 +787,9 @@ pub struct PlanTarget {
     /// preview の後の外部変更（音声の差し替え等）を tagwrite の事前条件確認で conflict にする。
     /// 無ければ記録時点の DB 値
     pub expected: Option<Precondition>,
+    /// 計画の時点で衝突していた（巻き戻しで現在値が元バッチの新値と違う等）。理由付きの
+    /// `skipped_conflict` op として記録し、DB も版も触らない
+    pub conflict: Option<String>,
 }
 
 /// 現在のタグ集合から新しいタグ集合を作る評価器（`domain::tagops::apply_ops` など）。
@@ -802,6 +809,8 @@ struct ConflictTarget {
     track_id: i64,
     expected: Precondition,
     error: String,
+    /// 意図していた変更（履歴に残す。preview 後に版が進んだ行は評価しないので空）
+    changes: Vec<(String, serde_json::Value, serde_json::Value)>,
 }
 
 /// 現在値との差分（キー → (旧 JSON, 新 JSON)）
@@ -829,11 +838,12 @@ fn diff_sets(
 }
 
 /// [`Editor::prepare_tags_with`] のトランザクション本体
-fn prepare_tags_tx(
+pub(super) fn prepare_tags_tx(
     conn: &mut Connection,
     description: Option<&str>,
     targets: &[PlanTarget],
     eval: &Evaluator,
+    reverts_batch_id: Option<i64>,
     now: i64,
 ) -> Result<Prepared, EditError> {
     let tx = conn.transaction()?;
@@ -856,12 +866,28 @@ fn prepare_tags_tx(
         let expected = target.expected.clone().unwrap_or(current_pre);
         let tag_version = history::track_tag_version(&tx, target.track_id)?
             .ok_or(EditError::TrackNotFound(target.track_id))?;
+        if let Some(reason) = &target.conflict {
+            // 意図していた変更は評価して edits に残す（履歴で何を戻そうとしたか分かるように）
+            let current = history::load_track_tags(&tx, target.track_id)?;
+            let changes = match eval(target, &current) {
+                Ok(new_set) => diff_sets(&current, &new_set),
+                Err(_) => Vec::new(),
+            };
+            conflicts.push(ConflictTarget {
+                track_id: target.track_id,
+                expected,
+                error: reason.clone(),
+                changes,
+            });
+            continue;
+        }
         if let Some(v) = target.expected_tag_version {
             if v != tag_version {
                 conflicts.push(ConflictTarget {
                     track_id: target.track_id,
                     expected,
                     error: format!("プレビューの後に変更された（tag_version {v} → {tag_version}）"),
+                    changes: Vec::new(),
                 });
                 continue;
             }
@@ -886,7 +912,7 @@ fn prepare_tags_tx(
     }
 
     let affected = planned.len() + conflicts.len();
-    let batch_id = history::insert_batch(&tx, description, affected as i64, None, now)?;
+    let batch_id = history::insert_batch(&tx, description, affected as i64, reverts_batch_id, now)?;
     let mut job_ids = Vec::with_capacity(planned.len());
     let mut ordinal = 0i64;
     for p in &planned {
@@ -928,6 +954,9 @@ fn prepare_tags_tx(
             &c.expected,
         )?;
         ordinal += 1;
+        for (key, old, new) in &c.changes {
+            history::insert_edit(&tx, op_id, key, old, new)?;
+        }
         history::finish_op(
             &tx,
             op_id,

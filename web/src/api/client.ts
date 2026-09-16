@@ -45,8 +45,10 @@ export async function apiFetch<T>(
     for (const l of unauthorizedListeners) l()
   }
   if (!res.ok) throw await parseError(res)
-  if (res.status === 204) return undefined as T
-  return (await res.json()) as T
+  // 202 / 204 など本文の無い成功（cancel 系）は undefined。本文があれば JSON
+  const text = await res.text()
+  if (text === '') return undefined as T
+  return JSON.parse(text) as T
 }
 
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {

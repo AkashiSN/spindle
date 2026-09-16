@@ -836,11 +836,14 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 { "items": [ { "id": 42, "created_at": 1, "description": "…", "kind": "tags",
                "state": "partial", "affected": 312, "applied": 309, "conflict": 3, "failed": 0,
                "reverts_batch_id": null, "reverted_by": 39, "finished_at": 1 } ] }
-// GET /api/history/:id  → 上 + "ops": [ { "track_id", "kind", "result", "error",
-//                                        "edits": { "TITLE": { "old": [...], "new": [...] } } } ]
-// POST /api/history/:id/revert  → 201 { "batch_id": 43 }
-//                               → 409 { "error": "not_terminal" | "already_reverted" | "pending" }
-// POST /api/history/:id/cancel  → 202
+//   reverted_by は reverted_at が立っているときだけ（戻した逆バッチの id）。reverted_at も返す
+// GET /api/history/:id  → 上 + "ops": [ { "id", "track_id", "kind", "result", "error", "rel_path",
+//                                        "edits": { "TITLE": { "old": [...], "new": [...] } },
+//                                        "current": { "TITLE": [...] } } ]   // skipped_conflict のときだけ
+//                                        （編集キーの現在値 = ファイルの再読込結果。rename は rel_path）
+// POST /api/history/:id/revert { "description"? }  → 201 { "batch_id": 43, "affected": 50, "conflict": 1 }
+//                               → 404 | 409 { "error": "not_terminal" | "already_reverted" | "pending" }
+// POST /api/history/:id/cancel  → 202 | 404 | 409 { "error": "not_cancellable" }
 
 // GET /api/jobs
 { "items": [ { "id", "type", "state", "progress", "done", "total", "attempts", "last_error",
@@ -1357,7 +1360,8 @@ src/
 ├── edit/
 │   ├── mod.rs           編集バッチの coordinator（記録・DB 先行更新・反映・overlay 解消・
 │   │                    キャンセル・起動時リカバリ。D-24 / D-41）
-│   └── rename.rs        一括リネームの計画・記録・2 phase 反映・album の追随（D-43）
+│   ├── rename.rs        一括リネームの計画・記録・2 phase 反映・album の追随（D-43）
+│   └── revert.rs        巻き戻し（対象集合・現在値の比較・逆バッチの記録。D-44）
 ├── media/
 │   ├── decode.rs        symphonia / ffmpeg フォールバック
 │   ├── encode.rs        flac / opus
@@ -1381,7 +1385,7 @@ src/
 │   ├── fb2k.rs          AST → foobar クエリ + ソートパターン
 │   └── export.rs        m3u8 / pls / パスマッピング
 ├── api/
-│   ├── mod.rs  tracks.rs  albums.rs  selection.rs  batch.rs  rename.rs  stream.rs  cd.rs  events.rs
+│   ├── mod.rs  tracks.rs  albums.rs  selection.rs  batch.rs  rename.rs  history.rs  stream.rs  cd.rs  events.rs
 │   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
 │   ├── state.rs  error.rs   AppState、`{ "error": code }` 応答
 └── web/                 SPA を rust-embed で同梱

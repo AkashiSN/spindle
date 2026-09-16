@@ -683,3 +683,71 @@ button.primary {
 .td.td-editing input[aria-invalid='true'] {
   border-color: #d33;
 }
+
+/* ---------------------------------------------------------------- 編集履歴（SPEC §12.4） */
+.history {
+  padding: 0 12px 12px;
+  overflow: auto;
+  height: 100%;
+}
+.history h1 {
+  font-size: 16px;
+  margin: 0;
+}
+.history-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.history-table th,
+.history-table td,
+.ops-table th,
+.ops-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.history-table th.num,
+.history-table td.num,
+.ops-table td.num {
+  text-align: right;
+  white-space: nowrap;
+}
+.history-table tbody tr {
+  cursor: pointer;
+}
+.history-table tbody tr:hover,
+.history-table tbody tr.open {
+  background: var(--bg-alt);
+}
+.history-table tr.detail {
+  cursor: default;
+}
+.history-table tr.detail td {
+  padding: 4px 8px 12px 24px;
+}
+.history-table td.actions {
+  white-space: nowrap;
+}
+.history-table td.actions button {
+  margin-left: 4px;
+}
+.ops-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+.ops-table td.path {
+  word-break: break-all;
+}
+.ops-table tr.conflict td {
+  background: #fff7ed;
+}
+.history-table td.nowrap,
+.ops-table td.nowrap {
+  white-space: nowrap;
+}
+.ops-table td.path {
+  min-width: 16em;
+}

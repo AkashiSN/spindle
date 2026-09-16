@@ -331,6 +331,7 @@ pub(super) fn prepare_rename_tx(
     conn: &mut Connection,
     description: Option<&str>,
     targets: &[RenameTarget],
+    reverts_batch_id: Option<i64>,
     now: i64,
 ) -> Result<Prepared, EditError> {
     let tx = conn.transaction()?;
@@ -429,7 +430,7 @@ pub(super) fn prepare_rename_tx(
     }
 
     let affected = planned.len() + conflicts.len();
-    let batch_id = history::insert_batch(&tx, description, affected as i64, None, now)?;
+    let batch_id = history::insert_batch(&tx, description, affected as i64, reverts_batch_id, now)?;
     let mut ordinal = 0i64;
     let mut op_ids = Vec::with_capacity(planned.len());
     for p in &planned {
@@ -1114,6 +1115,7 @@ impl Editor {
                     c,
                     description.as_deref(),
                     &targets,
+                    None,
                     now_epoch(),
                 ))
             })

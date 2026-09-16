@@ -6,6 +6,7 @@ pub mod batch;
 pub mod error;
 pub mod events;
 pub mod health;
+pub mod history;
 pub mod jobs;
 pub mod rename;
 pub mod scan;
@@ -36,6 +37,10 @@ pub fn router(state: AppState) -> Router {
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))
+        .route("/history", get(history::list))
+        .route("/history/{id}", get(history::get))
+        .route("/history/{id}/revert", post(history::revert))
+        .route("/history/{id}/cancel", post(history::cancel))
         .route("/jobs", get(jobs::list))
         .route("/jobs/{id}/cancel", post(jobs::cancel))
         .route("/jobs/{id}/retry", post(jobs::retry))

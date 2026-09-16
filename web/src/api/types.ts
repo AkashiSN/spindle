@@ -120,3 +120,40 @@ export type PreviewResponse = {
 }
 export type ApplyResponse = { batch_id: number; affected: number }
 export type PendingConflict = { error: 'pending'; count: number; track_ids: number[] }
+
+// 編集履歴（SPEC §9、P0-12）
+export type BatchState = 'prepared' | 'applying' | 'applied' | 'partial' | 'failed' | 'cancelled'
+export type OpKind = 'tags' | 'rename' | 'delete' | 'archive'
+export type OpResult = 'pending' | 'applied' | 'skipped_conflict' | 'failed' | 'superseded'
+
+export type HistoryItem = {
+  id: number
+  created_at: number
+  description: string | null
+  kind: OpKind | null
+  state: BatchState
+  affected: number | null
+  applied: number
+  conflict: number
+  failed: number
+  reverts_batch_id: number | null
+  reverted_by: number | null
+  finished_at: number | null
+  reverted_at: number | null
+}
+export type HistoryList = { items: HistoryItem[] }
+
+export type EditView = { old: unknown; new: unknown }
+export type OpView = {
+  id: number
+  track_id: number
+  kind: OpKind
+  result: OpResult
+  error: string | null
+  rel_path: string | null
+  edits: Record<string, EditView>
+  /** skipped_conflict の op だけ: 編集キーの現在値 */
+  current?: Record<string, unknown>
+}
+export type HistoryDetail = HistoryItem & { ops: OpView[] }
+export type RevertResponse = { batch_id: number; affected: number; conflict: number }

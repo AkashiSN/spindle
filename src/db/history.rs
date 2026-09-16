@@ -328,7 +328,55 @@ pub fn aggregate_batch(conn: &Connection, batch_id: i64, now: i64) -> Result<Opt
          WHERE id = ?1 AND state IN ('prepared','applying')",
         params![batch_id, state.as_str(), now],
     )?;
-    Ok((changed > 0).then_some(state))
+    if changed == 0 {
+        return Ok(None);
+    }
+    // 逆バッチが終端になったら、元バッチの applied op が逆バッチ群で全件 applied になったかを見て
+    // reverted_at を立てる（SPEC §7.5「巻き戻し」）
+    let reverts: Option<i64> = conn
+        .query_row(
+            "SELECT reverts_batch_id FROM edit_batches WHERE id = ?1",
+            [batch_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(orig) = reverts {
+        mark_reverted_if_covered(conn, orig, now)?;
+    }
+    Ok(Some(state))
+}
+
+/// 元バッチ `orig` の applied op のうち、逆バッチ（`reverts_batch_id = orig`）で applied に
+/// なっていない op が無ければ `reverted_at` を立てる。立てたら `true`
+pub fn mark_reverted_if_covered(conn: &Connection, orig: i64, now: i64) -> Result<bool> {
+    let uncovered: i64 = conn.query_row(
+        "SELECT count(*) FROM edit_ops o
+         WHERE o.batch_id = ?1 AND o.result = 'applied'
+           AND NOT EXISTS (
+             SELECT 1 FROM edit_ops r JOIN edit_batches b ON b.id = r.batch_id
+             WHERE b.reverts_batch_id = ?1 AND r.result = 'applied' AND r.track_id = o.track_id)",
+        [orig],
+        |r| r.get(0),
+    )?;
+    if uncovered > 0 {
+        return Ok(false);
+    }
+    let changed = conn.execute(
+        "UPDATE edit_batches SET reverted_at = ?2 WHERE id = ?1 AND reverted_at IS NULL",
+        params![orig, now],
+    )?;
+    Ok(changed > 0)
+}
+
+/// 元バッチ `orig` の applied op のうち、逆バッチで既に applied になっているトラック
+pub fn reverted_track_ids(conn: &Connection, orig: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT DISTINCT r.track_id FROM edit_ops r JOIN edit_batches b ON b.id = r.batch_id
+         WHERE b.reverts_batch_id = ?1 AND r.result = 'applied' ORDER BY r.track_id",
+    )?;
+    let rows = stmt.query_map([orig], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<i64>>>()?)
 }
 
 // ---------------------------------------------------------------- op
@@ -609,6 +657,90 @@ pub fn track_rel_path(conn: &Connection, track_id: i64) -> Result<Option<String>
             "SELECT rel_path FROM tracks WHERE id = ?1",
             [track_id],
             |r| r.get(0),
+        )
+        .optional()?)
+}
+
+// ---------------------------------------------------------------- 一覧（API 用）
+
+/// 一覧の上限。編集履歴はユーザ操作 1 回 = 1 行なので、数千行を超えることは想定しない
+pub const LIST_LIMIT: usize = 1000;
+
+/// `GET /api/history` の 1 行（SPEC §9）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BatchSummary {
+    pub id: i64,
+    pub created_at: i64,
+    pub description: Option<String>,
+    /// op の種別（バッチは単一種別）。op が無ければ None
+    pub kind: Option<OpKind>,
+    pub state: BatchState,
+    pub affected: Option<i64>,
+    pub applied: i64,
+    pub conflict: i64,
+    pub failed: i64,
+    pub reverts_batch_id: Option<i64>,
+    /// このバッチを戻した逆バッチ（`reverted_at` が立っているときだけ）
+    pub reverted_by: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub reverted_at: Option<i64>,
+}
+
+const SUMMARY_SQL: &str = "SELECT b.id, b.created_at, b.description, b.state, b.affected,
+        b.reverts_batch_id, b.finished_at, b.reverted_at,
+        (SELECT o.kind FROM edit_ops o WHERE o.batch_id = b.id ORDER BY o.ordinal LIMIT 1),
+        (SELECT count(*) FROM edit_ops o WHERE o.batch_id = b.id AND o.result = 'applied'),
+        (SELECT count(*) FROM edit_ops o WHERE o.batch_id = b.id AND o.result = 'skipped_conflict'),
+        (SELECT count(*) FROM edit_ops o WHERE o.batch_id = b.id AND o.result = 'failed'),
+        CASE WHEN b.reverted_at IS NULL THEN NULL ELSE
+          (SELECT max(r.id) FROM edit_batches r
+            WHERE r.reverts_batch_id = b.id
+              AND EXISTS (SELECT 1 FROM edit_ops o WHERE o.batch_id = r.id AND o.result = 'applied'))
+        END
+     FROM edit_batches b";
+
+fn summary_from_row(r: &Row<'_>) -> rusqlite::Result<BatchSummary> {
+    let kind: Option<String> = r.get(8)?;
+    let kind = match kind {
+        Some(k) => Some(k.parse::<OpKind>().map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(e)),
+            )
+        })?),
+        None => None,
+    };
+    Ok(BatchSummary {
+        id: r.get(0)?,
+        created_at: r.get(1)?,
+        description: r.get(2)?,
+        state: parse_col(r, 3)?,
+        affected: r.get(4)?,
+        reverts_batch_id: r.get(5)?,
+        finished_at: r.get(6)?,
+        reverted_at: r.get(7)?,
+        kind,
+        applied: r.get(9)?,
+        conflict: r.get(10)?,
+        failed: r.get(11)?,
+        reverted_by: r.get(12)?,
+    })
+}
+
+/// バッチ一覧（新しい順、`LIST_LIMIT` 件まで）
+pub fn list_batches(conn: &Connection) -> Result<Vec<BatchSummary>> {
+    let mut stmt = conn.prepare_cached(&format!("{SUMMARY_SQL} ORDER BY b.id DESC LIMIT ?1"))?;
+    let rows = stmt.query_map([LIST_LIMIT as i64], summary_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn get_batch_summary(conn: &Connection, id: i64) -> Result<Option<BatchSummary>> {
+    Ok(conn
+        .query_row(
+            &format!("{SUMMARY_SQL} WHERE b.id = ?1"),
+            [id],
+            summary_from_row,
         )
         .optional()?)
 }

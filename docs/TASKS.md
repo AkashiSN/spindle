@@ -300,19 +300,24 @@ A↔B の swap と 3 件の循環リネームが完了し、phase 1 直後に ki
 
 ### P0-12 編集履歴 API と巻き戻し
 
-- [ ] `GET /api/history`、バッチ単位の一覧（state / affected / applied / conflict / failed /
+- [x] `GET /api/history`、バッチ単位の一覧（state / affected / applied / conflict / failed /
       reverts_batch_id / reverted_by）。`GET /api/history/:id` で op 一覧と edits
-- [ ] 履歴画面（SPEC §12.4）: 一覧、行を開いて op と conflict の現在値、[巻き戻す] は終端状態のみ、
+      （`api::history`、`db::history::list_batches` / `get_batch_summary`）
+- [x] 履歴画面（SPEC §12.4）: 一覧、行を開いて op と conflict の現在値、[巻き戻す] は終端状態のみ、
       戻し済みは「#N で戻し済み」、↩ で逆バッチの関係を表示
-- [ ] `POST /api/history/:batch/revert` で DB とファイルの両方を戻す。
-      **tag / rename / delete の 3 種すべて**が対象
-- [ ] 対象は終端状態のバッチのみ（`prepared` / `applying` は 409。先にキャンセル）
-- [ ] 対象集合 = 元バッチの `applied` op − 既存逆バッチで `applied` 済みの op。空なら 409
+      （`web/src/components/HistoryView.tsx`、`hooks/useHistory.ts`、`lib/history.ts`）
+- [x] `POST /api/history/:batch/revert` で DB とファイルの両方を戻す。
+      **tag / rename / delete の 3 種すべて**が対象（`edit::revert`。tags は `prepare_tags_tx`、
+      rename は `prepare_rename_tx` に乗り、delete は DB だけなので即終端。D-44）
+- [x] 対象は終端状態のバッチのみ（`prepared` / `applying` は 409。先にキャンセル）
+- [x] 対象集合 = 元バッチの `applied` op − 既存逆バッチで `applied` 済みの op。空なら 409
       `already_reverted`
-- [ ] 逆バッチを作り `reverts_batch_id` で元を指す。元バッチの `reverted_at` は
+- [x] 逆バッチを作り `reverts_batch_id` で元を指す。元バッチの `reverted_at` は
       **逆バッチが終端になり対象を全件 applied にしたとき**だけ立てる
-- [ ] 現在値が元バッチの新値と 1 フィールドでも違う op は `skipped_conflict`（op 単位）
-- [ ] `POST /api/history/:batch/cancel`
+      （`history::aggregate_batch` → `mark_reverted_if_covered`）
+- [x] 現在値が元バッチの新値と 1 フィールドでも違う op は `skipped_conflict`（op 単位）。
+      戻そうとした変更は edits に残す
+- [x] `POST /api/history/:batch/cancel`
 
 受け入れ: 1000 件の一括編集を戻して元のタグに一致する。
 1000 件の一括リネームを戻して元のパスに一致する。
@@ -320,6 +325,7 @@ A↔B の swap と 3 件の循環リネームが完了し、phase 1 直後に ki
 巻き戻し対象の 1 件を外部で書き換えておくと、その 1 件だけ conflict になり他は戻る。
 そのとき元バッチの `reverted_at` は立たず、外部変更を直してから再 revert すると残り 1 件だけが対象になる。
 `partial` のバッチを戻すと applied だった op だけが戻り、skipped だった op は触られない。
+（`tests/revert.rs` / `tests/history_api.rs` / `web/src/lib/history.test.ts`）
 
 依存: P0-10, P0-11
 

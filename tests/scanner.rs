@@ -518,6 +518,9 @@ async fn mtime_preserving_overwrite_is_detected_via_ctime() {
     let p = require_ffmpeg!(lib.add("A/B/01.flac", 1, "t", "B", 1));
     lib.scan().await;
     let before = lib.track("A/B/01.flac").unwrap();
+    // inode の時刻はカーネルの粗い時計（数 ms 刻み）なので、直前の stat と同じ刻みで書き換えると
+    // ctime が動かない。刻みをまたいでから書き換える
+    std::thread::sleep(Duration::from_millis(20));
     overwrite_preserving_mtime(&p, |p| {
         common::retag(p, |tag| tag.set_title("x".to_owned()))
     });

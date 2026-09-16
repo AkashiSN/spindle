@@ -280,6 +280,7 @@ async fn apply_claimed(
             expected_tag_version: Some(r.tag_version),
             index,
             expected: Some(precondition_of(r)),
+            conflict: None,
         })
         .collect();
     let eval: Arc<Evaluator> = {

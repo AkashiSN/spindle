@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch, apiPost, onUnauthorized } from './api/client'
 import type { LibraryEvent, TrackRow } from './api/types'
 import { BottomBar } from './components/BottomBar'
+import { HistoryView } from './components/HistoryView'
 import { Login } from './components/Login'
 import { Placeholder } from './components/Placeholder'
 import { RightPanel, type SelectionSummary } from './components/RightPanel'
@@ -18,6 +19,7 @@ import { TrackTable } from './components/TrackTable'
 import { useAlbums } from './hooks/useAlbums'
 import { useBatchEdit } from './hooks/useBatchEdit'
 import { useEvents } from './hooks/useEvents'
+import { useHistory } from './hooks/useHistory'
 import { useJobSummary } from './hooks/useJobSummary'
 import { useTracks } from './hooks/useTracks'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
@@ -86,6 +88,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const tracks = useTracks(filter, sort, sseOpen)
   const albums = useAlbums(sseOpen)
   const jobs = useJobSummary(sseOpen)
+  // 履歴は画面を開いたときに取り、開いている間は batch イベントで取り直す
+  const history = useHistory(sseOpen && view === 'history')
   const visibleEnd = useRef(0)
 
   // filter 形の選択の「うち反映待ち」。選択集合は immutable でも中の行の pending はバッチの進行で
@@ -120,7 +124,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     albums.refresh()
     tracks.reload(Math.max(visibleEnd.current + 1, 1))
     refreshPending()
-  }, [jobs, albums, tracks, refreshPending])
+    if (view === 'history') history.refresh()
+  }, [jobs, albums, tracks, refreshPending, view, history])
   // SSE が切れたとき（401 で閉じられた場合を含む）にセッションを確かめる。401 なら
   // apiFetch の onUnauthorized 経由でログイン画面へ戻る。連続するエラーは 5 秒に 1 回に間引くが、
   // 最後のエラーは必ず確認する（サーバ再起動直後は接続拒否 → 再接続で 401 の順に来る。
@@ -154,6 +159,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       // バッチの状態変化は反映待ち / conflict バッジと「うち反映待ち」を変える
       tracks.reload(Math.max(visibleEnd.current + 1, 1))
       refreshPending()
+      if (view === 'history') history.refresh()
     },
     onLibrary,
     onResync: refreshAll,
@@ -275,7 +281,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         ) : view === 'jobs' ? (
           <Placeholder title="ジョブ" note="種別ごとの待ち行列・進捗・再試行は後続タスクで。下部バーの要約は SSE で更新中" />
         ) : view === 'history' ? (
-          <Placeholder title="編集履歴" note="バッチ一覧と巻き戻しは P0-9 / P0-10 以降" />
+          <HistoryView history={history} />
         ) : (
           <Placeholder title="設定" note="config.toml の閲覧、再スキャン / deep scan / GC dry-run は後続タスクで" />
         )}

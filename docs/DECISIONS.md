@@ -1133,3 +1133,42 @@ coordinator で追随させるのは、リネーム直後の一覧（category / 
 **却下**: track 単位の rename ジョブ（phase 境界の管理が DB に要る）。`.spindle-tmp-*` を一時名に
 使う案（スキャナが回収する）。phase 2 の途中で cancel を効かせる案（swap の片側だけ戻せない）。
 同名の album をマージする案（D-7）。
+
+---
+
+## D-44 巻き戻しの固定値と境界
+
+**決定**: 仕様（SPEC §7.5「巻き戻し」/ §9 / §12.4）が定めていない値と境界を次のとおり固定する。
+
+- **逆バッチは通常のバッチ**で、`reverts_batch_id` だけが違う。tags は `prepare_tags_tx`、rename は
+  `prepare_rename_tx` に乗る（DB 先行更新 + tagwrite / rename ジョブ、事前条件は記録時点の DB 値、
+  pending の 409、キャンセル、リカバリはすべて同じ経路）。`delete` は `missing_since` を戻すだけの
+  DB 操作なので、同じトランザクションで op を applied にして即終端にする（構成トラックが戻った album の
+  `missing_since` も外す）。`archive` の巻き戻しは未実装（P1）
+- **対象集合はトラック単位**で引く: 元バッチの `applied` op − 逆バッチ群（`reverts_batch_id` = 元）で
+  `applied` になった op の `track_id`。1 バッチ 1 トラック 1 op なので op と track は 1:1
+- **現在値の比較は DB の値**（`track_tags` / `rel_path` / `missing_since`）で行う。DB はファイルの
+  キャッシュで、スキャン済みの外部変更はここで conflict になり、未スキャンの外部変更は tagwrite /
+  rename の事前条件確認（tag_hash / stat）が conflict にする。どちらも op 単位の `skipped_conflict`
+- **計画時点の conflict にも edits を残す**（戻そうとした変更 = 現在値 → 元の値）。履歴画面が
+  「何を戻そうとして、現在値が何だったか」を出せる。preview 後に版が進んだ行（tags の
+  `expected_tag_version` 不一致）は評価しないので edits は空
+- **`reverted_at` は `aggregate_batch` が立てる**: 逆バッチが終端になった時点で、元バッチの applied op が
+  逆バッチ群で全件 applied になっていれば元バッチに `reverted_at`。partial なら立てず、再 revert は
+  残りだけが対象。やり直し（redo）= 逆バッチの revert で、同じ規則で逆バッチに `reverted_at` が立つ。
+  元バッチの `reverted_at` は redo でも消さない（「#39 で戻し済み」の事実は変わらない。さらに戻すなら
+  redo バッチを revert する）
+- **一覧の `reverted_by`** は `reverted_at` が立っているときだけ、applied op を持つ逆バッチの最大 id。
+  一覧は新しい順で 1000 件まで（履歴はユーザ操作 1 回 = 1 行）
+- **`description` は省略可**で、無ければ UI が「(#N の巻き戻し)」と表示する（DB には入れない）
+- **UI**（`HistoryView`）: 一覧は画面を開いたときに取り、開いている間は SSE `batch` で取り直す
+  （250ms で間引く）。開いている行の詳細も一緒に取り直す。[巻き戻す] は終端かつ applied の op があり
+  `reverted_at` が無いときだけ。逆バッチの行は「巻き戻す (=やり直し)」。[キャンセル] は
+  prepared / applying のみ。conflict の op は「ファイルを再読込した現在値」として `current` を出す
+
+**理由**: 巻き戻しを既存のバッチ機構にそのまま乗せることで、pending / conflict / cancel / リカバリの
+規則が 1 本になる。対象集合をトラック単位で引くのは、部分的に戻った後の再 revert（残りだけ）と
+redo を同じ式で扱うため。
+
+**却下**: 逆バッチを専用の状態機械にする案（同じ規則を二重に持つ）。元バッチの `reverted_at` を redo で
+消す案（履歴の事実が書き換わり「#N で戻し済み」の表示が揺れる）。
