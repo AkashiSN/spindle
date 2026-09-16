@@ -26,7 +26,7 @@ use crate::db::scans::{
 use crate::db::{now_epoch, Db, DbError};
 use crate::domain::identity::{self, Decision, Entry, Identity, Via};
 use crate::domain::relpath::{canonical_key, RelPath};
-use crate::domain::tags::{read_audio_file, tag_hash, Codec, TagSet};
+use crate::domain::tags::{read_audio_file, tag_hash, AudioFile, Codec, TagSet};
 use crate::fsroot::{FileKind, FsError, RootDir, TMP_PREFIX};
 use crate::media::fingerprint;
 
@@ -251,7 +251,8 @@ impl Scanner {
             tokio::task::spawn_blocking(move || {
                 let mut cache: HashMap<usize, Option<[u8; 16]>> = HashMap::new();
                 let decisions = identity::resolve(&entries, &rows, &mut |i| {
-                    let m = lossless_md5(&root, &inv.entries[i]);
+                    let e = &inv.entries[i];
+                    let m = lossless_md5(&root, &e.rel, e.ext_codec);
                     cache.insert(i, m);
                     m
                 });
@@ -485,16 +486,16 @@ fn reclaim_tmp(root: &RootDir, rel: &RelPath, now: i64, inv: &mut Inventory) {
 // ---------------------------------------------------------------- Phase 2 / 3 の読み取り
 
 /// 可逆の `audio_md5`。非可逆・未設定・読めないときは None
-fn lossless_md5(root: &RootDir, e: &InvEntry) -> Option<[u8; 16]> {
-    let ext = e.rel.file_name().rsplit_once('.').map(|(_, x)| x);
-    let open = || root.open_file(&e.rel).ok();
-    match e.ext_codec {
+fn lossless_md5(root: &RootDir, rel: &RelPath, ext_codec: Codec) -> Option<[u8; 16]> {
+    let ext = rel.file_name().rsplit_once('.').map(|(_, x)| x);
+    let open = || root.open_file(rel).ok();
+    match ext_codec {
         Codec::Flac => fingerprint::flac_streaminfo_md5(open()?)
-            .map_err(|err| tracing::debug!(path = %e.rel, error = %err, "STREAMINFO を読めない"))
+            .map_err(|err| tracing::debug!(path = %rel, error = %err, "STREAMINFO を読めない"))
             .ok()
             .flatten(),
         Codec::Wav | Codec::Aiff => fingerprint::decoded_pcm_md5(open()?, ext)
-            .map_err(|err| tracing::warn!(path = %e.rel, error = %err, "PCM の MD5 を計算できない"))
+            .map_err(|err| tracing::warn!(path = %rel, error = %err, "PCM の MD5 を計算できない"))
             .ok(),
         Codec::Aac => {
             // m4a は中身が ALAC のときだけ可逆
@@ -504,11 +505,58 @@ fn lossless_md5(root: &RootDir, e: &InvEntry) -> Option<[u8; 16]> {
             }
             fingerprint::decoded_pcm_md5(open()?, ext)
                 .map_err(
-                    |err| tracing::warn!(path = %e.rel, error = %err, "ALAC の MD5 を計算できない"),
+                    |err| tracing::warn!(path = %rel, error = %err, "ALAC の MD5 を計算できない"),
                 )
                 .ok()
         }
         _ => None,
+    }
+}
+
+/// 読み取ったファイルの音声フィンガープリント（可逆は `audio_md5`、非可逆は `audio_fp`）。
+/// 計算できなければ `None` 入り（呼び出し側は旧値を残す）。編集バッチが外部差し替えを
+/// 採用するときにもスキャナと同じ計算をするために公開する
+pub fn read_fingerprint(root: &RootDir, rel: &RelPath, af: &AudioFile) -> Fingerprint {
+    let ext = rel.file_name().rsplit_once('.').map(|(_, x)| x);
+    if af.lossless {
+        let ext_codec = ext.and_then(Codec::from_extension).unwrap_or(af.codec);
+        Fingerprint::Md5(lossless_md5(root, rel, ext_codec))
+    } else {
+        let f = root.open_file(rel).ok().and_then(|f| {
+            fingerprint::packet_fp(f, ext)
+                .map_err(|err| tracing::warn!(path = %rel, error = %err, "audio_fp を計算できない"))
+                .ok()
+        });
+        Fingerprint::Fp(f)
+    }
+}
+
+/// 音声の変化: 同種のフィンガープリントが違う、または種類が変わった（可逆 ⇔ 非可逆の
+/// 差し替え。旧値が片方しか無いので同種比較では見えない）
+pub fn audio_changed(
+    new: Fingerprint,
+    old_md5: Option<[u8; 16]>,
+    old_fp: Option<[u8; 32]>,
+) -> bool {
+    match (new, old_md5, old_fp) {
+        (Fingerprint::Md5(Some(new)), Some(old), _) => new != old,
+        (Fingerprint::Fp(Some(new)), _, Some(old)) => new != old,
+        (Fingerprint::Md5(Some(_)), None, Some(_)) => true,
+        (Fingerprint::Fp(Some(_)), Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// DB に書くフィンガープリント。計算できなかった（None）ときは旧値を残す
+pub fn effective_fingerprint(
+    new: Fingerprint,
+    old_md5: Option<[u8; 16]>,
+    old_fp: Option<[u8; 32]>,
+) -> Fingerprint {
+    match new {
+        Fingerprint::Md5(None) => Fingerprint::Md5(old_md5),
+        Fingerprint::Fp(None) => Fingerprint::Fp(old_fp),
+        other => other,
     }
 }
 
@@ -521,39 +569,33 @@ fn read_entry(
     let ext = e.rel.file_name().rsplit_once('.').map(|(_, x)| x);
     let file = root.open_file(&e.rel).map_err(|err| err.to_string())?;
     let af = read_audio_file(file, ext).map_err(|err| err.to_string())?;
-    let fp = if af.lossless {
-        let m = match cached_md5 {
-            Some(m) => m,
-            None => lossless_md5(root, e),
-        };
-        Fingerprint::Md5(m)
-    } else {
-        let f = root.open_file(&e.rel).ok().and_then(|f| {
-            fingerprint::packet_fp(f, ext)
-                .map_err(
-                    |err| tracing::warn!(path = %e.rel, error = %err, "audio_fp を計算できない"),
-                )
-                .ok()
-        });
-        Fingerprint::Fp(f)
+    let fp = match (af.lossless, cached_md5) {
+        (true, Some(m)) => Fingerprint::Md5(m),
+        (true, None) => Fingerprint::Md5(lossless_md5(root, &e.rel, e.ext_codec)),
+        (false, _) => read_fingerprint(root, &e.rel, &af),
     };
-    let cache = cache_columns(&af.tags);
     Ok(ReadResult {
-        content: TrackContent {
-            codec: af.codec.as_str().to_owned(),
-            lossless: af.lossless,
-            sample_rate: af.sample_rate,
-            bit_depth: af.bit_depth,
-            channels: af.channels,
-            bitrate: af.bitrate,
-            duration_ms: af.duration_ms,
-            tag_hash: tag_hash(&af.tags),
-            tags: af.tags,
-            cache,
-        },
+        content: track_content(af),
         fp,
         hardlink,
     })
+}
+
+/// 読み取ったファイルのうち DB に書く内容（`tag_hash` とキャッシュ列を含む）
+pub fn track_content(af: AudioFile) -> TrackContent {
+    let cache = cache_columns(&af.tags);
+    TrackContent {
+        codec: af.codec.as_str().to_owned(),
+        lossless: af.lossless,
+        sample_rate: af.sample_rate,
+        bit_depth: af.bit_depth,
+        channels: af.channels,
+        bitrate: af.bitrate,
+        duration_ms: af.duration_ms,
+        tag_hash: tag_hash(&af.tags),
+        tags: af.tags,
+        cache,
+    }
 }
 
 /// 先頭の整数（"3/12" → 3）
@@ -566,7 +608,8 @@ fn leading_int(s: &str) -> Option<i64> {
     digits.parse().ok()
 }
 
-fn cache_columns(tags: &TagSet) -> CacheColumns {
+/// 表示・ソート用キャッシュ列をタグ集合から求める（編集バッチの overlay でも使う）
+pub fn cache_columns(tags: &TagSet) -> CacheColumns {
     let artists: Vec<&str> = tags.values("ARTIST").collect();
     CacheColumns {
         title: tags.first("TITLE").map(str::to_owned),
@@ -861,26 +904,12 @@ impl Commit {
             };
             scans::update_content(tx, row.id, &r.content, tag_version)?;
         }
-        // 音声の変化: 同種のフィンガープリントが違う、または種類が変わった（可逆 ⇔ 非可逆の
-        // 差し替え。旧値が片方しか無いので同種比較では見えない）
-        let audio_changed = match (r.fp, row.audio_md5, row.audio_fp) {
-            (Fingerprint::Md5(Some(new)), Some(old), _) => new != old,
-            (Fingerprint::Fp(Some(new)), _, Some(old)) => new != old,
-            (Fingerprint::Md5(Some(_)), None, Some(_)) => true,
-            (Fingerprint::Fp(Some(_)), Some(_), None) => true,
-            _ => false,
-        };
-        let audio_version = if audio_changed {
+        let audio_version = if audio_changed(r.fp, row.audio_md5, row.audio_fp) {
             row.audio_version + 1
         } else {
             row.audio_version
         };
-        // 計算できなかった（None）ときは旧値を残す
-        let fp = match r.fp {
-            Fingerprint::Md5(None) => Fingerprint::Md5(row.audio_md5),
-            Fingerprint::Fp(None) => Fingerprint::Fp(row.audio_fp),
-            other => other,
-        };
+        let fp = effective_fingerprint(r.fp, row.audio_md5, row.audio_fp);
         scans::update_fingerprint(tx, row.id, fp, audio_version)?;
         Ok(())
     }

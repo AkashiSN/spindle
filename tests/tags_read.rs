@@ -173,3 +173,24 @@ fn codec_from_extension_matches_scanner_whitelist() {
     assert_eq!(Codec::from_extension("txt"), None);
     assert_eq!(Codec::Opus.as_str(), "opus");
 }
+
+#[test]
+fn mp3_with_two_tag_blocks_prefers_primary_and_fills_missing_keys_from_secondary() {
+    use lofty::config::WriteOptions;
+    use lofty::tag::{TagExt, TagType};
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::retag(&p, |t| t.set_title("v2".to_owned()));
+    let mut v1 = lofty::tag::Tag::new(TagType::Id3v1);
+    v1.set_title("v1".to_owned());
+    v1.set_artist("only-in-v1".to_owned());
+    v1.save_to_path(&p, WriteOptions::default()).unwrap();
+
+    let af = tags_of(&p, "mp3");
+    let get = |k: &str| -> Vec<&str> { af.tags.values(k).collect() };
+    // 同じキーは primary（ID3v2）だけ。副ブロックの同値・異値は多値にしない
+    assert_eq!(get("TITLE"), ["v2"]);
+    // primary に無いキーは副ブロックから補う
+    assert_eq!(get("ARTIST"), ["only-in-v1"]);
+}

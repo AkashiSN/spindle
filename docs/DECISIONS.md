@@ -885,3 +885,90 @@ token を DB に保存する案（短期状態に永続化は過剰。P0-9 の `
 **却下**: react-query 等のデータ取得ライブラリ（キーセット + 順読みの都合を吸収できず、依存が
 増えるだけ）。TanStack Table の rowSelection（ID 列挙前提で filter 形を表せない）。無効化で表示中の
 ページだけをそのカーソルで取り直す案（行が増減するとページ境界がずれて重複・欠落する）。
+
+---
+
+## D-41 編集履歴の記録機構の固定値と境界
+
+**決定**: 仕様（SPEC §7.5 / §8）が定めていない値と境界を次のとおり固定する。設定には出さない。
+
+- **外部 rename の追随と ctime。** Linux の rename は対象 inode の ctime を進めるので、事前条件に
+  `ctime_ns` を含めたままでは「rel_path のみ不一致（外部 rename）は tags op なら追随」（SPEC §7.5）が
+  成立しない。**DB の `rel_path` が記録時点の `expected_rel_path` と違う（= スキャナが `(dev, inode)` で
+  外部 rename を追随した）ときに限り、`ctime_ns` だけの不一致は rename によるものとみなして続行する。**
+  dev / inode / size / mtime_ns / tag_hash のどれかも違えば conflict。rel_path が同じなら ctime の
+  不一致は従来どおり conflict（`touch -r` を伴う in-place 更新の検出）。宛先 key の占有はスキャナが
+  移動を記録する時点で解決済み（`rel_path_key` UNIQUE）なので、tagwrite 側では再判定しない
+- **事前条件の不一致でも、ファイルの全フィールドが op の新値と一致すれば `applied` として確定する。**
+  クラッシュ前に rename まで済んでいた op の確定（SPEC §7.5 リカバリ）を、起動時の特別処理ではなく
+  通常の `apply_op` の経路で行う。再投入されたジョブが同じ判定を通るので、リカバリの手順は
+  「pending の op に track ジョブを再投入する」だけになる
+- **overlay の解消はファイルの現在値が原則、読めないときだけ記録値。** ファイルが消えている・
+  壊れていて読めない op は `skipped_conflict` にし、`edits.old_value` と事前条件の物理属性
+  （dev / inode / size / mtime_ns / ctime_ns / tag_hash）へ戻す。物理属性を記録時点へ戻すのは、その後
+  ファイルが外部で変わっていれば次回スキャンが差分として拾い直せるようにするため（`rel_path` は
+  戻さない。所在は常にスキャナが追随する）
+- **キャンセルは書き込みロックの外でファイルを読む。** 1 つ目のトランザクションで子ジョブに
+  cancel 要求を立て（queued は即 `cancelled`）、pending の op のうちジョブが `running` でないものを
+  集める。その後 op ごとにファイルを開いて現在値を読み、`failed`（error = `cancelled`）に閉じて
+  overlay を解消する。running のジョブはそのまま完了し、そのジョブが集計する。queued のジョブは
+  1 つ目のトランザクションで `cancelled` になっているので、その後に claim されることはない
+- **バッチの `cancelled` は「error = 'cancelled' の failed op が 1 件以上ある」で判定する。** cancel を
+  要求しても全 op が既に進行中で完了した場合は `applied` / `partial` になる（キャンセルは何もしていない）
+- **tagwrite ジョブはファイル操作を始める前だけ cancel を見る。** 始めた後は完了まで走り、`Done` を
+  返す（進行中の op は完了を待つ。SPEC §7.5）。手を付ける前に cancel 要求があれば op を `failed`
+  （`cancelled`）に閉じて `Cancelled`
+- **最終試行の失敗では op を `failed` に閉じる。** バックオフの上限（`max_attempts`）に達する失敗を
+  ハンドラが検知し、overlay を解消してから `Failed` を返す。op を pending のまま残すと再起動まで
+  そのトラックを編集できず、再起動後は同じ失敗を繰り返す
+- **起動時リカバリは `jobs::recovery::run` の後・ワーカー起動の前。** prepared / applying のバッチの
+  pending op について、対応するジョブが `cancelled` なら op を閉じ、ジョブが無い・`done`・`failed` なら
+  現在の `tag_version` で track ジョブを再投入する（dedup key `tagwrite:<track_id>:<tag_version>` で
+  二重にはならない）。pending が無いのに開いているバッチは集計する
+- **prepare は値が変わらないトラックを op にしない。** 全フィールドが現在値と同じトラックは
+  `unchanged` に数えるだけで `tag_version` も動かさない。全件が unchanged ならバッチを作らず
+  `NoChanges`。同じトラックが入力に 2 回あれば拒否する。値はキー大文字化・NFC 正規化してから
+  比較・記録する（`edits.new_value` と反映後の読み戻しが同じ表記になる）
+- **書いた内容は同じ FD から読み戻して `tag_hash` を確定し、編集キーが意図どおりでなければ反映
+  しない。** lofty が書いた結果をスキャナと同じ関数で読み、編集した全キーが `edits.new_value` と
+  一致することを確かめてから rename する。一致しなければ（その形式で表現できない値）tmp を捨てて
+  op を `failed` に閉じる（再試行しても直らない）。hash と fstat（rename 後）を DB に書く。
+  rename は ctime を進めるので rename の後に fstat する。rename 後に親ディレクトリを fsync する
+- **rename の直前に宛先を開き直して stat を再確認する。** 事前条件の確認から rename までの窓
+  （コピー + タグ書き込み。大きいファイルでは秒単位）で外部が書き換えていれば、tmp を捨てて
+  `skipped_conflict`（overlay はその時点のファイルから解消）。dev / inode / size / mtime_ns /
+  ctime_ns が確認時点の FD と同じなら内容も同じ（書けば ctime が進む）。再確認と rename の間の
+  窓は排他ロックを持たない以上は残り（不変条件 5）、そこはスキャンが調停する
+- **tmp には元ファイルの mode / 所有者 / xattr を写す。** mode（`fchmod`）は必須で、失敗したら
+  反映しない。所有者（`fchown`）と xattr（`user.*` / `system.*` を含む全部。TrueNAS SCALE の
+  NFSv4 ACL は xattr として見える）は best-effort で、権限や FS の都合で写せなければ警告して続行する
+  （タグ編集のためにアクセス制御を変えない。それでも写せない属性は運用でディレクトリ継承に任せる）
+- **外部の実体を採用する経路では音声属性とフィンガープリントも確定する。** 事前条件不一致で
+  `applied`（全フィールドが新値）/ `skipped_conflict` になるとき、および overlay 解消・cancel で
+  ファイルを読むときは、スキャナと同じ規則（`import::scanner::read_fingerprint` /
+  `audio_changed`）で `audio_md5` / `audio_fp` を比べ、変わっていれば `audio_version` を進め、
+  codec / 音声属性も置き換える。物理属性を新ファイルに揃えると次回スキャンには「変更なし」と
+  見えるので、ここで確定しないと音声の差し替えを deep scan まで拾えない。自分の tagwrite の
+  結果（音声不変が既知。SPEC §6）では計算しない
+- **generic 形式（ID3 / APE 等）は全タグブロックに同じ変更を当てる。** 読み側は複数ブロック
+  （ID3v2 + ID3v1 など）を **primary 優先で集約し、副ブロックからは primary に無いキーだけを
+  補う**（連結すると同値が多値として二重になる。P0-6 の読み側もこの規則に揃えた）。
+  書き側が primary だけ書くと副ブロックの旧値が残るので、全ブロックに当てる
+- **generic Tag に写像できないキーは書かない。** MP4 / ID3 / APE 等では lofty の `ItemKey` に
+  写像できるキー（Vorbis Comment 名）だけを書き、写像できないキーは警告して落とす（読み側も
+  名前を持たない項目を落とす。P0-6）
+- **`tracks.album`（albums の複製）と album メタは prepare では更新しない。** ALBUM タグの編集は
+  `track_tags` とキャッシュ列 `title / artist_display / albumartist / track_no / disc_no / date` に
+  反映され、album 側は tagwrite 後の次回スキャン（物理属性が変わるので dirty group になる）で
+  再計算される。UI からの編集（P0-10）で即時性が要るなら、そこで album メタの再計算を足す
+
+**理由**: 事前条件は「ユーザが見たものと同じファイルか」を保証するための道具であり、rename が
+進める ctime を conflict にすると日常操作（フォルダ整理中の一括編集）が全部 conflict になる。
+タグ内容は同じ FD の `tag_hash` で確認しているので、rename 追随時に ctime を緩めても書き込みの安全性は
+落ちない。overlay の解消をファイル読みで行うのは「ファイルが正」を守るためで、記録値に戻すのは
+読めないときの次善策にとどめる。キャンセルで 6 万ファイルを書き込みロックの中で読まない。
+
+**却下**: 起動時に rename 済み op を専用の手順で確定する案（`apply_op` の経路と二重になり、
+片方だけ直す事故が起きる）。キャンセルで op を記録値へ戻す案（pending 中の外部変更を DB が
+見失い、物理属性が一致したままだと次回スキャンも拾わない）。pending のまま失敗し続ける op を
+残す案（そのトラックが永久に 409 になる）。

@@ -90,17 +90,7 @@ impl Jobs {
             .write(move |c| dbjobs::request_cancel(c, id, now_epoch()))
             .await?;
         match outcome {
-            CancelOutcome::Requested => {
-                let token = self
-                    .running
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&id)
-                    .cloned();
-                if let Some(token) = token {
-                    token.cancel();
-                }
-            }
+            CancelOutcome::Requested => self.cancel_running_token(id),
             CancelOutcome::Cancelled => self.emit_job(id).await,
             CancelOutcome::NotFound | CancelOutcome::NotCancellable => {}
         }
@@ -114,6 +104,35 @@ impl Jobs {
             self.wake.notify_one();
         }
         Ok(outcome)
+    }
+
+    /// 別のトランザクションで直接 `jobs` に投入した後に呼ぶ（編集バッチの prepare 等）。
+    /// イベントを流してワーカーを起こす
+    pub async fn notify_enqueued(&self, ids: &[i64]) {
+        self.notify_changed(ids).await;
+        if !ids.is_empty() {
+            self.wake.notify_one();
+        }
+    }
+
+    /// 別のトランザクションで状態を変えたジョブのイベントを流す
+    pub async fn notify_changed(&self, ids: &[i64]) {
+        for id in ids {
+            self.emit_job(*id).await;
+        }
+    }
+
+    /// 実行中ジョブの token を倒す（DB の `cancel_requested_at` は呼び出し側が立てている）
+    pub fn cancel_running_token(&self, id: i64) {
+        let token = self
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned();
+        if let Some(token) = token {
+            token.cancel();
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {

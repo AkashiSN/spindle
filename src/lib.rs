@@ -5,6 +5,7 @@ pub mod api;
 pub mod config;
 pub mod db;
 pub mod domain;
+pub mod edit;
 pub mod fsroot;
 pub mod import;
 pub mod jobs;

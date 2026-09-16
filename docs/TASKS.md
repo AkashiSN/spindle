@@ -209,23 +209,27 @@ SSE 再取得を同じセッションで確認。詳細と Chrome 安定版で�
 
 タグ編集・リネーム・論理削除の共通土台。API はまだ持たない。
 
-- [ ] `edit_batches` / `edit_ops` / `edits` への記録（旧値・新値は JSON、
+- [x] `edit_batches` / `edit_ops` / `edits` への記録（旧値・新値は JSON、
       事前条件 dev / inode / size / mtime_ns / **ctime_ns** / **tag_hash** / rel_path は op に持つ）
-- [ ] 事前条件の確認は open した FD の fstat + 同じ FD からのタグ読みで行い、tmp はその FD の
-      親ディレクトリに作る
-- [ ] **ファイル反映の単位は op（トラック）。** 同一トラックの全フィールドを 1 回の
+      （`db::history`、`edit::Editor::prepare_tags`）
+- [x] 事前条件の確認は open した FD の fstat + 同じ FD からのタグ読みで行い、tmp はその FD の
+      親ディレクトリに作る（`fsroot::fstat` / `RootDir::replace_file`）
+- [x] **ファイル反映の単位は op（トラック）。** 同一トラックの全フィールドを 1 回の
       tmp+rename で書き、配下の edits を同時に確定。`tag_version` はトラックごとに 1 回
-- [ ] pending の op があるトラックへの新規 op を拒否（DB の partial UNIQUE + API の 409）
-- [ ] バッチ状態機械 `prepared → applying → applied | partial | failed | cancelled`。
-      終端状態は子ジョブ・op の結果から集計
-- [ ] 事前条件の再確認と `skipped_conflict` 判定（op 単位。1 フィールドでも不一致なら op 全体）。
-      外部 rename（rel_path のみ不一致）は tags op なら追随、ただし宛先 key が他行に占有されて
-      いれば conflict。rename op は常に conflict
-- [ ] **overlay の解消**: applied 以外の終端になる op は同じトランザクションで DB をファイルの
-      現在値へ戻す
-- [ ] 起動時リカバリ: `prepared` / `applying` のバッチの track ジョブ再投入、rename 済み op の
-      「ファイルの全フィールドが新値と一致すれば applied」確定
-- [ ] バッチ単位のキャンセル（子ジョブへ `cancel_requested_at`、未着手 op は failed）
+      （`domain::tags::write_tag_changes`、`edit::Editor::apply_op`、`jobs::handlers::tagwrite`）
+- [x] pending の op があるトラックへの新規 op を拒否（DB の partial UNIQUE + `EditError::Pending`。
+      API の 409 は P0-10）
+- [x] バッチ状態機械 `prepared → applying → applied | partial | failed | cancelled`。
+      終端状態は子ジョブ・op の結果から集計（`db::history::aggregate_batch`、SSE `batch`）
+- [x] 事前条件の再確認と `skipped_conflict` 判定（op 単位。1 フィールドでも不一致なら op 全体）。
+      外部 rename（rel_path のみ不一致）は tags op なら追随（rename が進める ctime はその場合だけ
+      許容。D-41）、宛先 key の占有はスキャナが解決済み。rename op は P0-11
+- [x] **overlay の解消**: applied 以外の終端になる op は同じトランザクションで DB をファイルの
+      現在値へ戻す（読めなければ記録値。D-41）
+- [x] 起動時リカバリ: `prepared` / `applying` のバッチの track ジョブ再投入、rename 済み op の
+      「ファイルの全フィールドが新値と一致すれば applied」確定（`Editor::recover` + `apply_op`）
+- [x] バッチ単位のキャンセル（子ジョブへ `cancel_requested_at`、未着手 op は failed）
+      （`Editor::cancel_batch`。API は P0-12）
 
 受け入れ: 単体テストで、同じ op の適用を何度繰り返しても結果と `tag_version` が
 変わらない。同一トラックの 3 フィールド編集が 1 回の rename で反映され、op が applied になる。

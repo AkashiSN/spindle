@@ -7,9 +7,11 @@ use tracing::info;
 
 use spindle::api::{self, auth, AppState};
 use spindle::db::{migrations, Db};
+use spindle::edit::Editor;
 use spindle::fsroot::Roots;
 use spindle::import::scanner::Scanner;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
+use spindle::jobs::handlers::tagwrite::TagwriteHandler;
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
 use spindle::{config::Config, logging};
 
@@ -79,7 +81,24 @@ async fn main() -> anyhow::Result<()> {
             shutdown.cancel();
         }
     });
-    // ハンドラは各タスクで登録する（tagwrite / rename は P0-9 …）
+    // 編集バッチの coordinator。起動時リカバリ（pending op の track ジョブ再投入）は
+    // ジョブのリカバリの後・ワーカー起動の前（SPEC §7.5）
+    let editor = Arc::new(Editor::new(
+        Arc::clone(&state.db),
+        Arc::clone(&library_root),
+        Arc::clone(&state.jobs),
+    ));
+    let edit_recovered = editor
+        .recover()
+        .await
+        .context("編集バッチのリカバリに失敗")?;
+    info!(
+        requeued = edit_recovered.requeued,
+        cancelled_ops = edit_recovered.cancelled_ops,
+        "編集バッチをリカバリした"
+    );
+
+    // ハンドラは各タスクで登録する（rename は P0-11 …）
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
@@ -92,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
             state.config.scan.deep_interval_days,
         )),
     );
+    registry.register(JobType::Tagwrite, Arc::new(TagwriteHandler::new(editor)));
     let worker = state.jobs.start(registry, shutdown.clone());
     // 起動時に 1 回 incremental を投入する（停止中の外部変更を拾う。D-38）
     match scan::enqueue_scan(&state.jobs, "incremental").await {

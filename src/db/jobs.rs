@@ -362,6 +362,16 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Job>> {
         .optional()?)
 }
 
+/// バッチに紐づく未完了（`queued` / `running`）のジョブ
+pub fn active_jobs_of_batch(conn: &Connection, batch_id: i64) -> Result<Vec<Job>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {JOB_COLUMNS} FROM jobs
+         WHERE edit_batch_id = ?1 AND state IN ('queued','running') ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([batch_id], job_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// 一覧。未完了を先に、その中では priority 降順・作成順。終端は新しい順
 pub fn list(conn: &Connection, limit: usize) -> Result<Vec<Job>> {
     let mut stmt = conn.prepare(&format!(

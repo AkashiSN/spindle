@@ -514,9 +514,10 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
        同じ FD からタグを読んで tag_hash を確認
          ├ いずれか不一致 → result='skipped_conflict'。ファイルは触らない。
          │                  同一トランザクションでその FD の内容から DB を戻す（下記「overlay の解消」）
-         ├ rel_path のみ不一致（外部 rename。inode で新パスを特定できた）
+         ├ rel_path のみ不一致（外部 rename。スキャナが inode で新パスを追随済み）
          │     → 新パスの rel_path_key が他の行に占有されていなければ tags op は追随して続行。
-         │       占有されていれば skipped_conflict。rename op は常に skipped_conflict
+         │       占有されていれば skipped_conflict。rename op は常に skipped_conflict。
+         │       rename は ctime を進めるので、このとき ctime_ns だけの不一致は許容する（D-41）
          └ 一致 → その FD の親ディレクトリに tmp を O_EXCL で作成 → 内容をコピー →
                   op 配下の全フィールドを lofty で書き換え → fsync → rename →
                   同一トランザクションで (dev, inode, size, mtime_ns, ctime_ns, tag_hash) 更新、
@@ -531,7 +532,9 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
   結果（`result`）は op にだけ持ち、**フィールド単位の部分適用はしない**
   （1 フィールドでも事前条件に合わなければ op 全体が conflict）
 - **事前条件に `ctime_ns` と `tag_hash` を含める。** inode も mtime も保ったままの in-place
-  更新（`touch -r` を伴うタグツール）は dev/inode/mtime では見えない
+  更新（`touch -r` を伴うタグツール）は dev/inode/mtime では見えない。ただし外部 rename も
+  ctime を進めるため、rel_path が記録時点と違う（スキャナが追随した）ときに限り ctime_ns だけの
+  不一致は許容する（D-41）
 - **DB 先行更新 + pending 記録**を採る。DB の値は「確定した真実」ではなく
   **書き込み意図のオーバーレイ**で、ファイル反映が終わるまで暫定。UI は pending を
   バッジで見せる。DB を失うと未反映の意図も失われる（ファイルは旧値のまま残るので
@@ -540,7 +543,9 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
 - **overlay の解消**: op が `applied` 以外の終端（skipped_conflict / failed / cancelled）に
   なるときは、**同じトランザクションで**そのトラックの DB 値をファイルの現在値に戻す
   （タグ・キャッシュ列・`tag_hash`・物理属性）。次回スキャン任せにしない。`tag_version` は
-  既に進んでいるので据え置く（Derived の追随ジョブはファイルの現在値で書くだけなので無害）
+  既に進んでいるので据え置く（Derived の追随ジョブはファイルの現在値で書くだけなので無害）。
+  ファイルを読めない（消えている・壊れている）ときだけ `edits.old_value` と事前条件の物理属性へ
+  戻す（D-41）
 - **pending 中の再編集は 409 で拒否する。** `edit_ops(track_id) WHERE result='pending'` の
   UNIQUE で DB 側でも保証する。後続バッチが先行 intent を統合する方式（`superseded`）は
   予約のみで P0 では実装しない
@@ -550,7 +555,9 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
   対応する track ジョブを再投入する（dedup で二重にはならない）。クラッシュ前に
   rename まで済んでいた op は inode 不一致になるので、ファイルのタグを読み
   **全フィールドが新値と一致すれば `applied` として確定**、そうでなければ
-  `skipped_conflict`（overlay の解消を伴う）。同じジョブを何度再実行しても結果は変わらない
+  `skipped_conflict`（overlay の解消を伴う）。この確定は再投入されたジョブが通常の反映経路で
+  行う（起動時の特別処理ではない）。同じジョブを何度再実行しても結果は変わらない。
+  バックオフの上限に達する失敗では、ハンドラが op を `failed` に閉じて overlay を解消する（D-41）
 - **stale ジョブ**: tagwrite の `dedup_key` は `tagwrite:<track_id>:<tag_version>`。
   409 により pending 中の再編集は起きないので、通常は stale にならない。
   それでも payload の版 < 現在値なら no-op で `done` にする（防御）
@@ -1309,6 +1316,9 @@ src/
 │   ├── tags.rs          lofty ラッパ、正規化、多値処理
 │   ├── replaygain.rs    ebur128、フォーマット別変換
 │   └── category.rs      統制語彙、GENRE 写像
+├── edit/
+│   └── mod.rs           編集バッチの coordinator（記録・DB 先行更新・反映・overlay 解消・
+│                        キャンセル・起動時リカバリ。D-24 / D-41）
 ├── media/
 │   ├── decode.rs        symphonia / ffmpeg フォールバック
 │   ├── encode.rs        flac / opus

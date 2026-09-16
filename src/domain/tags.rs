@@ -94,15 +94,17 @@ fn hex(bytes: &[u8]) -> String {
 
 // ---------------------------------------------------------------- lofty ラッパ
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
 
-use lofty::config::ParseOptions;
+use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile as _, FileType, TaggedFileExt};
+use lofty::ogg::tag::VorbisComments;
 use lofty::ogg::OggPictureStorage as _;
 use lofty::probe::Probe;
 use lofty::properties::FileProperties;
-use lofty::tag::{ItemValue, TagType};
+use lofty::tag::{ItemKey, ItemValue, Tag, TagItem, TagType};
 
 /// `tracks.codec` の値（スキーマの CHECK と一致させる）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -251,7 +253,11 @@ pub fn read_audio_file(file: File, ext: Option<&str>) -> Result<AudioFile, TagRe
                 _ => return Err(TagReadError::Unsupported(ty)),
             };
             if let Some(ilst) = f.ilst() {
-                collect_generic(&mut set, &lofty::tag::Tag::from(ilst.clone()));
+                collect_generic(
+                    &mut set,
+                    &lofty::tag::Tag::from(ilst.clone()),
+                    &mut HashSet::new(),
+                );
             }
             (codec, f.properties().clone().into())
         }
@@ -264,8 +270,16 @@ pub fn read_audio_file(file: File, ext: Option<&str>) -> Result<AudioFile, TagRe
                 FileType::Ape => Codec::Ape,
                 _ => Codec::Aiff,
             };
-            for tag in tagged.tags() {
-                collect_generic(&mut set, tag);
+            // 複数ブロック（ID3v2 + ID3v1 など）は primary を優先し、副ブロックからは
+            // primary に無いキーだけを補う。単純に連結すると同じ値が多値として二重になる
+            let primary = tagged.primary_tag_type();
+            let mut seen: HashSet<String> = HashSet::new();
+            let ordered = tagged
+                .primary_tag()
+                .into_iter()
+                .chain(tagged.tags().iter().filter(|t| t.tag_type() != primary));
+            for tag in ordered {
+                collect_generic(&mut set, tag, &mut seen);
             }
             (codec, tagged.properties().clone())
         }
@@ -297,18 +311,174 @@ fn collect_vorbis(set: &mut TagSet, vc: &lofty::ogg::tag::VorbisComments) {
     }
 }
 
-/// lofty の generic `Tag` を Vorbis Comment 名へ写像して取り込む。名前を持たない項目は落ちる
-fn collect_generic(set: &mut TagSet, tag: &lofty::tag::Tag) {
-    let items = tag.items().filter_map(|item| {
-        let key = item.key().map_key(TagType::VorbisComments)?;
-        let value = match item.value() {
-            ItemValue::Text(s) | ItemValue::Locator(s) => s.clone(),
-            ItemValue::Binary(_) => return None,
-        };
-        Some((key.to_owned(), value))
-    });
+/// lofty の generic `Tag` を Vorbis Comment 名へ写像して取り込む。名前を持たない項目は落ちる。
+/// `seen` に既にあるキー（先に読んだブロックが持つキー）は取り込まず、このブロックで
+/// 取り込んだキーを `seen` に加える
+fn collect_generic(set: &mut TagSet, tag: &lofty::tag::Tag, seen: &mut HashSet<String>) {
+    let mut added: Vec<String> = Vec::new();
+    let items: Vec<(String, String)> = tag
+        .items()
+        .filter_map(|item| {
+            let key = item.key().map_key(TagType::VorbisComments)?.to_uppercase();
+            if seen.contains(&key) {
+                return None;
+            }
+            let value = match item.value() {
+                ItemValue::Text(s) | ItemValue::Locator(s) => s.clone(),
+                ItemValue::Binary(_) => return None,
+            };
+            added.push(key.clone());
+            Some((key, value))
+        })
+        .collect();
     set.extend(items);
-    for pic in tag.pictures() {
-        set.add_picture(mime_of(pic), pic.data());
+    seen.extend(added);
+    if !tag.pictures().is_empty() && !seen.contains(PICTURE_KEY) {
+        for pic in tag.pictures() {
+            set.add_picture(mime_of(pic), pic.data());
+        }
+        seen.insert(PICTURE_KEY.to_owned());
+    }
+}
+
+// ---------------------------------------------------------------- 書き込み
+
+/// 1 キーの変更。`values` が `None` ならそのキーを削除する（空配列も削除と同義）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagChange {
+    pub key: String,
+    pub values: Option<Vec<String>>,
+}
+
+impl TagChange {
+    /// キーを大文字化し、値を NFC に正規化する（[`TagSet`] と同じ規則）。空配列は `None` に畳む
+    pub fn normalized(&self) -> TagChange {
+        let values = self
+            .values
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map(|v| v.iter().map(|s| s.nfc().collect()).collect());
+        TagChange {
+            key: self.key.to_uppercase(),
+            values,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TagWriteError {
+    #[error("音声ファイルとして認識できない")]
+    Unrecognized,
+    #[error("対応していない形式: {0:?}")]
+    Unsupported(FileType),
+    #[error("タグの読み取りに失敗: {0}")]
+    Parse(#[from] lofty::error::FileParseError),
+    #[error("タグの書き込みに失敗: {0}")]
+    Encode(#[from] lofty::error::FileEncodingError),
+    #[error("I/O エラー: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// `file`（読み書きで開いた実体）のタグを `changes` のキーだけ置き換えて保存する。
+/// 他のキー・多値・画像は保つ。呼び出し側が tmp にコピーした上で呼ぶこと（対象を直接
+/// 書き換えない。SPEC §7.5 tmp + rename）。FLAC / Opus / Vorbis は VorbisComments を直接、
+/// 他は lofty の generic `Tag` に Vorbis 名を写像して書く
+pub fn write_tag_changes(
+    file: &mut File,
+    ext: Option<&str>,
+    changes: &[TagChange],
+) -> Result<(), TagWriteError> {
+    let changes: Vec<TagChange> = changes.iter().map(TagChange::normalized).collect();
+    file.seek(SeekFrom::Start(0))?;
+    let ty = {
+        let mut probe = Probe::new(&mut *file);
+        if let Some(ft) = ext.and_then(FileType::from_ext) {
+            probe = probe.set_file_type(ft);
+        }
+        let probe = probe.guess_file_type()?;
+        probe.file_type().ok_or(TagWriteError::Unrecognized)?
+    };
+    file.seek(SeekFrom::Start(0))?;
+    let opts = ParseOptions::new();
+    let write_opts = WriteOptions::default();
+    match ty {
+        FileType::Flac => {
+            let mut f = lofty::flac::FlacFile::read_from(&mut *file, opts)?;
+            if f.vorbis_comments().is_none() {
+                f.set_vorbis_comments(VorbisComments::default());
+            }
+            if let Some(vc) = f.vorbis_comments_mut() {
+                apply_vorbis(vc, &changes);
+            }
+            file.seek(SeekFrom::Start(0))?;
+            f.save_to(file, write_opts)?;
+        }
+        FileType::Opus => {
+            let mut f = lofty::ogg::OpusFile::read_from(&mut *file, opts)?;
+            apply_vorbis(f.vorbis_comments_mut(), &changes);
+            file.seek(SeekFrom::Start(0))?;
+            f.save_to(file, write_opts)?;
+        }
+        FileType::Vorbis => {
+            let mut f = lofty::ogg::VorbisFile::read_from(&mut *file, opts)?;
+            apply_vorbis(f.vorbis_comments_mut(), &changes);
+            file.seek(SeekFrom::Start(0))?;
+            f.save_to(file, write_opts)?;
+        }
+        FileType::Mp4
+        | FileType::Mpeg
+        | FileType::Wav
+        | FileType::WavPack
+        | FileType::Ape
+        | FileType::Aiff => {
+            let mut tagged = Probe::new(&mut *file)
+                .set_file_type(ty)
+                .options(opts)
+                .read()?;
+            if tagged.primary_tag().is_none() {
+                let tt = tagged.primary_tag_type();
+                tagged.insert_tag(Tag::new(tt));
+            }
+            // 読み側は全ブロックを集約する（ID3v2 + ID3v1 など）ので、書きも全ブロックに
+            // 同じ変更を当てる。primary だけ書くと副ブロックの旧値が読み戻しに残る
+            let types: Vec<TagType> = tagged.tags().iter().map(|t| t.tag_type()).collect();
+            for tt in types {
+                if let Some(tag) = tagged.tag_mut(tt) {
+                    apply_generic(tag, &changes);
+                }
+            }
+            file.seek(SeekFrom::Start(0))?;
+            tagged.save_to(file, write_opts)?;
+        }
+        other => return Err(TagWriteError::Unsupported(other)),
+    }
+    Ok(())
+}
+
+fn apply_vorbis(vc: &mut VorbisComments, changes: &[TagChange]) {
+    for c in changes {
+        // remove は遅延イテレータなので消費して確定させる
+        vc.remove(&c.key).for_each(drop);
+        if let Some(values) = &c.values {
+            for v in values {
+                vc.push(c.key.clone(), v.clone());
+            }
+        }
+    }
+}
+
+fn apply_generic(tag: &mut Tag, changes: &[TagChange]) {
+    for c in changes {
+        // generic Tag は名前付きキーしか持てない。写像できないキーは書けない（読み側も落とす）
+        let Some(key) = ItemKey::from_key(TagType::VorbisComments, &c.key) else {
+            tracing::warn!(key = %c.key, "この形式には写像できないキーなので書かない");
+            continue;
+        };
+        tag.remove_key(key);
+        if let Some(values) = &c.values {
+            for v in values {
+                tag.push(TagItem::new(key, ItemValue::Text(v.clone())));
+            }
+        }
     }
 }

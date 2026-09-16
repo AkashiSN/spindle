@@ -16,9 +16,9 @@ use std::path::PathBuf;
 use crate::domain::relpath::RelPath;
 
 #[cfg(target_os = "linux")]
-pub use linux::RootDir;
+pub use linux::{copy_attrs, fstat, RootDir};
 #[cfg(not(target_os = "linux"))]
-pub use stub::RootDir;
+pub use stub::{copy_attrs, fstat, RootDir};
 
 /// 書き込みの一時ファイル名の前置き。対象と同じディレクトリに `O_EXCL` で作る
 pub const TMP_PREFIX: &str = ".spindle-tmp-";
@@ -240,7 +240,8 @@ mod linux {
             };
             for _ in 0..TMP_RETRIES {
                 let name = format!("{TMP_PREFIX}{}", random_hex()?);
-                let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC;
+                // RDWR: 書いた後に同じ FD から読み戻して tag_hash を確定する（tagwrite）
+                let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC;
                 match rustix::fs::openat(&parent, &name, flags, Mode::from_raw_mode(0o644)) {
                     Ok(fd) => {
                         let rel = match dir {
@@ -277,6 +278,92 @@ mod linux {
             rustix::fs::unlinkat(&parent, rel.file_name(), AtFlags::empty())?;
             Ok(())
         }
+
+        /// tmp を対象へ**置き換え**る rename（tmp + rename の最終段。SPEC §7.5）。宛先は同じ
+        /// ディレクトリにある前提で、rename 後に親ディレクトリを fsync して電源断でも
+        /// エントリが残るようにする
+        pub fn replace_file(&self, tmp: &RelPath, dst: &RelPath) -> Result<(), FsError> {
+            let from_dir = self.open_parent(tmp)?;
+            let to_dir = self.open_parent(dst)?;
+            rustix::fs::renameat(&from_dir, tmp.file_name(), &to_dir, dst.file_name())?;
+            // O_PATH の fd は fsync できないので開き直す
+            let dir = self.open_at(
+                dst.parent().as_ref().map(RelPath::as_str).unwrap_or("."),
+                OFlags::RDONLY | OFlags::DIRECTORY,
+            )?;
+            rustix::fs::fsync(&dir)?;
+            Ok(())
+        }
+    }
+
+    /// 開いた FD の stat（事前条件の確認は open した FD に対して行う。SPEC §7.5）
+    pub fn fstat(file: &File) -> Result<Stat, FsError> {
+        Ok(rustix::fs::fstat(file)?.into())
+    }
+
+    /// tmp + rename で置き換える前に、元ファイルの属性を tmp へ写す（D-41）。
+    /// mode は必須（失敗したらエラー）。所有者と xattr（NFSv4 ACL を含む）は best-effort で、
+    /// 権限や FS の都合で写せなければ警告して続行する
+    pub fn copy_attrs(src: &File, dst: &File) -> Result<(), FsError> {
+        let st = rustix::fs::fstat(src)?;
+        rustix::fs::fchmod(dst, Mode::from_raw_mode(st.st_mode))?;
+        if let Err(e) = rustix::fs::fchown(
+            dst,
+            Some(rustix::fs::Uid::from_raw(st.st_uid)),
+            Some(rustix::fs::Gid::from_raw(st.st_gid)),
+        ) {
+            if e != Errno::PERM {
+                tracing::warn!(error = %e, "所有者を写せない");
+            }
+        }
+        let names = match list_xattr_names(src) {
+            Ok(n) => n,
+            Err(Errno::NOTSUP) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(error = %e, "xattr を列挙できない");
+                return Ok(());
+            }
+        };
+        for name in names {
+            let value = match get_xattr(src, &name) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(xattr = %name, error = %e, "xattr を読めない");
+                    continue;
+                }
+            };
+            if let Err(e) =
+                rustix::fs::fsetxattr(dst, &name, &value, rustix::fs::XattrFlags::empty())
+            {
+                // security.* / trusted.* は権限が要る。写せなくても書き込み自体は続ける
+                tracing::warn!(xattr = %name, error = %e, "xattr を写せない");
+            }
+        }
+        Ok(())
+    }
+
+    fn list_xattr_names(file: &File) -> Result<Vec<String>, Errno> {
+        let mut empty: [u8; 0] = [];
+        let needed = rustix::fs::flistxattr(file, &mut empty[..])?;
+        if needed == 0 {
+            return Ok(Vec::new());
+        }
+        let mut buf = vec![0u8; needed];
+        let n = rustix::fs::flistxattr(file, &mut buf[..])?;
+        Ok(buf[..n]
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect())
+    }
+
+    fn get_xattr(file: &File, name: &str) -> Result<Vec<u8>, Errno> {
+        let mut empty: [u8; 0] = [];
+        let needed = rustix::fs::fgetxattr(file, name, &mut empty[..])?;
+        let mut buf = vec![0u8; needed];
+        let n = rustix::fs::fgetxattr(file, name, &mut buf[..])?;
+        buf.truncate(n);
+        Ok(buf)
     }
 
     fn random_hex() -> Result<String, FsError> {
@@ -332,5 +419,17 @@ mod stub {
         pub fn unlink(&self, _rel: &RelPath) -> Result<(), FsError> {
             Err(FsError::Openat2Unsupported)
         }
+
+        pub fn replace_file(&self, _tmp: &RelPath, _dst: &RelPath) -> Result<(), FsError> {
+            Err(FsError::Openat2Unsupported)
+        }
+    }
+
+    pub fn fstat(_file: &File) -> Result<Stat, FsError> {
+        Err(FsError::Openat2Unsupported)
+    }
+
+    pub fn copy_attrs(_src: &File, _dst: &File) -> Result<(), FsError> {
+        Err(FsError::Openat2Unsupported)
     }
 }

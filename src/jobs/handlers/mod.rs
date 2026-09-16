@@ -2,3 +2,4 @@
 //! 実行基盤（`Registry` / `JobContext`）は親モジュールにある
 
 pub mod scan;
+pub mod tagwrite;
