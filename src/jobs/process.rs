@@ -1,18 +1,321 @@
 //! 外部プロセスを自分のプロセスグループで起動し、キャンセル時にグループごと kill する。
-//! 引数配列・`--` 前置・タイムアウト・終了コード検査を含む共通ラッパは P0-5 で
-//! この上に載せる。
+//! [`ExternalCommand`] が引数配列・`--` / `./` 前置・タイムアウト・終了コード検査・stderr の
+//! ログを担い、[`ChildGroup`] の上に載る（SPEC §5「パスの表現と境界」、コーディング規約）。
 //!
 //! 「グループが消えたか」は leader の終了ではなく `killpg(pgid, 0)` で判定する。leader が
 //! TERM で死んでも、TERM を無視する孫が残っていればグループはまだ存在する（D-36）。
 
-use std::process::ExitStatus;
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use rustix::process::{kill_process_group, test_kill_process_group, Pid, Signal};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
 use super::JobError;
+
+/// 外部コマンドの既定タイムアウト。エンコード等の長い処理は呼び出し側で伸ばす
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+/// エラーとログに残す stderr の末尾の上限（バイト）
+const STDERR_KEEP: usize = 16 * 1024;
+
+/// パス引数の無害化方式。先頭 `-` のファイル名がオプションと解釈されるのを防ぐ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStyle {
+    /// `--` 対応ツール（flac / opusenc / cat …）。最初のパスの前に `--` を 1 度だけ置く。
+    /// **以降の引数はすべてオペランド**になるのでオプションはパスより前に並べる
+    DoubleDash,
+    /// `--` 非対応ツール（ffmpeg …）。先頭 `-` の相対パスに `./` を前置する
+    DotSlash,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProcessError {
+    #[error("{program} を起動できない: {source}")]
+    Spawn {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{program} が {after:?} 以内に終わらないので kill した")]
+    Timeout { program: String, after: Duration },
+    #[error("キャンセルされた")]
+    Cancelled,
+    #[error("{program} が {status} で終了: {stderr}")]
+    Failed {
+        program: String,
+        status: ExitStatus,
+        /// stderr の末尾（[`STDERR_KEEP`] バイトまで）
+        stderr: String,
+    },
+    #[error("{program} の入出力エラー: {source}")]
+    Io {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl From<ProcessError> for JobError {
+    fn from(e: ProcessError) -> Self {
+        match e {
+            ProcessError::Cancelled => JobError::Cancelled,
+            other => JobError::Failed(other.into()),
+        }
+    }
+}
+
+/// 正常終了したコマンドの結果
+#[derive(Debug)]
+pub struct Output {
+    pub status: ExitStatus,
+    /// `stdout_file` を指定した場合は空
+    pub stdout: Vec<u8>,
+    /// stderr の末尾（ログにも出している）
+    pub stderr: String,
+}
+
+/// 引数配列で組み立てる外部コマンド。`sh -c` は使わない
+#[derive(Debug)]
+pub struct ExternalCommand {
+    program: PathBuf,
+    args: Vec<OsString>,
+    path_style: PathStyle,
+    double_dash_emitted: bool,
+    current_dir: Option<PathBuf>,
+    timeout: Duration,
+    stdin: Option<File>,
+    stdout_file: Option<File>,
+}
+
+impl ExternalCommand {
+    pub fn new(program: impl AsRef<Path>) -> Self {
+        Self {
+            program: program.as_ref().to_path_buf(),
+            args: Vec::new(),
+            path_style: PathStyle::DoubleDash,
+            double_dash_emitted: false,
+            current_dir: None,
+            timeout: DEFAULT_TIMEOUT,
+            stdin: None,
+            stdout_file: None,
+        }
+    }
+
+    pub fn path_style(mut self, style: PathStyle) -> Self {
+        self.path_style = style;
+        self
+    }
+
+    /// オプション等のパスでない引数
+    pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
+        self.args.push(arg.as_ref().to_os_string());
+        self
+    }
+
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        for a in args {
+            self.args.push(a.as_ref().to_os_string());
+        }
+        self
+    }
+
+    /// ファイルパスの引数。[`PathStyle`] に従って先頭 `-` を無害化する
+    pub fn path_arg(mut self, path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        match self.path_style {
+            PathStyle::DoubleDash => {
+                if !self.double_dash_emitted {
+                    self.args.push(OsString::from("--"));
+                    self.double_dash_emitted = true;
+                }
+                self.args.push(path.as_os_str().to_os_string());
+            }
+            PathStyle::DotSlash => {
+                let starts_with_dash = path
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .first()
+                    .is_some_and(|b| *b == b'-');
+                if path.is_relative() && starts_with_dash {
+                    self.args.push(Path::new(".").join(path).into_os_string());
+                } else {
+                    self.args.push(path.as_os_str().to_os_string());
+                }
+            }
+        }
+        self
+    }
+
+    pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.current_dir = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// 開いたファイルを stdin に繋ぐ（パスを渡さずに済む場合はこちらを優先する）
+    pub fn stdin_file(mut self, file: File) -> Self {
+        self.stdin = Some(file);
+        self
+    }
+
+    /// stdout を開いたファイルへ書く。指定しなければメモリに取り込む
+    pub fn stdout_file(mut self, file: File) -> Self {
+        self.stdout_file = Some(file);
+        self
+    }
+
+    /// 組み立てた引数（テストと診断用）
+    pub fn arg_list(&self) -> Vec<String> {
+        self.args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn program_name(&self) -> String {
+        self.program
+            .file_name()
+            .unwrap_or(self.program.as_os_str())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// 起動して終了まで待つ。終了コードが 0 でなければ [`ProcessError::Failed`]。
+    /// `token` が倒れるかタイムアウトしたらプロセスグループごと kill する
+    pub async fn run(self, token: &CancellationToken) -> Result<Output, ProcessError> {
+        let program = self.program_name();
+        let timeout = self.timeout;
+        tracing::debug!(program = %self.program.display(), args = ?self.arg_list(), "外部コマンドを起動");
+
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&self.args).stderr(Stdio::piped());
+        cmd.stdin(match self.stdin {
+            Some(f) => Stdio::from(f),
+            None => Stdio::null(),
+        });
+        let capture_stdout = self.stdout_file.is_none();
+        cmd.stdout(match self.stdout_file {
+            Some(f) => Stdio::from(f),
+            None => Stdio::piped(),
+        });
+        if let Some(dir) = &self.current_dir {
+            cmd.current_dir(dir);
+        }
+        let mut child = ChildGroup::spawn(cmd).map_err(|source| ProcessError::Spawn {
+            program: program.clone(),
+            source,
+        })?;
+        let io_err = |source| ProcessError::Io {
+            program: program.clone(),
+            source,
+        };
+        let mut stderr_pipe = child
+            .child_mut()
+            .stderr
+            .take()
+            .ok_or_else(|| io_err(std::io::Error::other("stderr を取れない")))?;
+        let mut stdout_pipe = if capture_stdout {
+            child.child_mut().stdout.take()
+        } else {
+            None
+        };
+
+        // タイムアウトは子 token で表現し、親 token の cancel と区別する
+        let local = token.child_token();
+        let timer = {
+            let local = local.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(timeout).await;
+                local.cancel();
+            })
+        };
+        let stderr_task = read_tail(&mut stderr_pipe, STDERR_KEEP);
+        let stdout_task = async {
+            let mut buf = Vec::new();
+            if let Some(pipe) = stdout_pipe.as_mut() {
+                pipe.read_to_end(&mut buf).await?;
+            }
+            Ok::<_, std::io::Error>(buf)
+        };
+        let (waited, stderr_buf, stdout_buf) =
+            tokio::join!(child.wait(local), stderr_task, stdout_task);
+        timer.abort();
+
+        let stderr = String::from_utf8_lossy(&stderr_buf.map_err(io_err)?)
+            .trim_end()
+            .to_owned();
+        let status = match waited {
+            Ok(status) => status,
+            Err(JobError::Cancelled) if token.is_cancelled() => {
+                tracing::info!(program, "キャンセルで外部コマンドを止めた");
+                return Err(ProcessError::Cancelled);
+            }
+            Err(JobError::Cancelled) => {
+                tracing::warn!(program, ?timeout, stderr, "外部コマンドがタイムアウト");
+                return Err(ProcessError::Timeout {
+                    program,
+                    after: timeout,
+                });
+            }
+            Err(JobError::Failed(e)) => {
+                return Err(ProcessError::Io {
+                    program,
+                    source: std::io::Error::other(e),
+                })
+            }
+        };
+        if !status.success() {
+            tracing::warn!(program, %status, stderr, "外部コマンドが失敗");
+            return Err(ProcessError::Failed {
+                program,
+                status,
+                stderr,
+            });
+        }
+        if !stderr.is_empty() {
+            tracing::debug!(program, stderr, "外部コマンドの stderr");
+        }
+        Ok(Output {
+            status,
+            stdout: stdout_buf.map_err(io_err)?,
+            stderr,
+        })
+    }
+}
+
+/// 読みながら末尾 `keep` バイトだけを保持する（全量を溜めない。長時間の ffmpeg が大量の
+/// stderr を出してもメモリは有界）。EOF まで読む
+async fn read_tail<R: tokio::io::AsyncRead + Unpin>(
+    pipe: &mut R,
+    keep: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut tail: Vec<u8> = Vec::with_capacity(keep.min(64 * 1024));
+    let mut chunk = vec![0u8; 8 * 1024];
+    loop {
+        let n = pipe.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(tail);
+        }
+        tail.extend_from_slice(&chunk[..n]);
+        if tail.len() > keep {
+            let excess = tail.len() - keep;
+            tail.drain(..excess);
+        }
+    }
+}
 
 /// SIGTERM 後にこれだけ待ってグループが残っていれば SIGKILL
 const KILL_GRACE: Duration = Duration::from_secs(2);
@@ -58,17 +361,31 @@ impl ChildGroup {
     }
 
     /// 終了を待つ。`token` が倒れたらプロセスグループを kill して `Err(Cancelled)`
+    ///
+    /// leader が終了しても同じグループに子孫が残っていれば（leader が fork して先に exit した）
+    /// グループごと掃除してから返す。放置すると継承した stdout / stderr パイプの EOF が来ず
+    /// 呼び出し側が固まるか、孫プロセスが漏れる
     pub async fn wait(mut self, token: CancellationToken) -> Result<ExitStatus, JobError> {
-        tokio::select! {
+        let status = tokio::select! {
             status = self.child.wait() => {
                 self.reaped = true;
-                Ok(status?)
+                status?
             }
             _ = token.cancelled() => {
                 self.kill_group().await;
-                Err(JobError::Cancelled)
+                return Err(JobError::Cancelled);
+            }
+        };
+        if let Some(pgid) = self.pgid() {
+            if test_kill_process_group(pgid).is_ok() {
+                tracing::warn!(
+                    pid = self.pid,
+                    "leader が終了したがプロセスグループに残りがある。掃除する"
+                );
+                self.kill_group().await;
             }
         }
+        Ok(status)
     }
 
     /// プロセスグループへ SIGTERM、猶予後にグループが残っていれば SIGKILL。

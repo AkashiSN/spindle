@@ -4,5 +4,8 @@
 pub mod api;
 pub mod config;
 pub mod db;
+pub mod domain;
+pub mod fsroot;
 pub mod jobs;
 pub mod logging;
+pub mod media;

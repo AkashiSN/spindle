@@ -599,3 +599,72 @@ SPA の静的配信（`/api` 以外の GET）はセッション不要で通す�
 キャンセル要求を出す案（`cancelled` は「ユーザが止めた」の意味であり、再起動で再開すべき
 ものと区別がつかなくなる）。Lagged を SSE の切断で伝える案（再接続のたびにイベントを
 失う窓ができ、resync 1 行を流す方が単純で確実）。
+
+---
+
+## D-37 パス安全層・同一性解決・フィンガープリントの固定値と境界
+
+**決定**: 仕様（SPEC §5 / §6）が定めていない値と境界を次のとおり固定する。設定には出さない。
+
+- **canonical key は `NFD → full casefold → NFD`。** casefold の結果は NFD とは限らない
+  （U+1F88 → U+1F00 U+03B9 のように分解が必要な文字がある）ので末尾で NFD を再適用し、
+  `key(key(x)) == key(x)` を保つ。casefold は Unicode の full case folding（`caseless`）で、
+  `ß` と `ss`、`ﬁ` と `fi` は同じ key になる。これは spindle 側の**保守的な**同値規則で、ZFS が
+  別名とみなす組を同名と見ることはあっても逆はない想定。差の実測は `tests/zfs_corpus.rs`
+  （`#[ignore]`）で対象 NAS 上で行い、結果をここに追記する
+- 相対パスの要素は、`/` 区切り・先頭 `/` なし・`.` / `..` なし・NUL / `\` なしに加え、
+  SMB / exFAT 禁止文字 `< > : " | ? *` と制御文字を含まず、末尾がドット・スペースでなく、
+  Windows 予約名（CON PRN AUX NUL COM1–9 LPT1–9。**拡張子付きも予約**、大小文字無視）でなく、
+  255 バイト以下。パス全体の長さ上限（240 UTF-16 単位）は検証ではなく**生成側**（P0-11）で
+  切り詰める。先頭 `-` のファイル名は正当で、外部コマンドへ渡す側で無害化する
+- root は `O_DIRECTORY` で開いた dirfd を保持し、以後は `openat2(RESOLVE_BENEATH |
+  RESOLVE_NO_SYMLINKS)` だけで解決する。**`O_NOFOLLOW` は付けない**（`O_PATH` と組むと末尾の
+  symlink 自体が開けてしまい、親ディレクトリの解決で symlink を通す穴になる。全段の拒否は
+  `RESOLVE_NO_SYMLINKS` の ELOOP に任せる）。stat は親を `O_PATH` で開いてから
+  `statat(AT_SYMLINK_NOFOLLOW)`、rename / unlink も親 dirfd 基準。tmp は
+  `.spindle-tmp-<16 hex>` を `O_EXCL` で作り、EEXIST なら 8 回まで引き直す。
+  起動時に全 root（library / derived / archive / inbox / playlists）を開き、
+  `openat2` が ENOSYS ならそこで落ちる。非 Linux では `RootDir` は空実装で `open` が常に
+  `Openat2Unsupported` を返す（crate はビルドでき、実ファイルの結合テストは
+  `#![cfg(target_os = "linux")]` で Linux の CI だけが走らせる）
+- 外部コマンドの既定タイムアウトは 600 秒（エンコード等は呼び出し側で伸ばす）。stderr は
+  **読みながら**末尾 16 KiB だけを保持し（全量を溜めない。長時間の ffmpeg でもメモリは有界）、
+  失敗時は warn、成功時は debug でログに出す。leader が終了した時点でプロセスグループに
+  子孫が残っていれば（leader が fork して先に exit した）グループごと掃除してから返す。
+  放置すると継承した stdout / stderr パイプの EOF が来ず呼び出し側が固まるか、孫が漏れる。`--` 方式では最初のパスの前に
+  `--` を 1 度だけ置くので**オプションはパスより前に並べる**。`./` 方式は相対パスで先頭 `-` の
+  ものだけ前置し、絶対パスは触らない。タイムアウトはキャンセルと同じ経路（プロセスグループ
+  SIGTERM → 2 秒 → SIGKILL、D-36）で止め、エラー型で区別する
+- 同一性解決は純関数（DB を触らない）で、inode 段 → md5 段 → path 段の順に**各段を全エントリ
+  について** `rel_path_key` 昇順で回す。エントリごとに 3 段を回す方式は、rename 後の旧パスに
+  別ファイルが置かれたとき、先に来た旧パスの path 一致が後のエントリの inode 一致から行を
+  奪うので採らない。DB 側で同じ `(dev, inode)` を複数行が持つ（過去の hardlink）場合は曖昧
+  として inode 段を飛ばす。同じ md5 の新パスが複数あり旧パスが消えている場合は key 昇順の
+  先頭だけが移動、残りは新規（duplicate_groups に出る）。`changed` は
+  `(dev, inode, size, mtime_ns, ctime_ns)` のいずれかの差で、md5 段の採用は常に `changed`
+- `decoded_pcm_md5`（ALAC / WAV）は FLAC エンコーダが STREAMINFO に書くのと同じ流儀
+  （チャンネルインターリーブ、リトルエンディアン、bps を 8 の倍数に切り上げたバイト数）で
+  取るので、同じ PCM の WAV / ALAC / FLAC は同じ `audio_md5` になる（WAV → FLAC 正規化と
+  ALAC からの移行で同一性が保たれる）。ALAC の bit depth は demuxer から来ないので magic
+  cookie（`extra_data`、`frma` / `alac` atom 前置あり）の 6 バイト目から読む
+- **非可逆の `audio_fp` は Opus を含めて symphonia の demuxer で取る。** symphonia が非対応
+  なのは Opus の**デコード**であり、Ogg の Opus パケットは取り出せる。ffmpeg 経由にすると
+  外部プロセスと ffmpeg の版差（remux 時のヘッダ生成）に結果が依存する。ハッシュはパケットの
+  データをそのまま連結した SHA-256（長さ前置なし。demuxer の packetization が変わっても
+  バイト列が同じなら同じ値）。MP3 / Opus / AAC(MP4) / Vorbis でタグ書き換え後に不変であることを
+  テストで固定する
+- `tag_hash` はキーを大文字化、値を NFC、キー順に整列（同一キーの多値は入力順を保持）した
+  `(key, value)` 列を、それぞれ 8 バイト LE の長さ前置で連結した SHA-256。埋め込み画像は
+  `PICTURE` キーに `<mime>:<画像バイト列の SHA-256 hex>` として入れる（カバー差し替えも
+  `tag_version` を進め、Derived のタグ追随対象になる）
+
+**理由**: 設定に出しても調整する場面が無い。key の規則を保守的にするのは、DB の UNIQUE が
+FS より緩い（別と見て同名を作ろうとする）方が、FS より厳しい（同じと見て正当な名前を拒む）
+より危険なため（前者は `O_EXCL` / `RENAME_NOREPLACE` が最終防衛線になるが、黙って上書きに
+近い挙動に見える）。PCM MD5 を FLAC と揃えるのは、正規化・移行で `audio_md5` が変わると
+Derived の再エンコードと重複検出の両方が空回りするため。
+
+**却下**: `char::to_lowercase` による簡易 casefold（`ß` などが畳まれず、ZFS の挙動との差が
+増える方向）。SQLite の `COLLATE NOCASE`（D-31）。パケット列のハッシュに長さを前置する案
+（packetization 差で値が変わる）。`bits_per_sample` が無い ALAC をバッファ幅（32 ビット）で
+ハッシュする案（FLAC と一致しなくなる）。

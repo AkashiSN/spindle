@@ -7,6 +7,7 @@ use tracing::info;
 
 use spindle::api::{self, auth, AppState};
 use spindle::db::{migrations, Db};
+use spindle::fsroot::Roots;
 use spindle::jobs::{self, Registry};
 use spindle::{config::Config, logging};
 
@@ -27,6 +28,8 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(&config_path)
         .with_context(|| format!("設定の読み込みに失敗: {}", config_path.display()))?;
     info!(config = %config_path.display(), library = %config.paths.library.display(), "設定を読み込んだ");
+    // 全 root を dirfd で開く。openat2 が無い（Linux 5.6 未満）ならここで止まる（D-31）
+    let _roots = Roots::open(&config.paths).context("ライブラリの root を開けない")?;
 
     let db_path = config.paths.data.join(DB_FILE_NAME);
     let db = {

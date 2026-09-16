@@ -83,19 +83,20 @@ Host だけが一致する（Origin が別）POST が 403 になることをテ�
 
 ### P0-5 同一性解決とパス安全層
 
-- [ ] 相対パスの検証（絶対 / `..` / 空 / NUL / `\\` を拒否）と canonical key `casefold(NFD())`
-- [ ] root dirfd 基準の open / rename / tmp 作成（`rustix` `openat2` with
+- [x] 相対パスの検証（絶対 / `..` / 空 / NUL / `\\` を拒否）と canonical key `casefold(NFD())`
+- [x] root dirfd 基準の open / rename / tmp 作成（`rustix` `openat2` with
       `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`、作成は `O_EXCL`、rename は `RENAME_NOREPLACE`）。
       全ファイル操作はこの層を通す。`openat2` 不可なら起動時に失敗
-- [ ] 外部コマンド起動の共通ラッパ（引数配列、`--` / `./` 前置、タイムアウト、終了コード、
+- [x] 外部コマンド起動の共通ラッパ（引数配列、`--` / `./` 前置、タイムアウト、終了コード、
       stderr ログ、プロセスグループ kill）
-- [ ] `(dev, inode)` → `audio_md5` → `rel_path_key` の順の解決関数。**inventory 全体を入力に取り**、
+- [x] `(dev, inode)` → `audio_md5` → `rel_path_key` の順の解決関数。**inventory 全体を入力に取り**、
       各段で候補を検証（inventory 内で inode が一意、未 claim、`nlink = 1`、size/mtime の一致、
       md5 候補は 1 行かつ旧 key が inventory に無い）。取り合いは `rel_path_key` 昇順
-- [ ] FLAC の STREAMINFO から PCM MD5 を読む（デコード不要）
-- [ ] ALAC / WAV は `symphonia` でデコードして算出
-- [ ] 非可逆の `audio_fp`（エンコード済みパケット列の SHA-256。symphonia で demux、Opus は ffmpeg）
-- [ ] `tag_hash`（正規化タグ集合の SHA-256）の算出
+- [x] FLAC の STREAMINFO から PCM MD5 を読む（デコード不要）
+- [x] ALAC / WAV は `symphonia` でデコードして算出
+- [x] 非可逆の `audio_fp`（エンコード済みパケット列の SHA-256。Opus を含め symphonia で demux、
+      デコードも外部プロセスも使わない。D-37）
+- [x] `tag_hash`（正規化タグ集合の SHA-256）の算出
 
 受け入れ: 単体テストで以下が通ること。
 (a) タグ書き換えでも同一と判定 (b) 別ディレクトリへ移動しても同一と判定
@@ -111,7 +112,8 @@ Host だけが一致する（Origin が別）POST が 403 になることをテ�
 (k) 訪問順を変えた inventory（コピー先を先に stat）でも判定結果が同じ
 (l) 非可逆ファイルのタグだけを書き換えて size が変わっても `audio_fp` が同じ
 (m) 対象 TrueNAS 上で corpus（大小文字・NFC/NFD・ß・トルコ語 I）を作り、`O_EXCL` の結果と
-    key の同値判定の差を記録する（差があれば D-31 の限界として文書化。`#[ignore]`）
+    key の同値判定の差を記録する（差があれば D-31 の限界として文書化。`#[ignore]`、
+    `tests/zfs_corpus.rs`。**移行前（P0-14）に対象 NAS で一度実行して結果を D-37 に追記する**）
 
 依存: P0-2
 

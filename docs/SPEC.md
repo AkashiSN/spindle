@@ -94,7 +94,7 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 | HTTP | axum + tokio + tower-http | |
 | DB | rusqlite (bundled) + FTS5 | 書き込みは単一コネクション、読み込みはプール |
 | タグ | lofty | FLAC / Opus / MP4 / WAV を一貫 API |
-| デコード | symphonia | FLAC/ALAC/AAC/WAV。**Opus 非対応 → ffmpeg 経由** |
+| デコード | symphonia | FLAC/ALAC/AAC/WAV。**Opus のデコードは非対応 → ffmpeg 経由**（demux は Opus も symphonia で可。`audio_fp` はこれを使う） |
 | ラウドネス | ebur128 | libebur128 の純 Rust 移植 |
 | 正規表現 | fancy-regex | 後方参照・先読みが必要（ytmusic パーサ） |
 | HTTP client | reqwest | MusicBrainz / CTDB |
@@ -261,7 +261,7 @@ Archive / Inbox / Playlists のいずれか）からの相対パス**で、次�
 |---|---|---|
 | FLAC | STREAMINFO の MD5（`audio_md5`） | 同一性（移動検出）と音声版 |
 | ALAC / WAV | デコードした PCM の MD5（`audio_md5`） | 同上 |
-| 非可逆（opus / aac / mp3 / ogg） | エンコード済みパケット列の SHA-256（`audio_fp`。demux のみ、デコードしない） | **音声版のみ**。同一性には使わない |
+| 非可逆（opus / aac / mp3 / ogg） | エンコード済みパケット列の SHA-256（`audio_fp`。symphonia で demux のみ、デコードしない。Opus も同様） | **音声版のみ**。同一性には使わない |
 
 | 観測 | 判定 | 版 |
 |---|---|---|

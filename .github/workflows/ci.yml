@@ -40,6 +40,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # フィンガープリントのテスト（tests/fingerprint.rs）が FLAC / ALAC / Opus / MP3 / AAC の
+      # 生成に ffmpeg を使う。無いと該当テストは skip されるので、CI では必ず入れる
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
