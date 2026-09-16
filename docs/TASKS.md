@@ -266,21 +266,35 @@ tagwrite の途中で kill → 再起動で残りが反映され、二重に版�
 
 ### P0-11 パス生成とリネーム
 
-- [ ] テンプレート展開（`{category}/{albumartist}/{album}/...`）
-- [ ] ファイル名の置換テーブル、SMB 制約、255 バイト切り詰め
-- [ ] 衝突時の降格（`{album}` → `{album} ({year})` → `{edition}`）
-- [ ] 同一リリース判定（MB Release ID / DiscID）。**同名 ≠ 同一リリース**
-- [ ] 一括リネームは coordinator の **2 phase**: phase 1 で全 op の source を予約済み一時名へ
-      退避（ファイルと DB key の両方）、phase 2 で `ordinal` 順に最終名へ（`RENAME_NOREPLACE`）。
-      `rename` ジョブは並列 1。衝突判定と一時名は `rel_path_key` で行う
-- [ ] phase 境界でのクラッシュ復旧: 一時名に残ったファイルを `edit_ops` から最終名へ進める
-- [ ] `edit_ops(kind='rename')` への記録（`expected_rel_path` 含む）と、ファイル rename 後の
-      `(dev, inode)` 追随。外部 rename と衝突した op は `skipped_conflict`
+- [x] テンプレート展開（`{category}/{albumartist}/{album}/...`）（`domain::pathgen::Template`。
+      `[layout]` は設定の読み込み時に検証。single / multi / unsorted の選択は D-43）
+- [x] ファイル名の置換テーブル、SMB 制約、255 バイト切り詰め（`pathgen::sanitize_component`、
+      パス全体 240 UTF-16 単位。D-43）
+- [x] 衝突時の降格（`{album}` → `{album} ({year})` → `{edition}`）（`pathgen::plan`。降格しても
+      解決しなければ conflict。既にそのディレクトリにいるリリースは降格しない）
+- [x] 同一リリース判定（MB Release ID / DiscID）。**同名 ≠ 同一リリース**（`mb:` → `disc:` →
+      `album:<id>` のキー。album 行が違えば別リリース）
+- [x] 一括リネームは coordinator の **2 phase**: phase 1 で全 op の source を一時名へ退避、
+      phase 2 で `ordinal` 順に最終名へ（`RENAME_NOREPLACE`）。`rename` ジョブは**バッチ 1 つに
+      1 つ**・並列 1。衝突判定は `rel_path_key`、DB の overlay は prepare 時の 2 段階更新、
+      一時名は `spindle-rename-<op_id>.<ext>`（`edit::rename`、`jobs::handlers::rename`。D-43）
+- [x] phase 境界でのクラッシュ復旧: 再投入されたジョブが op ごとの所在（最終名 / 一時名 / source）を
+      inode で判定して続きを行う（`Editor::recover` がバッチジョブを再投入）
+- [x] `edit_ops(kind='rename')` への記録（`expected_rel_path` 含む）と、ファイル rename 後の
+      `(dev, inode)` 追随。外部 rename と衝突した op は `skipped_conflict`（スキャナは一時名 /
+      最終名を「作業中」として扱う）
+- [x] album の追随（album 全体の移動は id を維持して `rel_dir` を書き換え、部分移動は新規 album。
+      overlay と overlay 解消の両方。D-43）
+- [x] `POST /api/rename/preview` / `POST /api/rename/apply`（SPEC §9。UI は未着手）
 
 受け入れ: 単体テストで置換テーブル・切り詰め・衝突降格を網羅。
 既存の ytmusic 出力と同じパスが再現できる。
 大小文字だけ違う 2 つのファイル名への一括リネームが衝突として検出される。
 A↔B の swap と 3 件の循環リネームが完了し、phase 1 直後に kill しても再起動で完了する。
+（`tests/pathgen.rs` / `tests/rename.rs` / `tests/rename_api.rs`）
+
+未決: album 全体を動かした後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）の
+追随。rename op はトラックのパスだけを所有する（D-43）
 
 依存: P0-6, P0-9
 
@@ -409,3 +423,5 @@ DB にしか存在しないもの（編集履歴 / プレイリスト / 検証�
 - `.fpl` 書き出しの要否（P4、非推奨）
 - `HAS` 演算子の foobar 実機との挙動突き合わせ（P1-8 実装時）
 - Inbox のポーリング間隔
+- 一括リネーム後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）と
+  空ディレクトリの扱い（P0-11 では動かさない。D-43）

@@ -704,9 +704,11 @@ impl Commit {
             if let Some(op) = pending.get(&track_id) {
                 if op.kind == "rename" {
                     // rel_path は rename op が所有する（overlay で先に変わっているかもしれない）。
-                    // 外部移動の判定は op 記録時点の物理パスと比べる
+                    // 外部移動の判定は op 記録時点の物理パスと比べる。自分の rename ジョブの
+                    // 作業中の所在（source / 一時名 / 最終名）は衝突ではない（D-43）
                     let expected = op.expected_rel_path.as_deref().unwrap_or(&row.rel_path);
-                    if canonical_key(expected) != e.key {
+                    let ours = crate::edit::in_progress_keys(op.op_id, expected, &row.rel_path);
+                    if !ours.contains(&e.key) {
                         scans::conflict_pending_op(
                             &tx,
                             op.op_id,
@@ -716,8 +718,12 @@ impl Commit {
                         tracing::warn!(track_id, path = %e.rel, "pending の rename op と外部 rename が衝突");
                         // pending → conflict でバッジが変わる。表に通知する
                         report.changed_ids.push(track_id);
+                        // op は終端になったので、以後は rel_path も実在パスに追随させる
+                        // （overlay の最終名のまま残すと、rename ジョブは pending しか見ないので
+                        // 次回スキャンまで DB が実在と食い違う）
+                    } else {
+                        continue;
                     }
-                    continue;
                 }
             }
             if row.rel_path == e.rel.as_str() {

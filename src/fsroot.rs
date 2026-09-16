@@ -272,6 +272,43 @@ mod linux {
             Ok(())
         }
 
+        /// `dir` までのディレクトリを root の下に作る（`mkdir -p`）。途中の symlink は拒否する。
+        /// 既にあれば何もしない
+        pub fn create_dir_all(&self, dir: &RelPath) -> Result<(), FsError> {
+            let mut prefix: Option<RelPath> = None;
+            for name in dir.components() {
+                let parent = match &prefix {
+                    Some(p) => self.open_at(p.as_str(), OFlags::PATH | OFlags::DIRECTORY)?,
+                    None => self.open_at(".", OFlags::PATH | OFlags::DIRECTORY)?,
+                };
+                match rustix::fs::mkdirat(&parent, name, Mode::from_raw_mode(0o755)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(e) => return Err(e.into()),
+                }
+                prefix = Some(match prefix {
+                    Some(p) => p
+                        .join(name)
+                        .map_err(|e| FsError::Io(std::io::Error::other(e)))?,
+                    None => {
+                        RelPath::parse(name).map_err(|e| FsError::Io(std::io::Error::other(e)))?
+                    }
+                });
+            }
+            // 末尾がディレクトリ（symlink でない）ことを確かめる
+            self.open_at(dir.as_str(), OFlags::PATH | OFlags::DIRECTORY)?;
+            Ok(())
+        }
+
+        /// ディレクトリを fsync する（rename 後にエントリを永続化する）。`None` は root
+        pub fn fsync_dir(&self, dir: Option<&RelPath>) -> Result<(), FsError> {
+            let fd = self.open_at(
+                dir.map(RelPath::as_str).unwrap_or("."),
+                OFlags::RDONLY | OFlags::DIRECTORY,
+            )?;
+            rustix::fs::fsync(&fd)?;
+            Ok(())
+        }
+
         /// ファイルを削除する（ディレクトリは対象外）
         pub fn unlink(&self, rel: &RelPath) -> Result<(), FsError> {
             let parent = self.open_parent(rel)?;
@@ -413,6 +450,14 @@ mod stub {
         }
 
         pub fn rename_noreplace(&self, _from: &RelPath, _to: &RelPath) -> Result<(), FsError> {
+            Err(FsError::Openat2Unsupported)
+        }
+
+        pub fn create_dir_all(&self, _dir: &RelPath) -> Result<(), FsError> {
+            Err(FsError::Openat2Unsupported)
+        }
+
+        pub fn fsync_dir(&self, _dir: Option<&RelPath>) -> Result<(), FsError> {
             Err(FsError::Openat2Unsupported)
         }
 

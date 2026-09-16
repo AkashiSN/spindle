@@ -1035,3 +1035,101 @@ preview で見た番号と apply の番号を一致させるため（飛ばす�
 **却下**: クライアントで操作を評価して新値を送る案（正規表現の方言が JS と Rust で違い、
 preview と apply の一致を保証できない）。preview の全行差分を返す案（6 万行で数十 MB）。
 409 で token を消費する案（「除外して適用」のたびに preview からやり直しになる）。
+
+---
+
+## D-43 パス生成と一括リネームの固定値と境界
+
+**決定**: 仕様（SPEC §5 / §7.5 / §8 / §9）が定めていない値と境界を次のとおり固定する。設定には
+出さない（テンプレートは `[layout]` の 3 本だけ。リクエストでは変えられない）。
+
+- **テンプレート**（`domain::pathgen::Template`）: プレースホルダは `category` / `albumartist` /
+  `artist` / `album` / `title` / `disc` / `track` / `year` / `edition`。`{track:02}` のように `:0N`
+  （N ≥ 1）で 0 埋め幅を指定できるのは整数フィールド（`disc` / `track`）だけ。`{track:2}` や
+  `{title:02}` は書式エラー。未知の名前・閉じていない `{` とともに設定の読み込み時に落とす（fail-fast）。拡張子はテンプレートに含めない（形式はファイルが決める）。
+  ytmusic の `<Cat>/<Artist>/<Album>/<track>. <title>` は `{category}/{albumartist}/{album}/{track}. {title}`
+  で再現できる
+- **テンプレートの選択**: album に category が無ければ `unsorted`、album が複数ディスク
+  （`albums.disc_count > 1`、または active な構成トラックの `disc_no` の最大が 2 以上）なら
+  `multi_disc`、それ以外は `single_disc`。`{category}` は `albums.category_id` の名前
+- **値のフォールバック**: `albumartist` → `artist_display` → `Unknown Artist`、`album` →
+  `Unknown Album`、`title` → 現在のファイル名（拡張子なし）、`track` → 0、`disc` → 1、
+  `year` は album の `date`（無ければトラックの `date`）の先頭 4 桁が数字のときだけ
+- **置換テーブル**は ytmusic の `FILENAME_REPLACE_TITLE` + `EXTRA` を全要素に適用する（ytmusic は
+  albumartist に `:` と `*` だけ当てていたが、表を 1 本にする。SPEC §5 の表のとおり）。表に無い
+  SMB / exFAT 禁止文字は同じ流儀で全角にする（`/`→`／` `\`→`＼` `|`→`｜` `"`→`＂`）。
+  制御文字は落とす。末尾のドット・スペースは削る。Windows の予約名は `_` を後置する
+  （`CON` → `CON_`、`con.txt` → `con_.txt`）。空になった要素は `_`。タグ値そのものは変えない
+- **切り詰め**: 各要素 255 バイト、パス全体 240 UTF-16 単位。要素はその要素の末尾を、全体は
+  ファイル名の stem を `…`（U+2026）付きで切る。拡張子は保つ。省略記号の前の末尾スペース・
+  ドットは削る。切り詰めた結果に元の文字が 1 つも残らない（ディレクトリだけで上限を超える、拡張子が
+  長すぎる、先頭が多バイト / サロゲートで予算に入らない）ときは生成エラー（計画では conflict）に
+  する。上限を満たさないパスは返さない
+- **衝突降格の単位はリリース**: `mb:<MUSICBRAINZ_ALBUMID>` → `disc:<DISCID>` → `album:<album_id>` の
+  順で決めるキーが同じなら同一リリース。同じ宛先ディレクトリに 2 つ以上のリリースが来たら、
+  そのディレクトリに**既にいる**リリース（選択外の占有者、または選択内で現在そこにいるもの）が
+  1 つだけでそれと同じなら合流（降格なし）、それ以外は `{album} ({year})` → `{album} ({edition})` に
+  降格する。年 / edition が無い、または降格しても衝突するものは `conflict`（マージにはしない。D-7）
+- **ファイル名の衝突**は `rel_path_key` で判定する（選択内の重複、選択外の active 行の占有）。
+  選択内の現在 key は占有とみなさない（swap / 循環が通る）。missing 行が宛先 key を持っていれば
+  prepare で `\0vacated:<id>` へ明け渡させ（スキャナと同じ規則）、ファイルが残っていれば
+  `RENAME_NOREPLACE` が最終判定になる。自分自身の大小文字だけの変更は許可する
+- **バッチ 1 つに `rename` ジョブ 1 つ**（payload `{ batch_id }`、dedup key
+  `rename:batch:<batch_id>`、並列 1）。SPEC §8 の「track 単位」を rename では採らない: 2 phase は
+  バッチ全体の順序を要し、track ジョブに分けると phase の境界を DB で管理する必要が出る。
+  ジョブは開始時にバッチの全トラックをロックする（取れなければ再キュー）
+- **DB の overlay は prepare の時点**で `rel_path` を新値にする（2 段階更新。D-24 と同じ
+  「DB 先行更新 + pending」）。`expected_rel_path` が記録時点の物理パス
+- **一時名は `spindle-rename-<op_id>.<ext>`**（source と同じディレクトリ、隠しファイルにしない）。
+  `.spindle-tmp-*` はスキャナが 1 時間で回収するので使えず、隠すとスキャナが対象外にして
+  トラックを missing にする。スキャナは pending の rename op があるトラックの所在が
+  source / 一時名 / 最終名（DB の `rel_path`）のいずれかなら衝突にしない（`edit::in_progress_keys`）。
+  どれでもなければ op を `skipped_conflict` にし、**同じトランザクションで `rel_path` を実在パスへ
+  追随させる**（rename ジョブは pending の op しか見ないので、overlay の最終名を残すと次回スキャンまで
+  DB が実在と食い違う）
+- **phase 1 の事前条件は stat だけ**（dev / inode / size / mtime_ns / ctime_ns）。タグは読まない
+  （内容は変えないので `tag_hash` の再計算は不要。in-place のタグ書き換えは ctime で見える）。
+  preview 時の `tag_hash` が apply 時の DB 値と違う行は prepare で `skipped_conflict` にする
+  （計画の前提が崩れている。D-33）
+- **op の終端は commit で一括**（1 トランザクション）。各 op の所在（最終名 / 一時名 / source /
+  不明）をファイルから決め、`rel_path` を所在へ揃え（2 段階更新）、物理属性を追随する。所在が
+  不明（ファイルが無い。一時名が外部に消された等）なら記録時点の `expected_rel_path` と物理属性へ
+  戻す（次回スキャンが inode で追随するか missing にする）。ただしその key を別の行（swap の相手の
+  実在パスを含む）が持っていれば戻せないので `\0vacated:<id>` のままにする（所在が分かっている行が
+  正。UNIQUE を踏んで commit が永久に失敗する経路を作らない）。順序は **所在不明の行を先に予約 key へ
+  退避 → 所在の分かった行を実在パスへ（バッチ外の占有者は明け渡し）→ 所在不明の行を空いていれば
+  記録時点のパスへ**（所在不明の行の overlay が、相手の戻り先と重なることがある）。phase 2 で宛先が取られていた op は
+  source へ戻して `skipped_conflict`、戻せなければ一時名のまま `skipped_conflict`（DB の `rel_path`
+  は一時名。警告を出す）。rename の直後は毎回親ディレクトリを fsync する（phase 1 / 巻き戻し /
+  phase 2 のどこで電源断しても rename が永続化されている）
+- **cancel は phase 2 に入るまで**: phase 1 の各 op の前と phase 1 完了直後に確認し、退避済みを
+  source へ戻して全 op を `failed('cancelled')` に閉じる。phase 2 に入ったら最後まで進める
+  （一部だけ戻すと swap / 循環が解けない）。ジョブが走っていないバッチの cancel / リカバリ /
+  最終失敗は `close_rename_ops` がバッチの pending を一度に閉じる（rename op はパスが互いに
+  絡むので op 単位に閉じない）
+- **クラッシュ復旧は所在の再判定**: 再投入されたジョブが op ごとに最終名 → 一時名 → source の
+  順に inode で所在を判定し、続きを行う。起動時の特別処理は無い（D-41 と同じ）
+- **album は coordinator が追随する**（「ディレクトリ = album」を DB でも保つ）: overlay と
+  overlay 解消の両方で、宛先ディレクトリに album 行があれば合流（missing なら復活）、無ければ
+  ある album の active な構成トラック全部が同じ宛先へ動くとき（album 全体の移動）は `rel_dir` を
+  書き換えて id を維持（D-32）、それ以外は新規 album（メタは構成トラックのキャッシュ列の最頻値、
+  category は先頭ディレクトリ名が語彙に一致すればそれ、無ければ旧 album から引き継ぐ）。宛先の
+  album 行が missing でこちらが album 全体の移動なら、その行を `\0displaced:<id>` へ退かせて
+  id を維持する。構成 0 になった旧 album は `missing_since`。スキャナは変更のないディレクトリの
+  照合を省く（D-38）ので、ここで揃えないと album が古いまま残る
+- **同梱ファイル（cover.jpg / disc.cue / rip.log 等）は動かさない。** rename op はトラック 1 本の
+  パスだけを所有し、巻き戻しの対象もそれだけ。album 全体を動かした後の旧ディレクトリに残る
+  同梱ファイルの扱い（追随・GC）は未決（残課題）
+- **API**（SPEC §9）: preview は選択を固定して token を返し、行ごとに `old` / `new`（衝突なら
+  null と `reason`）。apply は token の集合で計画を取り直し、`affected` / `conflict` を返す。
+  409 の規則は tags と同じ（`pending` / `preview_stale` / `no_changes`）
+
+**理由**: 2 phase をバッチ単位のジョブにすると、phase の境界がプロセス内の制御フローだけで済み、
+クラッシュ復旧は「所在をファイルから判定する」1 本になる。一時名を可視にするのは、スキャンが
+リネームと並走する前提（不変条件 5）で pending 中のトラックを missing にしないため。album を
+coordinator で追随させるのは、リネーム直後の一覧（category / albumartist / album のツリー）が
+次回 deep scan まで古いままになるのを避けるため。
+
+**却下**: track 単位の rename ジョブ（phase 境界の管理が DB に要る）。`.spindle-tmp-*` を一時名に
+使う案（スキャナが回収する）。phase 2 の途中で cancel を効かせる案（swap の片側だけ戻せない）。
+同名の album をマージする案（D-7）。

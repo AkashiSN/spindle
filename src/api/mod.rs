@@ -7,6 +7,7 @@ pub mod error;
 pub mod events;
 pub mod health;
 pub mod jobs;
+pub mod rename;
 pub mod scan;
 pub mod selection;
 pub mod spa;
@@ -30,6 +31,8 @@ pub fn router(state: AppState) -> Router {
         .route("/tracks/{id}", get(tracks::get))
         .route("/tracks/batch", patch(batch::apply))
         .route("/tracks/batch/preview", post(batch::preview))
+        .route("/rename/preview", post(rename::preview))
+        .route("/rename/apply", post(rename::apply))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))

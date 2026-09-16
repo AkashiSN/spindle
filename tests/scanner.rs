@@ -741,9 +741,10 @@ async fn pending_rename_op_conflicts_with_external_rename() {
     std::fs::rename(&p, lib.path("A/B/renamed.flac")).unwrap();
 
     let report = lib.scan().await;
-    let t = lib.track("A/B/01.flac").unwrap();
-    assert_eq!(t.id, before.id, "rel_path は据え置き");
-    assert!(lib.track("A/B/renamed.flac").is_none());
+    // op は conflict になり、同じトランザクションで rel_path は実在パスへ追随する（D-43）
+    let t = lib.track("A/B/renamed.flac").unwrap();
+    assert_eq!(t.id, before.id);
+    assert!(lib.track("A/B/01.flac").is_none());
     // pending → conflict でバッジが変わるので、SSE library の変更行に入る
     assert_eq!(report.changed_ids, vec![before.id]);
     let (result, err): (String, Option<String>) = lib
@@ -1291,9 +1292,10 @@ async fn pending_rename_overlay_conflicts_when_file_moved_away_from_expected_pat
     };
     std::fs::rename(&p, lib.path("A/B/elsewhere.flac")).unwrap();
     lib.scan().await;
-    let t = lib.track("A/B/01 Renamed.flac").unwrap();
-    assert_eq!(t.id, before.id, "rel_path は overlay のまま据え置き");
-    assert!(lib.track("A/B/elsewhere.flac").is_none());
+    // op は conflict になり、overlay の最終名ではなく実在パスへ追随する（D-43）
+    let t = lib.track("A/B/elsewhere.flac").unwrap();
+    assert_eq!(t.id, before.id);
+    assert!(lib.track("A/B/01 Renamed.flac").is_none());
     let result: String = lib
         .conn()
         .query_row("SELECT result FROM edit_ops WHERE id = ?1", [op_id], |r| {

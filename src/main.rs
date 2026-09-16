@@ -10,6 +10,7 @@ use spindle::db::{migrations, Db};
 use spindle::edit::Editor;
 use spindle::fsroot::Roots;
 use spindle::import::scanner::Scanner;
+use spindle::jobs::handlers::rename::RenameHandler;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
@@ -99,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         "編集バッチをリカバリした"
     );
 
-    // ハンドラは各タスクで登録する（rename は P0-11 …）
+    // ハンドラは各タスクで登録する
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
@@ -112,7 +113,11 @@ async fn main() -> anyhow::Result<()> {
             state.config.scan.deep_interval_days,
         )),
     );
-    registry.register(JobType::Tagwrite, Arc::new(TagwriteHandler::new(editor)));
+    registry.register(
+        JobType::Tagwrite,
+        Arc::new(TagwriteHandler::new(Arc::clone(&editor))),
+    );
+    registry.register(JobType::Rename, Arc::new(RenameHandler::new(editor)));
     let worker = state.jobs.start(registry, shutdown.clone());
     // 起動時に 1 回 incremental を投入する（停止中の外部変更を拾う。D-38）
     match scan::enqueue_scan(&state.jobs, "incremental").await {

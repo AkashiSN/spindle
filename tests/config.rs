@@ -300,12 +300,23 @@ fn layout_template_must_be_root_relative() {
             "{bad:?}: {err}"
         );
     }
-    // どのプレースホルダを使うかは P0-11 のテンプレート展開が決める。ここでは縛らない
     Config::parse(&with_override(
         "layout",
         r#"single_disc = "{album}/{track:02}""#,
     ))
     .unwrap();
+}
+
+#[test]
+fn layout_template_placeholders_are_validated_at_load() {
+    for bad in ["{album}/{genre}", "{album}/{title", "{album}/{track:x}"] {
+        let toml = with_override("layout", &format!("multi_disc = {bad:?}"));
+        let err = Config::parse(&toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Invalid(ref m) if m.contains("multi_disc")),
+            "{bad:?}: {err}"
+        );
+    }
 }
 
 #[test]

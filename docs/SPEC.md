@@ -159,11 +159,17 @@ ytmusic の foo_fileops 互換置換テーブルを継承し、以下を追加:
 ```
 
 - タグ値は NFC 正規化のみ（原文字を保持）、ファイル名にのみ置換テーブルを適用
-- SMB 制約: 末尾のドット・スペース禁止、予約名 (CON, PRN, AUX, NUL, COM1-9, LPT1-9) 回避
+- 表に無い禁止文字 `/` `\` `|` `"` も同じ流儀で全角化（`／` `＼` `｜` `＂`）、制御文字は除去（D-43）
+- SMB 制約: 末尾のドット・スペース禁止（削る）、予約名 (CON, PRN, AUX, NUL, COM1-9, LPT1-9) 回避
+  （`_` を後置: `CON` → `CON_`）。空になった要素は `_`
 - Android 側 exFAT 制約: パス長上限、`|` `"` 禁止
 - **各コンポーネント**は 255 バイト以下（ZFS / SMB の上限。パス全体の上限ではない）。
   パス全体は Windows / Android 互換のため **240 文字（UTF-16 単位）**を上限とし、
   超える場合はタイトル部を省略記号付きで切り詰める
+- 値が無いときのフォールバック: `albumartist` → `artist` → `Unknown Artist`、`album` →
+  `Unknown Album`、`title` → 現在のファイル名、`track` → 0、`disc` → 1（D-43）
+- テンプレートの選択: category が無ければ `unsorted`、複数ディスク（`disc_count > 1` または
+  構成トラックの `disc_no` の最大が 2 以上）なら `multi_disc`、それ以外は `single_disc`
 
 ### パスの表現と境界
 
@@ -398,7 +404,8 @@ Phase 4  commit:     1 トランザクションで
   ファイルの `rel_path` / `size` / `mtime_ns` / `ctime_ns` は更新する。外部 rename は inode も
   mtime も変えないので、これを止めると tagwrite が旧パスを開けなくなる。
   抑止するのは `tags` op ならタグとキャッシュ列・`tag_version`、`rename` op なら
-  `rel_path`（外部 rename と衝突したら op を `skipped_conflict` にする）だけ。
+  `rel_path`（外部 rename と衝突したら op を `skipped_conflict` にし、同じトランザクションで
+  `rel_path` を実在パスへ追随させる。D-43）だけ。
   外部 rename の**宛先が別の行（missing 行を含む）に占有されていた**場合は、Phase 4 で
   その行の missing 確定と key の入れ替えを同じトランザクションで行う
 - 走査対象は Library のみ。Derived / Archive はスキャンしない
@@ -577,10 +584,18 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
   - やり直し（redo）= 逆バッチを revert する。同じ規則で処理される
   - 巻き戻しも通常のバッチなので、対象トラックに pending があれば 409
 - リネーム（P0-11）と論理削除も同じ機構に乗せる（`kind = rename / delete`）。
-  巻き戻しの対象は tag に限らない。**一括リネームは coordinator が 2 phase で行う**:
-  phase 1 で全 op の source を予約済み一時名へ退避（ファイルと DB key の両方）、phase 2 で
-  `ordinal` 順に最終名へ置く。swap / 循環はこれで解ける。phase 境界でのクラッシュは
-  一時名に残ったファイルを `edit_ops` から復元する
+  巻き戻しの対象は tag に限らない。**一括リネームは coordinator が 2 phase で行う**（D-43）:
+  prepare で DB の `rel_path` を 2 段階更新で新値にし（overlay。`expected_rel_path` が記録時点の
+  物理パス）、album の所属も追随させ、**バッチ 1 つに `rename` ジョブ 1 つ**を投入する。ジョブは
+  phase 1 で全 op の source を同じディレクトリの一時名 `spindle-rename-<op_id>.<ext>` へ
+  `RENAME_NOREPLACE` で退避（事前条件は dev / inode / size / mtime_ns / ctime_ns。外れていれば
+  `skipped_conflict` で触らない）、phase 2 で `ordinal` 順に最終名へ置く（宛先ディレクトリは作る。
+  宛先が取られていれば source へ戻して `skipped_conflict`）。最後に 1 トランザクションで op を
+  終端にし、`rel_path` をファイルの所在へ揃え、物理属性を追随し、バッチを集計する。
+  swap / 循環はこれで解ける。phase 境界でのクラッシュは、再投入されたジョブが op ごとの所在
+  （最終名 / 一時名 / source）を inode で判定して続きを行う。cancel は phase 2 に入るまで
+  （退避済みを戻して全 op を `failed('cancelled')`）。スキャナは pending の rename op があるトラックの
+  所在が source / 一時名 / 最終名のいずれかなら衝突にしない
 
 ### 7.6 Derived 生成
 
@@ -664,7 +679,7 @@ DB の追随は必要。
 | `rg` | CPU コア数 | album_id |
 | `transcode` | CPU コア数 - 1 | track_id + audio_version |
 | `tagwrite` | 4 | track_id + tag_version（`edit_batch_id` でバッチに紐づく） |
-| `rename` | 1 | track_id（2 段階更新の順序を守るため直列） |
+| `rename` | 1 | batch_id（バッチ 1 つに 1 ジョブ。2 phase の順序を守るため直列。D-43） |
 | `normalize` | 2 | track_id |
 | `thumbnail` | 4 | artwork_id |
 | `flaccheck` | CPU コア数 | track_id |
@@ -690,8 +705,8 @@ DB の追随は必要。
   `track_id` 昇順に取得し、1 つでも取れなければ全解放して再キュー（デッドロック回避）
 - 版を持つジョブ（`tagwrite` / `transcode`）は開始直前に payload の版と現在値を比較し、
   古ければ no-op で `done`（§7.5 stale ジョブ）
-- **編集バッチは coordinator + track ジョブ。** `tagwrite` / `rename` ジョブは track 単位で
-  投入し `jobs.edit_batch_id` でバッチに紐づける。バッチ自体はジョブではなく、
+- **編集バッチは coordinator + 子ジョブ。** `tagwrite` ジョブは track 単位、`rename` ジョブは
+  バッチ単位で投入し `jobs.edit_batch_id` でバッチに紐づける。バッチ自体はジョブではなく、
   終端状態は子ジョブ・op の結果から集計する（最後に終端になった子ジョブが集計する）。
   起動時リカバリ・キャンセルはバッチ配下の子ジョブに対して行う
 
@@ -709,8 +724,8 @@ GET    /api/tracks/:id                            セッション有りは一覧
                                                   セッション無しは限定フィールド（D-27 / D-39）
 PATCH  /api/tracks/batch                          一括編集（dry_run フラグ）
 POST   /api/tracks/batch/preview                  変更プレビュー
-POST   /api/rename/preview                        テンプレート適用結果
-POST   /api/rename/apply
+POST   /api/rename/preview                        テンプレート適用結果（selection_token を発行）
+POST   /api/rename/apply                          token の集合をリネームバッチとして記録
 
 GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
 GET    /api/categories, POST /api/categories
@@ -802,6 +817,20 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //   409 { "error": "preview_stale" }                             // token 期限切れ・ops 不一致
 //   409 { "error": "no_changes" }                                // 値が変わる行が無い
 //   409 の応答では token を消費しない（同じ token でやり直せる）。201 で消費する
+
+// POST /api/rename/preview   { "selection": {...}, "sort"? }
+//   selection を解決して固定し selection_token を返す（D-33）。各行に [layout] のテンプレートを
+//   適用した宛先を返す。items は宛先が変わる行と衝突した行だけ（変更なし・反映待ちは件数）
+{ "selection_token": "…", "count": 980,
+  "changed": 975, "unchanged": 2, "conflict": 2, "pending_excluded": 1,
+  "items": [ { "id": 1, "old": "old/a.flac", "new": "J-Pop/花譜/魔法/03 過去を喰らう.flac" },
+             { "id": 2, "old": "old/b.flac", "new": null, "reason": "同名の別リリースと衝突（…）" } ] }
+
+// POST /api/rename/apply   { "selection_token", "description"?, "skip_pending": false }
+//   token の集合で計画を取り直してバッチを記録する。衝突した行と preview の後にタグが変わった行は
+//   skipped_conflict の op として記録だけする（affected に含む）
+//   201 { "batch_id": 43, "affected": 977, "conflict": 2 }
+//   409 { "error": "pending" | "preview_stale" | "no_changes" }   // 規則は PATCH /api/tracks/batch と同じ
 
 // GET /api/history
 { "items": [ { "id": 42, "created_at": 1, "description": "…", "kind": "tags",
@@ -1326,8 +1355,9 @@ src/
 │   ├── replaygain.rs    ebur128、フォーマット別変換
 │   └── category.rs      統制語彙、GENRE 写像
 ├── edit/
-│   └── mod.rs           編集バッチの coordinator（記録・DB 先行更新・反映・overlay 解消・
-│                        キャンセル・起動時リカバリ。D-24 / D-41）
+│   ├── mod.rs           編集バッチの coordinator（記録・DB 先行更新・反映・overlay 解消・
+│   │                    キャンセル・起動時リカバリ。D-24 / D-41）
+│   └── rename.rs        一括リネームの計画・記録・2 phase 反映・album の追随（D-43）
 ├── media/
 │   ├── decode.rs        symphonia / ffmpeg フォールバック
 │   ├── encode.rs        flac / opus
@@ -1351,7 +1381,7 @@ src/
 │   ├── fb2k.rs          AST → foobar クエリ + ソートパターン
 │   └── export.rs        m3u8 / pls / パスマッピング
 ├── api/
-│   ├── mod.rs  tracks.rs  albums.rs  selection.rs  stream.rs  cd.rs  events.rs
+│   ├── mod.rs  tracks.rs  albums.rs  selection.rs  batch.rs  rename.rs  stream.rs  cd.rs  events.rs
 │   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
 │   ├── state.rs  error.rs   AppState、`{ "error": code }` 応答
 └── web/                 SPA を rust-embed で同梱
@@ -1410,3 +1440,6 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 - [ ] 偽ハイレゾ検出のしきい値設計（P3）
 - [ ] 移行後の NFSv4 ACL 再適用（rsync では引き継げない）
 - [ ] Inbox のポーリング間隔（inotify はコンテナ越しに不安定なため既定はポーリング）
+- [ ] 一括リネームで album 全体を動かした後、旧ディレクトリに残る同梱ファイル（cover.jpg /
+      disc.cue / rip.log 等）の追随と空ディレクトリの扱い（rename op はトラックのパスだけを
+      所有する。D-43）

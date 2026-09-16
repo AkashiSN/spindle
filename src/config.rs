@@ -290,7 +290,7 @@ impl Config {
             }
         }
 
-        // [layout]: ルート相対の `/` 区切り。プレースホルダの規則は P0-11 のテンプレート展開が持つ
+        // [layout]: ルート相対の `/` 区切り。プレースホルダは `domain::pathgen::Template` の規則
         for (key, tpl) in [
             ("layout.multi_disc", &self.layout.multi_disc),
             ("layout.single_disc", &self.layout.single_disc),
@@ -308,6 +308,9 @@ impl Config {
                 return invalid(format!(
                     "{key} に空・`.`・`..` のコンポーネントがある: {tpl:?}"
                 ));
+            }
+            if let Err(e) = crate::domain::pathgen::Template::parse(tpl) {
+                return invalid(format!("{key} のテンプレートが不正: {e}: {tpl:?}"));
             }
         }
 

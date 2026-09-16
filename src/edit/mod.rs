@@ -22,6 +22,8 @@
 //! だけ、記録時点の旧値（`edits.old_value`）と事前条件の物理属性へ戻す。物理属性を記録時点へ
 //! 戻すのは、その後ファイルが外部で変わっていればスキャンが差分として拾い直せるようにするため
 
+mod rename;
+
 use std::io::{Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +46,10 @@ use crate::import::scanner::{
 use crate::jobs::{BatchEvent, Event, JobState, JobType, Jobs, NewJob};
 
 pub use crate::domain::tags::TagChange;
+pub use rename::{
+    in_progress_keys, rename_dedup_key, temp_rel_path, PlannedRename, RenameHook, RenameOutcome,
+    RenameStep, RenameTarget,
+};
 
 /// 1 トラックへのタグ変更（`prepare_tags` の入力）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +155,7 @@ pub struct Editor {
     root: Arc<RootDir>,
     jobs: Arc<Jobs>,
     before_rename: Mutex<Option<BeforeRenameHook>>,
+    rename_hook: Mutex<Option<RenameHook>>,
 }
 
 /// tagwrite ジョブの dedup key（SPEC §8）
@@ -278,6 +285,7 @@ impl Editor {
             root,
             jobs,
             before_rename: Mutex::new(None),
+            rename_hook: Mutex::new(None),
         }
     }
 
@@ -455,6 +463,10 @@ impl Editor {
         if op.result != OpResult::Pending {
             return Ok(false);
         }
+        if op.kind == OpKind::Rename {
+            // rename op はパスが互いに絡む（swap / 循環）ので、バッチの pending を一度に閉じる
+            return Ok(self.close_rename_ops(op.batch_id, job_id, error).await? > 0);
+        }
         let current = {
             let root = Arc::clone(&self.root);
             tokio::task::spawn_blocking(move || read_file_state(&root, &rel_path)).await?
@@ -551,8 +563,20 @@ impl Editor {
         self.jobs.notify_changed(&touched_jobs).await;
         let mut ops_cancelled = 0;
         for op_id in to_close {
-            if self.close_op(op_id, CANCELLED_ERROR, None).await? {
-                ops_cancelled += 1;
+            match self.load_op(op_id).await {
+                // rename op は 1 回の呼び出しでバッチの pending を全件閉じる
+                Ok((op, _, _)) if op.kind == OpKind::Rename => {
+                    ops_cancelled += self
+                        .close_rename_ops(op.batch_id, None, CANCELLED_ERROR)
+                        .await?;
+                }
+                Ok(_) => {
+                    if self.close_op(op_id, CANCELLED_ERROR, None).await? {
+                        ops_cancelled += 1;
+                    }
+                }
+                Err(EditError::OpNotFound(_)) => {}
+                Err(e) => return Err(e),
             }
         }
         if running.is_empty() {
@@ -617,8 +641,19 @@ impl Editor {
 
         let mut report = RecoverReport::default();
         for op_id in plan.to_cancel {
-            if self.close_op(op_id, CANCELLED_ERROR, None).await? {
-                report.cancelled_ops += 1;
+            match self.load_op(op_id).await {
+                Ok((op, _, _)) if op.kind == OpKind::Rename => {
+                    report.cancelled_ops += self
+                        .close_rename_ops(op.batch_id, None, CANCELLED_ERROR)
+                        .await?;
+                }
+                Ok(_) => {
+                    if self.close_op(op_id, CANCELLED_ERROR, None).await? {
+                        report.cancelled_ops += 1;
+                    }
+                }
+                Err(EditError::OpNotFound(_)) => {}
+                Err(e) => return Err(e),
             }
         }
         let to_requeue = plan.to_requeue;
@@ -630,14 +665,27 @@ impl Editor {
                 let mut job_ids = Vec::new();
                 let mut requeued = 0;
                 for op in &to_requeue {
-                    let Some(tag_version) = history::track_tag_version(&tx, op.track_id)? else {
-                        continue;
+                    let job = match op.kind {
+                        OpKind::Tags => {
+                            let Some(tag_version) = history::track_tag_version(&tx, op.track_id)?
+                            else {
+                                continue;
+                            };
+                            tagwrite_job(op.track_id, tag_version, op.id, op.batch_id)
+                        }
+                        // rename はバッチ 1 つに 1 ジョブ。dedup で 2 件目以降は Duplicate になる
+                        OpKind::Rename => rename::rename_job(op.batch_id),
+                        _ => continue,
                     };
-                    let job = tagwrite_job(op.track_id, tag_version, op.id, op.batch_id);
-                    if let dbjobs::EnqueueResult::Inserted(id) = dbjobs::enqueue(&tx, &job, now)? {
-                        history::set_op_job(&tx, op.id, id)?;
-                        job_ids.push(id);
-                        requeued += 1;
+                    match dbjobs::enqueue(&tx, &job, now)? {
+                        dbjobs::EnqueueResult::Inserted(id) => {
+                            history::set_op_job(&tx, op.id, id)?;
+                            job_ids.push(id);
+                            requeued += 1;
+                        }
+                        dbjobs::EnqueueResult::Duplicate(id) => {
+                            history::set_op_job(&tx, op.id, id)?;
+                        }
                     }
                 }
                 tx.commit()?;
