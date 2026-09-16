@@ -11,8 +11,8 @@ use crate::db::scans::{last_completed_deep_started_at, ScanKind};
 use crate::db::{now_epoch, Result as DbResult};
 use crate::import::scanner::{ScanError, Scanner};
 use crate::jobs::{
-    BoxFuture, EnqueueResult, Handler, HandlerResult, JobContext, JobError, JobType, Jobs, NewJob,
-    Outcome,
+    BoxFuture, EnqueueResult, Event, Handler, HandlerResult, JobContext, JobError, JobType, Jobs,
+    LibraryEvent, NewJob, Outcome,
 };
 
 pub const DEDUP_KEY: &str = "scan";
@@ -125,6 +125,11 @@ impl Handler for ScanHandler {
                     // 最後の値を確実に書く
                     let total = report.files_seen as i64;
                     let _ = ctx.progress(total, total).await;
+                    // 変更行を表へ通知する（SPEC §9 `library`）。commit 済みなので取得すれば新しい値が見える
+                    if let Some(ev) = LibraryEvent::from_changes(report.run_id, report.changed_ids)
+                    {
+                        ctx.jobs().publish(Event::Library(ev));
+                    }
                     Ok(Outcome::Done)
                 }
                 Err(ScanError::Cancelled) => Err(JobError::Cancelled),

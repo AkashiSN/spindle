@@ -740,10 +740,12 @@ async fn pending_rename_op_conflicts_with_external_rename() {
     let op_id = insert_pending_op(&lib.conn(), before.id, "rename", "A/B/01.flac");
     std::fs::rename(&p, lib.path("A/B/renamed.flac")).unwrap();
 
-    lib.scan().await;
+    let report = lib.scan().await;
     let t = lib.track("A/B/01.flac").unwrap();
     assert_eq!(t.id, before.id, "rel_path は据え置き");
     assert!(lib.track("A/B/renamed.flac").is_none());
+    // pending → conflict でバッジが変わるので、SSE library の変更行に入る
+    assert_eq!(report.changed_ids, vec![before.id]);
     let (result, err): (String, Option<String>) = lib
         .conn()
         .query_row(
@@ -754,6 +756,31 @@ async fn pending_rename_op_conflicts_with_external_rename() {
         .unwrap();
     assert_eq!(result, "skipped_conflict");
     assert!(err.is_some());
+}
+
+#[tokio::test]
+async fn unreadable_changed_file_updates_physical_attrs_and_is_reported_as_changed() {
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("A/B/01.flac", 1, "t", "B", 1));
+    lib.scan().await;
+    let before = lib.track("A/B/01.flac").unwrap();
+    // 壊れたファイルに差し替える（size / mtime が変わるので「変更あり」、タグは読めない）
+    std::fs::write(&p, b"not a flac file at all").unwrap();
+
+    let report = lib.scan().await;
+    assert_eq!(report.errors, 1);
+    let t = lib.track("A/B/01.flac").unwrap();
+    assert_eq!(t.id, before.id);
+    assert_ne!(t.size, before.size, "物理属性は更新される");
+    assert_eq!(
+        t.tag_version, before.tag_version,
+        "タグは読めなかったので据え置き"
+    );
+    assert_eq!(
+        report.changed_ids,
+        vec![before.id],
+        "表示値が変わったので通知対象"
+    );
 }
 
 // ---------------------------------------------------------------- deep scan / tmp 回収

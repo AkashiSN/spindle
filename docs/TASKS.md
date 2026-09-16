@@ -153,22 +153,30 @@ missing だった行を同じパスに戻すと復活する。
 
 ### P0-7 トラック一覧 API
 
-- [ ] `GET /api/tracks` カーソルページング、ソート、フィルタ。SPEC §9 のレスポンス形
+- [x] `GET /api/tracks` カーソルページング（キーセット）、ソート（ホワイトリスト）、フィルタ
+      （JSON、ホワイトリスト。D-39）。SPEC §9 のレスポンス形
       （`pending_batch_id` / `conflict_batch_id` / `duplicate_group` / `hardlink` / `derived` を
-      1 クエリの LEFT JOIN で返す）
-- [ ] `selection` の 2 形（`ids` / `filter + exclude_ids`）を解決する共通関数
-- [ ] preview で selection をスナップショットし `selection_token`（TTL 15 分）を返す。
-      apply は token の集合だけを対象にする（D-33）
-- [ ] バッジ用の JOIN（最新 op、`duplicate_groups`）を `EXPLAIN QUERY PLAN` で確認し、
-      temp B-tree が出ないことを固定。`total` の COUNT も同じ計測に含める
-- [ ] `GET /api/search` FTS5 trigram、3 文字未満は LIKE フォールバック
-- [ ] `GET /api/albums`
-- [ ] `GET /api/events`（SSE: job / batch / library）
+      1 クエリで返す。pending / 最新 op は LEFT JOIN、重複は相関 EXISTS）
+- [x] `selection` の 2 形（`ids` / `filter + exclude_ids`）を解決する共通関数
+      （`db::tracks::resolve_selection`）
+- [x] preview で selection をスナップショットし `selection_token`（TTL 15 分）を返す。
+      apply は token の集合だけを対象にする（D-33）。`api::selection::snapshot` / `lookup`、
+      `SelectionStore`（プロセス内、上限 16 件）。エンドポイント本体は P0-10 で載せる
+- [x] バッジ用の JOIN（最新 op、重複）を `EXPLAIN QUERY PLAN` で確認し、
+      temp B-tree が出ないことを固定（`tests/tracks_query.rs`。無フィルタの全ソートキー × 昇降 ×
+      1 / 2 ページ目と `total` の COUNT）。フィルタ付きソートの temp B-tree は許容（D-39）
+- [x] `GET /api/search` FTS5 trigram、3 文字未満は LIKE フォールバック（一覧と同じレスポンス形）
+- [x] `GET /api/albums` / `:id`
+- [x] `GET /api/events`（SSE: job / batch / library）。scan 完了時に `library`（200 件以下は
+      `ids`、超えたら `bulk`）を流す。`GET /api/tracks/:id`（CIDR 経由は限定フィールド）も併せて実装
 
 受け入れ: 6 万件 + 履歴 10 万 op + 重複 5% の合成 DB で、100 件取得が warm cache で 100ms 以内
 （バッジ用の JOIN と `total` 込み。対象 NAS または参照マシンを明記）。日本語の部分一致が引ける。
 フィルタ形の selection が 6 万件で ID 列挙なしに解決できる。
 preview 後にスキャンで行が増えても apply の対象が増えない。
+計測: `tests/tracks_perf.rs`（`#[ignore]`、`cargo test --release --test tracks_perf -- --ignored --nocapture`）。
+2026-09-16、TrueNAS ホスト（AMD Ryzen 5 7600、DB は tmpfs）で最悪 53ms（FTS で全行に当たる語）、
+既定ソート 0.75ms。詳細は D-39
 
 依存: P0-3, P0-6
 

@@ -693,16 +693,22 @@ DB の追随は必要。
 ## 9. HTTP API
 
 ```
-GET    /api/tracks?filter=&sort=&cursor=&limit=   カーソルページング
-GET    /api/tracks/:id
+GET    /api/tracks?filter=&sort=&cursor=&limit=   カーソルページング（D-39）
+                                                  filter = URL エンコードした JSON（下記）、
+                                                  sort = album(既定) | title | artist | album_title |
+                                                  albumartist | date | duration | codec | rel_path | id
+                                                  （`-` 前置で降順）、limit = 1..=1000（既定 100）
+GET    /api/tracks/:id                            セッション有りは一覧と同じ行。trusted_cidrs からの
+                                                  セッション無しは限定フィールド（D-27 / D-39）
 PATCH  /api/tracks/batch                          一括編集（dry_run フラグ）
 POST   /api/tracks/batch/preview                  変更プレビュー
 POST   /api/rename/preview                        テンプレート適用結果
 POST   /api/rename/apply
 
-GET    /api/albums / :id
+GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
 GET    /api/categories, POST /api/categories
-GET    /api/search?q=                             FTS5 trigram
+GET    /api/search?q=                             FTS5 trigram（3 文字未満は LIKE）。/api/tracks と同じ
+                                                  レスポンス形で、filter / sort / cursor / limit も受ける
 
 GET    /api/stream/:id                            Range 対応。原本
 GET    /api/stream/:id?transcode=opus             オンザフライ変換
@@ -740,6 +746,17 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 
 ```jsonc
 // GET /api/tracks?filter=...&sort=title&cursor=...&limit=100
+//   filter はホワイトリストのキーだけを持つ JSON（未知キーは 400。D-39）:
+//   { "category": "J-Pop",            // ツリー: categories.name
+//     "albumartist": "…",              // ツリー: tracks.albumartist の完全一致
+//     "album_id": 12,                  // ツリー
+//     "playlist_id": 3,                // プレイリスト所属
+//     "flags": ["missing", "pending"], // 固定フィルタ（AND）: unverified | duplicate | missing |
+//                                      //   no_rg | pending | conflict | hardlink
+//     "q": "情緒" }                    // 検索語（3 文字以上 FTS5 / 未満 LIKE）
+//   cursor は前ページの next_cursor をそのまま返す不透明文字列（キーセット）。sort が変わったら
+//   捨てる（別ソートで発行したカーソルは 400）。
+//   total はフィルタに一致する全件数（同じ読み取りスナップショットで数える）
 { "items": [ { "id": 1, "title": "...", "artist_display": "...", "album": "...", "albumartist": "...",
                "track_no": 1, "disc_no": 1, "date": "2024", "category": "J-Pop",
                "duration_ms": 280000, "codec": "flac", "lossless": true,
@@ -794,6 +811,7 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //   batch:   { "id", "state", "applied", "conflict", "failed" }
 //   library: { "scan_run_id", "kind": "ids", "track_ids": [ … ] }   // 変更が 200 行以下
 //            { "scan_run_id", "kind": "bulk" }                     // それ以上。ページを無効化
+//            scan の完了時に 1 回（commit 後）。変更行 0 件なら流さない（D-39）
 //   resync:  { "skipped": n }   // サーバ側で取りこぼした。一覧（jobs / history / 表示ページ）を再取得
 //   クライアントは SSE を開いてから一覧を取得する（逆順だと開く前のイベントを失う。D-36）
 ```
@@ -804,8 +822,16 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 再取得、`bulk` は無条件に再取得。選択（`selection`）はイベントで変えない。
 
 `pending_batch_id` / `conflict_batch_id` / `duplicate_group` / `hardlink` は一覧の
-バッジ列（§12.2）が直接使う。`GET /api/tracks` は 1 クエリで返せるよう、
-`edit_ops` の pending と `duplicate_groups` を LEFT JOIN で引く。
+バッジ列（§12.2）が直接使う。`GET /api/tracks` は 1 クエリで返す: `edit_ops` の pending と
+最新 op は LEFT JOIN、重複は `audio_md5` 索引への相関 EXISTS で行ごとに引く
+（`duplicate_groups` ビューを JOIN すると毎回 GROUP BY の実体化が走る。D-39）。
+
+// GET /api/albums
+{ "items": [ { "id": 1, "rel_dir": "J-Pop/…/…", "category": "J-Pop", "albumartist": "…", "album": "…",
+               "date": "2024", "original_date": null, "edition": null, "mb_release_id": null,
+               "disc_count": null, "artwork_id": null, "track_count": 12, "duration_ms": 2800000,
+               "missing_since": null } ] }
+// GET /api/albums/:id  → 上の 1 要素 | 404
 
 ### 認証
 
@@ -1271,9 +1297,12 @@ src/
 ├── db/
 │   ├── mod.rs           コネクション管理（write 単一 / read プール）
 │   ├── migrations.rs    リポジトリ直下 db/migrations/*.sql の埋め込みと適用
-│   ├── tracks.rs  albums.rs  playlists.rs  jobs.rs  history.rs
+│   ├── tracks.rs        一覧（キーセット）・検索・selection 解決・アルバム一覧（D-39）
+│   ├── playlists.rs  jobs.rs  history.rs
 ├── domain/
 │   ├── identity.rs      inode / audio_md5 による同一性解決
+│   ├── filter.rs        一覧のフィルタ（JSON）/ ソート / カーソルの検証
+│   ├── selection.rs     selection の 2 形、preview のスナップショット store（D-33）
 │   ├── pathgen.rs       テンプレート展開・正規化・衝突回避
 │   ├── tags.rs          lofty ラッパ、正規化、多値処理
 │   ├── replaygain.rs    ebur128、フォーマット別変換
@@ -1301,7 +1330,7 @@ src/
 │   ├── fb2k.rs          AST → foobar クエリ + ソートパターン
 │   └── export.rs        m3u8 / pls / パスマッピング
 ├── api/
-│   ├── mod.rs  tracks.rs  stream.rs  cd.rs  events.rs
+│   ├── mod.rs  tracks.rs  albums.rs  selection.rs  stream.rs  cd.rs  events.rs
 │   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
 │   ├── state.rs  error.rs   AppState、`{ "error": code }` 応答
 └── web/                 SPA を rust-embed で同梱

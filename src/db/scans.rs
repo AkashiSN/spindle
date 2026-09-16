@@ -627,17 +627,21 @@ pub fn conflict_pending_op(conn: &Connection, op_id: i64, error: &str, now: i64)
 
 /// finalize（`completed` のときだけ）: この run で claim されなかった active 行に missing を立て、
 /// 構成 0 の album に missing を立てる。戻り値は missing にしたトラック数
-pub fn finalize_missing(conn: &Connection, run_id: i64, now: i64) -> Result<i64> {
-    let tracks = conn.execute(
+pub fn finalize_missing(conn: &Connection, run_id: i64, now: i64) -> Result<Vec<i64>> {
+    // 立てた行の id を返す（SSE `library` イベントの変更行に含める）
+    let mut stmt = conn.prepare_cached(
         "UPDATE tracks SET missing_since = ?2
-         WHERE missing_since IS NULL AND (seen_run_id IS NULL OR seen_run_id <> ?1)",
-        params![run_id, now],
+         WHERE missing_since IS NULL AND (seen_run_id IS NULL OR seen_run_id <> ?1)
+         RETURNING id",
     )?;
+    let tracks = stmt
+        .query_map(params![run_id, now], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     conn.execute(
         "UPDATE albums SET missing_since = ?1
          WHERE missing_since IS NULL
            AND NOT EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = albums.id AND t.missing_since IS NULL)",
         [now],
     )?;
-    Ok(tracks as i64)
+    Ok(tracks)
 }

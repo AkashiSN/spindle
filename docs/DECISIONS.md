@@ -748,3 +748,77 @@ Derived の再エンコードと重複検出の両方が空回りするため。
 
 **却下**: ffmpeg で全ファイルの音声属性を取る案（lofty の properties で足りる。外部プロセス
 1 万回は遅い）。`.spindle-tmp-*` を無条件に回収する案（並走する tagwrite の tmp を消す）。
+
+## D-39 トラック一覧 API の固定値と境界
+
+**決定**: 仕様（SPEC §9 / §12）が定めていない値と境界を次のとおり固定する。設定には出さない。
+
+- **フィルタ式は URL エンコードした JSON 1 文字列**で、キーはホワイトリスト（未知キーは 400）:
+  `category`（`categories.name`）/ `albumartist`（`tracks.albumartist` 完全一致）/ `album_id` /
+  `playlist_id` / `flags`（`unverified` `duplicate` `missing` `no_rg` `pending` `conflict` `hardlink`。
+  複数は AND）/ `q`（検索語）。サイドバーの 3 区画（ツリー・プレイリスト・固定フィルタ）と
+  検索ボックスをそのまま表せる。`selection.filter` も同じ文字列。P1-7 のスマートプレイリスト
+  DSL は同じ JSON に `dsl` キーとして足す（DSL を一覧のフィルタ式に採用して P1-7 を前倒しする案は
+  「タスクをまたいで先回りしない」に反し、プレイリスト所属も表せないので却下）
+- `unverified` は `verification = 'not_attempted'` だけ。`unverifiable`（TOC が無い音源）と
+  `mismatch` は別の意味を持つバッジなので混ぜない（SPEC §6）
+- **ソートはホワイトリスト**（`album`（既定。albumartist, album_id, disc_no, track_no）/ `title` /
+  `artist` / `album_title` / `albumartist` / `date` / `duration` / `codec` / `rel_path` / `id`。
+  `-` 前置で降順）。**キーセットページング**で、カーソルは「発行時のソート `s` / 最終行のソートキー値
+  `k` / `id`」の JSON オブジェクトを base64url にした不透明文字列。ソート列は NULL を許すが行値比較は
+  NULL で不定になるので、
+  ソート式は `coalesce(col, '' | 0 | -1)` に畳み、同じ式の**式索引**を `0002_tracks_sort_indexes.sql`
+  に持つ（NULL は昇順で先頭、降順で末尾）。SQLite は式索引に行値比較の範囲最適化を掛けないため、
+  述語は「先頭キーの `>=` / `<=`（索引の入口）AND 全キー + id の行値比較（絞り込み）」の 2 段にする。
+  **カーソルは発行時のソート（向き込み）を持ち**、デコード時にキー数と値の型（TEXT / INTEGER）を
+  ソートキーの型並びと照合する。型が違う値をバインドすると SQLite の storage class 順序で比較が
+  常に真になり先頭ページが再掲されるため、キー数だけの照合では足りない。**リクエストの `sort` と
+  発行時のソートが違う（向き違いを含む）カーソルは `Query::from_params` で 400**、DB 層に直接
+  届いた不一致は空ページ（二重防御。エラーにしない）。`limit` は 1..=1000、既定 100
+- **バッジ列は行ごとの索引検索で引く**: pending は `edit_ops` の partial UNIQUE を LEFT JOIN、
+  最新 op は `max(id)` の相関サブクエリを LEFT JOIN、重複は `idx_tracks_md5` への相関 EXISTS。
+  `duplicate_groups` ビューを LEFT JOIN すると毎回 GROUP BY の実体化と自動索引（temp B-tree）が
+  走るので使わない（SPEC §9 の「LEFT JOIN で引く」は「1 クエリで返す」の意味に読み替える）。
+  `total` は同じ読み取りトランザクションで `count(*)` を取る
+- フィルタ `pending` / `conflict` は行ごとの相関サブクエリではなく **`edit_ops` 側から集合を作って
+  `IN` で引く**（該当行は少数で、全行を歩くと 6 万回の索引検索になる。計測で 124ms → 0.2ms）。
+  `duplicate` は相関 EXISTS のまま（ビューの `IN` は 2 倍遅い）
+- **フィルタ付きソートの temp B-tree は許容する。** 索引の無い組み合わせ（`category` で絞って
+  `album` 順など）では planner が絞り込み側の索引を選んで ORDER BY を temp B-tree で解く。
+  絞り込んだ集合のソートなので 100ms 以内に収まる（下の計測）。無フィルタの全ソートキーと
+  バッジ用 JOIN、`total` に temp B-tree が出ないことはテストで固定する
+- 検索は **3 文字以上（文字数。バイト数ではない）で FTS5 trigram**、未満は 4 列（title /
+  artist_display / album / albumartist）の `LIKE ... ESCAPE '\'`。FTS には入力全体を 1 フレーズ
+  （`"` は `""`）として渡し、演算子・構文文字を解釈させない。`GET /api/search?q=` は一覧と同じ
+  レスポンス形（`filter.q` を差し替えるだけ。表の集合を差し替える SPEC §12.1 の作りに合わせる）
+- **`selection_token` の保存はプロセス内メモリ**（TTL 15 分、上限 16 件で最古を追い出す）。
+  DB に置かないのは、再起動で消えてよい短期の状態で、apply 側が 409 `preview_stale` で preview から
+  やり直せるから。token は 32 バイトの乱数（base64url）で、**乱数源が読めなければ発行しない**
+  （時刻などで代用しない）。apply は `take`（期限確認と削除を同じロックの中で行う）で token を
+  原子的に消費し、同じ token の並行 apply は 1 つだけ通る。スナップショットは `track_id` /
+  `tag_version` / `audio_version` / 事前条件（dev / inode / size / mtime_ns / ctime_ns / tag_hash /
+  rel_path）と preview 時の `ops` を持つ。`ids` 形の解決は `json_each` で 1 パラメータに畳む
+  （数万個のプレースホルダを並べない）
+- `GET /api/tracks/:id` を trusted_cidrs から**セッション無し**で引いたときの限定フィールドは
+  id / title / artist_display / album / albumartist / track_no / disc_no / date / duration_ms /
+  codec / lossless。パス・編集状態（pending / conflict）・重複・missing・検証結果は含めない（D-27）
+- `GET /api/albums` はページングしない（数千件。ツリーの構築に全件を使う）。`track_count` /
+  `duration_ms` は active なトラックだけを数える
+- SSE `library` は **scan ジョブの完了時に 1 回**流す。変更行（新規・更新・移動・復活・明け渡し・
+  missing 確定・pending rename の conflict 化・読めなかったファイルの物理属性更新）が 200 件以下なら
+  `ids`、超えたら `bulk`、0 件なら流さない。基準は「表の表示値（バッジ含む）が変わった行」。
+  commit 後に流すのでクライアントが再取得すれば新しい値が見える
+- **性能の参照値**（`tests/tracks_perf.rs`、`--release`、6 万件 / 5,000 album / 履歴 10 万 op /
+  重複 5% / pending 50 件、warm cache、5 回の中央値）: 2026-09-16、TrueNAS ホスト（AMD Ryzen 5 7600、
+  12 論理コア、DB は tmpfs）で **既定ソート 1 ページ目 0.75ms、title 昇順 1.2ms、599 ページ目
+  1.2ms、`category` 絞り込み 12ms、`duplicate` 32ms、`conflict` 19ms、`no_rg` + `-date` 21ms、
+  FTS で全行に当たる語 53ms（最悪）、LIKE 13ms**。フィルタ形 selection の全件解決は 27ms
+  （ID 列挙なし）。すべて `total` とバッジ列込み
+
+**理由**: 一覧は P0-8 の表が 6 万行を仮想スクロールで流す土台なので、ページ取得の遅さがそのまま
+体感になる。キーセットにしたのは OFFSET が深いページで線形に遅くなるため（599 ページ目でも
+1.2ms）。フィルタ形式を JSON にしたのはパーサを持たずにホワイトリストで SQL を閉じられ、
+サイドバーの操作と 1 対 1 に対応するから。
+
+**却下**: OFFSET ページング。`duplicate_groups` ビューの LEFT JOIN（実体化のコストが毎回かかる）。
+token を DB に保存する案（短期状態に永続化は過剰。P0-9 の `edit_batches` が apply 後の正）。

@@ -176,6 +176,9 @@ pub struct BatchEvent {
     pub failed: i64,
 }
 
+/// SSE `library` イベントを `ids` で流す変更行数の上限。超えたら `bulk`（SPEC §9）
+pub const LIBRARY_IDS_MAX: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum LibraryEvent {
@@ -186,4 +189,23 @@ pub enum LibraryEvent {
     Bulk {
         scan_run_id: i64,
     },
+}
+
+impl LibraryEvent {
+    /// 変更行の集合からイベントを作る。変更が無ければ None（何も流さない）。
+    /// `LIBRARY_IDS_MAX` 以下なら `ids`、超えたら `bulk`
+    pub fn from_changes(scan_run_id: i64, mut track_ids: Vec<i64>) -> Option<LibraryEvent> {
+        track_ids.sort_unstable();
+        track_ids.dedup();
+        if track_ids.is_empty() {
+            None
+        } else if track_ids.len() <= LIBRARY_IDS_MAX {
+            Some(LibraryEvent::Ids {
+                scan_run_id,
+                track_ids,
+            })
+        } else {
+            Some(LibraryEvent::Bulk { scan_run_id })
+        }
+    }
 }

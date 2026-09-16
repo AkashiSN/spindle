@@ -8,6 +8,7 @@
 pub mod jobs;
 pub mod migrations;
 pub mod scans;
+pub mod tracks;
 
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};

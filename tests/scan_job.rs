@@ -21,7 +21,9 @@ use spindle::db::Db;
 use spindle::fsroot::RootDir;
 use spindle::import::scanner::Scanner;
 use spindle::jobs::handlers::scan::{enqueue_scan, ScanHandler};
-use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};
+use spindle::jobs::{
+    EnqueueResult, Event, JobState, JobType, Jobs, LibraryEvent, Registry, LIBRARY_IDS_MAX,
+};
 
 const EXAMPLE: &str = include_str!("../deploy/config.example.toml");
 const LAN: &str = "192.168.1.23:50000";
@@ -113,6 +115,98 @@ async fn scan_job_runs_the_scanner_and_reports_progress() {
     }
     assert!(saw_progress);
     let _ = &h.db;
+}
+
+/// スキャン完了で SSE `library` イベントが流れる（変更行が 200 件以下なら `ids`）。
+/// 変更が無い run では流れない（SPEC §9、P0-7）
+#[tokio::test]
+async fn scan_publishes_library_event_with_changed_ids_only_when_something_changed() {
+    let h = Harness::new();
+    let lib = h.dir.path().join("Library");
+    std::fs::create_dir_all(lib.join("A/B")).unwrap();
+    let p = require_ffmpeg!(common::make_audio(&lib.join("A/B"), "01.flac", "flac", 1));
+    common::set_basic_tags(&p, "t", "Ar", "B", "AA", 1, 1);
+    let mut events = h.jobs.subscribe();
+    h.start(0);
+
+    let EnqueueResult::Inserted(id) = enqueue_scan(&h.jobs, "incremental").await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(h.wait_terminal(id).await, JobState::Done);
+    let track_id: i64 = h
+        .raw()
+        .query_row("SELECT id FROM tracks", [], |r| r.get(0))
+        .unwrap();
+    let mut library = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        if let Event::Library(l) = ev {
+            library.push(l);
+        }
+    }
+    assert_eq!(
+        library,
+        vec![LibraryEvent::Ids {
+            scan_run_id: 1,
+            track_ids: vec![track_id]
+        }]
+    );
+    // SSE の JSON 形（SPEC §9）
+    let ev = Event::Library(library.remove(0));
+    assert_eq!(ev.name(), "library");
+    assert_eq!(
+        ev.data(),
+        serde_json::json!({ "kind": "ids", "scan_run_id": 1, "track_ids": [track_id] })
+    );
+
+    // 変更なしの再スキャンでは library イベントは流れない
+    let EnqueueResult::Inserted(id) = enqueue_scan(&h.jobs, "incremental").await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(h.wait_terminal(id).await, JobState::Done);
+    while let Ok(ev) = events.try_recv() {
+        assert!(!matches!(ev, Event::Library(_)), "{ev:?}");
+    }
+
+    // ファイルを消すと missing になった行が ids で流れる
+    std::fs::remove_file(&p).unwrap();
+    let EnqueueResult::Inserted(id) = enqueue_scan(&h.jobs, "incremental").await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(h.wait_terminal(id).await, JobState::Done);
+    let mut library = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        if let Event::Library(l) = ev {
+            library.push(l);
+        }
+    }
+    assert_eq!(
+        library,
+        vec![LibraryEvent::Ids {
+            scan_run_id: 3,
+            track_ids: vec![track_id]
+        }]
+    );
+}
+
+#[test]
+fn library_event_switches_to_bulk_above_the_threshold() {
+    assert_eq!(LibraryEvent::from_changes(1, vec![]), None);
+    assert_eq!(
+        LibraryEvent::from_changes(1, vec![3, 1, 3]),
+        Some(LibraryEvent::Ids {
+            scan_run_id: 1,
+            track_ids: vec![1, 3]
+        })
+    );
+    let many: Vec<i64> = (0..=LIBRARY_IDS_MAX as i64).collect();
+    assert_eq!(
+        LibraryEvent::from_changes(2, many),
+        Some(LibraryEvent::Bulk { scan_run_id: 2 })
+    );
+    assert_eq!(
+        Event::Library(LibraryEvent::Bulk { scan_run_id: 2 }).data(),
+        serde_json::json!({ "kind": "bulk", "scan_run_id": 2 })
+    );
 }
 
 #[tokio::test]

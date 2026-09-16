@@ -1,13 +1,16 @@
 //! HTTP API。`/health` 以外の全ルート（SPA 配信を含む）は `auth::guard` の配下に置く
 
+pub mod albums;
 pub mod auth;
 pub mod error;
 pub mod events;
 pub mod health;
 pub mod jobs;
 pub mod scan;
+pub mod selection;
 pub mod spa;
 mod state;
+pub mod tracks;
 
 use axum::http::StatusCode;
 use axum::response::Response;
@@ -22,6 +25,11 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/session", get(auth::session))
+        .route("/tracks", get(tracks::list))
+        .route("/tracks/{id}", get(tracks::get))
+        .route("/search", get(tracks::search))
+        .route("/albums", get(albums::list))
+        .route("/albums/{id}", get(albums::get))
         .route("/jobs", get(jobs::list))
         .route("/jobs/{id}/cancel", post(jobs::cancel))
         .route("/jobs/{id}/retry", post(jobs::retry))

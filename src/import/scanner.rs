@@ -73,6 +73,9 @@ pub struct ScanReport {
     /// `seen` だけ更新した（次回スキャンで整合する）
     pub overtaken: u64,
     pub skipped: Vec<Skipped>,
+    /// この run で DB の内容が変わった行（新規・更新・移動・復活・明け渡し・missing）。
+    /// SSE `library` イベントに使う（200 件以下なら `ids`、超えたら `bulk`。SPEC §9）
+    pub changed_ids: Vec<i64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -668,6 +671,8 @@ impl Commit {
                             now,
                         )?;
                         tracing::warn!(track_id, path = %e.rel, "pending の rename op と外部 rename が衝突");
+                        // pending → conflict でバッジが変わる。表に通知する
+                        report.changed_ids.push(track_id);
                     }
                     continue;
                 }
@@ -710,6 +715,8 @@ impl Commit {
         scans::move_track_paths(&tx, &moves)?;
         let moved_ids: HashSet<i64> = moves.iter().map(|(id, _, _)| *id).collect();
         report.moved = moves.len() as u64;
+        report.changed_ids.extend(evicted.iter().copied());
+        report.changed_ids.extend(moved_ids.iter().copied());
 
         // b/c. 既存行の更新と新規挿入
         for (i, d) in self.decisions.iter().enumerate() {
@@ -744,6 +751,9 @@ impl Commit {
                     }
                     group.track_ids.push(*track_id);
                     let read = self.results.get(&i);
+                    if *revived && !moved_ids.contains(track_id) {
+                        report.changed_ids.push(*track_id);
+                    }
                     if !*changed && !self.deep {
                         scans::touch_seen(&tx, *track_id, run_id, now)?;
                         if *revived || moved_ids.contains(track_id) || *via != Via::Inode {
@@ -759,10 +769,15 @@ impl Commit {
                         Some(Ok(r)) => {
                             self.apply_content(&tx, row, pending.get(track_id), r)?;
                             report.updated += 1;
+                            if !*revived && !moved_ids.contains(track_id) {
+                                report.changed_ids.push(*track_id);
+                            }
                         }
                         Some(Err(err)) => {
                             tracing::warn!(track_id, path = %e.rel, error = %err, "ファイルを読めない。物理属性だけ更新した");
                             report.errors += 1;
+                            // nlink（hardlink バッジ）等の表示値は update_physical で変わっている
+                            report.changed_ids.push(*track_id);
                         }
                         None => {
                             // 読む対象ではなかった（deep でない changed=false は上で処理済み）
@@ -789,6 +804,7 @@ impl Commit {
                             }
                             group.track_ids.push(id);
                             report.new += 1;
+                            report.changed_ids.push(id);
                         }
                         Some(Err(err)) => {
                             tracing::warn!(path = %e.rel, error = %err, "新規ファイルを読めない。登録しない");
@@ -806,7 +822,12 @@ impl Commit {
         self.resolve_albums(&tx, groups, now)?;
 
         // f. finalize
-        report.missing_marked = scans::finalize_missing(&tx, run_id, now)? as u64;
+        let missing = scans::finalize_missing(&tx, run_id, now)?;
+        report.missing_marked = missing.len() as u64;
+        report.changed_ids.extend(missing);
+        // 1 行が複数の経路（conflict + 物理更新など）で入ることがある
+        report.changed_ids.sort_unstable();
+        report.changed_ids.dedup();
         scans::finish_run(
             &tx,
             run_id,

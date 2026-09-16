@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::db::Db;
+use crate::domain::selection::SelectionStore;
 use crate::jobs::Jobs;
 use tokio_util::sync::CancellationToken;
 
@@ -15,6 +16,8 @@ pub struct AppState {
     pub db: Arc<Db>,
     pub auth: Arc<auth::Shared>,
     pub jobs: Arc<Jobs>,
+    /// preview が固定した selection（token → スナップショット。D-33）
+    pub selection: Arc<SelectionStore>,
     /// プロセス停止の合図。シグナルハンドラが倒し、HTTP サーバ・ワーカー・SSE が同時に見る
     pub shutdown: CancellationToken,
 }
@@ -27,6 +30,7 @@ impl AppState {
             db,
             auth: Arc::new(auth::Shared::new(mode)),
             jobs,
+            selection: Arc::new(SelectionStore::default()),
             shutdown: CancellationToken::new(),
         }
     }
