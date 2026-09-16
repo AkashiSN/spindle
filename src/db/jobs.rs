@@ -509,6 +509,16 @@ pub fn next_run_after(conn: &Connection) -> Result<Option<i64>> {
     )?)
 }
 
+/// 種別 `ty` の終端になったジョブのうち最新の `finished_at`（周期ジョブの due 判定に使う）
+pub fn last_finished_at(conn: &Connection, ty: JobType) -> Result<Option<i64>> {
+    Ok(conn.query_row(
+        "SELECT max(finished_at) FROM jobs
+         WHERE type = ?1 AND state IN ('done', 'failed', 'cancelled')",
+        [ty.as_str()],
+        |r| r.get(0),
+    )?)
+}
+
 /// 指数バックオフの待ち秒数。`attempts` は失敗回数（1 始まり）。10 秒から倍々で 1 時間まで
 pub fn backoff_secs(attempts: i64) -> i64 {
     const BASE: i64 = 10;

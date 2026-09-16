@@ -1,0 +1,93 @@
+# 運用手順
+
+移行後の日常運用で、コードを読まずに済ませたい手順をまとめる。移行そのものは
+`docs/MIGRATION.md`。
+
+## バックアップ
+
+DB（`/data/spindle.db`）は原則キャッシュで、ファイルから再構築できる（SPEC §3）。
+ただし **プレイリスト / 編集履歴 / 検証結果 / ジョブ履歴** は DB にしか無い。
+バックアップは任意ではない。
+
+### 自動
+
+`backup` ジョブが `/data/backup/` へ `VACUUM INTO` で一貫したスナップショットを書く。
+
+- 周期は `[backup].interval_hours`（既定 24）。起動時と 10 分ごとに「最後の終端 `backup`
+  ジョブからの経過」で判定し、経っていれば投入する。ジョブ一覧（`GET /api/jobs`）に
+  `backup` として出る
+- ファイル名は `spindle-<YYYYMMDDTHHMMSSZ>.db`（UTC）。WAL / SHM を伴わない単独ファイルで、
+  そのまま `spindle.db` に置けば使える
+- tmp（`.spindle-….db.tmp`）に書いて `quick_check` → fsync → rename（同名があれば上書きせず
+  失敗）→ `backup/` と `/data` の fsync の順で確定する。途中で落ちた tmp は次回の実行が消す
+- 空き容量が「DB サイズ + 64 MiB」を下回るなら書かずに失敗する。失敗はジョブの
+  バックオフで再試行され、上限で `failed` になる。`failed` はジョブ一覧に残るので
+  `last_error` を見る
+- 世代は `[backup].retention_generations`（既定 14）件。名前順で新しいものから残し、
+  古いものを消す。**この名前形式以外のファイルは触らない**ので、手で取ったコピーを
+  `backup/` に置いても GC されない
+- `apps/spindle` データセットのスナップショット（毎日）と二重化する。スナップショットは
+  `spindle.db` と `backup/` の両方を含む
+
+### 手で取る
+
+アプリを止めずに取るなら、コンテナの外から `VACUUM INTO` を使う。`cp` は WAL 中の
+変更を取りこぼすので使わない。
+
+```bash
+sqlite3 /mnt/tank/apps/spindle/spindle.db \
+  "VACUUM INTO '/mnt/tank/apps/spindle/backup/manual-$(date -u +%Y%m%dT%H%M%SZ).db'"
+```
+
+## 復元
+
+前提: コンテナを止める。動いたまま差し替えると、開いているコネクションが古い inode を
+持ち続けて書き込みが行方不明になる。
+
+```bash
+cd /mnt/tank/apps/spindle
+docker compose -f /path/to/compose.yaml stop spindle
+
+# 1. 壊れた DB を退避（WAL / SHM も一緒に。残すと差し替えた DB に古い WAL が適用される）
+mkdir -p broken
+mv spindle.db broken/ 2>/dev/null
+mv spindle.db-wal broken/ 2>/dev/null
+mv spindle.db-shm broken/ 2>/dev/null
+
+# 2. 戻す世代を選んで差し替える
+ls -1 backup/
+cp backup/spindle-20260916T030000Z.db spindle.db
+chown 1000:1000 spindle.db          # compose の user に合わせる
+
+# 3. 起動。起動時スキャンがファイルとの差分を吸収する
+docker compose -f /path/to/compose.yaml start spindle
+```
+
+起動後に確認すること:
+
+- `GET /api/jobs` で起動時 `scan` が `done` になり、`backup` が投入される（復元した DB
+  には古い記録しか無いので、すぐ 1 世代取れる）
+- トラック数がライブラリの音声ファイル数と一致する（移行時の照合と同じ。
+  `docs/MIGRATION.md` §3）
+- 編集履歴（`GET /api/history`）とプレイリストがバックアップ時点の内容で見える
+
+### 何が失われるか
+
+バックアップ時点より後の変更のうち **DB にしか無いもの**: プレイリストの編集、
+編集履歴、検証結果、ジョブ履歴。
+
+ファイル側は失われない。バックアップ後に反映済みだったタグ編集・リネームはファイルが
+新しい値を持っているので、起動時スキャンが「外部変更」として取り込む（ファイルが正）。
+その編集の履歴だけが消えるので、巻き戻しはできなくなる。
+
+バックアップ時点で `prepared` / `applying` だった編集バッチは、復元した DB では未反映の
+op を抱えたままになる。起動時リカバリが子ジョブを再投入し、事前条件（`tag_version` /
+inode）が合えば続きを反映し、合わなければ `skipped_conflict` で止める。ファイルは
+旧値のままなので壊れない。
+
+## 復元ドリル
+
+`tests/backup.rs::restore_drill_rescans_to_the_same_state` が同じ手順を自動で通す
+（編集履歴 3 バッチ + プレイリスト 2 本 → バックアップ → DB と WAL / SHM を削除 →
+差し替え → 再スキャン → トラック数・履歴・プレイリストの一致）。実機で初めて
+復元するときも、まず別ディレクトリにコピーして手順を一度通してから本番に当てる。

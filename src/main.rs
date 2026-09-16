@@ -10,6 +10,7 @@ use spindle::db::{migrations, Db};
 use spindle::edit::Editor;
 use spindle::fsroot::Roots;
 use spindle::import::scanner::Scanner;
+use spindle::jobs::handlers::backup::{self, BackupHandler};
 use spindle::jobs::handlers::rename::RenameHandler;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
@@ -118,7 +119,20 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(TagwriteHandler::new(Arc::clone(&editor))),
     );
     registry.register(JobType::Rename, Arc::new(RenameHandler::new(editor)));
+    registry.register(
+        JobType::Backup,
+        Arc::new(BackupHandler::new(
+            state.config.paths.data.join(backup::BACKUP_DIR_NAME),
+            state.config.backup.retention_generations,
+        )),
+    );
     let worker = state.jobs.start(registry, shutdown.clone());
+    // 定期バックアップ（SPEC §14）。最後の終端 backup から interval_hours 経っていれば投入する
+    let backup_scheduler = backup::spawn_scheduler(
+        Arc::clone(&state.jobs),
+        state.config.backup.interval_hours,
+        shutdown.clone(),
+    );
     // 起動時に 1 回 incremental を投入する（停止中の外部変更を拾う。D-38）
     match scan::enqueue_scan(&state.jobs, "incremental").await {
         Ok(EnqueueResult::Inserted(id)) => info!(job_id = id, "起動時スキャンを投入した"),
@@ -139,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
     .context("HTTP サーバが異常終了")?;
     // ワーカーは新規 claim を止め、実行中は破棄済み（次回起動のリカバリで queued に戻る）
     let _ = worker.await;
+    let _ = backup_scheduler.await;
     info!("停止した");
     Ok(())
 }

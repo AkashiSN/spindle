@@ -18,6 +18,7 @@ CD リッピング（AccurateRip / CTDB 照合付き）、メタデータ一括�
 | `docs/TASKS.md` | 実装タスクと受け入れ条件 |
 | `docs/DSL.md` | スマートプレイリストの文法と AST/SQL 変換 |
 | `docs/MIGRATION.md` | 旧ライブラリからの移行手順 |
+| `docs/OPERATIONS.md` | 運用手順。バックアップと復元 |
 | `db/migrations/0001_init.sql` | 初期スキーマ（SQLite 3.46 で適用・FTS 動作を検証済み） |
 | `scripts/preflight.py` | 移行前チェック（標準ライブラリのみ） |
 

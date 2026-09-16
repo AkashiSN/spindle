@@ -1325,13 +1325,19 @@ TrueNAS の ACL エディタで新データセットにプリセットを適用�
 ### バックアップ
 
 - SQLite は `backup` ジョブが `VACUUM INTO` でバックアップ（WAL 中の安全なコピー手段。
-  `[backup].interval_hours` 既定 24）。tmp に書いて fsync → rename → **親ディレクトリも fsync**
-  してから世代 GC。容量不足なら中断してエラーを残す
-- 保持世代は `[backup].retention_generations`（既定 14）。`apps/spindle` データセットの
-  スナップショットと二重化
-- 復元: コンテナ停止 → `spindle.db` を差し替え → 起動。起動時スキャンがファイルとの
-  差分を吸収する。未反映だった編集意図（pending）は失われるが、ファイルは旧値のまま
-  なので壊れない。復元ドリルを P0-13 の受け入れに含める
+  読み取りコネクションで走らせ、書き手を止めない）。tmp に書いて `quick_check` → fsync →
+  rename（`RENAME_NOREPLACE`。同名の確定済みを上書きしない）→ **`backup/` とその親も fsync**
+  してから世代 GC。空き容量が DB サイズ + 64 MiB を
+  下回るなら書かずに失敗する（ジョブのバックオフで再試行）
+- 周期は `[backup].interval_hours`（既定 24）。スケジューラが起動時と 10 分ごとに
+  「`jobs` の最後の終端 `backup` からの経過」で due を判定して投入する（dedup key `backup`）。
+  ファイルの mtime は見ない。復元直後は古い記録しか無いので、すぐ 1 世代取れる
+- ファイル名は `spindle-<YYYYMMDDTHHMMSSZ>.db`（UTC、固定幅。名前順 = 時刻順）。
+  保持世代は `[backup].retention_generations`（既定 14）で、この名前形式のファイルだけを
+  新しい順に残す。`apps/spindle` データセットのスナップショットと二重化
+- 復元: コンテナ停止 → `spindle.db`（と `-wal` / `-shm`）を差し替え → 起動。起動時スキャンが
+  ファイルとの差分を吸収する。未反映だった編集意図（pending）は失われるが、ファイルは
+  旧値のままなので壊れない。手順は `docs/OPERATIONS.md`、復元ドリルは `tests/backup.rs`
 - DB は「キャッシュ」だが、プレイリスト / 編集履歴 / 検証結果 / ジョブ履歴は DB にしか
   ない（§3）。バックアップは任意ではない
 

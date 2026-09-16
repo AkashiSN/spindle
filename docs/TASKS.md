@@ -334,12 +334,12 @@ A↔B の swap と 3 件の循環リネームが完了し、phase 1 直後に ki
 DB にしか存在しないもの（編集履歴 / プレイリスト / 検証結果 / ジョブ履歴）を守る。
 実データを載せる前に必須。
 
-- [ ] `backup` ジョブ: `VACUUM INTO` で `data/backup/` へ（`[backup].interval_hours`）。tmp に書いて
+- [x] `backup` ジョブ: `VACUUM INTO` で `data/backup/` へ（`[backup].interval_hours`）。tmp に書いて
       fsync → rename → 親ディレクトリ fsync、容量不足で中断、世代 GC（`[backup].retention_generations`）
-- [ ] 復元手順を `docs/MIGRATION.md` または `docs/OPERATIONS.md` に書く
+- [x] 復元手順を `docs/OPERATIONS.md` に書く
       （停止 → ファイル差し替え → 起動 → 起動時スキャンで差分吸収）
-- [ ] 復元ドリルのテスト: バックアップから復元した DB で再スキャンし、
-      トラック数・プレイリスト・履歴件数が一致する
+- [x] 復元ドリルのテスト: バックアップから復元した DB で再スキャンし、
+      トラック数・プレイリスト・履歴件数が一致する（`tests/backup.rs`）
 
 受け入れ: バックアップを取って DB を消し、復元 → スキャンで元の状態に戻る
 （fixture: 編集履歴 3 バッチとプレイリスト 2 本を含む DB。履歴とプレイリストが復元後も一致）。
