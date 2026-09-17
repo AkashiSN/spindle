@@ -1334,3 +1334,50 @@ redo を同じ式で扱うため。
 （`flac -8` の参照エンコーダを外すうえ、照合が単一デコーダの自己一致になる）。元ファイルを
 Archive から move で戻す（Archive の追記のみの原則に例外が増える）。DB を先行更新して codec=flac
 を先に見せる（失敗時の overlay 解消が要る）。
+
+---
+
+## D-47 ReplayGain 解析の起動と固定値（実装合わせ）
+
+**決定**（P1-1）:
+
+- **起動は `POST /api/rg { selection }`**（selection は rename / normalize と同じ `ids` / `filter`
+  の 2 形）。含まれる active なトラックの `album_id` ごとに `rg` ジョブ（dedup `rg:album:<id>`）を
+  投入し、`album_id` を持たないトラックは track 単位（`rg:track:<id>`）。既に queued / running の
+  album は `duplicates` に数えて投入しない。preview 段階は無い（DB にしか書かない）。全曲は
+  `filter = {"flags":["no_rg"]}` で指定する。UI の起動ボタンは未着手（curl で起動できる）
+- **album の集計はデコード結果が 2ch のトラックだけ**（SPEC §6 / D-22 のとおり mono も除外）。
+  判定は DB の `channels` 列ではなく実際にデコードしたチャンネル数（ファイルが正）。集計に
+  入らないトラックは track の値だけ持ち、`rg_album_gain` / `rg_album_peak` は NULL。track 単位の
+  ジョブも album の値を持たない
+- **開いた FD を DB の行と照合してから解析する**: root から開いた FD の fstat（dev / inode /
+  size / mtime / ctime）が行と一致しなければ失敗（パスは識別子ではない。同名で差し替えられて
+  いれば別トラックの音声をこの行の値として保存してしまう）。デコード後にも同じ FD を fstat し直し、
+  解析中の in-place 更新を検出する。外部のタグ書き換えでも size / mtime は動くので、その場合は
+  再スキャンで行が更新された後の再試行で通る
+- **album は all-or-nothing**: 構成トラックが 1 本でもデコードできなければジョブを失敗にし、
+  何も書かない。一部だけ書くと album gain が揃わないまま次の再解析まで残る。書き込みの
+  トランザクション内で構成（active な構成トラックの id と stat・rel_path）を読み直し、解析した
+  行の集合と違えば（scanner が missing にした・別 album へ移した・新しいトラックが加わった・
+  同じ行を別実体へ追随させた）何も書かずに失敗する。
+  失敗したジョブは `last_error` に該当パスを持ち、`/api/jobs/:id/retry` で再投入できる
+- **無音（絶対ゲート -70 LUFS 以下）は gain 0 dB**（補正なし）。積分ラウドネスが `-inf` になる
+  ので `reference - lufs` が定義できない。peak は測定値のまま
+- **デコードは symphonia を優先し、持たない形式だけ ffmpeg**（Opus は demux まで symphonia、
+  PCM は ffmpeg の `f32le` を stdout のチャンクで受ける。WavPack / APE は lofty の属性 + ffmpeg）。
+  ffmpeg の stdout はメモリに溜めない（`ExternalCommand::stdout_channel`。受け手が消えたら子を
+  グループごと止める。SIGPIPE を無視する子でもタイムアウトまで待たない）
+- **`rg_scanned_at` だけ更新**し、`rg_written_at`（P1-2）と `audio_version` / `tag_version` は
+  動かさない。走査中に missing になった行は書かない
+
+**理由**: rg ジョブは SPEC §8 で album_id 単位・CPU コア数並列と決まっているが、起動の入口が
+§9 に無かった。selection で受ければ UI の選択・フィルタとそのまま繋がり、移行直後の「全曲」も
+`no_rg` フラグで表現できる。2ch 判定をデコード結果で行うのは、`channels` 列が lofty 由来の
+キャッシュであり、不変条件 1 に従うと解析時に読んだ実体を採用すべきため。
+
+**却下**: scan 完了時の自動投入（移行直後に 9,098 曲の解析が勝手に始まる。normalize と同じ理由）。
+失敗トラックを飛ばして album を書く（嘘の album gain が残る）。ffmpeg で全部デコードする
+（外部プロセス起動と f32 のパイプが 9,000 回。symphonia で済む形式は済ませる）。
+
+**未決**: 外部で音声が差し替わって `audio_version` が上がったとき `rg_scanned_at` を NULL に
+戻すか（現状は残る。scanner に足すなら別タスク）。

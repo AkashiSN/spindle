@@ -176,3 +176,54 @@ async fn stderr_is_bounded_to_a_tail_while_reading() {
     assert!(stderr.contains("line-19999-"));
     assert!(!stderr.contains("line-0-"));
 }
+
+#[tokio::test]
+async fn stdout_can_be_streamed_through_a_channel() {
+    // 大きな stdout をメモリに溜めず、チャンクのまま受け取れる（ffmpeg の PCM 出力用）
+    let dir = tempfile::tempdir().unwrap();
+    let big: Vec<u8> = (0..(3 * 1024 * 1024u32)).map(|i| (i % 251) as u8).collect();
+    fs::write(dir.path().join("big.bin"), &big).unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+    let consumer = tokio::spawn(async move {
+        let mut got = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            got.extend_from_slice(&chunk);
+        }
+        got
+    });
+    let out = ExternalCommand::new("cat")
+        .stdin_file(fs::File::open(dir.path().join("big.bin")).unwrap())
+        .stdout_channel(tx)
+        .run(&CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        out.stdout.is_empty(),
+        "チャネルへ流した stdout はメモリに残さない"
+    );
+    assert_eq!(consumer.await.unwrap(), big);
+}
+
+#[tokio::test]
+async fn dropped_stdout_receiver_stops_the_command() {
+    // 受け手が途中で消えたら子をグループごと止める。SIGPIPE を無視して書き続ける子でも
+    // タイムアウトまで待たない
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    drop(rx);
+    let started = Instant::now();
+    let err = ExternalCommand::new("sh")
+        .args([
+            "-c",
+            "trap '' PIPE; while :; do echo x 2>/dev/null || :; done",
+        ])
+        .stdout_channel(tx)
+        .timeout(Duration::from_secs(10))
+        .run(&CancellationToken::new())
+        .await
+        .expect_err("失敗するはず");
+    assert!(started.elapsed() < Duration::from_secs(5), "{err:?}");
+    assert!(
+        matches!(err, ProcessError::OutputAbandoned { .. }),
+        "{err:?}"
+    );
+}

@@ -1,0 +1,197 @@
+//! PCM デコード（SPEC §15 `media/decode.rs`）。symphonia が扱える形式はプロセス内で、
+//! Opus は ffmpeg で f32 に落とす。どちらの経路でも同じ `PcmSink` に同じ形で流れること
+
+#![cfg(target_os = "linux")]
+
+mod common;
+
+use std::fs::File;
+
+use tokio_util::sync::CancellationToken;
+
+use spindle::media::decode::{DecodeError, Decoder, PcmInfo, PcmSink};
+
+#[derive(Default)]
+struct Collect {
+    info: Option<PcmInfo>,
+    samples: Vec<f32>,
+}
+
+impl PcmSink for Collect {
+    fn start(&mut self, info: &PcmInfo) -> anyhow::Result<()> {
+        assert!(self.info.is_none(), "start が 2 回呼ばれた");
+        self.info = Some(*info);
+        Ok(())
+    }
+
+    fn push(&mut self, interleaved: &[f32]) -> anyhow::Result<()> {
+        assert!(self.info.is_some(), "start の前に push された");
+        self.samples.extend_from_slice(interleaved);
+        Ok(())
+    }
+}
+
+fn rms(s: &[f32]) -> f64 {
+    (s.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt()
+}
+
+#[tokio::test]
+async fn decodes_flac_in_process() {
+    let ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::make_audio(dir.path(), "a.flac", "flac", 1).unwrap();
+    let dec = Decoder::new(&ffmpeg);
+    let (info, out) = dec
+        .decode(
+            File::open(&path).unwrap(),
+            Some("flac"),
+            Collect::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        info,
+        PcmInfo {
+            channels: 2,
+            sample_rate: 44_100
+        }
+    );
+    assert_eq!(out.info, Some(info));
+    let expected = common::pcm_samples(1);
+    assert_eq!(out.samples.len(), expected.len());
+    for (got, want) in out.samples.iter().zip(&expected) {
+        let want = *want as f32 / 32768.0;
+        assert!((got - want).abs() < 1e-4, "{got} != {want}");
+    }
+}
+
+#[tokio::test]
+async fn decodes_opus_via_ffmpeg() {
+    let ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::make_audio(dir.path(), "a.opus", "opus", 1).unwrap();
+    let dec = Decoder::new(&ffmpeg);
+    let (info, out) = dec
+        .decode(
+            File::open(&path).unwrap(),
+            Some("opus"),
+            Collect::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        info,
+        PcmInfo {
+            channels: 2,
+            sample_rate: 48_000
+        }
+    );
+    // 1 秒 ± 数十 ms（pre-skip / パディング）
+    let frames = out.samples.len() / 2;
+    assert!((47_000..=49_000).contains(&frames), "frames = {frames}");
+    // 非可逆でも実効値はほぼ保たれる
+    let source: Vec<f32> = common::pcm_samples(1)
+        .iter()
+        .map(|v| *v as f32 / 32768.0)
+        .collect();
+    let (a, b) = (rms(&source), rms(&out.samples));
+    assert!((a - b).abs() / a < 0.05, "rms {a} vs {b}");
+}
+
+#[tokio::test]
+async fn ffmpeg_failure_is_reported() {
+    let _ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::make_audio(dir.path(), "a.opus", "opus", 1).unwrap();
+    let dec = Decoder::new("/nonexistent/ffmpeg");
+    let err = dec
+        .decode(
+            File::open(&path).unwrap(),
+            Some("opus"),
+            Collect::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .err()
+        .expect("失敗するはず");
+    assert!(matches!(err, DecodeError::Process(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn garbage_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.flac");
+    std::fs::write(&path, b"not audio at all").unwrap();
+    let dec = Decoder::new("ffmpeg");
+    let err = dec
+        .decode(
+            File::open(&path).unwrap(),
+            Some("flac"),
+            Collect::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .err()
+        .expect("失敗するはず");
+    assert!(!matches!(err, DecodeError::Cancelled), "{err:?}");
+}
+
+#[tokio::test]
+async fn cancel_stops_in_process_decode() {
+    let ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let dir = tempfile::tempdir().unwrap();
+    let path = common::make_audio(dir.path(), "a.flac", "flac", 1).unwrap();
+    let token = CancellationToken::new();
+    token.cancel();
+    let err = Decoder::new(&ffmpeg)
+        .decode(
+            File::open(&path).unwrap(),
+            Some("flac"),
+            Collect::default(),
+            &token,
+        )
+        .await
+        .err()
+        .expect("キャンセルされるはず");
+    assert!(matches!(err, DecodeError::Cancelled), "{err:?}");
+}
+
+#[tokio::test]
+async fn formats_symphonia_cannot_probe_fall_back_to_ffmpeg_with_lofty_properties() {
+    // WavPack は symphonia に demuxer が無い。チャンネル数とレートは lofty から取り、
+    // PCM は ffmpeg に出させる
+    let ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("src.wav");
+    common::write_wav(&wav, &common::pcm_samples(1), 16);
+    let path = dir.path().join("a.wv");
+    if common::encode(&wav, &path, &["-c:a", "wavpack"]).is_none() {
+        eprintln!("ffmpeg に wavpack が無いので skip");
+        return;
+    }
+    let dec = Decoder::new(&ffmpeg);
+    let (info, out) = dec
+        .decode(
+            File::open(&path).unwrap(),
+            Some("wv"),
+            Collect::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        info,
+        PcmInfo {
+            channels: 2,
+            sample_rate: 44_100
+        }
+    );
+    let expected = common::pcm_samples(1);
+    assert_eq!(out.samples.len(), expected.len());
+    for (got, want) in out.samples.iter().zip(&expected) {
+        let want = *want as f32 / 32768.0;
+        assert!((got - want).abs() < 1e-4, "{got} != {want}");
+    }
+}

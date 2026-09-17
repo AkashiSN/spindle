@@ -10,6 +10,7 @@ pub mod history;
 pub mod jobs;
 pub mod normalize;
 pub mod rename;
+pub mod rg;
 pub mod scan;
 pub mod selection;
 pub mod spa;
@@ -37,6 +38,7 @@ pub fn router(state: AppState) -> Router {
         .route("/rename/apply", post(rename::apply))
         .route("/normalize/preview", post(normalize::preview))
         .route("/normalize/apply", post(normalize::apply))
+        .route("/rg", post(rg::start))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))

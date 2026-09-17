@@ -400,8 +400,23 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `Scanner` Phase 2 の直列 `audio_md5` を、既存行が md5 で突き合わせを要するときだけ計算するか
       Phase 3 の並列読みへ回す。Phase 2 中も進捗を出す。`symphonia` / `lofty` のファイルごとの
       WARN を既定フィルタで落とす（ALAC 7,572 本で 75 分 → 並列度分だけ短縮が目安）
-- [ ] **P1-1** ReplayGain スキャン（`ebur128`、album は `album_id` 単位、
-      2ch 以外は集計から除外）
+- [x] **P1-1** ReplayGain スキャン（`ebur128`、album は `album_id` 単位、
+      2ch 以外は集計から除外。D-47）
+      - [x] `domain::replaygain`: `LoudnessMeter`（積分ラウドネス + true peak、フレーム端数の持ち越し）、
+            `album_loudness`（構成トラックの状態をまとめてゲートし直す）、無音は gain 0
+      - [x] `media::decode`: symphonia（FLAC / ALAC / WAV / AIFF / MP3 / AAC / Vorbis）→ Opus は
+            OpusHead の情報 + ffmpeg `f32le`、WavPack / APE は lofty の属性 + ffmpeg。
+            `ExternalCommand::stdout_channel` で stdout をチャンクのまま受ける
+      - [x] `jobs::handlers::rg`: `{"album_id"}` / `{"track_id"}`、構成トラックを id 昇順に全件ロック、
+            2ch だけ album 集計、all-or-nothing、`rg_scanned_at` のみ更新
+      - [x] `POST /api/rg { selection }`（`api::rg`）。UI の起動ボタンは未着手
+
+      受け入れ: `tests/replaygain.rs`（正弦波の LUFS / peak、album の電力平均、無音）、`tests/decode.rs`
+      （FLAC / Opus / WavPack が同じ形で流れる、キャンセル、失敗）、`tests/rg_job.rs`（track / album の
+      値、6ch の除外、missing の除外、album 無し、失敗で何も書かない、cancel）、`tests/rg_api.rs`
+
+      未決: `audio_version` が上がったときの `rg_scanned_at` の扱い（D-47）。UI の起動導線は P1-2 か
+      一括編集パネルの拡張で載せる
 - [ ] **P1-2** RG タグ書き込み（Opus のみ -23 LUFS 基準の Q7.8:
       `round((G18 - 5.0) * 256)` を符号付き 16bit に飽和。SPEC §6 のテストベクトルを
       単体テストに置く。`rg_scanned_at` と `rg_written_at` を分離）

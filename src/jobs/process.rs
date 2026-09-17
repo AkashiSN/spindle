@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use rustix::process::{kill_process_group, test_kill_process_group, Pid, Signal};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::JobError;
@@ -22,6 +23,8 @@ use super::JobError;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 /// エラーとログに残す stderr の末尾の上限（バイト）
 const STDERR_KEEP: usize = 16 * 1024;
+/// `stdout_channel` で流す 1 チャンクの大きさ
+const STDOUT_CHUNK: usize = 64 * 1024;
 
 /// パス引数の無害化方式。先頭 `-` のファイル名がオプションと解釈されるのを防ぐ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +48,10 @@ pub enum ProcessError {
     Timeout { program: String, after: Duration },
     #[error("キャンセルされた")]
     Cancelled,
+    /// `stdout_channel` の受け手が消えたので子を止めた。受け手側の失敗が本当の原因なので、
+    /// 呼び出し側はそちらを優先して報告する
+    #[error("{program} の stdout の受け手が消えたので kill した")]
+    OutputAbandoned { program: String },
     #[error("{program} が {status} で終了: {stderr}")]
     Failed {
         program: String,
@@ -90,6 +97,7 @@ pub struct ExternalCommand {
     timeout: Duration,
     stdin: Option<File>,
     stdout_file: Option<File>,
+    stdout_channel: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 impl ExternalCommand {
@@ -103,6 +111,7 @@ impl ExternalCommand {
             timeout: DEFAULT_TIMEOUT,
             stdin: None,
             stdout_file: None,
+            stdout_channel: None,
         }
     }
 
@@ -177,6 +186,14 @@ impl ExternalCommand {
         self
     }
 
+    /// stdout をチャンクごとにチャネルへ流す（メモリに溜めない。ffmpeg の PCM 出力など
+    /// 大きな出力用）。受け手が消えたら子をグループごと止め [`ProcessError::OutputAbandoned`]
+    /// （SIGPIPE を無視する子でもタイムアウトまで待たない）
+    pub fn stdout_channel(mut self, tx: mpsc::Sender<Vec<u8>>) -> Self {
+        self.stdout_channel = Some(tx);
+        self
+    }
+
     /// 組み立てた引数（テストと診断用）
     pub fn arg_list(&self) -> Vec<String> {
         self.args
@@ -243,15 +260,37 @@ impl ExternalCommand {
             })
         };
         let stderr_task = read_tail(&mut stderr_pipe, STDERR_KEEP);
+        let stdout_channel = self.stdout_channel;
+        // 受け手が消えて子を止めたか（タイムアウトの cancel と区別する）
+        let abandoned = std::sync::atomic::AtomicBool::new(false);
         let stdout_task = async {
             let mut buf = Vec::new();
-            if let Some(pipe) = stdout_pipe.as_mut() {
-                pipe.read_to_end(&mut buf).await?;
+            match (stdout_pipe.as_mut(), stdout_channel) {
+                (Some(pipe), Some(tx)) => {
+                    let mut chunk = vec![0u8; STDOUT_CHUNK];
+                    loop {
+                        let n = pipe.read(&mut chunk).await?;
+                        if n == 0 {
+                            break;
+                        }
+                        if tx.send(chunk[..n].to_vec()).await.is_err() {
+                            // 受け手が消えた。子をグループごと止める（EPIPE 任せにしない）
+                            abandoned.store(true, std::sync::atomic::Ordering::SeqCst);
+                            local.cancel();
+                            break;
+                        }
+                    }
+                    drop(stdout_pipe.take());
+                }
+                (Some(pipe), None) => {
+                    pipe.read_to_end(&mut buf).await?;
+                }
+                (None, _) => {}
             }
             Ok::<_, std::io::Error>(buf)
         };
         let (waited, stderr_buf, stdout_buf) =
-            tokio::join!(child.wait(local), stderr_task, stdout_task);
+            tokio::join!(child.wait(local.clone()), stderr_task, stdout_task);
         timer.abort();
 
         let stderr = String::from_utf8_lossy(&stderr_buf.map_err(io_err)?)
@@ -262,6 +301,14 @@ impl ExternalCommand {
             Err(JobError::Cancelled) if token.is_cancelled() => {
                 tracing::info!(program, "キャンセルで外部コマンドを止めた");
                 return Err(ProcessError::Cancelled);
+            }
+            Err(JobError::Cancelled) if abandoned.load(std::sync::atomic::Ordering::SeqCst) => {
+                tracing::warn!(
+                    program,
+                    stderr,
+                    "stdout の受け手が消えたので外部コマンドを止めた"
+                );
+                return Err(ProcessError::OutputAbandoned { program });
             }
             Err(JobError::Cancelled) => {
                 tracing::warn!(program, ?timeout, stderr, "外部コマンドがタイムアウト");

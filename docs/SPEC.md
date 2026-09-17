@@ -349,7 +349,10 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
   `OpusHead` の output gain は 0 のまま触らない（合成すると再解析時に二重に掛かる）
 - `rg_scanned_at` と `rg_written_at` を分離。数万件のスキャン後に書き込みが中断しても
   再スキャンなしで書き込みのみ再開できる
-- album gain は `album_id` 単位。**2ch 以外は album 集計から除外**
+- album gain は `album_id` 単位。**2ch 以外は album 集計から除外**（判定はデコード結果の
+  チャンネル数。除外されたトラックの album の値は NULL）。構成トラックが 1 本でも
+  デコードできなければ album 全体を書かない（D-47）
+- 無音（絶対ゲート以下、積分ラウドネス `-inf`）の gain は 0 dB
 
 ---
 

@@ -4,6 +4,7 @@ pub mod filter;
 pub mod identity;
 pub mod pathgen;
 pub mod relpath;
+pub mod replaygain;
 pub mod selection;
 pub mod tagops;
 pub mod tags;

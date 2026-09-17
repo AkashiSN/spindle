@@ -9,6 +9,7 @@ pub mod archive;
 pub mod history;
 pub mod jobs;
 pub mod migrations;
+pub mod replaygain;
 pub mod scans;
 pub mod tracks;
 

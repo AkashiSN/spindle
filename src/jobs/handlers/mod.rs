@@ -4,5 +4,6 @@
 pub mod backup;
 pub mod normalize;
 pub mod rename;
+pub mod rg;
 pub mod scan;
 pub mod tagwrite;

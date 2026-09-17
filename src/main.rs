@@ -13,9 +13,11 @@ use spindle::import::scanner::Scanner;
 use spindle::jobs::handlers::backup::{self, BackupHandler};
 use spindle::jobs::handlers::normalize::NormalizeHandler;
 use spindle::jobs::handlers::rename::RenameHandler;
+use spindle::jobs::handlers::rg::RgHandler;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
+use spindle::media::decode::Decoder;
 use spindle::media::encode::FlacEncoder;
 use spindle::{config::Config, logging};
 
@@ -123,7 +125,11 @@ async fn main() -> anyhow::Result<()> {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
-    let scanner = Arc::new(Scanner::new(Arc::clone(&state.db), library_root, cpus));
+    let scanner = Arc::new(Scanner::new(
+        Arc::clone(&state.db),
+        Arc::clone(&library_root),
+        cpus,
+    ));
     let mut registry = Registry::new();
     registry.register(
         JobType::Scan,
@@ -141,6 +147,15 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(RenameHandler::new(Arc::clone(&editor))),
     );
     registry.register(JobType::Normalize, Arc::new(NormalizeHandler::new(editor)));
+    // ReplayGain 解析（P1-1）。Opus は ffmpeg でデコードする
+    registry.register(
+        JobType::Rg,
+        Arc::new(RgHandler::new(
+            library_root,
+            Decoder::new(&state.config.bin.ffmpeg),
+            state.config.replaygain.reference_lufs,
+        )),
+    );
     registry.register(
         JobType::Backup,
         Arc::new(BackupHandler::new(
