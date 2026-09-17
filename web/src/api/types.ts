@@ -8,6 +8,13 @@ export type Verification =
   | 'not_attempted'
 
 export type Derived = { codec: string; stale_tags: boolean }
+/** FLAC 健全性チェックの結果（P1-5）。stale は検査後に audio_version が進んだ */
+export type FlacCheck = {
+  status: 'ok' | 'md5_missing' | 'decode_error'
+  checked_at: number | null
+  stale: boolean
+  error: string | null
+}
 export type RgValues = { track_gain: number; track_peak: number; album_gain: number | null; album_peak: number | null }
 
 export type TrackRow = {
@@ -29,6 +36,7 @@ export type TrackRow = {
   /** 解析値（-18 LUFS 基準の dB）。未解析なら null */
   rg: RgValues | null
   derived: Derived | null
+  flac_check: FlacCheck | null
   pending_batch_id: number | null
   conflict_batch_id: number | null
   duplicate_group: string | null

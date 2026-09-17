@@ -585,6 +585,13 @@ table.kv tr.differs td {
   background: #fce7f3;
   color: #9d174d;
 }
+.badge.b-flac-error {
+  color: var(--error);
+  font-weight: 600;
+}
+.badge.b-flac-md5 {
+  color: var(--muted);
+}
 .badge.b-hardlink {
   background: #ede9fe;
   color: #5b21b6;

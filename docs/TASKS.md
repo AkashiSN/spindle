@@ -502,8 +502,31 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
       未決: 20 bit などの ffmpeg PCM エンコーダが無いビット深度は failed（ビット深度に合う
       `pcm_s*le` を選ぶだけなので、必要なら raw → `flac --bps` の経路を足す）
-- [ ] **P1-5** FLAC 健全性チェック（`flac -t`、MD5 未設定の補填。
-      補填時は `audio_version` 据え置き）
+- [x] **P1-5** FLAC 健全性チェック（`flac -t`、MD5 未設定の補填。
+      補填時は `audio_version` 据え置き）。D-57。**補填は P1-5b に切り出し**（実データに FLAC が無く、
+      今後の FLAC は自前の `flac -8 --verify` と CD リップで MD5 が付く）
+      - [x] マイグレーション 0010: `tracks.flac_check` / `flac_checked_at` / `flac_check_version` /
+            `flac_check_error`
+      - [x] `jobs::handlers::flaccheck`: 版付き（`flaccheck:<id>:<audio_version>`、stale ゲート、
+            `track_locks`）。root で開いた FD を fstat して行と照合 → STREAMINFO の MD5 → `flac -t -`
+            （FD を stdin、タイムアウト、終了コード、stderr）→ 版を再確認して 1 UPDATE。ファイルは書かない
+      - [x] `db::flaccheck`: `enqueue_selection` / `enqueue_all_unchecked`（スキャン完了時、
+            `[normalize].flac_verify_on_import`）
+      - [x] `POST /api/flaccheck { selection }`、一覧の `flac_check { status, checked_at, stale, error }`、
+            フィルタ `flac_unchecked` / `flac_error`
+      - [x] UI: バッジ（`decode_error` は赤、`md5_missing` は薄く、古い結果は点付き）とサイドバーの
+            固定フィルタ。起動ボタンは RG と同じく未着手
+
+      受け入れ: `tests/flaccheck_job.rs`（ok / md5_missing（ファイルを触らない）/ decode_error（stderr）/
+      非 FLAC と missing は no-op / stale 版と差し替えは書かない / flac 無しで失敗 /
+      `enqueue_all_unchecked` の対象 / scan 完了時の自動投入と 2 回目は投入しない）、
+      `tests/flaccheck_api.rs`（投入件数・skip・重複・行の値・フィルタ・stale・409・401）、
+      `web/src/lib/badges.test.ts`
+
+      未決: P1-5b（MD5 補填。STREAMINFO の 16 バイトを tmp + rename で書き換える編集 op）。UI の起動導線
+- [ ] **P1-5b** FLAC の MD5 補填（`flac_fix_missing_md5`）。`md5_missing` のトラックを選んで、デコードした
+      PCM MD5 を STREAMINFO に書く編集バッチ（`edit_ops.kind` に `md5` を足すマイグレーション、旧値 = 全ゼロ
+      を `edits` に残して巻き戻し可、`audio_version` 据え置き、inode / mtime は追随）。D-57
 - [x] **P1-6** プレイリスト（手動、並べ替え、m3u8 書き出し。D-53）
       - [x] `db::playlists`: CRUD（名前の一意性は `name_key` = canonical key。マイグレーション 0006）、
             項目の追加（同じトラックは 1 回）・除外・移動（`before` の直前 / 末尾）、`position` の振り直し、

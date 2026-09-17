@@ -730,9 +730,15 @@ flac -t で検証
 旧ブロックを掴むため保持期間中は実効使用量が倍増する。
 `flac -8` は新規生成物（CD リップ、WAV 正規化）にのみ適用する。
 
-MD5 補填のための再エンコードでは `audio_version` を据え置く
+MD5 補填のための書き換えでは `audio_version` を据え置く
 （音声内容が変わらないため Derived の再生成は不要）。inode と mtime は変わるので
-DB の追随は必要。
+DB の追随は必要。補填は再エンコードではなく STREAMINFO の MD5 16 バイトだけを書き換える
+（P1-5b、D-57）。
+
+検査（`flaccheck` ジョブ）は読むだけで、結果を `tracks.flac_check`（`ok` / `md5_missing` /
+`decode_error`）に検査時の `audio_version` 付きで記録する。版が進めば結果は古い扱いになり、
+`[normalize].flac_verify_on_import` ならスキャン完了時に結果の無い FLAC を自動で検査する。
+手動は `POST /api/flaccheck { selection }`。一覧の固定フィルタ `flac_unchecked` / `flac_error`。
 
 ---
 
@@ -749,7 +755,7 @@ DB の追随は必要。
 | `rename` | 1 | batch_id（バッチ 1 つに 1 ジョブ。2 phase の順序を守るため直列。D-43） |
 | `normalize` | 2 | track_id + op_id（同じトラックの直列化は track_locks） |
 | `thumbnail` | 4 | artwork_id |
-| `flaccheck` | CPU コア数 | track_id |
+| `flaccheck` | CPU コア数 | track_id + audio_version（版付き。D-57） |
 | `inbox` | 1 | 固定 |
 | `gc` | 1 | 固定（scan と同じ排他 `library` を取れなければ Requeue。D-56） |
 | `backup` | 1 | 固定 |
@@ -800,6 +806,8 @@ POST   /api/rg                                    { selection }。album ごと�
 POST   /api/rg/write                              { selection, description?, skip_pending? }。解析値を
                                                   タグとして書く編集バッチを記録（§6、D-48）。
                                                   preview 段階は無い（値は DB から決まる）
+POST   /api/flaccheck                             { selection }。active な FLAC ごとに flaccheck ジョブを
+                                                  投入（§7.9、D-57。読むだけで preview は無い）
 
 GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
 GET    /api/categories, POST /api/categories
@@ -860,7 +868,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //     "album_id": 12,                  // ツリー
 //     "playlist_id": 3,                // プレイリスト所属
 //     "flags": ["missing", "pending"], // 固定フィルタ（AND）: unverified | duplicate | missing |
-//                                      //   no_rg | rg_unwritten | pending | conflict | hardlink
+//                                      //   no_rg | rg_unwritten | pending | conflict | hardlink |
+//                                      //   flac_unchecked | flac_error（§7.9）
 //     "q": "情緒" }                    // 検索語（3 文字以上 FTS5 / 未満 LIKE）
 //   cursor は前ページの next_cursor をそのまま返す不透明文字列（キーセット）。sort が変わったら
 //   捨てる（別ソートで発行したカーソルは 400）。
@@ -870,6 +879,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "duration_ms": 280000, "codec": "flac", "lossless": true,
                "verification": "verified_ctdb", "rg_scanned_at": 1, "rg_written_at": 1,
                "derived": { "codec": "opus", "stale_tags": false },   // または null
+               "flac_check": { "status": "ok", "checked_at": 1700000000, "stale": false, "error": null },
+                                                                       // 未検査なら null（§7.9）
                "pending_batch_id": 42,                                // または null
                "conflict_batch_id": 41,                               // または null
                "duplicate_group": "a1b2…",                            // audio_md5 hex または null

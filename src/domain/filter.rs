@@ -111,6 +111,10 @@ pub enum Flag {
     Conflict,
     /// `nlink > 1`
     Hardlink,
+    /// FLAC で健全性チェックの結果が無いか、`audio_version` が進んで古い（P1-5）
+    FlacUnchecked,
+    /// `flac_check = 'decode_error'`
+    FlacError,
 }
 
 impl Flag {
@@ -124,6 +128,8 @@ impl Flag {
             Flag::Pending => "pending",
             Flag::Conflict => "conflict",
             Flag::Hardlink => "hardlink",
+            Flag::FlacUnchecked => "flac_unchecked",
+            Flag::FlacError => "flac_error",
         }
     }
 }

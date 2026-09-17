@@ -92,7 +92,7 @@ impl JobType {
     pub fn version_field(self) -> Option<(&'static str, &'static str)> {
         match self {
             JobType::Tagwrite => Some(("tag_version", "tag_version")),
-            JobType::Transcode => Some(("audio_version", "audio_version")),
+            JobType::Transcode | JobType::Flaccheck => Some(("audio_version", "audio_version")),
             _ => None,
         }
     }

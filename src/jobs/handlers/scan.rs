@@ -38,6 +38,8 @@ pub async fn enqueue_scan(jobs: &Jobs, kind: &str) -> DbResult<EnqueueResult> {
 pub struct ScanHandler {
     scanner: Arc<Scanner>,
     deep_interval_days: u32,
+    /// `[normalize].flac_verify_on_import`: 完了時に結果の無い FLAC へ flaccheck を投入する（D-57）
+    flac_verify: bool,
 }
 
 impl ScanHandler {
@@ -45,7 +47,13 @@ impl ScanHandler {
         Self {
             scanner,
             deep_interval_days,
+            flac_verify: false,
         }
+    }
+
+    pub fn with_flac_verify(mut self, enabled: bool) -> Self {
+        self.flac_verify = enabled;
+        self
     }
 
     /// incremental を deep に昇格させるか
@@ -67,10 +75,12 @@ impl Handler for ScanHandler {
     fn run(&self, ctx: JobContext) -> BoxFuture<'static, HandlerResult> {
         let scanner = Arc::clone(&self.scanner);
         let deep_interval_days = self.deep_interval_days;
+        let flac_verify = self.flac_verify;
         Box::pin(async move {
             let this = ScanHandler {
                 scanner,
                 deep_interval_days,
+                flac_verify,
             };
             let requested = ctx
                 .job
@@ -151,6 +161,27 @@ impl Handler for ScanHandler {
                         );
                     }
                     ctx.jobs().notify_enqueued(&derived_jobs).await;
+                    // FLAC 健全性チェック（D-57）。現在の版の結果が無い FLAC を投入する
+                    if this.flac_verify {
+                        let flac_jobs = ctx
+                            .db()
+                            .write(|c| {
+                                let tx = c.transaction()?;
+                                let ids =
+                                    crate::db::flaccheck::enqueue_all_unchecked(&tx, now_epoch())?;
+                                tx.commit()?;
+                                Ok(ids)
+                            })
+                            .await?;
+                        if !flac_jobs.is_empty() {
+                            tracing::info!(
+                                job_id = ctx.job.id,
+                                flaccheck_jobs = flac_jobs.len(),
+                                "FLAC の健全性チェックを投入した"
+                            );
+                        }
+                        ctx.jobs().notify_enqueued(&flac_jobs).await;
+                    }
                     // 変更行を表へ通知する（SPEC §9 `library`）。commit 済みなので取得すれば新しい値が見える
                     if let Some(ev) = LibraryEvent::from_changes(report.run_id, report.changed_ids)
                     {

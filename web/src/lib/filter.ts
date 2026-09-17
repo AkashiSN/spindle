@@ -10,6 +10,8 @@ export const FLAGS = [
   'pending',
   'conflict',
   'hardlink',
+  'flac_unchecked',
+  'flac_error',
 ] as const
 export type Flag = (typeof FLAGS)[number]
 
@@ -22,6 +24,8 @@ export const FLAG_LABELS: Record<Flag, string> = {
   pending: '反映待ち',
   conflict: 'conflict',
   hardlink: 'hardlink',
+  flac_unchecked: 'FLAC 未検査',
+  flac_error: 'FLAC エラー',
 }
 
 export type Filter = {

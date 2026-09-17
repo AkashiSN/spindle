@@ -20,6 +20,7 @@ const base: TrackRow = {
   rg: null,
   rg_written_at: null,
   derived: null,
+  flac_check: null,
   pending_batch_id: null,
   conflict_batch_id: null,
   duplicate_group: null,
@@ -70,5 +71,27 @@ describe('badgesOf', () => {
     ])
     expect(badgesOf(t).find((b) => b.key === 'derived')!.icon).toBe('D•')
     expect(badgesOf(t).find((b) => b.key === 'pending')!.label).toContain('#42')
+  })
+
+  it('FLAC 健全性チェックは decode_error と md5_missing のときだけ出し、古い結果は点付き', () => {
+    const ok: TrackRow = { ...base, flac_check: { status: 'ok', checked_at: 1, stale: false, error: null } }
+    expect(keys(ok)).not.toContain('flac')
+    const bad: TrackRow = {
+      ...base,
+      flac_check: { status: 'decode_error', checked_at: 1, stale: false, error: 'boom' },
+    }
+    const b = badgesOf(bad).find((x) => x.key === 'flac')!
+    expect(b.icon).toBe('✘F')
+    expect(b.cls).toContain('b-flac-error')
+    expect(b.label).toContain('boom')
+    const nomd5: TrackRow = {
+      ...base,
+      flac_check: { status: 'md5_missing', checked_at: 1, stale: true, error: null },
+    }
+    const m = badgesOf(nomd5).find((x) => x.key === 'flac')!
+    expect(m.icon).toBe('F•')
+    expect(m.cls).toContain('b-flac-md5')
+    expect(m.label).toContain('MD5')
+    expect(m.label).toContain('古い')
   })
 })

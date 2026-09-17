@@ -2,6 +2,7 @@
 //! 実行基盤（`Registry` / `JobContext`）は親モジュールにある
 
 pub mod backup;
+pub mod flaccheck;
 pub mod gc;
 pub mod normalize;
 pub mod rename;

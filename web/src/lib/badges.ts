@@ -40,6 +40,24 @@ export function badgesOf(t: TrackRow): Badge[] {
       cls: 'badge b-derived',
     })
   }
+  if (t.flac_check && t.flac_check.status !== 'ok') {
+    const stale = t.flac_check.stale ? '（結果が古い。再検査待ち）' : ''
+    if (t.flac_check.status === 'decode_error') {
+      out.push({
+        key: 'flac',
+        icon: t.flac_check.stale ? '✘F•' : '✘F',
+        label: `FLAC のデコードエラー${stale}: ${t.flac_check.error ?? ''}`.trimEnd(),
+        cls: 'badge b-flac-error',
+      })
+    } else {
+      out.push({
+        key: 'flac',
+        icon: t.flac_check.stale ? 'F•' : 'F',
+        label: `FLAC の STREAMINFO に MD5 が無い${stale}`,
+        cls: 'badge b-flac-md5',
+      })
+    }
+  }
   if (t.pending_batch_id != null) {
     out.push({
       key: 'pending',

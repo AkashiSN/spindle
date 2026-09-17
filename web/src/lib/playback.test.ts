@@ -33,6 +33,7 @@ function row(id: number, codec: string, lossless: boolean, missing = false): Tra
     rg_written_at: null,
     rg: null,
     derived: null,
+    flac_check: null,
     pending_batch_id: null,
     conflict_batch_id: null,
     duplicate_group: null,

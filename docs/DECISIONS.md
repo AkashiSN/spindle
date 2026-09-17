@@ -1894,3 +1894,42 @@ GC に委ねた事項の固定値と境界）:
 ジョブ（順序に依存がある: A → D、E 行 → E dir）。
 
 **未決**: 設定画面からの起動（SPEC §12.6）。Library の同梱ファイルの回収（D-43）。
+
+## D-57 FLAC 健全性チェックは検査結果を版付きで記録し、MD5 の補填は別タスクにする
+
+**決定**（P1-5。仕様 SPEC §7.9 / §8 / §13 `[normalize]` が定めていない値と境界）:
+
+- **`flaccheck` ジョブは読むだけ。** payload `{ track_id, audio_version }`（版付き。dedup key
+  `flaccheck:<id>:<ver>`。ワーカーの stale ゲートで古い版は no-op、`track_locks` で同じトラックの
+  書き手と直列化）、並列 CPU コア数。対象は `codec = 'flac'` で active。それ以外は no-op で `done`
+- **手順**: root で開いた FD を `fstat` して DB の `(dev, inode)` と照合（不一致は書かずに `done`。
+  次のスキャンで版が進めば再投入される）→ STREAMINFO の MD5 を読む（`media::fingerprint`。全ゼロは
+  未設定）→ `flac -t -`（FD を stdin で渡す。タイムアウトは長さに比例、終了コード検査、stderr は
+  ログ）→ 1 UPDATE で記録（`WHERE audio_version = ?` で版を再確認）
+- **結果は `tracks` の列**（マイグレーション 0010）: `flac_check`（`ok` / `md5_missing` /
+  `decode_error`）、`flac_checked_at`、`flac_check_version`（検査時の `audio_version`。現在値と違えば
+  結果は古い。スキャナは触らない）、`flac_check_error`（stderr の末尾）。判定は `flac -t` の終了
+  コード ≠ 0 → `decode_error`、0 で MD5 全ゼロ → `md5_missing`、0 で MD5 あり → `ok`
+- **起動契機**: `POST /api/flaccheck { selection }`（RG と同型。selection の active な FLAC を
+  track 単位で投入）と、`[normalize].flac_verify_on_import = true` ならスキャン完了時に
+  「結果が無い・版が古い」FLAC を全件投入（Derived の追随と同じ場所）
+- **一覧**: 行に `flac_check { status, checked_at, stale }`。固定フィルタ `flac_unchecked`（FLAC で
+  結果が無いか古い）と `flac_error`（`decode_error`）。UI はバッジとサイドバーのフィルタだけで、
+  起動ボタンは RG と同じく未着手
+- **MD5 の補填（`flac_fix_missing_md5`）は P1-5b に切り出す。** 方式は再エンコードではなく
+  **STREAMINFO の MD5 16 バイトだけを tmp + rename で書き換える**（デコードして PCM MD5 を計算し
+  埋める。圧縮も音声も変わらず `audio_version` 据え置き、inode / mtime は追随）。編集バッチに
+  乗せ（`edit_ops.kind` に `md5` を足すマイグレーションが要る）、旧値 = 全ゼロを `edits` に残して
+  巻き戻せるようにする。今は実データに FLAC が無く、今後の FLAC は自前の `flac -8 --verify` と
+  CD リップで MD5 が付くので急がない
+
+**理由**: SPEC の「再エンコードして補填」は MD5 を付けることが目的で、`flac -8` の再圧縮は禁止事項
+（圧縮レベルを揃える一括再エンコード）と紙一重。16 バイトの書き換えで目的を満たせる。検査は
+読むだけなので編集履歴に乗せず、版で古さを表す。
+
+**却下**: 検査結果を履歴表にする（一覧のフィルタとバッジには列が素直）。`flac -t` の stderr から
+MD5 未設定を読む（版差で文言が変わる。STREAMINFO を直接読めばよい）。normalize の archive op を
+FLAC → FLAC に広げて補填する（2,000 行の壊れやすい経路を同じパスへの置き換えに拡張するより、
+専用の小さな op の方が安全）。
+
+**未決**: P1-5b（補填）。UI の起動導線（RG と一緒に一括編集パネルへ）。

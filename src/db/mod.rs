@@ -8,6 +8,7 @@
 pub mod archive;
 pub mod artwork;
 pub mod derived;
+pub mod flaccheck;
 pub mod gc;
 pub mod history;
 pub mod jobs;

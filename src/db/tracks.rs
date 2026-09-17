@@ -39,6 +39,8 @@ pub struct TrackRow {
     /// 解析値（内部表現 -18 LUFS 基準の dB。再生時にクライアントが掛ける。P1-9）。未解析なら None
     pub rg: Option<RgValues>,
     pub derived: Option<Derived>,
+    /// FLAC 健全性チェックの結果（P1-5）。未検査なら None
+    pub flac_check: Option<FlacCheck>,
     pub pending_batch_id: Option<i64>,
     pub conflict_batch_id: Option<i64>,
     /// `audio_md5` の hex（小文字）。重複でなければ None
@@ -54,6 +56,16 @@ pub struct RgValues {
     pub track_peak: f64,
     pub album_gain: Option<f64>,
     pub album_peak: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FlacCheck {
+    /// `ok` / `md5_missing` / `decode_error`
+    pub status: String,
+    pub checked_at: Option<i64>,
+    /// 検査時の `audio_version` が現在値と違う（結果は古い）
+    pub stale: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -80,9 +92,10 @@ const ROW_COLUMNS: &str = "t.id, t.title, t.artist_display, t.album, t.albumarti
          SELECT 1 FROM tracks t2 WHERE t2.audio_md5 = t.audio_md5 AND t2.missing_since IS NULL AND t2.id <> t.id)
        THEN lower(hex(t.audio_md5)) END,
   t.nlink > 1, t.missing_since, t.rel_path,
-  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak";
+  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak,
+  t.flac_check, t.flac_checked_at, t.flac_check_version <> t.audio_version, t.flac_check_error";
 /// `ROW_COLUMNS` の列数。ソートキーの値はこの位置から始まる
-const ROW_COLUMN_COUNT: usize = 27;
+const ROW_COLUMN_COUNT: usize = 31;
 
 const ROW_JOINS: &str = "FROM tracks t
 LEFT JOIN derived_files d ON d.track_id = t.id
@@ -103,6 +116,15 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
             album_peak: r.get(26)?,
         }),
         _ => None,
+    };
+    let flac_check = match r.get::<_, Option<String>>(27)? {
+        Some(status) => Some(FlacCheck {
+            status,
+            checked_at: r.get(28)?,
+            stale: r.get::<_, Option<bool>>(29)?.unwrap_or(true),
+            error: r.get(30)?,
+        }),
+        None => None,
     };
     Ok(TrackRow {
         id: r.get(0)?,
@@ -125,6 +147,7 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
             codec,
             stale_tags: stale.unwrap_or(false),
         }),
+        flac_check,
         pending_batch_id: r.get(17)?,
         conflict_batch_id: r.get(18)?,
         duplicate_group: r.get(19)?,
@@ -253,6 +276,10 @@ fn filter_where(f: &Filter) -> Where {
                             AND o.id = (SELECT max(o2.id) FROM edit_ops o2 WHERE o2.track_id = o.track_id))"
             }
             Flag::Hardlink => "t.nlink > 1",
+            Flag::FlacUnchecked => {
+                "t.codec = 'flac' AND (t.flac_check_version IS NULL OR t.flac_check_version <> t.audio_version)"
+            }
+            Flag::FlacError => "t.flac_check = 'decode_error'",
         };
         w.push(clause, []);
     }

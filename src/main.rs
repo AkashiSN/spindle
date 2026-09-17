@@ -12,6 +12,7 @@ use spindle::fsroot::Roots;
 use spindle::gc::GcRoots;
 use spindle::import::scanner::Scanner;
 use spindle::jobs::handlers::backup::{self, BackupHandler};
+use spindle::jobs::handlers::flaccheck::FlaccheckHandler;
 use spindle::jobs::handlers::gc::{self as gc_job, GcHandler};
 use spindle::jobs::handlers::normalize::NormalizeHandler;
 use spindle::jobs::handlers::rename::RenameHandler;
@@ -163,9 +164,17 @@ async fn main() -> anyhow::Result<()> {
     let mut registry = Registry::new();
     registry.register(
         JobType::Scan,
-        Arc::new(ScanHandler::new(
-            scanner,
-            state.config.scan.deep_interval_days,
+        Arc::new(
+            ScanHandler::new(scanner, state.config.scan.deep_interval_days)
+                .with_flac_verify(state.config.normalize.flac_verify_on_import),
+        ),
+    );
+    // FLAC 健全性チェック（P1-5、D-57）。読むだけ
+    registry.register(
+        JobType::Flaccheck,
+        Arc::new(FlaccheckHandler::new(
+            Arc::clone(&library_root),
+            &state.config.bin.flac,
         )),
     );
     registry.register(

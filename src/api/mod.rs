@@ -6,6 +6,7 @@ pub mod auth;
 pub mod batch;
 pub mod error;
 pub mod events;
+pub mod flaccheck;
 pub mod gc;
 pub mod health;
 pub mod history;
@@ -44,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .route("/normalize/apply", post(normalize::apply))
         .route("/rg", post(rg::start))
         .route("/rg/write", post(rg::write))
+        .route("/flaccheck", post(flaccheck::start))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))
