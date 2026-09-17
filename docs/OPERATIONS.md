@@ -91,3 +91,37 @@ inode）が合えば続きを反映し、合わなければ `skipped_conflict` �
 （編集履歴 3 バッチ + プレイリスト 2 本 → バックアップ → DB と WAL / SHM を削除 →
 差し替え → 再スキャン → トラック数・履歴・プレイリストの一致）。実機で初めて
 復元するときも、まず別ディレクトリにコピーして手順を一度通してから本番に当てる。
+
+## ロスレスの FLAC 化（正規化）
+
+Library の WAV / ALAC / AIFF を FLAC に置き換える（SPEC §7.4、D-45 / D-46）。移行で取り込んだ
+ALAC 7,572 本が主対象。UI は未着手なので API を直接叩く。変換は `normalize` ジョブ（並列 2）が
+1 曲ずつ行い、元ファイルは `Archive/` の同じ相対パスへ退避される（`archived_files` 台帳、
+既定 30 日後に GC が回収。それまでは履歴画面の [巻き戻す] で元に戻せる）。
+
+前提: Archive（`/mnt/hdd/media/Archive`）に退避ぶんの空き（ALAC 全件で約 220G）がある。
+`config.toml` の `[normalize].wav_to_flac = true`。
+
+```bash
+BASE=http://truenas:8080
+# 1. ログイン（Cookie を保存）
+curl -s -c cookie.txt -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-origin' \
+  -d '{"password":"…"}' "$BASE/api/auth/login"
+# 2. プレビュー。filter は表のフィルタ式（{} で全曲。FLAC / 非可逆は unchanged に数えられるだけ）
+curl -s -b cookie.txt -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-origin' \
+  -d '{"selection":{"filter":"{}"}}' "$BASE/api/normalize/preview" | tee preview.json | \
+  jq '{count, changed, unchanged, conflict, pending_excluded}'
+# 3. 適用（token は 15 分で期限切れ）
+TOKEN=$(jq -r .selection_token preview.json)
+curl -s -b cookie.txt -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-origin' \
+  -d "{\"selection_token\":\"$TOKEN\",\"description\":\"ALAC → FLAC\"}" "$BASE/api/normalize/apply"
+# 4. 進み具合はジョブ一覧か履歴画面で（batch_id の applied / conflict / failed）
+curl -s -b cookie.txt "$BASE/api/jobs" | jq .summary
+```
+
+- 一部だけ試すなら `"selection":{"ids":[…]}`（表で選んだ id）で 1 アルバムぶんから
+- `conflict` は宛先（`.flac`）を別のトラックが占有している行。`failed` は PCM MD5 の不一致か
+  ビット深度非対応で、元ファイルは無傷のまま残る。履歴画面の op の `error` を見る
+- 変換中（op が pending）のトラックはタグ編集・リネームが 409 になる。バッチ単位のキャンセルは
+  `POST /api/history/:batch/cancel`（変換中の 1 曲は止め、配置を始めた曲は完了を待つ）
+- 変換後の再スキャンで差分が出ないことを確認する（`new` / `moved` / `missing` が 0）

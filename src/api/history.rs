@@ -146,7 +146,17 @@ fn current_values(
                 .unwrap_or(None);
             out.insert("missing_since".to_owned(), serde_json::json!(missing));
         }
-        OpKind::Archive => {}
+        OpKind::Archive => {
+            out.insert("rel_path".to_owned(), serde_json::json!(rel_path));
+            let codec: Option<String> = c
+                .query_row(
+                    "SELECT codec FROM tracks WHERE id = ?1",
+                    [op.track_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            out.insert("codec".to_owned(), serde_json::json!(codec));
+        }
     }
     Ok(out)
 }

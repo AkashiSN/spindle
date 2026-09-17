@@ -105,6 +105,9 @@ pub struct PendingOp {
     /// 記録時点の物理パス（rename op の外部移動判定に使う。DB の `rel_path` は overlay で
     /// 先に変わっているかもしれない）
     pub expected_rel_path: Option<String>,
+    /// op が置く先のパス（`edits.rel_path` の新値。rename / archive op）。archive op は DB を
+    /// 先行更新しないので、宛先に現れたファイルはここで「自分の作業中」と判定する（P1-4）
+    pub target_rel_path: Option<String>,
 }
 
 fn blob_array<const N: usize>(v: Option<Vec<u8>>) -> Option<[u8; N]> {
@@ -523,7 +526,10 @@ pub fn set_track_album(
 /// 現在の pending op（track_id → op）。commit トランザクションの中で読み直す用
 pub fn load_pending_ops(conn: &Connection) -> Result<std::collections::HashMap<i64, PendingOp>> {
     let mut stmt = conn.prepare(
-        "SELECT track_id, id, kind, expected_rel_path FROM edit_ops WHERE result = 'pending'",
+        "SELECT o.track_id, o.id, o.kind, o.expected_rel_path,
+                (SELECT json_extract(e.new_value, '$') FROM edits e
+                  WHERE e.op_id = o.id AND e.key = 'rel_path')
+         FROM edit_ops o WHERE o.result = 'pending'",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -532,6 +538,7 @@ pub fn load_pending_ops(conn: &Connection) -> Result<std::collections::HashMap<i
                 op_id: r.get(1)?,
                 kind: r.get(2)?,
                 expected_rel_path: r.get(3)?,
+                target_rel_path: r.get(4)?,
             },
         ))
     })?;

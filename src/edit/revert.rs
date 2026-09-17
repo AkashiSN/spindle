@@ -21,11 +21,13 @@ use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension as _};
 
+use crate::db::archive::{self, ArchiveState};
 use crate::db::history::{self, Op, OpKind, OpResult};
 use crate::db::now_epoch;
 use crate::domain::tags::TagSet;
 use crate::jobs::Event;
 
+use super::normalize::{prepare_normalize_tx, NormalizeTarget};
 use super::rename::{prepare_rename_tx, RenameTarget};
 use super::{
     batch_event, json_values, prepare_tags_tx, with_replaced, EditError, Editor, Evaluator,
@@ -100,8 +102,72 @@ fn revert_tx(
         OpKind::Tags => revert_tags(conn, batch_id, description, targets, now),
         OpKind::Rename => revert_rename(conn, batch_id, description, targets, now),
         OpKind::Delete => revert_delete(conn, batch_id, description, targets, now),
-        OpKind::Archive => Err(EditError::UnsupportedKind(kind).into()),
+        OpKind::Archive => revert_archive(conn, batch_id, description, targets, now),
     }
+}
+
+/// ロスレス正規化の巻き戻し（SPEC §7.4、D-46）。同じ op 種別で向きを逆にする（`rel_path` 新→旧、
+/// `codec` 新→旧）。復元元は Archive の held 行なので、GC 済み（deleted）や台帳に無いものは
+/// conflict。Library の現在値（rel_path / codec）が元バッチの新値と違うものも conflict
+fn revert_archive(
+    conn: &mut Connection,
+    batch_id: i64,
+    description: Option<&str>,
+    targets: Vec<Target>,
+    now: i64,
+) -> Result<Prepared, RevertError> {
+    let mut plan: Vec<NormalizeTarget> = Vec::with_capacity(targets.len());
+    for t in &targets {
+        let edit_of = |key: &str| -> Result<(String, String), RevertError> {
+            let e = t.edits.iter().find(|e| e.key == key).ok_or_else(|| {
+                EditError::Internal(format!("op {} に {key} の edit が無い", t.op.id))
+            })?;
+            Ok((
+                e.old_value.as_str().unwrap_or_default().to_owned(),
+                e.new_value.as_str().unwrap_or_default().to_owned(),
+            ))
+        };
+        let (old_path, new_path) = edit_of("rel_path")?;
+        let (old_codec, new_codec) = edit_of("codec")?;
+        let current: Option<(String, String)> = conn
+            .query_row(
+                "SELECT rel_path, codec FROM tracks WHERE id = ?1",
+                [t.op.track_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((cur_path, cur_codec)) = current else {
+            return Err(EditError::TrackNotFound(t.op.track_id).into());
+        };
+        let conflict = if cur_path != new_path || cur_codec != new_codec {
+            Some(format!(
+                "現在値が元バッチの新値と違う（外部変更または後続の編集）: {cur_path} ({cur_codec})"
+            ))
+        } else {
+            match archive::get_by_rel_path(conn, &old_path)? {
+                Some(a) if a.state == ArchiveState::Held => None,
+                Some(a) => Some(format!(
+                    "退避ファイルが Archive に無い（台帳 {}）: {old_path}",
+                    a.state.as_str()
+                )),
+                None => Some(format!("退避ファイルが台帳に無い: {old_path}")),
+            }
+        };
+        plan.push(NormalizeTarget {
+            track_id: t.op.track_id,
+            new_rel_path: old_path,
+            new_codec: old_codec,
+            expected: None,
+            planned_conflict: conflict,
+        });
+    }
+    Ok(prepare_normalize_tx(
+        conn,
+        description,
+        &plan,
+        Some(batch_id),
+        now,
+    )?)
 }
 
 fn revert_tags(

@@ -37,7 +37,7 @@ rustix = { version = "1.1.4", features = ["fs", "process", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
-symphonia = { version = "0.6.1", default-features = false, features = ["isomp4", "ogg", "mp3", "aac", "alac", "wav", "pcm", "flac"] }
+symphonia = { version = "0.6.1", default-features = false, features = ["isomp4", "ogg", "mp3", "aac", "alac", "wav", "aiff", "pcm", "flac"] }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-stream = { version = "0.1.19", features = ["sync"] }
@@ -52,5 +52,6 @@ unicode-normalization = "0.1.25"
 http-body-util = "0.1.5"
 lofty = "0.25.2"
 serde_json = "1.0.151"
+sha2 = "0.11.0"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }

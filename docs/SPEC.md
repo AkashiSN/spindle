@@ -477,17 +477,34 @@ Library のロスレスは FLAC に統一する（D-45）。移行で取り込�
 AIFF も、同じ機構で FLAC にする。
 
 ```
-WAV / ALAC / AIFF 検出
-  → デコードして PCM MD5 算出
-  → flac -8 でエンコード（tmp → fsync → Library へ rename）。タグは lofty で移す
+POST /api/normalize/preview → /apply（selection。rename と同型。D-46）
+  → edit_batches + edit_ops(kind='archive', pending) + edits(rel_path 旧→新, codec 旧→'flac')
+    を記録し、track 単位の normalize ジョブを投入。DB は先行更新しない
+normalize ジョブ（track をロック）
+  → 事前条件（stat + tag_hash）を確認。外れていれば skipped_conflict
+  → symphonia でデコードして PCM MD5 算出
+  → ffmpeg でデコード → flac -8 --verify でエンコード（data/tmp）。タグと画像は lofty で移す
   → 生成 FLAC の STREAMINFO MD5 と突き合わせ
-     ├ 一致   → 元ファイルを Archive/ の同じ相対パスへ move、
-     │          edit_ops(kind='archive') に from/to を記録、
-     │          archived_files に台帳（eligible_after = now + retention）を追加、
-     │          original_codec（'wav' | 'alac' | 'aiff'）、normalized_at 記録。
-     │          audio_md5 は同じ PCM なので変わらず、audio_version も上げない（Derived は据え置き）
-     └ 不一致 → 中止、エラー報告、元ファイルを残す（生成した FLAC は捨てる）
+     ├ 一致   → Library の同じディレクトリに tmp → fsync → RENAME_NOREPLACE で <name>.flac を置く
+     │          → 元ファイルを同じディレクトリの一時名 spindle-normalize-<op_id>.<ext> へ退避
+     │            （inode を確認。外部の tmp + rename と分離する）
+     │          → Archive/ の同じ相対パスへ実コピー（SHA-256 を照合し、edits に記録）
+     │          → unlink の直前に同じ FD の stat とバイト列を再照合 → 一時名を unlink
+     │          → 1 トランザクションで op を applied、rel_path / 物理属性 / codec を追随、
+     │            archived_files に台帳（eligible_after = now + retention）を追加、
+     │            original_codec（'wav' | 'alac' | 'aiff'）、normalized_at 記録。
+     │            audio_md5 は同じ PCM なので変わらず、audio_version も上げない（Derived は据え置き）。
+     │            tag_version は写したタグの tag_hash が元と違うときだけ進める
+     └ 不一致 → op は failed、元ファイルを残す（生成した FLAC は捨てる）
 ```
+
+宛先は拡張子を `.flac` に置き換えた同じパス。宛先を別のトラックが占有していれば計画の時点で
+conflict。反映の直前に宛先へ別のファイルが現れていれば `skipped_conflict`（音声 MD5 が期待値と
+一致するときだけ自分の成果物とみなして続きを行う。クラッシュ後の再投入も同じ判定）。
+スキャナは pending の archive op の元・一時名・宛先のパスを「作業中」として扱い、新規登録も
+missing 判定もしない。unlink の前に元ファイルが外部で更新・差し替えされていれば conflict にして
+元パスへ戻す（自分が置いた宛先と Archive のコピーは消す）。cancel は Library を触る前まで
+（変換中の子プロセスは止める）。
 
 WAV は RIFF INFO / ID3 のどちらを使うかがソフトごとに異なり、ReplayGain タグの
 互換性も低い。ALAC（MP4 ilst）は複数値タグが弱く、Safari 以外のブラウザで再生できない。
@@ -497,7 +514,10 @@ WAV は RIFF INFO / ID3 のどちらを使うかがソフトごとに異なり�
 **元ファイルは即時削除しない。** 物理削除はユーザデータ全般と同じく GC ジョブのみが行う
 （禁止事項）。退避した元ファイルは `archived_files`（state='held'）を台帳として GC が
 `eligible_after` 経過後に回収し state='deleted' にする。それまでは履歴の巻き戻しで
-Library へ戻せる（state='restored'。FLAC の方を Archive へ移す）。
+Library へ戻せる: 元ファイルは Archive から Library へ**コピー**で戻し（Archive の実体は残る。
+state='restored'）、Library にあった FLAC は Archive へ move して台帳に `reason='restore'` の行を
+足す（GC の対象）。やり直し（逆バッチの revert）はその逆で、同じパスの台帳行は作り直さず `held` に
+戻す。復元元が GC 済みの op は `skipped_conflict`（D-46）。
 編集履歴は revert / redo で状態が動くので GC の台帳には使わない。
 Archive の「追記のみ」の例外はこの GC だけ。
 
@@ -686,7 +706,7 @@ DB の追随は必要。
 | `transcode` | CPU コア数 - 1 | track_id + audio_version |
 | `tagwrite` | 4 | track_id + tag_version（`edit_batch_id` でバッチに紐づく） |
 | `rename` | 1 | batch_id（バッチ 1 つに 1 ジョブ。2 phase の順序を守るため直列。D-43） |
-| `normalize` | 2 | track_id |
+| `normalize` | 2 | track_id + op_id（同じトラックの直列化は track_locks） |
 | `thumbnail` | 4 | artwork_id |
 | `flaccheck` | CPU コア数 | track_id |
 | `inbox` | 1 | 固定 |
@@ -732,6 +752,8 @@ PATCH  /api/tracks/batch                          一括編集（dry_run フラ�
 POST   /api/tracks/batch/preview                  変更プレビュー
 POST   /api/rename/preview                        テンプレート適用結果（selection_token を発行）
 POST   /api/rename/apply                          token の集合をリネームバッチとして記録
+POST   /api/normalize/preview                     ロスレス → FLAC 正規化の宛先（selection_token を発行）
+POST   /api/normalize/apply                       token の集合を正規化バッチとして記録（§7.4）
 
 GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
 GET    /api/categories, POST /api/categories
@@ -837,6 +859,16 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //   skipped_conflict の op として記録だけする（affected に含む）
 //   201 { "batch_id": 43, "affected": 977, "conflict": 2 }
 //   409 { "error": "pending" | "preview_stale" | "no_changes" }   // 規則は PATCH /api/tracks/batch と同じ
+
+// POST /api/normalize/preview   { "selection": {...}, "sort"? }
+//   rename と同型。items は宛先が決まる行（old / codec / new）と衝突した行（new: null, reason）。
+//   既に FLAC・非可逆は unchanged に数える
+{ "selection_token": "…", "count": 7572,
+  "changed": 7570, "unchanged": 0, "conflict": 2, "pending_excluded": 0,
+  "items": [ { "id": 1, "old": "J-Pop/…/01 ….m4a", "codec": "alac", "new": "J-Pop/…/01 ….flac" } ] }
+// POST /api/normalize/apply   { "selection_token", "description"?, "skip_pending": false }
+//   201 { "batch_id": 44, "affected": 7572, "conflict": 2 }
+//   409 { "error": "pending" | "preview_stale" | "no_changes" | "normalize_disabled" }
 
 // GET /api/history
 { "items": [ { "id": 42, "created_at": 1, "description": "…", "kind": "tags",
@@ -1338,6 +1370,7 @@ src/
 │   ├── mod.rs           コネクション管理（write 単一 / read プール）
 │   ├── migrations.rs    リポジトリ直下 db/migrations/*.sql の埋め込みと適用
 │   ├── tracks.rs        一覧（キーセット）・検索・selection 解決・アルバム一覧（D-39）
+│   ├── archive.rs       archived_files 台帳（退避・復元・GC の根拠）
 │   ├── playlists.rs  jobs.rs  history.rs
 ├── domain/
 │   ├── identity.rs      inode / audio_md5 による同一性解決
@@ -1351,10 +1384,12 @@ src/
 │   ├── mod.rs           編集バッチの coordinator（記録・DB 先行更新・反映・overlay 解消・
 │   │                    キャンセル・起動時リカバリ。D-24 / D-41）
 │   ├── rename.rs        一括リネームの計画・記録・2 phase 反映・album の追随（D-43）
+│   ├── normalize.rs     ロスレス → FLAC 正規化の計画・記録・反映・Archive 退避（D-46）
 │   └── revert.rs        巻き戻し（対象集合・現在値の比較・逆バッチの記録。D-44）
 ├── media/
+│   ├── fingerprint.rs   STREAMINFO MD5 / デコード PCM MD5 / パケット列ハッシュ
 │   ├── decode.rs        symphonia / ffmpeg フォールバック
-│   ├── encode.rs        flac / opus
+│   ├── encode.rs        flac（ffmpeg デコード → flac -8）/ opus
 │   └── artwork.rs       抽出・埋め込み・サムネイル
 ├── cd/
 │   ├── device.rs        ioctl / SG_IO / ポーリング
@@ -1364,7 +1399,6 @@ src/
 │   └── ctdb.rs          CRC32、照会、修復
 ├── import/
 │   ├── scanner.rs
-│   ├── normalize.rs     WAV → FLAC
 │   └── ytmusic/         parser.rs（ルール TOML）、downloader.rs
 ├── jobs/
 │   ├── queue.rs  worker.rs  recovery.rs
@@ -1375,7 +1409,8 @@ src/
 │   ├── fb2k.rs          AST → foobar クエリ + ソートパターン
 │   └── export.rs        m3u8 / pls / パスマッピング
 ├── api/
-│   ├── mod.rs  tracks.rs  albums.rs  selection.rs  batch.rs  rename.rs  history.rs  stream.rs  cd.rs  events.rs
+│   ├── mod.rs  tracks.rs  albums.rs  selection.rs  batch.rs  rename.rs  normalize.rs  history.rs
+│   │   stream.rs  cd.rs  events.rs
 │   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
 │   ├── state.rs  error.rs   AppState、`{ "error": code }` 応答
 └── web/                 SPA を rust-embed で同梱

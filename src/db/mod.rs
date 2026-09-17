@@ -5,6 +5,7 @@
 //! （`journal_mode` / `synchronous` はトランザクション内で変更できず、`foreign_keys` は
 //! トランザクション中は無視されるため）。
 
+pub mod archive;
 pub mod history;
 pub mod jobs;
 pub mod migrations;

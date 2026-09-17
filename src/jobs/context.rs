@@ -164,6 +164,7 @@ impl JobContext {
 
 /// drop されると対象パスを削除する。キャンセル・失敗・panic のどれでも tmp を残さないための道具
 #[must_use = "束縛しないと即座に削除される"]
+#[derive(Debug)]
 pub struct TempGuard {
     path: PathBuf,
     keep: bool,

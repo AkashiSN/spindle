@@ -82,6 +82,7 @@ pub fn encode_args(ext: &str) -> &'static [&'static str] {
         "mp3" => &["-c:a", "libmp3lame", "-b:a", "128k"],
         "m4a" => &["-c:a", "aac", "-b:a", "128k"],
         "alac.m4a" => &["-c:a", "alac"],
+        "aiff" => &["-c:a", "pcm_s16be", "-f", "aiff"],
         "ogg" => &["-c:a", "libvorbis", "-q:a", "3"],
         other => panic!("unknown ext {other}"),
     }

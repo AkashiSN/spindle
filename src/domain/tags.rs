@@ -208,6 +208,36 @@ pub enum TagReadError {
 /// 多値を保つ。FLAC / Opus / Vorbis は VorbisComments を直接読む（lofty の generic `Tag` は
 /// 未知のキーを落とす）。他の形式は lofty の `ItemKey` を Vorbis 名へ写像する
 pub fn read_audio_file(file: File, ext: Option<&str>) -> Result<AudioFile, TagReadError> {
+    let (af, _pictures) = read_parts(file, ext)?;
+    Ok(af)
+}
+
+/// 形式をまたいで移すタグ（ロスレス正規化で元ファイルから FLAC へ写す。SPEC §7.4）。
+/// 項目は [`TagSet`] と同じ正規化済みの Vorbis 名・値（`PICTURE` 疑似キーは含まない）、
+/// 画像は実体ごと持つ
+#[derive(Debug, Clone, Default)]
+pub struct TransferTags {
+    pub items: Vec<(String, String)>,
+    pub pictures: Vec<lofty::picture::Picture>,
+}
+
+/// 元ファイルのタグと画像を、別形式へ書くために読む
+pub fn read_transfer_tags(file: File, ext: Option<&str>) -> Result<TransferTags, TagReadError> {
+    let (af, pictures) = read_parts(file, ext)?;
+    let items = af
+        .tags
+        .items()
+        .iter()
+        .filter(|(k, _)| k != PICTURE_KEY)
+        .cloned()
+        .collect();
+    Ok(TransferTags { items, pictures })
+}
+
+fn read_parts(
+    file: File,
+    ext: Option<&str>,
+) -> Result<(AudioFile, Vec<lofty::picture::Picture>), TagReadError> {
     let mut reader = BufReader::new(file);
     let mut probe = Probe::new(&mut reader);
     if let Some(ext) = ext {
@@ -222,25 +252,27 @@ pub fn read_audio_file(file: File, ext: Option<&str>) -> Result<AudioFile, TagRe
     let opts = ParseOptions::new();
 
     let mut set = TagSet::default();
+    let mut pictures: Vec<lofty::picture::Picture> = Vec::new();
     let (codec, props): (Codec, FileProperties) = match ty {
         FileType::Flac => {
             let f = lofty::flac::FlacFile::read_from(reader, opts)?;
             if let Some(vc) = f.vorbis_comments() {
-                collect_vorbis(&mut set, vc);
+                collect_vorbis(&mut set, &mut pictures, vc);
             }
             for (pic, _) in f.pictures() {
                 set.add_picture(mime_of(pic), pic.data());
+                pictures.push(pic.clone());
             }
             (Codec::Flac, (*f.properties()).into())
         }
         FileType::Opus => {
             let f = lofty::ogg::OpusFile::read_from(reader, opts)?;
-            collect_vorbis(&mut set, f.vorbis_comments());
+            collect_vorbis(&mut set, &mut pictures, f.vorbis_comments());
             (Codec::Opus, (*f.properties()).into())
         }
         FileType::Vorbis => {
             let f = lofty::ogg::VorbisFile::read_from(reader, opts)?;
-            collect_vorbis(&mut set, f.vorbis_comments());
+            collect_vorbis(&mut set, &mut pictures, f.vorbis_comments());
             (Codec::Ogg, (*f.properties()).into())
         }
         FileType::Mp4 => {
@@ -255,6 +287,7 @@ pub fn read_audio_file(file: File, ext: Option<&str>) -> Result<AudioFile, TagRe
             if let Some(ilst) = f.ilst() {
                 collect_generic(
                     &mut set,
+                    &mut pictures,
                     &lofty::tag::Tag::from(ilst.clone()),
                     &mut HashSet::new(),
                 );
@@ -279,23 +312,26 @@ pub fn read_audio_file(file: File, ext: Option<&str>) -> Result<AudioFile, TagRe
                 .into_iter()
                 .chain(tagged.tags().iter().filter(|t| t.tag_type() != primary));
             for tag in ordered {
-                collect_generic(&mut set, tag, &mut seen);
+                collect_generic(&mut set, &mut pictures, tag, &mut seen);
             }
             (codec, tagged.properties().clone())
         }
         other => return Err(TagReadError::Unsupported(other)),
     };
 
-    Ok(AudioFile {
-        codec,
-        lossless: codec.lossless(),
-        sample_rate: props.sample_rate(),
-        bit_depth: props.bit_depth().map(u32::from),
-        channels: props.channels().map(u32::from),
-        bitrate: props.audio_bitrate().or(props.overall_bitrate()),
-        duration_ms: Some(props.duration().as_millis() as u64),
-        tags: set,
-    })
+    Ok((
+        AudioFile {
+            codec,
+            lossless: codec.lossless(),
+            sample_rate: props.sample_rate(),
+            bit_depth: props.bit_depth().map(u32::from),
+            channels: props.channels().map(u32::from),
+            bitrate: props.audio_bitrate().or(props.overall_bitrate()),
+            duration_ms: Some(props.duration().as_millis() as u64),
+            tags: set,
+        },
+        pictures,
+    ))
 }
 
 fn mime_of(pic: &lofty::picture::Picture) -> &str {
@@ -303,18 +339,28 @@ fn mime_of(pic: &lofty::picture::Picture) -> &str {
 }
 
 /// VorbisComments の全項目を raw のまま取り込む（キーは大文字化、値は NFC）
-fn collect_vorbis(set: &mut TagSet, vc: &lofty::ogg::tag::VorbisComments) {
+fn collect_vorbis(
+    set: &mut TagSet,
+    pictures: &mut Vec<lofty::picture::Picture>,
+    vc: &lofty::ogg::tag::VorbisComments,
+) {
     let items = vc.items().map(|(k, v)| (k.to_owned(), v.to_owned()));
     set.extend(items);
     for (pic, _) in vc.pictures() {
         set.add_picture(mime_of(pic), pic.data());
+        pictures.push(pic.clone());
     }
 }
 
 /// lofty の generic `Tag` を Vorbis Comment 名へ写像して取り込む。名前を持たない項目は落ちる。
 /// `seen` に既にあるキー（先に読んだブロックが持つキー）は取り込まず、このブロックで
 /// 取り込んだキーを `seen` に加える
-fn collect_generic(set: &mut TagSet, tag: &lofty::tag::Tag, seen: &mut HashSet<String>) {
+fn collect_generic(
+    set: &mut TagSet,
+    pictures: &mut Vec<lofty::picture::Picture>,
+    tag: &lofty::tag::Tag,
+    seen: &mut HashSet<String>,
+) {
     let mut added: Vec<String> = Vec::new();
     let items: Vec<(String, String)> = tag
         .items()
@@ -336,6 +382,7 @@ fn collect_generic(set: &mut TagSet, tag: &lofty::tag::Tag, seen: &mut HashSet<S
     if !tag.pictures().is_empty() && !seen.contains(PICTURE_KEY) {
         for pic in tag.pictures() {
             set.add_picture(mime_of(pic), pic.data());
+            pictures.push(pic.clone());
         }
         seen.insert(PICTURE_KEY.to_owned());
     }
@@ -481,4 +528,33 @@ fn apply_generic(tag: &mut Tag, changes: &[TagChange]) {
             }
         }
     }
+}
+
+/// 生成した FLAC（`file` は読み書きで開いた実体。まだ Library に置いていない tmp）に、元ファイル
+/// から読んだ [`TransferTags`] を**そのまま**書く（ロスレス正規化。SPEC §7.4）。既存の
+/// VorbisComments と画像は置き換える。Vorbis Comment は任意キー・多値を素直に表現できるので
+/// 写像は要らない（読み側が既に Vorbis 名へ揃えている）
+pub fn write_flac_tags(file: &mut File, tags: &TransferTags) -> Result<(), TagWriteError> {
+    use lofty::ogg::OggPictureStorage as _;
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut f = lofty::flac::FlacFile::read_from(&mut *file, ParseOptions::new())?;
+    let mut vc = VorbisComments::default();
+    for (key, value) in &tags.items {
+        vc.push(key.clone(), value.clone());
+    }
+    f.set_vorbis_comments(vc);
+    while !f.pictures().is_empty() {
+        f.remove_picture(0);
+    }
+    for pic in &tags.pictures {
+        if let Err(e) = f.insert_picture(pic.clone(), None) {
+            // 画像が壊れている（寸法を読めない等）ときは音声の正規化を止めない。タグの差分として
+            // tag_version が進み、履歴に残る
+            tracing::warn!(error = %e, "埋め込み画像を FLAC に写せない");
+        }
+    }
+    file.seek(SeekFrom::Start(0))?;
+    f.save_to(file, WriteOptions::default())?;
+    Ok(())
 }

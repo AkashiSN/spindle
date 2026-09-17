@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension as _};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -667,10 +667,38 @@ impl Commit {
         // pending と版・ハッシュはこのトランザクションの中で読み直す（D-24）
         let pending = scans::load_pending_ops(&tx)?;
 
+        // pending の archive op（ロスレス正規化。P1-4）は DB を先行更新せず、ジョブが元と宛先の
+        // 両方を一時的に Library に置く。元（記録時点のパス）と宛先の key にあるエントリは
+        // 「自分の作業中」なので、新規登録も移動も missing 判定もせず seen だけにする
+        let mut in_progress: HashMap<String, i64> = HashMap::new();
+        for (track_id, op) in &pending {
+            if op.kind != "archive" {
+                continue;
+            }
+            let (Some(expected), Some(target)) = (&op.expected_rel_path, &op.target_rel_path)
+            else {
+                continue;
+            };
+            for key in crate::edit::normalize_in_progress_keys(op.op_id, expected, target) {
+                in_progress.insert(key, *track_id);
+            }
+        }
+        let mut skipped_entries: HashSet<usize> = HashSet::new();
+        for (i, e) in self.inv.entries.iter().enumerate() {
+            if let Some(track_id) = in_progress.get(&e.key) {
+                tracing::debug!(track_id, path = %e.rel, "正規化の作業中のパス。今回は seen だけにする");
+                scans::touch_seen(&tx, *track_id, run_id, now)?;
+                skipped_entries.insert(i);
+            }
+        }
+
         // Phase 2 の後に別の書き手（tagwrite / rename）が更新した行は、今回の inventory と
         // 読み取りが古い。パスも属性もタグも触らず seen だけにして次回スキャンに委ねる
         let mut overtaken: HashSet<i64> = HashSet::new();
         for (i, d) in self.decisions.iter().enumerate() {
+            if skipped_entries.contains(&i) {
+                continue;
+            }
             let Identity::Existing {
                 track_id, changed, ..
             } = d.identity
@@ -693,6 +721,9 @@ impl Commit {
         // a. パスの 2 段階更新（pending の rename op があれば据え置いて衝突にする）
         let mut moves: Vec<(i64, String, String)> = Vec::new();
         for (i, d) in self.decisions.iter().enumerate() {
+            if skipped_entries.contains(&i) {
+                continue;
+            }
             let Identity::Existing { track_id, .. } = d.identity else {
                 continue;
             };
@@ -769,6 +800,9 @@ impl Commit {
 
         // b/c. 既存行の更新と新規挿入
         for (i, d) in self.decisions.iter().enumerate() {
+            if skipped_entries.contains(&i) {
+                continue;
+            }
             let e = &self.inv.entries[i];
             if let Identity::Existing { track_id, .. } = &d.identity {
                 if overtaken.contains(track_id) {
@@ -835,6 +869,22 @@ impl Commit {
                     }
                 }
                 Identity::New => {
+                    // Phase 2 の後に別の書き手（正規化の確定など）がこの key を持つ行を作って
+                    // いれば、今回の判定は古い。挿入すると rel_path_key の UNIQUE を踏んで走査
+                    // 全体が失敗するので、その行を seen だけにして次回に委ねる
+                    let holder: Option<i64> = tx
+                        .query_row(
+                            "SELECT id FROM tracks WHERE rel_path_key = ?1",
+                            [&e.key],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(holder) = holder {
+                        tracing::info!(track_id = holder, path = %e.rel, "スナップショット後に別のジョブがこのパスの行を作った。今回は seen だけにする");
+                        scans::touch_seen(&tx, holder, run_id, now)?;
+                        report.overtaken += 1;
+                        continue;
+                    }
                     group.dirty = true;
                     match self.results.get(&i) {
                         Some(Ok(r)) => {

@@ -22,6 +22,7 @@
 //! だけ、記録時点の旧値（`edits.old_value`）と事前条件の物理属性へ戻す。物理属性を記録時点へ
 //! 戻すのは、その後ファイルが外部で変わっていればスキャンが差分として拾い直せるようにするため
 
+mod normalize;
 mod rename;
 mod revert;
 
@@ -47,6 +48,11 @@ use crate::import::scanner::{
 use crate::jobs::{BatchEvent, Event, JobState, JobType, Jobs, NewJob};
 
 pub use crate::domain::tags::TagChange;
+pub use normalize::{
+    flac_rel_path, normalize_dedup_key, normalize_in_progress_keys, normalize_temp_rel_path,
+    NormalizeEnv, NormalizeHook, NormalizePlan, NormalizeStep, NormalizeTarget, PlannedNormalize,
+    NORMALIZE_SOURCES, SOURCE_HASH_KEY, UNDO_QUARANTINE_PREFIX,
+};
 pub use rename::{
     in_progress_keys, rename_dedup_key, temp_rel_path, PlannedRename, RenameHook, RenameOutcome,
     RenameStep, RenameTarget,
@@ -90,6 +96,8 @@ pub enum EditError {
     OpNotFound(i64),
     #[error("この種別の op はまだ反映できない: {0:?}")]
     UnsupportedKind(OpKind),
+    #[error("キャンセルされた")]
+    Cancelled,
     #[error(transparent)]
     Db(#[from] DbError),
     #[error(transparent)]
@@ -158,6 +166,9 @@ pub struct Editor {
     jobs: Arc<Jobs>,
     before_rename: Mutex<Option<BeforeRenameHook>>,
     rename_hook: Mutex<Option<RenameHook>>,
+    /// ロスレス正規化の環境（Archive root / エンコーダ）。無ければ正規化は使えない（P1-4）
+    normalize: Option<NormalizeEnv>,
+    normalize_hook: Mutex<Option<NormalizeHook>>,
 }
 
 /// tagwrite ジョブの dedup key（SPEC §8）
@@ -288,7 +299,15 @@ impl Editor {
             jobs,
             before_rename: Mutex::new(None),
             rename_hook: Mutex::new(None),
+            normalize: None,
+            normalize_hook: Mutex::new(None),
         }
+    }
+
+    /// ロスレス正規化（P1-4）を有効にする
+    pub fn with_normalize(mut self, env: NormalizeEnv) -> Self {
+        self.normalize = Some(env);
+        self
     }
 
     /// テスト用: 事前条件の確認後・rename の直前に呼ばれるフックを置く（引数は rel_path）
@@ -471,9 +490,20 @@ impl Editor {
             // rename op はパスが互いに絡む（swap / 循環）ので、バッチの pending を一度に閉じる
             return Ok(self.close_rename_ops(op.batch_id, job_id, error).await? > 0);
         }
-        let current = {
+        // archive op は DB を先行更新しない（overlay が無い）ので、閉じるだけでよい。
+        // 再試行のために一時名へ退避したままの元ファイルがあれば元パスへ戻す
+        let has_overlay = op.kind != OpKind::Archive;
+        let current = if has_overlay {
             let root = Arc::clone(&self.root);
             tokio::task::spawn_blocking(move || read_file_state(&root, &rel_path)).await?
+        } else {
+            let root = Arc::clone(&self.root);
+            let (op_id, expected, edits) = (op.id, op.expected.clone(), edits.clone());
+            tokio::task::spawn_blocking(move || {
+                normalize::restore_staged_source_of(&root, op_id, &expected, &edits)
+            })
+            .await?;
+            None
         };
         let error = error.to_owned();
         let batch_id = op.batch_id;
@@ -484,7 +514,7 @@ impl Editor {
                 let now = now_epoch();
                 let closed =
                     history::finish_op(&tx, op.id, OpResult::Failed, Some(&error), job_id, now)?;
-                if closed {
+                if closed && has_overlay {
                     resolve_overlay(&tx, &op, &edits, current.as_ref())?;
                 }
                 let event = match history::aggregate_batch(&tx, batch_id, now)? {
@@ -679,7 +709,10 @@ impl Editor {
                         }
                         // rename はバッチ 1 つに 1 ジョブ。dedup で 2 件目以降は Duplicate になる
                         OpKind::Rename => rename::rename_job(op.batch_id),
-                        _ => continue,
+                        OpKind::Archive => {
+                            normalize::normalize_job(op.track_id, op.id, op.batch_id)
+                        }
+                        OpKind::Delete => continue,
                     };
                     match dbjobs::enqueue(&tx, &job, now)? {
                         dbjobs::EnqueueResult::Inserted(id) => {

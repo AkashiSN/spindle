@@ -1144,7 +1144,7 @@ coordinator で追随させるのは、リネーム直後の一覧（category / 
   `prepare_rename_tx` に乗る（DB 先行更新 + tagwrite / rename ジョブ、事前条件は記録時点の DB 値、
   pending の 409、キャンセル、リカバリはすべて同じ経路）。`delete` は `missing_since` を戻すだけの
   DB 操作なので、同じトランザクションで op を applied にして即終端にする（構成トラックが戻った album の
-  `missing_since` も外す）。`archive` の巻き戻しは未実装（P1）
+  `missing_since` も外す）。`archive`（ロスレス正規化）は `prepare_normalize_tx` に乗る（D-46）
 - **対象集合はトラック単位**で引く: 元バッチの `applied` op − 逆バッチ群（`reverts_batch_id` = 元）で
   `applied` になった op の `track_id`。1 バッチ 1 トラック 1 op なので op と track は 1:1
 - **現在値の比較は DB の値**（`track_tags` / `rel_path` / `missing_since`）で行う。DB はファイルの
@@ -1233,3 +1233,104 @@ redo を同じ式で扱うため。
 **却下**: ALAC のまま Library に残す（Safari 以外の再生が全件変換、複数値タグの制約が続く）。
 `AAC/` を Archive に置く（音声を書き換えた非可逆で原本性が無い）。`Original/Playlists` の fpl を
 移す（foobar 専用。P1-6 の取り込みでパスは書き換えるので m3u8 だけで足りる）。
+
+## D-46 ロスレス正規化の固定値と境界
+
+**決定**: 仕様（SPEC §7.4 / §8 / §9、D-10 / D-45）が定めていない値と境界を次のとおり固定する。
+
+- **起動は selection API**（`POST /api/normalize/preview` → `/apply`。rename と同型で
+  `selection_token` を使う）。スキャンは WAV / ALAC / AIFF を見つけても自動投入しない。移行で
+  取り込んだ ALAC 7,572 本（220G）の変換は数時間の CPU と Archive への実コピーを伴うので、
+  いつ・どの範囲を変換するかはユーザが決める。Inbox 取り込み（P2-10）の後続ジョブとしての
+  自動投入はそのときに足す。`[normalize].wav_to_flac = false` なら API は 409 `normalize_disabled`
+- **編集バッチの機構に乗せる**: `edit_batches` + `edit_ops(kind='archive')` + `edits`
+  （`rel_path` 旧→新、`codec` 旧→新）。宛先は拡張子を `.flac` に置き換えた同じパス。
+  ジョブは track 単位の `normalize`（dedup `normalize:<track_id>:<op_id>`、並列 2。op ごとに一意に
+  しないと、巻き戻し直後の新しい op がまだ `running` の前のジョブに相乗りして実行されない）で、
+  ハンドラが自分で
+  `track_locks` を取る。pending の op があるトラックは再編集できない（409）ので、変換中にタグ編集や
+  リネームが割り込むことはない
+- **DB は先行更新しない**（tags / rename の overlay と違う）。変換が終わるまで表は元ファイルの実体
+  （ALAC / WAV）を示す。エンコードが失敗すれば何も変わらない。コーデックを先に FLAC と見せると
+  失敗時に戻す overlay 解消が要り、表示も嘘になる
+- **照合は独立した 2 つのデコーダ**: 元の PCM MD5 は symphonia（`decoded_pcm_md5`、スキャンと同じ
+  計算）、エンコード側は ffmpeg でデコードした WAV を `flac -8 --verify` に通した STREAMINFO の
+  MD5。両者が一致するときだけ置く。どちらかが元ファイルを読み違えれば不一致になり、op は
+  `failed`（元ファイルは無傷、生成物は捨てる）。ALAC を ffmpeg に渡すときは `/dev/stdin` に
+  root から開いた FD を繋ぐ（MP4 は moov が末尾にあると pipe では読めない。パス文字列は渡さない）
+- **タグは lofty で写す**: 読み側が Vorbis 名へ揃えた項目と画像の実体を、生成した FLAC の
+  VorbisComments と PICTURE ブロックにそのまま書く。写した結果の `tag_hash` が元と違うときだけ
+  `tag_version` を進める（MP4 ilst で表現していたキーが落ちた等。同値なら進めない）。
+  `audio_md5` は同じ PCM なので変わらず、`audio_version` も据え置く
+- **破壊フェーズは 3 段で、unlink の直前まで元ファイルを照合し続ける**（排他ロックは使わない。
+  不変条件 5）。(1) 宛先の FLAC を置き、元ファイルを同じディレクトリの一時名
+  `spindle-normalize-<op_id>.<ext>` へ `RENAME_NOREPLACE` で退避する。rename した実体の inode が
+  自分の FD と違えば（stat と rename の間に差し替えられた）戻して conflict。以後に元パスへ現れる
+  外部のファイル（tmp + rename）は自分の inode と分離され、触らない。(2) Archive へ実コピー
+  （別プールなので rename できない）。コピーしながら取った SHA-256 が最初の値と違えば（同じ inode
+  への in-place 更新）conflict、書いた tmp を読み戻して一致しなければ I/O 失敗として再試行。
+  rename の前に **元ファイルのコンテナ全体の SHA-256 を `edits(key='source_sha256')` に記録**する。
+  (3) unlink の直前に同じ FD の stat とバイト列、一時名にあるのがその FD の実体（dev / inode）
+  であること、宛先にあるのが期待した音声（MD5）であることをもう一度照合し、外れていれば
+  conflict。**unlink が不可逆な確定点**で、その後の失敗（dir の fsync 等）では宛先も Archive も
+  消さず再試行に回す（反映済み経路で確定する）。
+  確定点では同じ blocking 関数の中で一時名の実体（dev / inode）を再確認してから unlink する。
+  conflict では元を元パスへ戻し、自分が置いた宛先と Archive の未確定コピーを消す（ユーザデータは
+  元の inode に無傷で残っている）。消すのは**今そのパスにあるのが自分の置いた実体で、置いてから
+  変わっていない（置いた直後の stat と dev / inode / size / mtime / ctime が一致し、内容の SHA-256 も
+  書いたときと一致する。カーネルの時刻は粗い粒度なので stat だけでは同じ tick の変更を見落とす）
+  ときだけ**で、
+  外部が差し替え・上書きしていれば触らない（パスは識別子ではない）。消すときも unlink をパスに
+  対して直接は行わず、同じディレクトリの隔離名（`.spindle-undo-…`。隠しファイルだが
+  `.spindle-tmp-` ではないので、スキャナの取り残し回収の対象に**ならない**）へ原子的に rename して
+  パスから切り離し、外した実体（dev / inode・size / mtime・内容）を照合する。一致した自分の生成物
+  だけを `.spindle-tmp-` の名前へ移してから unlink する（消す前に落ちても 1 時間後に回収される）。
+  照合に外れれば元の場所へ戻す（塞がっていれば回収パス。どちらも失敗すれば隔離名のまま残り、
+  自動では消えない）。一時名の実体が差し替えられて
+  いれば、開いている FD の内容を元パスへ、元パスも塞がっていれば同じディレクトリの回収パス
+  `spindle-recovery-<op_id>-<random>.<ext>` へ書き出す（所在は op の error に残る）。元をどこにも
+  残せなかったときは、同じ音声を持つ自分の生成物（宛先の FLAC・Archive のコピー）を 1 つも消さず、
+  実在する複製だけを op の error に記す。I/O 失敗（再試行）では生成物
+  だけ消し、元は一時名に残す（戻す rename は ctime を進めて次の試行の事前条件が外れるため。
+  一時名にある元は「rename による ctime の差」として許容する）。op を閉じるとき（最終失敗・
+  キャンセル）に、一時名にあるのが記録した inode なら元パスへ戻す。
+  台帳 `archived_files` は `rel_path`（Archive 相対 = 元の Library 相対）で UNIQUE、
+  `eligible_after = now + [gc].retention_days`
+- **巻き戻しは同じ op 種別で向きを逆にする**（`rel_path` 新→旧、`codec` 新→旧。D-44 の
+  「未実装」を解消）。元ファイルは Archive から Library へ**コピー**で戻し、Archive の実体は消さない
+  （Archive は追記のみ。台帳は `restored`）。Library にあった FLAC は Archive へ move し、台帳に
+  `reason='restore'` の行を足す（GC の対象。マイグレーション 0003 で CHECK を広げた）。
+  やり直し（逆バッチの revert）は WAV を再び Archive へ move するが、同じパスの行が既にあるので
+  作り直さず `held` に戻して期限を更新する。復元元が GC 済み（`deleted`）や台帳に無い op は
+  `skipped_conflict`
+- **冪等性の判定はファイルの実体**: 再投入されたジョブは Library/<旧>（無ければ一時名）の有無、
+  Library/<新> の音声 MD5（期待値と一致するときだけ自分の成果物）、Archive/<旧> のバイト列（元と
+  一致するときだけ退避済み）から続きを行う。<旧> も一時名も無く、<新> の音声 MD5 が DB と一致し、
+  Archive/<旧> の SHA-256 が記録した `source_sha256` と一致するときだけ「反映済み」として DB を
+  確定する。記録が無い・一致しないときは何も消さず `skipped_conflict`（宛先も Archive の実体も
+  残す）。宛先に別のファイルがあれば `skipped_conflict`、Archive の同じパスに別のファイルがあれば
+  **Library を触る前に** `failed`。置いた宛先の読み直しに失敗したときは terminal にせず再試行
+  （反映済み経路で確定する）
+- **スキャナは作業中のパスを避ける**: pending の archive op の元（`expected_rel_path`）・一時名・
+  宛先（`edits.rel_path` の新値）の key にあるエントリは新規登録も移動も missing 判定もせず、
+  seen だけにする。DB を先行更新しないので、ジョブが宛先を置いてから DB を確定するまでの窓で
+  スキャンが宛先を「新規トラック」に登録すると、確定時に `rel_path` の UNIQUE を踏む。
+  inventory を取った後・commit の前にジョブが DB を確定した（op はもう pending でない）場合は、
+  `Identity::New` の挿入直前に `rel_path_key` の占有を読み直し、占有されていれば挿入せず
+  seen だけにする（走査全体を UNIQUE 違反で失敗させない）
+- **cancel は Library を触る前まで**（変換中の ffmpeg / flac は子プロセスごと止め、tmp を消す）。
+  配置を始めたら最後まで進める。外部の変更は事前条件（stat + tag_hash）で `skipped_conflict`、
+  変換の間に元ファイルが更新されていれば配置の直前に同じ FD の fstat で検出する
+- **UI は未着手**（rename と同じ。curl で起動できる）。設定画面の「退避ファイルの一覧と復元」
+  （SPEC §12.6）は台帳 API と合わせて後で載せる
+
+**理由**: 破壊的操作（Library からファイルを外す）は必ずバッチとして巻き戻せる必要があり
+（不変条件 4）、既存の編集バッチの機構に乗せれば pending / conflict / cancel / リカバリ / 履歴 /
+巻き戻しの規則が 1 本になる。DB を先行更新しないのは、変換の成否がファイルを読むまで分からず、
+失敗が普通に起きる（MD5 不一致、ビット深度非対応）ため。2 つのデコーダで照合するのは、
+「可逆変換だから情報は失われない」を実装が検査できる形にするため。
+
+**却下**: スキャンで自動投入（220G の変換が起動直後に勝手に走る）。ffmpeg だけで FLAC まで作る
+（`flac -8` の参照エンコーダを外すうえ、照合が単一デコーダの自己一致になる）。元ファイルを
+Archive から move で戻す（Archive の追記のみの原則に例外が増える）。DB を先行更新して codec=flac
+を先に見せる（失敗時の overlay 解消が要る）。

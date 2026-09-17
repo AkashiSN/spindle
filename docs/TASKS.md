@@ -407,10 +407,38 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       単体テストに置く。`rg_scanned_at` と `rg_written_at` を分離）
 - [ ] **P1-3** アートワーク（埋め込み / `cover.jpg` 両対応、抽出・一括差し替え、
       WebP サムネイル生成とキャッシュ。アルバムグリッド画面 → クリックで表を `album_id` に絞る）
-- [ ] **P1-4** ロスレス → FLAC 正規化（WAV / ALAC / AIFF。D-45。変換前後の PCM MD5 照合。
+- [x] **P1-4** ロスレス → FLAC 正規化（WAV / ALAC / AIFF。D-45 / D-46。変換前後の PCM MD5 照合。
       不一致なら中止。一致時は元ファイルを `Archive/` へ move し `edit_ops(kind='archive')` と
       `archived_files` 台帳に記録。**即時削除しない**。`audio_version` は据え置き。
       移行で取り込んだ ALAC 7,572 本が主対象）
+      - [x] `POST /api/normalize/preview` / `apply`（selection。rename と同型。`api::normalize`。
+            UI は未着手。`[normalize].wav_to_flac = false` で 409）
+      - [x] `edit::normalize`: `edit_ops(kind='archive')` + `edits(rel_path / codec)`、DB は先行更新
+            しない。track 単位の `normalize` ジョブ（並列 2、`jobs::handlers::normalize`）
+      - [x] `media::encode::FlacEncoder`: ffmpeg デコード（root の FD を `/dev/stdin` で渡す）→
+            `flac -8 --verify`。STREAMINFO MD5 を symphonia の PCM MD5 と照合。タグ・画像は lofty で
+            写す（`tags::read_transfer_tags` / `write_flac_tags`）。`tag_hash` が変わったときだけ
+            `tag_version++`
+      - [x] 破壊フェーズ: 元を一時名 `spindle-normalize-<op_id>.<ext>` へ退避（inode 確認）→ Archive へ
+            実コピー + SHA-256 の読み戻し照合（`edits.source_sha256` に記録）→ unlink 直前に同じ FD の
+            stat とバイト列を再照合 → unlink。conflict は元パスへ戻して生成物を消す。台帳 `db::archive`
+      - [x] 巻き戻し（`revert_archive`）: Archive からコピーで復元、FLAC は Archive へ move して
+            `reason='restore'`（マイグレーション 0003）。redo は同じ台帳行を `held` に戻す
+      - [x] 冪等（宛先 / 一時名 / Archive の実体と記録した SHA-256 から続きを判定）、cancel（Library を
+            触る前まで）、スキャナが作業中のパス（元・一時名・宛先）を避け、inventory 後に確定された
+            宛先を `Identity::New` で挿入しない（`PendingOp::target_rel_path`）
+      - [x] symphonia の `aiff` feature を有効化（AIFF の PCM MD5 が計算できていなかった）
+
+      受け入れ: `tests/normalize.rs` / `tests/normalize_api.rs` / `tests/encode.rs`。WAV / ALAC / AIFF が
+      FLAC になり `audio_md5` / `audio_version` が変わらない。MD5 不一致（ffmpeg を差し替えた模擬）で
+      元ファイルが無傷のまま failed。事前条件不一致・宛先の占有が conflict。revert → redo が通り
+      Archive の実体が減らない。配置後 / 退避後 / unlink 後のクラッシュから再投入で完了。Archive のコピー
+      中・unlink 直前の in-place 更新と元パスの差し替えでユーザデータを失わない。Archive のコピーが
+      壊れた状態からの復旧は conflict で何も消さない。I/O 失敗は生成物を消して再試行できる。作業中に
+      走ったスキャンが宛先を新規登録せず、inventory 後に確定されても走査が失敗しない。
+
+      未決: 20 bit などの ffmpeg PCM エンコーダが無いビット深度は failed（ビット深度に合う
+      `pcm_s*le` を選ぶだけなので、必要なら raw → `flac --bps` の経路を足す）
 - [ ] **P1-5** FLAC 健全性チェック（`flac -t`、MD5 未設定の補填。
       補填時は `audio_version` 据え置き）
 - [ ] **P1-6** プレイリスト（手動、並べ替え、m3u8 書き出し）

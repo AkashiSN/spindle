@@ -7,20 +7,24 @@ use tracing::info;
 
 use spindle::api::{self, auth, AppState};
 use spindle::db::{migrations, Db};
-use spindle::edit::Editor;
+use spindle::edit::{Editor, NormalizeEnv};
 use spindle::fsroot::Roots;
 use spindle::import::scanner::Scanner;
 use spindle::jobs::handlers::backup::{self, BackupHandler};
+use spindle::jobs::handlers::normalize::NormalizeHandler;
 use spindle::jobs::handlers::rename::RenameHandler;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
+use spindle::media::encode::FlacEncoder;
 use spindle::{config::Config, logging};
 
 /// `SPINDLE_CONFIG` 未設定時の設定ファイルパス（SPEC §14 環境変数）
 const DEFAULT_CONFIG_PATH: &str = "/data/config.toml";
 /// `[paths].data` 直下の DB ファイル名（SPEC §5）
 const DB_FILE_NAME: &str = "spindle.db";
+/// `[paths].data` 直下の変換作業領域（SPEC §5）
+const TMP_DIR_NAME: &str = "tmp";
 /// 初回起動時の管理パスワード（SPEC §14 環境変数、D-28）
 const INITIAL_PASSWORD_ENV: &str = "SPINDLE_INITIAL_PASSWORD";
 
@@ -37,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
     // 全 root を dirfd で開く。openat2 が無い（Linux 5.6 未満）ならここで止まる（D-31）
     let roots = Roots::open(&config.paths).context("ライブラリの root を開けない")?;
     let library_root = Arc::new(roots.library);
+    let archive_root = Arc::new(roots.archive);
 
     let db_path = config.paths.data.join(DB_FILE_NAME);
     let db = {
@@ -85,11 +90,24 @@ async fn main() -> anyhow::Result<()> {
     });
     // 編集バッチの coordinator。起動時リカバリ（pending op の track ジョブ再投入）は
     // ジョブのリカバリの後・ワーカー起動の前（SPEC §7.5）
-    let editor = Arc::new(Editor::new(
-        Arc::clone(&state.db),
-        Arc::clone(&library_root),
-        Arc::clone(&state.jobs),
-    ));
+    let editor = Arc::new(
+        Editor::new(
+            Arc::clone(&state.db),
+            Arc::clone(&library_root),
+            Arc::clone(&state.jobs),
+        )
+        // ロスレス正規化（P1-4）。作業領域は data/tmp、退避先は Archive root
+        .with_normalize(NormalizeEnv {
+            archive: archive_root,
+            encoder: FlacEncoder::new(
+                &state.config.bin.ffmpeg,
+                &state.config.bin.flac,
+                state.config.encode.flac_compression,
+                state.config.paths.data.join(TMP_DIR_NAME),
+            ),
+            retention_days: state.config.gc.retention_days,
+        }),
+    );
     state = state.with_editor(Arc::clone(&editor));
     let edit_recovered = editor
         .recover()
@@ -118,7 +136,11 @@ async fn main() -> anyhow::Result<()> {
         JobType::Tagwrite,
         Arc::new(TagwriteHandler::new(Arc::clone(&editor))),
     );
-    registry.register(JobType::Rename, Arc::new(RenameHandler::new(editor)));
+    registry.register(
+        JobType::Rename,
+        Arc::new(RenameHandler::new(Arc::clone(&editor))),
+    );
+    registry.register(JobType::Normalize, Arc::new(NormalizeHandler::new(editor)));
     registry.register(
         JobType::Backup,
         Arc::new(BackupHandler::new(
