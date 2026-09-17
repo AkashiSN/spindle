@@ -7,6 +7,9 @@
 //! Phase 3  read:       変更あり / 新規 / deep のエントリだけタグとフィンガープリントを並列に読む
 //! Phase 4  commit:     1 トランザクションで path の 2 段階更新 → 属性・タグ・版 → 新規挿入 →
 //!                      album 照合 → finalize（missing）
+//! Phase 5  artwork:    構成が変わった / 同梱カバー画像が変わった / 未解決の album について
+//!                      アートワークを解決し、原画像をキャッシュへ置いて thumbnail ジョブを投入
+//!                      （`ArtworkStore` があるときだけ。P1-3、D-49）
 //! ```
 //!
 //! ジョブ基盤には依存しない。`Db` と `RootDir` と進捗コールバックと CancellationToken だけで動く
@@ -19,6 +22,8 @@ use rusqlite::{Connection, OptionalExtension as _};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+use crate::db::artwork::{self as dbart, AlbumArtworkState, CoverStat};
+use crate::db::jobs as dbjobs;
 use crate::db::scans::{
     self, AlbumMeta, AlbumSnap, CacheColumns, Fingerprint, Physical, RunState, TrackContent,
     TrackSnap,
@@ -26,8 +31,12 @@ use crate::db::scans::{
 use crate::db::{now_epoch, Db, DbError};
 use crate::domain::identity::{self, Decision, Entry, Identity, Via};
 use crate::domain::relpath::{canonical_key, RelPath};
-use crate::domain::tags::{read_audio_file, tag_hash, AudioFile, Codec, TagSet};
-use crate::fsroot::{FileKind, FsError, RootDir, TMP_PREFIX};
+use crate::domain::tags::{
+    read_audio_file, read_transfer_tags, tag_hash, AudioFile, Codec, TagSet,
+};
+use crate::fsroot::{self, FileKind, FsError, RootDir, TMP_PREFIX};
+use crate::jobs::handlers::thumbnail::new_thumbnail_job;
+use crate::media::artwork::{cover_rank, pick_embedded, sniff, ArtworkStore, ImageInfo};
 use crate::media::fingerprint;
 
 pub use crate::db::scans::ScanKind;
@@ -76,6 +85,12 @@ pub struct ScanReport {
     /// この run で DB の内容が変わった行（新規・更新・移動・復活・明け渡し・missing）。
     /// SSE `library` イベントに使う（200 件以下なら `ids`、超えたら `bulk`。SPEC §9）
     pub changed_ids: Vec<i64>,
+    /// Phase 5 でアートワークを解決し直した album 数
+    pub artwork_resolved: u64,
+    /// Phase 5 で投入したジョブ（thumbnail）。呼び出し側がワーカーを起こす
+    pub enqueued_jobs: Vec<i64>,
+    /// Phase 5 が失敗した（run は completed のまま。予約は DB に残る）
+    pub artwork_error: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +119,23 @@ pub struct Scanner {
     db: Arc<Db>,
     root: Arc<RootDir>,
     parallelism: usize,
+    /// アートワークのキャッシュ（P1-3）。無ければ Phase 5 を行わない
+    artwork: Option<Arc<ArtworkStore>>,
+    /// テスト用: Phase 5 の予約の前後で呼ぶ（[`BeforeArtworkHook`]）
+    before_artwork: Mutex<Option<BeforeArtworkHook>>,
+}
+
+/// Phase 5 のフック（テスト用。Phase 4 の commit 後の cancel / 停止を起こす）。引数は呼ばれる位置:
+/// `"before_reserve"`（Phase 4 の commit 直後・Phase 5 の予約前）、`"after_reserve"`（候補を予約した
+/// 直後・解決を始める前）
+pub type BeforeArtworkHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Phase 1 で見つけた同梱カバー画像（ディレクトリごとに最も優先度の高い 1 つ）
+#[derive(Debug, Clone)]
+struct CoverEntry {
+    rel: RelPath,
+    rank: u8,
+    stat: CoverStat,
 }
 
 /// Phase 1 の 1 エントリ
@@ -123,6 +155,8 @@ struct Inventory {
     entries: Vec<InvEntry>,
     skipped: Vec<Skipped>,
     tmp_removed: u64,
+    /// dir_key → 同梱カバー画像
+    covers: HashMap<String, CoverEntry>,
 }
 
 /// Phase 3 の読み取り結果
@@ -138,7 +172,24 @@ impl Scanner {
             db,
             root,
             parallelism: parallelism.max(1),
+            artwork: None,
+            before_artwork: Mutex::new(None),
         }
+    }
+
+    /// アートワークの解決（Phase 5）を有効にする
+    pub fn with_artwork(mut self, store: Arc<ArtworkStore>) -> Self {
+        self.artwork = Some(store);
+        self
+    }
+
+    /// テスト用: Phase 5 の予約の前後で呼ばれるフックを置く（[`BeforeArtworkHook`]）
+    #[doc(hidden)]
+    pub fn set_before_artwork_hook(&self, hook: BeforeArtworkHook) {
+        *self
+            .before_artwork
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     /// 走査を 1 回実行する。失敗・キャンセル時は `scan_runs` を `failed` / `cancelled` にして返す
@@ -319,7 +370,8 @@ impl Scanner {
             .unwrap_or_else(|e| e.into_inner());
 
         // Phase 4
-        let inv = Arc::try_unwrap(inv).unwrap_or_else(|a| (*a).clone());
+        let mut inv = Arc::try_unwrap(inv).unwrap_or_else(|a| (*a).clone());
+        let covers = std::mem::take(&mut inv.covers);
         let commit = Commit {
             run_id,
             deep,
@@ -333,8 +385,342 @@ impl Scanner {
         };
         let mut report = self.db.write(move |c| commit.apply(c)).await?;
         report.files_seen = files_seen;
+
+        // Phase 5。Phase 4 は commit 済み（missing の確定と scan_runs = completed を含む）なので、
+        // ここでの cancel / 失敗は run の状態を戻さない。再解決の予約は DB に残っているので
+        // 次のスキャンで続きを行う
+        if let Some(store) = &self.artwork {
+            self.artwork_hook("before_reserve");
+            match self.resolve_artwork(store, deep, covers, token).await {
+                Ok((resolved, jobs)) => {
+                    report.artwork_resolved = resolved;
+                    report.enqueued_jobs = jobs;
+                }
+                Err(ScanError::Cancelled) => {
+                    tracing::info!(
+                        run_id,
+                        "アートワークの解決をキャンセルした（次のスキャンで続きを行う）"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(run_id, error = %e, "アートワークの解決に失敗した（次のスキャンでやり直す）");
+                    report.artwork_error = Some(e.to_string());
+                }
+            }
+        }
         Ok(report)
     }
+
+    // ------------------------------------------------------------ Phase 5
+
+    fn artwork_hook(&self, point: &str) {
+        if let Some(hook) = self
+            .before_artwork
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            hook(point);
+        }
+    }
+
+    /// album のアートワークを解決し直す（SPEC §7.1「アートワーク」、D-49）。対象は deep なら全 album、
+    /// それ以外は「未解決（`artwork_resolved_at IS NULL`。Phase 4 が行の変わったトラックの新旧 album を
+    /// 予約する）」「同梱カバー画像の有無・stat が前回と違う」「参照中の原画像がキャッシュに無い」
+    /// album。missing の album は触らない。画像の読み取りは並列（Phase 3 と同じ並列度）、DB 更新は
+    /// 1 トランザクション。決められなかった album（I/O 失敗）は状態を動かさない
+    async fn resolve_artwork(
+        &self,
+        store: &Arc<ArtworkStore>,
+        deep: bool,
+        covers: HashMap<String, CoverEntry>,
+        token: &CancellationToken,
+    ) -> Result<(u64, Vec<i64>), ScanError> {
+        let states = self.db.read(dbart::album_states).await?;
+        let candidates: Vec<(AlbumArtworkState, Option<CoverEntry>)> = states
+            .into_iter()
+            .filter(|s| !s.missing)
+            .filter_map(|s| {
+                let cover = covers.get(&s.rel_dir_key).cloned();
+                let cover_changed = match (&s.cover, &cover) {
+                    (None, None) => false,
+                    (Some(a), Some(b)) => *a != b.stat,
+                    _ => true,
+                };
+                // 参照中の原画像が無い・長さが違う（同じ長さの破損は deep のハッシュ照合で直す）
+                let orig_lost = match (&s.artwork_sha256, &s.artwork_mime, s.artwork_bytes) {
+                    (Some(sha), Some(mime), Some(len)) => {
+                        !store.has_original_of_len(sha, mime, len as u64)
+                    }
+                    _ => false,
+                };
+                (deep || s.resolved_at.is_none() || cover_changed || orig_lost)
+                    .then_some((s, cover))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+        // 候補を全件、解決を始める前に予約する（`artwork_resolved_at = NULL`）。成功した album だけ
+        // `set_album_artwork` が予約を消すので、ここから先の cancel・DB エラー・panic・プロセス停止の
+        // どこで止まっても、残りは次のスキャンで続きになる（deep だけを理由に対象になった album を含む）
+        let ids: Vec<i64> = candidates.iter().map(|(s, _)| s.id).collect();
+        let paths: HashMap<i64, Vec<String>> = self
+            .db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                dbart::mark_unresolved(&tx, &ids)?;
+                let mut out = HashMap::with_capacity(ids.len());
+                for id in ids {
+                    out.insert(id, dbart::album_track_paths(&tx, id)?);
+                }
+                tx.commit()?;
+                Ok(out)
+            })
+            .await?;
+        self.artwork_hook("after_reserve");
+        if token.is_cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+
+        let sem = Arc::new(Semaphore::new(self.parallelism));
+        let mut handles = Vec::with_capacity(candidates.len());
+        for (state, cover) in candidates {
+            if token.is_cancelled() {
+                return Err(ScanError::Cancelled);
+            }
+            let permit = Arc::clone(&sem)
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow::anyhow!("semaphore: {e}"))?;
+            let root = Arc::clone(&self.root);
+            let store = Arc::clone(store);
+            let tracks = paths.get(&state.id).cloned().unwrap_or_default();
+            handles.push(tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let album_id = state.id;
+                (
+                    album_id,
+                    resolve_album_artwork(&root, &store, album_id, cover, &tracks),
+                )
+            }));
+        }
+        let mut resolved: Vec<ResolvedArtwork> = Vec::with_capacity(handles.len());
+        // 決められなかった album は予約（NULL）のまま残る
+        for h in handles {
+            if let (_, Some(r)) = h.await? {
+                resolved.push(r);
+            }
+        }
+        if token.is_cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        let n = resolved.len() as u64;
+        let job_ids = self
+            .db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                let now = now_epoch();
+                let mut job_ids = Vec::new();
+                for r in &resolved {
+                    let artwork_id = match &r.found {
+                        Some(f) => {
+                            let id = dbart::upsert(
+                                &tx,
+                                &f.hash,
+                                f.info.mime,
+                                Some(f.info.width),
+                                Some(f.info.height),
+                                f.bytes,
+                                f.origin,
+                            )?;
+                            if f.needs_thumbs {
+                                if let dbjobs::EnqueueResult::Inserted(job_id) =
+                                    dbjobs::enqueue(&tx, &new_thumbnail_job(id), now)?
+                                {
+                                    job_ids.push(job_id);
+                                }
+                            }
+                            Some(id)
+                        }
+                        None => None,
+                    };
+                    dbart::set_album_artwork(&tx, r.album_id, artwork_id, r.cover.as_ref(), now)?;
+                }
+                tx.commit()?;
+                Ok(job_ids)
+            })
+            .await?;
+        tracing::info!(
+            albums = n,
+            thumbnail_jobs = job_ids.len(),
+            "アートワークを解決した"
+        );
+        Ok((n, job_ids))
+    }
+}
+
+/// 解決した画像（キャッシュに置いた後）
+struct FoundArtwork {
+    hash: [u8; 32],
+    info: ImageInfo,
+    bytes: usize,
+    origin: &'static str,
+    /// サムネイルがまだ無い（thumbnail ジョブを投入する）
+    needs_thumbs: bool,
+}
+
+struct ResolvedArtwork {
+    album_id: i64,
+    found: Option<FoundArtwork>,
+    /// 今回見つけた同梱カバー画像の stat（無ければ None）
+    cover: Option<CoverStat>,
+}
+
+/// 同梱カバー画像として読む上限（D-49）。これより大きいファイルは画像とみなさない
+const MAX_COVER_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 1 album のアートワークを決める（ブロッキング）。同梱カバー画像 → 構成トラック（順に）の
+/// 埋め込み画像。決められないとき（I/O 失敗、読んでいる間にファイルが変わった、構成トラックを
+/// 読めない）は None を返し、album の状態を動かさない（次のスキャンでやり直す）。
+/// 構成トラックが 1 本でも読めなければ「画像なし」も「後続が最初」も確定できないので None
+fn resolve_album_artwork(
+    root: &RootDir,
+    store: &ArtworkStore,
+    album_id: i64,
+    cover: Option<CoverEntry>,
+    tracks: &[String],
+) -> Option<ResolvedArtwork> {
+    let mut cover_stat: Option<CoverStat> = None;
+    if let Some(c) = cover {
+        match root.open_file(&c.rel) {
+            Ok(mut file) => {
+                let st = match fsroot::fstat(&file) {
+                    Ok(st) => st,
+                    Err(e) => {
+                        tracing::warn!(path = %c.rel, error = %e, "同梱カバー画像の stat を取れない");
+                        return None;
+                    }
+                };
+                cover_stat = Some(CoverStat {
+                    inode: st.inode as i64,
+                    size: st.size as i64,
+                    mtime_ns: st.mtime_ns,
+                    ctime_ns: st.ctime_ns,
+                });
+                if st.size <= MAX_COVER_BYTES {
+                    // 上限 + 1 までしか読まない（読んでいる間に伸びても無制限にはならない）
+                    let mut bytes = Vec::with_capacity(st.size as usize);
+                    let read = std::io::Read::read_to_end(
+                        &mut std::io::Read::take(&mut file, MAX_COVER_BYTES + 1),
+                        &mut bytes,
+                    );
+                    if let Err(e) = read {
+                        tracing::warn!(path = %c.rel, error = %e, "同梱カバー画像を読めない");
+                        return None;
+                    }
+                    // 読んでいる間に書き換えられていたら決めない（次のスキャンで stat が違うので読み直す）
+                    match fsroot::fstat(&file) {
+                        Ok(after) if same_cover(&st, &after) && bytes.len() as u64 == st.size => {}
+                        Ok(_) => {
+                            tracing::info!(path = %c.rel, "同梱カバー画像が読んでいる間に変わった");
+                            return None;
+                        }
+                        Err(e) => {
+                            tracing::warn!(path = %c.rel, error = %e, "同梱カバー画像の stat を取れない");
+                            return None;
+                        }
+                    }
+                    match sniff(&bytes) {
+                        Some(info) => {
+                            return register_artwork(store, bytes, info, "file").map(|found| {
+                                ResolvedArtwork {
+                                    album_id,
+                                    found: Some(found),
+                                    cover: cover_stat,
+                                }
+                            });
+                        }
+                        None => {
+                            tracing::warn!(path = %c.rel, "同梱カバー画像として認識できない");
+                        }
+                    }
+                } else {
+                    tracing::warn!(path = %c.rel, size = st.size, "同梱カバー画像が大きすぎる");
+                }
+            }
+            Err(FsError::NotFound) => {}
+            Err(e) => {
+                tracing::warn!(path = %c.rel, error = %e, "同梱カバー画像を開けない");
+                return None;
+            }
+        }
+    }
+    for rel_path in tracks {
+        let Ok(rel) = RelPath::parse(rel_path) else {
+            tracing::warn!(path = rel_path, "構成トラックのパスが不正");
+            return None;
+        };
+        let ext = rel.file_name().rsplit_once('.').map(|(_, x)| x);
+        let file = match root.open_file(&rel) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::info!(path = %rel, error = %e, "構成トラックを開けないのでアートワークを決めない");
+                return None;
+            }
+        };
+        let pictures = match read_transfer_tags(file, ext) {
+            Ok(t) => t.pictures,
+            Err(e) => {
+                tracing::info!(path = %rel, error = %e, "構成トラックのタグを読めないのでアートワークを決めない");
+                return None;
+            }
+        };
+        let Some(pic) = pick_embedded(&pictures) else {
+            continue;
+        };
+        let Some(info) = sniff(pic.data()) else {
+            tracing::warn!(path = %rel, "埋め込み画像として認識できない");
+            continue;
+        };
+        let bytes = pic.data().to_vec();
+        return register_artwork(store, bytes, info, "embedded").map(|found| ResolvedArtwork {
+            album_id,
+            found: Some(found),
+            cover: cover_stat,
+        });
+    }
+    Some(ResolvedArtwork {
+        album_id,
+        found: None,
+        cover: cover_stat,
+    })
+}
+
+/// 同じ実体・同じ内容か（inode / size / mtime / ctime）
+fn same_cover(a: &fsroot::Stat, b: &fsroot::Stat) -> bool {
+    a.inode == b.inode && a.size == b.size && a.mtime_ns == b.mtime_ns && a.ctime_ns == b.ctime_ns
+}
+
+/// 画像をキャッシュへ置く。置けなければ None
+fn register_artwork(
+    store: &ArtworkStore,
+    bytes: Vec<u8>,
+    info: ImageInfo,
+    origin: &'static str,
+) -> Option<FoundArtwork> {
+    let hash = ArtworkStore::hash_of(&bytes);
+    if let Err(e) = store.put_original(&hash, info.mime, &bytes) {
+        tracing::warn!(hash = %ArtworkStore::hex(&hash), error = %e, "原画像をキャッシュへ置けない");
+        return None;
+    }
+    Some(FoundArtwork {
+        hash,
+        info,
+        bytes: bytes.len(),
+        origin,
+        needs_thumbs: !store.missing_thumbs(&hash).is_empty(),
+    })
 }
 
 // ---------------------------------------------------------------- Phase 1
@@ -403,6 +789,38 @@ fn walk(root: &RootDir, token: &CancellationToken) -> Result<Inventory, ScanErro
                 continue;
             }
             if name.starts_with('.') {
+                continue;
+            }
+            if let Some(rank) = cover_rank(name) {
+                // 同梱カバー画像。ディレクトリごとに最も優先度の高い 1 つだけ覚える
+                let dir_key = dir.as_ref().map(RelPath::key).unwrap_or_default();
+                let better = inv.covers.get(&dir_key).is_none_or(|c| rank < c.rank);
+                if better {
+                    match root.stat(&child) {
+                        Ok(st) if st.kind == FileKind::File => {
+                            inv.covers.insert(
+                                dir_key,
+                                CoverEntry {
+                                    rel: child,
+                                    rank,
+                                    stat: CoverStat {
+                                        inode: st.inode as i64,
+                                        size: st.size as i64,
+                                        mtime_ns: st.mtime_ns,
+                                        ctime_ns: st.ctime_ns,
+                                    },
+                                },
+                            );
+                        }
+                        Ok(_) | Err(FsError::NotFound) => {}
+                        Err(source) => {
+                            return Err(ScanError::Walk {
+                                path: child.as_str().to_owned(),
+                                source,
+                            })
+                        }
+                    }
+                }
                 continue;
             }
             let Some(ext_codec) = child
@@ -927,6 +1345,23 @@ impl Commit {
         // 1 行が複数の経路（conflict + 物理更新など）で入ることがある
         report.changed_ids.sort_unstable();
         report.changed_ids.dedup();
+        // g. アートワークの再解決を同じトランザクションで予約する（D-49）。行が変わったトラックの
+        //    現在の album と、直前まで属していた album（分割・移動で構成を失った側）の両方。
+        //    Phase 5 が cancel / 失敗 / 停止で終わっても DB に残るので、次のスキャンでやり直せる
+        let mut dirty_albums: Vec<i64> = report
+            .changed_ids
+            .iter()
+            .filter_map(|id| snap.get(id).and_then(|t| t.album_id))
+            .collect();
+        dirty_albums.extend(scans::album_ids_of_tracks(&tx, &report.changed_ids)?);
+        dirty_albums.sort_unstable();
+        dirty_albums.dedup();
+        dbart::mark_unresolved(&tx, &dirty_albums)?;
+        if self.deep {
+            // deep は全 album を解決し直す。Phase 5 の前（この commit の直後）に止まっても
+            // 予約が残るよう、ここで active な album 全件を予約する
+            dbart::mark_all_unresolved(&tx)?;
+        }
         scans::finish_run(
             &tx,
             run_id,

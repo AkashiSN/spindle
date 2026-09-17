@@ -466,6 +466,8 @@ pub struct AlbumRow {
     pub mb_release_id: Option<String>,
     pub disc_count: Option<i64>,
     pub artwork_id: Option<i64>,
+    /// アートワークの SHA-256（hex 小文字）。`GET /api/artwork/:hash` のキー（P1-3）
+    pub artwork_hash: Option<String>,
     /// active なトラック数
     pub track_count: i64,
     pub duration_ms: i64,
@@ -476,9 +478,10 @@ const ALBUM_SQL: &str = "SELECT a.id, a.rel_dir, c.name, a.albumartist, a.album,
   a.mb_release_id, a.disc_count, a.artwork_id,
   (SELECT count(*) FROM tracks t WHERE t.album_id = a.id AND t.missing_since IS NULL),
   (SELECT coalesce(sum(t.duration_ms), 0) FROM tracks t WHERE t.album_id = a.id AND t.missing_since IS NULL),
-  a.missing_since
+  a.missing_since, CASE WHEN w.sha256 IS NULL THEN NULL ELSE lower(hex(w.sha256)) END
 FROM albums a
-LEFT JOIN categories c ON c.id = a.category_id";
+LEFT JOIN categories c ON c.id = a.category_id
+LEFT JOIN artwork w ON w.id = a.artwork_id";
 
 fn read_album(r: &Row) -> rusqlite::Result<AlbumRow> {
     Ok(AlbumRow {
@@ -496,6 +499,7 @@ fn read_album(r: &Row) -> rusqlite::Result<AlbumRow> {
         track_count: r.get(11)?,
         duration_ms: r.get(12)?,
         missing_since: r.get(13)?,
+        artwork_hash: r.get(14)?,
     })
 }
 

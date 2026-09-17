@@ -28,6 +28,7 @@ fancy-regex = "0.19.2"
 futures-core = "0.3.34"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
+imagesize = "0.15.0"
 ipnet = { version = "2.12.2", features = ["serde"] }
 lofty = "0.25.2"
 md-5 = "0.11.0"

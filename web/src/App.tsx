@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch, apiPost, onUnauthorized } from './api/client'
 import type { LibraryEvent, TrackRow } from './api/types'
+import { AlbumGrid } from './components/AlbumGrid'
 import { BottomBar } from './components/BottomBar'
 import { HistoryView } from './components/HistoryView'
 import { Login } from './components/Login'
@@ -275,7 +276,11 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             onInlineEdit={handleInlineEdit}
           />
         ) : view === 'albums' ? (
-          <Placeholder title="アルバム" note="サムネイルグリッドは P1。ツリーのアルバムをクリックすると一覧が絞られる" />
+          <AlbumGrid
+            albums={albums.albums}
+            error={albums.error}
+            onOpen={(a) => handleScope({ album_id: a.id })}
+          />
         ) : view === 'cd' ? (
           <Placeholder title="CD" note="リッピングのウィザードは P2" />
         ) : view === 'jobs' ? (

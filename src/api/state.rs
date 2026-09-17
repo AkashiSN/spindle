@@ -7,6 +7,7 @@ use crate::db::Db;
 use crate::domain::selection::SelectionStore;
 use crate::edit::Editor;
 use crate::jobs::Jobs;
+use crate::media::artwork::ArtworkStore;
 use tokio_util::sync::CancellationToken;
 
 use super::auth;
@@ -24,6 +25,8 @@ pub struct AppState {
     /// 編集バッチの coordinator（P0-9）。ライブラリ root を要するので `with_editor` で後から載せる。
     /// 無いと一括編集の API は 503
     pub editor: Option<Arc<Editor>>,
+    /// アートワークのキャッシュ（P1-3）。無いと `/api/artwork` は 503
+    pub artwork: Option<Arc<ArtworkStore>>,
 }
 
 impl AppState {
@@ -37,7 +40,13 @@ impl AppState {
             selection: Arc::new(SelectionStore::default()),
             shutdown: CancellationToken::new(),
             editor: None,
+            artwork: None,
         }
+    }
+
+    pub fn with_artwork(mut self, store: Arc<ArtworkStore>) -> Self {
+        self.artwork = Some(store);
+        self
     }
 
     pub fn with_editor(mut self, editor: Arc<Editor>) -> Self {

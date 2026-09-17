@@ -7,3 +7,4 @@ pub mod rename;
 pub mod rg;
 pub mod scan;
 pub mod tagwrite;
+pub mod thumbnail;

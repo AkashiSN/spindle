@@ -1430,3 +1430,68 @@ Archive から move で戻す（Archive の追記のみの原則に例外が増�
 触らない。外部ツールが RG タグを消しても `rg_written_at` は残る。P1-0 か scanner の別タスクで
 `sync_written_at` を呼ぶ）。`tag_version` が進むので Derived の追随（P1-10）が RG タグを
 `R128_*` へ変換して埋める（SPEC §7.6）のは P1-10 側の責務。
+
+## D-49 アートワークの解決とキャッシュ（読み側。実装合わせ）
+
+**決定**（P1-3 の読み側）:
+
+- **album のアートワークは同梱カバー画像 → 最初のトラックの埋め込み画像の順。** 同梱画像は
+  `cover` / `folder` / `front` × `jpg` / `jpeg` / `png` / `webp` を名前 → 拡張子の優先順で 1 つ
+  （大文字小文字は区別しない。ZFS insensitive と同じ）。埋め込みは構成トラックを
+  `disc_no` / `track_no` / `rel_path` 順に見て最初に見つかる 1 枚（front cover を優先、無ければ
+  ファイル内の最初）。形式と寸法はバイト列のヘッダ（`imagesize`）で判別する
+- **原画像は元の形式のまま、サムネイルだけ WebP。** `artwork` 表は画像の SHA-256 で一意化し、
+  原画像を `<data>/thumbs/<hex>/orig.<ext>` へコピーする（同じ画像は 1 回だけ。Library には
+  何も書かない）。`thumbnail` ジョブ（dedup `thumbnail:<artwork_id>`、並列 4）が ffmpeg で
+  `256.webp` / `768.webp`（長辺、拡大なし、quality 82）を tmp + rename で作る
+- **解決はスキャンの Phase 5（commit の後）で、予約された album だけ。** Phase 4 は行が変わった
+  トラックの**現在の album と直前まで属していた album**（分割・移動で構成を失った側）の
+  `artwork_resolved_at` を同じトランザクションで NULL にして再解決を予約する。予約は DB に残るので、
+  Phase 5 が cancel・失敗・プロセス停止で終わっても次のスキャンで続きを行う（ジョブの冪等性）。
+  Phase 5 の対象はこの予約に加えて、同梱画像の有無・stat（`albums.cover_inode / cover_size /
+  cover_mtime_ns / cover_ctime_ns`。トラックではないので最速パスでは拾えない。マイグレーション
+  0004）が前回と違う album と、参照中の原画像がキャッシュに無い・`artwork.bytes` と長さが違う album
+  （thumbnail ジョブも原画像の欠損で参照 album を予約する）。同じ長さの破損は incremental では
+  見えないが、`put_original` が既存ファイルの SHA-256 を照合して不一致なら置き直すので deep で直る。
+  deep は Phase 4 の同じトランザクションで active な album 全件を予約する（commit 直後・Phase 5 の
+  前に止まっても残る）。Phase 5 も候補を全件、解決を始める前に予約し（`artwork_resolved_at = NULL`）、
+  成功した album だけが予約を消す。決められなかった album（deep だけを理由に対象になったものを含む）と、cancel・
+  DB エラー・panic・プロセス停止で処理できなかった album は予約のまま残り、次の incremental で続きになる。マイグレーション直後の既存 album と、アートワーク無しで
+  走ったスキャナの結果も NULL なので次のスキャンで解決する。画像の読み取りは並列、DB 更新は
+  1 トランザクション
+- **決められない album は状態を動かさない。** キャッシュへ置けない、同梱画像の I/O 失敗、読んで
+  いる間に同梱画像が変わった（読み前後の stat 不一致）、構成トラックを 1 本でも開けない・タグを
+  読めない（先頭が読めなければ「画像なし」も「後続が最初」も確定できない）ときは、旧画像も
+  `artwork_resolved_at` も据え置いて次のスキャンでやり直す。同梱画像が画像として認識できない
+  （magic だけ一致して寸法が読めない・0・16,384 px 超）ときだけは埋め込みへ倒し、stat は記録する
+  （変わるまで読み直さない）。同梱画像は 32 MiB を上限とし（それ以上は画像とみなさない）、読み取りも
+  上限 + 1 で打ち切る
+- **Phase 4 の commit 後の Phase 5 は run の状態を戻さない。** missing の確定と `scan_runs = completed`
+  は commit 済みなので、Phase 5 の cancel は「続きは次回」、失敗は `ScanReport.artwork_error`
+  （警告ログ）にとどめ、scan ジョブは done にする。予約が残っているので取りこぼさない
+- **`GET /api/artwork/:hash?size=`** は `size` があれば WebP、無ければ原画像を元の MIME で返す。
+  サムネイルが未生成なら原画像へ倒す。倒した応答は `no-cache`（ETag で再検証。後で WebP に
+  置き換わる）、それ以外は `immutable`。`GET /api/albums` に `artwork_hash`（hex）を足す
+- UI のアルバムグリッドは missing の album を出さず、クリックで一覧を `album_id` に絞る
+
+**理由**: foobar2000 や SMB クライアントは同梱の cover.jpg を見るので、それを優先すると spindle と
+他のプレイヤーで同じ絵になる。ハッシュアドレスにすると同じ画像を持つ数千 album でも原画像と
+サムネイルは 1 組で済み、URL が不変なのでブラウザキャッシュを最大にできる。原画像を Library から
+都度読む案は、埋め込み画像の取り出しに毎回 lofty のパースが要り、cover.jpg の差し替え後に旧画像を
+出せない（将来の巻き戻しに使えない）。ffmpeg は既に必須の外部バイナリで libwebp を内蔵する。
+
+**却下**: 埋め込み優先（ディレクトリ単位で他のクライアントが見る絵と食い違う）。`image` クレート
+（WebP は可逆のみでサムネイルが大きい）。`webp` クレート（Docker ビルドに C 依存が増える）。
+スキャンのたびに全 album の同梱画像をハッシュする（9,000 album × 数百 KB を毎回読む）。
+サムネイル未生成時の 404（グリッドに壊れた画像が出る）。
+
+**却下（追加）**: Phase 5 の対象を「この run で行が変わったトラックの現在の album」から都度計算する
+（構成を失った旧 album が対象から漏れ、Phase 5 が途中で止まると次回 incremental では track が
+unchanged なので二度と再試行されない）。Phase 5 の cancel / 失敗で run を cancelled / failed に
+上書きする（missing_since が立っているのに run が failed という矛盾。SPEC §7.1）。
+
+**未決**: 書き側（埋め込み → cover.jpg の抽出、画像アップロードによる一括差し替え）は別の作業で
+設計する（cover.jpg の書き換えを編集バッチでどう巻き戻すか、埋め込みを全トラックに書くか）。
+参照が無くなった `artwork` 行と `thumbs/` の回収は GC（P1-11）。スキャナが外部の埋め込み画像の
+変更を検出するのは tag_hash 経由（`PICTURE` 疑似キー）なので、画像だけ差し替えられた場合も
+Phase 5 に入る。

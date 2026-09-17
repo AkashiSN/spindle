@@ -1,0 +1,181 @@
+//! アートワーク（SPEC §5 / §7.1、P1-3、D-49）。
+//!
+//! - album のアートワークは **ディレクトリの同梱カバー画像**（[`cover_rank`] の名前）があれば
+//!   それ、無ければ**最初のトラックの埋め込み画像**（[`pick_embedded`]。front cover を優先）
+//! - 画像はバイト列の SHA-256 でハッシュアドレスし、原画像を元の形式のまま
+//!   `thumbs/<hex>/orig.<ext>` に置く。サムネイルは常に WebP（`thumbs/<hex>/<size>.webp`。
+//!   `thumbnail` ジョブが ffmpeg で作る）。Library には何も書かない
+//! - 形式の判別はバイト列のヘッダ（[`sniff`]）。拡張子やタグの MIME は信用しない
+
+use std::fs::File;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+
+use lofty::picture::{Picture, PictureType};
+use sha2::{Digest, Sha256};
+
+/// サムネイルの一辺（長辺をこの長さに縮める。小さい画像は拡大しない）
+pub const THUMB_SIZES: [u32; 2] = [256, 768];
+
+/// 同梱カバー画像として認識する基本名（優先順）
+const COVER_NAMES: [&str; 3] = ["cover", "folder", "front"];
+/// 同梱カバー画像として認識する拡張子（優先順）
+const COVER_EXTS: [&str; 4] = ["jpg", "jpeg", "png", "webp"];
+
+/// ファイル名が同梱カバー画像なら優先順位（小さいほど優先）。大文字小文字は区別しない
+/// （ZFS insensitive と同じ）。名前の優先が拡張子の優先より強い
+pub fn cover_rank(name: &str) -> Option<u8> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    let stem = stem.to_ascii_lowercase();
+    let ext = ext.to_ascii_lowercase();
+    let n = COVER_NAMES.iter().position(|c| *c == stem)?;
+    let e = COVER_EXTS.iter().position(|c| *c == ext)?;
+    Some((n * COVER_EXTS.len() + e) as u8)
+}
+
+/// 画像ヘッダから読んだ種別と寸法
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageInfo {
+    pub mime: &'static str,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 一辺の上限。これを超える寸法はヘッダの誤読とみなす（一般的なデコーダの上限に合わせる）
+pub const MAX_DIMENSION: u32 = 16_384;
+
+/// バイト列のヘッダから画像の種別と寸法を読む。magic だけ一致して寸法が読めない・0・上限超の
+/// 入力は画像とみなさない（壊れた同梱画像を album に確定させない）
+pub fn sniff(bytes: &[u8]) -> Option<ImageInfo> {
+    use imagesize::ImageType;
+    let mime = match imagesize::image_type(bytes).ok()? {
+        ImageType::Jpeg => "image/jpeg",
+        ImageType::Png => "image/png",
+        ImageType::Webp => "image/webp",
+        ImageType::Gif => "image/gif",
+        ImageType::Bmp => "image/bmp",
+        ImageType::Tiff => "image/tiff",
+        _ => return None,
+    };
+    let size = imagesize::blob_size(bytes).ok()?;
+    let width = u32::try_from(size.width).ok()?;
+    let height = u32::try_from(size.height).ok()?;
+    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return None;
+    }
+    Some(ImageInfo {
+        mime,
+        width,
+        height,
+    })
+}
+
+/// MIME に対応する拡張子（原画像の保存名に使う）
+pub fn ext_of_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
+        _ => "bin",
+    }
+}
+
+/// 埋め込み画像から album のアートワークに使う 1 枚を選ぶ: front cover があればそれ、
+/// 無ければ最初の 1 枚（lofty が並べた順 = ファイル内の順）
+pub fn pick_embedded(pictures: &[Picture]) -> Option<&Picture> {
+    pictures
+        .iter()
+        .find(|p| p.pic_type() == PictureType::CoverFront)
+        .or_else(|| pictures.first())
+}
+
+// ---------------------------------------------------------------- キャッシュ
+
+/// ハッシュアドレスのアートワーク置き場（`<data>/thumbs`）
+#[derive(Debug, Clone)]
+pub struct ArtworkStore {
+    dir: PathBuf,
+}
+
+impl ArtworkStore {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn hash_of(bytes: &[u8]) -> [u8; 32] {
+        Sha256::digest(bytes).into()
+    }
+
+    pub fn hex(hash: &[u8]) -> String {
+        hash.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn entry_dir(&self, hash: &[u8]) -> PathBuf {
+        self.dir.join(Self::hex(hash))
+    }
+
+    pub fn original_path(&self, hash: &[u8], mime: &str) -> PathBuf {
+        self.entry_dir(hash)
+            .join(format!("orig.{}", ext_of_mime(mime)))
+    }
+
+    pub fn thumb_path(&self, hash: &[u8], size: u32) -> PathBuf {
+        self.entry_dir(hash).join(format!("{size}.webp"))
+    }
+
+    pub fn has_original(&self, hash: &[u8], mime: &str) -> bool {
+        self.original_path(hash, mime).is_file()
+    }
+
+    /// 原画像が期待どおりの長さで存在するか（欠損・長さの違う破損の検出。同じ長さの破損は
+    /// [`Self::put_original`] のハッシュ照合で置き直す）
+    pub fn has_original_of_len(&self, hash: &[u8], mime: &str, len: u64) -> bool {
+        std::fs::metadata(self.original_path(hash, mime))
+            .is_ok_and(|m| m.is_file() && m.len() == len)
+    }
+
+    /// まだ無いサムネイルの一辺
+    pub fn missing_thumbs(&self, hash: &[u8]) -> Vec<u32> {
+        THUMB_SIZES
+            .into_iter()
+            .filter(|s| !self.thumb_path(hash, *s).is_file())
+            .collect()
+    }
+
+    /// 原画像を置く（tmp + rename）。既にあるファイルは**内容の SHA-256 が一致するときだけ**
+    /// 流用する（ハッシュアドレスの不変条件。長さが同じでも壊れていれば置き直す）。返り値は置いた先
+    pub fn put_original(&self, hash: &[u8], mime: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+        let path = self.original_path(hash, mime);
+        if let Ok(existing) = std::fs::read(&path) {
+            if Self::hash_of(&existing) == hash {
+                return Ok(path);
+            }
+            tracing::warn!(path = %path.display(), "原画像の内容がハッシュと一致しないので置き直す");
+        }
+        let dir = self.entry_dir(hash);
+        std::fs::create_dir_all(&dir)?;
+        // 同じハッシュ = 同じ内容なので、並行して置かれても rename の上書きで壊れない
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = dir.join(format!(".orig-{}-{nonce}.tmp", std::process::id()));
+        let result = (|| -> std::io::Result<()> {
+            let mut f = File::create(&tmp)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result.map(|()| path)
+    }
+}

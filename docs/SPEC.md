@@ -424,6 +424,25 @@ Phase 4  commit:     1 トランザクションで
   その行の missing 確定と key の入れ替えを同じトランザクションで行う
 - 走査対象は Library のみ。Derived / Archive はスキャンしない
 
+**アートワーク**（Phase 5、commit の後。D-49）:
+
+- album のアートワークは、ディレクトリの**同梱カバー画像**（`cover` / `folder` / `front` ×
+  `jpg` / `jpeg` / `png` / `webp`。名前 → 拡張子の優先順、大文字小文字は区別しない）があれば
+  それ、無ければ**構成トラックを `disc_no` / `track_no` / `rel_path` 順に見て最初に見つかる埋め込み
+  画像**（front cover を優先）。形式はバイト列のヘッダで判別し、拡張子やタグの MIME は信用しない
+- 画像は SHA-256 でハッシュアドレスし（`artwork` 表。行は消さない）、原画像を**元の形式のまま**
+  `<data>/thumbs/<hex>/orig.<ext>` に置く。サムネイル（`<size>.webp`、256 / 768。長辺、拡大なし）は
+  `thumbnail` ジョブが ffmpeg で作る。Library には何も書かない
+- Phase 4 は行が変わったトラックの現在の album と直前まで属していた album の
+  `albums.artwork_resolved_at` を NULL にして再解決を**予約**する（同じトランザクション）。
+  Phase 5 が解決し直すのは deep なら全 album、それ以外は「予約された（NULL）」「同梱画像の有無・
+  stat（inode / size / mtime / ctime。`albums.cover_*`）が前回と違う」「参照中の原画像がキャッシュに
+  無い」album。missing の album は触らない。決められない album（I/O 失敗、読んでいる間に同梱画像が
+  変わった、構成トラックを読めない）は状態を動かさず次回やり直す。同梱画像が画像として認識できない
+  ときは埋め込みへ倒し、stat は記録する（変わるまで読み直さない）
+- Phase 4 の commit 後なので、Phase 5 の cancel / 失敗は run の状態（completed）と missing の確定を
+  戻さない。予約が残るので次のスキャンで続きを行う
+
 ### 7.2 CD 取り込み
 
 ```
@@ -779,7 +798,9 @@ GET    /api/search?q=                             FTS5 trigram（3 文字未満�
 
 GET    /api/stream/:id                            Range 対応。原本
 GET    /api/stream/:id?transcode=opus             オンザフライ変換
-GET    /api/artwork/:hash?size=                   サムネイル
+GET    /api/artwork/:hash?size=                   size = 256 | 768 で WebP のサムネイル、無しで原画像
+                                                  （元の MIME）。hash は albums.artwork_hash。未生成なら
+                                                  原画像へ倒す（no-cache）。ハッシュアドレスなので immutable
 
 GET    /api/playlists, POST, PATCH, DELETE
 POST   /api/playlists/:id/preview                 スマートルールの評価結果
@@ -932,8 +953,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 // GET /api/albums
 { "items": [ { "id": 1, "rel_dir": "J-Pop/…/…", "category": "J-Pop", "albumartist": "…", "album": "…",
                "date": "2024", "original_date": null, "edition": null, "mb_release_id": null,
-               "disc_count": null, "artwork_id": null, "track_count": 12, "duration_ms": 2800000,
-               "missing_since": null } ] }
+               "disc_count": null, "artwork_id": null, "artwork_hash": null,   // SHA-256 hex
+               "track_count": 12, "duration_ms": 2800000, "missing_since": null } ] }
 // GET /api/albums/:id  → 上の 1 要素 | 404
 
 ### 認証
@@ -1171,7 +1192,8 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
 
 ### 12.6 その他の画面（骨格のみ）
 
-- **アルバム**（P1）: サムネイルグリッド → クリックで表を `album_id` に絞る（一覧へ戻る）
+- **アルバム**（P1-3）: サムネイルグリッド（`/api/artwork/:hash?size=256`。missing は出さない）→
+  クリックで表を `album_id` に絞る（一覧へ戻る）
 - **CD**（P2）: ウィザード。検出 → 候補選択 / 手入力 / トラックリスト貼り付け →
   オフセット確認 → 進捗。照会ゼロ件でも完走できる
 - **設定**: `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
@@ -1407,7 +1429,7 @@ src/
 │   ├── fingerprint.rs   STREAMINFO MD5 / デコード PCM MD5 / パケット列ハッシュ
 │   ├── decode.rs        symphonia / ffmpeg フォールバック
 │   ├── encode.rs        flac（ffmpeg デコード → flac -8）/ opus
-│   └── artwork.rs       抽出・埋め込み・サムネイル
+│   └── artwork.rs       同梱 / 埋め込み画像の選択、判別、ハッシュアドレスのキャッシュ（P1-3）
 ├── cd/
 │   ├── device.rs        ioctl / SG_IO / ポーリング
 │   ├── toc.rs           TOC パース、各種 DiscID 算出

@@ -1,6 +1,7 @@
 //! HTTP API。`/health` 以外の全ルート（SPA 配信を含む）は `auth::guard` の配下に置く
 
 pub mod albums;
+pub mod artwork;
 pub mod auth;
 pub mod batch;
 pub mod error;
@@ -43,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))
+        .route("/artwork/{hash}", get(artwork::get))
         .route("/history", get(history::list))
         .route("/history/{id}", get(history::get))
         .route("/history/{id}/revert", post(history::revert))

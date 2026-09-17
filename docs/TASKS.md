@@ -437,6 +437,25 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       未決: スキャナが外部のタグ変更を取り込んだときの `rg_written_at` の判定（D-48）
 - [ ] **P1-3** アートワーク（埋め込み / `cover.jpg` 両対応、抽出・一括差し替え、
       WebP サムネイル生成とキャッシュ。アルバムグリッド画面 → クリックで表を `album_id` に絞る）
+      - [x] 読み側（D-49）: `media::artwork`（同梱画像の名前の優先順、ヘッダでの判別、埋め込みの選択、
+            `ArtworkStore` = `<data>/thumbs/<hex>/orig.<ext>` + `<size>.webp`）
+      - [x] スキャンの Phase 5（`Scanner::with_artwork`）: Phase 4 が新旧 album の再解決を予約
+            （`artwork_resolved_at = NULL`）し、Phase 5 は予約 + 同梱画像の stat 変化 + 原画像の欠損だけを
+            解決し直す（マイグレーション 0004）。決められない album は状態を動かさない。原画像を
+            キャッシュへ置き `thumbnail` ジョブを投入。Phase 5 の cancel / 失敗は run を戻さない
+      - [x] `jobs::handlers::thumbnail`: ffmpeg で 256 / 768 の WebP（長辺、拡大なし、tmp + rename、冪等）
+      - [x] `GET /api/artwork/:hash?size=`（`api::artwork`。未生成なら原画像へ倒す）、
+            `GET /api/albums` の `artwork_hash`
+      - [x] UI: アルバムグリッド（`AlbumGrid`）→ クリックで一覧を `album_id` に絞る
+      - [ ] 書き側: 埋め込み → `cover.jpg` の抽出、画像アップロードによる一括差し替え（設計を確認してから。
+            cover.jpg の書き換えの巻き戻し方、埋め込みを全トラックに書くか）
+
+      受け入れ: `tests/artwork.rs`（名前の優先順、判別、埋め込みの選択、キャッシュの配置）、
+      `tests/artwork_scan.rs`（同梱 > 埋め込み、最初のトラック、無し → NULL、名前の優先順、同梱画像の
+      差し替え / 削除の検出、未解決 album の解決、deep、同じ画像の共有、読めない同梱画像、missing、
+      画像付きトラックの移動で新旧 album を解決、commit 後の cancel で run は completed のまま次回再開、
+      キャッシュ書き込み失敗 / 読めないトラックで状態を動かさない、原画像の欠損を incremental で復旧）、
+      `tests/thumbnail_job.rs`（寸法・アスペクト比・拡大なし・冪等・原画像なし）、`tests/artwork_api.rs`
 - [x] **P1-4** ロスレス → FLAC 正規化（WAV / ALAC / AIFF。D-45 / D-46。変換前後の PCM MD5 照合。
       不一致なら中止。一致時は元ファイルを `Archive/` へ move し `edit_ops(kind='archive')` と
       `archived_files` 台帳に記録。**即時削除しない**。`audio_version` は据え置き。

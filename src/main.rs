@@ -16,7 +16,9 @@ use spindle::jobs::handlers::rename::RenameHandler;
 use spindle::jobs::handlers::rg::RgHandler;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
+use spindle::jobs::handlers::thumbnail::ThumbnailHandler;
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
+use spindle::media::artwork::ArtworkStore;
 use spindle::media::decode::Decoder;
 use spindle::media::encode::FlacEncoder;
 use spindle::{config::Config, logging};
@@ -27,6 +29,8 @@ const DEFAULT_CONFIG_PATH: &str = "/data/config.toml";
 const DB_FILE_NAME: &str = "spindle.db";
 /// `[paths].data` 直下の変換作業領域（SPEC §5）
 const TMP_DIR_NAME: &str = "tmp";
+/// `[paths].data` 直下のアートワークキャッシュ（SPEC §5、P1-3）
+const THUMBS_DIR_NAME: &str = "thumbs";
 /// 初回起動時の管理パスワード（SPEC §14 環境変数、D-28）
 const INITIAL_PASSWORD_ENV: &str = "SPINDLE_INITIAL_PASSWORD";
 
@@ -113,6 +117,11 @@ async fn main() -> anyhow::Result<()> {
         .with_replaygain_reference(state.config.replaygain.reference_lufs),
     );
     state = state.with_editor(Arc::clone(&editor));
+    // アートワークのキャッシュ（P1-3）。スキャナが原画像を置き、thumbnail ジョブが WebP を作る
+    let artwork = Arc::new(ArtworkStore::new(
+        state.config.paths.data.join(THUMBS_DIR_NAME),
+    ));
+    state = state.with_artwork(Arc::clone(&artwork));
     let edit_recovered = editor
         .recover()
         .await
@@ -127,11 +136,10 @@ async fn main() -> anyhow::Result<()> {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
-    let scanner = Arc::new(Scanner::new(
-        Arc::clone(&state.db),
-        Arc::clone(&library_root),
-        cpus,
-    ));
+    let scanner = Arc::new(
+        Scanner::new(Arc::clone(&state.db), Arc::clone(&library_root), cpus)
+            .with_artwork(Arc::clone(&artwork)),
+    );
     let mut registry = Registry::new();
     registry.register(
         JobType::Scan,
@@ -157,6 +165,10 @@ async fn main() -> anyhow::Result<()> {
             Decoder::new(&state.config.bin.ffmpeg),
             state.config.replaygain.reference_lufs,
         )),
+    );
+    registry.register(
+        JobType::Thumbnail,
+        Arc::new(ThumbnailHandler::new(artwork, &state.config.bin.ffmpeg)),
     );
     registry.register(
         JobType::Backup,

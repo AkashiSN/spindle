@@ -52,6 +52,7 @@ export type AlbumRow = {
   mb_release_id: string | null
   disc_count: number | null
   artwork_id: number | null
+  artwork_hash: string | null
   track_count: number
   duration_ms: number
   missing_since: number | null

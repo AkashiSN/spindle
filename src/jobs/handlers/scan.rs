@@ -125,6 +125,8 @@ impl Handler for ScanHandler {
                     // 最後の値を確実に書く
                     let total = report.files_seen as i64;
                     let _ = ctx.progress(total, total).await;
+                    // Phase 5 が投入した thumbnail ジョブでワーカーを起こす
+                    ctx.jobs().notify_enqueued(&report.enqueued_jobs).await;
                     // 変更行を表へ通知する（SPEC §9 `library`）。commit 済みなので取得すれば新しい値が見える
                     if let Some(ev) = LibraryEvent::from_changes(report.run_id, report.changed_ids)
                     {
