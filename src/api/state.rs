@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::domain::selection::SelectionStore;
 use crate::edit::Editor;
+use crate::fsroot::RootDir;
 use crate::jobs::Jobs;
 use crate::media::artwork::ArtworkStore;
 use tokio_util::sync::CancellationToken;
@@ -27,6 +28,11 @@ pub struct AppState {
     pub editor: Option<Arc<Editor>>,
     /// アートワークのキャッシュ（P1-3）。無いと `/api/artwork` は 503
     pub artwork: Option<Arc<ArtworkStore>>,
+    /// 再生用の root（P1-9）。無いと `/api/stream` は 503
+    pub library: Option<Arc<RootDir>>,
+    pub derived: Option<Arc<RootDir>>,
+    /// オンザフライ変換の上限に足す猶予（トラック長 + これ。P1-9）
+    pub transcode_grace: std::time::Duration,
 }
 
 impl AppState {
@@ -41,7 +47,22 @@ impl AppState {
             shutdown: CancellationToken::new(),
             editor: None,
             artwork: None,
+            library: None,
+            derived: None,
+            transcode_grace: super::stream::TRANSCODE_GRACE,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn with_transcode_grace(mut self, grace: std::time::Duration) -> Self {
+        self.transcode_grace = grace;
+        self
+    }
+
+    pub fn with_roots(mut self, library: Arc<RootDir>, derived: Arc<RootDir>) -> Self {
+        self.library = Some(library);
+        self.derived = Some(derived);
+        self
     }
 
     pub fn with_artwork(mut self, store: Arc<ArtworkStore>) -> Self {

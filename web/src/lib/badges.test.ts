@@ -17,6 +17,7 @@ const base: TrackRow = {
   lossless: true,
   verification: 'not_attempted',
   rg_scanned_at: null,
+  rg: null,
   rg_written_at: null,
   derived: null,
   pending_batch_id: null,

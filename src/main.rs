@@ -124,6 +124,8 @@ async fn main() -> anyhow::Result<()> {
         state.config.paths.data.join(THUMBS_DIR_NAME),
     ));
     state = state.with_artwork(Arc::clone(&artwork));
+    // 再生（P1-9）。原本と Derived を Range で直送する
+    state = state.with_roots(Arc::clone(&library_root), Arc::clone(&derived_root));
     let edit_recovered = editor
         .recover()
         .await

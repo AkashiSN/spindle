@@ -195,6 +195,7 @@ async fn list_returns_spec_shape_with_cursor_and_total() {
         "verification",
         "rg_scanned_at",
         "rg_written_at",
+        "rg",
         "derived",
         "pending_batch_id",
         "conflict_batch_id",
@@ -208,6 +209,7 @@ async fn list_returns_spec_shape_with_cursor_and_total() {
     assert_eq!(row["title"], "t0");
     assert_eq!(row["category"], "J-Pop");
     assert_eq!(row["derived"], serde_json::Value::Null);
+    assert_eq!(row["rg"], serde_json::Value::Null, "未解析なら null");
     assert_eq!(row["pending_batch_id"], serde_json::Value::Null);
     assert_eq!(row["hardlink"], false);
     assert_eq!(row["lossless"], true);
@@ -231,6 +233,20 @@ async fn list_returns_spec_shape_with_cursor_and_total() {
     .await;
     assert_eq!(body3["items"].as_array().unwrap().len(), 1);
     assert_eq!(body3["next_cursor"], serde_json::Value::Null, "最終ページ");
+
+    // 解析済みの行は rg に 4 値（album 無しなら null）
+    app.raw()
+        .execute(
+            "UPDATE tracks SET rg_track_gain = -6.5, rg_track_peak = 0.9, rg_scanned_at = 1
+             WHERE title = 't0'",
+            [],
+        )
+        .unwrap();
+    let (_, body) = get(&app, &c, "/api/tracks?sort=title&limit=1").await;
+    let rg = &body["items"][0]["rg"];
+    assert_eq!(rg["track_gain"], -6.5);
+    assert_eq!(rg["track_peak"], 0.9);
+    assert_eq!(rg["album_gain"], serde_json::Value::Null);
 
     // filter は URL エンコードした JSON
     let f = urlenc(r#"{"category":"J-Pop","flags":["missing"]}"#);

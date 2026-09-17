@@ -509,9 +509,21 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - [ ] **P1-8** エクスポートプロファイル（foobar / android / internal、
       foobar Autoplaylist クエリ生成）。**依存: P1-10**（`delivery` プロファイルが Derived を前提）。
       タグ鮮度が必要な export / 同期は `stale_tags` の件数を明示するか追随ジョブの完了を待つ
-- [ ] **P1-9** 再生（Range 対応、ALAC は既定で Opus 変換、
+- [x] **P1-9** 再生（Range 対応、ALAC は既定で Opus 変換、
       `canPlayType()` によるクライアント能力判定。下部バー左側の再生 UI: 再生・停止・
-      シーク・音量・RG 適用切替）
+      シーク・音量・RG 適用切替）。D-52
+      - [x] `api::stream`: `GET /api/stream/:id`（原本、Range / HEAD / ETag、開いた FD を行と照合して
+            不一致は 409 `stale`）、`?transcode=opus`（`delivery` が Derived を指せば直送、無ければ ffmpeg で
+            Ogg/Opus を chunked、`start=` で `-ss`。非可逆は変換しない）
+      - [x] `GET /api/tracks` の行に `rg`（解析値。未解析なら null）
+      - [x] UI: 行先頭の ▶（ホバー表示、その行から表示順に連続再生）、下部バーの再生
+            （`<audio>` + Web Audio の GainNode で RG、音量、シーク、原本 / Derived の切替）、
+            `canPlayType()` による URL の選択（`lib/playback`）
+      - [x] テスト: `tests/stream_api.rs`（Range / HEAD / ETag / 416 / stale / missing / CIDR / MIME /
+            Derived 直送 / ffmpeg フォールバックと `start=` / ffmpeg 無し 503）、
+            `web/src/lib/playback.test.ts`
+
+      未決: Safari（Opus 不可）向けの AAC 変換、album gain モード、ハイレゾのサンプルレート変換（D-52）
 - [x] **P1-10** Derived 自動生成と追随（`audio_version` / `tag_version` 差分判定、
       Library の移動・削除への追随。`delivery` ビューの版一致フォールバックの結合テスト）。
       P1-8 の `delivery` プロファイルと Android 同期がこれを前提にするため P3 から前倒し。D-51

@@ -53,9 +53,9 @@ const columns = helper.columns([
   helper.display({
     id: 'sel',
     header: '',
-    size: 28,
-    minSize: 28,
-    maxSize: 28,
+    size: 44,
+    minSize: 44,
+    maxSize: 44,
     enableResizing: false,
     cell: () => null, // 選択状態は行側で描く（TanStack の rowSelection は使わない）
   }),
@@ -135,6 +135,10 @@ export type TrackTableProps = {
   preview: PreviewState | null
   /** セルのダブルクリック編集（1 件バッチ）。失敗の理由を返す */
   onInlineEdit: (id: number, columnId: string, value: string) => Promise<string | null>
+  /** 行先頭の ▶（その行から再生。P1-9） */
+  onPlay: (track: TrackRow) => void
+  /** 再生中の行（強調） */
+  playingId: number | null
 }
 
 /** インライン編集中のセル */
@@ -409,6 +413,19 @@ export function TrackTable(props: TrackTableProps) {
                               }}
                               onChange={() => {}}
                             />
+                            <button
+                              type="button"
+                              className={`play-row${props.playingId === track.id ? ' on' : ''}`}
+                              tabIndex={-1}
+                              disabled={track.missing_since != null}
+                              title="この行から再生"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                props.onPlay(track)
+                              }}
+                            >
+                              ▶
+                            </button>
                           </div>
                         ) : editing && editing.id === track.id && editing.columnId === cell.column.id ? (
                           <div key={cell.id} className="td td-editing" style={{ width: cell.column.getSize() }}>

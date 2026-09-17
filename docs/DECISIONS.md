@@ -1629,3 +1629,52 @@ cover.jpg 優先の D-49 と食い違い、原寸のまま太る）。missing �
 Derived 側の `cover.jpg` ミラー（P1-8 のエクスポートで要るなら）。transcode が**実行中**に scan が
 同じトラックの版を進めた場合、その scan の一括投入は dedup で落ちる（ハンドラが記録するのは
 読み始めた時点の版なので不一致は残り、次の scan で投入される）。
+
+## D-52 再生は原本か Derived を Range で直送し、オンザフライ変換は Derived が無いときだけ
+
+**決定**（P1-9）:
+
+- **`GET /api/stream/:id`** は Library の原本を Range 対応で返す（単一範囲、206 / 416、
+  `Accept-Ranges: bytes`、HEAD、`ETag` は `(inode, size, mtime_ns)`、`Content-Type` は codec から）。
+  ファイルは `RootDir::open_file`（dirfd 基準）で開き、**開いた FD の fstat が DB の行と一致する**
+  ことを確かめてから返す（パスは識別子ではない。同名で差し替えられていれば 409 `stale`。次の
+  スキャンで直る）。missing は 404
+- **`?transcode=opus`** は `delivery` ビューが Derived を指す（音声版が一致）なら **Derived の Opus を
+  同じ Range 対応で直送**する。SPEC §11 の「変換結果はキャッシュしない（Derived と役割が重複）」は、
+  Derived がそのキャッシュだという意味。Derived が無い・音声版が古いときだけ ffmpeg を stdout
+  パイプで起動して Ogg/Opus（libopus 128k）を chunked で返す。このときは Range に応えず、
+  `?start=<秒>` を `-ss` に渡してその位置から返す。子プロセスはクライアントの切断（本文の drop）で
+  group ごと kill する。上限はトラック長 + 猶予（60 秒）で、本文のストリームが `Sleep` も poll する
+  ので stdout が止まったままでも期限で起きて打ち切る（本文はエラーで終わり、子は kill）。stdout の
+  EOF 後は終了コードを検査し、非ゼロなら本文をエラーで終える（200 の途中で切れる形になるが成功と
+  区別できる）。malformed な Range（数値でない・桁あふれ・逆順・複数範囲）は無視して 200、構文は
+  正しいが範囲外のときだけ 416。`If-None-Match` は `*` と弱比較（`W/`）と並記を扱い、304 にも
+  `ETag` / `Cache-Control` を付ける
+- **クライアント能力は再生時に URL で選ぶ。** 起動時に `canPlayType()` で codec ごとの可否を
+  持ち、再生できない codec なら `?transcode=opus`。サーバへ能力を通知して保存する形（SPEC §11）は
+  取らない（状態を持たないほうが単純で、同じ結果になる）。**可逆はブラウザが再生できても既定で
+  Derived の Opus を使う**（帯域。設定「可逆は原本を再生」を localStorage に持ち、原本を選ぶと
+  Range 直送）
+- **RG はクライアントで掛ける。** `GET /api/tracks` の行に `rg { track_gain, track_peak, album_gain,
+  album_peak }`（内部表現 -18 LUFS 基準の dB、未解析なら null）を足し、UI は Web Audio の
+  `GainNode` で `10^(gain/20)` を掛ける。peak でクリップしないよう `min(10^(gain/20), 1/peak)`。
+  P1-9 は track gain のみ。トグルは localStorage
+- **UI**: 表の行先頭に ▶（ホバーで表示）を置き、その行から**表示中の順序で連続再生**する。
+  下部バー左に ▶ / ‖、シーク、経過 / 総時間、音量、RG トグル、曲名。`transcode=opus` を要求しても
+  Derived の直送か ffmpeg の chunked かはクライアントには応答からしか分からないので、`loadedmetadata`
+  で duration が有限なら `<audio>` のネイティブシーク（Range）、無限 / NaN なら chunked として
+  `start=` で読み直して表示時刻をオフセットする。metadata 前のシークは保留して確定後に適用する。
+  次曲は表の現在の順序で決め、末尾で未読なら読んでから続け、フィルタ・ソートの変更で現在曲が表から
+  消えたらその曲で止まる。ユーザの play / stop は自動継続の待ちを必ず打ち切る
+
+**理由**: P1-10 で可逆全曲の Derived が揃うので、再生の大半は静的ファイルの Range 配信で済み、
+ffmpeg の起動はライブラリに加わった直後の短い期間に限られる。ffmpeg の chunked 出力はシークが
+できない（`-ss` の再起動で代替）ので、Range が効く Derived を優先する。RG をクライアントで掛けるのは、
+サーバ側でゲインを掛けると原本の直送ができなくなり、Derived にも `R128_*` が入っていてブラウザは
+それを読まないため。
+
+**却下**: 変換結果のサーバ側キャッシュ（Derived と二重）。サーバへの能力通知（セッションに状態を
+持つ理由が無い）。`<audio>` の `volume` で RG（0..1 なので正のゲインを掛けられない）。
+
+**未決**: Safari（Opus 不可）向けの AAC 変換（`transcode=aac`。ffmpeg の aac エンコーダで足せる）。
+album gain モード。ハイレゾのサンプルレート変換（原本を選んだときは 96 kHz をそのまま送る）。

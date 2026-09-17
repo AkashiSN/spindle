@@ -36,6 +36,8 @@ pub struct TrackRow {
     pub verification: String,
     pub rg_scanned_at: Option<i64>,
     pub rg_written_at: Option<i64>,
+    /// 解析値（内部表現 -18 LUFS 基準の dB。再生時にクライアントが掛ける。P1-9）。未解析なら None
+    pub rg: Option<RgValues>,
     pub derived: Option<Derived>,
     pub pending_batch_id: Option<i64>,
     pub conflict_batch_id: Option<i64>,
@@ -44,6 +46,14 @@ pub struct TrackRow {
     pub hardlink: bool,
     pub missing_since: Option<i64>,
     pub rel_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RgValues {
+    pub track_gain: f64,
+    pub track_peak: f64,
+    pub album_gain: Option<f64>,
+    pub album_peak: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -69,9 +79,10 @@ const ROW_COLUMNS: &str = "t.id, t.title, t.artist_display, t.album, t.albumarti
   CASE WHEN t.audio_md5 IS NOT NULL AND t.missing_since IS NULL AND EXISTS (
          SELECT 1 FROM tracks t2 WHERE t2.audio_md5 = t.audio_md5 AND t2.missing_since IS NULL AND t2.id <> t.id)
        THEN lower(hex(t.audio_md5)) END,
-  t.nlink > 1, t.missing_since, t.rel_path";
+  t.nlink > 1, t.missing_since, t.rel_path,
+  t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak";
 /// `ROW_COLUMNS` の列数。ソートキーの値はこの位置から始まる
-const ROW_COLUMN_COUNT: usize = 23;
+const ROW_COLUMN_COUNT: usize = 27;
 
 const ROW_JOINS: &str = "FROM tracks t
 LEFT JOIN derived_files d ON d.track_id = t.id
@@ -81,6 +92,18 @@ LEFT JOIN edit_ops lo ON lo.id = (SELECT max(o.id) FROM edit_ops o WHERE o.track
 fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
     let derived_codec: Option<String> = r.get(15)?;
     let stale: Option<bool> = r.get(16)?;
+    let rg_scanned_at: Option<i64> = r.get(13)?;
+    let track_gain: Option<f64> = r.get(23)?;
+    let track_peak: Option<f64> = r.get(24)?;
+    let rg = match (rg_scanned_at, track_gain, track_peak) {
+        (Some(_), Some(track_gain), Some(track_peak)) => Some(RgValues {
+            track_gain,
+            track_peak,
+            album_gain: r.get(25)?,
+            album_peak: r.get(26)?,
+        }),
+        _ => None,
+    };
     Ok(TrackRow {
         id: r.get(0)?,
         title: r.get(1)?,
@@ -95,8 +118,9 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
         codec: r.get(10)?,
         lossless: r.get(11)?,
         verification: r.get(12)?,
-        rg_scanned_at: r.get(13)?,
+        rg_scanned_at,
         rg_written_at: r.get(14)?,
+        rg,
         derived: derived_codec.map(|codec| Derived {
             codec,
             stale_tags: stale.unwrap_or(false),

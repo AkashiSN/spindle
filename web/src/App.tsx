@@ -22,6 +22,7 @@ import { useBatchEdit } from './hooks/useBatchEdit'
 import { useEvents } from './hooks/useEvents'
 import { useHistory } from './hooks/useHistory'
 import { useJobSummary } from './hooks/useJobSummary'
+import { usePlayer } from './hooks/usePlayer'
 import { useTracks } from './hooks/useTracks'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
 import type { View } from './lib/views'
@@ -234,6 +235,10 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     [edit],
   )
 
+  // ---------------------------------------------------------------- 再生
+
+  const player = usePlayer(tracks.snapshot.rows, tracks.snapshot.exhausted, tracks.ensure)
+
   // ---------------------------------------------------------------- 表示
 
   const handleSort = useCallback((key: SortKey) => setSort((s) => toggleSort(s, key)), [])
@@ -274,6 +279,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             onRangeChange={handleRange}
             preview={edit.preview}
             onInlineEdit={handleInlineEdit}
+            onPlay={player.play}
+            playingId={player.track?.id ?? null}
           />
         ) : view === 'albums' ? (
           <AlbumGrid
@@ -292,7 +299,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         )}
       </main>
       <RightPanel selection={selection} summary={summary} selectedRows={selectedRows} edit={edit} />
-      <BottomBar summary={jobs.summary} connected={connected} onJobsClick={() => setView('jobs')} />
+      <BottomBar player={player} summary={jobs.summary} connected={connected} onJobsClick={() => setView('jobs')} />
     </div>
   )
 }

@@ -16,6 +16,7 @@ pub mod scan;
 pub mod selection;
 pub mod spa;
 mod state;
+pub mod stream;
 pub mod tracks;
 
 use axum::http::StatusCode;
@@ -45,6 +46,7 @@ pub fn router(state: AppState) -> Router {
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))
         .route("/artwork/{hash}", get(artwork::get))
+        .route("/stream/{id}", get(stream::get))
         .route("/history", get(history::list))
         .route("/history/{id}", get(history::get))
         .route("/history/{id}/revert", post(history::revert))

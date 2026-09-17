@@ -1072,10 +1072,12 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 | **ALAC** | **Safari のみ** | **既定で Opus へ変換** |
 | ハイレゾ FLAC | 再生可だが帯域大 | クライアント設定で変換可 |
 
-- ffmpeg を `stdout` パイプで起動し、chunked で返す
-- シーク時は該当位置から ffmpeg を再起動（`-ss` 指定）
-- 変換結果はキャッシュしない（Derived と役割が重複するため）
-- クライアント能力は起動時に `canPlayType()` で判定してサーバへ通知
+- `GET /api/stream/:id` は原本を Range で直送。`?transcode=opus` は `delivery` が Derived を指せば
+  Derived を Range で直送し、無いときだけ ffmpeg を `stdout` パイプで起動して chunked で返す（D-52）
+- 変換中のシークは該当位置から ffmpeg を再起動（`?start=` → `-ss`）
+- 変換結果はキャッシュしない（Derived がそのキャッシュ）
+- クライアント能力は起動時に `canPlayType()` で判定し、再生時に URL で選ぶ（サーバへは通知しない）。
+  可逆はブラウザが再生できても既定で Derived の Opus（設定「原本」で直送）
 
 ---
 

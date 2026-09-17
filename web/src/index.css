@@ -286,6 +286,36 @@ table.kv tr.differs td {
 }
 .bottom-bar .player {
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.bottom-bar .player .play-toggle {
+  width: 28px;
+}
+.bottom-bar .player .seek {
+  width: 220px;
+}
+.bottom-bar .player .volume {
+  width: 80px;
+}
+.bottom-bar .player .time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.bottom-bar .player label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.bottom-bar .player .now-playing {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .bottom-bar .jobs-summary {
   display: flex;
@@ -449,6 +479,28 @@ table.kv tr.differs td {
 }
 .td-sel input {
   margin: 0;
+}
+.td-sel .play-row {
+  margin-left: 4px;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--fg-muted, #888);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  visibility: hidden;
+}
+.tr:hover .td-sel .play-row,
+.td-sel .play-row.on {
+  visibility: visible;
+}
+.td-sel .play-row.on {
+  color: var(--accent, #2a7);
+}
+.td-sel .play-row:disabled {
+  cursor: default;
+  visibility: hidden;
 }
 .td-no,
 .td-duration,

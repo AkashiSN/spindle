@@ -8,6 +8,7 @@ export type Verification =
   | 'not_attempted'
 
 export type Derived = { codec: string; stale_tags: boolean }
+export type RgValues = { track_gain: number; track_peak: number; album_gain: number | null; album_peak: number | null }
 
 export type TrackRow = {
   id: number
@@ -25,6 +26,8 @@ export type TrackRow = {
   verification: Verification
   rg_scanned_at: number | null
   rg_written_at: number | null
+  /** 解析値（-18 LUFS 基準の dB）。未解析なら null */
+  rg: RgValues | null
   derived: Derived | null
   pending_batch_id: number | null
   conflict_batch_id: number | null

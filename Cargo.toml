@@ -43,7 +43,7 @@ symphonia = { version = "0.6.1", default-features = false, features = ["isomp4",
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-stream = { version = "0.1.19", features = ["sync"] }
-tokio-util = { version = "0.7.19", features = ["rt"] }
+tokio-util = { version = "0.7.19", features = ["io", "rt"] }
 toml = "1.1.6"
 tower-http = { version = "0.7.1", features = ["fs", "trace"] }
 tracing = "0.1.44"
