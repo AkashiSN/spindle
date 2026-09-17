@@ -411,7 +411,9 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `resolve` の要求を含む）、`tests/scanner.rs`（初回と変更なしの増分で `Md5` 相が出ない、コピー + 削除で
       `Md5` 相が未決 2 本で出て移動として解決）、`tests/logging.rs`
 
-      未決: 実機での計測（リハーサル環境で deep scan の所要時間を再計測する）
+      計測（2026-09-17、リハーサル環境 9,098 トラック / ALAC 7,570 本、12 コア）: 空 DB からの初回
+      deep scan **552 秒**（P0-14 時点の 3,583 秒 → 約 6.5 倍速）、既存 DB への deep scan 554 秒、
+      変更なしの増分 1 秒未満。Phase 5（アートワーク 721 album）は 1 秒未満。errors 0
 - [x] **P1-1** ReplayGain スキャン（`ebur128`、album は `album_id` 単位、
       2ch 以外は集計から除外。D-47）
       - [x] `domain::replaygain`: `LoudnessMeter`（積分ラウドネス + true peak、フレーム端数の持ち越し）、
