@@ -451,7 +451,8 @@ pub fn recover(conn: &Connection, now: i64) -> Result<RecoveryReport> {
         "UPDATE jobs SET state = 'queued', started_at = NULL WHERE state = 'running'",
         [],
     )?;
-    let locks_cleared = conn.execute("DELETE FROM track_locks", [])?;
+    let locks_cleared = conn.execute("DELETE FROM track_locks", [])?
+        + conn.execute("DELETE FROM derived_path_locks", [])?;
     Ok(RecoveryReport {
         requeued,
         cancelled,

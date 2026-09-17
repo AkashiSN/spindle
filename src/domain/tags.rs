@@ -558,3 +558,26 @@ pub fn write_flac_tags(file: &mut File, tags: &TransferTags) -> Result<(), TagWr
     f.save_to(file, WriteOptions::default())?;
     Ok(())
 }
+
+/// 生成した Opus（`file` は読み書きで開いた tmp）に [`TransferTags`] をそのまま書く（Derived。
+/// SPEC §7.6、D-51）。既存の Vorbis Comment と画像は置き換える。画像の寸法は lofty に推定させる
+/// （PNG / JPEG 以外は 0×0 になるが、プレイヤーは画像本体を見る）
+pub fn write_opus_tags(file: &mut File, tags: &TransferTags) -> Result<(), TagWriteError> {
+    use lofty::ogg::OggPictureStorage as _;
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut f = lofty::ogg::OpusFile::read_from(&mut *file, ParseOptions::new())?;
+    let mut vc = VorbisComments::default();
+    for (key, value) in &tags.items {
+        vc.push(key.clone(), value.clone());
+    }
+    for pic in &tags.pictures {
+        if let Err(e) = vc.insert_picture(pic.clone(), None) {
+            tracing::warn!(error = %e, "画像を Opus に写せない");
+        }
+    }
+    f.set_vorbis_comments(vc);
+    file.seek(SeekFrom::Start(0))?;
+    f.save_to(file, WriteOptions::default())?;
+    Ok(())
+}

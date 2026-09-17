@@ -77,7 +77,9 @@ pub fn track_member(conn: &Connection, track_id: i64) -> Result<Vec<Member>> {
 pub use crate::domain::replaygain::Values;
 
 /// 解析結果をまとめて書く（呼び出し側のトランザクション内）。`rg_scanned_at` を `now` にし、
-/// 版は動かさない。走査中に missing になった行は書かない。
+/// 版は動かさない。走査中に missing になった行は書かない。値が変わるときの `rg_scanned_at` は
+/// 前回より必ず大きくする（同じ秒に再解析して値が変わっても Derived の `src_rg_scanned_at` との
+/// 比較で世代が進んで見えるように。P1-10 / D-51）。
 ///
 /// `rg_written_at` は「ファイルのタグが解析値と一致していると確認した時刻」なので、値が
 /// 1 つでも変われば NULL にする（ファイルは旧値のまま）。時刻が秒単位のため、同じ秒に確認と
@@ -91,8 +93,11 @@ pub fn store(conn: &Connection, results: &[(i64, Values)], now: i64) -> Result<u
                    AND rg_album_gain IS ?4 AND rg_album_peak IS ?5
                    AND rg_written_at IS NOT NULL AND rg_written_at >= rg_scanned_at
                   THEN ?6 ELSE NULL END,
-                rg_track_gain = ?2, rg_track_peak = ?3, rg_album_gain = ?4, rg_album_peak = ?5,
-                rg_scanned_at = ?6
+                rg_scanned_at = CASE
+                  WHEN rg_track_gain IS ?2 AND rg_track_peak IS ?3
+                   AND rg_album_gain IS ?4 AND rg_album_peak IS ?5
+                  THEN ?6 ELSE MAX(?6, COALESCE(rg_scanned_at, 0) + 1) END,
+                rg_track_gain = ?2, rg_track_peak = ?3, rg_album_gain = ?4, rg_album_peak = ?5
           WHERE id = ?1 AND missing_since IS NULL",
     )?;
     let mut n = 0;

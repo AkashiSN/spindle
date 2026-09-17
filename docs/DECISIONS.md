@@ -1532,3 +1532,100 @@ deep scan 3,583 秒 → **552 秒**。既存 DB への deep scan 554 秒（Phase
 **未決**: deep scan は Phase 3 で全エントリのフィンガープリントを計算し直すので、可逆のフルデコードは
 残る（deep の定義そのもの。並列度分だけ短縮）。P1-4 の正規化で ALAC が FLAC になれば、deep でも
 STREAMINFO の MD5 を読むだけになる。
+
+## D-51 Derived の生成と追随はトラック単位の `transcode` ジョブが現在値に揃える
+
+**決定**（P1-10）:
+
+- **`transcode` ジョブ（payload `{track_id, audio_version, tag_version}`、dedup
+  `transcode:<track_id>:<audio_version>`、並列 cpus-1、基盤が `audio_version` で stale 判定して track
+  lock を取る。SPEC §8）は「そのトラックの Derived を現在の状態に揃える」ハンドラ。** D-42 の
+  payload `kind` は解釈しない（廃止）。ハンドラは毎回現在値から必要な処理を判定する
+  （`domain::derived::plan`）: 非可逆 / missing / 1ch・2ch 以外（チャンネル数不明を含む。属性を読めなかった
+  ファイルはマルチチャンネルかもしれない）は no-op（Derived を作らない。D-8 / D-22）。
+  `derived_files` が無い・`src_audio_version` が違えば再エンコード。音声版が一致していて `rel_path`
+  が期待値（Library の `rel_path` の拡張子を `.opus` に替えたもの）と違えば Derived を rename
+  （元が無ければ再エンコード）。`src_tag_version` / `src_artwork_id` / `src_rg_scanned_at` のどれかが
+  違えばタグ・画像だけ上書き（Derived が無ければ再エンコード）。全部一致なら no-op。
+  Library の FD は開いた直後とエンコード後に fstat して DB の行と照合し、違えば失敗（再スキャン
+  後の再試行で通る。パスは識別子ではない）
+- **投入契機は 4 つ**で、すべて `db::derived::enqueue_if_stale`（上の判定に当たるときだけ投入）に
+  集約する。(1) **scan ジョブの完了時**に対象を 1 クエリで取り出して一括投入
+  （`enqueue_all_stale`。初回は可逆全曲、以後は差分。外部の移動・音声差し替え・カバー差し替え・
+  実行中に dedup で落ちた分もここで拾う）。(2) tagwrite が applied になったトランザクション
+  （D-42 の `enqueue_derived_retag` を置き換え）。(3) rename が applied になったトランザクション。
+  (4) RG 解析値の保存と同じトランザクション。**タグ版に乗らない 2 つの世代を `derived_files` に
+  持つ**（マイグレーション 0005）: `src_artwork_id`（埋めた画像。NULL = 画像なし）と
+  `src_rg_scanned_at`（埋めた `R128_*` の元になった `tracks.rg_scanned_at`。NULL = 未解析で書いた）。
+  これが無いと RG の解析やカバーの差し替えが Derived に届くのは次のタグ編集まで。`src_artwork_id` に
+  記録するのは album の `artwork_id` ではなく**実際に埋めた**画像の id（原画像がキャッシュに無くて
+  画像なしで書いたら NULL。album の id を書くと、スキャンが原画像を復旧しても同じ SHA-256 → 同じ id
+  なので不一致が出ず、画像なしのまま固定される）。`rg_scanned_at` は値が変わる再解析では前回より
+  必ず大きくする（同じ秒でも世代が進む。`db::replaygain::store`）
+- **エンコードは `media::encode::OpusEncoder`（`FlacEncoder` と同型）。** Library の FD を
+  `/dev/stdin` で ffmpeg に渡して `<data>/tmp` の WAV へ（ビット深度に合う `pcm_s*le`、無ければ
+  `pcm_s24le`）→ `opusenc --bitrate <derived_bitrate> --vbr --music --discard-comments
+  --discard-pictures` → lofty で Vorbis Comment と画像を書く → Derived の宛先ディレクトリの tmp
+  （`create_tmp`）へコピー → `replace_file`。`derived_files` の upsert はファイル配置後
+- **タグは Library ファイルの `TransferTags` をそのまま写し、RG だけ DB の解析値から `R128_*` へ変換して
+  差し替える**（`REPLAYGAIN_*` は消す。SPEC §7.6「再解析しない」。解析前なら RG タグは書かない）。
+  **画像は album の `artwork_id` の `768.webp`**（P1-3 のキャッシュ。無ければ thumbnail ジョブと同じ
+  変換で作る。原画像も無ければ画像なしで作り、次のスキャンが原画像を復旧したときに
+  `src_artwork_id` の不一致で書き直される）を `image/webp` の front cover 1 枚として埋める。
+  トラック自身の埋め込み画像は使わない
+- **Derived の削除は行わない。** missing は可逆（SMB 切断）なので Derived を残し、
+  `retention_days` 超の回収と孤児ファイルの回収は GC（P1-11）。期待パスを**別トラックの**
+  `derived_files` 行が占有しているとき（A を消して B を A のパスへ移した: B は inode で追随し、A は
+  key を明け渡して missing になるが、A の Derived の行は残る）は、占有側が missing ならその行を消して
+  上書きする（Derived は再生成物でユーザデータではない）。占有側が生きていれば failed（バックオフで
+  再試行。A が生きたまま別のパスへ移り、その跡地に B が来た場合で、A の transcode が先に Derived を
+  動かせば次の試行で通る。占有側のファイルは占有側のロックを持たないので触らない）。**占有の確定は
+  物理的な書き込みの前に 1 トランザクションで行う**（`claim_path`: 読んで missing なら行を消す、まで
+  同じトランザクション）。scanner は track lock を取らないので、確認と書き込みの間に A が別のパスで
+  復活しうる。先に行を消しておけば、復活した A は「Derived 無し」として自分の期待パスに作り直すだけで、
+  B が置いたファイルを A のパスへ動かすことはない。**期待パスの canonical key は `derived_path_locks`
+  （マイグレーション 0005）で排他予約してから触る**（encode / move / retag の全経路。別のジョブが
+  持っていれば試行回数を数えずに再キュー、終了時に解放。持ち主が `running` でなくなれば無効、
+  起動時リカバリで全件消す）。`track_locks` は track 単位なので、`x.flac` と `x.wav` のように別の
+  Library パスが同じ期待パスに写る 2 本の並走や、先に走っている retag が後から同じパスを置き換える
+  ことを防げない。予約があれば、並走は直列化されて負けた方が「生きているトラックが持っている」で
+  失敗し（勝者のファイルは上書きされない）、retag 中の宛先を別のトラックが claim することもない
+- **Library の swap / 循環 rename は自己退避で解く。** 期待パスを**生きている**トラックが持っていて、
+  それがその相手の期待パスでもない（相手も追随待ち）ときは、自分の Derived を同じディレクトリの
+  一時名 `<名前>.moving-<track_id>` へ退避して行のパスもそこへ向け（音声版が古くても退避する。次の
+  試行の Encode が置き換えて退避ファイルを消す。実体が無ければ行を消して key を明け渡し、次の試行は
+  Encode）、相手の transcode が queued / running なら再キュー（試行回数を数えない）、いなければ失敗
+  （バックオフ。次の scan で両方投入される）。
+  相手はそれで自分の元パスへ移れ、自分は次の試行で相手が空けたパスへ移る（rename バッチの 2 段階と
+  同じ考え方。相手のファイルは相手のロックを持たないので触らない）。相手の期待パスでもあるとき
+  （`x.flac` / `x.wav`）だけが本当の衝突で、失敗にする。退避名は起動時回収の対象外（行が指している）で、
+  クラッシュで行が追随しなかった退避ファイルは GC が孤児として回収する
+- **SIGKILL / 電源断で残った作業ファイルは起動時に回収する**（`transcode::sweep_tmp`。ワーカー起動前）。
+  `<data>/tmp` の `spindle-transcode-*` / `spindle-normalize-*` と Derived の `.spindle-tmp-*`。単一
+  インスタンスで起動前は何も走っていないので年齢を見ずに消す。Derived は scan の対象外なので
+  scanner の猶予付き回収は効かない
+- `delivery` ビューは変えない（D-25）
+
+**理由**: ハンドラが「現在値に揃える」1 種類だと、retag / move / 再エンコードの区別を投入側が
+正しく判定する必要がなく、投入が重複しても（dedup は `audio_version` 単位）最初の 1 本で全部
+片づく。冪等性（電源断・再投入）も同じ判定で済む。scan 完了時の一括投入にしたのは、旧 `Opus/` を
+捨てた移行直後は Derived が空で（D-45）、手動の起動を待つ理由がないから。画像を album の WebP
+サムネイルにするのは、Android 側に cover.jpg のミラーが無く埋め込みが要る一方、原画像（数百 KB〜
+数 MB）を 7,500 本に埋めると Derived が数 GB 太るため。長辺 768 の WebP は数十 KB で足りる。
+
+**却下**: `kind = "retag"` / `"move"` / `"encode"` を投入側で決める（判定が 2 か所になり、投入後に
+状態が変わると誤る）。Derived を 1 本の同期ジョブで全曲処理する（並列度と stale 判定を自前で持つ
+ことになり、SPEC §8 の `transcode` と二重になる）。トラック自身の埋め込み画像を写す（同梱
+cover.jpg 優先の D-49 と食い違い、原寸のまま太る）。missing になった時点で Derived を消す
+（SMB 切断のたびに再エンコードが走る）。手動 API のみ（移行直後の 7,500 本を誰も投入しない）。
+
+**計測**（2026-09-17、リハーサル環境 ALAC 7,570 本、12 コア、`transcode` 並列 11）: 起動時スキャンの
+完了で 7,570 件を一括投入し、39 分で全件完了（failed 0）。Derived 30 GB。投入自体は 1 トランザクションで
+0.14 秒。エンコード中のロードアベレージは 13 前後で、他のコンテナと同居する NAS では並列度を設定で
+落とせるようにする余地がある（SPEC §8 の cpus-1 固定のまま）。
+
+**未決**: マルチチャンネルのダウンミックスと非可逆の `force_transcode`（SPEC §7.6。どちらも
+スキーマに列が無く、需要が出てから）。`transcode` の並列度の設定化。UI の起動導線と進捗表示（P1-1 / P1-2 と同様に後回し）。
+Derived 側の `cover.jpg` ミラー（P1-8 のエクスポートで要るなら）。transcode が**実行中**に scan が
+同じトラックの版を進めた場合、その scan の一括投入は dedup で落ちる（ハンドラが記録するのは
+読み始めた時点の版なので不一致は残り、次の scan で投入される）。

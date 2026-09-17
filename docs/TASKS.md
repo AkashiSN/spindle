@@ -512,9 +512,44 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - [ ] **P1-9** 再生（Range 対応、ALAC は既定で Opus 変換、
       `canPlayType()` によるクライアント能力判定。下部バー左側の再生 UI: 再生・停止・
       シーク・音量・RG 適用切替）
-- [ ] **P1-10** Derived 自動生成と追随（`audio_version` / `tag_version` 差分判定、
+- [x] **P1-10** Derived 自動生成と追随（`audio_version` / `tag_version` 差分判定、
       Library の移動・削除への追随。`delivery` ビューの版一致フォールバックの結合テスト）。
-      P1-8 の `delivery` プロファイルと Android 同期がこれを前提にするため P3 から前倒し
+      P1-8 の `delivery` プロファイルと Android 同期がこれを前提にするため P3 から前倒し。D-51
+      - [x] マイグレーション 0005: `derived_files.src_artwork_id` / `src_rg_scanned_at`
+            （タグ版に乗らない 2 つの世代）
+      - [x] `domain::derived`: 期待パス（拡張子を `.opus` に）、対象判定（可逆・active・1ch / 2ch）、
+            `plan`（Skip / Encode / Move / Retag / MoveAndRetag / UpToDate）、Opus に書くタグ集合
+            （`TransferTags` + DB の RG を `R128_*` へ + album のカバー 1 枚）
+      - [x] `media::encode::OpusEncoder`: ffmpeg → WAV → `opusenc --vbr --music`。
+            `domain::tags::write_opus_tags` でタグと画像
+      - [x] `db::derived`: 行の読み書き、`enqueue_if_stale`、scan 完了時の一括投入
+            （`enqueue_all_stale`）、占有行の明け渡し
+      - [x] `jobs::handlers::transcode`: 現在値に揃える（no-op / 再エンコード / rename / retag）。
+            Library の FD を DB の行と照合、期待パスの排他予約（`derived_path_locks`）と占有の確定
+            （`claim_path`）を物理書き込みの前に、宛先の tmp + `replace_file`、cancel、冪等。画像は album の `768.webp`（キャッシュに
+            無ければ生成、原画像も無ければ画像なしで `src_artwork_id = NULL`）。起動時の取り残し回収
+            （`sweep_tmp`）
+      - [x] 投入契機: scan ジョブ完了、tagwrite applied（`enqueue_derived_retag` を置換）、
+            rename applied、RG 保存
+      - [x] `delivery` ビューの結合テスト（生成 → Derived、`audio_version++` → Library、
+            `tag_version++` → `stale_tags`、retag → 解消）
+
+      受け入れ: `tests/derived.rs`（純粋な判定）、`tests/derived_db.rs`（投入判定）、
+      `tests/opus_encode.rs`、`tests/transcode_job.rs`（初回・no-op・retag・再エンコード・stale・
+      外部移動・消失・カバー差し替え・RG 後追い・FD 不一致・占有・占有確定後の復活との競合・
+      同じ期待パスの並走・retag 中の claim 待ち・swap / 3 件循環の追随（音声差し替え付き・実体無しを
+      含む）・move 失敗時の予約解放・
+      画像キャッシュ欠損からの復旧・cancel・取り残し回収）、
+      `tests/derived_sync.rs`
+      （4 つの契機と `delivery` の end-to-end）。UI の起動導線は未着手
+
+      計測（2026-09-17、リハーサル環境 9,098 トラック / 可逆は ALAC 7,570 本、12 コア、並列 11）:
+      起動時スキャンの完了で 7,570 件を投入 → **39 分**で全件 done（failed 0、警告 0、tmp の残り 0）。
+      Derived は 30 GB（全件に album の WebP カバー入り）。`delivery` は可逆 7,570 が Derived、
+      非可逆 1,528 が Library 原本
+
+      未決: マルチチャンネルのダウンミックス、非可逆の `force_transcode`、Derived 側の `cover.jpg`
+      ミラー（D-51）
 - [ ] **P1-11** GC ジョブ（`missing_since` 30 日超の行、`Archive/` へ退避した WAV、
       Derived の孤児。**物理削除を行う唯一の経路**。dry-run と削除件数のログを必須にする）
 

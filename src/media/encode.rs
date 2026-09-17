@@ -183,3 +183,133 @@ impl FlacEncoder {
         })
     }
 }
+
+// ---------------------------------------------------------------- Derived の Opus
+
+/// 作業ファイル名の前置き（Derived 用）
+const OPUS_TMP_PREFIX: &str = "spindle-transcode-";
+
+/// Derived の Opus エンコード（SPEC §7.6、D-9、D-51）。
+///
+/// ```text
+/// Library の可逆（root から開いた FD） → ffmpeg で tmp の WAV へ（FlacEncoder と同じ経路）
+///   → opusenc --vbr --music で tmp の Opus へ（コメント・画像は移さない。タグは呼び出し側が
+///     lofty で書く。`domain::tags::write_opus_tags`）
+/// ```
+#[derive(Debug, Clone)]
+pub struct OpusEncoder {
+    ffmpeg: PathBuf,
+    opusenc: PathBuf,
+    bitrate_kbps: u32,
+    tmp_dir: PathBuf,
+}
+
+/// エンコードした Opus（tmp）。`guard` を drop すると消える
+#[derive(Debug)]
+pub struct EncodedOpus {
+    pub guard: TempGuard,
+}
+
+impl OpusEncoder {
+    pub fn new(
+        ffmpeg: impl Into<PathBuf>,
+        opusenc: impl Into<PathBuf>,
+        bitrate_kbps: u32,
+        tmp_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            ffmpeg: ffmpeg.into(),
+            opusenc: opusenc.into(),
+            bitrate_kbps: bitrate_kbps.max(1),
+            tmp_dir: tmp_dir.into(),
+        }
+    }
+
+    pub fn tmp_dir(&self) -> &Path {
+        &self.tmp_dir
+    }
+
+    pub fn bitrate_kbps(&self) -> u32 {
+        self.bitrate_kbps
+    }
+
+    fn tmp_path(&self, ext: &str) -> Result<PathBuf, EncodeError> {
+        let mut buf = [0u8; 8];
+        getrandom::fill(&mut buf).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(self.tmp_dir.join(format!("{OPUS_TMP_PREFIX}{hex}.{ext}")))
+    }
+
+    /// `source`（読み取りで開いた Library のファイル）を Opus にする。`bit_depth` は中間 WAV の
+    /// PCM 形式に使う（ffmpeg にエンコーダが無い深度・不明なら 24 bit。非可逆にするので
+    /// 切り上げは無害）。`token` が倒れたら子プロセスごと止めて [`ProcessError::Cancelled`]
+    pub async fn encode(
+        &self,
+        source: File,
+        bit_depth: Option<u32>,
+        token: &CancellationToken,
+    ) -> Result<EncodedOpus, EncodeError> {
+        let pcm_codec = bit_depth
+            .and_then(|b| FlacEncoder::pcm_codec(b).ok())
+            .unwrap_or("pcm_s24le");
+        std::fs::create_dir_all(&self.tmp_dir).map_err(|source| EncodeError::TmpDir {
+            path: self.tmp_dir.clone(),
+            source,
+        })?;
+        let wav = TempGuard::new(self.tmp_path("wav")?);
+        let opus = TempGuard::new(self.tmp_path("opus")?);
+
+        // 1. デコード（FlacEncoder と同じ。メタデータは移さない）
+        ExternalCommand::new(&self.ffmpeg)
+            .path_style(PathStyle::DotSlash)
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                "/dev/stdin",
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-map_metadata",
+                "-1",
+                "-fflags",
+                "+bitexact",
+                "-flags",
+                "+bitexact",
+                "-c:a",
+                pcm_codec,
+                "-f",
+                "wav",
+            ])
+            .path_arg(wav.path())
+            .stdin_file(source)
+            .timeout(STEP_TIMEOUT)
+            .run(token)
+            .await?;
+
+        // 2. エンコード。opusenc は 48 kHz へのリサンプルを自分で行う。コメントと画像は捨てる
+        //    （タグは lofty で書く。WAV には無いが明示しておく）
+        let bitrate = self.bitrate_kbps.to_string();
+        ExternalCommand::new(&self.opusenc)
+            .path_style(PathStyle::DoubleDash)
+            .args([
+                "--quiet",
+                "--bitrate",
+                bitrate.as_str(),
+                "--vbr",
+                "--music",
+                "--discard-comments",
+                "--discard-pictures",
+            ])
+            .path_arg(wav.path())
+            .path_arg(opus.path())
+            .timeout(STEP_TIMEOUT)
+            .run(token)
+            .await?;
+        drop(wav);
+        Ok(EncodedOpus { guard: opus })
+    }
+}

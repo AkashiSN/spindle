@@ -967,12 +967,20 @@ fn holder_of(tx: &Connection, key: &str) -> crate::db::Result<Option<i64>> {
 }
 
 /// op を終端にし、rel_path をファイルの実際の所在へ揃え、物理属性を追随し、バッチを集計する
+/// `commit_settled` の結果。`derived_jobs` は applied のトラックへ投入した Derived の追随ジョブ
+/// （commit 後にワーカーを起こす）
+struct Committed {
+    outcome: RenameOutcome,
+    event: Option<crate::jobs::BatchEvent>,
+    derived_jobs: Vec<i64>,
+}
+
 fn commit_settled(
     conn: &mut Connection,
     batch_id: i64,
     job_id: Option<i64>,
     settled: &[Settled],
-) -> Result<(RenameOutcome, Option<crate::jobs::BatchEvent>), EditError> {
+) -> Result<Committed, EditError> {
     let tx = conn.transaction()?;
     let now = now_epoch();
     let mut outcome = RenameOutcome::default();
@@ -1052,12 +1060,25 @@ fn commit_settled(
         }
     }
     reassign_albums(&tx, &album_moves, now)?;
+    // Derived の追随（D-51）。パスが変わった（applied）トラックの Derived を rename させる
+    let mut derived_jobs = Vec::new();
+    for s in settled {
+        if s.result == OpResult::Applied {
+            if let Some(id) = crate::db::derived::enqueue_if_stale(&tx, s.op.track_id, now)? {
+                derived_jobs.push(id);
+            }
+        }
+    }
     let event = match history::aggregate_batch(&tx, batch_id, now)? {
         Some(state) => Some(batch_event(&tx, batch_id, state)?),
         None => None,
     };
     tx.commit()?;
-    Ok((outcome, event))
+    Ok(Committed {
+        outcome,
+        event,
+        derived_jobs,
+    })
 }
 
 impl Editor {
@@ -1216,11 +1237,11 @@ impl Editor {
             .zip(locs)
             .map(|(r, loc)| settle(r, loc, "反映の途中で止まった"))
             .collect();
-        let (outcome, event) = self
+        let committed = self
             .db
             .write(move |c| Ok(commit_settled(c, batch_id, job_id, &settled)))
             .await??;
-        self.publish_batch(event);
+        let outcome = self.finish_commit(committed).await;
         tracing::info!(
             batch_id,
             applied = outcome.applied,
@@ -1248,12 +1269,12 @@ impl Editor {
             };
             settled.push(settle(r, loc, CANCELLED_ERROR));
         }
-        let (mut outcome, event) = self
+        let committed = self
             .db
             .write(move |c| Ok(commit_settled(c, batch_id, job_id, &settled)))
             .await??;
+        let mut outcome = self.finish_commit(committed).await;
         outcome.cancelled = true;
-        self.publish_batch(event);
         tracing::info!(batch_id, "リネームバッチを phase 1 でキャンセルした");
         Ok(outcome)
     }
@@ -1279,11 +1300,11 @@ impl Editor {
             };
             settled.push(settle(r, loc, error));
         }
-        let (outcome, event) = self
+        let committed = self
             .db
             .write(move |c| Ok(commit_settled(c, batch_id, job_id, &settled)))
             .await??;
-        self.publish_batch(event);
+        let outcome = self.finish_commit(committed).await;
         Ok(outcome.applied + outcome.conflict + outcome.failed)
     }
 
@@ -1320,6 +1341,13 @@ impl Editor {
             final_path: r.final_path.clone(),
         };
         Ok(tokio::task::spawn_blocking(move || f(&root, &r)).await??)
+    }
+
+    /// commit 後の後始末: 投入した Derived の追随ジョブでワーカーを起こし、バッチの終端を通知する
+    async fn finish_commit(&self, c: Committed) -> RenameOutcome {
+        self.jobs.notify_enqueued(&c.derived_jobs).await;
+        self.publish_batch(c.event);
+        c.outcome
     }
 
     fn publish_batch(&self, event: Option<crate::jobs::BatchEvent>) {

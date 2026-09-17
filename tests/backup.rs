@@ -506,7 +506,12 @@ async fn restore_drill_rescans_to_the_same_state() {
             .map(Result::unwrap)
             .collect();
         let jobs = c
-            .prepare("SELECT id, type, state FROM jobs WHERE type <> 'backup' ORDER BY id")
+            // transcode は tagwrite の applied が投入する追随ジョブ（P1-10）。ここで見たいのは
+            // 履歴（tagwrite）なので除く
+            .prepare(
+                "SELECT id, type, state FROM jobs WHERE type NOT IN ('backup', 'transcode')
+                 ORDER BY id",
+            )
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap()

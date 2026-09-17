@@ -127,6 +127,25 @@ impl Handler for ScanHandler {
                     let _ = ctx.progress(total, total).await;
                     // Phase 5 が投入した thumbnail ジョブでワーカーを起こす
                     ctx.jobs().notify_enqueued(&report.enqueued_jobs).await;
+                    // Derived の追随（D-51）。可逆で Derived が無い・版が古い・パスがずれた・カバーが
+                    // 変わったトラックに transcode を投入する。初回は可逆全曲
+                    let derived_jobs = ctx
+                        .db()
+                        .write(|c| {
+                            let tx = c.transaction()?;
+                            let ids = crate::db::derived::enqueue_all_stale(&tx, now_epoch())?;
+                            tx.commit()?;
+                            Ok(ids)
+                        })
+                        .await?;
+                    if !derived_jobs.is_empty() {
+                        tracing::info!(
+                            job_id = ctx.job.id,
+                            transcode_jobs = derived_jobs.len(),
+                            "Derived の追随を投入した"
+                        );
+                    }
+                    ctx.jobs().notify_enqueued(&derived_jobs).await;
                     // 変更行を表へ通知する（SPEC §9 `library`）。commit 済みなので取得すれば新しい値が見える
                     if let Some(ev) = LibraryEvent::from_changes(report.run_id, report.changed_ids)
                     {

@@ -269,7 +269,8 @@ impl Handler for RgHandler {
                         tx.rollback()?;
                         return Ok(None);
                     }
-                    let n = dbrg::store(&tx, &results, now_epoch())?;
+                    let now = now_epoch();
+                    let n = dbrg::store(&tx, &results, now)?;
                     if n != results.len() {
                         tx.rollback()?;
                         return Err(DbError::Internal(format!(
@@ -277,15 +278,24 @@ impl Handler for RgHandler {
                             results.len()
                         )));
                     }
+                    // Derived の追随（D-51）。解析値は版に乗らないので、ここで retag を投入する
+                    let mut derived_jobs = Vec::new();
+                    for (track_id, _) in &results {
+                        if let Some(id) = crate::db::derived::enqueue_if_stale(&tx, *track_id, now)?
+                        {
+                            derived_jobs.push(id);
+                        }
+                    }
                     tx.commit()?;
-                    Ok(Some(n))
+                    Ok(Some((n, derived_jobs)))
                 })
                 .await?;
-            let Some(written) = written else {
+            let Some((written, derived_jobs)) = written else {
                 return Err(JobError::Failed(anyhow::anyhow!(
                     "解析中に構成が変わったので書かなかった（再試行）"
                 )));
             };
+            ctx.jobs().notify_enqueued(&derived_jobs).await;
             ctx.progress(total, total).await?;
             tracing::info!(job_id, written, "ReplayGain を解析した");
             Ok(Outcome::Done)

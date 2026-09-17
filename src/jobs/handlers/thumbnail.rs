@@ -49,7 +49,7 @@ impl ThumbnailHandler {
 }
 
 /// `src` から一辺 `size` の WebP を `dst` に作る（tmp + rename。失敗したら tmp を消す）
-async fn make_thumb(
+pub async fn make_thumb(
     ffmpeg: &Path,
     src: &Path,
     dst: &Path,

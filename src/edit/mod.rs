@@ -490,7 +490,10 @@ impl Editor {
                     Staged::Written(fs) | Staged::AlreadyMatches(fs) => {
                         history::finish_op(&tx, op.id, OpResult::Applied, None, job_id, now)?;
                         sync_track_to_file(&tx, op.track_id, &fs, reference, now)?;
-                        if let Some(id) = enqueue_derived_retag(&tx, op.track_id, now)? {
+                        // Derived の追随（D-51）。無い・版が古い・パスがずれていれば transcode を投入する
+                        if let Some(id) =
+                            crate::db::derived::enqueue_if_stale(&tx, op.track_id, now)?
+                        {
                             followup_jobs.push(id);
                         }
                         OpOutcome::Applied
@@ -1407,46 +1410,6 @@ fn same_stat(a: &fsroot::Stat, b: &fsroot::Stat) -> bool {
         && a.size == b.size
         && a.mtime_ns == b.mtime_ns
         && a.ctime_ns == b.ctime_ns
-}
-
-// ---------------------------------------------------------------- Derived の追随
-
-/// applied になったトラックに Derived があり、その `src_tag_version` が現在の `tag_version` より
-/// 古ければタグ上書きジョブを投入する（SPEC §7.6「tag_version 差分のみ → タグ上書き」、D-42）。
-/// 種別は `transcode`（payload `kind = "retag"`、dedup key は `transcode:<track_id>:<audio_version>`）。
-/// ハンドラは P1-10。Derived が無ければ何もしない
-fn enqueue_derived_retag(
-    tx: &Connection,
-    track_id: i64,
-    now: i64,
-) -> crate::db::Result<Option<i64>> {
-    use rusqlite::OptionalExtension as _;
-    let stale: Option<(i64, i64)> = tx
-        .query_row(
-            "SELECT t.audio_version, t.tag_version FROM tracks t
-             JOIN derived_files d ON d.track_id = t.id
-             WHERE t.id = ?1 AND d.src_tag_version <> t.tag_version",
-            [track_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((audio_version, tag_version)) = stale else {
-        return Ok(None);
-    };
-    let job = NewJob::new(
-        JobType::Transcode,
-        serde_json::json!({
-            "track_id": track_id,
-            "audio_version": audio_version,
-            "tag_version": tag_version,
-            "kind": "retag",
-        }),
-    )
-    .dedup_key(format!("transcode:{track_id}:{audio_version}"));
-    Ok(match dbjobs::enqueue(tx, &job, now)? {
-        dbjobs::EnqueueResult::Inserted(id) => Some(id),
-        dbjobs::EnqueueResult::Duplicate(_) => None,
-    })
 }
 
 // ---------------------------------------------------------------- DB の追随と overlay の解消

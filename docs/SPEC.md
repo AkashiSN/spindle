@@ -665,10 +665,12 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
 | 対象 | Library 内の可逆のみ（flac / alac / wav）。opus / aac / mp3 は対象外 |
 | 出力 | Opus 128kbps VBR（`--vbr`, signal=music）。可逆200GBで約25GB |
 | パス | Library と完全ミラー（拡張子のみ `.opus`） |
-| RG | 再解析しない。Library 側の解析値を `R128_*` へ変換して埋める |
-| 判定 | `audio_version` 差分 → 再エンコード / `tag_version` 差分のみ → タグ上書き |
-| 追随 | Library の移動・削除に追随。孤児は GC ジョブで回収 |
-| マルチch | 既定で対象外。トラック単位で `-ac 2` ダウンミックスをオプトイン可 |
+| RG | 再解析しない。Library 側の解析値を `R128_*` へ変換して埋める（`REPLAYGAIN_*` は書かない） |
+| 画像 | album のアートワーク（§7.1「アートワーク」で解決したもの）の長辺 768 の WebP を 1 枚だけ埋める。トラック自身の埋め込み画像は写さない（D-51） |
+| 判定 | `audio_version` 差分 → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）の差分のみ → タグ上書き / パスの差分のみ → rename |
+| 投入 | scan ジョブの完了時に食い違う全トラック、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（track 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める |
+| 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児は GC ジョブ |
+| マルチch | 既定で対象外（チャンネル数不明も対象外）。トラック単位で `-ac 2` ダウンミックスをオプトイン可（未実装） |
 
 非可逆音源は Derived を作らず原本をそのまま配布する（多重劣化の回避）。
 容量逼迫時のみ、トラック単位で `force_transcode` を手動指定可能。

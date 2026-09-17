@@ -585,7 +585,7 @@ async fn apply_with_nothing_to_change_is_409_no_changes() {
 }
 
 #[tokio::test]
-async fn applied_op_enqueues_derived_retag_only_when_derived_exists() {
+async fn applied_op_enqueues_derived_sync_for_each_track() {
     let app = App::new().await;
     setup!(app, "A/01.flac" => "a", "A/02.flac" => "b");
     let c = app.cookie().await;
@@ -625,10 +625,20 @@ async fn applied_op_enqueues_derived_retag_only_when_derived_exists() {
         .unwrap()
         .map(|s| serde_json::from_str(&s.unwrap()).unwrap())
         .collect();
-    assert_eq!(payloads.len(), 1, "{payloads:?}");
-    assert_eq!(payloads[0]["track_id"], a);
-    assert_eq!(payloads[0]["kind"], "retag");
-    assert_eq!(payloads[0]["tag_version"], 2);
+    // Derived がある a はタグ版の差分、無い b は「Derived 無し」として、どちらも投入される（D-51）
+    let mut tracks: Vec<i64> = payloads
+        .iter()
+        .map(|p| p["track_id"].as_i64().unwrap())
+        .collect();
+    tracks.sort();
+    let mut want = vec![a, b];
+    want.sort();
+    assert_eq!(tracks, want, "{payloads:?}");
+    for p in &payloads {
+        assert_eq!(p["tag_version"], 2);
+        assert_eq!(p["audio_version"], 1);
+        assert!(p.get("kind").is_none());
+    }
 }
 
 // ---------------------------------------------------------------- 受け入れ

@@ -17,10 +17,11 @@ use spindle::jobs::handlers::rg::RgHandler;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
 use spindle::jobs::handlers::thumbnail::ThumbnailHandler;
+use spindle::jobs::handlers::transcode::{self, TranscodeHandler};
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
 use spindle::media::artwork::ArtworkStore;
 use spindle::media::decode::Decoder;
-use spindle::media::encode::FlacEncoder;
+use spindle::media::encode::{FlacEncoder, OpusEncoder};
 use spindle::{config::Config, logging};
 
 /// `SPINDLE_CONFIG` 未設定時の設定ファイルパス（SPEC §14 環境変数）
@@ -48,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let roots = Roots::open(&config.paths).context("ライブラリの root を開けない")?;
     let library_root = Arc::new(roots.library);
     let archive_root = Arc::new(roots.archive);
+    let derived_root = Arc::new(roots.derived);
 
     let db_path = config.paths.data.join(DB_FILE_NAME);
     let db = {
@@ -161,14 +163,39 @@ async fn main() -> anyhow::Result<()> {
     registry.register(
         JobType::Rg,
         Arc::new(RgHandler::new(
-            library_root,
+            Arc::clone(&library_root),
             Decoder::new(&state.config.bin.ffmpeg),
             state.config.replaygain.reference_lufs,
         )),
     );
     registry.register(
         JobType::Thumbnail,
-        Arc::new(ThumbnailHandler::new(artwork, &state.config.bin.ffmpeg)),
+        Arc::new(ThumbnailHandler::new(
+            Arc::clone(&artwork),
+            &state.config.bin.ffmpeg,
+        )),
+    );
+    // Derived の生成と追随（P1-10、D-51）。作業領域は data/tmp、画像は thumbs のキャッシュ。
+    // 前回の強制終了で残った作業ファイルはワーカーを起こす前に回収する
+    let swept = transcode::sweep_tmp(&state.config.paths.data.join(TMP_DIR_NAME), &derived_root);
+    if swept != transcode::SweepReport::default() {
+        info!(?swept, "取り残された作業ファイルを回収した");
+    }
+    registry.register(
+        JobType::Transcode,
+        Arc::new(TranscodeHandler::new(
+            Arc::clone(&library_root),
+            derived_root,
+            OpusEncoder::new(
+                &state.config.bin.ffmpeg,
+                &state.config.bin.opusenc,
+                state.config.encode.derived_bitrate,
+                state.config.paths.data.join(TMP_DIR_NAME),
+            ),
+            artwork,
+            &state.config.bin.ffmpeg,
+            state.config.replaygain.reference_lufs,
+        )),
     );
     registry.register(
         JobType::Backup,
