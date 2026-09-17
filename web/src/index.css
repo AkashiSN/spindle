@@ -881,3 +881,113 @@ button.primary {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ---------------------------------------------------------------- プレイリスト（P1-6） */
+.sidebar section.playlists h2 {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.sidebar section.playlists h2 button.ghost {
+  font-size: 11px;
+  padding: 0 4px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.playlist-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border: 1px dashed transparent;
+}
+.playlist-row.drop-over {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.playlist-row .row-menu {
+  visibility: hidden;
+  padding: 0 4px;
+}
+.playlist-row:hover .row-menu,
+.playlist-row .row-menu[aria-expanded='true'] {
+  visibility: visible;
+}
+.popup-menu {
+  position: absolute;
+  right: 4px;
+  top: 100%;
+  z-index: 20;
+  min-width: 140px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+}
+.popup-menu button {
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 4px 10px;
+}
+.popup-menu button:hover {
+  background: var(--bg-alt);
+}
+.popup-menu button.danger {
+  color: var(--error);
+}
+.notice {
+  margin: 4px 6px;
+  padding: 4px 6px;
+  background: var(--bg-alt);
+  border-left: 2px solid var(--accent);
+  white-space: pre-wrap;
+  cursor: pointer;
+}
+.import-panel {
+  margin: 2px 6px 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+.import-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.import-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 0;
+}
+.import-row .path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-panel .unresolved li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.add-to-playlist {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+.add-to-playlist select {
+  flex: 1;
+  min-width: 0;
+}
+/* 並べ替えのドロップ位置 */
+.tr.drop-above {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.tr.drop-below {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}

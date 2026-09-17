@@ -31,6 +31,8 @@ pub struct AppState {
     /// 再生用の root（P1-9）。無いと `/api/stream` は 503
     pub library: Option<Arc<RootDir>>,
     pub derived: Option<Arc<RootDir>>,
+    /// プレイリストの書き出し先・取り込み元（P1-6）。無いと export の POST と import は 503
+    pub playlists: Option<Arc<RootDir>>,
     /// オンザフライ変換の上限に足す猶予（トラック長 + これ。P1-9）
     pub transcode_grace: std::time::Duration,
 }
@@ -49,6 +51,7 @@ impl AppState {
             artwork: None,
             library: None,
             derived: None,
+            playlists: None,
             transcode_grace: super::stream::TRANSCODE_GRACE,
         }
     }
@@ -62,6 +65,11 @@ impl AppState {
     pub fn with_roots(mut self, library: Arc<RootDir>, derived: Arc<RootDir>) -> Self {
         self.library = Some(library);
         self.derived = Some(derived);
+        self
+    }
+
+    pub fn with_playlists(mut self, playlists: Arc<RootDir>) -> Self {
+        self.playlists = Some(playlists);
         self
     }
 

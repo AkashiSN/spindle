@@ -152,7 +152,39 @@ fn sort_exprs(key: SortKey) -> &'static [&'static str] {
         SortKey::Codec => &["t.codec"],
         SortKey::RelPath => &["t.rel_path"],
         SortKey::Id => &[],
+        // `position_join` が付ける別名。playlist_id が無いときは `effective_sort` で id に倒す
+        SortKey::Position => &["pi.position"],
     }
+}
+
+/// position ソートはプレイリストが決まっているときだけ意味を持つ。無ければ id 順
+fn effective_sort(f: &Filter, sort: Sort) -> Sort {
+    if sort.key == SortKey::Position && f.playlist_id.is_none() {
+        Sort {
+            key: SortKey::Id,
+            desc: sort.desc,
+        }
+    } else {
+        sort
+    }
+}
+
+/// FROM 句に足す JOIN と WHERE 句。position ソートは `playlist_items` を JOIN して
+/// （所属の絞り込みも JOIN が兼ねる）、`(playlist_id, position)` の主キー順で読む
+fn shape(f: &Filter, sort: Sort) -> (String, Where) {
+    let mut w = Where::default();
+    let mut join = String::new();
+    let mut f = f.clone();
+    if sort.key == SortKey::Position {
+        if let Some(id) = f.playlist_id.take() {
+            join = "JOIN playlist_items pi ON pi.track_id = t.id AND pi.playlist_id = ?".to_owned();
+            w.params.push(Value::from(id));
+        }
+    }
+    let rest = filter_where(&f);
+    w.clauses.extend(rest.clauses);
+    w.params.extend(rest.params);
+    (join, w)
 }
 
 /// WHERE 句の断片とパラメータ
@@ -284,23 +316,24 @@ fn cursor_where(sort: Sort, cursor: &Cursor) -> Option<(String, Vec<Value>)> {
 
 /// 一覧の SELECT 文（カーソル生成用にソートキーの値を末尾に付ける）
 fn list_sql(q: &Query) -> (String, Vec<Value>) {
-    let mut w = filter_where(&q.filter);
+    let sort = effective_sort(&q.filter, q.sort);
+    let (join, mut w) = shape(&q.filter, sort);
     if let Some(c) = &q.cursor {
-        if let Some((sql, params)) = cursor_where(q.sort, c) {
+        if let Some((sql, params)) = cursor_where(sort, c) {
             w.push(&sql, params);
         } else {
             // ソートとカーソルの形が合わない: 空ページを返す
             w.push("0", []);
         }
     }
-    let key_cols = sort_exprs(q.sort.key)
+    let key_cols = sort_exprs(sort.key)
         .iter()
         .map(|e| format!(", {e}"))
         .collect::<String>();
     let sql = format!(
-        "SELECT {ROW_COLUMNS}{key_cols}\n{ROW_JOINS}\nWHERE {}\n{}\nLIMIT ?",
+        "SELECT {ROW_COLUMNS}{key_cols}\n{ROW_JOINS}\n{join}\nWHERE {}\n{}\nLIMIT ?",
         w.sql(),
-        order_by(q.sort)
+        order_by(sort)
     );
     let mut params = w.params;
     params.push(Value::from(q.limit as i64 + 1));
@@ -332,7 +365,8 @@ pub fn list(conn: &Connection, q: &Query) -> Result<Page> {
     let tx = conn.unchecked_transaction()?;
     let (sql, params) = list_sql(q);
     let mut stmt = tx.prepare_cached(&sql)?;
-    let n_keys = sort_exprs(q.sort.key).len();
+    let sort = effective_sort(&q.filter, q.sort);
+    let n_keys = sort_exprs(sort.key).len();
     let mut rows = stmt.query(params_from_iter(params))?;
     let mut items: Vec<TrackRow> = Vec::with_capacity(q.limit);
     let mut last_cursor: Option<Cursor> = None;
@@ -348,7 +382,7 @@ pub fn list(conn: &Connection, q: &Query) -> Result<Page> {
             keys.push(cursor_value(r.get::<_, Value>(ROW_COLUMN_COUNT + i)?)?);
         }
         last_cursor = Some(Cursor {
-            sort: q.sort,
+            sort,
             keys,
             id: row.id,
         });
@@ -435,14 +469,14 @@ pub fn resolve_selection_sorted(
     sel: &Selection,
     sort: Option<Sort>,
 ) -> Result<Vec<SnapshotRow>> {
-    let order = match sort {
-        Some(s) => order_by(s),
-        None => "ORDER BY t.id".to_owned(),
-    };
     match sel {
         Selection::Ids(ids) => {
             // 大量の id を IN に並べず、JSON 配列 1 本を json_each で展開して JOIN する。
-            // 同じ id が 2 回あっても 1 行にする
+            // 同じ id が 2 回あっても 1 行にする。position はプレイリストが決まらないので id 順
+            let order = match sort.map(|s| effective_sort(&Filter::default(), s)) {
+                Some(s) => order_by(s),
+                None => "ORDER BY t.id".to_owned(),
+            };
             let json = serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_owned());
             let sql = format!(
                 "SELECT {SNAPSHOT_COLUMNS} FROM tracks t
@@ -456,7 +490,14 @@ pub fn resolve_selection_sorted(
             filter,
             exclude_ids,
         } => {
-            let mut w = filter_where(filter);
+            let (join, order) = match sort.map(|s| effective_sort(filter, s)) {
+                Some(s) => (Some(s), order_by(s)),
+                None => (None, "ORDER BY t.id".to_owned()),
+            };
+            let (join, mut w) = match join {
+                Some(s) => shape(filter, s),
+                None => (String::new(), filter_where(filter)),
+            };
             if !exclude_ids.is_empty() {
                 let json = serde_json::to_string(exclude_ids).unwrap_or_else(|_| "[]".to_owned());
                 w.push(
@@ -465,7 +506,7 @@ pub fn resolve_selection_sorted(
                 );
             }
             let sql = format!(
-                "SELECT {SNAPSHOT_COLUMNS} FROM tracks t WHERE {} {order}",
+                "SELECT {SNAPSHOT_COLUMNS} FROM tracks t {join} WHERE {} {order}",
                 w.sql()
             );
             let mut stmt = conn.prepare(&sql)?;

@@ -23,8 +23,10 @@ import { useEvents } from './hooks/useEvents'
 import { useHistory } from './hooks/useHistory'
 import { useJobSummary } from './hooks/useJobSummary'
 import { usePlayer } from './hooks/usePlayer'
+import { usePlaylists } from './hooks/usePlaylists'
 import { useTracks } from './hooks/useTracks'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
+import { scopeAfterPlaylistDelete, sortForScope } from './lib/playlists'
 import type { View } from './lib/views'
 import {
   DEFAULT_SORT,
@@ -89,6 +91,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   // 一覧は SSE を開いてから取る（開く前のイベントを失わない。D-36）
   const tracks = useTracks(filter, sort, sseOpen)
   const albums = useAlbums(sseOpen)
+  const playlists = usePlaylists(sseOpen)
+  const refreshPlaylists = playlists.refresh
   const jobs = useJobSummary(sseOpen)
   // 履歴は画面を開いたときに取り、開いている間は batch イベントで取り直す
   const history = useHistory(sseOpen && view === 'history')
@@ -108,6 +112,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const onLibrary = useCallback(
     (e: LibraryEvent) => {
       albums.refresh()
+      // missing の件数が変わる
+      refreshPlaylists()
       // 選択集合内の行が変わったかは client で分からないので、library は常に数え直す
       refreshPending()
       const keep = Math.max(visibleEnd.current + 1, 1)
@@ -118,16 +124,17 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       // ids: 表示中（読み込み済み）に含まれる id があるときだけ取り直す
       if (e.track_ids.some((id) => tracks.byId.has(id))) tracks.reload(keep)
     },
-    [albums, tracks, refreshPending],
+    [albums, refreshPlaylists, tracks, refreshPending],
   )
   /** 表示範囲・ジョブ要約・アルバム・反映待ち集計をまとめて取り直す（再接続 / resync） */
   const refreshAll = useCallback(() => {
     jobs.refresh()
     albums.refresh()
+    refreshPlaylists()
     tracks.reload(Math.max(visibleEnd.current + 1, 1))
     refreshPending()
     if (view === 'history') history.refresh()
-  }, [jobs, albums, tracks, refreshPending, view, history])
+  }, [jobs, albums, refreshPlaylists, tracks, refreshPending, view, history])
   // SSE が切れたとき（401 で閉じられた場合を含む）にセッションを確かめる。401 なら
   // apiFetch の onUnauthorized 経由でログイン画面へ戻る。連続するエラーは 5 秒に 1 回に間引くが、
   // 最後のエラーは必ず確認する（サーバ再起動直後は接続拒否 → 再接続で 401 の順に来る。
@@ -245,10 +252,64 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const handleRange = useCallback((end: number) => {
     visibleEnd.current = end
   }, [])
-  const handleScope = useCallback((s: Scope) => {
-    setScope(s)
-    setView('tracks')
-  }, [])
+  const handleScope = useCallback(
+    (s: Scope) => {
+      // プレイリストに入ったら position 順、出たら既定ソートへ（lib/playlists）
+      setSort((sort) => sortForScope(scope, s, sort))
+      setScope(s)
+      setView('tracks')
+    },
+    [scope],
+  )
+
+  // ---------------------------------------------------------------- プレイリスト（P1-6）
+
+  const [playlistNotice, setPlaylistNotice] = useState<string | null>(null)
+  const currentPlaylist = useMemo(
+    () => (scope.playlist_id == null ? null : (playlists.items.find((p) => p.id === scope.playlist_id) ?? null)),
+    [scope.playlist_id, playlists.items],
+  )
+  const playlistName = (id: number) => playlists.items.find((p) => p.id === id)?.name ?? `#${id}`
+  const reloadIfCurrent = useCallback(
+    (playlistId: number) => {
+      if (scope.playlist_id === playlistId) tracks.reload(Math.max(visibleEnd.current + 1, 1))
+    },
+    [scope.playlist_id, tracks],
+  )
+  const failNotice = (e: unknown) => setPlaylistNotice(`失敗: ${e instanceof Error ? e.message : String(e)}`)
+  const addToPlaylist = async (playlistId: number, what: Selection | number[]) => {
+    try {
+      const r = await playlists.addTracks(playlistId, what, sortToParam(sort))
+      if (!r) return
+      setPlaylistNotice(
+        `「${playlistName(playlistId)}」に ${r.added} 件を追加${r.skipped > 0 ? `（${r.skipped} 件は既に入っている）` : ''}`,
+      )
+      reloadIfCurrent(playlistId)
+    } catch (e) {
+      failNotice(e)
+    }
+  }
+  const removeSelectedFromPlaylist = async () => {
+    if (!currentPlaylist || selection.kind === 'none') return
+    try {
+      const r = await playlists.removeTracks(currentPlaylist.id, selection)
+      if (!r) return
+      setPlaylistNotice(`「${currentPlaylist.name}」から ${r.removed} 件を除外`)
+      clearSelection()
+      reloadIfCurrent(currentPlaylist.id)
+    } catch (e) {
+      failNotice(e)
+    }
+  }
+  const reorderPlaylist = async (trackIds: number[], before: number | null) => {
+    if (!currentPlaylist) return
+    try {
+      await playlists.moveTracks(currentPlaylist.id, trackIds, before)
+      reloadIfCurrent(currentPlaylist.id)
+    } catch (e) {
+      failNotice(e)
+    }
+  }
   const logout = async () => {
     try {
       await apiPost('/api/auth/logout', {})
@@ -260,7 +321,20 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   return (
     <div className="shell">
       <TopNav view={view} onView={setView} query={query} onQuery={setQuery} onLogout={logout} />
-      <Sidebar albums={albums.albums} scope={scope} onScope={handleScope} />
+      <Sidebar
+        albums={albums.albums}
+        scope={scope}
+        onScope={handleScope}
+        playlists={playlists}
+        onPlaylistDeleted={(id) => {
+          // 表示中のプレイリストを消したら「すべて」へ（行キャッシュと position ソートを残さない）
+          const next = scopeAfterPlaylistDelete(scope, id)
+          if (next !== scope) handleScope(next)
+        }}
+        onDropTracks={(id, ids) => void addToPlaylist(id, ids)}
+        playlistNotice={playlistNotice}
+        onPlaylistNotice={setPlaylistNotice}
+      />
       <main className="center">
         {view === 'tracks' ? (
           <TrackTable
@@ -281,6 +355,16 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             onInlineEdit={handleInlineEdit}
             onPlay={player.play}
             playingId={player.track?.id ?? null}
+            playlist={
+              currentPlaylist
+                ? {
+                    name: currentPlaylist.name,
+                    reorderable: sort.key === 'position' && !sort.desc,
+                    onRemoveSelected: () => void removeSelectedFromPlaylist(),
+                    onReorder: (ids, before) => void reorderPlaylist(ids, before),
+                  }
+                : null
+            }
           />
         ) : view === 'albums' ? (
           <AlbumGrid
@@ -298,7 +382,14 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           <Placeholder title="設定" note="config.toml の閲覧、再スキャン / deep scan / GC dry-run は後続タスクで" />
         )}
       </main>
-      <RightPanel selection={selection} summary={summary} selectedRows={selectedRows} edit={edit} />
+      <RightPanel
+        selection={selection}
+        summary={summary}
+        selectedRows={selectedRows}
+        edit={edit}
+        playlists={playlists.items}
+        onAddToPlaylist={(id) => void addToPlaylist(id, selection)}
+      />
       <BottomBar player={player} summary={jobs.summary} connected={connected} onJobsClick={() => setView('jobs')} />
     </div>
   )

@@ -161,3 +161,28 @@ export type OpView = {
 }
 export type HistoryDetail = HistoryItem & { ops: OpView[] }
 export type RevertResponse = { batch_id: number; affected: number; conflict: number }
+
+// ---------------------------------------------------------------- プレイリスト（P1-6）
+
+export type PlaylistExport = { profile: string; out_path: string; exported_at: number | null }
+export type Playlist = {
+  id: number
+  name: string
+  kind: 'manual' | 'smart'
+  auto_export: boolean
+  created_at: number
+  updated_at: number
+  track_count: number
+  missing_count: number
+  duration_ms: number
+  exports: PlaylistExport[]
+}
+export type PlaylistList = { items: Playlist[] }
+export type AppendResponse = { added: number; skipped: number }
+export type ExportResponse = { out_path: string; count: number; skipped_missing: number }
+export type ImportCandidate = { path: string; size: number }
+export type ImportResponse = { playlist: Playlist; matched: number; duplicates: number; unresolved: string[] }
+
+/** 書き出しプロファイル名（`export_profiles` の seed。CRUD は P1-8） */
+export const EXPORT_PROFILES = ['internal', 'foobar', 'android'] as const
+export type ExportProfileName = (typeof EXPORT_PROFILES)[number]

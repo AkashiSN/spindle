@@ -504,7 +504,34 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `pcm_s*le` を選ぶだけなので、必要なら raw → `flac --bps` の経路を足す）
 - [ ] **P1-5** FLAC 健全性チェック（`flac -t`、MD5 未設定の補填。
       補填時は `audio_version` 据え置き）
-- [ ] **P1-6** プレイリスト（手動、並べ替え、m3u8 書き出し）
+- [x] **P1-6** プレイリスト（手動、並べ替え、m3u8 書き出し。D-53）
+      - [x] `db::playlists`: CRUD（名前の一意性は `name_key` = canonical key。マイグレーション 0006）、
+            項目の追加（同じトラックは 1 回）・除外・移動（`before` の直前 / 末尾）、`position` の振り直し、
+            書き出し記録、`export_profiles` の読み出し
+      - [x] `sort=position`（`filter.playlist_id` と組でだけ有効。`playlist_items` を JOIN して主キー順、
+            カーソルページング可）
+      - [x] `playlist::export`（m3u8 の生成とパス写像: relative は `../../`、absolute は prefix、区切りの
+            置換）、`playlist::import`（行の正規化 → `rel_path_key` 完全一致 → stem 一致、active 優先、
+            複数なら曖昧として未解決。root 名の無い絶対パスは未解決）
+      - [x] API: `GET/POST /api/playlists`、`GET/PATCH/DELETE /:id`、`POST/DELETE /:id/items`、
+            `POST /:id/items/move`、`GET /:id/export?profile=`（本文。CIDR allowlist）/ `POST`
+            （`Playlists/<profile>/<name>.m3u8` に tmp + rename、`playlist_exports` に記録）、
+            `GET/POST /api/playlists/import`（Playlists root 下の m3u8 の一覧 / 取り込み）
+      - [x] UI: サイドバーのプレイリスト区画（一覧・作成・改名・削除・書き出し・取り込み）、表の行を
+            プレイリストへドラッグで追加、右パネルの「プレイリストへ追加」（Ctrl+A のフィルタ形も可）、
+            プレイリスト scope では position 順、行のドラッグで並べ替え、「除外」ボタンと Delete キー
+
+      受け入れ: `tests/playlist_export.rs`（3 プロファイルの写像、EXTINF、BOM なし）、
+      `tests/playlist_import.rs`（BOM / `#` 行 / `\` / `../` / root 名 / UNC・ドライブレター / 完全一致 vs
+      stem / active 優先 / 曖昧 / 未解決 / 重複）、`tests/playlists_db.rs`（作成・重複（大小文字 / NFC-NFD）、
+      追加の順と skip、除外、移動、改名、削除の
+      CASCADE、件数と記録、`export_tracks` の missing 除外と delivery）、`tests/tracks_query.rs`（position
+      順とカーソル、playlist_id 必須、temp B-tree なし、selection の position 順）、
+      `tests/playlists_api.rs`（CRUD、名前の検証、項目、export の GET / POST / CIDR / 503、import）、
+      `web/src/lib/playlists.test.ts`（scope とソートの連動、ドラッグの payload、並べ替えの移動先）
+
+      未決: 自動再書き出し（P1-7）。スマートの表示（`kind='smart'` は ⚙ で出すだけ）。
+      リハーサル環境の 28 本は再デプロイ後に UI から取り込む
 - [ ] **P1-7** スマートプレイリスト（`docs/DSL.md`。pest → AST → SQL）
 - [ ] **P1-8** エクスポートプロファイル（foobar / android / internal、
       foobar Autoplaylist クエリ生成）。**依存: P1-10**（`delivery` プロファイルが Derived を前提）。

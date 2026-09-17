@@ -271,7 +271,7 @@ async fn backup_job_writes_a_consistent_copy_without_leaving_tmp() {
     let mut lib = Lib::new();
     lib.conn()
         .execute(
-            "INSERT INTO playlists (name, created_at, updated_at) VALUES ('p', 1, 1)",
+            "INSERT INTO playlists (name, name_key, created_at, updated_at) VALUES ('p', 'p', 1, 1)",
             [],
         )
         .unwrap();
@@ -475,7 +475,7 @@ async fn restore_drill_rescans_to_the_same_state() {
     {
         let c = lib.conn();
         c.execute(
-            "INSERT INTO playlists (id, name, created_at, updated_at) VALUES (1, 'one', 1, 1), (2, 'two', 2, 2)",
+            "INSERT INTO playlists (id, name, name_key, created_at, updated_at) VALUES (1, 'one', 'one', 1, 1), (2, 'two', 'two', 2, 2)",
             [],
         )
         .unwrap();

@@ -70,6 +70,8 @@ export const SORT_KEYS = [
   'codec',
   'rel_path',
   'id',
+  // プレイリスト内の並び。filter.playlist_id と組でだけ有効（lib/playlists の sortForScope が切り替える）
+  'position',
 ] as const
 export type SortKey = (typeof SORT_KEYS)[number]
 

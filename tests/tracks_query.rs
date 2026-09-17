@@ -464,7 +464,7 @@ fn filters_by_tree_playlist_and_flags() {
         },
     );
     conn.execute(
-        "INSERT INTO playlists (name, created_at, updated_at) VALUES ('p', 1, 1)",
+        "INSERT INTO playlists (name, name_key, created_at, updated_at) VALUES ('p', 'p', 1, 1)",
         [],
     )
     .unwrap();
@@ -867,4 +867,173 @@ fn list_and_count_plans_have_no_temp_btree_for_indexed_sorts() {
     )
     .unwrap();
     assert_no_temp_btree(&plan, "count with badge flags");
+}
+
+// ---------------------------------------------------------------- プレイリスト順（P1-6、D-53）
+
+fn insert_playlist(conn: &Connection, name: &str, track_ids: &[i64]) -> i64 {
+    conn.execute(
+        "INSERT INTO playlists (name, name_key, created_at, updated_at) VALUES (?1, lower(?1), 0, 0)",
+        [name],
+    )
+    .unwrap();
+    let id = conn.last_insert_rowid();
+    for (pos, t) in track_ids.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO playlist_items (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
+            params![id, pos as i64, t],
+        )
+        .unwrap();
+    }
+    id
+}
+
+#[test]
+fn position_sort_follows_playlist_order_and_pages_by_cursor() {
+    let conn = open_memory_connection().unwrap();
+    let mut all = Vec::new();
+    for i in 0..7 {
+        let rel: &'static str = Box::leak(format!("x/{i}.flac").into_boxed_str());
+        let title: &'static str = Box::leak(format!("t{i}").into_boxed_str());
+        all.push(insert(
+            &conn,
+            rel,
+            &T {
+                title: Some(title),
+                albumartist: Some("a"),
+                ..t()
+            },
+        ));
+    }
+    // 逆順 + 1 本抜き
+    let order: Vec<i64> = all.iter().rev().skip(1).copied().collect();
+    let pl = insert_playlist(&conn, "p", &order);
+    let filter = Filter {
+        playlist_id: Some(pl),
+        ..Default::default()
+    };
+    let (rows, pages) = walk(&conn, query(filter.clone(), "position", 2));
+    assert_eq!(ids(&rows), order);
+    assert_eq!(pages, 3);
+    let (rows, _) = walk(&conn, query(filter.clone(), "-position", 4));
+    let mut rev = order.clone();
+    rev.reverse();
+    assert_eq!(ids(&rows), rev);
+    // 別のプレイリストに絞れば別の並び
+    let pl2 = insert_playlist(&conn, "q", &all[..3]);
+    let (rows, _) = walk(
+        &conn,
+        query(
+            Filter {
+                playlist_id: Some(pl2),
+                ..Default::default()
+            },
+            "position",
+            10,
+        ),
+    );
+    assert_eq!(ids(&rows), all[..3].to_vec());
+    // 他のフィルタと組み合わせても順は保たれる（q で 1 本に絞る）
+    let (rows, _) = walk(
+        &conn,
+        query(
+            Filter {
+                playlist_id: Some(pl),
+                q: Some("t5".to_owned()),
+                ..Default::default()
+            },
+            "position",
+            10,
+        ),
+    );
+    assert_eq!(ids(&rows), vec![all[5]]);
+}
+
+#[test]
+fn position_sort_requires_playlist_filter() {
+    // from_params は 400 相当のエラー。Sort::parse 自体は通る（cursor の復号で使う）
+    assert!(Sort::parse("position").is_ok());
+    let err = Query::from_params(None, Some("position"), None, None).unwrap_err();
+    assert!(
+        matches!(err, spindle::domain::filter::FilterError::Sort(_)),
+        "{err}"
+    );
+    let err =
+        Query::from_params(Some(r#"{"album_id":1}"#), Some("-position"), None, None).unwrap_err();
+    assert!(
+        matches!(err, spindle::domain::filter::FilterError::Sort(_)),
+        "{err}"
+    );
+    assert!(Query::from_params(Some(r#"{"playlist_id":1}"#), Some("position"), None, None).is_ok());
+}
+
+#[test]
+fn position_sort_plans_have_no_temp_btree() {
+    let conn = open_memory_connection().unwrap();
+    let mut all = Vec::new();
+    for i in 0..50 {
+        let rel: &'static str = Box::leak(format!("x/{i}.flac").into_boxed_str());
+        all.push(insert(
+            &conn,
+            rel,
+            &T {
+                albumartist: Some("a"),
+                ..t()
+            },
+        ));
+    }
+    let pl = insert_playlist(&conn, "p", &all);
+    let filter = Filter {
+        playlist_id: Some(pl),
+        ..Default::default()
+    };
+    for s in ["position", "-position"] {
+        let mut q = query(filter.clone(), s, 10);
+        let plan = tracks::explain_list(&conn, &q).unwrap();
+        assert_no_temp_btree(&plan, &format!("sort={s} 1 ページ目"));
+        let page = tracks::list(&conn, &q).unwrap();
+        q.cursor = Some(Cursor::decode(&page.next_cursor.unwrap()).unwrap());
+        let plan = tracks::explain_list(&conn, &q).unwrap();
+        assert_no_temp_btree(&plan, &format!("sort={s} 2 ページ目"));
+    }
+    let plan = tracks::explain_count(&conn, &filter).unwrap();
+    assert_no_temp_btree(&plan, "count by playlist");
+}
+
+#[test]
+fn selection_resolves_in_position_order_when_asked() {
+    let conn = open_memory_connection().unwrap();
+    let mut all = Vec::new();
+    for i in 0..4 {
+        let rel: &'static str = Box::leak(format!("x/{i}.flac").into_boxed_str());
+        all.push(insert(
+            &conn,
+            rel,
+            &T {
+                albumartist: Some("a"),
+                ..t()
+            },
+        ));
+    }
+    let order = vec![all[2], all[0], all[3]];
+    let pl = insert_playlist(&conn, "p", &order);
+    let sel = Selection::Filter {
+        filter: Filter {
+            playlist_id: Some(pl),
+            ..Default::default()
+        },
+        exclude_ids: vec![],
+    };
+    let rows =
+        tracks::resolve_selection_sorted(&conn, &sel, Some(Sort::parse("position").unwrap()))
+            .unwrap();
+    let got: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    assert_eq!(got, order);
+    // ids 形 + position: どのプレイリストの順か決まらないので id 順に倒す
+    let sel = Selection::Ids(vec![all[1], all[3], all[2]]);
+    let rows =
+        tracks::resolve_selection_sorted(&conn, &sel, Some(Sort::parse("position").unwrap()))
+            .unwrap();
+    let got: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    assert_eq!(got, vec![all[1], all[2], all[3]]);
 }

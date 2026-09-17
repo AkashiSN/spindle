@@ -11,6 +11,7 @@ pub mod derived;
 pub mod history;
 pub mod jobs;
 pub mod migrations;
+pub mod playlists;
 pub mod replaygain;
 pub mod scans;
 pub mod tracks;

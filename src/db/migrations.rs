@@ -116,6 +116,94 @@ pub fn current_version(conn: &Connection) -> Result<Option<u32>, MigrationError>
     .map_err(MigrationError::Version)
 }
 
+/// マイグレーション SQL から呼べる関数。`spindle_canonical_key(text)` は
+/// [`crate::domain::relpath::canonical_key`] と同じ値（casefold + NFD）を返す。SQL の `lower()` は
+/// ASCII しか畳まず NFD もしないので、key 列の backfill はこれで行う（0006）
+fn register_functions(conn: &Connection) -> Result<(), MigrationError> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "spindle_canonical_key",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let s: String = ctx.get(0)?;
+            Ok(crate::domain::relpath::canonical_key(&s))
+        },
+    )
+    .map_err(|source| MigrationError::Sql { version: 0, source })
+}
+
+/// SQL では書けない手当て。その版の SQL を流した直後、同じトランザクションで実行する
+fn post_sql(tx: &Connection, version: u32) -> rusqlite::Result<()> {
+    match version {
+        6 => playlists_name_key::resolve_collisions_and_index(tx),
+        _ => Ok(()),
+    }
+}
+
+/// 0006: 既存プレイリスト名の衝突解消と UNIQUE INDEX の作成
+mod playlists_name_key {
+    use std::collections::HashSet;
+
+    use rusqlite::{params, Connection};
+
+    use crate::domain::relpath::{canonical_key, MAX_COMPONENT_BYTES};
+    use crate::playlist::export::EXPORT_EXT;
+
+    /// 同じ key の行は id 最小の 1 本が名前を保ち、後続は空いている `"<name> (n)"`（n = 2, 3, …）へ
+    /// 改名する。候補は他の全行の key（改名前の勝者と、既に決めた改名先）と衝突しないものを選び、
+    /// `<name> (n).m3u8` が要素長の上限に収まるよう名前側を削る。消さない
+    pub(super) fn resolve_collisions_and_index(tx: &Connection) -> rusqlite::Result<()> {
+        let rows: Vec<(i64, String, String)> = tx
+            .prepare("SELECT id, name, name_key FROM playlists ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        // 勝者（各 key の最初の行）の key を先に押さえ、改名先がそこへ二次衝突しないようにする
+        let mut taken: HashSet<String> = HashSet::new();
+        let mut losers = Vec::new();
+        for (id, name, key) in &rows {
+            if taken.insert(key.clone()) {
+                continue;
+            }
+            losers.push((*id, name.clone()));
+        }
+        for (id, name) in losers {
+            let mut n = 2u64;
+            let renamed = loop {
+                let candidate = with_suffix(&name, n);
+                let key = canonical_key(&candidate);
+                if taken.insert(key.clone()) {
+                    break (candidate, key);
+                }
+                n += 1;
+            };
+            tx.execute(
+                "UPDATE playlists SET name = ?1, name_key = ?2 WHERE id = ?3",
+                params![renamed.0, renamed.1, id],
+            )?;
+        }
+        tx.execute_batch("CREATE UNIQUE INDEX idx_playlists_name_key ON playlists(name_key)")?;
+        Ok(())
+    }
+
+    /// `"<name> (n)"`。`.m3u8` 込みで要素長の上限を超えるなら name の末尾を文字境界で削る
+    fn with_suffix(name: &str, n: u64) -> String {
+        let suffix = format!(" ({n})");
+        let budget = MAX_COMPONENT_BYTES
+            .saturating_sub(EXPORT_EXT.len())
+            .saturating_sub(suffix.len());
+        let mut base = name.to_owned();
+        if base.len() > budget {
+            let mut cut = budget;
+            while cut > 0 && !base.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            base.truncate(cut);
+        }
+        format!("{base}{suffix}")
+    }
+}
+
 /// 埋め込みマイグレーションのうち未適用のものを適用し、適用した版の一覧を返す
 pub fn apply(conn: &mut Connection) -> Result<Vec<u32>, MigrationError> {
     let list = embedded()?;
@@ -125,6 +213,7 @@ pub fn apply(conn: &mut Connection) -> Result<Vec<u32>, MigrationError> {
 /// `list`（版順）のうち `current_version` より新しいものを 1 ファイル = 1 トランザクションで適用する。
 /// DB の版がリストの最新より新しければ何もせずエラー（古いバイナリで新しい DB を触らない）
 pub fn apply_list(conn: &mut Connection, list: &[Migration]) -> Result<Vec<u32>, MigrationError> {
+    register_functions(conn)?;
     let current = current_version(conn)?.unwrap_or(0);
     let latest = list.last().map(|m| m.version).unwrap_or(0);
     if current > latest {
@@ -140,6 +229,7 @@ pub fn apply_list(conn: &mut Connection, list: &[Migration]) -> Result<Vec<u32>,
             source,
         })?;
         tx.execute_batch(&m.sql)
+            .and_then(|_| post_sql(&tx, m.version))
             .and_then(|_| {
                 tx.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",

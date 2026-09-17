@@ -33,7 +33,7 @@ ipnet = { version = "2.12.2", features = ["serde"] }
 lofty = "0.25.2"
 md-5 = "0.11.0"
 mime_guess = "2.0.5"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "functions"] }
 rust-embed = { version = "8.12.0", features = ["include-exclude"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }

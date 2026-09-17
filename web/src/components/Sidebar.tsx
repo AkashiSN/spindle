@@ -3,7 +3,9 @@
 
 import { useMemo, useState } from 'react'
 import type { AlbumRow } from '../api/types'
+import type { Playlists } from '../hooks/usePlaylists'
 import { FLAGS, FLAG_LABELS, filterToParam, type Filter, type Flag } from '../lib/filter'
+import { PlaylistSection } from './PlaylistSection'
 
 /** サイドバーが決める部分。検索語 q は上部ナビが別に持つ */
 export type Scope = Omit<Filter, 'q'>
@@ -34,10 +36,20 @@ export function Sidebar({
   albums,
   scope,
   onScope,
+  playlists,
+  onPlaylistDeleted,
+  onDropTracks,
+  playlistNotice,
+  onPlaylistNotice,
 }: {
   albums: AlbumRow[]
   scope: Scope
   onScope: (s: Scope) => void
+  playlists: Playlists
+  onPlaylistDeleted: (playlistId: number) => void
+  onDropTracks: (playlistId: number, trackIds: number[]) => void
+  playlistNotice: string | null
+  onPlaylistNotice: (text: string | null) => void
 }) {
   const tree = useMemo(() => buildTree(albums), [albums])
   const [open, setOpen] = useState<Set<string>>(() => new Set())
@@ -137,10 +149,15 @@ export function Sidebar({
         </ul>
       </section>
 
-      <section>
-        <h2>プレイリスト</h2>
-        <p className="muted small">P1 で実装（手動 / スマート）</p>
-      </section>
+      <PlaylistSection
+        playlists={playlists}
+        activeId={scope.playlist_id ?? null}
+        onOpen={(id) => onScope({ playlist_id: id })}
+        onDeleted={onPlaylistDeleted}
+        onDropTracks={onDropTracks}
+        notice={playlistNotice}
+        onNotice={onPlaylistNotice}
+      />
 
       <section>
         <h2>フィルタ</h2>

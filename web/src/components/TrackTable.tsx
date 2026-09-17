@@ -23,6 +23,7 @@ import type { TrackRow } from '../api/types'
 import type { Sort, SortKey } from '../lib/filter'
 import { formatDuration, formatTrackNo } from '../lib/format'
 import { cellDiff, COLUMN_TAG, formatValues, type PreviewState } from '../lib/preview'
+import { dropTarget, parseDragIds, serializeDragIds, TRACK_DRAG_TYPE, type DropHalf } from '../lib/playlists'
 import type { ClickModifiers, Selection, VisibleOrder } from '../lib/selection'
 import { isSelected } from '../lib/selection'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
@@ -139,6 +140,14 @@ export type TrackTableProps = {
   onPlay: (track: TrackRow) => void
   /** 再生中の行（強調） */
   playingId: number | null
+  /** プレイリスト scope（P1-6）: ツールバーの「除外」と Delete キー、position 順なら行のドラッグで並べ替え */
+  playlist: {
+    name: string
+    /** sort が position 昇順のとき true。行のドロップで並べ替える */
+    reorderable: boolean
+    onRemoveSelected: () => void
+    onReorder: (trackIds: number[], before: number | null) => void
+  } | null
 }
 
 /** インライン編集中のセル */
@@ -240,6 +249,7 @@ export function TrackTable(props: TrackTableProps) {
   const totalWidth = table.getTotalSize()
 
   const order: VisibleOrder = useMemo(() => rows.map((r) => r.id), [rows])
+  const showFilterHighlight = selection.kind !== 'filter' || highlightFilterSelection
   const handleRowClick = useCallback(
     (e: MouseEvent, id: number) => {
       e.preventDefault()
@@ -248,7 +258,7 @@ export function TrackTable(props: TrackTableProps) {
     [order, props],
   )
 
-  // キーボード: Ctrl+A（フィルタ形の全選択）、Esc（解除）
+  // キーボード: Ctrl+A（フィルタ形の全選択）、Esc（解除）、Delete（プレイリスト scope で選択を除外）
   const handleKey = useCallback(
     (e: React.KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
@@ -256,10 +266,53 @@ export function TrackTable(props: TrackTableProps) {
         props.onSelectAll()
       } else if (e.key === 'Escape') {
         props.onClearSelection()
+      } else if (e.key === 'Delete' && props.playlist && selection.kind !== 'none') {
+        e.preventDefault()
+        props.playlist.onRemoveSelected()
       }
     },
-    [props],
+    [props, selection.kind],
   )
+
+  // 行のドラッグ（P1-6）: 掴んだ行が選択に入っていれば選択中の行（表示順）、そうでなければその 1 行
+  const dragIds = useCallback(
+    (id: number): number[] => {
+      if (selection.kind === 'ids' && selection.ids.has(id)) {
+        const visible = order.filter((x) => selection.ids.has(x))
+        const seen = new Set(visible)
+        for (const x of selection.ids) if (!seen.has(x)) visible.push(x)
+        return visible
+      }
+      if (selection.kind === 'filter' && showFilterHighlight && isSelected(selection, id)) {
+        // filter 形は読み込み済みの行だけ（集合全体は右パネルの「プレイリストへ追加」で）
+        return order.filter((x) => isSelected(selection, x))
+      }
+      return [id]
+    },
+    [selection, order, showFilterHighlight],
+  )
+  const [dropMark, setDropMark] = useState<{ id: number; half: DropHalf } | null>(null)
+  const dragOverRow = (e: React.DragEvent, id: number) => {
+    const pl = props.playlist
+    if (!pl?.reorderable || !e.dataTransfer.types.includes(TRACK_DRAG_TYPE)) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    const rect = e.currentTarget.getBoundingClientRect()
+    const half: DropHalf = e.clientY - rect.top < rect.height / 2 ? 'above' : 'below'
+    setDropMark((cur) => (cur && cur.id === id && cur.half === half ? cur : { id, half }))
+  }
+  const dropOnRow = (e: React.DragEvent, id: number) => {
+    const pl = props.playlist
+    setDropMark(null)
+    if (!pl?.reorderable || !e.dataTransfer.types.includes(TRACK_DRAG_TYPE)) return
+    e.preventDefault()
+    const rect = e.currentTarget.getBoundingClientRect()
+    const half: DropHalf = e.clientY - rect.top < rect.height / 2 ? 'above' : 'below'
+    const ids = parseDragIds(e.dataTransfer.getData(TRACK_DRAG_TYPE))
+    if (!ids) return
+    const target = dropTarget(order, ids, id, half)
+    if (target) pl.onReorder(ids, target.before)
+  }
 
   // 列ヘッダの並べ替え（HTML5 DnD）
   const dragging = useRef<string | null>(null)
@@ -276,7 +329,6 @@ export function TrackTable(props: TrackTableProps) {
     })
   }
 
-  const showFilterHighlight = selection.kind !== 'filter' || highlightFilterSelection
   const sortable = (id: string) => SORT_OF[id]
 
   return (
@@ -287,6 +339,20 @@ export function TrackTable(props: TrackTableProps) {
           {props.loading ? '（読み込み中…）' : ''}
         </span>
         {props.error && <span className="error">読み込みに失敗: {props.error}</span>}
+        {props.playlist && (
+          <button
+            type="button"
+            className="ghost"
+            disabled={selection.kind === 'none'}
+            title="選択した行をこのプレイリストから外す（Delete）"
+            onClick={props.playlist.onRemoveSelected}
+          >
+            「{props.playlist.name}」から除外
+          </button>
+        )}
+        {props.playlist && !props.playlist.reorderable && (
+          <span className="muted small">並べ替えは position 昇順のときだけ</span>
+        )}
         <span className="spacer" />
         <button type="button" className="ghost" onClick={() => setChooserOpen((o) => !o)}>
           列
@@ -386,6 +452,7 @@ export function TrackTable(props: TrackTableProps) {
                 track.pending_batch_id != null ? 'pending' : '',
                 track.missing_since != null ? 'missing' : '',
                 previewUnchanged ? 'preview-unchanged' : '',
+                dropMark?.id === track.id ? `drop-${dropMark.half}` : '',
               ]
                 .filter(Boolean)
                 .join(' ')
@@ -398,6 +465,14 @@ export function TrackTable(props: TrackTableProps) {
                   className={cls}
                   style={{ transform: `translateY(${item.start}px)`, height: ROW_HEIGHT }}
                   onClick={(e) => handleRowClick(e, track.id)}
+                  draggable={editing == null}
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData(TRACK_DRAG_TYPE, serializeDragIds(dragIds(track.id)))
+                    e.dataTransfer.effectAllowed = 'copyMove'
+                  }}
+                  onDragOver={(e) => dragOverRow(e, track.id)}
+                  onDragLeave={() => setDropMark((cur) => (cur?.id === track.id ? null : cur))}
+                  onDrop={(e) => dropOnRow(e, track.id)}
                 >
                   {row
                     ? row.getAllCells().map((cell) =>

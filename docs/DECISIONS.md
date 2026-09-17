@@ -1678,3 +1678,63 @@ ffmpeg の起動はライブラリに加わった直後の短い期間に限ら�
 
 **未決**: Safari（Opus 不可）向けの AAC 変換（`transcode=aac`。ffmpeg の aac エンコーダで足せる）。
 album gain モード。ハイレゾのサンプルレート変換（原本を選んだときは 96 kHz をそのまま送る）。
+
+## D-53 手動プレイリストと m3u8 の書き出し・取り込みの固定値と境界
+
+**決定**（P1-6。仕様 SPEC §9 / §10 / §12 が定めていない値と境界）:
+
+- **1 プレイリストに同じトラックは 1 回だけ。** 追加・取り込みで既にある・入力内で重複する
+  トラックは黙って飛ばし、件数（`skipped` / `duplicates`）だけ返す。`playlist_items` の主キーは
+  `(playlist_id, position)` で重複を許す形だが、表の行 = トラックの同一性（選択・一括編集・
+  `sort=position` の 1:1 JOIN）を崩さないために使わない。`position` は 0 から連続で、追加・除外・
+  移動のたびに全行を振り直す（高々数千件）
+- **並びは表と共通。** 項目一覧の API は作らず、`GET /api/tracks?filter={"playlist_id":N}&sort=position`
+  で取る。`position` は `filter.playlist_id` と組でだけ有効（単独は 400）。`playlist_items` を JOIN して
+  `(playlist_id, position)` の主キー順で読むので temp B-tree は出ない。UI はプレイリストに入ったら
+  `position` 昇順、出たら既定ソートへ戻す。並べ替え（行のドラッグ）は `position` 昇順のときだけ
+- **移動は「集合を `before` の直前（null なら末尾）へ」。** 移動する側は現在の相対順を保つ。
+  `before` が集合の中・プレイリストに無いときは 400
+- **書き出し先は `Playlists/<profile>/<name>.m3u8`。** foobar / android / internal の 3 プロファイルが
+  同名で衝突しないよう、プロファイル名のディレクトリに分ける。`Playlists/<profile>/` は `Library/` と
+  同じ深さなので相対パスは SPEC §10 どおり `../../Library/…` / `../../Derived/…`。旧ライブラリから
+  移した `Playlists/m3u8/` は取り込み元として残す（書き出しはそこへ戻さない）。書き出しは tmp + rename、
+  `playlist_exports (playlist_id, profile_id)` に `out_path` と時刻を記録する（改名後の書き出しは
+  新しい名前のファイルで、古いファイルは消さない。GC の対象にもしない）
+- **プレイリスト名はそのままファイル名になる**ので、`RelPath` の 1 要素と同じ規則（`/` `\` NUL 不可、
+  SMB / exFAT の禁止文字・予約名・末尾ドット）で名前単体と `<name>.m3u8` の両方を検証し（長さの
+  255 バイトは拡張子込み）、前後の空白は落とす。**一意性は `name_key`（`canonical_key` = casefold +
+  NFD。マイグレーション 0006）で判定する。** ZFS の insensitive + formD では `Foo.m3u8` と `foo.m3u8`、
+  NFC と NFD の同名が同じ実体なので、`name` の BINARY UNIQUE だけでは別プレイリストの書き出しが
+  上書きし合う。違反は 409 `duplicate`。既存行の backfill はマイグレーション実行時に登録する SQL 関数
+  `spindle_canonical_key()`（Rust の `canonical_key` そのもの。`lower()` は ASCII しか畳まない）で行い、
+  同じ key の行が既にあれば id 最小の 1 本を残して後続を空いている `<name> (n)`（n = 2, 3, …。他の
+  全行の key と二次衝突しないもの、`.m3u8` 込みで 255 バイトに収まるよう名前側を削る）に改名する
+  （消さない。SQL では書けないので `db::migrations::post_sql(6)` が同じトランザクションで行い、
+  UNIQUE INDEX もそこで作る）
+- **m3u8 は `#EXTM3U` + `#EXTINF:<秒>,<Artist - Title>` 付き、UTF-8 BOM なし、LF。** missing の
+  トラックは書かず件数（`skipped_missing`）で返す。`delivery` プロファイルは `delivery` ビューの
+  `path`（音声版が一致する Derived、無ければ原本）
+- **`GET /api/playlists/:id/export?profile=` は本文を返し、`POST` が書く。** GET は trusted CIDR の
+  allowlist（D-27）に入っているので、他プレイヤーが curl で取れる。POST と import は Playlists root が
+  無ければ 503
+- **取り込みは Playlists root 下のファイルから**（`GET /api/playlists/import` が `.m3u8` / `.m3u` を
+  深さ 4 まで列挙、`POST { path, name? }` で 1 本を手動プレイリストにする）。行の解決は
+  `\` → `/` にしてから、絶対パス（`/…`、UNC `//host/share/…`、ドライブレター `C:/…`）なら
+  `/Library/` `/Derived/` のうち文字列中で最も早く現れるものの直後から取り、**無ければ root の外として
+  解決しない**（偶然同じ
+  rel_path があっても誤一致させない）。相対なら先頭の `./` `../` を剥がし先頭の root 名を落とす。
+  root 相対にしてから `rel_path_key` の完全一致 → 拡張子を除いた stem の一致（旧 `Opus/` の `.opus` 行が
+  今の `.m4a` / `.flac` に当たる）。stem の候補が複数なら active を優先し、**その中でまだ複数なら曖昧と
+  して解決しない**（同じ stem の `.flac` と `.m4a` が両方 active のような状態でどちらかを黙って選ばない）。
+  解決できない行は応答の `unresolved` に返すだけで DB には残さない。名前の既定はファイル名の stem
+- **自動再書き出し（ライブラリ変更をトリガにデバウンス）は P1-7 で**（スマートプレイリストが
+  前提。手動は明示の書き出しだけ）。`auto_export` 列は PATCH で切り替えられるが今は何も駆動しない
+
+**理由**: 旧ライブラリの `Playlists/m3u8/` 28 本は foobar 由来で、`../Anime/…/1.01. Crow Song.opus` の
+ように旧 `Opus/` 相対かつ拡張子が今の Library と違う。パスの完全一致だけでは 1 本も当たらないので
+stem で当てる。プロファイル別のディレクトリにするのは、SPEC の `Playlists/m3u8/` 1 段だと 3 つの
+出力先が同名で上書きし合うため。
+
+**却下**: 同じトラックの複数回収録（表の行の同一性が崩れる）。項目一覧の専用 API（表の集合は
+サイドバーの scope で差し替えるだけという SPEC §12.1 の原則に反する）。取り込みを画面からの
+ファイルアップロードにする（ファイルは既に Playlists root にある。SMB を開かずに済む）。

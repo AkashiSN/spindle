@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let library_root = Arc::new(roots.library);
     let archive_root = Arc::new(roots.archive);
     let derived_root = Arc::new(roots.derived);
+    let playlists_root = Arc::new(roots.playlists);
 
     let db_path = config.paths.data.join(DB_FILE_NAME);
     let db = {
@@ -126,6 +127,8 @@ async fn main() -> anyhow::Result<()> {
     state = state.with_artwork(Arc::clone(&artwork));
     // 再生（P1-9）。原本と Derived を Range で直送する
     state = state.with_roots(Arc::clone(&library_root), Arc::clone(&derived_root));
+    // プレイリストの書き出し先・取り込み元（P1-6）
+    state = state.with_playlists(Arc::clone(&playlists_root));
     let edit_recovered = editor
         .recover()
         .await

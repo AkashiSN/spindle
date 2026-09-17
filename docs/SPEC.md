@@ -124,7 +124,9 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 │       （FLAC 正規化で退避した WAV / ALAC / AIFF もここ。GC まで保持）
 ├── Inbox/                             [dataset] snapshot: なし
 │   └── （承認前の一時領域。ハイレゾ購入分などをここへ置く）
-└── Playlists/m3u8/
+└── Playlists/
+    ├── m3u8/                          旧ライブラリから移した m3u8（取り込み元）
+    └── <profile>/<name>.m3u8          書き出し（internal / android / foobar。D-53）
 
 /mnt/ssd/apps/spindle/                [dataset] snapshot: 毎日
 ├── spindle.db                        SQLite
@@ -807,9 +809,15 @@ GET    /api/artwork/:hash?size=                   size = 256 | 768 で WebP の�
                                                   （元の MIME）。hash は albums.artwork_hash。未生成なら
                                                   原画像へ倒す（no-cache）。ハッシュアドレスなので immutable
 
-GET    /api/playlists, POST, PATCH, DELETE
+GET    /api/playlists, POST, PATCH, DELETE        手動プレイリストの CRUD（D-53）。並びは
+                                                  /api/tracks?filter={"playlist_id":N}&sort=position
+POST   /api/playlists/:id/items                   { selection, sort? } を末尾に追加（同じトラックは 1 回）
+DELETE /api/playlists/:id/items                   { track_ids?, selection? } を外す
+POST   /api/playlists/:id/items/move              { track_ids, before } before の直前（null は末尾）へ
 POST   /api/playlists/:id/preview                 スマートルールの評価結果
-POST   /api/playlists/:id/export?profile=         プロファイル指定で書き出し
+GET    /api/playlists/:id/export?profile=         m3u8 の本文（trusted CIDR で認証スキップ）
+POST   /api/playlists/:id/export?profile=         Playlists/<profile>/<name>.m3u8 へ書き出し
+GET    /api/playlists/import, POST                Playlists root 下の m3u8 の一覧 / { path, name? } で取り込み
 GET    /api/playlists/:id/fb2k_query              foobar Autoplaylist 用クエリ
 GET    /api/export-profiles, POST, PATCH, DELETE
 
@@ -1055,8 +1063,10 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 | `android` | delivery (Derived 優先) | relative | — | `/` |
 | `internal` | master | relative | — | `/` |
 
-`Playlists/m3u8/` は `Library/` の兄弟なので、相対パスは `../../Library/...` で
-正しく解決される。スマートプレイリストはライブラリ変更をトリガに、
+書き出し先は `Playlists/<profile>/<name>.m3u8`（プロファイルごとにディレクトリを分ける。D-53）。
+`Playlists/<profile>/` は `Library/` と同じ深さなので、相対パスは `../../Library/...` で
+正しく解決される。旧ライブラリから移した `Playlists/m3u8/` は取り込み元として残す。
+スマートプレイリストはライブラリ変更をトリガに、
 デバウンス（既定 30 秒）を挟んで自動再エクスポートする。
 
 ---

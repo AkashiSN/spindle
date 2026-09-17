@@ -10,6 +10,7 @@ pub mod health;
 pub mod history;
 pub mod jobs;
 pub mod normalize;
+pub mod playlists;
 pub mod rename;
 pub mod rg;
 pub mod scan;
@@ -46,6 +47,26 @@ pub fn router(state: AppState) -> Router {
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))
         .route("/artwork/{hash}", get(artwork::get))
+        .route("/playlists", get(playlists::list).post(playlists::create))
+        .route(
+            "/playlists/import",
+            get(playlists::import_list).post(playlists::import_create),
+        )
+        .route(
+            "/playlists/{id}",
+            get(playlists::get)
+                .patch(playlists::patch)
+                .delete(playlists::delete),
+        )
+        .route(
+            "/playlists/{id}/items",
+            post(playlists::append).delete(playlists::remove),
+        )
+        .route("/playlists/{id}/items/move", post(playlists::move_items))
+        .route(
+            "/playlists/{id}/export",
+            get(playlists::export_get).post(playlists::export_post),
+        )
         .route("/stream/{id}", get(stream::get))
         .route("/history", get(history::list))
         .route("/history/{id}", get(history::get))

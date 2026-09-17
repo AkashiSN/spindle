@@ -128,6 +128,8 @@ pub enum SortKey {
     Codec,
     RelPath,
     Id,
+    /// プレイリスト内の並び（`playlist_items.position`）。`filter.playlist_id` と組でだけ有効
+    Position,
 }
 
 impl SortKey {
@@ -143,6 +145,7 @@ impl SortKey {
             "codec" => SortKey::Codec,
             "rel_path" => SortKey::RelPath,
             "id" => SortKey::Id,
+            "position" => SortKey::Position,
             _ => return None,
         })
     }
@@ -159,6 +162,7 @@ impl SortKey {
             SortKey::Codec => "codec",
             SortKey::RelPath => "rel_path",
             SortKey::Id => "id",
+            SortKey::Position => "position",
         }
     }
 }
@@ -241,7 +245,7 @@ impl SortKey {
             | SortKey::Date
             | SortKey::Codec
             | SortKey::RelPath => &[KeyType::Text],
-            SortKey::Duration => &[KeyType::Int],
+            SortKey::Duration | SortKey::Position => &[KeyType::Int],
             SortKey::Id => &[],
         }
     }
@@ -342,6 +346,12 @@ impl Query {
     ) -> Result<Query, FilterError> {
         let filter = Filter::parse(filter.unwrap_or(""))?;
         let sort = Sort::parse(sort.unwrap_or(""))?;
+        // position はどのプレイリストの並びかが要る
+        if sort.key == SortKey::Position && filter.playlist_id.is_none() {
+            return Err(FilterError::Sort(
+                "position は filter.playlist_id と組でだけ使える".to_owned(),
+            ));
+        }
         let cursor = match cursor.map(str::trim).filter(|c| !c.is_empty()) {
             Some(c) => {
                 let cursor = Cursor::decode(c)?;

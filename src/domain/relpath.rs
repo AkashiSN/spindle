@@ -9,7 +9,7 @@ use std::fmt;
 use unicode_normalization::UnicodeNormalization;
 
 /// ZFS / SMB の要素長上限（バイト）。パス全体ではなく各要素の上限
-const MAX_COMPONENT_BYTES: usize = 255;
+pub const MAX_COMPONENT_BYTES: usize = 255;
 
 /// SMB / exFAT で使えない文字（`/` は区切り、`\` と NUL は別エラーで先に弾く）
 const FORBIDDEN_CHARS: [char; 7] = ['<', '>', ':', '"', '|', '?', '*'];

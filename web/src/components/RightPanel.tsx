@@ -1,8 +1,8 @@
 // 右パネル（SPEC §12.1 / §12.3）: 2 タブ（一括編集 / 選択の詳細）。折りたたみ可、幅は永続化。
 // 一括編集の操作リスト・プレビュー・適用は BatchEditPanel（状態は hooks/useBatchEdit）
 
-import { useEffect, useRef } from 'react'
-import type { TrackRow } from '../api/types'
+import { useEffect, useRef, useState } from 'react'
+import type { Playlist, TrackRow } from '../api/types'
 import type { BatchEdit } from '../hooks/useBatchEdit'
 import { formatCount } from '../lib/format'
 import type { Selection } from '../lib/selection'
@@ -26,13 +26,19 @@ export function RightPanel({
   summary,
   selectedRows,
   edit,
+  playlists,
+  onAddToPlaylist,
 }: {
   selection: Selection
   summary: SelectionSummary
   /** 読み込み済みの選択行（詳細タブの共通値に使う。filter 形は表示中の一部だけ） */
   selectedRows: TrackRow[]
   edit: BatchEdit
+  /** 「プレイリストへ追加」の候補（手動のみ）と追加の実行（P1-6） */
+  playlists: Playlist[]
+  onAddToPlaylist: (playlistId: number) => void
 }) {
+  const [addTo, setAddTo] = useState<number | ''>('')
   const [collapsed, setCollapsed] = useLocalStorageState<boolean>(
     'panel.collapsed',
     false,
@@ -119,6 +125,29 @@ export function RightPanel({
           <div className="muted small">
             フィルタ形の選択（選択時のフィルタ: <code>{selection.filter || '{}'}</code>
             {selection.excludeIds.size > 0 ? `、除外 ${selection.excludeIds.size} 件` : ''}）
+          </div>
+        )}
+        {selection.kind !== 'none' && playlists.length > 0 && (
+          <div className="add-to-playlist">
+            <select value={addTo} onChange={(e) => setAddTo(e.target.value === '' ? '' : Number(e.target.value))}>
+              <option value="">プレイリストへ追加…</option>
+              {playlists
+                .filter((p) => p.kind === 'manual')
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+            </select>
+            <button
+              type="button"
+              disabled={addTo === ''}
+              onClick={() => {
+                if (addTo !== '') onAddToPlaylist(addTo)
+              }}
+            >
+              追加
+            </button>
           </div>
         )}
       </div>
