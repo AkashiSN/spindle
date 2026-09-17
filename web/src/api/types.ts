@@ -182,7 +182,9 @@ export type Playlist = {
 }
 export type PlaylistList = { items: Playlist[] }
 export type AppendResponse = { added: number; skipped: number }
-export type ExportResponse = { out_path: string; count: number; skipped_missing: number }
+export type ExportResponse = { out_path: string; count: number; skipped_missing: number; stale_tags: number }
+/** `GET /api/playlists/:id/fb2k_query`: foobar Autoplaylist のクエリとソートパターン、変換できなかった指定 */
+export type Fb2kQuery = { query: string; sort: string | null; notes: string[] }
 export type ImportCandidate = { path: string; size: number }
 export type ImportResponse = { playlist: Playlist; matched: number; duplicates: number; unresolved: string[] }
 export type RulePreview = { count: number; ast: unknown }

@@ -818,10 +818,10 @@ POST   /api/playlists/:id/items/move              { track_ids, before } before �
 POST   /api/playlists/preview                     { rule } スマートルールの検証と評価件数（保存しない。D-54）
 POST   /api/playlists/:id/refresh                 スマートを今の DB で再評価（項目を書き直す）
 GET    /api/playlists/:id/export?profile=         m3u8 の本文（trusted CIDR で認証スキップ）
-POST   /api/playlists/:id/export?profile=         Playlists/<profile>/<name>.m3u8 へ書き出し
+POST   /api/playlists/:id/export?profile=         Playlists/<profile>/<name>.m3u8 へ書き出し。応答に
+                                                  count / skipped_missing / stale_tags（delivery のタグ追随待ち）
 GET    /api/playlists/import, POST                Playlists root 下の m3u8 の一覧 / { path, name? } で取り込み
-GET    /api/playlists/:id/fb2k_query              foobar Autoplaylist 用クエリ
-GET    /api/export-profiles, POST, PATCH, DELETE
+GET    /api/playlists/:id/fb2k_query              foobar Autoplaylist 用の { query, sort, notes }（smart のみ。D-55）
 
 POST   /api/auth/login, POST /api/auth/logout
 GET    /api/auth/session
@@ -1037,9 +1037,9 @@ ORDER BY %date% DESC LIMIT 100
 | 出力先 | 形式 | 内容 |
 |---|---|---|
 | foobar（静的） | `.m3u8` | 評価結果のトラック一覧。UTF-8 / BOM なし |
-| foobar（動的） | `.txt` / クリップボード | **クエリ文字列**。Autoplaylist 作成時に貼る |
-| Android | `.m3u8` | 配布ビュー（Derived 優先）で解決したパス |
-| 汎用 | `.pls` | 任意 |
+| foobar（動的） | クリップボード | **クエリ文字列とソートパターン**。Autoplaylist 作成時に貼る（`.txt` は作らない。D-55） |
+| Android | `.m3u8` | 配布ビュー（Derived 優先）で解決したパス。タグ追随待ちの Derived は件数（`stale_tags`）で示す |
+| 汎用 | `.pls` | 任意（未実装。`export_profiles.format` に列挙だけしてある） |
 
 `.fpl` は非対応。非公開のバイナリ形式で foobar 1.x と 2.x で構造が異なり、
 書き損じると foobar 側の状態を壊す。
@@ -1047,11 +1047,14 @@ ORDER BY %date% DESC LIMIT 100
 ### foobar クエリへの変換
 
 1. **フィールド名の写像。** foobar はスペース区切り: `ALBUMARTIST` → `%album artist%`、
-   `TRACKNUMBER` → `%tracknumber%`。写像表を持つ
+   `TRACKNUMBER` → `%tracknumber%`。写像表を持つ（docs/DSL.md）。技術情報（`codec` `samplerate`
+   `bitrate` `channels` `bitdepth` `duration`）は foobar の技術フィールドへ、spindle 固有
+   （`verification` `category` `source_type` `lossless` `added` `has_derived` `missing`）と `MATCHES` は
+   変換不能としてその項を落とし `notes` に出す
 2. **`ORDER BY` は分離。** foobar の Autoplaylist はソートをクエリに書かず、
    別欄のタイトルフォーマット文字列で指定する。「クエリ」「ソートパターン」の
    2 本を出力する
-3. **`LIMIT` と `random` は変換不能。** 出力にコメントで明示する
+3. **`LIMIT` と `random`、降順は変換不能。** `notes` に明示する
 
 `HAS` の語境界の扱いなど演算子の細部は foobar のバージョン差があるため、
 実装時に実機で一度突き合わせること。
@@ -1059,7 +1062,8 @@ ORDER BY %date% DESC LIMIT 100
 ### パスマッピング（エクスポートプロファイル）
 
 NAS 上の `/library/...` をそのまま書いても foobar からは開けない。
-出力先ごとにプロファイルを持つ（`export_profiles` テーブル）。
+出力先ごとにプロファイルを持つ（`export_profiles` テーブル）。3 つは固定で、CRUD の API は
+持たない。`foobar` の `prefix` だけ `[export].fb2k_prefix` を正として起動時に揃える（D-55）。
 
 | プロファイル | source | path_style | prefix | sep |
 |---|---|---|---|---|

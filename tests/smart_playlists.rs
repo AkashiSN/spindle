@@ -686,3 +686,41 @@ async fn sqlite_failures_during_evaluation_are_500_not_rule_failed() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(body["error"], "internal");
 }
+
+#[tokio::test]
+async fn fb2k_query_converts_the_stored_rule() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    let (status, body) = post(
+        &app,
+        &c,
+        "/api/playlists",
+        json!({
+            "name": "fb",
+            "rule": "%albumartist% IS ヰ世界情緒 AND %verification% IS verified_ctdb ORDER BY %date% DESC LIMIT 10"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_i64().unwrap();
+    let (status, body) = get(&app, &c, &format!("/api/playlists/{id}/fb2k_query")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["query"], "%album artist% IS ヰ世界情緒");
+    assert_eq!(body["sort"], "%date%");
+    let notes = body["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 3, "{body}");
+    assert!(notes[0].as_str().unwrap().contains("%verification%"));
+    assert!(notes[2].as_str().unwrap().contains("LIMIT 10"));
+    // 手動は 409、無い id は 404
+    let manual = create(&app, &c, "manual").await;
+    let (status, body) = get(&app, &c, &format!("/api/playlists/{manual}/fb2k_query")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "manual");
+    let (status, _) = get(&app, &c, "/api/playlists/999999/fb2k_query").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // 未認証は 401
+    let r = req(Method::GET, &format!("/api/playlists/{id}/fb2k_query"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, r).await.status(), StatusCode::UNAUTHORIZED);
+}

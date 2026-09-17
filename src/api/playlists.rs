@@ -31,6 +31,7 @@ use crate::jobs::{Event, PlaylistEvent};
 use crate::playlist::compile;
 use crate::playlist::dsl;
 use crate::playlist::export::EXPORT_EXT;
+use crate::playlist::fb2k;
 use crate::playlist::import::{parse_m3u8, resolve_entries, Resolver};
 use crate::playlist::smart;
 use crate::playlist::writer;
@@ -122,6 +123,8 @@ pub struct Exported {
     pub out_path: String,
     pub count: usize,
     pub skipped_missing: usize,
+    /// `delivery` で Derived を採用したうちタグ追随待ちの件数（`master` は 0）
+    pub stale_tags: usize,
 }
 
 #[derive(Serialize)]
@@ -356,6 +359,32 @@ pub async fn refresh(
             }
             Json(r).into_response()
         }
+    })
+}
+
+/// `GET /api/playlists/:id/fb2k_query`: 保存済みのルールを foobar2000 Autoplaylist のクエリと
+/// ソートパターンへ変換して返す（`playlist::fb2k`）。手動は 409 `manual`
+pub async fn fb2k_query(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let result = state
+        .db
+        .read(move |c| {
+            let Some(kind) = dbpl::kind(c, id)? else {
+                return Ok(None);
+            };
+            if kind != "smart" {
+                return Ok(Some(None::<dsl::Rule>));
+            }
+            // rule_ast を読めない行は無いものとして 404
+            Ok(smart::load_rule(c, id)?.map(Some))
+        })
+        .await?;
+    Ok(match result {
+        None => not_found(),
+        Some(None) => smart_only(),
+        Some(Some(rule)) => Json(fb2k::convert(&rule)).into_response(),
     })
 }
 
@@ -656,6 +685,7 @@ pub async fn export_post(
             out_path: w.out_path,
             count: w.count,
             skipped_missing: w.skipped_missing,
+            stale_tags: w.stale_tags,
         })
         .into_response()),
         Err(writer::WriteError::Render(e)) => render_error(e),

@@ -489,29 +489,51 @@ pub fn profile_by_name(conn: &Connection, name: &str) -> Result<Option<ProfileRo
     Ok(st.query_row([name], profile_of).optional()?)
 }
 
-/// 書き出す行（position 順、missing は除く）と除いた件数。プレイリストが無ければ `None`
-pub fn export_tracks(
-    conn: &Connection,
-    id: i64,
-    source: Source,
-) -> Result<Option<(Vec<ExportTrack>, usize)>> {
+/// `foobar` プロファイルの `path_prefix` を `[export].fb2k_prefix` に揃える（起動時。D-55）。
+/// 変わったとき `true`。プロファイルの CRUD は持たず、UNC の prefix だけ config を正とする
+pub fn sync_foobar_prefix(conn: &Connection, prefix: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE export_profiles SET path_prefix = ?1
+         WHERE name = 'foobar' AND path_prefix IS NOT ?1",
+        [prefix],
+    )?;
+    Ok(n > 0)
+}
+
+/// 書き出し対象の集合（[`export_tracks`]）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportSet {
+    /// `position` 順。missing は含まない
+    pub tracks: Vec<ExportTrack>,
+    /// missing で書かなかった件数
+    pub skipped_missing: usize,
+    /// `delivery` で Derived を採用したうちタグ版が陳腐化している件数（追随ジョブ待ち）。`master` は 0
+    pub stale_tags: usize,
+}
+
+/// 書き出す行と除いた件数。プレイリストが無ければ `None`
+pub fn export_tracks(conn: &Connection, id: i64, source: Source) -> Result<Option<ExportSet>> {
     if !exists(conn, id)? {
         return Ok(None);
     }
-    let path_expr = match source {
-        Source::Master => "'Library/' || t.rel_path",
+    let (path_expr, stale_expr) = match source {
+        Source::Master => ("'Library/' || t.rel_path", "0"),
         // delivery ビューは missing を含まない（missing はどのみち書かないので原本で埋める）
-        Source::Delivery => {
-            "coalesce((SELECT v.path FROM delivery v WHERE v.track_id = t.id), 'Library/' || t.rel_path)"
-        }
+        Source::Delivery => (
+            "coalesce((SELECT v.path FROM delivery v WHERE v.track_id = t.id), 'Library/' || t.rel_path)",
+            "coalesce((SELECT v.stale_tags FROM delivery v WHERE v.track_id = t.id), 0)",
+        ),
     };
     let mut st = conn.prepare_cached(&format!(
-        "SELECT {path_expr}, t.title, t.artist_display, t.duration_ms, t.missing_since IS NOT NULL
+        "SELECT {path_expr}, t.title, t.artist_display, t.duration_ms, t.missing_since IS NOT NULL, {stale_expr}
          FROM playlist_items i JOIN tracks t ON t.id = i.track_id
          WHERE i.playlist_id = ? ORDER BY i.position"
     ))?;
-    let mut rows = Vec::new();
-    let mut skipped = 0;
+    let mut set = ExportSet {
+        tracks: Vec::new(),
+        skipped_missing: 0,
+        stale_tags: 0,
+    };
     for r in st.query_map([id], |r| {
         Ok((
             ExportTrack {
@@ -521,16 +543,20 @@ pub fn export_tracks(
                 duration_ms: r.get(3)?,
             },
             r.get::<_, bool>(4)?,
+            r.get::<_, bool>(5)?,
         ))
     })? {
-        let (t, missing) = r?;
+        let (t, missing, stale) = r?;
         if missing {
-            skipped += 1;
+            set.skipped_missing += 1;
         } else {
-            rows.push(t);
+            if stale {
+                set.stale_tags += 1;
+            }
+            set.tracks.push(t);
         }
     }
-    Ok(Some((rows, skipped)))
+    Ok(Some(set))
 }
 
 /// 書き出しの記録（同じプロファイルは上書き）

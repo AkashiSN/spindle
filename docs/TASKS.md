@@ -560,9 +560,26 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
       未決: foobar Autoplaylist クエリ変換（P1-8）。`HAS` の語境界の実機突き合わせ。UI の並び替え
       （smart は ORDER BY で決まるので表のソート変更は表示だけ）
-- [ ] **P1-8** エクスポートプロファイル（foobar / android / internal、
+- [x] **P1-8** エクスポートプロファイル（foobar / android / internal、
       foobar Autoplaylist クエリ生成）。**依存: P1-10**（`delivery` プロファイルが Derived を前提）。
-      タグ鮮度が必要な export / 同期は `stale_tags` の件数を明示するか追随ジョブの完了を待つ
+      タグ鮮度が必要な export / 同期は `stale_tags` の件数を明示するか追随ジョブの完了を待つ。D-55
+      - [x] `playlist::fb2k`: AST → `{ query, sort, notes }`（写像表、後置 PRESENT / MISSING、date の
+            AFTER / BEFORE、引用規則、変換不能な葉の脱落と親の畳み込み、ORDER BY の分離）
+      - [x] `GET /api/playlists/:id/fb2k_query`（smart のみ。manual は 409）
+      - [x] UI: smart のメニュー「foobar クエリ」→ コピーボタン付きダイアログ（`Fb2kQueryDialog`）
+      - [x] `export_tracks` が `delivery` のタグ追随待ちを数え、`POST …/export` の応答と UI の通知に
+            `stale_tags`。自動再書き出しはログ
+      - [x] `[export].fb2k_prefix` を正として起動時に `export_profiles.foobar.path_prefix` を揃える。
+            プロファイル CRUD と `.pls` は作らない
+
+      受け入れ: `tests/fb2k.rs`（写像表全件、技術フィールド、spindle 固有の脱落、後置 PRESENT、
+      AFTER / BEFORE、MATCHES、引用規則と `"` の警告、括弧、脱落による親の畳み込み、sort と DESC、
+      random / LIMIT、DSL.md の例）、`tests/smart_playlists.rs`（fb2k_query の 200 / 409 / 404 / 401）、
+      `tests/playlists_db.rs`（`stale_tags` の集計、prefix の同期）、`tests/playlists_api.rs`
+      （android の `stale_tags`、internal は 0）、`web/src/lib/playlists.test.ts`（通知文）
+
+      未決: `HAS` の語境界と技術情報フィールドの `PRESENT` / `MISSING` の foobar 実機との突き合わせ
+      （下記「残課題」）
 - [x] **P1-9** 再生（Range 対応、ALAC は既定で Opus 変換、
       `canPlayType()` によるクライアント能力判定。下部バー左側の再生 UI: 再生・停止・
       シーク・音量・RG 適用切替）。D-52
@@ -655,7 +672,9 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 - Discogs / VGMdb 連携の要否（P3 以降）
 - `.fpl` 書き出しの要否（P4、非推奨）
-- `HAS` 演算子の foobar 実機との挙動突き合わせ（P1-8 実装時）
+- foobar 実機との挙動突き合わせ（P1-8 で変換は実装済み）: `HAS` の語境界（spindle は `LIKE %v%` の
+  部分一致。`%title% HAS ab` が `xaby` に当たるか）と、`%__bitspersample% MISSING` のような技術情報
+  フィールドの `PRESENT` / `MISSING`。違えば D-55 に追記する
 - Inbox のポーリング間隔
 - 一括リネーム後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）と
   空ディレクトリの扱い（P0-11 では動かさない。D-43）

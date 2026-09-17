@@ -85,6 +85,16 @@ async fn main() -> anyhow::Result<()> {
         "ジョブをリカバリした"
     );
 
+    // foobar プロファイルの UNC prefix は config を正とする（D-55）
+    let fb2k_prefix = config.export.fb2k_prefix.clone();
+    if db
+        .write(move |c| spindle::db::playlists::sync_foobar_prefix(c, &fb2k_prefix))
+        .await
+        .context("export_profiles の更新に失敗")?
+    {
+        info!(prefix = %config.export.fb2k_prefix, "foobar プロファイルの prefix を config に揃えた");
+    }
+
     let listen = config.server.listen;
     let mut state = AppState::new(Arc::new(config), db, mode);
 

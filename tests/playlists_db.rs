@@ -220,35 +220,51 @@ fn list_counts_active_tracks_and_carries_export_records() {
 #[test]
 fn export_tracks_skip_missing_and_follow_source() {
     let (c, id) = setup();
-    // 1 は Derived が現在値、2 は Derived の音声版が不一致（再エンコード待ち）、3 は Derived 無し
+    // 1 は Derived が現在値、2 は Derived の音声版が不一致（再エンコード待ち）、3 は Derived 無し、
+    // 4 は Derived のタグ版だけ不一致（配るが stale_tags に数える）
     c.execute(
         "INSERT INTO derived_files (track_id, rel_path, rel_path_key, codec, src_audio_version, src_tag_version, generated_at)
          VALUES (1, 'A/1.opus', 'a/1.opus', 'opus', 1, 1, 0),
-                (2, 'A/2.opus', 'a/2.opus', 'opus', 2, 1, 0)",
+                (2, 'A/2.opus', 'a/2.opus', 'opus', 2, 1, 0),
+                (4, 'A/4.opus', 'a/4.opus', 'opus', 1, 2, 0)",
         [],
     )
     .unwrap();
-    playlists::append(&c, id, &[1, 9, 2, 3], 200).unwrap();
-    let (rows, skipped) = playlists::export_tracks(&c, id, Source::Master)
+    playlists::append(&c, id, &[1, 9, 2, 3, 4], 200).unwrap();
+    let set = playlists::export_tracks(&c, id, Source::Master)
         .unwrap()
         .unwrap();
-    assert_eq!(skipped, 1);
-    let paths: Vec<&str> = rows.iter().map(|t| t.path.as_str()).collect();
+    assert_eq!(set.skipped_missing, 1);
+    // master は Derived を見ないので stale_tags は常に 0
+    assert_eq!(set.stale_tags, 0);
+    let paths: Vec<&str> = set.tracks.iter().map(|t| t.path.as_str()).collect();
     assert_eq!(
         paths,
-        vec!["Library/A/1.flac", "Library/A/2.flac", "Library/A/3.flac"]
+        vec![
+            "Library/A/1.flac",
+            "Library/A/2.flac",
+            "Library/A/3.flac",
+            "Library/A/4.flac"
+        ]
     );
-    assert_eq!(rows[0].title.as_deref(), Some("T1"));
-    assert_eq!(rows[0].artist.as_deref(), Some("A"));
-    assert_eq!(rows[0].duration_ms, Some(1000));
-    let (rows, _) = playlists::export_tracks(&c, id, Source::Delivery)
+    assert_eq!(set.tracks[0].title.as_deref(), Some("T1"));
+    assert_eq!(set.tracks[0].artist.as_deref(), Some("A"));
+    assert_eq!(set.tracks[0].duration_ms, Some(1000));
+    let set = playlists::export_tracks(&c, id, Source::Delivery)
         .unwrap()
         .unwrap();
-    let paths: Vec<&str> = rows.iter().map(|t| t.path.as_str()).collect();
+    let paths: Vec<&str> = set.tracks.iter().map(|t| t.path.as_str()).collect();
     assert_eq!(
         paths,
-        vec!["Derived/A/1.opus", "Library/A/2.flac", "Library/A/3.flac"]
+        vec![
+            "Derived/A/1.opus",
+            "Library/A/2.flac",
+            "Library/A/3.flac",
+            "Derived/A/4.opus"
+        ]
     );
+    assert_eq!(set.skipped_missing, 1);
+    assert_eq!(set.stale_tags, 1);
     assert!(playlists::export_tracks(&c, 999, Source::Master)
         .unwrap()
         .is_none());
@@ -274,4 +290,22 @@ fn import_candidates_cover_all_tracks_with_active_flag() {
     let missing = cands.iter().find(|x| x.track_id == 9).unwrap();
     assert!(!missing.active);
     assert_eq!(missing.rel_path_key, "a/9.flac");
+}
+
+#[test]
+fn foobar_prefix_is_synced_from_config() {
+    let c = conn();
+    // 起動時に config の [export].fb2k_prefix で foobar 行の path_prefix を上書きする（D-55）
+    let changed = playlists::sync_foobar_prefix(&c, r"\\nas\share\music\").unwrap();
+    assert!(changed);
+    let p = playlists::profile_by_name(&c, "foobar").unwrap().unwrap();
+    assert_eq!(
+        p.profile.path_prefix.as_deref(),
+        Some(r"\\nas\share\music\")
+    );
+    // 同じ値なら変更なし
+    assert!(!playlists::sync_foobar_prefix(&c, r"\\nas\share\music\").unwrap());
+    // 他のプロファイルは触らない
+    let android = playlists::profile_by_name(&c, "android").unwrap().unwrap();
+    assert_eq!(android.profile.path_prefix, None);
 }

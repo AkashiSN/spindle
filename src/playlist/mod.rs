@@ -5,6 +5,7 @@ pub mod autoexport;
 pub mod compile;
 pub mod dsl;
 pub mod export;
+pub mod fb2k;
 pub mod import;
 pub mod smart;
 pub mod writer;

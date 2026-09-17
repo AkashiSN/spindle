@@ -809,3 +809,50 @@ async fn import_lists_m3u8_files_under_playlists_root_and_creates_playlist() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn delivery_export_reports_stale_tags_count() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    let a = insert_track(&app.raw(), "J-Pop/A/B/01 One.flac", "One", false);
+    let b = insert_track(&app.raw(), "J-Pop/A/B/02 Two.flac", "Two", false);
+    let d = insert_track(&app.raw(), "J-Pop/A/B/03 Three.flac", "Three", false);
+    // a: Derived が現在値、b: タグ版だけ陳腐化（配るが追随待ち）、d: Derived 無し
+    app.raw()
+        .execute(
+            "INSERT INTO derived_files (track_id, rel_path, rel_path_key, codec, src_audio_version, src_tag_version, generated_at)
+             VALUES (?1, 'J-Pop/A/B/01 One.opus', 'j-pop/a/b/01 one.opus', 'opus', 1, 1, 0),
+                    (?2, 'J-Pop/A/B/02 Two.opus', 'j-pop/a/b/02 two.opus', 'opus', 1, 2, 0)",
+            params![a, b],
+        )
+        .unwrap();
+    let id = create(&app, &c, "配布").await;
+    post(
+        &app,
+        &c,
+        &format!("/api/playlists/{id}/items"),
+        json!({ "selection": { "ids": [a, b, d] } }),
+    )
+    .await;
+    let (status, body) = post(
+        &app,
+        &c,
+        &format!("/api/playlists/{id}/export?profile=android"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["count"], 3);
+    assert_eq!(body["skipped_missing"], 0);
+    assert_eq!(body["stale_tags"], 1);
+    // master のプロファイルは Derived を見ないので 0
+    let (status, body) = post(
+        &app,
+        &c,
+        &format!("/api/playlists/{id}/export?profile=internal"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["stale_tags"], 0);
+}

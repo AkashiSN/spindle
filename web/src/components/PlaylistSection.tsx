@@ -4,10 +4,11 @@
 
 import { useCallback, useEffect, useState, type DragEvent } from 'react'
 import { ApiError } from '../api/client'
-import { EXPORT_PROFILES, type ExportProfileName, type ImportCandidate, type Playlist } from '../api/types'
+import { EXPORT_PROFILES, type ExportProfileName, type Fb2kQuery, type ImportCandidate, type Playlist } from '../api/types'
 import type { Playlists } from '../hooks/usePlaylists'
 import { formatDuration } from '../lib/format'
-import { parseDragIds, TRACK_DRAG_TYPE } from '../lib/playlists'
+import { exportNotice, parseDragIds, TRACK_DRAG_TYPE } from '../lib/playlists'
+import { Fb2kQueryDialog } from './Fb2kQueryDialog'
 
 export function PlaylistSection({
   playlists,
@@ -37,6 +38,7 @@ export function PlaylistSection({
   onNotice: (text: string | null) => void
 }) {
   const [menuFor, setMenuFor] = useState<number | null>(null)
+  const [fb2k, setFb2k] = useState<{ name: string; result: Fb2kQuery } | null>(null)
   const [dropOver, setDropOver] = useState<number | null>(null)
   const [importOpen, setImportOpen] = useState(false)
 
@@ -82,9 +84,7 @@ export function PlaylistSection({
     setMenuFor(null)
     try {
       const r = await playlists.exportTo(p.id, profile)
-      onNotice(
-        `Playlists/${r.out_path} に ${r.count} 件を書き出し${r.skipped_missing > 0 ? `（missing ${r.skipped_missing} 件は除外）` : ''}`,
-      )
+      onNotice(exportNotice(r))
     } catch (e) {
       fail(e)
     }
@@ -92,6 +92,15 @@ export function PlaylistSection({
 
   const acceptsDrop = (e: DragEvent, p: Playlist) =>
     p.kind === 'manual' && e.dataTransfer.types.includes(TRACK_DRAG_TYPE)
+  const showFb2k = async (p: Playlist) => {
+    setMenuFor(null)
+    try {
+      const result = await playlists.fb2kQuery(p.id)
+      setFb2k({ name: p.name, result })
+    } catch (e) {
+      fail(e)
+    }
+  }
   const refreshSmart = async (p: Playlist) => {
     setMenuFor(null)
     try {
@@ -184,6 +193,9 @@ export function PlaylistSection({
                     <button type="button" role="menuitem" onClick={() => void refreshSmart(p)}>
                       再評価
                     </button>
+                    <button type="button" role="menuitem" onClick={() => void showFb2k(p)}>
+                      foobar クエリ
+                    </button>
                   </>
                 )}
                 {EXPORT_PROFILES.map((profile) => (
@@ -209,6 +221,7 @@ export function PlaylistSection({
           {notice}
         </p>
       )}
+      {fb2k && <Fb2kQueryDialog name={fb2k.name} result={fb2k.result} onClose={() => setFb2k(null)} />}
     </section>
   )
 }

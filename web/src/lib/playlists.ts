@@ -4,10 +4,19 @@
 // - 表の行 → サイドバーのプレイリストへのドラッグは id 列を dataTransfer に載せる
 // - プレイリスト内の並べ替えは「落とした行の前 / 次の行の前」を移動先（before）に写す
 
+import type { ExportResponse } from '../api/types'
 import { DEFAULT_SORT, type Filter, type Sort } from './filter'
 
 /** dataTransfer の MIME。表の行だけがこの型を載せる */
 export const TRACK_DRAG_TYPE = 'application/x-spindle-tracks'
+
+/** 書き出し結果の通知文。missing の除外と delivery のタグ追随待ち（P1-8）を添える */
+export function exportNotice(r: ExportResponse): string {
+  const extra: string[] = []
+  if (r.skipped_missing > 0) extra.push(`missing ${r.skipped_missing} 件は除外`)
+  if (r.stale_tags > 0) extra.push(`タグ追随待ちの Derived ${r.stale_tags} 件を含む`)
+  return `Playlists/${r.out_path} に ${r.count} 件を書き出し${extra.length > 0 ? `（${extra.join('、')}）` : ''}`
+}
 
 export function sortForScope(prev: Omit<Filter, 'q'>, next: Omit<Filter, 'q'>, sort: Sort): Sort {
   const entering = next.playlist_id != null && prev.playlist_id !== next.playlist_id

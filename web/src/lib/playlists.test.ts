@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_SORT } from './filter'
 import {
   dropTarget,
+  exportNotice,
   parseDragIds,
   scopeAfterPlaylistDelete,
   serializeDragIds,
@@ -81,5 +82,19 @@ describe('dropTarget', () => {
   })
   it('表示中に無い行へは落とせない', () => {
     expect(dropTarget(order, [10], 99, 'above')).toBeNull()
+  })
+})
+
+describe('exportNotice', () => {
+  it('件数と除外・タグ追随待ちを添える', () => {
+    expect(exportNotice({ out_path: 'internal/通勤.m3u8', count: 3, skipped_missing: 0, stale_tags: 0 })).toBe(
+      'Playlists/internal/通勤.m3u8 に 3 件を書き出し',
+    )
+    expect(exportNotice({ out_path: 'android/通勤.m3u8', count: 3, skipped_missing: 1, stale_tags: 2 })).toBe(
+      'Playlists/android/通勤.m3u8 に 3 件を書き出し（missing 1 件は除外、タグ追随待ちの Derived 2 件を含む）',
+    )
+    expect(exportNotice({ out_path: 'android/x.m3u8', count: 1, skipped_missing: 0, stale_tags: 1 })).toBe(
+      'Playlists/android/x.m3u8 に 1 件を書き出し（タグ追随待ちの Derived 1 件を含む）',
+    )
   })
 })

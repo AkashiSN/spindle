@@ -105,7 +105,18 @@ impl AutoExport {
             match writer::export_to_root(&self.db, Arc::clone(&self.root), playlist_id, &profile)
                 .await
             {
-                Ok(_) => written += 1,
+                Ok(w) => {
+                    written += 1;
+                    if w.stale_tags > 0 {
+                        // 追随ジョブが終われば次の合図で書き直される
+                        tracing::info!(
+                            playlist_id,
+                            profile,
+                            stale_tags = w.stale_tags,
+                            "タグ追随待ちの Derived を含めて書き出した"
+                        );
+                    }
+                }
                 Err(e) => tracing::warn!(playlist_id, profile, error = %e, "自動再書き出しに失敗"),
             }
         }

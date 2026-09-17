@@ -18,6 +18,8 @@ pub struct Rendered {
     pub body: String,
     pub count: usize,
     pub skipped_missing: usize,
+    /// `delivery` で Derived を採用したうちタグ追随待ちの件数（`master` は 0）
+    pub stale_tags: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,26 +45,27 @@ pub async fn render(db: &Db, id: i64, profile: &str) -> Result<Rendered, RenderE
             let Some(playlist) = dbpl::get(c, id)? else {
                 return Ok(Some(None));
             };
-            let Some((rows, skipped)) = dbpl::export_tracks(c, id, profile.profile.source)? else {
+            let Some(set) = dbpl::export_tracks(c, id, profile.profile.source)? else {
                 return Ok(Some(None));
             };
-            Ok(Some(Some((playlist, profile, rows, skipped))))
+            Ok(Some(Some((playlist, profile, set))))
         })
         .await?;
     match result {
         None => Err(RenderError::NoProfile),
         Some(None) => Err(RenderError::NotFound),
-        Some(Some((playlist, profile, rows, skipped_missing))) => {
+        Some(Some((playlist, profile, set))) => {
             if profile.format != "m3u8" {
                 return Err(RenderError::BadFormat(profile.format.clone()));
             }
-            let body = render_m3u8(&profile.profile, &rows);
+            let body = render_m3u8(&profile.profile, &set.tracks);
             Ok(Rendered {
                 playlist,
                 profile,
                 body,
-                count: rows.len(),
-                skipped_missing,
+                count: set.tracks.len(),
+                skipped_missing: set.skipped_missing,
+                stale_tags: set.stale_tags,
             })
         }
     }
@@ -74,6 +77,7 @@ pub struct Written {
     pub out_path: String,
     pub count: usize,
     pub skipped_missing: usize,
+    pub stale_tags: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +117,7 @@ pub async fn export_to_root(
         out_path,
         count: r.count,
         skipped_missing: r.skipped_missing,
+        stale_tags: r.stale_tags,
     })
 }
 

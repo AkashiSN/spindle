@@ -4,6 +4,7 @@ import type {
   AppendResponse,
   ExportProfileName,
   ExportResponse,
+  Fb2kQuery,
   ImportCandidate,
   ImportResponse,
   Playlist,
@@ -122,6 +123,9 @@ export function usePlaylists(enabled: boolean) {
     },
     [refresh],
   )
+  const fb2kQuery = useCallback(async (id: number) => {
+    return apiFetch<Fb2kQuery>(`/api/playlists/${id}/fb2k_query`)
+  }, [])
   const importCandidates = useCallback(async () => {
     const r = await apiFetch<{ items: ImportCandidate[] }>('/api/playlists/import')
     return r.items
@@ -149,6 +153,7 @@ export function usePlaylists(enabled: boolean) {
     removeTracks,
     moveTracks,
     exportTo,
+    fb2kQuery,
     importCandidates,
     importFile,
   }

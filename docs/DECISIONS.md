@@ -1787,4 +1787,49 @@ stem で当てる。プロファイル別のディレクトリにするのは、
 **却下**: 仮想スマート（上記）。ジョブとしての再評価（CHECK 制約の変更に表の作り直しが要る）。
 `IS` を canonical key で比較（タグの値に key 列が無く、全行の関数評価になる）。
 
-**未決**: foobar Autoplaylist クエリへの変換（P1-8）。`HAS` の語境界（DSL.md、実機で突き合わせ）。
+**未決**: `HAS` の語境界（DSL.md、実機で突き合わせ）。foobar クエリへの変換は D-55。
+
+## D-55 foobar クエリ変換は変換できない項を落として notes に出し、プロファイルは固定
+
+**決定**（P1-8。仕様 SPEC §10「エクスポート形式」「foobar クエリへの変換」、docs/DSL.md が定めて
+いない値と境界）:
+
+- **変換は AST → `{ query, sort, notes }` の純粋関数**（`playlist::fb2k`）。`GET /api/playlists/:id/fb2k_query`
+  が保存済みの `rule_ast` を変換して返す（smart のみ。manual は 409 `manual`）。SPEC の `.txt` 出力は
+  作らず、UI のダイアログからクリップボードへコピーする
+- **写像表**: `albumartist` → `%album artist%`、技術情報は生の値を返す `%__…%`（`%__codec%`
+  `%__samplerate%` `%__bitrate%` `%__channels%` `%__bitspersample%`。`%channels%` は mono / stereo の
+  表示文字列になるので比較・ソートに使えない）、`duration` → 特殊フィールド `%length_seconds%`
+  （技術情報でないので `PRESENT` / `MISSING` は変換不能）、その他の標準タグ・任意タグは同名。
+  spindle 固有（`verification` `category` `source_type` `lossless` `added` `has_derived` `missing`）と
+  `MATCHES` は変換不能
+- **変換不能な項は落とし、`notes` に原文（spindle の記法）と理由を残す。** 落ちて空になった `AND` /
+  `OR` と、子が落ちた `NOT` も落とす。全部落ちたら `query` は空で、その旨も `notes` に出す。
+  `OR` の 1 項が落ちると結果は狭まるが、黙って別の条件に置き換えるよりは `notes` で見せて手で
+  直してもらう方が安全
+- **演算子**: `PRESENT` / `MISSING` は foobar の後置形、`date` の `GREATER` / `LESS` は `AFTER` /
+  `BEFORE`。値は空白・括弧・`"` を含むか予約語と同じなら二重引用符で囲む。`"` を含む値は foobar 側で
+  エスケープできないので `notes` に警告。複合式の子は常に括弧で囲み、foobar 側の優先順位に頼らない
+- **`ORDER BY` は `sort`（ソートパターン）へ分離。** ソートパターンは title-format の出力を文字列で
+  比べるので、spindle が数値順にするフィールド（`tracknumber` `discnumber` `samplerate` `bitrate`
+  `channels` `bitdepth` `duration`）は `$num(…,10)` でゼロ埋めする（比較には付けない）。降順・
+  `random`・`LIMIT` は表せないので `notes`
+- **`delivery` の書き出しは `stale_tags`（タグ追随待ちの Derived）を件数で返す**（`POST …/export` の
+  応答。自動再書き出しはログ）。追随ジョブの完了を待つ方式は取らない（書き出しがジョブ待ちで止まる
+  方が運用上困る。追随が終われば次の合図で書き直される）
+- **エクスポートプロファイルは 3 つ固定で CRUD の API は持たない。** 実運用で変えたいのは foobar の
+  UNC prefix だけなので `[export].fb2k_prefix` を正とし、起動時に `export_profiles` の `foobar` 行の
+  `path_prefix` を揃える（`db::playlists::sync_foobar_prefix`）。`.pls` も作らない（`format` の CHECK に
+  列挙だけ残す）
+
+**理由**: Autoplaylist はファイルで渡せないので、ユーザが貼れる 2 本の文字列と「何が落ちたか」が
+あれば足りる。技術フィールドまで写すのは、`%codec% IS flac` のような条件がライブラリの整理で
+普通に出てくるため。
+
+**却下**: 変換不能な項を `%path% HAS` などへ近似する（`category` はディレクトリ名と一致するが
+部分一致で誤ヒットする）。プロファイル CRUD（3 つ以外の出力先が無い）。`.txt` の書き出し
+（Playlists root に置いても foobar はそこから読まない）。
+
+**未決**: foobar 実機との突き合わせ。`HAS` の語境界（spindle は `LIKE %v%` の部分一致）と、
+`%__…%` の技術情報フィールドに対する `PRESENT` / `MISSING` の挙動（ヘルプの記述に従って写して
+いるが未確認）。

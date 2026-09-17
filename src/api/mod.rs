@@ -54,6 +54,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/playlists/preview", post(playlists::preview))
         .route("/playlists/{id}/refresh", post(playlists::refresh))
+        .route("/playlists/{id}/fb2k_query", get(playlists::fb2k_query))
         .route(
             "/playlists/{id}",
             get(playlists::get)
