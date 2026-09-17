@@ -156,6 +156,15 @@ impl JobContext {
             .await
     }
 
+    /// 名前付き排他（`job_mutexes`）を取る。取れなければ `false`（ハンドラは `Requeue` にする）。
+    /// ジョブの終端で自動的に解放される
+    pub async fn lock_mutex(&self, name: &'static str) -> Result<bool> {
+        let id = self.job.id;
+        self.db()
+            .write(move |c| dbjobs::acquire_mutex(c, name, id, now_epoch()))
+            .await
+    }
+
     /// drop 時に消える一時ファイルのガード。成果物として残すなら [`TempGuard::keep`]
     pub fn temp_file(&self, path: impl AsRef<Path>) -> TempGuard {
         TempGuard::new(path)

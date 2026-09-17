@@ -8,6 +8,7 @@
 pub mod archive;
 pub mod artwork;
 pub mod derived;
+pub mod gc;
 pub mod history;
 pub mod jobs;
 pub mod migrations;

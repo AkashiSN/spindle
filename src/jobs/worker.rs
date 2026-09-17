@@ -151,6 +151,7 @@ async fn execute(
             .write(move |c| {
                 let tx = c.transaction()?;
                 dbjobs::release_track_locks(&tx, id)?;
+                dbjobs::release_mutexes(&tx, id)?;
                 dbjobs::mark_failed(&tx, id, &message, now_epoch())?;
                 tx.commit()?;
                 Ok(())
@@ -209,6 +210,7 @@ async fn run_one(
                 }
                 if dbjobs::is_stale(&tx, &job)? {
                     dbjobs::release_track_locks(&tx, id)?;
+                    dbjobs::release_mutexes(&tx, id)?;
                     dbjobs::mark_done(&tx, id, now_epoch())?;
                     tx.commit()?;
                     return Ok(Gate::Stale);
@@ -255,6 +257,7 @@ async fn run_one(
             dbjobs::update_progress(&tx, id, done, total)?;
         }
         dbjobs::release_track_locks(&tx, id)?;
+                dbjobs::release_mutexes(&tx, id)?;
         match outcome {
             // 完了直前に cancel が来ていても完了が勝つ（仕事は済んでいる。D-36）
             Ok(Outcome::Done) => {

@@ -15,6 +15,7 @@ pub mod handlers;
 pub mod process;
 mod queue;
 pub mod recovery;
+pub mod scheduler;
 mod worker;
 
 use std::collections::HashMap;
@@ -188,6 +189,9 @@ pub struct BatchEvent {
 
 /// SSE `library` イベントを `ids` で流す変更行数の上限。超えたら `bulk`（SPEC §9）
 pub const LIBRARY_IDS_MAX: usize = 200;
+
+/// scan と gc が取り合う名前付き排他（`job_mutexes`。D-56）。取れた側だけが走る
+pub const LIBRARY_MUTEX: &str = "library";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]

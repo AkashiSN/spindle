@@ -9,8 +9,10 @@ use spindle::api::{self, auth, AppState};
 use spindle::db::{migrations, Db};
 use spindle::edit::{Editor, NormalizeEnv};
 use spindle::fsroot::Roots;
+use spindle::gc::GcRoots;
 use spindle::import::scanner::Scanner;
 use spindle::jobs::handlers::backup::{self, BackupHandler};
+use spindle::jobs::handlers::gc::{self as gc_job, GcHandler};
 use spindle::jobs::handlers::normalize::NormalizeHandler;
 use spindle::jobs::handlers::rename::RenameHandler;
 use spindle::jobs::handlers::rg::RgHandler;
@@ -118,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
         )
         // ロスレス正規化（P1-4）。作業領域は data/tmp、退避先は Archive root
         .with_normalize(NormalizeEnv {
-            archive: archive_root,
+            archive: Arc::clone(&archive_root),
             encoder: FlacEncoder::new(
                 &state.config.bin.ffmpeg,
                 &state.config.bin.flac,
@@ -197,6 +199,22 @@ async fn main() -> anyhow::Result<()> {
     if swept != transcode::SweepReport::default() {
         info!(?swept, "取り残された作業ファイルを回収した");
     }
+    // GC（P1-11、D-56）。物理削除を行う唯一の経路。dry-run は GET /api/gc/preview
+    let gc_roots = Arc::new(GcRoots {
+        library: Arc::clone(&library_root),
+        archive: Arc::clone(&archive_root),
+        derived: Arc::clone(&derived_root),
+        artwork: Arc::clone(&artwork),
+    });
+    state = state.with_gc(Arc::clone(&gc_roots));
+    registry.register(
+        JobType::Gc,
+        Arc::new(GcHandler::new(
+            Arc::clone(&state.db),
+            gc_roots,
+            i64::from(state.config.gc.retention_days) * 86_400,
+        )),
+    );
     registry.register(
         JobType::Transcode,
         Arc::new(TranscodeHandler::new(
@@ -227,6 +245,8 @@ async fn main() -> anyhow::Result<()> {
         state.config.backup.interval_hours,
         shutdown.clone(),
     );
+    // 定期 GC（D-56）。最後の終端 gc から 24 時間経っていれば投入する
+    let gc_scheduler = gc_job::spawn_scheduler(Arc::clone(&state.jobs), shutdown.clone());
     // スマートプレイリストの自動再評価と、記録済みプロファイルへの自動再書き出し（P1-7、D-54）
     let autoexport = AutoExport::new(
         Arc::clone(&state.db),
@@ -256,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
     // ワーカーは新規 claim を止め、実行中は破棄済み（次回起動のリカバリで queued に戻る）
     let _ = worker.await;
     let _ = backup_scheduler.await;
+    let _ = gc_scheduler.await;
     let _ = autoexport.await;
     info!("停止した");
     Ok(())

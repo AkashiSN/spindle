@@ -7,6 +7,7 @@ use crate::db::Db;
 use crate::domain::selection::SelectionStore;
 use crate::edit::Editor;
 use crate::fsroot::RootDir;
+use crate::gc::GcRoots;
 use crate::jobs::Jobs;
 use crate::media::artwork::ArtworkStore;
 use tokio_util::sync::CancellationToken;
@@ -33,6 +34,8 @@ pub struct AppState {
     pub derived: Option<Arc<RootDir>>,
     /// プレイリストの書き出し先・取り込み元（P1-6）。無いと export の POST と import は 503
     pub playlists: Option<Arc<RootDir>>,
+    /// GC が触る root（P1-11）。無いと `/api/gc/preview` は 503
+    pub gc: Option<Arc<GcRoots>>,
     /// オンザフライ変換の上限に足す猶予（トラック長 + これ。P1-9）
     pub transcode_grace: std::time::Duration,
 }
@@ -52,6 +55,7 @@ impl AppState {
             library: None,
             derived: None,
             playlists: None,
+            gc: None,
             transcode_grace: super::stream::TRANSCODE_GRACE,
         }
     }
@@ -70,6 +74,11 @@ impl AppState {
 
     pub fn with_playlists(mut self, playlists: Arc<RootDir>) -> Self {
         self.playlists = Some(playlists);
+        self
+    }
+
+    pub fn with_gc(mut self, roots: Arc<GcRoots>) -> Self {
+        self.gc = Some(roots);
         self
     }
 

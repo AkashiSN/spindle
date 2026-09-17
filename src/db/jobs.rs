@@ -452,7 +452,8 @@ pub fn recover(conn: &Connection, now: i64) -> Result<RecoveryReport> {
         [],
     )?;
     let locks_cleared = conn.execute("DELETE FROM track_locks", [])?
-        + conn.execute("DELETE FROM derived_path_locks", [])?;
+        + conn.execute("DELETE FROM derived_path_locks", [])?
+        + conn.execute("DELETE FROM job_mutexes", [])?;
     Ok(RecoveryReport {
         requeued,
         cancelled,
@@ -811,6 +812,31 @@ pub fn acquire_track_locks(
 
 pub fn release_track_locks(conn: &Connection, job_id: i64) -> Result<usize> {
     Ok(conn.execute("DELETE FROM track_locks WHERE job_id = ?1", [job_id])?)
+}
+
+/// 名前付き排他（`job_mutexes`）を `job_id` のために取る。別の running なジョブが持っていれば
+/// false。持ち主が running でなくなっていれば無効として奪う。同じジョブの再取得は true
+pub fn acquire_mutex(conn: &Connection, name: &str, job_id: i64, now: i64) -> Result<bool> {
+    conn.execute(
+        "DELETE FROM job_mutexes
+          WHERE name = ?1 AND job_id NOT IN (SELECT id FROM jobs WHERE state = 'running')",
+        [name],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO job_mutexes (name, job_id, acquired_at) VALUES (?1, ?2, ?3)",
+        params![name, job_id, now],
+    )?;
+    let holder: i64 = conn.query_row(
+        "SELECT job_id FROM job_mutexes WHERE name = ?1",
+        [name],
+        |r| r.get(0),
+    )?;
+    Ok(holder == job_id)
+}
+
+/// ジョブが持つ名前付き排他を全部解放する
+pub fn release_mutexes(conn: &Connection, job_id: i64) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM job_mutexes WHERE job_id = ?1", [job_id])?)
 }
 
 pub fn track_exists(conn: &Connection, track_id: i64) -> Result<bool> {

@@ -12,7 +12,7 @@ use crate::db::{now_epoch, Result as DbResult};
 use crate::import::scanner::{ScanError, Scanner};
 use crate::jobs::{
     BoxFuture, EnqueueResult, Event, Handler, HandlerResult, JobContext, JobError, JobType, Jobs,
-    LibraryEvent, NewJob, Outcome,
+    LibraryEvent, NewJob, Outcome, LIBRARY_MUTEX,
 };
 
 pub const DEDUP_KEY: &str = "scan";
@@ -79,6 +79,11 @@ impl Handler for ScanHandler {
                 .and_then(|v| v.as_str())
                 .and_then(parse_kind)
                 .unwrap_or(ScanKind::Incremental);
+            // GC と同じ排他。取れた側だけが走る（D-56）。終端で自動的に解放される
+            if !ctx.lock_mutex(LIBRARY_MUTEX).await? {
+                tracing::info!(job_id = ctx.job.id, "GC が動いているのでスキャンを待たせる");
+                return Ok(Outcome::Requeue);
+            }
             let kind = this.effective_kind(&ctx, requested).await?;
             if kind != requested {
                 tracing::info!(

@@ -316,6 +316,14 @@ mod linux {
             Ok(())
         }
 
+        /// 空のディレクトリを消す（`rmdir`）。空でなければ [`FsError::Io`]（`ENOTEMPTY`）、
+        /// root 自身は対象外
+        pub fn remove_dir(&self, rel: &RelPath) -> Result<(), FsError> {
+            let parent = self.open_parent(rel)?;
+            rustix::fs::unlinkat(&parent, rel.file_name(), AtFlags::REMOVEDIR)?;
+            Ok(())
+        }
+
         /// tmp を対象へ**置き換え**る rename（tmp + rename の最終段。SPEC §7.5）。宛先は同じ
         /// ディレクトリにある前提で、rename 後に親ディレクトリを fsync して電源断でも
         /// エントリが残るようにする
@@ -462,6 +470,10 @@ mod stub {
         }
 
         pub fn unlink(&self, _rel: &RelPath) -> Result<(), FsError> {
+            Err(FsError::Openat2Unsupported)
+        }
+
+        pub fn remove_dir(&self, _rel: &RelPath) -> Result<(), FsError> {
             Err(FsError::Openat2Unsupported)
         }
 

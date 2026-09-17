@@ -1833,3 +1833,64 @@ stem で当てる。プロファイル別のディレクトリにするのは、
 **未決**: foobar 実機との突き合わせ。`HAS` の語境界（spindle は `LIKE %v%` の部分一致）と、
 `%__…%` の技術情報フィールドに対する `PRESENT` / `MISSING` の挙動（ヘルプの記述に従って写して
 いるが未確認）。
+
+## D-56 GC は 5 区分を 1 本のジョブで回収し、dry-run は同じ計画関数を API が同期で返す
+
+**決定**（P1-11。仕様 SPEC §6「論理削除」/ §8 / §13 `[gc]`、D-45 / D-46 / D-49 / D-51 / D-53 が
+GC に委ねた事項の固定値と境界）:
+
+- **物理削除を行う唯一の経路は `gc` ジョブ**（並列 1、dedup key `gc`、payload `{}`）。対象は 5 区分:
+  | 区分 | 対象 | 判定 | 物理削除 |
+  |---|---|---|---|
+  | A | missing トラック | `missing_since <= now - retention` **かつ Library に実体が無い**（`stat` で再確認。あれば次のスキャンが復活させるので飛ばす。symlink 等 NotFound 以外のエラーも飛ばす） | 行のみ。CASCADE で `playlist_items` / `track_tags` / `derived_files` / RG / verifications |
+  | B | missing アルバム | `missing_since <= now - retention` かつ構成トラック 0（A の削除後に判定） | 行のみ |
+  | C | Archive の退避ファイル | `archived_files.state='held'` かつ `eligible_after <= now` | `Archive/<rel_path>` を unlink → `state='deleted'`。実体が既に無ければ warn して `deleted`。unlink がそれ以外で失敗したら `held` のまま次回 |
+  | D | Derived の孤児 | `Derived/` 配下の実体で `derived_files` に `rel_path_key` が無いもの（A で行が消えた Derived もここで拾う）。`.spindle-tmp-*` と **mtime が 24 時間以内**の実体は除外 | unlink。空になったディレクトリも消す（root は残す） |
+  | E | アートワーク孤児 | `artwork` 行: `albums.artwork_id` から参照されない。`thumbs/<hex>/`: 行の無い hex（**mtime が 24 時間以内**の dir は除外。スキャン Phase 5 が原画像を置いてから行を入れるまでの間を守る） | 行を DELETE、dir を再帰削除 |
+  触らないもの: Archive 内の台帳に無いファイル、`Playlists/` の古い書き出し（D-53）、Library の
+  同梱ファイル（D-43 の残課題）、`data/tmp`（起動時回収の領分）
+- **判定（`gc::plan`）と実行（`gc::execute`）を分け、dry-run は `GET /api/gc/preview` が `plan` を同期で
+  呼んで返す**（区分ごとの件数・バイト数と先頭 50 件のパス）。ジョブの結果を返す列が `jobs` に
+  無く、「ジョブとしての dry-run」は結果をログでしか見られない。`POST /api/gc` はジョブの投入
+  （未完了があれば 409 `duplicate`）
+- **scan と GC は同じ名前付き排他 `library`（`job_mutexes`。マイグレーション 0009）を取り、取れた
+  側だけが走る。** 取れなければ `Outcome::Requeue`（1 秒後に再試行）。check-then-requeue を両側に
+  置くだけでは同時に claim されたとき両方が譲り合い続けるので、勝者を DB で一意に決める。排他は
+  `track_locks` と同じくジョブの終端で自動的に解放され、持ち主が running でなくなれば奪える。
+  起動時リカバリで全件消す。A の行削除がスキャン Phase 4 の commit と、E(dir) の削除が Phase 5 の
+  原画像の配置と競合しないため
+- **実行順と原子性**: A → B → E(行) を 1 トランザクション（削除の SQL でも `missing_since` /
+  参照の無さを再確認する）→ C → D → E(dir)。ファイル削除は 1 件ずつ、失敗はログして続行し、
+  区分ごとの件数・バイト数・失敗数を `info!` で出す（**削除件数のログは必須**）。24 時間の猶予は
+  in-flight の書き込みと手作業で置いた実体の保護。Derived のサブディレクトリが読めなければその下
+  だけ飛ばして続ける（root が読めなければ計画できず失敗）
+- **計画と実行の間に状態が変わりうるので、物理削除の直前に 1 件ずつ再確認する**（計画は数秒〜
+  数分前の読み取り。その間に巻き戻し・redo・スキャンの復活・transcode の claim・Phase 5 が動く）:
+  - C: 行がまだ `held` で `eligible_after <= now`、`rel_path` が計画時と同じことを確認し、その台帳の
+    トラック行が残っていれば**トラックのロック**（`track_locks`）を GC のジョブで取ってから unlink
+    する（巻き戻しの normalize ジョブと同時に走らない。取れなければ今回は飛ばす）。`deleted` への
+    遷移は `UPDATE … WHERE state = 'held'` の CAS。クラッシュで実体だけ消えて `held` が残った行は
+    次回 NotFound として `deleted` に進む
+  - D: その key を指す `derived_files` 行が無いことを確認して **transcode と同じ排他予約**
+    （`derived_path_locks`。`track_id` は NULL。マイグレーション 0008 で NULL 可にした）を GC の
+    ジョブで取ってから `stat` し直し、一覧時と inode / mtime が同じときだけ unlink、件ごとに解放する。
+    transcode は予約無しに宛先へ書かない（D-51）ので、GC が持っている間は置き換えられない。running
+    なジョブの予約があれば飛ばし、終わったジョブの残骸は奪う（`lock_path` の規則）
+  - E(dir): その hex の `artwork` 行が無く（E(行) が参照の出現で skip されたとき・スキャンが行を
+    入れたとき）、dir の mtime がまだ猶予を過ぎていることを確認してから消す
+- **冪等**: 途中で落ちても次回が続きを拾う（行が消えて実体が残った Derived は D、`held` のまま実体が
+  無い Archive は C で `deleted` に進む）。キャンセルは区分の境界と件ごとの進捗で見る
+- **起動契機は backup と同じスケジューラ**（起動時と 10 分ごとに「最後の終端 `gc` から 24 時間」で
+  due 判定）+ 手動 `POST /api/gc`。間隔は定数（`[gc]` に設定を足さない。`retention_days` が 30 日
+  なので 1 日 1 回で足りる）
+- **UI は作らない**（SPEC §12.6 の設定画面は骨格のみ。API とジョブで受け入れを満たす）
+
+**理由**: 編集履歴（`edit_ops` / `archived_files` の `track_id`）は意図的に FK にしていないので、
+行を消しても巻き戻しの根拠は残る。Derived は transcode が物理書き込みの前に `derived_files` の
+行で期待パスを占有する（D-51）ので「行の無い実体」= 孤児と判定できる。
+
+**却下**: ジョブとしての dry-run（結果の置き場が無い）。Archive の台帳に無いファイルの回収
+（Archive は追記のみでスキャン対象外。何が置かれたか分からないものは消さない）。区分ごとに別
+ジョブ（順序に依存がある: A → D、E 行 → E dir）。
+
+**未決**: 設定画面からの起動（SPEC §12.6）。Library の同梱ファイルの回収（D-43）。

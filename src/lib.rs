@@ -7,6 +7,7 @@ pub mod db;
 pub mod domain;
 pub mod edit;
 pub mod fsroot;
+pub mod gc;
 pub mod import;
 pub mod jobs;
 pub mod logging;

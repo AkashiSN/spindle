@@ -633,8 +633,32 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
       未決: マルチチャンネルのダウンミックス、非可逆の `force_transcode`、Derived 側の `cover.jpg`
       ミラー（D-51）
-- [ ] **P1-11** GC ジョブ（`missing_since` 30 日超の行、`Archive/` へ退避した WAV、
-      Derived の孤児。**物理削除を行う唯一の経路**。dry-run と削除件数のログを必須にする）
+- [x] **P1-11** GC ジョブ（`missing_since` 30 日超の行、`Archive/` へ退避した WAV、
+      Derived の孤児。**物理削除を行う唯一の経路**。dry-run と削除件数のログを必須にする）。D-56
+      - [x] `gc::plan`（読み取りのみ）: A missing トラック（`stat` で実体が無いことを再確認）、B missing
+            アルバム（構成 0）、C `archived_files` の `held` で期限超、D Derived の孤児（`.spindle-tmp-*` と
+            24 時間以内は除外）、E 参照の無い `artwork` 行と行の無い `thumbs/<hex>/`
+      - [x] `gc::execute_*`: A → B → E(行) を 1 トランザクション（条件を再確認）→ C（`held` と期限を
+            再確認しトラックをロックしてから unlink → CAS で `deleted`）→ D（行が無ければ transcode と
+            同じ `derived_path_locks` の予約を取り、unlink 直前に inode / mtime を照合、空ディレクトリも
+            消す。マイグレーション 0008）→ E(dir)（行が無く猶予超を再確認）。
+            失敗はログして続行、区分ごとの件数・バイト数を `info!`
+      - [x] `jobs::handlers::gc`: scan と同じ名前付き排他 `library`（`job_mutexes`。マイグレーション
+            0009、`JobContext::lock_mutex`）を取れなければ `Requeue`。`jobs::scheduler` に backup と共通の
+            周期投入を切り出し、1 日 1 回自動投入
+      - [x] `GET /api/gc/preview`（dry-run。`plan` を同期で返す）、`POST /api/gc`。UI は作らない
+      - [x] `RootDir::remove_dir`
+
+      受け入れ: `tests/gc.rs`（期限前後と実体の有無、CASCADE と履歴の残存、アルバムの構成判定、Archive
+      の状態遷移と unlink 失敗、Derived の孤児・tmp・猶予・同じ実行で消える missing の Derived・空
+      ディレクトリ・一覧後の差し替え、アートワークの行と dir、scan 中の待ちと dedup、計画後の
+      restored / 期限延長 / 他ジョブのロック / 復活 / claim / 参照の出現 / dir の更新で消えないこと、
+      GC の予約中は transcode が claim できず残骸は奪えること、mutex を持つ相手がいれば待つこと、
+      scan と gc を同時に 5 回投入して両方が完走すること）、
+      `tests/gc_api.rs`
+      （preview が何も消さない、POST の 202 / 409 / 401、root 無しの 503）
+
+      未決: 設定画面からの起動（SPEC §12.6）。Library の同梱ファイルの回収（D-43）
 
 ---
 

@@ -185,7 +185,7 @@ impl TranscodeHandler {
             .db()
             .write({
                 let key = key.clone();
-                move |c| dbderived::lock_path(c, &key, track_id, job_id, now_epoch())
+                move |c| dbderived::lock_path(c, &key, Some(track_id), job_id, now_epoch())
             })
             .await?;
         if !locked {

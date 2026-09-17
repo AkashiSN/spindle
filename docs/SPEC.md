@@ -335,7 +335,9 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
 ### 論理削除
 
 `missing_since` による論理削除。SMB 一時切断やスキャン中のマウント欠落で行を物理削除すると、
-プレイリストと編集履歴が巻き添えになる。既定 30 日経過後に GC。
+プレイリストと編集履歴が巻き添えになる。既定 30 日経過後に GC（`gc` ジョブ。missing トラック・
+アルバムの行、`Archive/` の退避ファイル、Derived の孤児、アートワークの孤児を回収する。
+1 日 1 回自動、`POST /api/gc` で手動、`GET /api/gc/preview` が dry-run。D-56）。
 
 ### ReplayGain の内部表現
 
@@ -749,10 +751,11 @@ DB の追随は必要。
 | `thumbnail` | 4 | artwork_id |
 | `flaccheck` | CPU コア数 | track_id |
 | `inbox` | 1 | 固定 |
-| `gc` | 1 | 固定 |
+| `gc` | 1 | 固定（scan と同じ排他 `library` を取れなければ Requeue。D-56） |
 | `backup` | 1 | 固定 |
 
-- 起動時リカバリ: `running` を `queued` へ戻し、`track_locks` を**全件削除**する
+- 起動時リカバリ: `running` を `queued` へ戻し、`track_locks` / `derived_path_locks` / `job_mutexes` を
+  **全件削除**する
   （ロックはプロセス生存中しか意味を持たない）。単一インスタンス前提。同じ DB を
   複数プロセスで開くことは想定しない（compose で replicas を増やさない）
 - `dedup_key` は **`queued` / `running` の間だけ**一意（partial unique index）。
@@ -833,6 +836,8 @@ POST   /api/cd/eject
 
 GET    /api/jobs, POST /api/jobs/:id/cancel, POST /api/jobs/:id/retry
 POST   /api/scan                                  {"kind": "incremental" | "deep"}。scan ジョブを投入
+GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件。何も消さない。D-56）
+POST   /api/gc                                    gc ジョブを投入（未完了があれば 409）
                                                   （202 + job_id。queued / running があれば 409 duplicate）
 GET    /api/events                                SSE: ジョブ進捗・ライブラリ変更
 
@@ -1465,8 +1470,10 @@ src/
 │   ├── scanner.rs
 │   └── ytmusic/         parser.rs（ルール TOML）、downloader.rs
 ├── jobs/
-│   ├── queue.rs  worker.rs  recovery.rs
+│   ├── queue.rs  worker.rs  recovery.rs  scheduler.rs（backup / gc の周期投入）
 │   └── handlers/
+├── gc/
+│   └── mod.rs           物理削除の唯一の経路。plan（判定・dry-run）と execute_*（5 区分。D-56）
 ├── playlist/
 │   ├── dsl.rs           pest 文法 → AST
 │   ├── compile.rs       AST → パラメータ化 SQL

@@ -9,8 +9,9 @@
 //! ファイル名は `spindle-<YYYYMMDDTHHMMSSZ>.db`（UTC）。固定幅なので名前順 = 時刻順で、
 //! 世代 GC はこの順で新しいものから `[backup].retention_generations` 件残す。
 //!
-//! 周期は [`spawn_scheduler`] が担う。due 判定は `jobs` 表の最後の終端 `backup` からの経過で、
-//! ファイルの mtime には依らない（復元直後は古い DB の記録しか無いので、すぐ 1 世代取れる）
+//! 周期は [`spawn_scheduler`]（`jobs::scheduler`）が担う。due 判定は `jobs` 表の最後の終端
+//! `backup` からの経過で、ファイルの mtime には依らない（復元直後は古い DB の記録しか無いので、
+//! すぐ 1 世代取れる）
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,7 +20,6 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use tokio_util::sync::CancellationToken;
 
-use crate::db::jobs as dbjobs;
 use crate::db::{now_epoch, Result as DbResult};
 use crate::jobs::{
     BoxFuture, EnqueueResult, Handler, HandlerResult, JobContext, JobError, JobType, Jobs, NewJob,
@@ -147,17 +147,9 @@ fn is_tmp_file_name(name: &str) -> bool {
 
 // ---------------------------------------------------------------- スケジューラ
 
-/// 最後の終端 `backup` から `interval_secs` 経ったか。一度も無ければ true。
-/// 時計が戻って `last` が未来にあるときは due にしない（次の実機時刻で自然に解消する）
-pub fn is_due(last: Option<i64>, now: i64, interval_secs: i64) -> bool {
-    match last {
-        None => true,
-        Some(last) => now >= last && now - last >= interval_secs,
-    }
-}
+pub use crate::jobs::scheduler::is_due;
 
-/// 周期投入のタスクを起動する。起動直後に一度判定し、以後は due までの残りか
-/// [`SCHEDULER_TICK`] の短い方だけ待って見直す。投入の重複は dedup key が防ぐ
+/// 周期投入のタスクを起動する（`jobs::scheduler`）。投入の重複は dedup key が防ぐ
 pub fn spawn_scheduler(
     jobs: Arc<Jobs>,
     interval_hours: u32,
@@ -178,40 +170,15 @@ pub fn spawn_scheduler_with(
     tick: Duration,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let wait = match jobs
-                .db()
-                .read(|c| dbjobs::last_finished_at(c, JobType::Backup))
-                .await
-            {
-                Ok(last) => {
-                    let now = now_epoch();
-                    if is_due(last, now, interval_secs) {
-                        match enqueue_backup(&jobs).await {
-                            Ok(EnqueueResult::Inserted(id)) => {
-                                tracing::info!(job_id = id, "定期バックアップを投入した")
-                            }
-                            Ok(EnqueueResult::Duplicate(_)) => {}
-                            Err(e) => tracing::warn!(error = %e, "定期バックアップを投入できない"),
-                        }
-                        tick
-                    } else {
-                        let remaining = last.map_or(0, |l| l + interval_secs - now).max(1);
-                        tick.min(Duration::from_secs(remaining as u64))
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "バックアップの due 判定に失敗");
-                    tick
-                }
-            };
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(wait) => {}
-            }
-        }
-    })
+    crate::jobs::scheduler::spawn_periodic(
+        jobs,
+        JobType::Backup,
+        new_backup_job,
+        interval_secs,
+        tick,
+        "定期バックアップ",
+        shutdown,
+    )
 }
 
 // ---------------------------------------------------------------- ハンドラ

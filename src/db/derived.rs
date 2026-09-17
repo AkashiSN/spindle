@@ -309,11 +309,11 @@ pub fn enqueue_all_stale(conn: &Connection, now: i64) -> Result<Vec<i64>> {
 
 /// `key`（Derived の canonical key）をジョブ `job_id` のために予約する。別のジョブが持っていれば
 /// false。持ち主のジョブが `running` でなくなっていれば（panic / 強制終了）無効として奪う。
-/// 同じジョブの再取得は true
+/// 同じジョブの再取得は true。`track_id` は GC の予約（孤児の削除。D-56）では `None`
 pub fn lock_path(
     conn: &Connection,
     key: &str,
-    track_id: i64,
+    track_id: Option<i64>,
     job_id: i64,
     now: i64,
 ) -> Result<bool> {

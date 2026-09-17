@@ -6,6 +6,7 @@ pub mod auth;
 pub mod batch;
 pub mod error;
 pub mod events;
+pub mod gc;
 pub mod health;
 pub mod history;
 pub mod jobs;
@@ -80,6 +81,8 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/{id}/retry", post(jobs::retry))
         .route("/events", get(events::stream))
         .route("/scan", post(scan::start))
+        .route("/gc", post(gc::start))
+        .route("/gc/preview", get(gc::preview))
         .fallback(api_not_found);
 
     let protected = Router::new()
