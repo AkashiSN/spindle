@@ -349,6 +349,16 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
   `OpusHead` の output gain は 0 のまま触らない（合成すると再解析時に二重に掛かる）
 - `rg_scanned_at` と `rg_written_at` を分離。数万件のスキャン後に書き込みが中断しても
   再スキャンなしで書き込みのみ再開できる
+- **タグ書き込みは通常の編集バッチ**（`POST /api/rg/write { selection }` → tags op。旧値の
+  記録・overlay・巻き戻しはタグ編集と同じ）。書くキーは形式ごとに固定で、値の無いキーは消す
+  （Opus: `R128_TRACK_GAIN` / `R128_ALBUM_GAIN` を書き `REPLAYGAIN_*` を消す。他形式:
+  `REPLAYGAIN_TRACK_GAIN` `+0.00 dB` / `REPLAYGAIN_TRACK_PEAK` `0.000000`（線形、true peak）/
+  `REPLAYGAIN_ALBUM_*`。album の値が無いトラックは album のキーを消す。D-48）
+- **`rg_written_at` は「ファイルの RG タグが解析値と一致していると確認した時刻」**。書き込み
+  バッチの applied だけでなく、DB をファイルの現在値へ揃えるすべての経路（overlay の解消・
+  外部変更の追随・巻き戻し）で判定し直し、一致しなければ NULL に戻す。再解析で値が変わった
+  行も NULL にする（秒単位の時刻では同じ秒の再解析を `<` で検出できない）。DB のタグが既に
+  一致している行は op にせず `rg_written_at` だけ立てる
 - album gain は `album_id` 単位。**2ch 以外は album 集計から除外**（判定はデコード結果の
   チャンネル数。除外されたトラックの album の値は NULL）。構成トラックが 1 本でも
   デコードできなければ album 全体を書かない（D-47）
@@ -757,6 +767,10 @@ POST   /api/rename/preview                        テンプレート適用結果
 POST   /api/rename/apply                          token の集合をリネームバッチとして記録
 POST   /api/normalize/preview                     ロスレス → FLAC 正規化の宛先（selection_token を発行）
 POST   /api/normalize/apply                       token の集合を正規化バッチとして記録（§7.4）
+POST   /api/rg                                    { selection }。album ごとに rg ジョブを投入（D-47）
+POST   /api/rg/write                              { selection, description?, skip_pending? }。解析値を
+                                                  タグとして書く編集バッチを記録（§6、D-48）。
+                                                  preview 段階は無い（値は DB から決まる）
 
 GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
 GET    /api/categories, POST /api/categories
@@ -805,7 +819,7 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //     "album_id": 12,                  // ツリー
 //     "playlist_id": 3,                // プレイリスト所属
 //     "flags": ["missing", "pending"], // 固定フィルタ（AND）: unverified | duplicate | missing |
-//                                      //   no_rg | pending | conflict | hardlink
+//                                      //   no_rg | rg_unwritten | pending | conflict | hardlink
 //     "q": "情緒" }                    // 検索語（3 文字以上 FTS5 / 未満 LIKE）
 //   cursor は前ページの next_cursor をそのまま返す不透明文字列（キーセット）。sort が変わったら
 //   捨てる（別ソートで発行したカーソルは 400）。

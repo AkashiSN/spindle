@@ -17,8 +17,8 @@
 //!   デコードした結果で判定する（ファイルが正）
 //! - 書き込みは 1 トランザクション。**その中で構成を読み直し**、解析した行の集合（id と stat）と
 //!   違えば（scanner が missing にした・別 album へ移した・新しいトラックが加わった・同じ行を
-//!   別実体へ追随させた）何も書かずに失敗する。`rg_scanned_at` だけ更新し、`rg_written_at`（P1-2）・`audio_version` /
-//!   `tag_version` は動かさない
+//!   別実体へ追随させた）何も書かずに失敗する。`rg_scanned_at` だけ更新し、`audio_version` /
+//!   `tag_version` は動かさない（`rg_written_at` は値が変わった行だけ NULL。D-48）
 //! - 無音（絶対ゲート以下）は gain 0 dB（`domain::replaygain`）
 
 use std::fs::File;

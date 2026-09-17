@@ -1367,8 +1367,8 @@ Archive から move で戻す（Archive の追記のみの原則に例外が増�
   PCM は ffmpeg の `f32le` を stdout のチャンクで受ける。WavPack / APE は lofty の属性 + ffmpeg）。
   ffmpeg の stdout はメモリに溜めない（`ExternalCommand::stdout_channel`。受け手が消えたら子を
   グループごと止める。SIGPIPE を無視する子でもタイムアウトまで待たない）
-- **`rg_scanned_at` だけ更新**し、`rg_written_at`（P1-2）と `audio_version` / `tag_version` は
-  動かさない。走査中に missing になった行は書かない
+- **`rg_scanned_at` だけ更新**し、`audio_version` / `tag_version` は動かさない（`rg_written_at`
+  は値が変われば NULL。D-48）。走査中に missing になった行は書かない
 
 **理由**: rg ジョブは SPEC §8 で album_id 単位・CPU コア数並列と決まっているが、起動の入口が
 §9 に無かった。selection で受ければ UI の選択・フィルタとそのまま繋がり、移行直後の「全曲」も
@@ -1381,3 +1381,52 @@ Archive から move で戻す（Archive の追記のみの原則に例外が増�
 
 **未決**: 外部で音声が差し替わって `audio_version` が上がったとき `rg_scanned_at` を NULL に
 戻すか（現状は残る。scanner に足すなら別タスク）。
+
+## D-48 ReplayGain のタグ書き込みは通常の編集バッチに乗せる（実装合わせ）
+
+**決定**（P1-2）:
+
+- **`POST /api/rg/write { selection, description?, skip_pending? }`** で、selection の解析済み
+  トラックについて DB の `rg_*` を形式ごとのタグに変換した **tags op の編集バッチ**を記録する
+  （`Editor::prepare_rg_write`）。旧値の記録・DB 先行更新（overlay）・track 単位の tagwrite・
+  事前条件・巻き戻し・キャンセル・リカバリはタグ編集と共通で、専用のジョブ種別も op 種別も持たない。
+  preview 段階は無い（値は DB から一意に決まり、ユーザが選ぶものが無い）。反映待ちがあれば 409
+  `pending`（`skip_pending` で除外）、書く行も一致済みの行も無ければ 409 `no_changes`、
+  `[replaygain].write_tags = false` なら 409 `rg_write_disabled`
+- **書くキーは形式ごとに固定し、値の無いキーは消す。** Opus は `R128_TRACK_GAIN` /
+  `R128_ALBUM_GAIN`（Q7.8、-23 LUFS 基準。SPEC §6 の式）だけを書き、`REPLAYGAIN_*` 4 キーは
+  消す（RFC 7845 §5.2.1 は Opus に `REPLAYGAIN_*` を使わないとしている。両方あると基準の違う
+  値をプレイヤーが拾う）。他形式は `REPLAYGAIN_TRACK_GAIN`（`+0.00 dB`、小数 2 桁、-18 LUFS
+  基準）/ `REPLAYGAIN_TRACK_PEAK`（線形の true peak、小数 6 桁。1.0 を超えうる）/
+  `REPLAYGAIN_ALBUM_GAIN` / `REPLAYGAIN_ALBUM_PEAK` を書き、`R128_*` は触らない（Opus 専用で
+  generic Tag に写像できない）。album の値を持たないトラック（album 無し・2ch 以外）は album
+  のキーを消す。MP4 / MP3 / APE 等へは lofty の写像（`----:com.apple.iTunes:replaygain_*`、
+  `TXXX:REPLAYGAIN_*`）で書く。`OpusHead` の output gain は触らない（SPEC §6）
+- **`rg_written_at` はフラグではなく「ファイルの RG タグが解析値と一致していると確認した時刻」。**
+  書き込み op の applied に限らず、DB をファイルの現在値へ揃える経路（`sync_track_to_file`:
+  applied の追随、overlay の解消、外部変更の採用）のすべてで `file_matches` を判定し直し、
+  一致すれば `now`、一致しなければ NULL にする。DB のタグが既に変換結果と一致している行
+  （再解析で同じ値になった、前回の書き込みが済んでいる）は op にせず `rg_written_at` だけ立てる
+  （DB のタグはファイルのキャッシュなので、pending が無ければファイルも一致している）。
+  巻き戻しやユーザの手編集で RG のキーが解析値と違う値になれば自動的に NULL に戻る。
+  **再解析（`db::replaygain::store`）で値が 1 つでも変わった行も NULL にする**（時刻が秒単位
+  なので、確認と再解析が同じ秒に起きると `rg_written_at < rg_scanned_at` では検出できない）。
+  値が全て同じで確認が有効なら確認時刻を `now` へ進める（同じ値の再解析で未書き込みに落とさない）
+- 一覧のフィルタに **`rg_unwritten`**（`rg_scanned_at IS NOT NULL AND (rg_written_at IS NULL OR
+  rg_written_at < rg_scanned_at)`）を足す。移行直後の「解析済み全曲を書く」は
+  `filter = {"flags":["rg_unwritten"]}` で表現する。UI の起動ボタンは未着手
+
+**理由**: 不変条件 4（タグ書き込みは旧値を記録してから）と 3（タグだけの変更で `audio_version` を
+上げない）は編集バッチがそのまま満たす。専用ジョブにすると事前条件・overlay・巻き戻しを二重に
+持つことになる。`rg_written_at` を op の属性（書き込みバッチかどうかのフラグ）にすると、巻き戻しや
+手編集でファイルの RG タグが変わっても「書き込み済み」のまま残り、UI の半透明表示が嘘になる。
+ファイルの内容から判定すれば不変条件 1（ファイルが正）と整合する。
+
+**却下**: 値だけ書いて他のキーを残す（Opus に `REPLAYGAIN_*` と `R128_*` が併存する、mono に
+なった曲の古い album gain が残る）。書き込み専用の op 種別 / ジョブ種別。preview → apply の
+2 段階（選ぶものが無い）。
+
+**未決**: スキャナが外部のタグ変更を取り込んだときの `rg_written_at` の判定（現状はスキャンでは
+触らない。外部ツールが RG タグを消しても `rg_written_at` は残る。P1-0 か scanner の別タスクで
+`sync_written_at` を呼ぶ）。`tag_version` が進むので Derived の追随（P1-10）が RG タグを
+`R128_*` へ変換して埋める（SPEC §7.6）のは P1-10 側の責務。

@@ -417,9 +417,24 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
       未決: `audio_version` が上がったときの `rg_scanned_at` の扱い（D-47）。UI の起動導線は P1-2 か
       一括編集パネルの拡張で載せる
-- [ ] **P1-2** RG タグ書き込み（Opus のみ -23 LUFS 基準の Q7.8:
+- [x] **P1-2** RG タグ書き込み（Opus のみ -23 LUFS 基準の Q7.8:
       `round((G18 - 5.0) * 256)` を符号付き 16bit に飽和。SPEC §6 のテストベクトルを
-      単体テストに置く。`rg_scanned_at` と `rg_written_at` を分離）
+      単体テストに置く。`rg_scanned_at` と `rg_written_at` を分離。D-48）
+      - [x] `domain::replaygain`: `opus_r128` / `rg2_gain_db` / `tag_changes`（形式ごとの固定キー集合。
+            値の無いキーは削除）/ `file_matches`
+      - [x] `Editor::prepare_rg_write`: 解析済みトラックを tags op の編集バッチとして記録（旧値・overlay・
+            tagwrite・巻き戻しはタグ編集と共通）。DB のタグが既に一致する行は `rg_written_at` だけ立てる
+      - [x] `rg_written_at` はファイルの現在値から判定（`db::replaygain::sync_written_at`。applied の追随・
+            overlay の解消・巻き戻し・手編集で自動的に立つ / 消える）
+      - [x] `POST /api/rg/write { selection, description?, skip_pending? }`（`api::rg::write`。missing は対象外）、
+            フィルタ `rg_unwritten`。UI の起動ボタンは未着手
+
+      受け入れ: `tests/replaygain.rs`（SPEC §6 のテストベクトル、飽和、書式、形式ごとのキー集合、
+      `file_matches`）、`tests/rg_write.rs`（FLAC / Opus / MP4 への書き込みと `rg_written_at`、一致済みは
+      バッチ無し、未解析の除外、pending、巻き戻し・手編集・conflict で NULL、再解析後の再書き込み）、
+      `tests/rg_write_api.rs`
+
+      未決: スキャナが外部のタグ変更を取り込んだときの `rg_written_at` の判定（D-48）
 - [ ] **P1-3** アートワーク（埋め込み / `cover.jpg` 両対応、抽出・一括差し替え、
       WebP サムネイル生成とキャッシュ。アルバムグリッド画面 → クリックで表を `album_id` に絞る）
 - [x] **P1-4** ロスレス → FLAC 正規化（WAV / ALAC / AIFF。D-45 / D-46。変換前後の PCM MD5 照合。

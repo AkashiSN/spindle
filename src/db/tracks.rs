@@ -183,6 +183,9 @@ fn filter_where(f: &Filter) -> Where {
             }
             Flag::Missing => "t.missing_since IS NOT NULL",
             Flag::NoRg => "t.rg_scanned_at IS NULL",
+            Flag::RgUnwritten => {
+                "t.rg_scanned_at IS NOT NULL AND (t.rg_written_at IS NULL OR t.rg_written_at < t.rg_scanned_at)"
+            }
             // pending / conflict は行ごとの相関サブクエリにしない。該当行は少数（数十〜数千）で
             // 全行を歩くと 6 万回の索引検索になる（計測で 120ms）。op 側から集合を作って IN で引く
             Flag::Pending => {

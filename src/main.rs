@@ -108,7 +108,9 @@ async fn main() -> anyhow::Result<()> {
                 state.config.paths.data.join(TMP_DIR_NAME),
             ),
             retention_days: state.config.gc.retention_days,
-        }),
+        })
+        // ReplayGain のタグ変換と rg_written_at の判定の基準（P1-2）
+        .with_replaygain_reference(state.config.replaygain.reference_lufs),
     );
     state = state.with_editor(Arc::clone(&editor));
     let edit_recovered = editor

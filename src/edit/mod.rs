@@ -34,11 +34,13 @@ use serde::Serialize;
 
 use crate::db::history::{self, BatchState, Op, OpKind, OpResult, Precondition, CANCELLED_ERROR};
 use crate::db::jobs as dbjobs;
+use crate::db::replaygain as dbrg;
 use crate::db::scans::{self, CacheColumns, Fingerprint, Physical, TrackContent};
 use crate::db::{now_epoch, Db, DbError};
 use crate::domain::relpath::{RelPath, RelPathError};
+use crate::domain::replaygain::tag_changes as rg_tag_changes;
 use crate::domain::tags::{
-    normalize_tags, read_audio_file, tag_hash, write_tag_changes, TagReadError, TagSet,
+    normalize_tags, read_audio_file, tag_hash, write_tag_changes, Codec, TagReadError, TagSet,
     TagWriteError,
 };
 use crate::fsroot::{self, FsError, RootDir};
@@ -78,6 +80,24 @@ pub struct Prepared {
     pub conflict: usize,
     pub job_ids: Vec<i64>,
     /// 記録の時点で終端になった（全件 conflict）ときの batch イベント
+    #[serde(skip)]
+    pub event: Option<BatchEvent>,
+}
+
+/// `prepare_rg_write` の結果
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RgWritePrepared {
+    /// 記録したバッチ。書く行が無ければ None
+    pub batch_id: Option<i64>,
+    /// 記録した op 数
+    pub affected: usize,
+    /// DB のタグが既に変換結果と一致していたので `rg_written_at` だけ立てた行数
+    pub unchanged: usize,
+    /// 未解析（`rg_scanned_at IS NULL`）で対象外の行数
+    pub unscanned: usize,
+    /// missing で対象外の行数（ファイルが無いので書けない）
+    pub missing: usize,
+    pub job_ids: Vec<i64>,
     #[serde(skip)]
     pub event: Option<BatchEvent>,
 }
@@ -169,6 +189,9 @@ pub struct Editor {
     /// ロスレス正規化の環境（Archive root / エンコーダ）。無ければ正規化は使えない（P1-4）
     normalize: Option<NormalizeEnv>,
     normalize_hook: Mutex<Option<NormalizeHook>>,
+    /// ReplayGain の内部基準（LUFS。`[replaygain].reference_lufs`）。タグへの変換と
+    /// `rg_written_at` の判定に使う（P1-2）
+    rg_reference: f64,
 }
 
 /// tagwrite ジョブの dedup key（SPEC §8）
@@ -301,7 +324,14 @@ impl Editor {
             rename_hook: Mutex::new(None),
             normalize: None,
             normalize_hook: Mutex::new(None),
+            rg_reference: -18.0,
         }
+    }
+
+    /// ReplayGain の内部基準（`[replaygain].reference_lufs`）。既定は -18 LUFS
+    pub fn with_replaygain_reference(mut self, reference_lufs: f64) -> Self {
+        self.rg_reference = reference_lufs;
+        self
     }
 
     /// ロスレス正規化（P1-4）を有効にする
@@ -385,6 +415,40 @@ impl Editor {
         Ok(prepared)
     }
 
+    /// ReplayGain の解析値（`rg_*` 列）を形式ごとのタグに変換して書く編集バッチを記録する
+    /// （SPEC §6「ReplayGain の内部表現」、P1-2）。通常の tags バッチと同じ機構に乗る
+    /// （旧値の記録、overlay、track 単位の tagwrite、巻き戻し）。
+    ///
+    /// - 未解析（`rg_scanned_at IS NULL`）の行は対象外（`unscanned`）、missing も対象外（`missing`）
+    /// - DB のタグが既に変換結果と一致する行は op にせず `rg_written_at` だけ `now` にする
+    ///   （`unchanged`。DB のタグはファイルのキャッシュなので、ファイルも一致している）
+    /// - 対象トラックに pending の op があれば何も記録せず [`EditError::Pending`]
+    pub async fn prepare_rg_write(
+        &self,
+        description: Option<&str>,
+        track_ids: Vec<i64>,
+    ) -> Result<RgWritePrepared, EditError> {
+        let description = description.map(str::to_owned);
+        let reference = self.rg_reference;
+        let prepared = self
+            .db
+            .write(move |c| {
+                Ok(prepare_rg_write_tx(
+                    c,
+                    description.as_deref(),
+                    &track_ids,
+                    reference,
+                    now_epoch(),
+                ))
+            })
+            .await??;
+        self.jobs.notify_enqueued(&prepared.job_ids).await;
+        if let Some(ev) = &prepared.event {
+            self.jobs.publish(Event::Batch(ev.clone()));
+        }
+        Ok(prepared)
+    }
+
     // ------------------------------------------------------------ apply
 
     /// pending の op をファイルへ反映する（tagwrite ジョブの本体。何度呼んでも結果は同じ）。
@@ -415,6 +479,7 @@ impl Editor {
         };
 
         let batch_id = op.batch_id;
+        let reference = self.rg_reference;
         let (outcome, event, followup_jobs) = self
             .db
             .write(move |c| {
@@ -424,7 +489,7 @@ impl Editor {
                 let outcome = match staged {
                     Staged::Written(fs) | Staged::AlreadyMatches(fs) => {
                         history::finish_op(&tx, op.id, OpResult::Applied, None, job_id, now)?;
-                        sync_track_to_file(&tx, op.track_id, &fs)?;
+                        sync_track_to_file(&tx, op.track_id, &fs, reference, now)?;
                         if let Some(id) = enqueue_derived_retag(&tx, op.track_id, now)? {
                             followup_jobs.push(id);
                         }
@@ -439,7 +504,7 @@ impl Editor {
                             job_id,
                             now,
                         )? {
-                            resolve_overlay(&tx, &op, &edits, current.as_ref())?;
+                            resolve_overlay(&tx, &op, &edits, current.as_ref(), reference, now)?;
                         }
                         OpOutcome::Conflict(reason)
                     }
@@ -452,7 +517,7 @@ impl Editor {
                             job_id,
                             now,
                         )? {
-                            resolve_overlay(&tx, &op, &edits, current.as_ref())?;
+                            resolve_overlay(&tx, &op, &edits, current.as_ref(), reference, now)?;
                         }
                         OpOutcome::Failed(reason)
                     }
@@ -507,6 +572,7 @@ impl Editor {
         };
         let error = error.to_owned();
         let batch_id = op.batch_id;
+        let reference = self.rg_reference;
         let (closed, event) = self
             .db
             .write(move |c| {
@@ -515,7 +581,7 @@ impl Editor {
                 let closed =
                     history::finish_op(&tx, op.id, OpResult::Failed, Some(&error), job_id, now)?;
                 if closed && has_overlay {
-                    resolve_overlay(&tx, &op, &edits, current.as_ref())?;
+                    resolve_overlay(&tx, &op, &edits, current.as_ref(), reference, now)?;
                 }
                 let event = match history::aggregate_batch(&tx, batch_id, now)? {
                     Some(state) => Some(batch_event(&tx, batch_id, state)?),
@@ -880,12 +946,27 @@ pub(super) fn prepare_tags_tx(
     now: i64,
 ) -> Result<Prepared, EditError> {
     let tx = conn.transaction()?;
+    let prepared = prepare_tags_in(&tx, description, targets, eval, reverts_batch_id, now)?;
+    tx.commit()?;
+    Ok(prepared)
+}
+
+/// 呼び出し側のトランザクション `tx` の中でタグ編集バッチを記録する（[`prepare_tags_tx`] の本体。
+/// 同じトランザクションで他の更新も行いたい呼び出し側が使う）
+fn prepare_tags_in(
+    tx: &Connection,
+    description: Option<&str>,
+    targets: &[PlanTarget],
+    eval: &Evaluator,
+    reverts_batch_id: Option<i64>,
+    now: i64,
+) -> Result<Prepared, EditError> {
     let mut ids: Vec<i64> = targets.iter().map(|t| t.track_id).collect();
     ids.sort_unstable();
     if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
         return Err(EditError::DuplicateTrack(w[0]));
     }
-    let pending = history::pending_track_ids(&tx, &ids)?;
+    let pending = history::pending_track_ids(tx, &ids)?;
     if !pending.is_empty() {
         return Err(EditError::Pending { track_ids: pending });
     }
@@ -894,14 +975,14 @@ pub(super) fn prepare_tags_tx(
     let mut conflicts: Vec<ConflictTarget> = Vec::new();
     let mut unchanged = 0;
     for target in targets {
-        let current_pre = history::precondition_of_track(&tx, target.track_id)?
+        let current_pre = history::precondition_of_track(tx, target.track_id)?
             .ok_or(EditError::TrackNotFound(target.track_id))?;
         let expected = target.expected.clone().unwrap_or(current_pre);
-        let tag_version = history::track_tag_version(&tx, target.track_id)?
+        let tag_version = history::track_tag_version(tx, target.track_id)?
             .ok_or(EditError::TrackNotFound(target.track_id))?;
         if let Some(reason) = &target.conflict {
             // 意図していた変更は評価して edits に残す（履歴で何を戻そうとしたか分かるように）
-            let current = history::load_track_tags(&tx, target.track_id)?;
+            let current = history::load_track_tags(tx, target.track_id)?;
             let changes = match eval(target, &current) {
                 Ok(new_set) => diff_sets(&current, &new_set),
                 Err(_) => Vec::new(),
@@ -925,7 +1006,7 @@ pub(super) fn prepare_tags_tx(
                 continue;
             }
         }
-        let current = history::load_track_tags(&tx, target.track_id)?;
+        let current = history::load_track_tags(tx, target.track_id)?;
         let new_set = eval(target, &current).map_err(EditError::Internal)?;
         let changes = diff_sets(&current, &new_set);
         if changes.is_empty() {
@@ -945,26 +1026,20 @@ pub(super) fn prepare_tags_tx(
     }
 
     let affected = planned.len() + conflicts.len();
-    let batch_id = history::insert_batch(&tx, description, affected as i64, reverts_batch_id, now)?;
+    let batch_id = history::insert_batch(tx, description, affected as i64, reverts_batch_id, now)?;
     let mut job_ids = Vec::with_capacity(planned.len());
     let mut ordinal = 0i64;
     for p in &planned {
-        let op_id = history::insert_op(
-            &tx,
-            batch_id,
-            ordinal,
-            p.track_id,
-            OpKind::Tags,
-            &p.expected,
-        )?;
+        let op_id =
+            history::insert_op(tx, batch_id, ordinal, p.track_id, OpKind::Tags, &p.expected)?;
         ordinal += 1;
         for (key, old, new) in &p.changes {
-            history::insert_edit(&tx, op_id, key, old, new)?;
+            history::insert_edit(tx, op_id, key, old, new)?;
         }
         // overlay: DB を新値へ。tag_version はトラックごとに 1 回だけ進める
         let hash = tag_hash(&p.new_set);
         history::set_track_tags(
-            &tx,
+            tx,
             p.track_id,
             &p.new_set,
             Some(&hash),
@@ -972,26 +1047,20 @@ pub(super) fn prepare_tags_tx(
             p.tag_version,
         )?;
         let job = tagwrite_job(p.track_id, p.tag_version, op_id, batch_id);
-        let job_id = dbjobs::enqueue(&tx, &job, now)?.id();
-        history::set_op_job(&tx, op_id, job_id)?;
+        let job_id = dbjobs::enqueue(tx, &job, now)?.id();
+        history::set_op_job(tx, op_id, job_id)?;
         job_ids.push(job_id);
     }
     // preview 後に版が進んだ行は conflict として記録だけする（DB も版も触らない）
     for c in &conflicts {
-        let op_id = history::insert_op(
-            &tx,
-            batch_id,
-            ordinal,
-            c.track_id,
-            OpKind::Tags,
-            &c.expected,
-        )?;
+        let op_id =
+            history::insert_op(tx, batch_id, ordinal, c.track_id, OpKind::Tags, &c.expected)?;
         ordinal += 1;
         for (key, old, new) in &c.changes {
-            history::insert_edit(&tx, op_id, key, old, new)?;
+            history::insert_edit(tx, op_id, key, old, new)?;
         }
         history::finish_op(
-            &tx,
+            tx,
             op_id,
             OpResult::SkippedConflict,
             Some(&c.error),
@@ -1000,11 +1069,10 @@ pub(super) fn prepare_tags_tx(
         )?;
     }
     // 全件 conflict なら pending が無いので、ここで終端にする
-    let event = match history::aggregate_batch(&tx, batch_id, now)? {
-        Some(state) => Some(batch_event(&tx, batch_id, state)?),
+    let event = match history::aggregate_batch(tx, batch_id, now)? {
+        Some(state) => Some(batch_event(tx, batch_id, state)?),
         None => None,
     };
-    tx.commit()?;
     tracing::info!(
         batch_id,
         affected,
@@ -1020,6 +1088,110 @@ pub(super) fn prepare_tags_tx(
         job_ids,
         event,
     })
+}
+
+/// [`Editor::prepare_rg_write`] のトランザクション本体
+fn prepare_rg_write_tx(
+    conn: &mut Connection,
+    description: Option<&str>,
+    track_ids: &[i64],
+    reference: f64,
+    now: i64,
+) -> Result<RgWritePrepared, EditError> {
+    let tx = conn.transaction()?;
+    let mut ids: Vec<i64> = track_ids.to_vec();
+    ids.sort_unstable();
+    if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
+        return Err(EditError::DuplicateTrack(w[0]));
+    }
+    let pending = history::pending_track_ids(&tx, &ids)?;
+    if !pending.is_empty() {
+        return Err(EditError::Pending { track_ids: pending });
+    }
+    let rows = dbrg::write_rows(&tx, &ids)?;
+    if let Some(missing) = ids.iter().find(|id| !rows.iter().any(|r| r.id == **id)) {
+        return Err(EditError::TrackNotFound(*missing));
+    }
+    let mut unscanned = 0usize;
+    let mut missing = 0usize;
+    // op の順序（ordinal）を id 順で安定させる
+    let mut changes: std::collections::BTreeMap<i64, Vec<(String, Vec<String>)>> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        if row.missing {
+            missing += 1;
+            continue;
+        }
+        let Some(v) = row.values else {
+            unscanned += 1;
+            continue;
+        };
+        let codec = Codec::parse(&row.codec).unwrap_or(Codec::Flac);
+        let cs = rg_tag_changes(codec, &v, reference)
+            .into_iter()
+            .map(|c| {
+                let c = c.normalized();
+                (c.key, c.values.unwrap_or_default())
+            })
+            .collect();
+        changes.insert(row.id, cs);
+    }
+    let targets: Vec<PlanTarget> = changes
+        .keys()
+        .copied()
+        .enumerate()
+        .map(|(index, track_id)| PlanTarget {
+            track_id,
+            expected_tag_version: None,
+            index,
+            expected: None,
+            conflict: None,
+        })
+        .collect();
+    let mut prepared = RgWritePrepared {
+        batch_id: None,
+        affected: 0,
+        unchanged: 0,
+        unscanned,
+        missing,
+        job_ids: Vec::new(),
+        event: None,
+    };
+    if targets.is_empty() {
+        tx.commit()?;
+        return Ok(prepared);
+    }
+    let eval = move |t: &PlanTarget, current: &TagSet| -> Result<TagSet, String> {
+        let cs = changes.get(&t.track_id).cloned().unwrap_or_default();
+        Ok(with_replaced(current, cs))
+    };
+    // op になったトラック以外（DB のタグが既に変換結果と一致）は、ファイルも一致している
+    // （DB はファイルのキャッシュ）ので rg_written_at だけ立てる
+    let mut written: Vec<i64> = targets.iter().map(|t| t.track_id).collect();
+    match prepare_tags_in(&tx, description, &targets, &eval, None, now) {
+        Ok(p) => {
+            for op in history::list_ops(&tx, p.batch_id)? {
+                written.retain(|id| *id != op.track_id);
+            }
+            prepared.batch_id = Some(p.batch_id);
+            prepared.affected = p.affected;
+            prepared.job_ids = p.job_ids;
+            prepared.event = p.event;
+        }
+        Err(EditError::NoChanges) => {}
+        Err(e) => return Err(e),
+    }
+    prepared.unchanged = dbrg::set_written(&tx, &written, now)?;
+    tx.commit()?;
+    tracing::info!(
+        batch_id = ?prepared.batch_id,
+        affected = prepared.affected,
+        unchanged = prepared.unchanged,
+        unscanned,
+        missing,
+        "ReplayGain の書き込みバッチを記録した"
+    );
+    Ok(prepared)
 }
 
 // ---------------------------------------------------------------- apply（ファイル側、同期）
@@ -1283,11 +1455,20 @@ fn enqueue_derived_retag(
 /// `tag_version` は動かさない。外部の実体を採用する（`fp` あり）ときはスキャナと同じ規則で
 /// フィンガープリントを比べ、音声が変わっていれば `audio_version` を進める
 /// （物理属性が新ファイルに揃うので、次回スキャンには「変更なし」と見える。ここで確定しないと
-/// 音声の差し替えを deep scan まで拾えない）
-fn sync_track_to_file(tx: &Connection, track_id: i64, fs: &FileState) -> crate::db::Result<()> {
+/// 音声の差し替えを deep scan まで拾えない）。
+/// ファイルの RG タグが解析値と一致するかも判定し直し、`rg_written_at` を追随させる
+/// （`reference` は RG の内部基準 LUFS。P1-2）
+fn sync_track_to_file(
+    tx: &Connection,
+    track_id: i64,
+    fs: &FileState,
+    reference: f64,
+    now: i64,
+) -> crate::db::Result<()> {
     let row = scans::load_current_row(tx, track_id)?;
     history::set_track_physical(tx, track_id, &fs.ph)?;
     scans::update_content(tx, track_id, &fs.content, row.tag_version)?;
+    dbrg::sync_written_at(tx, track_id, &fs.content.tags, reference, now)?;
     if let Some(fp) = fs.fp {
         let audio_version = if audio_changed(fp, row.audio_md5, row.audio_fp) {
             tracing::info!(
@@ -1311,9 +1492,11 @@ fn resolve_overlay(
     op: &Op,
     edits: &[history::Edit],
     current: Option<&FileState>,
+    reference: f64,
+    now: i64,
 ) -> crate::db::Result<()> {
     if let Some(fs) = current {
-        return sync_track_to_file(tx, op.track_id, fs);
+        return sync_track_to_file(tx, op.track_id, fs, reference, now);
     }
     let tag_version = history::track_tag_version(tx, op.track_id)?.unwrap_or(1);
     let now = history::load_track_tags(tx, op.track_id)?;

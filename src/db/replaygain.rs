@@ -1,10 +1,16 @@
-//! ReplayGain の解析結果の読み書き（SPEC §6「ReplayGain の内部表現」、P1-1）。
-//! 値は内部表現（-18 LUFS 基準の dB、peak は線形）。タグへの書き込み状態（`rg_written_at`）は
-//! ここでは触らない（P1-2）
+//! ReplayGain の解析結果の読み書き（SPEC §6「ReplayGain の内部表現」、P1-1 / P1-2）。
+//! 値は内部表現（-18 LUFS 基準の dB、peak は線形）。
+//!
+//! `rg_written_at` は「ファイルの RG タグが解析値と一致していることを確認した時刻」。書き込み
+//! バッチの applied だけでなく、DB をファイルの現在値へ揃える経路（overlay の解消、外部変更の
+//! 追随）でも [`sync_written_at`] で判定し直す。`rg_scanned_at` より古ければ UI は「書き込み
+//! 未反映」として見せる
 
 use rusqlite::{params, Connection};
 
 use super::Result;
+use crate::domain::replaygain::file_matches;
+use crate::domain::tags::{Codec, TagSet};
 
 /// 解析対象の 1 行（active なトラックだけ）。stat の列は「開いた FD がこの行の実体か」の
 /// 照合用（パスは識別子ではない。SPEC §6）
@@ -68,21 +74,24 @@ pub fn track_member(conn: &Connection, track_id: i64) -> Result<Vec<Member>> {
     Ok(rows)
 }
 
-/// 1 トラック分の書き込み値。album 側は集計に入らないトラック（2ch 以外、album 無し）で `None`
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Values {
-    pub track_gain: f64,
-    pub track_peak: f64,
-    pub album_gain: Option<f64>,
-    pub album_peak: Option<f64>,
-}
+pub use crate::domain::replaygain::Values;
 
 /// 解析結果をまとめて書く（呼び出し側のトランザクション内）。`rg_scanned_at` を `now` にし、
-/// `rg_written_at` と版は動かさない。走査中に missing になった行は書かない
+/// 版は動かさない。走査中に missing になった行は書かない。
+///
+/// `rg_written_at` は「ファイルのタグが解析値と一致していると確認した時刻」なので、値が
+/// 1 つでも変われば NULL にする（ファイルは旧値のまま）。時刻が秒単位のため、同じ秒に確認と
+/// 再解析が起きると `rg_written_at < rg_scanned_at` では検出できない。値が全て同じで確認が
+/// 有効（`rg_written_at >= rg_scanned_at`）なら確認は成り立ったままなので `now` へ進める
 pub fn store(conn: &Connection, results: &[(i64, Values)], now: i64) -> Result<usize> {
     let mut st = conn.prepare_cached(
         "UPDATE tracks
-            SET rg_track_gain = ?2, rg_track_peak = ?3, rg_album_gain = ?4, rg_album_peak = ?5,
+            SET rg_written_at = CASE
+                  WHEN rg_track_gain IS ?2 AND rg_track_peak IS ?3
+                   AND rg_album_gain IS ?4 AND rg_album_peak IS ?5
+                   AND rg_written_at IS NOT NULL AND rg_written_at >= rg_scanned_at
+                  THEN ?6 ELSE NULL END,
+                rg_track_gain = ?2, rg_track_peak = ?3, rg_album_gain = ?4, rg_album_peak = ?5,
                 rg_scanned_at = ?6
           WHERE id = ?1 AND missing_since IS NULL",
     )?;
@@ -124,4 +133,85 @@ pub fn scopes_of(conn: &Connection, track_ids: &[i64]) -> Result<(Vec<i64>, Vec<
         .query_map([&json], |r| r.get(0))?
         .collect::<std::result::Result<Vec<i64>, _>>()?;
     Ok((albums, tracks))
+}
+
+// ---------------------------------------------------------------- タグ書き込み（P1-2）
+
+/// 書き込み対象の 1 行。`values` は解析済み（`rg_scanned_at IS NOT NULL`）のときだけ
+#[derive(Debug, Clone, PartialEq)]
+pub struct WriteRow {
+    pub id: i64,
+    pub codec: String,
+    pub values: Option<Values>,
+    pub missing: bool,
+}
+
+/// `track_ids` の行（missing も含む。存在しない id は返さない）を id 昇順で
+pub fn write_rows(conn: &Connection, track_ids: &[i64]) -> Result<Vec<WriteRow>> {
+    let json =
+        serde_json::to_string(track_ids).map_err(|e| super::DbError::Internal(e.to_string()))?;
+    let mut st = conn.prepare_cached(
+        "SELECT id, codec, rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak,
+                rg_scanned_at, missing_since IS NOT NULL
+           FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id",
+    )?;
+    let rows = st
+        .query_map([&json], |r| {
+            let scanned: Option<i64> = r.get(6)?;
+            let track_gain: Option<f64> = r.get(2)?;
+            let track_peak: Option<f64> = r.get(3)?;
+            let values = match (scanned, track_gain, track_peak) {
+                (Some(_), Some(track_gain), Some(track_peak)) => Some(Values {
+                    track_gain,
+                    track_peak,
+                    album_gain: r.get(4)?,
+                    album_peak: r.get(5)?,
+                }),
+                _ => None,
+            };
+            Ok(WriteRow {
+                id: r.get(0)?,
+                codec: r.get(1)?,
+                values,
+                missing: r.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// `rg_written_at` を `now` にする（ファイルが既に解析値を持つと分かった行）
+pub fn set_written(conn: &Connection, track_ids: &[i64], now: i64) -> Result<usize> {
+    let mut st = conn.prepare_cached(
+        "UPDATE tracks SET rg_written_at = ?2 WHERE id = ?1 AND rg_scanned_at IS NOT NULL",
+    )?;
+    let mut n = 0;
+    for id in track_ids {
+        n += st.execute(params![id, now])?;
+    }
+    Ok(n)
+}
+
+/// ファイルの現在のタグ集合から `rg_written_at` を判定し直す。解析値と一致していれば `now`、
+/// 一致しない（RG のキーが無い・別の値・未解析）なら NULL。返り値は一致したか
+pub fn sync_written_at(
+    conn: &Connection,
+    track_id: i64,
+    tags: &TagSet,
+    reference: f64,
+    now: i64,
+) -> Result<bool> {
+    let rows = write_rows(conn, &[track_id])?;
+    let matched = rows.first().is_some_and(|row| {
+        row.values.is_some_and(|v| {
+            let codec = Codec::parse(&row.codec).unwrap_or(Codec::Flac);
+            file_matches(codec, tags, &v, reference)
+        })
+    });
+    let written: Option<i64> = matched.then_some(now);
+    conn.execute(
+        "UPDATE tracks SET rg_written_at = ?2 WHERE id = ?1",
+        params![track_id, written],
+    )?;
+    Ok(matched)
 }

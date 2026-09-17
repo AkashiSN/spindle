@@ -1586,6 +1586,7 @@ impl Editor {
         }
         let batch_id = op.batch_id;
         let env_retention = env.retention_days;
+        let reference = self.rg_reference;
         let dir_for_db = Arc::clone(&dir);
         let (outcome, event) = self
             .db
@@ -1617,7 +1618,7 @@ impl Editor {
                             now,
                         )? {
                             if let Some(fs) = current.as_ref() {
-                                sync_track_to_file(&tx, op.track_id, fs)?;
+                                sync_track_to_file(&tx, op.track_id, fs, reference, now)?;
                             }
                         }
                         OpOutcome::Conflict(reason)

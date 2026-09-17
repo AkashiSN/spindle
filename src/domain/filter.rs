@@ -88,6 +88,8 @@ pub enum Flag {
     Missing,
     /// `rg_scanned_at IS NULL`
     NoRg,
+    /// 解析済みだが書き込み未反映（`rg_written_at IS NULL OR rg_written_at < rg_scanned_at`）
+    RgUnwritten,
     /// pending の op がある
     Pending,
     /// 最新の op が `skipped_conflict`
@@ -103,6 +105,7 @@ impl Flag {
             Flag::Duplicate => "duplicate",
             Flag::Missing => "missing",
             Flag::NoRg => "no_rg",
+            Flag::RgUnwritten => "rg_unwritten",
             Flag::Pending => "pending",
             Flag::Conflict => "conflict",
             Flag::Hardlink => "hardlink",

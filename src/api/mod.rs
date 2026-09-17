@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/normalize/preview", post(normalize::preview))
         .route("/normalize/apply", post(normalize::apply))
         .route("/rg", post(rg::start))
+        .route("/rg/write", post(rg::write))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))
