@@ -378,7 +378,10 @@ scan_runs に行を作る（state='running'）
 Phase 1  inventory:  walk(Library) を並列に stat（symlink は辿らず一覧へ）。
                      (rel_path_key, dev, inode, nlink, size, mtime_ns, ctime_ns) をメモリに固定
 Phase 2  candidates: inventory の各エントリと既存行の候補を、inode → audio_md5 → rel_path_key の
-                     順で列挙（§6 の採用条件。md5 段の「移動元が消えている」は inventory 全体で判定）
+                     順で列挙（§6 の採用条件。md5 段の「移動元が消えている」は inventory 全体で判定）。
+                     解決が要求しうる audio_md5（inode 一致で size も mtime も違う行が md5 を持つ /
+                     移動候補があるときの未決エントリ）だけを先に並列で計算し、進捗を出す。初回や
+                     移動の無い増分では要求が無く、可逆のデコードは Phase 3 に回る（D-50）
 Phase 3  claim:      rel_path_key 昇順で決定的に採用。取り合いに負けたエントリは次の段へ。
                      変更ありのエントリはここでタグ読込・フィンガープリント計算（並列）
 Phase 4  commit:     1 トランザクションで

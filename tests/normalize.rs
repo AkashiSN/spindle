@@ -186,7 +186,7 @@ impl Lib {
         self.scanner
             .run(
                 ScanKind::Incremental,
-                Arc::new(|_, _| {}),
+                Arc::new(|_, _, _| {}),
                 CancellationToken::new(),
             )
             .await
@@ -1349,8 +1349,11 @@ async fn scan_overtaken_by_normalize_commit_does_not_abort() {
     let editor = lib.editor.clone();
     let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let fired2 = fired.clone();
-    let progress: spindle::import::scanner::Progress = Arc::new(move |done, _| {
-        if done == 0 && !fired2.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    let progress: spindle::import::scanner::Progress = Arc::new(move |phase, done, _| {
+        if phase == spindle::import::scanner::ScanPhase::Read
+            && done == 0
+            && !fired2.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
             let editor = editor.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();

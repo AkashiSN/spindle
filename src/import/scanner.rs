@@ -3,7 +3,8 @@
 //! ```text
 //! Phase 1  inventory:  root を walk して (rel_path_key, dev, inode, nlink, size, mtime, ctime) を固定。
 //!                      symlink・不正名は対象外として一覧へ。古い .spindle-tmp-* を回収
-//! Phase 2  candidates: 既存行のスナップショットと inventory 全体を domain::identity::resolve に渡す
+//! Phase 2  candidates: 既存行のスナップショットと inventory 全体を domain::identity::resolve に渡す。
+//!                      解決が要求しうる audio_md5 だけを先に並列で計算する（初回・移動なしなら 0 件）
 //! Phase 3  read:       変更あり / 新規 / deep のエントリだけタグとフィンガープリントを並列に読む
 //! Phase 4  commit:     1 トランザクションで path の 2 段階更新 → 属性・タグ・版 → 新規挿入 →
 //!                      album 照合 → finalize（missing）
@@ -47,7 +48,17 @@ pub const TMP_RECLAIM_AGE_SECS: i64 = 3600;
 /// 多値 ARTIST の表示用区切り（D-38）
 pub const ARTIST_SEPARATOR: &str = ", ";
 
-pub type Progress = Arc<dyn Fn(u64, u64) + Send + Sync>;
+/// 進捗を出す相。Phase 2 の md5 計算は要求があるときだけ出る
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanPhase {
+    /// Phase 2: 同一性解決が要求した audio_md5 の並列計算
+    Md5,
+    /// Phase 3: 変更あり / 新規 / deep のエントリの読み取り
+    Read,
+}
+
+/// 進捗コールバック `(phase, done, total)`。各相は `(phase, 0, total)` で始まる
+pub type Progress = Arc<dyn Fn(ScanPhase, u64, u64) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SkipReason {
@@ -296,18 +307,15 @@ impl Scanner {
             })
             .collect();
         let inv = Arc::new(inv);
-        let (decisions, md5_cache) = {
-            let root = Arc::clone(&self.root);
-            let inv = Arc::clone(&inv);
+        // 同一性解決が要求しうる audio_md5 を先に並列で計算する（P1-0）。初回スキャンと移動の無い
+        // 増分スキャンでは要求が無い（`identity::md5_requests`）。可逆のデコードを伴うので進捗を出す
+        let requests = identity::md5_requests(&entries, &rows);
+        let md5_cache: HashMap<usize, Option<[u8; 16]>> =
+            self.compute_md5s(&inv, &requests, progress, token).await?;
+        let decisions = {
+            let cache = md5_cache.clone();
             tokio::task::spawn_blocking(move || {
-                let mut cache: HashMap<usize, Option<[u8; 16]>> = HashMap::new();
-                let decisions = identity::resolve(&entries, &rows, &mut |i| {
-                    let e = &inv.entries[i];
-                    let m = lossless_md5(&root, &e.rel, e.ext_codec);
-                    cache.insert(i, m);
-                    m
-                });
-                (decisions, cache)
+                identity::resolve(&entries, &rows, &mut |i| cache.get(&i).copied().flatten())
             })
             .await?
         };
@@ -327,43 +335,33 @@ impl Scanner {
             .map(|(i, _)| i)
             .collect();
         let total = need_read.len() as u64;
-        progress(0, total);
+        progress(ScanPhase::Read, 0, total);
         let results: Arc<Mutex<HashMap<usize, Result<ReadResult, String>>>> = Arc::default();
-        let sem = Arc::new(Semaphore::new(self.parallelism));
         let done = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let mut handles = Vec::with_capacity(need_read.len());
-        for i in need_read {
-            if token.is_cancelled() {
-                return Err(ScanError::Cancelled);
-            }
-            let permit = Arc::clone(&sem)
-                .acquire_owned()
-                .await
-                .map_err(|e| anyhow::anyhow!("semaphore: {e}"))?;
+        let work = {
             let root = Arc::clone(&self.root);
             let inv = Arc::clone(&inv);
             let results = Arc::clone(&results);
-            let cached = md5_cache.get(&i).copied();
-            let hardlink = decisions[i].hardlink;
-            let done = Arc::clone(&done);
+            let md5_cache = Arc::new(md5_cache.clone());
+            let hardlinks: Arc<Vec<bool>> =
+                Arc::new(decisions.iter().map(|d| d.hardlink).collect());
             let progress = Arc::clone(progress);
-            handles.push(tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let r = read_entry(&root, &inv.entries[i], cached, hardlink);
+            Arc::new(move |i: usize| {
+                let r = read_entry(
+                    &root,
+                    &inv.entries[i],
+                    md5_cache.get(&i).copied(),
+                    hardlinks[i],
+                );
                 results
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(i, r);
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                progress(n, total);
-            }));
-        }
-        for h in handles {
-            h.await?;
-        }
-        if token.is_cancelled() {
-            return Err(ScanError::Cancelled);
-        }
+                progress(ScanPhase::Read, n, total);
+            })
+        };
+        self.run_blocking_pool(need_read, token, work).await?;
         let results = Arc::try_unwrap(results)
             .map_err(|_| anyhow::anyhow!("読み取り結果の参照が残っている"))?
             .into_inner()
@@ -409,6 +407,102 @@ impl Scanner {
             }
         }
         Ok(report)
+    }
+
+    // ------------------------------------------------------------ 並列実行
+
+    /// `items` を並列度の上限で `spawn_blocking` に流し、**起動した分は全部終わるまで待つ**。
+    /// cancel は permit 待ちを中断し、起動済みの仕事の完了を待ってから `Cancelled` を返す
+    /// （`spawn_blocking` は途中で止められないので、放置すると run が cancelled になった後も
+    /// デコードと進捗が続き、直後の再実行と重なって並列度の上限を超える）。JoinError も同様に
+    /// 残りを待ってから返す
+    async fn run_blocking_pool(
+        &self,
+        items: Vec<usize>,
+        token: &CancellationToken,
+        work: Arc<dyn Fn(usize) + Send + Sync>,
+    ) -> Result<(), ScanError> {
+        let sem = Arc::new(Semaphore::new(self.parallelism));
+        let mut handles = Vec::with_capacity(items.len());
+        let mut outcome: Result<(), ScanError> = Ok(());
+        for i in items {
+            let permit = tokio::select! {
+                _ = token.cancelled() => {
+                    outcome = Err(ScanError::Cancelled);
+                    break;
+                }
+                p = Arc::clone(&sem).acquire_owned() => match p {
+                    Ok(p) => p,
+                    Err(e) => {
+                        outcome = Err(anyhow::anyhow!("semaphore: {e}").into());
+                        break;
+                    }
+                },
+            };
+            // permit を待っている間に cancel されていれば起動しない
+            if token.is_cancelled() {
+                outcome = Err(ScanError::Cancelled);
+                break;
+            }
+            let work = Arc::clone(&work);
+            handles.push(tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                work(i);
+            }));
+        }
+        for h in handles {
+            if let Err(e) = h.await {
+                if outcome.is_ok() {
+                    outcome = Err(e.into());
+                }
+            }
+        }
+        if outcome.is_ok() && token.is_cancelled() {
+            outcome = Err(ScanError::Cancelled);
+        }
+        outcome
+    }
+
+    // ------------------------------------------------------------ Phase 2
+
+    /// `requests` のエントリの `audio_md5` を Phase 3 と同じ並列度で計算する。結果は Phase 3 の
+    /// フィンガープリント計算にも渡す（同じファイルを二度デコードしない）
+    async fn compute_md5s(
+        &self,
+        inv: &Arc<Inventory>,
+        requests: &[usize],
+        progress: &Progress,
+        token: &CancellationToken,
+    ) -> Result<HashMap<usize, Option<[u8; 16]>>, ScanError> {
+        let total = requests.len() as u64;
+        if total == 0 {
+            return Ok(HashMap::new());
+        }
+        progress(ScanPhase::Md5, 0, total);
+        let results: Arc<Mutex<HashMap<usize, Option<[u8; 16]>>>> = Arc::default();
+        let done = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let work = {
+            let root = Arc::clone(&self.root);
+            let inv = Arc::clone(inv);
+            let results = Arc::clone(&results);
+            let progress = Arc::clone(progress);
+            Arc::new(move |i: usize| {
+                let e = &inv.entries[i];
+                let m = lossless_md5(&root, &e.rel, e.ext_codec);
+                results
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(i, m);
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                progress(ScanPhase::Md5, n, total);
+            })
+        };
+        self.run_blocking_pool(requests.to_vec(), token, work)
+            .await?;
+        Ok(Arc::try_unwrap(results)
+            .map_err(|_| anyhow::anyhow!("md5 の結果の参照が残っている"))?
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner()))
     }
 
     // ------------------------------------------------------------ Phase 5

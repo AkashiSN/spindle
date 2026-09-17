@@ -111,7 +111,7 @@ impl App {
         self.scanner
             .run(
                 ScanKind::Incremental,
-                Arc::new(|_, _| {}),
+                Arc::new(|_, _, _| {}),
                 CancellationToken::new(),
             )
             .await
@@ -718,7 +718,7 @@ async fn scan_while_tagwrite_is_pending_keeps_the_edit_in_db() {
     app.scanner
         .run(
             ScanKind::Deep,
-            Arc::new(|_, _| {}),
+            Arc::new(|_, _, _| {}),
             CancellationToken::new(),
         )
         .await

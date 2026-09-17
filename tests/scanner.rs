@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use spindle::db::Db;
 use spindle::fsroot::RootDir;
-use spindle::import::scanner::{ScanKind, ScanReport, Scanner, SkipReason};
+use spindle::import::scanner::{ScanKind, ScanPhase, ScanReport, Scanner, SkipReason};
 
 // ---------------------------------------------------------------- ハーネス
 
@@ -95,7 +95,7 @@ impl Lib {
 
     async fn scan_kind(&self, kind: ScanKind) -> ScanReport {
         self.scanner
-            .run(kind, Arc::new(|_, _| {}), CancellationToken::new())
+            .run(kind, Arc::new(|_, _, _| {}), CancellationToken::new())
             .await
             .unwrap()
     }
@@ -606,7 +606,7 @@ async fn cancelled_run_does_not_mark_missing() {
     let t = token.clone();
     let calls = Arc::new(AtomicU64::new(0));
     let c = calls.clone();
-    let progress = Arc::new(move |_done: u64, _total: u64| {
+    let progress = Arc::new(move |_phase, _done: u64, _total: u64| {
         c.fetch_add(1, Ordering::SeqCst);
         t.cancel();
     });
@@ -651,7 +651,7 @@ async fn failed_run_when_root_walk_errors_does_not_mark_missing() {
         .scanner
         .run(
             ScanKind::Incremental,
-            Arc::new(|_, _| {}),
+            Arc::new(|_, _, _| {}),
             CancellationToken::new(),
         )
         .await;
@@ -977,9 +977,9 @@ async fn pending_op_created_between_snapshot_and_commit_is_respected() {
     let id = before.id;
     let inserted = Arc::new(AtomicU64::new(0));
     let ins = inserted.clone();
-    // progress(0, total) は Phase 2 の後・Phase 3 の前に呼ばれる
-    let progress = Arc::new(move |done: u64, _total: u64| {
-        if done == 0 && ins.fetch_add(1, Ordering::SeqCst) == 0 {
+    // progress(Read, 0, total) は Phase 2 の後・Phase 3 の前に呼ばれる
+    let progress = Arc::new(move |phase, done: u64, _total: u64| {
+        if phase == ScanPhase::Read && done == 0 && ins.fetch_add(1, Ordering::SeqCst) == 0 {
             let c = Connection::open(&db_path).unwrap();
             insert_pending_op(&c, id, "tags", "A/B/01.flac");
             c.execute(
@@ -1102,8 +1102,12 @@ async fn tagwrite_completed_during_phase3_is_not_rolled_back_by_commit() {
     let id = before.id;
     let fired = Arc::new(AtomicU64::new(0));
     let f = fired.clone();
-    let progress = Arc::new(move |done: u64, total: u64| {
-        if total > 0 && done == total && f.fetch_add(1, Ordering::SeqCst) == 0 {
+    let progress = Arc::new(move |phase, done: u64, total: u64| {
+        if phase == ScanPhase::Read
+            && total > 0
+            && done == total
+            && f.fetch_add(1, Ordering::SeqCst) == 0
+        {
             // tagwrite 相当: tmp に書いて rename（inode が変わる）
             let tmp = file.with_file_name(".spindle-tmp-test.flac");
             std::fs::copy(&file, &tmp).unwrap();
@@ -1195,8 +1199,8 @@ async fn rename_job_completed_during_phase3_keeps_its_album_assignment() {
     let db_path = lib.db_path.clone();
     let lib_dir = lib.lib();
     let id = before.id;
-    let progress = Arc::new(move |done: u64, total: u64| {
-        if total > 0 && done == total {
+    let progress = Arc::new(move |phase, done: u64, total: u64| {
+        if phase == ScanPhase::Read && total > 0 && done == total {
             std::fs::create_dir_all(lib_dir.join("A/C")).unwrap();
             std::fs::rename(lib_dir.join("A/B/01.flac"), lib_dir.join("A/C/01.flac")).unwrap();
             let c = Connection::open(&db_path).unwrap();
@@ -1319,8 +1323,8 @@ async fn pending_rename_created_after_snapshot_is_handled_at_commit() {
     common::retag(&p, |tag| tag.set_title("external".to_owned()));
     let db_path = lib.db_path.clone();
     let id = before.id;
-    let progress = Arc::new(move |done: u64, _total: u64| {
-        if done == 0 {
+    let progress = Arc::new(move |phase, done: u64, _total: u64| {
+        if phase == ScanPhase::Read && done == 0 {
             let c = Connection::open(&db_path).unwrap();
             if c.query_row("SELECT count(*) FROM edit_ops", [], |r| r.get::<_, i64>(0))
                 .unwrap()
@@ -1355,4 +1359,143 @@ async fn pending_rename_created_after_snapshot_is_handled_at_commit() {
         )
         .unwrap();
     assert_eq!(pending, 1);
+}
+
+// ---------------------------------------------------------------- Phase 2 の md5（P1-0）
+
+/// 進捗の `(0, total)` は Phase 2（md5 の並列計算。要求があるときだけ）と Phase 3 の開始で出る。
+/// 記録して、Phase 2 が走ったかを数える
+type ProgressLog = Arc<std::sync::Mutex<Vec<(ScanPhase, u64, u64)>>>;
+
+fn recording_progress() -> (ProgressLog, spindle::import::scanner::Progress) {
+    let log: ProgressLog = Arc::default();
+    let l = log.clone();
+    let progress: spindle::import::scanner::Progress = Arc::new(move |phase, done, total| {
+        l.lock().unwrap().push((phase, done, total));
+    });
+    (log, progress)
+}
+
+/// 各相の開始 `(phase, total)`
+fn phase_starts(log: &[(ScanPhase, u64, u64)]) -> Vec<(ScanPhase, u64)> {
+    log.iter()
+        .filter(|(_, done, _)| *done == 0)
+        .map(|(phase, _, total)| (*phase, *total))
+        .collect()
+}
+
+#[tokio::test]
+async fn initial_scan_computes_no_md5_in_phase2() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/01.flac", 1, "a", "A", 1));
+    lib.add("A/02.flac", 2, "b", "A", 2).unwrap();
+    lib.add("B/01.flac", 3, "c", "B", 1).unwrap();
+    let (log, progress) = recording_progress();
+    let report = lib
+        .scanner
+        .run(ScanKind::Incremental, progress, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(report.new, 3);
+    // Phase 3 の開始だけ（Phase 2 の要求は 0 件なので進捗を出さない）
+    assert_eq!(
+        phase_starts(&log.lock().unwrap()),
+        vec![(ScanPhase::Read, 3)]
+    );
+    // 変更の無い増分スキャンも同じ
+    let (log, progress) = recording_progress();
+    lib.scanner
+        .run(ScanKind::Incremental, progress, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        phase_starts(&log.lock().unwrap()),
+        vec![(ScanPhase::Read, 0)]
+    );
+}
+
+#[tokio::test]
+async fn move_candidate_triggers_parallel_md5_with_progress() {
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("A/01.flac", 1, "a", "A", 1));
+    lib.add("A/02.flac", 2, "b", "A", 2).unwrap();
+    lib.scan().await;
+    let before = lib.track("A/01.flac").unwrap();
+    // コピー + 削除（inode が変わる。旧 key が消えるので md5 の移動候補になる）と新規 1 本
+    std::fs::create_dir_all(lib.lib().join("C")).unwrap();
+    std::fs::copy(&p, lib.lib().join("C/01.flac")).unwrap();
+    std::fs::remove_file(&p).unwrap();
+    lib.add("C/03.flac", 3, "d", "C", 3).unwrap();
+    let (log, progress) = recording_progress();
+    let report = lib
+        .scanner
+        .run(ScanKind::Incremental, progress, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(report.moved, 1);
+    assert_eq!(report.new, 1);
+    // Phase 2 は未決の 2 本（コピー先と新規）の md5 を要求し、Phase 3 はその 2 本を読む
+    let starts = phase_starts(&log.lock().unwrap());
+    assert_eq!(
+        starts,
+        vec![(ScanPhase::Md5, 2), (ScanPhase::Read, 2)],
+        "{:?}",
+        log.lock().unwrap()
+    );
+    let log = log.lock().unwrap();
+    assert!(log.contains(&(ScanPhase::Md5, 2, 2)));
+    let moved = lib.track("C/01.flac").unwrap();
+    assert_eq!(moved.id, before.id);
+}
+
+#[tokio::test]
+async fn cancel_during_phase2_drains_running_md5_work_before_returning() {
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("A/01.flac", 1, "a", "A", 1));
+    lib.scan().await;
+    // 移動候補を作り、未決の新規を並列度より多く用意する（Md5 相が複数の仕事を持つ）
+    std::fs::create_dir_all(lib.lib().join("C")).unwrap();
+    std::fs::copy(&p, lib.lib().join("C/01.flac")).unwrap();
+    std::fs::remove_file(&p).unwrap();
+    for n in 2..=9 {
+        lib.add(&format!("C/{n:02}.flac"), n, "x", "C", n).unwrap();
+    }
+    let (log, progress) = recording_progress();
+    let token = CancellationToken::new();
+    let t = token.clone();
+    let progress: spindle::import::scanner::Progress = Arc::new(move |phase, done, total| {
+        progress(phase, done, total);
+        // Md5 相の最初の完了で cancel
+        if phase == ScanPhase::Md5 && done == 1 {
+            t.cancel();
+        }
+    });
+    let err = lib
+        .scanner
+        .run(ScanKind::Incremental, progress, token)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, spindle::import::scanner::ScanError::Cancelled),
+        "{err:?}"
+    );
+    // 返った時点で起動済みの仕事は終わっている: その後に進捗は増えない
+    let n = log.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(log.lock().unwrap().len(), n);
+    assert!(log
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(phase, _, _)| *phase == ScanPhase::Md5));
+    let state: String = lib
+        .conn()
+        .query_row(
+            "SELECT state FROM scan_runs ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "cancelled");
+    assert!(lib.track("C/01.flac").is_none(), "commit していない");
 }

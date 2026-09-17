@@ -135,7 +135,7 @@ impl Lib {
 
     async fn scan_kind(&self, kind: ScanKind) -> ScanReport {
         self.scanner
-            .run(kind, Arc::new(|_, _| {}), CancellationToken::new())
+            .run(kind, Arc::new(|_, _, _| {}), CancellationToken::new())
             .await
             .unwrap()
     }
@@ -360,7 +360,7 @@ async fn unresolved_albums_are_resolved_on_next_scan_even_without_changes() {
     plain
         .run(
             ScanKind::Incremental,
-            Arc::new(|_, _| {}),
+            Arc::new(|_, _, _| {}),
             CancellationToken::new(),
         )
         .await
@@ -483,7 +483,7 @@ async fn cancel_after_commit_keeps_run_completed_and_resumes_next_scan() {
         .set_before_artwork_hook(Arc::new(move |_| hook_token.cancel()));
     let report = lib
         .scanner
-        .run(ScanKind::Incremental, Arc::new(|_, _| {}), token)
+        .run(ScanKind::Incremental, Arc::new(|_, _, _| {}), token)
         .await
         .expect("Phase 4 は commit 済みなので run は成功で返る");
     assert_eq!(report.missing_marked, 1);
@@ -664,7 +664,7 @@ async fn deep_cancel_at(point: &'static str) {
     }));
     let report = lib
         .scanner
-        .run(ScanKind::Deep, Arc::new(|_, _| {}), token)
+        .run(ScanKind::Deep, Arc::new(|_, _, _| {}), token)
         .await
         .unwrap();
     assert_eq!(report.artwork_resolved, 0, "{point}");

@@ -381,3 +381,98 @@ fn duplicates_registered_as_new_tracks_appear_in_duplicate_groups() {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+// ---------------------------------------------------------------- md5 の遅延（P1-0）
+
+/// 初回スキャン（既存行なし）では md5 を 1 度も要求しない。段 2 の候補（md5 を持ち、旧 key が
+/// inventory に無い未 claim の行）が存在しないときは、md5 を計算しても照合相手が無い
+#[test]
+fn no_md5_is_requested_when_no_row_can_be_matched_by_md5() {
+    let t = Md5Table::new(&[("a", md5(1)), ("b", md5(2))]);
+    let inv = vec![entry("a", 1), entry("b", 2)];
+    let d = t.resolve(&inv, &[]);
+    assert!(d.iter().all(is_new));
+    assert!(t.calls.borrow().is_empty(), "{:?}", t.calls.borrow());
+
+    // 既存行があっても、その旧 key が inventory に残っている（移動元が消えていない）なら候補にならない
+    let rows = vec![row(1, "a", 1, Some(md5(1)))];
+    let inv = vec![entry("a", 1), entry("c", 3)];
+    let d = t.resolve(&inv, &rows);
+    assert_eq!(existing(&d[0]), (1, Via::Inode, false));
+    assert!(is_new(&d[1]));
+    assert!(t.calls.borrow().is_empty(), "{:?}", t.calls.borrow());
+
+    // 段 1 で claim された行も候補にならない（inode で見つかった行の旧 key が消えていても）
+    let rows = vec![row(1, "old", 1, Some(md5(1)))];
+    let inv = vec![entry("moved", 1), entry("c", 3)];
+    let d = t.resolve(&inv, &rows);
+    assert_eq!(
+        existing(&d[0]),
+        (1, Via::Inode, false),
+        "物理属性は同じ（パスだけ違う）"
+    );
+    assert!(is_new(&d[1]));
+    assert!(t.calls.borrow().is_empty(), "{:?}", t.calls.borrow());
+}
+
+/// inode 一致で size も mtime も違うときの照合は、行が md5 を持つときだけ md5 を要求する
+#[test]
+fn inode_reuse_check_does_not_request_md5_when_row_has_none() {
+    let t = Md5Table::new(&[("a", md5(1))]);
+    let mut e = entry("a", 1);
+    e.size += 1;
+    e.mtime_ns += 1;
+    let rows = vec![row(1, "a", 1, None)];
+    let d = t.resolve(&[e], &rows);
+    // 段 1 は検証できず、段 3（path）で一致
+    assert_eq!(existing(&d[0]), (1, Via::Path, true));
+    assert!(t.calls.borrow().is_empty(), "{:?}", t.calls.borrow());
+}
+
+/// 段 2 の候補があるときだけ、未決のエントリの md5 を要求する
+#[test]
+fn md5_is_requested_only_when_a_move_candidate_exists() {
+    let t = Md5Table::new(&[("a", md5(1)), ("new1", md5(9)), ("new2", md5(1))]);
+    // 行 1 の旧 key "gone" が inventory に無い → 候補。a は inode で解決するので要求されない
+    let rows = vec![
+        row(1, "gone", 5, Some(md5(1))),
+        row(2, "a", 1, Some(md5(7))),
+    ];
+    let inv = vec![entry("a", 1), entry("new1", 8), entry("new2", 9)];
+    let d = t.resolve(&inv, &rows);
+    assert_eq!(existing(&d[0]), (2, Via::Inode, false));
+    assert!(is_new(&d[1]));
+    assert_eq!(existing(&d[2]), (1, Via::AudioMd5, true));
+    let mut calls = t.calls.borrow().clone();
+    calls.sort();
+    assert_eq!(calls, vec!["new1".to_owned(), "new2".to_owned()]);
+}
+
+/// [`md5_requests`] は `resolve` が要求しうるエントリの集合（`resolve` の要求を含む）。
+/// 呼び出し側はこれを並列に計算してから `resolve` にキャッシュを渡す
+#[test]
+fn md5_requests_is_a_superset_of_what_resolve_asks_for() {
+    use spindle::domain::identity::md5_requests;
+    let t = Md5Table::new(&[("a", md5(1)), ("new1", md5(9)), ("new2", md5(1))]);
+    let rows = vec![
+        row(1, "gone", 5, Some(md5(1))),
+        row(2, "a", 1, Some(md5(7))),
+    ];
+    let inv = vec![entry("a", 1), entry("new1", 8), entry("new2", 9)];
+    let mut req = md5_requests(&inv, &rows);
+    req.sort_unstable();
+    assert_eq!(req, vec![1, 2]);
+    let _ = t.resolve(&inv, &rows);
+    for k in t.calls.borrow().iter() {
+        let i = inv.iter().position(|e| e.key == *k).unwrap();
+        assert!(req.contains(&i), "{k}");
+    }
+    // 候補が無ければ空
+    assert!(md5_requests(&inv, &[]).is_empty());
+    assert!(md5_requests(&inv, &[row(2, "a", 1, Some(md5(7)))]).is_empty());
+    // 段 1 の inode 再利用の照合（size / mtime が両方違い、行が md5 を持つ）も含む
+    let mut e = entry("a", 1);
+    e.size += 1;
+    e.mtime_ns += 1;
+    assert_eq!(md5_requests(&[e], &[row(2, "a", 1, Some(md5(7)))]), vec![0]);
+}

@@ -107,7 +107,7 @@ impl App {
         self.scanner
             .run(
                 ScanKind::Incremental,
-                Arc::new(|_, _| {}),
+                Arc::new(|_, _, _| {}),
                 CancellationToken::new(),
             )
             .await

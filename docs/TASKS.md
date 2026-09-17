@@ -396,10 +396,22 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 実データでの検証は P0-14 のリハーサル環境（`ssh truenas`、`/root/spindle-migration/`、
 `/mnt/ssd/media/Library` 9,098 トラック）で行う。`ssd/musics` は正なので触らない。
 
-- [ ] **P1-0** 初回 deep scan の高速化（P0-14 の後続課題。リリース時の再移行でも効く）:
+- [x] **P1-0** 初回 deep scan の高速化（P0-14 の後続課題。リリース時の再移行でも効く。D-50）:
       `Scanner` Phase 2 の直列 `audio_md5` を、既存行が md5 で突き合わせを要するときだけ計算するか
       Phase 3 の並列読みへ回す。Phase 2 中も進捗を出す。`symphonia` / `lofty` のファイルごとの
       WARN を既定フィルタで落とす（ALAC 7,572 本で 75 分 → 並列度分だけ短縮が目安）
+      - [x] `identity::resolve`: 段 1 は行が md5 を持つときだけ、段 2 は移動候補があるときだけ md5 を要求。
+            `identity::md5_requests` で要求されうる集合を先に求める（初回・移動なしは 0 件）
+      - [x] `Scanner::compute_md5s`: 要求分を Phase 3 と同じ並列度で計算し、`resolve` と Phase 3 に渡す。
+            `Progress` に相（`ScanPhase::Md5` / `Read`）を持たせて Phase 2 も進捗を出す
+      - [x] `logging::default_filter`: `lofty` / `symphonia*` を error に
+
+      受け入れ: `tests/identity.rs`（初回・移動元が残っている・段 1 で claim 済みなら md5 を要求しない、
+      行が md5 を持たない inode 再利用は要求しない、移動候補があるときだけ未決分を要求、`md5_requests` が
+      `resolve` の要求を含む）、`tests/scanner.rs`（初回と変更なしの増分で `Md5` 相が出ない、コピー + 削除で
+      `Md5` 相が未決 2 本で出て移動として解決）、`tests/logging.rs`
+
+      未決: 実機での計測（リハーサル環境で deep scan の所要時間を再計測する）
 - [x] **P1-1** ReplayGain スキャン（`ebur128`、album は `album_id` 単位、
       2ch 以外は集計から除外。D-47）
       - [x] `domain::replaygain`: `LoudnessMeter`（積分ラウドネス + true peak、フレーム端数の持ち越し）、

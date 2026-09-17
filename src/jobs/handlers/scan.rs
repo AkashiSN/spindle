@@ -94,7 +94,7 @@ impl Handler for ScanHandler {
             let progress = {
                 let latest = Arc::clone(&latest);
                 let notify = Arc::clone(&notify);
-                Arc::new(move |done: u64, total: u64| {
+                Arc::new(move |_phase, done: u64, total: u64| {
                     *latest.lock().unwrap_or_else(|e| e.into_inner()) = Some((done, total));
                     notify.notify_one();
                 })

@@ -138,11 +138,11 @@ pub fn resolve(
         }
         let row = &rows[r];
         let fast = e.size == row.size || e.mtime_ns == row.mtime_ns;
+        // md5 は行が持つときだけ要求する（持たなければ照合できないので計算しても無駄）
         let verified = fast
-            || matches!(
-                (md5_of(i, &mut md5_cache), row.audio_md5),
-                (Some(a), Some(b)) if a == b
-            );
+            || row
+                .audio_md5
+                .is_some_and(|b| md5_of(i, &mut md5_cache) == Some(b));
         if !verified {
             continue;
         }
@@ -156,8 +156,17 @@ pub fn resolve(
     }
 
     // 段 2: audio_md5。候補がちょうど 1 行・未 claim・その行の旧 key が inventory に無い
-    // （= 移動元が消えている）。候補が複数、または移動元が残っていれば新規（自動マージしない）
+    // （= 移動元が消えている）。候補が複数、または移動元が残っていれば新規（自動マージしない）。
+    // 候補になりうる行（md5 を持ち、未 claim、旧 key が inventory に無い）が 1 つも無ければ
+    // md5 を計算しても照合相手が無いので、この段は md5 を要求しない（初回スキャンと、移動の無い
+    // 通常の増分スキャンでは可逆ファイルのデコードが丸ごと省ける。P1-0）
+    let any_move_candidate = rows.iter().enumerate().any(|(r, row)| {
+        row.audio_md5.is_some() && !claimed[r] && !inventory_keys.contains(row.key.as_str())
+    });
     for &i in &order {
+        if !any_move_candidate {
+            break;
+        }
         if decided[i].is_some() || hardlink[i] {
             continue;
         }
@@ -214,6 +223,23 @@ pub fn resolve(
             hardlink,
         })
         .collect()
+}
+
+/// [`resolve`] が md5 を要求しうる inventory のエントリ（`resolve` の要求を含む集合。昇順）。
+///
+/// 要求は段 1（inode 一致で size も mtime も違い、行が md5 を持つ）と段 2（移動候補があるときの
+/// 未決エントリ全部）で起きる。呼び出し側はこの集合を**並列に**計算してから、キャッシュを引く
+/// コールバックで `resolve` を呼ぶ（P1-0）。md5 が無い前提で `resolve` を走らせて要求を記録する
+/// ので、実際の `resolve` は段 1 でより多く決まる分、要求は減ることはあっても増えない
+pub fn md5_requests(inventory: &[Entry], rows: &[Row]) -> Vec<usize> {
+    let mut requested: Vec<usize> = Vec::new();
+    let _ = resolve(inventory, rows, &mut |i| {
+        requested.push(i);
+        None
+    });
+    requested.sort_unstable();
+    requested.dedup();
+    requested
 }
 
 /// 最速パスの比較: `(dev, inode, size, mtime_ns, ctime_ns)` がすべて一致なら変更なし
