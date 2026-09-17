@@ -530,8 +530,12 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/playlists_api.rs`（CRUD、名前の検証、項目、export の GET / POST / CIDR / 503、import）、
       `web/src/lib/playlists.test.ts`（scope とソートの連動、ドラッグの payload、並べ替えの移動先）
 
-      未決: 自動再書き出し（P1-7）。スマートの表示（`kind='smart'` は ⚙ で出すだけ）。
-      リハーサル環境の 28 本は再デプロイ後に UI から取り込む
+      取り込み（2026-09-17、リハーサル環境）: `Playlists/m3u8/` の 28 本を `POST /api/playlists/import` で
+      全件取り込み。14,205 行すべてが解決（未解決 0、重複 0。旧 `../<Category>/…/<n>. Title.opus` 行が
+      stem 一致で ALAC / Opus の Library 行に当たった）。`00_Anime` の android 書き出し 4,741 件も確認
+      （`Playlists/android/00_Anime.m3u8`、`../../Derived/…`）
+
+      未決: 自動再書き出し（P1-7）。スマートの表示（`kind='smart'` は ⚙ で出すだけ）
 - [ ] **P1-7** スマートプレイリスト（`docs/DSL.md`。pest → AST → SQL）
 - [ ] **P1-8** エクスポートプロファイル（foobar / android / internal、
       foobar Autoplaylist クエリ生成）。**依存: P1-10**（`delivery` プロファイルが Derived を前提）。
