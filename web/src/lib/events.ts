@@ -4,7 +4,7 @@
 // job / batch / library は `resync` としても届かない（resync は接続中の購読者が遅れたとき専用）。
 // なので **再接続のたびに一覧を取り直す**必要があり、初回の open と区別して呼び出し側へ伝える
 
-import type { BatchEvent, JobEvent, LibraryEvent, ResyncEvent } from '../api/types'
+import type { BatchEvent, JobEvent, LibraryEvent, PlaylistEvent, ResyncEvent } from '../api/types'
 
 export type EventHandlers = {
   /** 接続が開いた。`reconnect` が true なら切断からの復帰（取りこぼしがあり得る） */
@@ -13,6 +13,8 @@ export type EventHandlers = {
   onBatch?: (e: BatchEvent) => void
   onLibrary?: (e: LibraryEvent) => void
   onResync?: (e: ResyncEvent) => void
+  /** プレイリストの項目が再評価で書き換わった（P1-7）。表示中なら表を取り直す */
+  onPlaylist?: (e: PlaylistEvent) => void
   /** 切断（EventSource は自動で再接続を試みる）。401 で閉じられた場合もここに来る */
   onError?: () => void
 }
@@ -58,5 +60,6 @@ export function connectEvents(
   on<BatchEvent>('batch', (h, e) => h.onBatch?.(e))
   on<LibraryEvent>('library', (h, e) => h.onLibrary?.(e))
   on<ResyncEvent>('resync', (h, e) => h.onResync?.(e))
+  on<PlaylistEvent>('playlist', (h, e) => h.onPlaylist?.(e))
   return () => es.close()
 }

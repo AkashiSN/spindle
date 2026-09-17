@@ -12,6 +12,13 @@ describe('filterToParam', () => {
     expect(filterToParam({ album_id: 0 })).toBe('{"album_id":0}')
   })
 
+  it('dsl はサーバの列順（flags の後、q の前）で入り、空白だけなら落ちる', () => {
+    expect(filterToParam({ q: 'x', dsl: '%a% IS 1', flags: ['missing'] })).toBe(
+      '{"flags":["missing"],"dsl":"%a% IS 1","q":"x"}',
+    )
+    expect(filterToParam({ dsl: '  ' })).toBe('')
+  })
+
   it('tracksUrl は filter を URL エンコードし cursor を付ける', () => {
     const u = tracksUrl({ filter: { q: '情緒' }, sort: { key: 'title', desc: true }, cursor: 'abc' })
     const p = new URL(u, 'http://x').searchParams

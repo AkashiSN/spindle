@@ -15,6 +15,8 @@ export function PlaylistSection({
   onOpen,
   onDeleted,
   onDropTracks,
+  onEditRule,
+  onRefreshed,
   notice,
   onNotice,
 }: {
@@ -24,8 +26,12 @@ export function PlaylistSection({
   onOpen: (id: number) => void
   /** 削除が終わったとき（表示中のプレイリストなら App が scope を戻す） */
   onDeleted: (id: number) => void
-  /** 表からドラッグした行を落としたとき */
+  /** 表からドラッグした行を落としたとき（manual だけ） */
   onDropTracks: (id: number, trackIds: number[]) => void
+  /** スマート: 新規作成（id なし）/ ルール編集（id あり）を中央ペインで開く（P1-7） */
+  onEditRule: (p: Playlist | null) => void
+  /** 再評価が終わったとき（表示中なら表を取り直す） */
+  onRefreshed: (id: number) => void
   /** 直近の操作結果（App が持つ。追加・除外は表側からも起きる） */
   notice: string | null
   onNotice: (text: string | null) => void
@@ -84,7 +90,18 @@ export function PlaylistSection({
     }
   }
 
-  const acceptsDrop = (e: DragEvent) => e.dataTransfer.types.includes(TRACK_DRAG_TYPE)
+  const acceptsDrop = (e: DragEvent, p: Playlist) =>
+    p.kind === 'manual' && e.dataTransfer.types.includes(TRACK_DRAG_TYPE)
+  const refreshSmart = async (p: Playlist) => {
+    setMenuFor(null)
+    try {
+      const r = await playlists.refreshSmart(p.id)
+      onNotice(`「${p.name}」を再評価: ${r.count} 件${r.changed ? '（変更あり）' : '（変更なし）'}`)
+      if (r.changed) onRefreshed(p.id)
+    } catch (e) {
+      fail(e)
+    }
+  }
 
   return (
     <section className="playlists">
@@ -93,6 +110,9 @@ export function PlaylistSection({
         <span className="spacer" />
         <button type="button" className="ghost" title="新しいプレイリスト" onClick={() => void create()}>
           ＋
+        </button>
+        <button type="button" className="ghost" title="新しいスマートプレイリスト（ルールで自動）" onClick={() => onEditRule(null)}>
+          ＋⚙
         </button>
         <button type="button" className="ghost" title="Playlists フォルダの m3u8 を取り込む" onClick={() => setImportOpen((o) => !o)}>
           取り込み…
@@ -108,14 +128,14 @@ export function PlaylistSection({
             key={p.id}
             className={`playlist-row${dropOver === p.id ? ' drop-over' : ''}`}
             onDragOver={(e) => {
-              if (!acceptsDrop(e)) return
+              if (!acceptsDrop(e, p)) return
               e.preventDefault()
               e.dataTransfer.dropEffect = 'copy'
               if (dropOver !== p.id) setDropOver(p.id)
             }}
             onDragLeave={() => setDropOver((cur) => (cur === p.id ? null : cur))}
             onDrop={(e) => {
-              if (!acceptsDrop(e)) return
+              if (!acceptsDrop(e, p)) return
               e.preventDefault()
               setDropOver(null)
               const ids = parseDragIds(e.dataTransfer.getData(TRACK_DRAG_TYPE))
@@ -126,8 +146,8 @@ export function PlaylistSection({
               type="button"
               className={`tree-node${activeId === p.id ? ' active' : ''}`}
               title={`${p.track_count} 件 / ${formatDuration(p.duration_ms)}${p.missing_count > 0 ? `（missing ${p.missing_count}）` : ''}${
-                p.exports.length > 0 ? `\n書き出し: ${p.exports.map((x) => x.out_path).join(', ')}` : ''
-              }`}
+                p.rule_source ? `\nルール: ${p.rule_source}` : ''
+              }${p.exports.length > 0 ? `\n書き出し: ${p.exports.map((x) => x.out_path).join(', ')}` : ''}`}
               onClick={() => onOpen(p.id)}
             >
               {p.kind === 'smart' ? '⚙ ' : '♪ '}
@@ -149,6 +169,23 @@ export function PlaylistSection({
                 <button type="button" role="menuitem" onClick={() => void rename(p)}>
                   改名
                 </button>
+                {p.kind === 'smart' && (
+                  <>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setMenuFor(null)
+                        onEditRule(p)
+                      }}
+                    >
+                      ルールを編集
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => void refreshSmart(p)}>
+                      再評価
+                    </button>
+                  </>
+                )}
                 {EXPORT_PROFILES.map((profile) => (
                   <button key={profile} type="button" role="menuitem" onClick={() => void exportTo(p, profile)}>
                     書き出し: {profile}

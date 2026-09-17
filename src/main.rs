@@ -22,6 +22,7 @@ use spindle::jobs::{self, EnqueueResult, JobType, Registry};
 use spindle::media::artwork::ArtworkStore;
 use spindle::media::decode::Decoder;
 use spindle::media::encode::{FlacEncoder, OpusEncoder};
+use spindle::playlist::autoexport::AutoExport;
 use spindle::{config::Config, logging};
 
 /// `SPINDLE_CONFIG` 未設定時の設定ファイルパス（SPEC §14 環境変数）
@@ -216,6 +217,14 @@ async fn main() -> anyhow::Result<()> {
         state.config.backup.interval_hours,
         shutdown.clone(),
     );
+    // スマートプレイリストの自動再評価と、記録済みプロファイルへの自動再書き出し（P1-7、D-54）
+    let autoexport = AutoExport::new(
+        Arc::clone(&state.db),
+        Arc::clone(&state.jobs),
+        Arc::clone(&playlists_root),
+        std::time::Duration::from_secs(u64::from(state.config.export.autoexport_debounce_sec)),
+    )
+    .spawn(shutdown.clone());
     // 起動時に 1 回 incremental を投入する（停止中の外部変更を拾う。D-38）
     match scan::enqueue_scan(&state.jobs, "incremental").await {
         Ok(EnqueueResult::Inserted(id)) => info!(job_id = id, "起動時スキャンを投入した"),
@@ -237,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
     // ワーカーは新規 claim を止め、実行中は破棄済み（次回起動のリカバリで queued に戻る）
     let _ = worker.await;
     let _ = backup_scheduler.await;
+    let _ = autoexport.await;
     info!("停止した");
     Ok(())
 }

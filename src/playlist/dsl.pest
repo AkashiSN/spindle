@@ -1,0 +1,45 @@
+// スマートプレイリスト DSL（docs/DSL.md）。キーワードは大小文字を区別しない。
+// 値・フィールド名・整数は atomic（内部の空白を読み飛ばさない）
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+query      = { SOI ~ expr ~ order? ~ limit? ~ EOI }
+
+expr       = { term ~ (or_op ~ term)* }
+term       = { factor ~ (and_op ~ factor)* }
+factor     = { not_op? ~ (group | compare | presence) }
+group      = { "(" ~ expr ~ ")" }
+
+compare    = { field ~ op ~ value }
+presence   = { (present_op | missing_op) ~ field }
+
+field      = @{ "%" ~ ident ~ "%" }
+ident      = @{ (ASCII_ALPHANUMERIC | "_" | " ")+ }
+// キーワードは語の途中で終わらない（`ISLAND` を IS + LAND と読まない）。`)AND` や `IS"x"` のように
+// 記号が続く隣接は通る
+kw_end     = _{ !(ASCII_ALPHANUMERIC | "_") }
+op         = { is_op | has_op | greater_op | less_op | matches_op }
+is_op      = @{ ^"IS" ~ kw_end }
+has_op     = @{ ^"HAS" ~ kw_end }
+greater_op = @{ ^"GREATER" ~ kw_end }
+less_op    = @{ ^"LESS" ~ kw_end }
+matches_op = @{ ^"MATCHES" ~ kw_end }
+present_op = @{ ^"PRESENT" ~ kw_end }
+missing_op = @{ ^"MISSING" ~ kw_end }
+and_op     = @{ ^"AND" ~ kw_end }
+or_op      = @{ ^"OR" ~ kw_end }
+not_op     = @{ ^"NOT" ~ kw_end }
+
+order      = { order_kw ~ by_kw ~ (field | random) ~ (asc | desc)? }
+order_kw   = @{ ^"ORDER" ~ kw_end }
+by_kw      = @{ ^"BY" ~ kw_end }
+random     = @{ ^"random" ~ kw_end }
+asc        = @{ ^"ASC" ~ kw_end }
+desc       = @{ ^"DESC" ~ kw_end }
+limit      = { limit_kw ~ integer }
+limit_kw   = @{ ^"LIMIT" ~ kw_end }
+integer    = @{ ASCII_DIGIT+ ~ kw_end }
+
+value      = { quoted | bare }
+quoted     = @{ "\"" ~ (("\\" ~ ANY) | (!"\"" ~ ANY))* ~ "\"" }
+bare       = @{ !"\"" ~ (!(WHITESPACE | ")") ~ ANY)+ }

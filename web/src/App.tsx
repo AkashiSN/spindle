@@ -7,13 +7,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch, apiPost, onUnauthorized } from './api/client'
-import type { LibraryEvent, TrackRow } from './api/types'
+import type { LibraryEvent, Playlist, TrackRow } from './api/types'
 import { AlbumGrid } from './components/AlbumGrid'
 import { BottomBar } from './components/BottomBar'
 import { HistoryView } from './components/HistoryView'
 import { Login } from './components/Login'
 import { Placeholder } from './components/Placeholder'
 import { RightPanel, type SelectionSummary } from './components/RightPanel'
+import { SmartRuleEditor, type RuleDraft } from './components/SmartRuleEditor'
 import { Sidebar, type Scope } from './components/Sidebar'
 import { TopNav } from './components/TopNav'
 import { TrackTable } from './components/TrackTable'
@@ -85,7 +86,14 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const [sseOpen, setSseOpen] = useState(false)
   const [connected, setConnected] = useState(false)
 
-  const filter: Filter = useMemo(() => ({ ...scope, q: query || undefined }), [scope, query])
+  // ルール編集中は表を編集中の DSL（WHERE）で差し替える（P1-7）。空なら scope のまま
+  const [ruleDraft, setRuleDraft] = useState<RuleDraft | null>(null)
+  const [draftDsl, setDraftDsl] = useState('')
+  const draftTimer = useRef<number | null>(null)
+  const filter: Filter = useMemo(
+    () => (ruleDraft && draftDsl ? { dsl: draftDsl, q: query || undefined } : { ...scope, q: query || undefined }),
+    [scope, query, ruleDraft, draftDsl],
+  )
   const filterParam = filterToParam(filter)
 
   // 一覧は SSE を開いてから取る（開く前のイベントを失わない。D-36）
@@ -172,6 +180,13 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     },
     onLibrary,
     onResync: refreshAll,
+    onPlaylist: (e) => {
+      // 再評価で項目が変わった: 一覧の件数と、表示中ならその表を取り直す
+      refreshPlaylists()
+      if (scope.playlist_id != null && e.playlist_ids.includes(scope.playlist_id)) {
+        tracks.reload(Math.max(visibleEnd.current + 1, 1))
+      }
+    },
   })
 
   // ---------------------------------------------------------------- 選択
@@ -277,6 +292,21 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     [scope.playlist_id, tracks],
   )
   const failNotice = (e: unknown) => setPlaylistNotice(`失敗: ${e instanceof Error ? e.message : String(e)}`)
+  const openRuleEditor = (p: Playlist | null) => {
+    setRuleDraft(p ? { id: p.id, name: p.name, rule: p.rule_source ?? '' } : { id: null, name: '', rule: '' })
+    setDraftDsl(p?.rule_source ?? '')
+    setView('tracks')
+  }
+  const closeRuleEditor = () => {
+    setRuleDraft(null)
+    setDraftDsl('')
+  }
+  const handleDraft = (d: RuleDraft) => {
+    setRuleDraft(d)
+    // 表への反映は 250ms 遅らせる（検索語と同じ）。不正な DSL は 400 で表が空になるだけ
+    if (draftTimer.current != null) window.clearTimeout(draftTimer.current)
+    draftTimer.current = window.setTimeout(() => setDraftDsl(d.rule.trim()), 250)
+  }
   const addToPlaylist = async (playlistId: number, what: Selection | number[]) => {
     try {
       const r = await playlists.addTracks(playlistId, what, sortToParam(sort))
@@ -332,10 +362,25 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           if (next !== scope) handleScope(next)
         }}
         onDropTracks={(id, ids) => void addToPlaylist(id, ids)}
+        onEditRule={openRuleEditor}
+        onRefreshed={reloadIfCurrent}
         playlistNotice={playlistNotice}
         onPlaylistNotice={setPlaylistNotice}
       />
       <main className="center">
+        {view === 'tracks' && ruleDraft && (
+          <SmartRuleEditor
+            draft={ruleDraft}
+            playlists={playlists}
+            onDraft={handleDraft}
+            onSaved={(id) => {
+              closeRuleEditor()
+              setPlaylistNotice('スマートプレイリストを保存して評価した')
+              handleScope({ playlist_id: id })
+            }}
+            onCancel={closeRuleEditor}
+          />
+        )}
         {view === 'tracks' ? (
           <TrackTable
             rows={tracks.snapshot.rows}
@@ -356,7 +401,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             onPlay={player.play}
             playingId={player.track?.id ?? null}
             playlist={
-              currentPlaylist
+              currentPlaylist && currentPlaylist.kind === 'manual' && !ruleDraft
                 ? {
                     name: currentPlaylist.name,
                     reorderable: sort.key === 'position' && !sort.desc,

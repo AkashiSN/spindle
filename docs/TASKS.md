@@ -536,7 +536,30 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       （`Playlists/android/00_Anime.m3u8`、`../../Derived/…`）
 
       未決: 自動再書き出し（P1-7）。スマートの表示（`kind='smart'` は ⚙ で出すだけ）
-- [ ] **P1-7** スマートプレイリスト（`docs/DSL.md`。pest → AST → SQL）
+- [x] **P1-7** スマートプレイリスト（`docs/DSL.md`。pest → AST → SQL。D-54）
+      - [x] `playlist::dsl`: `dsl.pest` の文法（キーワードは大小文字無視、値は引用可、`NOT` > `AND` > `OR`）→
+            AST（DSL.md の JSON 形で `rule_ast` に保存、原文は `rule_source`）、構文エラーは行・桁付き
+      - [x] `playlist::compile`: ホワイトリストの列解決、任意タグは `track_tags` の EXISTS、値は全てバインド、
+            `regexp()` を全コネクションに登録、`missing` を参照しない限り active 限定、型に合わない演算子は
+            実行前にエラー。`evaluate` で並び付きの id 列
+      - [x] マイグレーション 0007: `tracks.added_at`（`added` フィールド。スキャナが INSERT 時に設定）
+      - [x] `filter.dsl`（一覧のプレビュー。WHERE だけ。D-39）
+      - [x] API: `POST /api/playlists { name, rule }` / `PATCH { rule }`（再評価）、`POST /api/playlists/preview`、
+            `POST /:id/refresh`、smart への項目操作は 409
+      - [x] `playlist::autoexport`: library / 終端 batch / 完了 job をデバウンスして全 smart を再評価、
+            `auto_export = 1` で記録のあるプレイリストを記録済みプロファイルへ再書き出し（起動時にも 1 回）
+      - [x] UI: サイドバー「＋⚙」→ 中央のルール編集（250ms で検証・件数、表は `filter.dsl` で追随、
+            Ctrl+Enter で保存）、smart 行の「ルールを編集」「再評価」、smart は ⚙ 表示でドロップ・並べ替え不可
+
+      受け入れ: `tests/dsl.rs`（優先順位・括弧・引用・大小文字・全演算子・PRESENT/MISSING・ORDER/LIMIT・
+      エラー位置・AST の往復）、`tests/dsl_compile.rs`（`:memory:` での評価: NOCASE、暗黙 missing、HAS /
+      MATCHES / presence、任意タグの多値、数値と duration、拡張フィールド、date / added、ORDER / LIMIT /
+      random、型エラー、値がバインドされる）、`tests/tracks_query.rs`（`filter.dsl`）、
+      `tests/smart_playlists.rs`（作成で materialize、400 の位置、preview、refresh / ルール差し替え、
+      項目操作の 409、autoexport のデバウンスと再書き出し・`auto_export = 0`）
+
+      未決: foobar Autoplaylist クエリ変換（P1-8）。`HAS` の語境界の実機突き合わせ。UI の並び替え
+      （smart は ORDER BY で決まるので表のソート変更は表示だけ）
 - [ ] **P1-8** エクスポートプロファイル（foobar / android / internal、
       foobar Autoplaylist クエリ生成）。**依存: P1-10**（`delivery` プロファイルが Derived を前提）。
       タグ鮮度が必要な export / 同期は `stale_tags` の件数を明示するか追随ジョブの完了を待つ

@@ -38,6 +38,7 @@ describe('connectEvents', () => {
       onBatch: (e) => log.push(`batch:${e.id}`),
       onLibrary: (e) => log.push(`library:${e.kind}`),
       onResync: (e) => log.push(`resync:${e.skipped}`),
+      onPlaylist: (e) => log.push(`playlist:${e.playlist_ids.join(',')}`),
     }
     const close = connectEvents(
       () => handlers,
@@ -49,6 +50,7 @@ describe('connectEvents', () => {
     src!.emit('library', { kind: 'bulk', scan_run_id: 1 })
     src!.emit('batch', { id: 42, state: 'applied', applied: 1, conflict: 0, failed: 0 })
     src!.emit('resync', { skipped: 7 })
+    src!.emit('playlist', { playlist_ids: [3, 4] })
     // 切断 → ブラウザが再接続 → onopen が再び呼ばれる（reconnect=true）
     src!.error()
     src!.open()
@@ -58,6 +60,7 @@ describe('connectEvents', () => {
       'library:bulk',
       'batch:42',
       'resync:7',
+      'playlist:3,4',
       'error',
       'open:true',
     ])

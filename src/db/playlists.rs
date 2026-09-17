@@ -21,6 +21,8 @@ pub struct Playlist {
     pub name: String,
     /// `manual` / `smart`
     pub kind: String,
+    /// smart: DSL の原文（docs/DSL.md）。manual は None
+    pub rule_source: Option<String>,
     pub auto_export: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -57,7 +59,8 @@ const PLAYLIST_COLUMNS: &str = "p.id, p.name, p.kind, p.auto_export, p.created_a
   (SELECT count(*) FROM playlist_items i JOIN tracks t ON t.id = i.track_id
      WHERE i.playlist_id = p.id AND t.missing_since IS NOT NULL),
   (SELECT coalesce(sum(t.duration_ms), 0) FROM playlist_items i JOIN tracks t ON t.id = i.track_id
-     WHERE i.playlist_id = p.id AND t.missing_since IS NULL)";
+     WHERE i.playlist_id = p.id AND t.missing_since IS NULL),
+  p.rule_source";
 
 fn playlist_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<Playlist> {
     Ok(Playlist {
@@ -70,6 +73,7 @@ fn playlist_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<Playlist> {
         track_count: r.get(6)?,
         missing_count: r.get(7)?,
         duration_ms: r.get(8)?,
+        rule_source: r.get(9)?,
         exports: Vec::new(),
     })
 }
@@ -142,6 +146,98 @@ pub fn create(conn: &Connection, name: &str, now: i64) -> Result<Option<Playlist
     get(conn, conn.last_insert_rowid())
 }
 
+/// スマートプレイリストを作る（`rule_ast` は検証済みの JSON）。名前が使われていれば `None`
+pub fn create_smart(
+    conn: &Connection,
+    name: &str,
+    rule_source: &str,
+    rule_ast: &str,
+    now: i64,
+) -> Result<Option<Playlist>> {
+    let n = conn.execute(
+        "INSERT INTO playlists (name, name_key, kind, rule_source, rule_ast, created_at, updated_at)
+         VALUES (?1, ?2, 'smart', ?3, ?4, ?5, ?5)
+         ON CONFLICT DO NOTHING",
+        params![name, canonical_key(name), rule_source, rule_ast, now],
+    )?;
+    if n == 0 {
+        return Ok(None);
+    }
+    get(conn, conn.last_insert_rowid())
+}
+
+/// smart のルールを差し替える。行が無い・manual なら false
+pub fn set_rule(
+    conn: &Connection,
+    id: i64,
+    rule_source: &str,
+    rule_ast: &str,
+    now: i64,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE playlists SET rule_source = ?1, rule_ast = ?2, updated_at = ?3
+         WHERE id = ?4 AND kind = 'smart'",
+        params![rule_source, rule_ast, now, id],
+    )?;
+    Ok(n > 0)
+}
+
+/// `kind`（`manual` / `smart`）。行が無ければ None
+pub fn kind(conn: &Connection, id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT kind FROM playlists WHERE id = ?", [id], |r| {
+            r.get(0)
+        })
+        .optional()?)
+}
+
+/// smart の保存済み AST（JSON）。行が無い・manual なら None
+pub fn rule_ast(conn: &Connection, id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT rule_ast FROM playlists WHERE id = ? AND kind = 'smart'",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// 全 smart の `(id, rule_ast)`
+pub fn smart_rules(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut st = conn.prepare_cached(
+        "SELECT id, rule_ast FROM playlists WHERE kind = 'smart' AND rule_ast IS NOT NULL ORDER BY id",
+    )?;
+    let rows = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 評価結果で項目を置き換える。並びが変わったときだけ書き直し、変わったら true
+pub fn materialize(conn: &Connection, id: i64, track_ids: &[i64], now: i64) -> Result<bool> {
+    let current = items(conn, id)?;
+    if current == track_ids {
+        return Ok(false);
+    }
+    rewrite_items(conn, id, track_ids, now)?;
+    Ok(true)
+}
+
+/// 自動再書き出しの対象: `auto_export = 1` で書き出し記録のある `(playlist_id, profile 名)`
+pub fn auto_export_targets(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut st = conn.prepare_cached(
+        "SELECT e.playlist_id, x.name FROM playlist_exports e
+         JOIN playlists p ON p.id = e.playlist_id
+         JOIN export_profiles x ON x.id = e.profile_id
+         WHERE p.auto_export = 1 ORDER BY e.playlist_id, x.id",
+    )?;
+    let rows = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rename {
     Ok,
@@ -201,24 +297,34 @@ pub fn items(conn: &Connection, id: i64) -> Result<Vec<i64>> {
     Ok(rows)
 }
 
-/// 項目を `order` の並びで書き直す（position を 0 から振り直す）
+/// 項目を `order` の並びで書き直す（position を 0 から振り直す）。
+/// SAVEPOINT で囲むので、呼び出し側のトランザクションの中でも外でも原子的
 fn rewrite_items(conn: &Connection, id: i64, order: &[i64], now: i64) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM playlist_items WHERE playlist_id = ?", [id])?;
-    {
-        let mut st = tx.prepare_cached(
+    conn.execute_batch("SAVEPOINT rewrite_items")?;
+    let r = (|| -> Result<()> {
+        conn.execute("DELETE FROM playlist_items WHERE playlist_id = ?", [id])?;
+        let mut st = conn.prepare_cached(
             "INSERT INTO playlist_items (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
         )?;
         for (pos, track_id) in order.iter().enumerate() {
             st.execute(params![id, pos as i64, track_id])?;
         }
+        conn.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    })();
+    match r {
+        Ok(()) => {
+            conn.execute_batch("RELEASE rewrite_items")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO rewrite_items; RELEASE rewrite_items");
+            Err(e)
+        }
     }
-    tx.execute(
-        "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
-        params![now, id],
-    )?;
-    tx.commit()?;
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

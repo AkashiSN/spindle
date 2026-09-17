@@ -1738,3 +1738,53 @@ stem で当てる。プロファイル別のディレクトリにするのは、
 **却下**: 同じトラックの複数回収録（表の行の同一性が崩れる）。項目一覧の専用 API（表の集合は
 サイドバーの scope で差し替えるだけという SPEC §12.1 の原則に反する）。取り込みを画面からの
 ファイルアップロードにする（ファイルは既に Playlists root にある。SMB を開かずに済む）。
+
+## D-54 スマートプレイリストは評価結果を materialize し、常駐タスクが再評価・再書き出しする
+
+**決定**（P1-7。仕様 SPEC §9 / §10、docs/DSL.md、D-16 / D-39 が定めていない値と境界）:
+
+- **評価結果は `playlist_items` に書く（materialize）。** ルール（`rule_ast`）が正で、項目はその
+  キャッシュ。ORDER BY / LIMIT を適用した並びをそのまま `position` にするので、表の
+  `playlist_id` scope・`sort=position`・m3u8 の書き出しは手動プレイリストと同じ経路で動き、
+  LIMIT / ORDER BY と表のキーセットページングが衝突しない。smart への項目の追加・除外・移動は
+  409 `smart`、manual へのルール差し替え・再評価は 409 `manual`
+- **`added`（初回スキャン日時）は `tracks.added_at`**（マイグレーション 0007。既存行は `seen_at` で
+  backfill。スキャナが INSERT 時に設定し、復活でも変えない）
+- **プレビューは id 無しの `POST /api/playlists/preview { rule }`**（構文・型の検証と評価件数、AST）。
+  SPEC §9 の `POST /api/playlists/:id/preview` は「保存前のルールを試す」用途に合わないので
+  置き換える。表でのプレビューは D-39 どおり `filter.dsl`（WHERE だけ。ORDER BY / LIMIT は無視し、
+  `Filter::parse` で構文・型を検証して 400）。`POST /api/playlists/:id/refresh` で手動再評価
+- **自動再評価・再書き出しはプロセス内の常駐タスク**（`playlist::autoexport`）。`jobs` 表の
+  `type` CHECK が固定でジョブ種別を足せず、ルールが正なので永続化する理由も無い。`library`
+  イベント・終端の `batch` イベント・完了した job を合図に `[export].autoexport_debounce_sec`
+  だけ待ち（その間の合図はまとめる）、全 smart を再評価して並びが変わったものだけ書き直し、
+  `auto_export = 1` で書き出し記録のあるプレイリスト（手動も）を記録済みプロファイルへ書き直す。
+  起動時にも 1 回走る。`auto_export = 0` は再書き出しの対象外（再評価はする）。項目が書き換わった
+  プレイリストは SSE `playlist { playlist_ids }` で知らせ、UI は一覧の件数と（表示中なら）表を取り直す
+  （UI は元の `library` イベントを即時に処理済みで、デバウンス後の書き換えを知らないため）
+- **プレイリストへの書き込み API は 1 トランザクション。** 複合 PATCH（name / auto_export / rule）は
+  どれかが通らなければ何も変えず、ルールの差し替え・作成は評価と materialize まで含めて原子的
+  （評価の実行時失敗のうち `regexp()` 由来 — バックトラック上限など。SQLite は UDF のエラーを文字列で
+  しか返さないので接頭辞 `regexp: ` で見分ける — は 400 `rule_failed` で巻き戻す。それ以外の SQLite
+  障害は 500 のまま）。
+  `rewrite_items` は SAVEPOINT で囲み、外側のトランザクションの有無によらず原子的
+- **キーワードには語境界がある**（`ISLAND` を `IS` + `LAND` と読まない。`)AND` や `IS"x"` の記号の
+  隣接は通る）。`LIMIT` は 1..=i64::MAX、`added` の日付は暦日として妥当な 1..=9999 年だけ
+- **SQL 生成の固定値**: `IS` は `COLLATE NOCASE`、`HAS` は `LIKE`（メタ文字はエスケープ。どちらも
+  ASCII の大小だけ畳む。日本語の casefold まではしない）、`MATCHES` は全コネクションに登録した
+  `regexp(pattern, text)`（fancy-regex。スレッドごとにコンパイル済みをキャッシュ）、`GREATER` /
+  `LESS` は数値フィールドと `date`（辞書順）/ `added`（`YYYY-MM-DD` は UTC 0 時か epoch 秒）だけ、
+  `duration` は秒（`IS` は丸めた秒）。真偽（`lossless` `has_derived` `missing`）は `IS true / false`
+  だけ。任意タグは `EXISTS (track_tags …)` で多値のどれかが一致すれば成立。`NOT` は `coalesce(…, 0)`
+  で NULL を偽に固定。ORDER BY は NULL を末尾、文字列は NOCASE、`t.id` でタイブレーク
+- キャッシュ列以外のフィールド名は `track_tags` のキーとして大文字化して引く。存在しないタグ名は
+  単に一致しない（エラーにしない。foobar と同じ）
+
+**理由**: スマートを仮想（毎回 SQL に展開）にすると、表のキーセットページングと LIMIT / ORDER BY
+が両立せず、書き出しも別経路になる。materialize なら P1-6 の機構をそのまま使え、評価コストも
+ライブラリ変更のたびに 1 回で済む（9,098 曲で数十 ms）。
+
+**却下**: 仮想スマート（上記）。ジョブとしての再評価（CHECK 制約の変更に表の作り直しが要る）。
+`IS` を canonical key で比較（タグの値に key 列が無く、全行の関数評価になる）。
+
+**未決**: foobar Autoplaylist クエリへの変換（P1-8）。`HAS` の語境界（DSL.md、実機で突き合わせ）。

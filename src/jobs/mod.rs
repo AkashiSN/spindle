@@ -124,6 +124,8 @@ pub enum Event {
     Job(JobEvent),
     Batch(BatchEvent),
     Library(LibraryEvent),
+    /// プレイリストの項目が（再評価で）書き換わった。表示中なら表を取り直す（P1-7、D-54）
+    Playlist(PlaylistEvent),
 }
 
 impl Event {
@@ -132,6 +134,7 @@ impl Event {
             Event::Job(_) => "job",
             Event::Batch(_) => "batch",
             Event::Library(_) => "library",
+            Event::Playlist(_) => "playlist",
         }
     }
 
@@ -141,9 +144,16 @@ impl Event {
             Event::Job(e) => serde_json::to_value(e),
             Event::Batch(e) => serde_json::to_value(e),
             Event::Library(e) => serde_json::to_value(e),
+            Event::Playlist(e) => serde_json::to_value(e),
         };
         r.unwrap_or_else(|_| serde_json::json!({}))
     }
+}
+
+/// 項目が書き換わったプレイリスト
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlaylistEvent {
+    pub playlist_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

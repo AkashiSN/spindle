@@ -991,3 +991,36 @@ button.primary {
 .tr.drop-below {
   box-shadow: inset 0 -2px 0 var(--accent);
 }
+
+/* ---------------------------------------------------------------- スマートプレイリストのルール編集（P1-7） */
+.rule-editor {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  background: var(--bg-alt);
+}
+.rule-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.rule-name {
+  width: 200px;
+}
+.rule-status.ok {
+  color: var(--accent);
+}
+.rule-status.error {
+  color: var(--error);
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rule-text {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 12px;
+  resize: vertical;
+}

@@ -1037,3 +1037,78 @@ fn selection_resolves_in_position_order_when_asked() {
     let got: Vec<i64> = rows.iter().map(|r| r.id).collect();
     assert_eq!(got, vec![all[1], all[2], all[3]]);
 }
+
+// ---------------------------------------------------------------- filter.dsl（P1-7、D-39 / D-54）
+
+#[test]
+fn dsl_filter_adds_the_rule_where_clause_and_ignores_order_and_limit() {
+    let conn = open_memory_connection().unwrap();
+    let a = insert(
+        &conn,
+        "x/a.flac",
+        &T {
+            title: Some("Crow Song"),
+            albumartist: Some("a"),
+            ..t()
+        },
+    );
+    let b = insert(
+        &conn,
+        "x/b.flac",
+        &T {
+            title: Some("alchemy"),
+            albumartist: Some("a"),
+            ..t()
+        },
+    );
+    let m = insert(
+        &conn,
+        "x/m.flac",
+        &T {
+            title: Some("Song gone"),
+            missing: Some(1),
+            ..t()
+        },
+    );
+    let f = Filter::parse(r#"{"dsl":"%title% HAS song ORDER BY %title% DESC LIMIT 1"}"#).unwrap();
+    // ORDER BY / LIMIT は評価時だけ。一覧では表のソートに従い、LIMIT も効かない
+    let (rows, _) = walk(&conn, query(f.clone(), "title", 10));
+    assert_eq!(ids(&rows), vec![a]);
+    let f = Filter::parse(r#"{"dsl":"%title% HAS song OR %missing% IS true"}"#).unwrap();
+    let (rows, _) = walk(&conn, query(f, "id", 10));
+    assert_eq!(ids(&rows), vec![a, m]);
+    // 他のキーと AND
+    let f = Filter::parse(r#"{"dsl":"%albumartist% IS a","q":"alch"}"#).unwrap();
+    let (rows, _) = walk(&conn, query(f, "id", 10));
+    assert_eq!(ids(&rows), vec![b]);
+    assert_eq!(
+        tracks::count(
+            &conn,
+            &Filter::parse(r#"{"dsl":"PRESENT %title%"}"#).unwrap()
+        )
+        .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn dsl_filter_rejects_syntax_and_type_errors_at_parse_time() {
+    let err = Filter::parse(r#"{"dsl":"%title% IS"}"#).unwrap_err();
+    assert!(
+        matches!(err, spindle::domain::filter::FilterError::Dsl(_)),
+        "{err}"
+    );
+    let err = Filter::parse(r#"{"dsl":"%title% GREATER 1"}"#).unwrap_err();
+    assert!(
+        matches!(err, spindle::domain::filter::FilterError::Dsl(_)),
+        "{err}"
+    );
+    // 空は無いのと同じ
+    assert!(Filter::parse(r#"{"dsl":"  "}"#).unwrap().dsl.is_none());
+    // filterToParam と同じ順で JSON に戻る
+    let f = Filter::parse(r#"{"dsl":"%a% IS 1","album_id":3}"#).unwrap();
+    assert_eq!(
+        serde_json::to_string(&f).unwrap(),
+        r#"{"album_id":3,"dsl":"%a% IS 1"}"#
+    );
+}

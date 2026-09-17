@@ -47,6 +47,10 @@ pub enum DbError {
     Join(#[from] tokio::task::JoinError),
     #[error("{0}")]
     Internal(String),
+    /// ルール（スマートプレイリスト）の評価が実行時に失敗した。トランザクションは巻き戻し済みで、
+    /// API はユーザ入力の問題（400）として返す
+    #[error("ルールの評価に失敗: {0}")]
+    Rule(String),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -66,6 +70,8 @@ fn init_connection(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     // 書き込み競合時に即エラーにせず待つ。読みプールと書き手が同時に動くため
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    // スマートプレイリストの MATCHES（P1-7）。読みプール・書き手のどちらでも評価する
+    crate::playlist::compile::register_regexp(conn)?;
     Ok(())
 }
 
@@ -154,6 +160,21 @@ impl Db {
             f(&mut conn)
         })
         .await?
+    }
+
+    /// 書き込みコネクションで `f` を 1 トランザクションとして実行する。`f` が `Err` なら巻き戻す
+    pub async fn transaction<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+    {
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            let out = f(&tx)?;
+            tx.commit()?;
+            Ok(out)
+        })
+        .await
     }
 
     /// 読み取りプールのコネクションで `f` を実行する。プールサイズまで並列に走る

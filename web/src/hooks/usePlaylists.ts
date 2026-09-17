@@ -8,6 +8,8 @@ import type {
   ImportResponse,
   Playlist,
   PlaylistList,
+  RefreshResponse,
+  RulePreview,
 } from '../api/types'
 import { toSelectionBody, type Selection } from '../lib/selection'
 
@@ -33,11 +35,38 @@ export function usePlaylists(enabled: boolean) {
     if (enabled) refresh()
   }, [enabled, refresh])
 
+  /** rule があればスマートプレイリスト（P1-7） */
   const create = useCallback(
-    async (name: string) => {
-      const p = await apiPost<Playlist>('/api/playlists', { name })
+    async (name: string, rule?: string) => {
+      const p = await apiPost<Playlist>('/api/playlists', rule ? { name, rule } : { name })
       refresh()
       return p
+    },
+    [refresh],
+  )
+  const setRule = useCallback(
+    async (id: number, rule: string) => {
+      const p = await apiPatch<Playlist>(`/api/playlists/${id}`, { rule })
+      refresh()
+      return p
+    },
+    [refresh],
+  )
+  const previewRule = useCallback(
+    (rule: string, signal?: AbortSignal) =>
+      apiFetch<RulePreview>('/api/playlists/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rule }),
+        signal,
+      }),
+    [],
+  )
+  const refreshSmart = useCallback(
+    async (id: number) => {
+      const r = await apiPost<RefreshResponse>(`/api/playlists/${id}/refresh`, {})
+      refresh()
+      return r
     },
     [refresh],
   )
@@ -111,6 +140,9 @@ export function usePlaylists(enabled: boolean) {
     error,
     refresh,
     create,
+    setRule,
+    previewRule,
+    refreshSmart,
     rename,
     remove,
     addTracks,

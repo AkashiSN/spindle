@@ -367,9 +367,9 @@ pub fn insert_track(
         "INSERT INTO tracks (rel_path, rel_path_key, dev, inode, nlink, size, mtime_ns, ctime_ns,
                              audio_md5, audio_fp, tag_hash, codec, lossless, sample_rate, bit_depth,
                              channels, bitrate, duration_ms, title, artist_display, albumartist,
-                             track_no, disc_no, date, seen_at, seen_run_id)
+                             track_no, disc_no, date, seen_at, seen_run_id, added_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                 ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                 ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?25)",
         params![
             rel_path,
             rel_path_key,

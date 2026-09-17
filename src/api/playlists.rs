@@ -1,6 +1,8 @@
 //! `/api/playlists`（SPEC §9 / §10、docs/TASKS.md P1-6、D-53）。
 //!
-//! - `GET /api/playlists`、`POST { name }`、`GET /:id`、`PATCH /:id { name?, auto_export? }`、`DELETE /:id`
+//! - `GET /api/playlists`、`POST { name, rule? }`（rule があれば smart）、`GET /:id`、
+//!   `PATCH /:id { name?, auto_export?, rule? }`、`DELETE /:id`
+//! - `POST /api/playlists/preview { rule }`（保存せずに検証と件数）、`POST /:id/refresh`（smart の再評価）
 //! - `POST /:id/items { selection, sort? }`（末尾に追加。ids 形は送られた順、filter 形は sort 順）、
 //!   `DELETE /:id/items { track_ids?, selection? }`、`POST /:id/items/move { track_ids, before }`
 //! - `GET /:id/export?profile=` は m3u8 の本文（trusted CIDR の allowlist 対象）、`POST` は
@@ -11,7 +13,7 @@
 //! 一覧・並べ替えは `GET /api/tracks?filter={"playlist_id":N}&sort=position` で表と共通
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
+use std::io::Read;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -19,14 +21,19 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::db::playlists::{self as dbpl, MoveError, Playlist, ProfileRow, Rename};
+use crate::db::playlists::{self as dbpl, MoveError, Playlist, Rename};
 use crate::db::{now_epoch, tracks};
 use crate::domain::filter::Sort;
 use crate::domain::relpath::{RelPath, RelPathError};
 use crate::domain::selection::SelectionBody;
 use crate::fsroot::{FileKind, FsError, RootDir};
-use crate::playlist::export::{render_m3u8, EXPORT_EXT};
+use crate::jobs::{Event, PlaylistEvent};
+use crate::playlist::compile;
+use crate::playlist::dsl;
+use crate::playlist::export::EXPORT_EXT;
 use crate::playlist::import::{parse_m3u8, resolve_entries, Resolver};
+use crate::playlist::smart;
+use crate::playlist::writer;
 
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::selection::SelectionError;
@@ -47,12 +54,37 @@ pub struct PlaylistList {
 #[derive(Deserialize)]
 pub struct CreateBody {
     pub name: String,
+    /// あればスマートプレイリスト（docs/DSL.md）。構文・型エラーは 400
+    #[serde(default)]
+    pub rule: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct PatchBody {
     pub name: Option<String>,
     pub auto_export: Option<bool>,
+    /// smart のルール差し替え（再評価する）。manual に付けると 409 `manual`
+    #[serde(default)]
+    pub rule: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PreviewBody {
+    pub rule: String,
+}
+
+#[derive(Serialize)]
+pub struct Previewed {
+    /// 評価結果の件数（ORDER BY / LIMIT 適用後）
+    pub count: usize,
+    pub ast: dsl::Rule,
+}
+
+#[derive(Serialize)]
+pub struct Refreshed {
+    pub count: usize,
+    /// 項目が書き換わったか
+    pub changed: bool,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +191,47 @@ fn unavailable() -> Response {
     error_response(StatusCode::SERVICE_UNAVAILABLE, "playlists_unavailable")
 }
 
+/// ルールの実行時の失敗（`DbError::Rule`）。トランザクションは巻き戻し済み
+fn rule_failed(msg: String) -> Response {
+    error_response_with_message(StatusCode::BAD_REQUEST, "rule_failed", msg)
+}
+
+/// `Db` の結果のうち `DbError::Rule` だけを 400 に写す（それ以外は `?` で 500）
+fn rule_or<T>(r: Result<T, crate::db::DbError>) -> Result<Result<T, Response>, ApiError> {
+    match r {
+        Ok(v) => Ok(Ok(v)),
+        Err(crate::db::DbError::Rule(m)) => Ok(Err(rule_failed(m))),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn smart_only() -> Response {
+    error_response(StatusCode::CONFLICT, "manual")
+}
+
+fn manual_only() -> Response {
+    error_response(StatusCode::CONFLICT, "smart")
+}
+
+/// ルールを構文・型まで検証して AST とその JSON を返す。失敗は 400（位置付き）
+fn parse_rule(src: &str) -> Result<(dsl::Rule, String), Box<Response>> {
+    let rule = dsl::parse(src).map_err(|e| Box::new(bad_request(format!("rule が不正: {e}"))))?;
+    compile::check(&rule).map_err(|e| Box::new(bad_request(format!("rule が不正: {e}"))))?;
+    let json = serde_json::to_string(&rule)
+        .map_err(|e| Box::new(bad_request(format!("rule を保存できない: {e}"))))?;
+    Ok((rule, json))
+}
+
+/// 項目操作の前に kind を見る。manual でなければ応答（404 / 409）
+async fn require_manual(state: &AppState, id: i64) -> Result<(), Box<Response>> {
+    match state.db.read(move |c| dbpl::kind(c, id)).await {
+        Ok(Some(k)) if k == "manual" => Ok(()),
+        Ok(Some(_)) => Err(Box::new(manual_only())),
+        Ok(None) => Err(Box::new(not_found())),
+        Err(e) => Err(Box::new(ApiError::from(e).into_response())),
+    }
+}
+
 fn selection_error(e: SelectionError) -> Result<Response, ApiError> {
     match e {
         SelectionError::Filter(e) => Ok(bad_request(e.to_string())),
@@ -189,13 +262,100 @@ pub async fn create(
         Ok(n) => n,
         Err(m) => return Ok(bad_request(m)),
     };
-    let row = state
-        .db
-        .write(move |c| dbpl::create(c, &name, now_epoch()))
-        .await?;
+    let rule = match body
+        .rule
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        Some(src) => match parse_rule(src) {
+            Ok((rule, json)) => Some((src.to_owned(), rule, json)),
+            Err(r) => return Ok(*r),
+        },
+        None => None,
+    };
+    // 作成と評価は 1 トランザクション（評価が失敗すれば空の smart 行を残さない）
+    let row = match rule_or(
+        state
+            .db
+            .transaction(move |c| {
+                let now = now_epoch();
+                match rule {
+                    None => dbpl::create(c, &name, now),
+                    Some((src, rule, json)) => {
+                        let Some(p) = dbpl::create_smart(c, &name, &src, &json, now)? else {
+                            return Ok(None);
+                        };
+                        smart::refresh_one(c, p.id, &rule, now)?;
+                        dbpl::get(c, p.id)
+                    }
+                }
+            })
+            .await,
+    )? {
+        Ok(row) => row,
+        Err(r) => return Ok(r),
+    };
     Ok(match row {
         Some(p) => (StatusCode::CREATED, Json(p)).into_response(),
         None => duplicate(),
+    })
+}
+
+/// `POST /api/playlists/preview { rule }`: 保存せずに構文検証と評価件数
+pub async fn preview(
+    State(state): State<AppState>,
+    Json(body): Json<PreviewBody>,
+) -> Result<Response, ApiError> {
+    let (rule, _) = match parse_rule(body.rule.trim()) {
+        Ok(v) => v,
+        Err(r) => return Ok(*r),
+    };
+    let ast = rule.clone();
+    let count = match rule_or(state.db.read(move |c| smart::evaluate(c, &rule)).await)? {
+        Ok(ids) => ids.len(),
+        Err(r) => return Ok(r),
+    };
+    Ok(Json(Previewed { count, ast }).into_response())
+}
+
+/// `POST /api/playlists/:id/refresh`: smart を今の DB で再評価する
+pub async fn refresh(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let result = match rule_or(
+        state
+            .db
+            .transaction(move |c| {
+                let Some(kind) = dbpl::kind(c, id)? else {
+                    return Ok(None);
+                };
+                if kind != "smart" {
+                    return Ok(Some(None));
+                }
+                let Some(rule) = smart::load_rule(c, id)? else {
+                    return Ok(None);
+                };
+                let (count, changed) = smart::refresh_one(c, id, &rule, now_epoch())?;
+                Ok(Some(Some(Refreshed { count, changed })))
+            })
+            .await,
+    )? {
+        Ok(r) => r,
+        Err(r) => return Ok(r),
+    };
+    Ok(match result {
+        None => not_found(),
+        Some(None) => smart_only(),
+        Some(Some(r)) => {
+            if r.changed {
+                state.jobs.publish(Event::Playlist(PlaylistEvent {
+                    playlist_ids: vec![id],
+                }));
+            }
+            Json(r).into_response()
+        }
     })
 }
 
@@ -210,30 +370,67 @@ pub async fn patch(
         None => None,
     };
     let auto_export = body.auto_export;
-    let result = state
-        .db
-        .write(move |c| {
-            let now = now_epoch();
-            if let Some(n) = &name {
-                match dbpl::rename(c, id, n, now)? {
-                    Rename::Ok => {}
-                    other => return Ok(Err(other)),
+    let rule = match body.rule.as_deref().map(str::trim) {
+        Some(src) => match parse_rule(src) {
+            Ok((rule, json)) => Some((src.to_owned(), rule, json)),
+            Err(r) => return Ok(*r),
+        },
+        None => None,
+    };
+    // 全フィールドを 1 トランザクションで。どれかが通らなければ何も変えない
+    let result = match rule_or(
+        state
+            .db
+            .transaction(move |c| {
+                let now = now_epoch();
+                let Some(kind) = dbpl::kind(c, id)? else {
+                    return Ok(Err(PatchFail::Rename(Rename::NotFound)));
+                };
+                if rule.is_some() && kind != "smart" {
+                    return Ok(Err(PatchFail::Manual));
                 }
-            }
-            if let Some(on) = auto_export {
-                if !dbpl::set_auto_export(c, id, on, now)? {
-                    return Ok(Err(Rename::NotFound));
+                if let Some(n) = &name {
+                    match dbpl::rename(c, id, n, now)? {
+                        Rename::Ok => {}
+                        other => return Ok(Err(PatchFail::Rename(other))),
+                    }
                 }
-            }
-            Ok(Ok(dbpl::get(c, id)?))
-        })
-        .await?;
+                if let Some(on) = auto_export {
+                    if !dbpl::set_auto_export(c, id, on, now)? {
+                        return Ok(Err(PatchFail::Rename(Rename::NotFound)));
+                    }
+                }
+                let mut changed = false;
+                if let Some((src, rule, json)) = rule {
+                    dbpl::set_rule(c, id, &src, &json, now)?;
+                    changed = smart::refresh_one(c, id, &rule, now)?.1;
+                }
+                Ok(Ok((dbpl::get(c, id)?, changed)))
+            })
+            .await,
+    )? {
+        Ok(r) => r,
+        Err(r) => return Ok(r),
+    };
     Ok(match result {
-        Ok(Some(p)) => Json(p).into_response(),
-        Ok(None) | Err(Rename::NotFound) => not_found(),
-        Err(Rename::Duplicate) => duplicate(),
-        Err(Rename::Ok) => unreachable_response(),
+        Ok((Some(p), changed)) => {
+            if changed {
+                state.jobs.publish(Event::Playlist(PlaylistEvent {
+                    playlist_ids: vec![id],
+                }));
+            }
+            Json(p).into_response()
+        }
+        Ok((None, _)) | Err(PatchFail::Rename(Rename::NotFound)) => not_found(),
+        Err(PatchFail::Rename(Rename::Duplicate)) => duplicate(),
+        Err(PatchFail::Rename(Rename::Ok)) => unreachable_response(),
+        Err(PatchFail::Manual) => smart_only(),
     })
+}
+
+enum PatchFail {
+    Rename(Rename),
+    Manual,
 }
 
 /// 型の上で到達しうるが論理的に起きない分岐。500 にせず 404 に倒す
@@ -260,6 +457,9 @@ pub async fn append(
     Path(id): Path<i64>,
     Json(body): Json<AppendBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(r) = require_manual(&state, id).await {
+        return Ok(*r);
+    }
     let sort = match body.sort.as_deref().map(Sort::parse) {
         Some(Ok(s)) => Some(s),
         Some(Err(e)) => return Ok(bad_request(e.to_string())),
@@ -301,7 +501,7 @@ pub async fn append(
     };
     let result = state
         .db
-        .write(move |c| dbpl::append(c, id, &track_ids, now_epoch()))
+        .transaction(move |c| dbpl::append(c, id, &track_ids, now_epoch()))
         .await?;
     Ok(match result {
         Some(a) => Json(serde_json::json!({
@@ -318,6 +518,9 @@ pub async fn remove(
     Path(id): Path<i64>,
     Json(body): Json<RemoveBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(r) = require_manual(&state, id).await {
+        return Ok(*r);
+    }
     if body.track_ids.is_empty() && body.selection.is_none() {
         return Ok(bad_request("track_ids か selection が必要"));
     }
@@ -339,7 +542,7 @@ pub async fn remove(
     }
     let result = state
         .db
-        .write(move |c| dbpl::remove(c, id, &track_ids, now_epoch()))
+        .transaction(move |c| dbpl::remove(c, id, &track_ids, now_epoch()))
         .await?;
     Ok(match result {
         Some(n) => Json(serde_json::json!({ "removed": n })).into_response(),
@@ -352,9 +555,12 @@ pub async fn move_items(
     Path(id): Path<i64>,
     Json(body): Json<MoveBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(r) = require_manual(&state, id).await {
+        return Ok(*r);
+    }
     let result = state
         .db
-        .write(move |c| dbpl::move_items(c, id, &body.track_ids, body.before, now_epoch()))
+        .transaction(move |c| dbpl::move_items(c, id, &body.track_ids, body.before, now_epoch()))
         .await?;
     Ok(match result {
         Some(Ok(())) => StatusCode::NO_CONTENT.into_response(),
@@ -367,47 +573,22 @@ pub async fn move_items(
 
 // ---------------------------------------------------------------- 書き出し
 
-/// プレイリストとプロファイルを引いて m3u8 を組む。`Err` は応答（400 / 404）
-async fn render(
-    state: &AppState,
-    id: i64,
-    profile: Option<String>,
-) -> Result<Result<(Playlist, ProfileRow, String, usize, usize), Response>, ApiError> {
-    let Some(name) = profile
+fn render_error(e: writer::RenderError) -> Result<Response, ApiError> {
+    Ok(match e {
+        writer::RenderError::NoProfile => bad_request("profile が不明"),
+        writer::RenderError::NotFound => not_found(),
+        writer::RenderError::BadFormat(f) => {
+            bad_request(format!("format={f} のプロファイルは m3u8 を書けない"))
+        }
+        writer::RenderError::Db(e) => return Err(e.into()),
+    })
+}
+
+fn profile_name(q: ExportQuery) -> Result<String, Box<Response>> {
+    q.profile
         .map(|p| p.trim().to_owned())
         .filter(|p| !p.is_empty())
-    else {
-        return Ok(Err(bad_request("profile が必要")));
-    };
-    let result = state
-        .db
-        .read(move |c| {
-            let Some(profile) = dbpl::profile_by_name(c, &name)? else {
-                return Ok(None);
-            };
-            let Some(playlist) = dbpl::get(c, id)? else {
-                return Ok(Some(Err(())));
-            };
-            let Some((rows, skipped)) = dbpl::export_tracks(c, id, profile.profile.source)? else {
-                return Ok(Some(Err(())));
-            };
-            Ok(Some(Ok((playlist, profile, rows, skipped))))
-        })
-        .await?;
-    Ok(match result {
-        None => Err(bad_request("profile が不明")),
-        Some(Err(())) => Err(not_found()),
-        Some(Ok((playlist, profile, rows, skipped))) => {
-            if profile.format != "m3u8" {
-                return Ok(Err(bad_request(format!(
-                    "format={} のプロファイルは m3u8 を書けない",
-                    profile.format
-                ))));
-            }
-            let body = render_m3u8(&profile.profile, &rows);
-            Ok((playlist, profile, body, rows.len(), skipped))
-        }
-    })
+        .ok_or_else(|| Box::new(bad_request("profile が必要")))
 }
 
 /// `GET /api/playlists/:id/export?profile=`: 本文を返す（ファイルは書かない）
@@ -416,13 +597,17 @@ pub async fn export_get(
     Path(id): Path<i64>,
     Query(q): Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
-    let (playlist, _, body, _, _) = match render(&state, id, q.profile).await? {
-        Ok(v) => v,
-        Err(r) => return Ok(r),
+    let profile = match profile_name(q) {
+        Ok(p) => p,
+        Err(r) => return Ok(*r),
+    };
+    let r = match writer::render(&state.db, id, &profile).await {
+        Ok(r) => r,
+        Err(e) => return render_error(e),
     };
     let disposition = format!(
         "attachment; filename*=UTF-8''{}",
-        percent_encode(&format!("{}{EXPORT_EXT}", playlist.name))
+        percent_encode(&format!("{}{EXPORT_EXT}", r.playlist.name))
     );
     Ok((
         StatusCode::OK,
@@ -433,7 +618,7 @@ pub async fn export_get(
             ),
             (header::CONTENT_DISPOSITION, disposition),
         ],
-        body,
+        r.body,
     )
         .into_response())
 }
@@ -453,7 +638,7 @@ fn percent_encode(s: &str) -> String {
 }
 
 /// `POST /api/playlists/:id/export?profile=`: `Playlists/<profile>/<name>.m3u8` に tmp + rename で
-/// 書き、`playlist_exports` に記録する
+/// 書き、`playlist_exports` に記録する（`playlist::writer`）
 pub async fn export_post(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -462,59 +647,21 @@ pub async fn export_post(
     let Some(root) = state.playlists.clone() else {
         return Ok(unavailable());
     };
-    let (playlist, profile, body, count, skipped) = match render(&state, id, q.profile).await? {
-        Ok(v) => v,
-        Err(r) => return Ok(r),
-    };
-    let dir = match RelPath::parse(&profile.name) {
-        Ok(d) => d,
-        Err(e) => return Ok(bad_request(format!("profile 名がパスとして不正: {e}"))),
-    };
-    let dst = match dir.join(&format!("{}{EXPORT_EXT}", playlist.name)) {
+    let profile = match profile_name(q) {
         Ok(p) => p,
-        Err(e) => return Ok(bad_request(format!("name がパスとして不正: {e}"))),
+        Err(r) => return Ok(*r),
     };
-    let out_path = dst.as_str().to_owned();
-    let written =
-        tokio::task::spawn_blocking(move || write_atomic(&root, &dir, &dst, body.as_bytes()))
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-    if let Err(e) = written {
-        return Err(ApiError::Internal(format!("m3u8 を書けない: {e}")));
+    match writer::export_to_root(&state.db, root, id, &profile).await {
+        Ok(w) => Ok(Json(Exported {
+            out_path: w.out_path,
+            count: w.count,
+            skipped_missing: w.skipped_missing,
+        })
+        .into_response()),
+        Err(writer::WriteError::Render(e)) => render_error(e),
+        Err(writer::WriteError::BadPath(m)) => Ok(bad_request(m)),
+        Err(e) => Err(ApiError::Internal(e.to_string())),
     }
-    let profile_id = profile.id;
-    let rec = out_path.clone();
-    state
-        .db
-        .write(move |c| dbpl::record_export(c, id, profile_id, &rec, now_epoch()))
-        .await?;
-    Ok(Json(Exported {
-        out_path,
-        count,
-        skipped_missing: skipped,
-    })
-    .into_response())
-}
-
-/// `dir` を作り、tmp に書いて fsync → rename で `dst` に置く。失敗時は tmp を消す
-fn write_atomic(root: &RootDir, dir: &RelPath, dst: &RelPath, bytes: &[u8]) -> Result<(), FsError> {
-    root.create_dir_all(dir)?;
-    let (tmp, mut file) = root.create_tmp(Some(dir))?;
-    let r = (|| {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        Ok::<(), std::io::Error>(())
-    })();
-    if let Err(e) = r {
-        let _ = root.unlink(&tmp);
-        return Err(FsError::Io(e));
-    }
-    drop(file);
-    if let Err(e) = root.replace_file(&tmp, dst) {
-        let _ = root.unlink(&tmp);
-        return Err(e);
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------- 取り込み
@@ -633,7 +780,7 @@ pub async fn import_create(
     let path_for_log = rel.as_str().to_owned();
     let result = state
         .db
-        .write(move |c| {
+        .transaction(move |c| {
             let now = now_epoch();
             let resolver = Resolver::new(dbpl::import_candidates(c)?);
             let resolved = resolve_entries(&resolver, entries);

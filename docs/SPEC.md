@@ -809,12 +809,14 @@ GET    /api/artwork/:hash?size=                   size = 256 | 768 で WebP の�
                                                   （元の MIME）。hash は albums.artwork_hash。未生成なら
                                                   原画像へ倒す（no-cache）。ハッシュアドレスなので immutable
 
-GET    /api/playlists, POST, PATCH, DELETE        手動プレイリストの CRUD（D-53）。並びは
+GET    /api/playlists, POST, PATCH, DELETE        プレイリストの CRUD（D-53）。POST / PATCH に rule があれば
+                                                  スマート（D-54。評価結果は playlist_items に書く）。並びは
                                                   /api/tracks?filter={"playlist_id":N}&sort=position
 POST   /api/playlists/:id/items                   { selection, sort? } を末尾に追加（同じトラックは 1 回）
 DELETE /api/playlists/:id/items                   { track_ids?, selection? } を外す
 POST   /api/playlists/:id/items/move              { track_ids, before } before の直前（null は末尾）へ
-POST   /api/playlists/:id/preview                 スマートルールの評価結果
+POST   /api/playlists/preview                     { rule } スマートルールの検証と評価件数（保存しない。D-54）
+POST   /api/playlists/:id/refresh                 スマートを今の DB で再評価（項目を書き直す）
 GET    /api/playlists/:id/export?profile=         m3u8 の本文（trusted CIDR で認証スキップ）
 POST   /api/playlists/:id/export?profile=         Playlists/<profile>/<name>.m3u8 へ書き出し
 GET    /api/playlists/import, POST                Playlists root 下の m3u8 の一覧 / { path, name? } で取り込み
@@ -1027,6 +1029,8 @@ ORDER BY %date% DESC LIMIT 100
 - 独自拡張（foobar に無い）: `MATCHES` / `LIMIT` / `ORDER BY random`
 - SQL 生成はホワイトリスト列へのマッピング。任意タグは
   `EXISTS (SELECT 1 FROM track_tags ...)` に展開。値は全てバインドパラメータ
+- 評価結果（ORDER BY / LIMIT 適用後）は `playlist_items` に書く（D-54）。表・書き出しは手動と同じ経路。
+  ライブラリ変更をトリガに常駐タスクがデバウンス後に再評価する
 
 ### エクスポート形式
 

@@ -2,7 +2,7 @@
 // どれを選んでも中心の表のフィルタ（scope）を差し替えるだけ
 
 import { useMemo, useState } from 'react'
-import type { AlbumRow } from '../api/types'
+import type { AlbumRow, Playlist } from '../api/types'
 import type { Playlists } from '../hooks/usePlaylists'
 import { FLAGS, FLAG_LABELS, filterToParam, type Filter, type Flag } from '../lib/filter'
 import { PlaylistSection } from './PlaylistSection'
@@ -39,6 +39,8 @@ export function Sidebar({
   playlists,
   onPlaylistDeleted,
   onDropTracks,
+  onEditRule,
+  onRefreshed,
   playlistNotice,
   onPlaylistNotice,
 }: {
@@ -48,6 +50,8 @@ export function Sidebar({
   playlists: Playlists
   onPlaylistDeleted: (playlistId: number) => void
   onDropTracks: (playlistId: number, trackIds: number[]) => void
+  onEditRule: (p: Playlist | null) => void
+  onRefreshed: (playlistId: number) => void
   playlistNotice: string | null
   onPlaylistNotice: (text: string | null) => void
 }) {
@@ -155,6 +159,8 @@ export function Sidebar({
         onOpen={(id) => onScope({ playlist_id: id })}
         onDeleted={onPlaylistDeleted}
         onDropTracks={onDropTracks}
+        onEditRule={onEditRule}
+        onRefreshed={onRefreshed}
         notice={playlistNotice}
         onNotice={onPlaylistNotice}
       />

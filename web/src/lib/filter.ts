@@ -30,6 +30,8 @@ export type Filter = {
   album_id?: number
   playlist_id?: number
   flags?: Flag[]
+  /** スマートプレイリスト DSL（WHERE だけ。ルール編集中のプレビュー用。D-39 / D-54） */
+  dsl?: string
   q?: string
 }
 
@@ -44,6 +46,8 @@ export function filterToParam(f: Filter): string {
   if (f.playlist_id != null) out.playlist_id = f.playlist_id
   const flags = [...new Set(f.flags ?? [])].sort()
   if (flags.length > 0) out.flags = flags
+  const dsl = f.dsl?.trim()
+  if (dsl) out.dsl = dsl
   const q = f.q?.trim()
   if (q) out.q = q
   return Object.keys(out).length === 0 ? '' : JSON.stringify(out)

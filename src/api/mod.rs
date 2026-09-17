@@ -52,6 +52,8 @@ pub fn router(state: AppState) -> Router {
             "/playlists/import",
             get(playlists::import_list).post(playlists::import_create),
         )
+        .route("/playlists/preview", post(playlists::preview))
+        .route("/playlists/{id}/refresh", post(playlists::refresh))
         .route(
             "/playlists/{id}",
             get(playlists::get)

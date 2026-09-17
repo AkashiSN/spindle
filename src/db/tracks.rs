@@ -256,6 +256,16 @@ fn filter_where(f: &Filter) -> Where {
         };
         w.push(clause, []);
     }
+    if let Some(dsl) = &f.dsl {
+        // Filter::parse が検証済み。万一ここで失敗したら空集合（黙って全件にしない）
+        match crate::playlist::dsl::parse(dsl)
+            .ok()
+            .and_then(|r| crate::playlist::compile::where_clause(&r).ok())
+        {
+            Some(frag) => w.push(&frag.sql, frag.params),
+            None => w.push("0", []),
+        }
+    }
     if let Some(q) = &f.q {
         if uses_fts(q) {
             w.push(

@@ -39,6 +39,10 @@ pub struct Filter {
     /// 固定フィルタ（SPEC §12.1 サイドバー）。複数は AND
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<Flag>,
+    /// スマートプレイリスト DSL（docs/DSL.md）の原文。WHERE 句だけを使い、ORDER BY / LIMIT は
+    /// 無視する（プレビュー用。D-39 / D-54）。`parse` で構文・型を検証済み
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsl: Option<String>,
     /// 検索語。`FTS_MIN_CHARS` 以上なら FTS5 trigram、未満なら LIKE
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
@@ -52,6 +56,8 @@ pub enum FilterError {
     Sort(String),
     #[error("cursor が不正")]
     Cursor,
+    #[error("dsl が不正: {0}")]
+    Dsl(String),
 }
 
 impl Filter {
@@ -64,6 +70,15 @@ impl Filter {
         // 空の検索語は無いのと同じ
         if f.q.as_deref().is_some_and(|q| q.trim().is_empty()) {
             f.q = None;
+        }
+        if f.dsl.as_deref().is_some_and(|d| d.trim().is_empty()) {
+            f.dsl = None;
+        }
+        // DSL は構文と型をここで検証し、SQL を組む側は失敗しない前提で扱う
+        if let Some(dsl) = &f.dsl {
+            let rule =
+                crate::playlist::dsl::parse(dsl).map_err(|e| FilterError::Dsl(e.to_string()))?;
+            crate::playlist::compile::check(&rule).map_err(|e| FilterError::Dsl(e.to_string()))?;
         }
         // 同じ flag の重複は無害だが SQL が伸びるので落とす
         f.flags.sort();

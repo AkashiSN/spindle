@@ -108,6 +108,7 @@ export type LibraryEvent =
   | { kind: 'ids'; scan_run_id: number; track_ids: number[] }
   | { kind: 'bulk'; scan_run_id: number }
 export type ResyncEvent = { skipped: number }
+export type PlaylistEvent = { playlist_ids: number[] }
 
 export type ErrorBody = { error: string; message?: string }
 
@@ -169,6 +170,8 @@ export type Playlist = {
   id: number
   name: string
   kind: 'manual' | 'smart'
+  /** smart のルール原文（docs/DSL.md）。manual は null */
+  rule_source: string | null
   auto_export: boolean
   created_at: number
   updated_at: number
@@ -182,6 +185,8 @@ export type AppendResponse = { added: number; skipped: number }
 export type ExportResponse = { out_path: string; count: number; skipped_missing: number }
 export type ImportCandidate = { path: string; size: number }
 export type ImportResponse = { playlist: Playlist; matched: number; duplicates: number; unresolved: string[] }
+export type RulePreview = { count: number; ast: unknown }
+export type RefreshResponse = { count: number; changed: boolean }
 
 /** 書き出しプロファイル名（`export_profiles` の seed。CRUD は P1-8） */
 export const EXPORT_PROFILES = ['internal', 'foobar', 'android'] as const
