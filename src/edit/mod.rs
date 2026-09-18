@@ -1570,6 +1570,8 @@ fn sync_track_to_file(
                 track_id,
                 "外部で音声が差し替えられていた。audio_version を進める"
             );
+            // 解析値は古いので捨てる（D-47。スキャナと同じ規則）
+            dbrg::reset_analysis(tx, track_id)?;
             row.audio_version + 1
         } else {
             row.audio_version

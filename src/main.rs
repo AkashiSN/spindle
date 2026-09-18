@@ -162,7 +162,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(2);
     let scanner = Arc::new(
         Scanner::new(Arc::clone(&state.db), Arc::clone(&library_root), cpus)
-            .with_artwork(Arc::clone(&artwork)),
+            .with_artwork(Arc::clone(&artwork))
+            .with_replaygain_reference(state.config.replaygain.reference_lufs),
     );
     let mut registry = Registry::new();
     registry.register(

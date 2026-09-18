@@ -362,7 +362,11 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
   バッチの applied だけでなく、DB をファイルの現在値へ揃えるすべての経路（overlay の解消・
   外部変更の追随・巻き戻し）で判定し直し、一致しなければ NULL に戻す。再解析で値が変わった
   行も NULL にする（秒単位の時刻では同じ秒の再解析を `<` で検出できない）。DB のタグが既に
-  一致している行は op にせず `rg_written_at` だけ立てる
+  一致している行は op にせず `rg_written_at` だけ立てる。スキャナも外部のタグ変更を取り込んだ
+  行（`tag_hash` が変わった行）で判定し直す（D-48）
+- **外部で音声が差し替わった（`audio_version` が進んだ）行の解析値は捨てる**（`rg_*` と
+  `rg_scanned_at` / `rg_written_at` を NULL。スキャナと tagwrite の overlay 解消の両方。D-47）。
+  古い解析値を Derived や再生に使わない。album の他のトラックの `rg_album_*` は次の album 解析で揃う
 - album gain は `album_id` 単位。**2ch 以外は album 集計から除外**（判定はデコード結果の
   チャンネル数。除外されたトラックの album の値は NULL）。構成トラックが 1 本でも
   デコードできなければ album 全体を書かない（D-47）

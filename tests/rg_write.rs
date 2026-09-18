@@ -531,3 +531,121 @@ async fn store_with_changed_values_clears_written_at_even_in_the_same_second() {
     dbrg::store(&lib.conn(), &[(a, values(3.0, Some(1.0)))], written + 20).unwrap();
     assert_eq!(lib.row(a).written_at, None);
 }
+
+// ---------------------------------------------------------------- スキャナの追随（D-47 / D-48 の未決）
+
+/// 外部で音声が差し替わって `audio_version` が進んだら解析値は古い: `rg_scanned_at` / `rg_written_at`
+/// を NULL に戻す（次の解析までは未解析扱い。古い値を Derived や再生に使わない）
+#[tokio::test]
+async fn external_audio_replacement_resets_rg_analysis_on_scan() {
+    let lib = Lib::new();
+    let flac = require_ffmpeg!(lib.add("A/1.flac", 1, "one"));
+    lib.scan().await;
+    let id = lib.track_id("A/1.flac");
+    lib.set_rg(id, values(-2.5, Some(-1.0)), 1000);
+    lib.conn()
+        .execute("UPDATE tracks SET rg_written_at = 1001 WHERE id = ?1", [id])
+        .unwrap();
+    let before = lib.row(id);
+
+    // 同じパスに別の音声（seed 違い）を置く
+    std::fs::remove_file(&flac).unwrap();
+    lib.add("A/1.flac", 9, "one");
+    lib.scan().await;
+    let after = lib.row(id);
+    assert_eq!(after.audio_version, before.audio_version + 1);
+    assert_eq!(after.scanned_at, None);
+    assert_eq!(after.written_at, None);
+
+    // 音声が変わらないタグだけの変更では据え置き
+    lib.set_rg(id, values(-2.5, Some(-1.0)), 2000);
+    common::retag(&flac, |t| {
+        t.insert_text(lofty::tag::ItemKey::TrackTitle, "renamed".to_owned());
+    });
+    lib.scan().await;
+    let row = lib.row(id);
+    assert_eq!(row.audio_version, after.audio_version);
+    assert_eq!(row.scanned_at, Some(2000));
+}
+
+/// 外部ツールが RG タグを消したり書き換えたりしたら `rg_written_at` を判定し直す
+#[tokio::test]
+async fn external_tag_change_resyncs_rg_written_at_on_scan() {
+    let lib = Lib::new();
+    let flac = require_ffmpeg!(lib.add("A/1.flac", 1, "one"));
+    lib.scan().await;
+    let id = lib.track_id("A/1.flac");
+    lib.set_rg(id, values(-2.5, Some(-1.0)), 1000);
+    lib.start();
+    let rep = lib.editor.prepare_rg_write(None, vec![id]).await.unwrap();
+    assert_eq!(
+        lib.wait_batch_terminal(rep.batch_id.unwrap()).await,
+        BatchState::Applied
+    );
+    assert!(lib.row(id).written_at.is_some());
+
+    // 外部ツールが RG タグを消す → 未書込に戻る
+    common::retag(&flac, |t| {
+        t.remove_key(lofty::tag::ItemKey::ReplayGainTrackGain);
+        t.remove_key(lofty::tag::ItemKey::ReplayGainTrackPeak);
+        t.remove_key(lofty::tag::ItemKey::ReplayGainAlbumGain);
+        t.remove_key(lofty::tag::ItemKey::ReplayGainAlbumPeak);
+    });
+    lib.scan().await;
+    assert_eq!(lib.row(id).written_at, None);
+    assert_eq!(lib.row(id).scanned_at, Some(1000), "解析値は残る");
+
+    // 外部ツールが解析値と一致する RG タグを書く → 書込済みに戻る
+    common::retag(&flac, |t| {
+        t.insert_text(
+            lofty::tag::ItemKey::ReplayGainTrackGain,
+            "-2.50 dB".to_owned(),
+        );
+        t.insert_text(
+            lofty::tag::ItemKey::ReplayGainTrackPeak,
+            "0.500000".to_owned(),
+        );
+        t.insert_text(
+            lofty::tag::ItemKey::ReplayGainAlbumGain,
+            "-1.00 dB".to_owned(),
+        );
+        t.insert_text(
+            lofty::tag::ItemKey::ReplayGainAlbumPeak,
+            "0.750000".to_owned(),
+        );
+    });
+    lib.scan().await;
+    assert!(lib.row(id).written_at.is_some());
+}
+
+/// tagwrite が事前条件不一致で外部の実体を読んだとき（overlay の解消）も、音声が差し替わっていれば
+/// 解析値を捨てる（スキャナと同じ規則）
+#[tokio::test]
+async fn audio_replacement_seen_by_tagwrite_conflict_resets_rg_analysis() {
+    let lib = Lib::new();
+    let flac = require_ffmpeg!(lib.add("A/1.flac", 1, "one"));
+    lib.scan().await;
+    let id = lib.track_id("A/1.flac");
+    lib.set_rg(id, values(-2.5, Some(-1.0)), 1000);
+    let p = lib
+        .editor
+        .prepare_tags(
+            None,
+            vec![NewTagOp {
+                track_id: id,
+                changes: vec![set("TITLE", &["x"])],
+            }],
+        )
+        .await
+        .unwrap();
+    std::fs::remove_file(&flac).unwrap();
+    lib.add("A/1.flac", 9, "one");
+    lib.start();
+    assert_eq!(
+        lib.wait_batch_terminal(p.batch_id).await,
+        BatchState::Failed
+    );
+    let row = lib.row(id);
+    assert_eq!(row.audio_version, 2);
+    assert_eq!(row.scanned_at, None);
+}

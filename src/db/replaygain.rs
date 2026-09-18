@@ -197,6 +197,19 @@ pub fn set_written(conn: &Connection, track_ids: &[i64], now: i64) -> Result<usi
     Ok(n)
 }
 
+/// 音声が差し替わった（`audio_version` が進んだ）トラックの解析値を捨てる（D-47）。値は残さず
+/// `rg_scanned_at` / `rg_written_at` を NULL にし、次の解析までは未解析扱い（古い値を Derived や
+/// 再生に使わない。album の他のトラックの `rg_album_*` は次の album 解析で揃う）
+pub fn reset_analysis(conn: &Connection, track_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE tracks SET rg_track_gain = NULL, rg_track_peak = NULL, rg_album_gain = NULL,
+                rg_album_peak = NULL, rg_scanned_at = NULL, rg_written_at = NULL
+          WHERE id = ?1",
+        [track_id],
+    )?;
+    Ok(())
+}
+
 /// ファイルの現在のタグ集合から `rg_written_at` を判定し直す。解析値と一致していれば `now`、
 /// 一致しない（RG のキーが無い・別の値・未解析）なら NULL。返り値は一致したか
 pub fn sync_written_at(

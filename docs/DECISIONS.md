@@ -1379,8 +1379,10 @@ Archive から move で戻す（Archive の追記のみの原則に例外が増�
 失敗トラックを飛ばして album を書く（嘘の album gain が残る）。ffmpeg で全部デコードする
 （外部プロセス起動と f32 のパイプが 9,000 回。symphonia で済む形式は済ませる）。
 
-**未決**: 外部で音声が差し替わって `audio_version` が上がったとき `rg_scanned_at` を NULL に
-戻すか（現状は残る。scanner に足すなら別タスク）。
+**追記（P1-13）**: 外部で音声が差し替わって `audio_version` が進んだ行は、スキャナ（Phase 4 の
+`apply_content`）と tagwrite の overlay 解消（`sync_track_to_file`）の両方で解析値を捨てる
+（`db::replaygain::reset_analysis`: `rg_*` と `rg_scanned_at` / `rg_written_at` を NULL）。古い値を
+Derived や再生に使わないため。album の他のトラックの `rg_album_*` は次の album 解析で揃う。
 
 ## D-48 ReplayGain のタグ書き込みは通常の編集バッチに乗せる（実装合わせ）
 
@@ -1426,10 +1428,11 @@ Archive から move で戻す（Archive の追記のみの原則に例外が増�
 なった曲の古い album gain が残る）。書き込み専用の op 種別 / ジョブ種別。preview → apply の
 2 段階（選ぶものが無い）。
 
-**未決**: スキャナが外部のタグ変更を取り込んだときの `rg_written_at` の判定（現状はスキャンでは
-触らない。外部ツールが RG タグを消しても `rg_written_at` は残る。P1-0 か scanner の別タスクで
-`sync_written_at` を呼ぶ）。`tag_version` が進むので Derived の追随（P1-10）が RG タグを
-`R128_*` へ変換して埋める（SPEC §7.6）のは P1-10 側の責務。
+**追記（P1-13）**: スキャナは外部のタグ変更を取り込んだ行（`tag_hash` が変わった。pending の tags op
+がある行は overlay を守るので除く）で `sync_written_at` を呼び、外部ツールが RG タグを消せば
+`rg_written_at` を NULL に、解析値と一致する値を書けば `now` にする（`Scanner::with_replaygain_reference`
+で基準を受ける）。`tag_version` が進むので Derived の追随（P1-10）が RG タグを `R128_*` へ変換して
+埋めるのは P1-10 側の責務。
 
 ## D-49 アートワークの解決とキャッシュ（読み側。実装合わせ）
 

@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::artwork::{self as dbart, AlbumArtworkState, CoverStat};
 use crate::db::jobs as dbjobs;
+use crate::db::replaygain as dbrg;
 use crate::db::scans::{
     self, AlbumMeta, AlbumSnap, CacheColumns, Fingerprint, Physical, PictureState, RunState,
     TrackContent, TrackSnap,
@@ -136,6 +137,9 @@ pub struct Scanner {
     parallelism: usize,
     /// アートワークのキャッシュ（P1-3）。無ければ Phase 5 を行わない
     artwork: Option<Arc<ArtworkStore>>,
+    /// ReplayGain の内部基準（LUFS。`[replaygain].reference_lufs`）。外部のタグ変更を取り込んだときの
+    /// `rg_written_at` の判定に使う（D-48）
+    rg_reference: f64,
     /// テスト用: Phase 5 の予約の前後で呼ぶ（[`BeforeArtworkHook`]）
     before_artwork: Mutex<Option<BeforeArtworkHook>>,
 }
@@ -188,8 +192,15 @@ impl Scanner {
             root,
             parallelism: parallelism.max(1),
             artwork: None,
+            rg_reference: -18.0,
             before_artwork: Mutex::new(None),
         }
+    }
+
+    /// ReplayGain の内部基準を設定する（既定 -18 LUFS。`Editor::with_replaygain_reference` と同じ値にする）
+    pub fn with_replaygain_reference(mut self, reference_lufs: f64) -> Self {
+        self.rg_reference = reference_lufs;
+        self
     }
 
     /// アートワークの解決（Phase 5）を有効にする
@@ -401,6 +412,7 @@ impl Scanner {
         let commit = Commit {
             run_id,
             deep,
+            rg_reference: self.rg_reference,
             inv,
             decisions,
             tracks,
@@ -1194,6 +1206,8 @@ pub fn cache_columns(tags: &TagSet) -> CacheColumns {
 struct Commit {
     run_id: i64,
     deep: bool,
+    /// ReplayGain の内部基準（`rg_written_at` の判定）
+    rg_reference: f64,
     inv: Inventory,
     decisions: Vec<Decision>,
     tracks: Vec<TrackSnap>,
@@ -1415,7 +1429,7 @@ impl Commit {
                     scans::update_physical(&tx, *track_id, &e.ph, run_id, now)?;
                     match read {
                         Some(Ok(r)) => {
-                            self.apply_content(&tx, row, pending.get(track_id), r)?;
+                            self.apply_content(&tx, row, pending.get(track_id), r, now)?;
                             report.updated += 1;
                             if !*revived && !moved_ids.contains(track_id) {
                                 report.changed_ids.push(*track_id);
@@ -1553,22 +1567,32 @@ impl Commit {
         row: &TrackSnap,
         pending: Option<&scans::PendingOp>,
         r: &ReadResult,
+        now: i64,
     ) -> crate::db::Result<()> {
         let tags_pending = pending.is_some_and(|op| op.kind == "tags");
         if !tags_pending {
-            let tag_version = match row.tag_hash {
-                Some(old) if old != r.content.tag_hash => row.tag_version + 1,
-                _ => row.tag_version,
+            let tags_changed = row.tag_hash.is_some_and(|old| old != r.content.tag_hash);
+            let tag_version = if tags_changed {
+                row.tag_version + 1
+            } else {
+                row.tag_version
             };
             scans::update_content(tx, row.id, &r.content, tag_version)?;
+            if tags_changed {
+                // 外部のタグ変更: RG タグが消えた / 書き換わった / 解析値と一致する値が書かれた
+                // を `rg_written_at` に反映する（D-48）
+                dbrg::sync_written_at(tx, row.id, &r.content.tags, self.rg_reference, now)?;
+            }
         }
-        let audio_version = if audio_changed(r.fp, row.audio_md5, row.audio_fp) {
-            row.audio_version + 1
+        if audio_changed(r.fp, row.audio_md5, row.audio_fp) {
+            // 外部で音声が差し替わった: 解析値は古いので捨てる（D-47）
+            dbrg::reset_analysis(tx, row.id)?;
+            let fp = effective_fingerprint(r.fp, row.audio_md5, row.audio_fp);
+            scans::update_fingerprint(tx, row.id, fp, row.audio_version + 1)?;
         } else {
-            row.audio_version
-        };
-        let fp = effective_fingerprint(r.fp, row.audio_md5, row.audio_fp);
-        scans::update_fingerprint(tx, row.id, fp, audio_version)?;
+            let fp = effective_fingerprint(r.fp, row.audio_md5, row.audio_fp);
+            scans::update_fingerprint(tx, row.id, fp, row.audio_version)?;
+        }
         Ok(())
     }
 

@@ -718,6 +718,11 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 完了条件: **新規 CD が検証付きで取り込め、既存 FLAC が格付けされる。**
 
+- [x] **P1-13** スキャナの ReplayGain 追随（D-47 / D-48 の未決）: 外部で音声が差し替わった行は解析値を
+      捨てる（`reset_analysis`。tagwrite の overlay 解消も同じ）、外部のタグ変更を取り込んだ行は
+      `rg_written_at` を判定し直す（`sync_written_at`。`Scanner::with_replaygain_reference`）。
+      受け入れ: `tests/rg_write.rs`（音声差し替えで NULL・タグだけの変更は据え置き、RG タグの削除 /
+      一致する書き込みで `rg_written_at` が動く、tagwrite の conflict で読んだ音声差し替え）
 - [x] **P1-12** UI の再構成と起動導線（foobar2000 のレイアウトに寄せる。D-58）。P1 の完了条件
       「foobar2000 を開かずに日常運用が回る」に対して、API だけで UI が無い機能（リネーム / 正規化 /
       RG / FLAC 検査 / GC）の起動導線と、ジョブ・設定画面を揃える
