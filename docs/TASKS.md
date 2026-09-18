@@ -616,8 +616,8 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/smart_playlists.rs`（作成で materialize、400 の位置、preview、refresh / ルール差し替え、
       項目操作の 409、autoexport のデバウンスと再書き出し・`auto_export = 0`）
 
-      foobar Autoplaylist クエリ変換は P1-8 で実施済み。未決: `HAS` の語境界の実機突き合わせ（P1-8 の
-      未決に集約）。UI の並び替え（smart は ORDER BY で決まるので表のソート変更は表示だけ）
+      foobar Autoplaylist クエリ変換は P1-8 で実施済み、`HAS` の語境界は実機で確認済み（D-55）。
+      UI の並び替え（smart は ORDER BY で決まるので表のソート変更は表示だけ）
 - [x] **P1-8** エクスポートプロファイル（foobar / android / internal、
       foobar Autoplaylist クエリ生成）。**依存: P1-10**（`delivery` プロファイルが Derived を前提）。
       タグ鮮度が必要な export / 同期は `stale_tags` の件数を明示するか追随ジョブの完了を待つ。D-55
@@ -636,8 +636,9 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/playlists_db.rs`（`stale_tags` の集計、prefix の同期）、`tests/playlists_api.rs`
       （android の `stale_tags`、internal は 0）、`web/src/lib/playlists.test.ts`（通知文）
 
-      未決: `HAS` の語境界と技術情報フィールドの `PRESENT` / `MISSING` の foobar 実機との突き合わせ
-      （下記「残課題」）
+      foobar 実機との突き合わせ（2026-09-19）: `HAS` は部分一致で spindle と同じ、技術情報フィールドの
+      `PRESENT` / `MISSING` も効く。二重引用符は挙動を変えず、単一引用符は一致しなくなる（D-55）。
+      変換器の変更は不要
 - [x] **P1-9** 再生（Range 対応、ALAC は既定で Opus 変換、
       `canPlayType()` によるクライアント能力判定。下部バー左側の再生 UI: 再生・停止・
       シーク・音量・RG の off / track / album）。D-52
@@ -788,9 +789,6 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 - Discogs / VGMdb 連携の要否（P3 以降）
 - `.fpl` 書き出しの要否（P4、非推奨）
-- foobar 実機との挙動突き合わせ（P1-8 で変換は実装済み）: `HAS` の語境界（spindle は `LIKE %v%` の
-  部分一致。`%title% HAS ab` が `xaby` に当たるか）と、`%__bitspersample% MISSING` のような技術情報
-  フィールドの `PRESENT` / `MISSING`。違えば D-55 に追記する
 - Inbox のポーリング間隔
 - 一括リネーム後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）と
   空ディレクトリの扱い（P0-11 では動かさない。D-43。P2-8 で決める）
