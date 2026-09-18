@@ -410,6 +410,9 @@ table.kv tr.differs td {
   gap: 3px;
   white-space: nowrap;
 }
+.player-bar .rg-mode {
+  font: inherit;
+}
 .player-bar .volume {
   width: 90px;
 }

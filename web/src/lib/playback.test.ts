@@ -82,15 +82,28 @@ describe('streamUrl', () => {
 })
 
 describe('rgGain', () => {
-  it('dB → 線形、peak で抑える', () => {
-    expect(rgGain({ track_gain: -6.0206, track_peak: 0.5, album_gain: null, album_peak: null }, true)).toBeCloseTo(0.5, 4)
+  it('track: dB → 線形、peak で抑える', () => {
+    expect(rgGain({ track_gain: -6.0206, track_peak: 0.5, album_gain: null, album_peak: null }, 'track')).toBeCloseTo(0.5, 4)
     // +6 dB だが peak 0.9 なので 1/0.9 に抑える
-    expect(rgGain({ track_gain: 6, track_peak: 0.9, album_gain: null, album_peak: null }, true)).toBeCloseTo(1 / 0.9, 6)
-    expect(rgGain({ track_gain: 6, track_peak: 0, album_gain: null, album_peak: null }, true)).toBeCloseTo(1.9953, 3)
+    expect(rgGain({ track_gain: 6, track_peak: 0.9, album_gain: null, album_peak: null }, 'track')).toBeCloseTo(1 / 0.9, 6)
+    expect(rgGain({ track_gain: 6, track_peak: 0, album_gain: null, album_peak: null }, 'track')).toBeCloseTo(1.9953, 3)
   })
-  it('無効・未解析は 1', () => {
-    expect(rgGain(null, true)).toBe(1)
-    expect(rgGain({ track_gain: -6, track_peak: 0.5, album_gain: null, album_peak: null }, false)).toBe(1)
+  it('off・未解析は 1', () => {
+    expect(rgGain(null, 'track')).toBe(1)
+    expect(rgGain(null, 'album')).toBe(1)
+    expect(rgGain({ track_gain: -6, track_peak: 0.5, album_gain: null, album_peak: null }, 'off')).toBe(1)
+  })
+  it('album: album_gain / album_peak を使う', () => {
+    const rg = { track_gain: -6.0206, track_peak: 0.5, album_gain: -12.0412, album_peak: 0.8 }
+    expect(rgGain(rg, 'album')).toBeCloseTo(0.25, 4)
+    // +6 dB を album_peak 0.8 で抑える（track_peak 0.5 ではない）
+    expect(rgGain({ ...rg, album_gain: 6 }, 'album')).toBeCloseTo(1 / 0.8, 6)
+  })
+  it('album: album_gain が無ければ track にフォールバック', () => {
+    expect(rgGain({ track_gain: -6.0206, track_peak: 0.5, album_gain: null, album_peak: null }, 'album')).toBeCloseTo(0.5, 4)
+  })
+  it('album: album_peak が無ければ track_peak で抑える', () => {
+    expect(rgGain({ track_gain: 0, track_peak: 0.5, album_gain: 12, album_peak: null }, 'album')).toBeCloseTo(2, 6)
   })
 })
 

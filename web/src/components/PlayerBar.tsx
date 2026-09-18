@@ -2,7 +2,7 @@
 // 左に曲名（無ければ Not playing）、中央に ◀◀ ▶ ▶▶ とシーク、右に RG / 原本 / 音量
 
 import type { PlayerHandle } from '../hooks/usePlayer'
-import { formatTime } from '../lib/playback'
+import { formatTime, isRgMode } from '../lib/playback'
 
 export function PlayerBar({ player }: { player: PlayerHandle }) {
   const { track, playing, position, duration } = player
@@ -58,9 +58,19 @@ export function PlayerBar({ player }: { player: PlayerHandle }) {
         <span className="time muted small">{formatTime(max)}</span>
       </div>
       <div className="player-options">
-        <label className="small" title="ReplayGain（track gain）を掛ける">
-          <input type="checkbox" checked={player.rgEnabled} onChange={(e) => player.setRgEnabled(e.target.checked)} />
+        <label className="small" title="ReplayGain の掛け方。album は album gain が無ければ track gain">
           RG
+          <select
+            className="rg-mode"
+            value={player.rgMode}
+            onChange={(e) => {
+              if (isRgMode(e.target.value)) player.setRgMode(e.target.value)
+            }}
+          >
+            <option value="off">off</option>
+            <option value="track">track</option>
+            <option value="album">album</option>
+          </select>
         </label>
         <label className="small" title="可逆を Derived の Opus ではなく原本で再生する">
           <input

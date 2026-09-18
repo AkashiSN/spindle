@@ -1660,9 +1660,11 @@ Derived 側の `cover.jpg` ミラー（P1-8 のエクスポートで要るなら
 - **RG はクライアントで掛ける。** `GET /api/tracks` の行に `rg { track_gain, track_peak, album_gain,
   album_peak }`（内部表現 -18 LUFS 基準の dB、未解析なら null）を足し、UI は Web Audio の
   `GainNode` で `10^(gain/20)` を掛ける。peak でクリップしないよう `min(10^(gain/20), 1/peak)`。
-  P1-9 は track gain のみ。トグルは localStorage
+  モードは off / track / album の 3 択（foobar2000 と同じ。localStorage `player.rgMode`）。album は
+  `album_gain` / `album_peak` を使い、`album_gain` が無い（単独曲・未集計）行は track に倒す
+  （foobar の "album, fallback to track"）。peak も同様に `album_peak` → `track_peak`
 - **UI**: 表の行先頭に ▶（ホバーで表示）を置き、その行から**表示中の順序で連続再生**する。
-  下部バー左に ▶ / ‖、シーク、経過 / 総時間、音量、RG トグル、曲名。`transcode=opus` を要求しても
+  下部バー左に ▶ / ‖、シーク、経過 / 総時間、音量、RG モード（off / track / album）、曲名。`transcode=opus` を要求しても
   Derived の直送か ffmpeg の chunked かはクライアントには応答からしか分からないので、`loadedmetadata`
   で duration が有限なら `<audio>` のネイティブシーク（Range）、無限 / NaN なら chunked として
   `start=` で読み直して表示時刻をオフセットする。metadata 前のシークは保留して確定後に適用する。
@@ -1679,7 +1681,7 @@ ffmpeg の起動はライブラリに加わった直後の短い期間に限ら�
 持つ理由が無い）。`<audio>` の `volume` で RG（0..1 なので正のゲインを掛けられない）。
 
 **未決**: Safari（Opus 不可）向けの AAC 変換（`transcode=aac`。ffmpeg の aac エンコーダで足せる）。
-album gain モード。ハイレゾのサンプルレート変換（原本を選んだときは 96 kHz をそのまま送る）。
+ハイレゾのサンプルレート変換（原本を選んだときは 96 kHz をそのまま送る）。
 
 ## D-53 手動プレイリストと m3u8 の書き出し・取り込みの固定値と境界
 

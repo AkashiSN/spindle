@@ -77,15 +77,28 @@ export function withStart(source: Source, start: number): string {
   return `${source.url}&start=${start.toFixed(3)}`
 }
 
+/** RG の掛け方。foobar2000 の Playback → ReplayGain と同じ 3 択 */
+export type RgMode = 'off' | 'track' | 'album'
+
+export const RG_MODES: readonly RgMode[] = ['off', 'track', 'album']
+
+export function isRgMode(v: unknown): v is RgMode {
+  return typeof v === 'string' && (RG_MODES as readonly string[]).includes(v)
+}
+
 /**
  * RG のゲイン（線形）。`rg` は内部表現（-18 LUFS 基準の dB）。peak でクリップしないよう
- * `min(10^(gain/20), 1/peak)`。無効・未解析なら 1
+ * `min(10^(gain/20), 1/peak)`。`album` は `album_gain` / `album_peak` を使い、album が無ければ
+ * track に倒す（foobar の "album, fallback to track"）。off・未解析なら 1
  */
-export function rgGain(rg: RgValues | null, enabled: boolean): number {
-  if (!enabled || rg == null) return 1
-  const linear = Math.pow(10, rg.track_gain / 20)
+export function rgGain(rg: RgValues | null, mode: RgMode): number {
+  if (mode === 'off' || rg == null) return 1
+  const useAlbum = mode === 'album' && rg.album_gain != null
+  const gain = useAlbum ? (rg.album_gain as number) : rg.track_gain
+  const peak = useAlbum && rg.album_peak != null ? rg.album_peak : rg.track_peak
+  const linear = Math.pow(10, gain / 20)
   if (!Number.isFinite(linear) || linear <= 0) return 1
-  if (rg.track_peak > 0 && Number.isFinite(rg.track_peak)) return Math.min(linear, 1 / rg.track_peak)
+  if (peak > 0 && Number.isFinite(peak)) return Math.min(linear, 1 / peak)
   return linear
 }
 

@@ -12,15 +12,18 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { TrackRow } from '../api/types'
 import {
   detectSupport,
+  isRgMode,
   nextTrack,
   prevTrack,
   resolvePendingSeek,
   rgGain,
   streamUrl,
   withStart,
+  type RgMode,
   type Source,
   type Support,
 } from '../lib/playback'
+import { loadJson } from '../lib/storage'
 import { useLocalStorageState } from './useLocalStorageState'
 
 export type PlayerState = {
@@ -34,7 +37,7 @@ export type PlayerState = {
   transcoding: boolean
   error: string | null
   volume: number
-  rgEnabled: boolean
+  rgMode: RgMode
   preferOriginal: boolean
   support: Support
 }
@@ -46,7 +49,7 @@ export type PlayerHandle = PlayerState & {
   stop: () => void
   seek: (seconds: number) => void
   setVolume: (v: number) => void
-  setRgEnabled: (on: boolean) => void
+  setRgMode: (mode: RgMode) => void
   setPreferOriginal: (on: boolean) => void
   /** 表の順で次 / 前へ（未読の次曲は読み込みを待たず何もしない） */
   next: () => void
@@ -58,6 +61,11 @@ type MediaState = 'loading' | 'seekable' | 'chunked'
 
 const isBool = (v: unknown): v is boolean => typeof v === 'boolean'
 const isVolume = (v: unknown): v is number => typeof v === 'number' && v >= 0 && v <= 1
+
+/** `player.rgMode` の初期値。3 択にする前の `player.rg`（真偽値）で RG を切っていた人は off のまま */
+function defaultRgMode(): RgMode {
+  return loadJson<boolean>('player.rg', true, isBool) ? 'track' : 'off'
+}
 
 export function usePlayer(rows: Rows, exhausted: boolean, ensure: (index: number) => void): PlayerHandle {
   // <audio> は描画に関係しない外部リソースなので ref に持つ（作るのは mount 時の effect）
@@ -82,7 +90,9 @@ export function usePlayer(rows: Rows, exhausted: boolean, ensure: (index: number
   /** 変換ストリームを `start=` で読み直したときの開始位置 */
   const offset = useRef(0)
   const [volume, setVolume] = useLocalStorageState<number>('player.volume', 1, isVolume)
-  const [rgEnabled, setRgEnabled] = useLocalStorageState<boolean>('player.rg', true, isBool)
+  // 旧キーの読み出しは初回だけ（再描画のたびに localStorage を読まない）
+  const [initialRgMode] = useState(defaultRgMode)
+  const [rgMode, setRgMode] = useLocalStorageState<RgMode>('player.rgMode', initialRgMode, isRgMode)
   const [preferOriginal, setPreferOriginal] = useLocalStorageState<boolean>('player.original', false, isBool)
 
   // 表の行は再生中に入れ替わる（ページの取り直し）。イベントハンドラからは最新を ref で見る
@@ -138,10 +148,10 @@ export function usePlayer(rows: Rows, exhausted: boolean, ensure: (index: number
 
   // RG と音量
   useEffect(() => {
-    const g = rgGain(track?.rg ?? null, rgEnabled)
+    const g = rgGain(track?.rg ?? null, rgMode)
     if (gain.current) gain.current.gain.value = g
     if (audioRef.current) audioRef.current.volume = volume
-  }, [track, rgEnabled, volume])
+  }, [track, rgMode, volume])
 
   const fail = useCallback((e: unknown) => setError(e instanceof Error ? e.message : String(e)), [])
 
@@ -327,7 +337,7 @@ export function usePlayer(rows: Rows, exhausted: boolean, ensure: (index: number
     transcoding: media === 'chunked',
     error,
     volume,
-    rgEnabled,
+    rgMode,
     preferOriginal,
     support,
     play,
@@ -335,7 +345,7 @@ export function usePlayer(rows: Rows, exhausted: boolean, ensure: (index: number
     stop,
     seek,
     setVolume,
-    setRgEnabled,
+    setRgMode,
     setPreferOriginal,
     next,
     prev,
