@@ -5,12 +5,20 @@ import { defineConfig } from 'vite'
 // 本番は `npm run build` の dist を rust-embed でバイナリへ同梱する
 const backend = process.env.SPINDLE_BACKEND ?? 'http://127.0.0.1:8080'
 
+// 中継先にはバックエンド自身の Origin / Host を付け直す（CSRF は Origin と Host の完全一致で見る。
+// 開発サーバの origin のままだと変更系が 403 になる）
+const proxy = {
+  target: backend,
+  changeOrigin: true,
+  headers: { origin: backend },
+}
+
 export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/api': backend,
-      '/health': backend,
+      '/api': proxy,
+      '/health': proxy,
     },
   },
 })

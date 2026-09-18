@@ -13,6 +13,7 @@ import type { TrackRow } from '../api/types'
 import {
   detectSupport,
   nextTrack,
+  prevTrack,
   resolvePendingSeek,
   rgGain,
   streamUrl,
@@ -47,6 +48,9 @@ export type PlayerHandle = PlayerState & {
   setVolume: (v: number) => void
   setRgEnabled: (on: boolean) => void
   setPreferOriginal: (on: boolean) => void
+  /** 表の順で次 / 前へ（未読の次曲は読み込みを待たず何もしない） */
+  next: () => void
+  prev: () => void
 }
 
 type Rows = readonly TrackRow[]
@@ -302,6 +306,19 @@ export function usePlayer(rows: Rows, exhausted: boolean, ensure: (index: number
     }
   }, [rows, exhausted, track, ensure, play])
 
+  const next = useCallback(() => {
+    const cur = trackRef.current
+    if (!cur) return
+    const n = nextTrack(rowsRef.current, cur.id, exhaustedRef.current)
+    if (n != null && n !== 'unloaded') play(n)
+  }, [play])
+  const prev = useCallback(() => {
+    const cur = trackRef.current
+    if (!cur) return
+    const p = prevTrack(rowsRef.current, cur.id)
+    if (p) play(p)
+  }, [play])
+
   return {
     track,
     playing,
@@ -320,5 +337,7 @@ export function usePlayer(rows: Rows, exhausted: boolean, ensure: (index: number
     setVolume,
     setRgEnabled,
     setPreferOriginal,
+    next,
+    prev,
   }
 }

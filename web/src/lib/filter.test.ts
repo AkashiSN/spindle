@@ -10,6 +10,9 @@ describe('filterToParam', () => {
     )
     expect(sameFilter({ flags: ['missing', 'pending'] }, { flags: ['pending', 'missing'] })).toBe(true)
     expect(filterToParam({ album_id: 0 })).toBe('{"album_id":0}')
+    // ツリーのノード（D-58）: 昇順・重複なしに正規化。空配列は空集合として残す
+    expect(filterToParam({ album_ids: [3, 1, 3] })).toBe('{"album_ids":[1,3]}')
+    expect(filterToParam({ album_ids: [] })).toBe('{"album_ids":[]}')
   })
 
   it('dsl はサーバの列順（flags の後、q の前）で入り、空白だけなら落ちる', () => {

@@ -21,6 +21,7 @@ const base: TrackRow = {
   rg_written_at: null,
   derived: null,
   flac_check: null,
+  album_id: null,
   pending_batch_id: null,
   conflict_batch_id: null,
   duplicate_group: null,

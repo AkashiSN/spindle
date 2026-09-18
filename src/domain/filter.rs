@@ -33,6 +33,9 @@ pub struct Filter {
     /// ツリー: `tracks.album_id`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album_id: Option<i64>,
+    /// ツリーのノード配下の album id の集合（D-58）。空は空集合
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_ids: Option<Vec<i64>>,
     /// プレイリスト所属（`playlist_items`）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playlist_id: Option<i64>,

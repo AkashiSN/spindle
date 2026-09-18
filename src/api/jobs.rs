@@ -4,9 +4,11 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
-use crate::jobs::{CancelOutcome, Job, RetryOutcome, Summary};
+use crate::jobs::{CancelOutcome, Job, JobType, RetryOutcome, Summary};
 
 use super::error::{error_response, ApiError};
 use super::AppState;
@@ -15,11 +17,22 @@ use super::AppState;
 pub struct JobList {
     pub items: Vec<Job>,
     pub summary: Summary,
+    /// 種別ごとの並列度（SPEC §8。ジョブ画面 §12.5 が待ち行列と並べて出す）
+    pub concurrency: BTreeMap<&'static str, usize>,
 }
 
 pub async fn list(State(state): State<AppState>) -> Result<Json<JobList>, ApiError> {
     let (items, summary) = state.jobs.list().await?;
-    Ok(Json(JobList { items, summary }))
+    let cpus = state.jobs.cpus();
+    let concurrency = JobType::ALL
+        .iter()
+        .map(|t| (t.as_str(), t.concurrency(cpus)))
+        .collect();
+    Ok(Json(JobList {
+        items,
+        summary,
+        concurrency,
+    }))
 }
 
 pub async fn cancel(

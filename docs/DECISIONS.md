@@ -1933,3 +1933,62 @@ FLAC → FLAC に広げて補填する（2,000 行の壊れやすい経路を同
 専用の小さな op の方が安全）。
 
 **未決**: P1-5b（補填）。UI の起動導線（RG と一緒に一括編集パネルへ）。
+
+## D-58 UI は foobar2000 の配置に寄せ、ツリーの表示形式はパターンで定義し、絞り込みは album_ids で行う
+
+**決定**（P1-12。SPEC §12 が定めていない配置・形式と、起動導線の置き場）:
+
+- **配置は foobar2000（macOS、DUI）のユーザのレイアウトに寄せる。** ヘッダ（画面切替・検索・ジョブ要約）
+  → プレイヤーバー（曲名 / ◀◀ ▶ ▶▶ / シーク / 音量 / RG）→ 本体は左右分割。左はツリー + プレイリスト +
+  固定フィルタ、その下にアルバムアート（選択行のアルバム、無ければ再生中）。右は上にプロパティ領域
+  （タブ: プロパティ / 一括編集 / 操作）、下に表。左右・上下の境界はドラッグで可変、localStorage に
+  永続化。配色は現状のライトのまま（ダークは別タスク。CSS 変数は `:root` に集約済み）。
+  表の既定列は `Playing | Artist/album | # | Title / artist | Duration`
+- **ツリーの表示形式は foobar の Album List と同じくパターン文字列で定義する。** `|` が階層、
+  `%field%` が差し込み、`[ … ]` は中のフィールドが全部空なら省く（角括弧は条件記号で表示しない。
+  foobar の title formatting と同じ）。フィールドはアルバム単位の値（`category` `albumartist` `album`
+  `date` `year` `original_date` `edition` `disc_count` `rel_dir` `folder`）に限る（`GET /api/albums` の
+  行から組む。トラックのタグは無い）。`%folder%` だけは特別で、パターン全体がそれだけのときに
+  `rel_dir` の階層をそのまま展開する（深さはアルバムごとに違う。他のフィールドや文字と混ぜると
+  構文エラー）。Library 直下（`rel_dir` が空）のアルバムは「（なし）」の 1 ノードに載せる（消すと
+  All Music の件数と合わない）。組み込み 5 形式はプリセット: by folder structure `%folder%`（既定。
+  リハーサル DB はカテゴリ未推定で by category が 1 本になるため）/ by category
+  `%category%|%albumartist%|%album%` / by artist `%albumartist%|%album%` / by album
+  `%album% — %albumartist%` / by year `%year%|%album%`。ユーザ定義は名前 + パターンで localStorage に
+  保存。空になった階層は「（なし）」で末尾、並びは日本語 collator、件数はトラック数の合計
+- **ノードの絞り込みは配下の album id の集合。** `GET /api/tracks` の filter に `album_ids`（配列）を
+  足し、SQL は `t.album_id IN (SELECT value FROM json_each(?))` で 1 パラメータにバインドする（件数の
+  上限なし。ホワイトリスト経由）。組み込み形式もこの経路に統一し、ルートは filter 無し。selection の
+  filter 形にもそのまま乗る
+- **プロパティタブは Selection Properties の再現。** Metadata（標準タグ + 任意タグ全部）と Location /
+  General（ファイル・技術情報・RG・検証・FLAC 検査・Derived）。複数選択は共通値、異なれば
+  `<複数の値>`（先頭 50 件で判定）。Metadata の値のダブルクリック編集は選択全体への 1 op の一括編集
+  （インライン編集と同じ preview → apply）。`GET /api/tracks/:id` のセッション向け応答に `detail`
+  （tags / size / mtime / sample_rate / bit_depth / channels / bitrate / audio_md5 / original_codec /
+  added_at）を足す。CIDR 経由の限定フィールドは変えない
+- **起動導線は操作タブ。** リネーム / 正規化（preview の old → new と衝突理由を一覧 → 適用。pending の
+  409 は既存の 2 択）、RG 解析 / RG 書き込み / FLAC 検査（投入件数・重複・skip を通知）、
+  プレイリストへ追加。既存 API のみ。ジョブの完了は行の値（RG / FLAC 検査 / Derived）を変えるが
+  `library` イベントは scan だけが流す（SPEC §9）ので、クライアントは `job` の done / failed で
+  表示ページとプロパティの詳細を取り直す（一括 transcode で数千回にならないよう 3 秒に 1 回に
+  間引く）
+- **ジョブ画面（SPEC §12.5）と設定画面（§12.6）を骨格から実装する。** ジョブ画面は種別ごとの並列度
+  （`GET /api/jobs` に `concurrency` を足す）と待ち行列の表、一覧（実行中・待ち / 失敗・取り消し /
+  すべて、種別で絞る）、`edit_batch_id` から履歴画面のそのバッチを開く。プロパティ領域は一覧のとき
+  だけ出す（ジョブ / 履歴 / 設定では表の代わりに画面が入るので選択の意味が無い）。設定画面の
+  `GET /api/config` は `Config` が保持する原文（`source`）をそのまま返し、画面からは書き換えない
+  （変更はファイルを編集して再起動）。`GET /api/archive` は台帳に `batch_id`（退避した op のバッチ）を
+  添え、保持中の行は「バッチ #n を巻き戻す」で履歴画面のそのバッチを開く（復元の API は別に作らない。
+  SPEC §7.4 のとおり巻き戻しが復元）。 設定は `GET /api/config`
+  （読み込んだ `config.toml` の原文。秘密は config に無い）、再スキャン / deep scan、GC の preview →
+  実行、`GET /api/archive`（`archived_files` の一覧。復元は対応バッチの履歴から巻き戻し）
+
+**理由**: ユーザが日常的に使っている foobar の配置に寄せれば、移行後の操作の学び直しが要らない。
+ツリーの形式をパターンにすると組み込みとユーザ定義が同じコードで済み、絞り込みを album_ids に
+統一すると形式ごとのフィルタの写像が要らない。
+
+**却下**: ノードごとに `category` / `albumartist` の固定フィルタへ写す（合成階層に写せない）。
+ツリーのパターンにトラックのタグを許す（アルバム単位で持っていない。必要なら `GET /api/albums` の
+拡張で足す）。ダークテーマ（別タスク）。
+
+**未決**: `by genre`（albums にジャンルが無い）。ダークテーマ。

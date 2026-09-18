@@ -48,7 +48,8 @@ impl Jobs {
         &self.db
     }
 
-    pub(super) fn cpus(&self) -> usize {
+    /// 論理コア数（種別ごとの並列度の元。`JobType::concurrency`）
+    pub fn cpus(&self) -> usize {
         self.cpus
     }
 

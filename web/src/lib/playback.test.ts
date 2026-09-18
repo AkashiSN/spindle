@@ -4,6 +4,7 @@ import {
   detectSupport,
   formatTime,
   nextTrack,
+  prevTrack,
   resolvePendingSeek,
   rgGain,
   streamUrl,
@@ -34,6 +35,7 @@ function row(id: number, codec: string, lossless: boolean, missing = false): Tra
     rg: null,
     derived: null,
     flac_check: null,
+    album_id: null,
     pending_batch_id: null,
     conflict_batch_id: null,
     duplicate_group: null,
@@ -102,6 +104,16 @@ describe('nextTrack', () => {
   })
   it('現在曲が表に無ければ null', () => {
     expect(nextTrack(rows, 99, false)).toBe(null)
+  })
+})
+
+describe('prevTrack', () => {
+  const rows = [row(1, 'flac', true), row(2, 'flac', true, true), row(3, 'opus', false), row(5, 'flac', true)]
+  it('表の順で前の行。missing は飛ばす。先頭や表に無ければ null', () => {
+    expect(prevTrack(rows, 3)).toBe(rows[0])
+    expect(prevTrack(rows, 5)).toBe(rows[2])
+    expect(prevTrack(rows, 1)).toBe(null)
+    expect(prevTrack(rows, 99)).toBe(null)
   })
 })
 

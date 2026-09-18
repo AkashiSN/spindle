@@ -1,7 +1,7 @@
 // 編集履歴画面（SPEC §12.4）: バッチ一覧、行を開いて op と conflict の現在値、[巻き戻す] /
 // [キャンセル]、戻し済みの注記、↩ で逆バッチの関係
 
-import { Fragment, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import type { HistoryDetail, HistoryItem, OpView } from '../api/types'
 import type { HistoryState } from '../hooks/useHistory'
 import { formatCount } from '../lib/format'
@@ -15,9 +15,14 @@ import {
   stateLabel,
 } from '../lib/history'
 
-export function HistoryView({ history }: { history: HistoryState }) {
-  const [openId, setOpenId] = useState<number | null>(null)
+export function HistoryView({ history, focusId = null }: { history: HistoryState; focusId?: number | null }) {
+  // ジョブ画面の「バッチ #n」から来たときはそのバッチを開いた状態で始める
+  const [openId, setOpenId] = useState<number | null>(focusId)
   const { items, error, details, notice } = history
+  const openInitial = history.open
+  useEffect(() => {
+    if (focusId != null) openInitial(focusId)
+  }, [focusId, openInitial])
 
   const toggle = (id: number) => {
     if (openId === id) {

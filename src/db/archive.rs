@@ -203,6 +203,16 @@ pub fn set_state(conn: &Connection, id: i64, state: ArchiveState, now: i64) -> R
     Ok(changed > 0)
 }
 
+/// 台帳の一覧（新しい順）に、退避した op のバッチ id を添える（`GET /api/archive`）
+pub fn list_with_batch(conn: &Connection) -> Result<Vec<(ArchivedFile, Option<i64>)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS}, (SELECT o.batch_id FROM edit_ops o WHERE o.id = archived_files.op_id)
+         FROM archived_files ORDER BY id DESC"
+    ))?;
+    let rows = stmt.query_map([], |r| Ok((from_row(r)?, r.get::<_, Option<i64>>(10)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// 台帳の一覧（新しい順）
 pub fn list(conn: &Connection) -> Result<Vec<ArchivedFile>> {
     let mut stmt = conn.prepare(&format!(

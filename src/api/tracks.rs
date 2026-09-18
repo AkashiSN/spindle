@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 
-use crate::db::tracks::{self, TrackRow};
+use crate::db::tracks::{self, TrackDetail, TrackRow};
 use crate::domain::filter::{FilterError, Query};
 
 use super::auth::Session;
@@ -108,16 +108,39 @@ impl From<TrackRow> for PublicTrack {
     }
 }
 
-/// `GET /api/tracks/:id`。セッションがあれば一覧と同じ行、allowlist 経由なら限定フィールド
+/// セッション向けの応答: 一覧と同じ行 + `detail`（D-58）
+#[derive(Serialize)]
+pub struct TrackWithDetail {
+    #[serde(flatten)]
+    pub row: TrackRow,
+    pub detail: TrackDetail,
+}
+
+/// `GET /api/tracks/:id`。セッションがあれば一覧と同じ行 + `detail`、allowlist 経由なら
+/// 限定フィールド（`detail` も付けない）
 pub async fn get(
     State(state): State<AppState>,
     session: Option<Extension<Session>>,
     Path(id): Path<i64>,
 ) -> Result<Response, ApiError> {
-    let row = state.db.read(move |c| tracks::get(c, id)).await?;
-    Ok(match (row, session) {
-        (Some(row), Some(_)) => Json(row).into_response(),
-        (Some(row), None) => Json(PublicTrack::from(row)).into_response(),
-        (None, _) => error_response(StatusCode::NOT_FOUND, "not_found"),
+    if session.is_none() {
+        let row = state.db.read(move |c| tracks::get(c, id)).await?;
+        return Ok(match row {
+            Some(row) => Json(PublicTrack::from(row)).into_response(),
+            None => error_response(StatusCode::NOT_FOUND, "not_found"),
+        });
+    }
+    // 行と詳細は同じ読み取りトランザクションで取る（間にスキャンが commit しても世代が混ざらない）
+    let found =
+        state
+            .db
+            .read(move |c| {
+                Ok(tracks::get_with_detail(c, id)?
+                    .map(|(row, detail)| TrackWithDetail { row, detail }))
+            })
+            .await?;
+    Ok(match found {
+        Some(t) => Json(t).into_response(),
+        None => error_response(StatusCode::NOT_FOUND, "not_found"),
     })
 }

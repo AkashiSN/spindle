@@ -29,6 +29,12 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// 読み込んだ TOML の原文（設定画面 `GET /api/config` が返す。SPEC §12.6）。秘密は config に無い
+    #[serde(skip)]
+    pub source: String,
+    /// 読み込んだファイルのパス（`parse` だけなら None）
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
     #[serde(default)]
     pub server: ServerConfig,
     pub paths: PathsConfig,
@@ -243,8 +249,9 @@ impl BinConfig {
 impl Config {
     /// TOML 文字列を解析し、値の妥当性を検証する。ファイルシステムは見ない
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
-        let cfg: Config = toml::from_str(text)?;
+        let mut cfg: Config = toml::from_str(text)?;
         cfg.validate_values()?;
+        cfg.source = text.to_owned();
         Ok(cfg)
     }
 
@@ -255,8 +262,9 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        let cfg = Config::parse(&text)?;
+        let mut cfg = Config::parse(&text)?;
         cfg.validate_roots_exist()?;
+        cfg.source_path = Some(path.to_path_buf());
         Ok(cfg)
     }
 

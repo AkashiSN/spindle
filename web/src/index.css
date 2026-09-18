@@ -1,9 +1,11 @@
 /* デスクトップブラウザ専用。ダークモード・レスポンシブは対象外（SPEC §12） */
 
 :root {
-  --panel-w: 320px;
-  --sidebar-w: 240px;
+  --sidebar-w: 340px;
+  --props-h: 260px;
+  --art-h: 320px;
   --bar-h: 40px;
+  --player-h: 56px;
   --row-h: 28px;
   --border: #d0d4da;
   --bg: #fff;
@@ -83,12 +85,46 @@ code {
 .shell {
   display: grid;
   height: 100vh;
-  grid-template-rows: var(--bar-h) minmax(0, 1fr) var(--bar-h);
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--panel-w);
+  grid-template-rows: var(--bar-h) var(--player-h) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w) 6px minmax(0, 1fr);
   grid-template-areas:
     'nav nav nav'
-    'side center panel'
-    'bottom bottom bottom';
+    'player player player'
+    'left vdiv right';
+}
+.left-col {
+  grid-area: left;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+}
+.right-col {
+  grid-area: right;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.divider-v {
+  grid-area: vdiv;
+  cursor: col-resize;
+  background: var(--bg-alt);
+}
+.divider-v:hover {
+  background: var(--accent-bg);
+}
+.divider-h {
+  height: 6px;
+  flex: none;
+  cursor: row-resize;
+  background: var(--bg-alt);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.divider-h:hover {
+  background: var(--accent-bg);
 }
 
 .top-nav {
@@ -115,6 +151,12 @@ code {
   gap: 2px;
   margin-left: auto;
 }
+.top-nav .jobs-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
 .top-nav .views button {
   background: transparent;
   border-color: transparent;
@@ -125,10 +167,48 @@ code {
 }
 
 .sidebar {
-  grid-area: side;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
-  border-right: 1px solid var(--border);
   padding: 8px 6px;
+}
+.tree-mode {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 6px 6px 0;
+}
+.tree-mode select {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+}
+.tree-editor {
+  margin: 4px 6px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-alt);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tree-editor input {
+  width: 100%;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.album-art {
+  height: var(--art-h);
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--bg-alt);
+}
+.album-art img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
 }
 .sidebar h2 {
   font-size: 12px;
@@ -189,35 +269,38 @@ code {
 }
 
 .center {
-  grid-area: center;
+  flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-.right-panel {
-  grid-area: panel;
+.props-area {
+  height: var(--props-h);
+  flex: none;
   position: relative;
-  border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  border-bottom: 1px solid var(--border);
 }
-.right-panel.collapsed {
+.props-area.collapsed {
+  height: auto;
+  flex-direction: row;
   align-items: center;
-  padding-top: 6px;
+  background: var(--bg-alt);
 }
-.right-panel .divider {
+.props-area .divider-h {
   position: absolute;
-  left: -3px;
-  top: 0;
+  left: 0;
+  right: 0;
   bottom: 0;
-  width: 6px;
-  cursor: col-resize;
+  border: none;
+  background: transparent;
 }
-.right-panel .divider:hover {
+.props-area .divider-h:hover {
   background: var(--accent-bg);
 }
 .panel-head {
@@ -276,51 +359,59 @@ table.kv tr.differs td {
   font-style: italic;
 }
 
-.bottom-bar {
-  grid-area: bottom;
-  display: flex;
+.player-bar {
+  grid-area: player;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(200px, 2fr) auto;
   align-items: center;
-  padding: 0 12px;
-  border-top: 1px solid var(--border);
+  gap: 16px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
   background: var(--bg-alt);
 }
-.bottom-bar .player {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.bottom-bar .player .play-toggle {
-  width: 28px;
-}
-.bottom-bar .player .seek {
-  width: 220px;
-}
-.bottom-bar .player .volume {
-  width: 80px;
-}
-.bottom-bar .player .time {
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.bottom-bar .player label {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  white-space: nowrap;
-}
-.bottom-bar .player .now-playing {
-  flex: 1;
+.player-bar .now-playing {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.bottom-bar .jobs-summary {
+.player-bar .np-title {
+  font-weight: 600;
+}
+.player-bar .transport {
+  display: flex;
+  gap: 2px;
+}
+.player-bar .transport button {
+  font-size: 18px;
+  width: 36px;
+}
+.player-bar .seek-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+}
+.player-bar .seek {
+  flex: 1;
+  min-width: 120px;
+}
+.player-bar .time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.player-bar .player-options {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.player-bar .player-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.player-bar .volume {
+  width: 90px;
 }
 .dot {
   display: inline-block;
@@ -1069,4 +1160,233 @@ button.primary {
   font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
   font-size: 12px;
   resize: vertical;
+}
+
+/* プロパティタブ（D-58） */
+.props-table tr.section th {
+  color: var(--fg);
+  font-weight: 600;
+  padding-top: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.props-table tr.section:first-child th {
+  padding-top: 0;
+}
+.props-table th {
+  width: 160px;
+}
+.props-table td {
+  padding-left: 6px;
+}
+.props-table tr.editing td input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 2px 4px;
+  font: inherit;
+}
+.props .error {
+  color: var(--danger);
+}
+
+/* 操作タブ（D-58） */
+.operations section {
+  margin-bottom: 12px;
+}
+.operations h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.operations .op-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.operations .op-row input {
+  flex: 1;
+  min-width: 200px;
+}
+.operations .path-preview {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.operations .preview-counts {
+  font-size: 12px;
+}
+.operations table.path-items {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.operations table.path-items td {
+  padding: 2px 4px;
+  vertical-align: top;
+  word-break: break-all;
+  border-bottom: 1px solid var(--border);
+}
+.operations table.path-items td.arrow {
+  width: 1.5em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.operations table.path-items tr.conflict .reason {
+  color: var(--error);
+}
+.operations .pending-prompt {
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 6px;
+  margin-top: 8px;
+}
+.operations .pending-prompt p {
+  margin: 0 0 6px;
+}
+.operations .notice {
+  margin: 8px 0 0;
+  cursor: default;
+}
+.operations .add-to-playlist {
+  margin-top: 0;
+}
+
+/* ジョブ画面（SPEC §12.5） */
+.jobs {
+  padding: 0 12px 12px;
+  overflow: auto;
+  height: 100%;
+}
+.jobs h1 {
+  font-size: 16px;
+  margin: 0;
+}
+.jobs .tabs {
+  display: flex;
+}
+.jobs .tabs button {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 6px 10px;
+}
+.jobs .tabs button.active {
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+table.jobs-types {
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+table.jobs-types th,
+table.jobs-types td {
+  text-align: left;
+  padding: 3px 12px 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+table.jobs-types th.num,
+table.jobs-types td.num {
+  text-align: right;
+  min-width: 4em;
+}
+table.jobs-types tbody tr {
+  cursor: pointer;
+}
+table.jobs-types tbody tr.selected {
+  background: var(--accent-bg);
+}
+table.jobs-types td.failed {
+  color: var(--error);
+  font-weight: 600;
+}
+.jobs-table tbody tr {
+  cursor: default;
+}
+.jobs-table tr.state-failed td.error-cell {
+  color: var(--error);
+}
+.jobs-table td.error-cell {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* 設定画面（SPEC §12.6） */
+.settings {
+  padding: 0 12px 12px;
+  overflow: auto;
+  height: 100%;
+}
+.settings h1 {
+  font-size: 16px;
+  margin: 0;
+}
+.settings h2 {
+  font-size: 13px;
+  margin: 16px 0 6px;
+  color: var(--muted);
+}
+.settings .op-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+table.gc-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 8px;
+  width: 100%;
+}
+table.gc-table th,
+table.gc-table td {
+  text-align: left;
+  padding: 3px 12px 3px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table.gc-table th.num,
+table.gc-table td.num {
+  text-align: right;
+  white-space: nowrap;
+}
+table.gc-table tr.muted td {
+  color: var(--muted);
+}
+table.gc-table td.sample {
+  word-break: break-all;
+  font-size: 12px;
+}
+.archive-table td.path {
+  word-break: break-all;
+}
+.archive-table tbody tr {
+  cursor: default;
+}
+.archive-table tr.state-deleted td,
+.archive-table tr.state-restored td {
+  color: var(--muted);
+}
+.config-text {
+  font-size: 12px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  padding: 8px;
+  overflow: auto;
+  max-height: 480px;
+  white-space: pre;
 }

@@ -8,6 +8,8 @@
 //! duplicate は行ごとの索引検索（LEFT JOIN と相関サブクエリ）で引き、`duplicate_groups`
 //! ビューは使わない（ビューを LEFT JOIN すると毎回 GROUP BY の実体化と自動索引が走る）。
 
+use std::collections::BTreeMap;
+
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, OptionalExtension, Row};
 use serde::Serialize;
@@ -48,6 +50,8 @@ pub struct TrackRow {
     pub hardlink: bool,
     pub missing_since: Option<i64>,
     pub rel_path: String,
+    /// 所属アルバム（アルバムアートの解決に使う。P1-12）
+    pub album_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -74,6 +78,25 @@ pub struct Derived {
     pub stale_tags: bool,
 }
 
+/// `GET /api/tracks/:id`（セッションあり）が行に加えて返す詳細（D-58）。プロパティタブの
+/// Metadata（`track_tags` 全部）と Location / General の元。一覧には付けない
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TrackDetail {
+    /// キー（大文字正規化）→ 値の並び（多値は idx 順）
+    pub tags: BTreeMap<String, Vec<String>>,
+    pub size: i64,
+    /// epoch 秒
+    pub mtime: i64,
+    pub sample_rate: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub channels: Option<i64>,
+    pub bitrate: Option<i64>,
+    /// hex（小文字）。可逆で未算出、または非可逆なら None
+    pub audio_md5: Option<String>,
+    pub original_codec: Option<String>,
+    pub added_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Page {
     pub items: Vec<TrackRow>,
@@ -93,9 +116,10 @@ const ROW_COLUMNS: &str = "t.id, t.title, t.artist_display, t.album, t.albumarti
        THEN lower(hex(t.audio_md5)) END,
   t.nlink > 1, t.missing_since, t.rel_path,
   t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak,
-  t.flac_check, t.flac_checked_at, t.flac_check_version <> t.audio_version, t.flac_check_error";
+  t.flac_check, t.flac_checked_at, t.flac_check_version <> t.audio_version, t.flac_check_error,
+  t.album_id";
 /// `ROW_COLUMNS` の列数。ソートキーの値はこの位置から始まる
-const ROW_COLUMN_COUNT: usize = 31;
+const ROW_COLUMN_COUNT: usize = 32;
 
 const ROW_JOINS: &str = "FROM tracks t
 LEFT JOIN derived_files d ON d.track_id = t.id
@@ -154,6 +178,7 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
         hardlink: r.get(20)?,
         missing_since: r.get(21)?,
         rel_path: r.get(22)?,
+        album_id: r.get(31)?,
     })
 }
 
@@ -245,6 +270,14 @@ fn filter_where(f: &Filter) -> Where {
     }
     if let Some(id) = f.album_id {
         w.push("t.album_id = ?", [Value::from(id)]);
+    }
+    if let Some(ids) = &f.album_ids {
+        // 件数に上限を持たせないため JSON 配列 1 つにバインドする（SQLite の変数上限を踏まない）
+        let json = serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_owned());
+        w.push(
+            "t.album_id IN (SELECT value FROM json_each(?))",
+            [Value::from(json)],
+        );
     }
     if let Some(id) = f.playlist_id {
         w.push(
@@ -453,6 +486,59 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<TrackRow>> {
     let sql = format!("SELECT {ROW_COLUMNS}\n{ROW_JOINS}\nWHERE t.id = ?");
     let mut stmt = conn.prepare_cached(&sql)?;
     Ok(stmt.query_row([id], read_row).optional()?)
+}
+
+/// 行と詳細を同じ読み取りスナップショットで取る（`GET /api/tracks/:id`）。`Db::read` は接続を
+/// 貸すだけでトランザクションを張らないので、WAL で別 SELECT がスキャンの commit を跨いで
+/// 世代の混ざった行と詳細を返さないよう、明示トランザクションで囲う
+pub fn get_with_detail(conn: &Connection, id: i64) -> Result<Option<(TrackRow, TrackDetail)>> {
+    let tx = conn.unchecked_transaction()?;
+    let found = match get(&tx, id)? {
+        Some(row) => detail(&tx, id)?.map(|d| (row, d)),
+        None => None,
+    };
+    tx.finish()?;
+    Ok(found)
+}
+
+/// 行の詳細（`get_with_detail` から使う）。行が無ければ None
+pub fn detail(conn: &Connection, id: i64) -> Result<Option<TrackDetail>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT size, mtime_ns, sample_rate, bit_depth, channels, bitrate,
+                CASE WHEN audio_md5 IS NULL THEN NULL ELSE lower(hex(audio_md5)) END,
+                original_codec, added_at
+         FROM tracks WHERE id = ?",
+    )?;
+    let Some(mut d) = stmt
+        .query_row([id], |r| {
+            let mtime_ns: i64 = r.get(1)?;
+            Ok(TrackDetail {
+                tags: BTreeMap::new(),
+                size: r.get(0)?,
+                mtime: mtime_ns.div_euclid(1_000_000_000),
+                sample_rate: r.get(2)?,
+                bit_depth: r.get(3)?,
+                channels: r.get(4)?,
+                bitrate: r.get(5)?,
+                audio_md5: r.get(6)?,
+                original_codec: r.get(7)?,
+                added_at: r.get(8)?,
+            })
+        })
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let mut tags = conn
+        .prepare_cached("SELECT key, value FROM track_tags WHERE track_id = ? ORDER BY key, idx")?;
+    let rows = tags.query_map([id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (key, value) = row?;
+        d.tags.entry(key).or_default().push(value);
+    }
+    Ok(Some(d))
 }
 
 /// `EXPLAIN QUERY PLAN` の各行（テストで temp B-tree が出ないことを固定する）

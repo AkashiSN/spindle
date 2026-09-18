@@ -63,7 +63,8 @@ export function newOp(kind: OpKind): TagOp {
 
 /** サーバへ送る形（`domain::tagops::parse_ops` が受ける JSON） */
 export type OpRequest =
-  | { op: 'set'; key: string; value: string }
+  /** 値は文字列か多値の配列（サーバはどちらも受け、空要素を落とす） */
+  | { op: 'set'; key: string; value: string | string[] }
   | { op: 'ref'; key: string; template: string }
   | { op: 'replace'; key: string; pattern: string; replacement: string }
   | { op: 'number'; key: string; start: number; pad: number }

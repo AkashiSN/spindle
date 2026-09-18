@@ -843,6 +843,8 @@ POST   /api/cd/rip                                リップ開始
 POST   /api/cd/eject
 
 GET    /api/jobs, POST /api/jobs/:id/cancel, POST /api/jobs/:id/retry
+GET    /api/config                                読み込んだ config.toml の原文 { "path", "text" }（設定画面 §12.6。秘密は config に無い）
+GET    /api/archive                                退避台帳 { "items": [ archived_files の行 + "batch_id" ] }（新しい順。復元は batch の巻き戻し）
 POST   /api/scan                                  {"kind": "incremental" | "deep"}。scan ジョブを投入
 GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件。何も消さない。D-56）
 POST   /api/gc                                    gc ジョブを投入（未完了があれば 409）
@@ -955,7 +957,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 // GET /api/jobs
 { "items": [ { "id", "type", "state", "progress", "done", "total", "attempts", "last_error",
                "run_after", "edit_batch_id", "created_at", "started_at" } ],
-  "summary": { "running": 3, "queued": 12, "pending_ops": 1204, "failed": 0 } }
+  "summary": { "running": 3, "queued": 12, "pending_ops": 1204, "failed": 0 },
+  "concurrency": { "scan": 1, "rg": 12, "transcode": 11, … } }   // 種別ごとの並列度（§8）
 // POST /api/jobs/:id/cancel  → 202（queued は即 cancelled、running は cancel_requested_at を立てる）
 //                            → 404 | 409 { "error": "not_cancellable" }   // 既に終端
 // POST /api/jobs/:id/retry   → 202（failed / cancelled を attempts=0 で queued に戻す）

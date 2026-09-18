@@ -1112,3 +1112,69 @@ fn dsl_filter_rejects_syntax_and_type_errors_at_parse_time() {
         r#"{"album_id":3,"dsl":"%a% IS 1"}"#
     );
 }
+
+#[test]
+fn album_ids_filter_selects_tracks_of_any_listed_album() {
+    // ツリーのノードは配下の album id の集合で絞る（D-58）。1 パラメータ（json_each）にバインドする
+    let conn = open_memory_connection().unwrap();
+    let jpop = insert_category(&conn, "J-Pop");
+    let a1 = insert_album(&conn, "J-Pop/A/X", Some(jpop), "A", "X");
+    let a2 = insert_album(&conn, "J-Pop/A/Y", Some(jpop), "A", "Y");
+    let a3 = insert_album(&conn, "J-Pop/B/Z", Some(jpop), "B", "Z");
+    let x = insert(
+        &conn,
+        "J-Pop/A/X/1.flac",
+        &T {
+            album_id: Some(a1),
+            ..t()
+        },
+    );
+    let y = insert(
+        &conn,
+        "J-Pop/A/Y/1.flac",
+        &T {
+            album_id: Some(a2),
+            ..t()
+        },
+    );
+    let _z = insert(
+        &conn,
+        "J-Pop/B/Z/1.flac",
+        &T {
+            album_id: Some(a3),
+            ..t()
+        },
+    );
+    let none = insert(&conn, "loose.flac", &t());
+    let run = |ids: Vec<i64>| {
+        let f = Filter {
+            album_ids: Some(ids),
+            ..Filter::default()
+        };
+        let (rows, _pages) = walk(&conn, query(f, "id", 10));
+        self::ids(&rows)
+    };
+    assert_eq!(run(vec![a1, a2]), vec![x, y]);
+    assert_eq!(run(vec![a2]), vec![y]);
+    // 行は album_id を持つ（アルバムアートの解決に使う）
+    let (rows, _) = walk(&conn, query(Filter::default(), "id", 10));
+    let by_id = |id: i64| rows.iter().find(|r| r.id == id).unwrap().album_id;
+    assert_eq!(by_id(x), Some(a1));
+    assert_eq!(by_id(none), None);
+    // 空の集合は空集合（全件にはしない）
+    assert_eq!(run(vec![]), Vec::<i64>::new());
+    // 無い id は単に当たらない。重複は無害
+    assert_eq!(run(vec![9999, a1, a1]), vec![x]);
+    // JSON からのパース。要素が整数でなければ 400 相当のエラー
+    let f = Filter::parse(&format!(r#"{{"album_ids":[{a1},{a2}]}}"#)).unwrap();
+    assert_eq!(f.album_ids, Some(vec![a1, a2]));
+    assert!(Filter::parse(r#"{"album_ids":["x"]}"#).is_err());
+    // 他のフィルタと AND
+    let f = Filter {
+        album_ids: Some(vec![a1, a2]),
+        album_id: Some(a2),
+        ..Filter::default()
+    };
+    let (rows, _) = walk(&conn, query(f, "id", 10));
+    assert_eq!(self::ids(&rows), vec![y]);
+}

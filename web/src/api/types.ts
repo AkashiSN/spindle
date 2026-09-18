@@ -43,7 +43,28 @@ export type TrackRow = {
   hardlink: boolean
   missing_since: number | null
   rel_path: string
+  /** 所属アルバム（アルバムアートの解決に使う。P1-12） */
+  album_id: number | null
 }
+
+/** `GET /api/tracks/:id`（セッションあり）が行に加えて返す詳細（D-58）。一覧には付かない */
+export type TrackDetail = {
+  /** キー（大文字）→ 値の並び（多値は idx 順）。`track_tags` 全部 */
+  tags: Record<string, string[]>
+  size: number
+  /** epoch 秒 */
+  mtime: number
+  sample_rate: number | null
+  bit_depth: number | null
+  channels: number | null
+  bitrate: number | null
+  /** hex（小文字）。無ければ null */
+  audio_md5: string | null
+  original_codec: string | null
+  added_at: number
+}
+
+export type TrackWithDetail = TrackRow & { detail: TrackDetail }
 
 export type TrackPage = {
   items: TrackRow[]
@@ -95,7 +116,7 @@ export type JobSummary = {
   failed: number
 }
 
-export type JobList = { items: Job[]; summary: JobSummary }
+export type JobList = { items: Job[]; summary: JobSummary; concurrency: Record<string, number> }
 
 // SSE /api/events
 export type JobEvent = {

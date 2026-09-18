@@ -1,4 +1,5 @@
-// 3 ペイン骨格（SPEC §12.1）とアプリ全体の状態。
+// 画面の骨格（SPEC §12.1、D-58: ヘッダ → プレイヤーバー → 左（ツリー / アルバムアート）・右
+// （プロパティ領域 / 表））とアプリ全体の状態。
 //
 // - 認証: GET /api/auth/session が 401 ならログイン画面。API の 401 でもログイン画面へ戻す
 // - 表の集合 = サイドバーの scope + 上部ナビの検索語（filter）+ ソート
@@ -9,10 +10,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch, apiPost, onUnauthorized } from './api/client'
 import type { LibraryEvent, Playlist, TrackRow } from './api/types'
 import { AlbumGrid } from './components/AlbumGrid'
-import { BottomBar } from './components/BottomBar'
+import { AlbumArt } from './components/AlbumArt'
 import { HistoryView } from './components/HistoryView'
+import { JobsView } from './components/JobsView'
 import { Login } from './components/Login'
 import { Placeholder } from './components/Placeholder'
+import { SettingsView } from './components/SettingsView'
+import { PlayerBar } from './components/PlayerBar'
 import { RightPanel, type SelectionSummary } from './components/RightPanel'
 import { SmartRuleEditor, type RuleDraft } from './components/SmartRuleEditor'
 import { Sidebar, type Scope } from './components/Sidebar'
@@ -20,11 +24,15 @@ import { TopNav } from './components/TopNav'
 import { TrackTable } from './components/TrackTable'
 import { useAlbums } from './hooks/useAlbums'
 import { useBatchEdit } from './hooks/useBatchEdit'
+import { useDragSize } from './hooks/useDragSize'
 import { useEvents } from './hooks/useEvents'
 import { useHistory } from './hooks/useHistory'
 import { useJobSummary } from './hooks/useJobSummary'
+import { useOperations } from './hooks/useOperations'
 import { usePlayer } from './hooks/usePlayer'
 import { usePlaylists } from './hooks/usePlaylists'
+import { useSettings } from './hooks/useSettings'
+import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
 import { scopeAfterPlaylistDelete, sortForScope } from './lib/playlists'
@@ -85,6 +93,9 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   )
   const [sseOpen, setSseOpen] = useState(false)
   const [connected, setConnected] = useState(false)
+  // プロパティタブの詳細キャッシュの世代。タグやファイルが変わり得るイベントで進める
+  const [detailsVersion, setDetailsVersion] = useState(0)
+  const bumpDetails = useCallback(() => setDetailsVersion((v) => v + 1), [])
 
   // ルール編集中は表を編集中の DSL（WHERE）で差し替える（P1-7）。空なら scope のまま
   const [ruleDraft, setRuleDraft] = useState<RuleDraft | null>(null)
@@ -104,6 +115,13 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const jobs = useJobSummary(sseOpen)
   // 履歴は画面を開いたときに取り、開いている間は batch イベントで取り直す
   const history = useHistory(sseOpen && view === 'history')
+  /** ジョブ / 設定画面から「バッチ #n」で飛んできたときに開くバッチ */
+  const [historyFocus, setHistoryFocus] = useState<number | null>(null)
+  const openBatch = useCallback((id: number) => {
+    setHistoryFocus(id)
+    setView('history')
+  }, [])
+  const settings = useSettings(sseOpen && view === 'settings')
   const visibleEnd = useRef(0)
 
   // filter 形の選択の「うち反映待ち」。選択集合は immutable でも中の行の pending はバッチの進行で
@@ -124,6 +142,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       refreshPlaylists()
       // 選択集合内の行が変わったかは client で分からないので、library は常に数え直す
       refreshPending()
+      bumpDetails()
       const keep = Math.max(visibleEnd.current + 1, 1)
       if (e.kind === 'bulk') {
         tracks.reload(keep)
@@ -132,7 +151,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       // ids: 表示中（読み込み済み）に含まれる id があるときだけ取り直す
       if (e.track_ids.some((id) => tracks.byId.has(id))) tracks.reload(keep)
     },
-    [albums, refreshPlaylists, tracks, refreshPending],
+    [albums, refreshPlaylists, tracks, refreshPending, bumpDetails],
   )
   /** 表示範囲・ジョブ要約・アルバム・反映待ち集計をまとめて取り直す（再接続 / resync） */
   const refreshAll = useCallback(() => {
@@ -141,8 +160,9 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     refreshPlaylists()
     tracks.reload(Math.max(visibleEnd.current + 1, 1))
     refreshPending()
+    bumpDetails()
     if (view === 'history') history.refresh()
-  }, [jobs, albums, refreshPlaylists, tracks, refreshPending, view, history])
+  }, [jobs, albums, refreshPlaylists, tracks, refreshPending, bumpDetails, view, history])
   // SSE が切れたとき（401 で閉じられた場合を含む）にセッションを確かめる。401 なら
   // apiFetch の onUnauthorized 経由でログイン画面へ戻る。連続するエラーは 5 秒に 1 回に間引くが、
   // 最後のエラーは必ず確認する（サーバ再起動直後は接続拒否 → 再接続で 401 の順に来る。
@@ -159,6 +179,24 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     if (wait <= 0) run()
     else if (authCheckTimer.current == null) authCheckTimer.current = window.setTimeout(run, wait)
   }, [])
+  // ジョブの完了は行の値（RG / FLAC 検査 / Derived のバッジ、プロパティの詳細）を変えるが、
+  // `library` イベントは scan だけが流す（SPEC §9）。done / failed のたびに表示ページを取り直すと
+  // 一括の transcode で数千回になるので 3 秒に 1 回に間引く（D-58）
+  const rowRefreshTimer = useRef<number | null>(null)
+  const scheduleRowRefresh = useCallback(() => {
+    if (rowRefreshTimer.current != null) return
+    rowRefreshTimer.current = window.setTimeout(() => {
+      rowRefreshTimer.current = null
+      tracks.reload(Math.max(visibleEnd.current + 1, 1))
+      bumpDetails()
+    }, 3000)
+  }, [tracks, bumpDetails])
+  useEffect(
+    () => () => {
+      if (rowRefreshTimer.current != null) window.clearTimeout(rowRefreshTimer.current)
+    },
+    [],
+  )
   useEvents({
     onOpen: (reconnect) => {
       setSseOpen(true)
@@ -170,12 +208,16 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       setConnected(false)
       checkSession()
     },
-    onJob: () => jobs.refresh(),
+    onJob: (e) => {
+      jobs.refresh()
+      if (e.state === 'done' || e.state === 'failed') scheduleRowRefresh()
+    },
     onBatch: () => {
       jobs.refresh()
       // バッチの状態変化は反映待ち / conflict バッジと「うち反映待ち」を変える
       tracks.reload(Math.max(visibleEnd.current + 1, 1))
       refreshPending()
+      bumpDetails()
       if (view === 'history') history.refresh()
     },
     onLibrary,
@@ -249,9 +291,14 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     return { count: 0, pending: 0 }
   }, [selection, selectionTotal, selectedRows, pendingInFilter, tracks.byId])
 
+  // プロパティタブの詳細（選択行の先頭 50 件）
+  const selectedIds = useMemo(() => selectedRows.map((r) => r.id), [selectedRows])
+  const details = useTrackDetails(selectedIds, detailsVersion, sseOpen && view === 'tracks')
+
   // ---------------------------------------------------------------- 一括編集
 
   const edit = useBatchEdit(selection, sortToParam(sort))
+  const operations = useOperations(selection, sortToParam(sort))
   const handleInlineEdit = useCallback(
     (id: number, columnId: string, value: string) => edit.applyInline(id, columnId, value),
     [edit],
@@ -348,9 +395,44 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     }
   }
 
+  // 左右の境界（左カラムの幅）と、左カラム内のアルバムアートの高さ
+  const sideDrag = useDragSize({
+    key: 'layout.sidebar',
+    cssVar: '--sidebar-w',
+    fallback: 340,
+    min: 200,
+    max: 800,
+    axis: 'x',
+    direction: 1,
+  })
+  const artDrag = useDragSize({
+    key: 'layout.art',
+    cssVar: '--art-h',
+    fallback: 320,
+    min: 0,
+    max: 800,
+    axis: 'y',
+    direction: -1,
+  })
+  // アルバムアート: 選択行（先頭）のアルバム、無ければ再生中のアルバム
+  const artAlbum = useMemo(() => {
+    const albumId = selectedRows[0]?.album_id ?? player.track?.album_id ?? null
+    return albumId == null ? null : (albums.albums.find((a) => a.id === albumId) ?? null)
+  }, [selectedRows, player.track, albums.albums])
+
   return (
     <div className="shell">
-      <TopNav view={view} onView={setView} query={query} onQuery={setQuery} onLogout={logout} />
+      <TopNav
+        view={view}
+        onView={setView}
+        query={query}
+        onQuery={setQuery}
+        summary={jobs.summary}
+        connected={connected}
+        onLogout={logout}
+      />
+      <PlayerBar player={player} />
+      <div className="left-col">
       <Sidebar
         albums={albums.albums}
         scope={scope}
@@ -367,6 +449,23 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         playlistNotice={playlistNotice}
         onPlaylistNotice={setPlaylistNotice}
       />
+      <div className="divider-h" onMouseDown={artDrag.onMouseDown} title="ドラッグで高さを変更" />
+      <AlbumArt album={artAlbum} />
+      </div>
+      <div className="divider-v" onMouseDown={sideDrag.onMouseDown} title="ドラッグで幅を変更" />
+      <div className="right-col">
+      {view === 'tracks' && (
+      <RightPanel
+        selection={selection}
+        summary={summary}
+        selectedRows={selectedRows}
+        details={details}
+        edit={edit}
+        ops={operations}
+        playlists={playlists.items}
+        onAddToPlaylist={(id) => void addToPlaylist(id, selection)}
+      />
+      )}
       <main className="center">
         {view === 'tracks' && ruleDraft && (
           <SmartRuleEditor
@@ -420,22 +519,17 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         ) : view === 'cd' ? (
           <Placeholder title="CD" note="リッピングのウィザードは P2" />
         ) : view === 'jobs' ? (
-          <Placeholder title="ジョブ" note="種別ごとの待ち行列・進捗・再試行は後続タスクで。下部バーの要約は SSE で更新中" />
+          <JobsView
+            jobs={jobs}
+            onOpenBatch={openBatch}
+          />
         ) : view === 'history' ? (
-          <HistoryView history={history} />
+          <HistoryView history={history} focusId={historyFocus} />
         ) : (
-          <Placeholder title="設定" note="config.toml の閲覧、再スキャン / deep scan / GC dry-run は後続タスクで" />
+          <SettingsView settings={settings} onOpenBatch={openBatch} />
         )}
       </main>
-      <RightPanel
-        selection={selection}
-        summary={summary}
-        selectedRows={selectedRows}
-        edit={edit}
-        playlists={playlists.items}
-        onAddToPlaylist={(id) => void addToPlaylist(id, selection)}
-      />
-      <BottomBar player={player} summary={jobs.summary} connected={connected} onJobsClick={() => setView('jobs')} />
+      </div>
     </div>
   )
 }

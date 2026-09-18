@@ -21,7 +21,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
 import type { TrackRow } from '../api/types'
 import type { Sort, SortKey } from '../lib/filter'
-import { formatDuration, formatTrackNo } from '../lib/format'
+import { formatArtistAlbum, formatDuration, formatTitleArtist, formatTrackNo } from '../lib/format'
 import { cellDiff, COLUMN_TAG, formatValues, type PreviewState } from '../lib/preview'
 import { dropTarget, parseDragIds, serializeDragIds, TRACK_DRAG_TYPE, type DropHalf } from '../lib/playlists'
 import type { ClickModifiers, Selection, VisibleOrder } from '../lib/selection'
@@ -40,6 +40,8 @@ const helper = createColumnHelper<typeof features, TrackRow>()
 /** 列 id → サーバのソートキー（無い列はソート不可） */
 const SORT_OF: Partial<Record<string, SortKey>> = {
   no: 'album',
+  artist_album: 'albumartist',
+  title_artist: 'title',
   title: 'title',
   artist: 'artist',
   album: 'album_title',
@@ -66,6 +68,20 @@ const columns = helper.columns([
     size: 56,
     minSize: 40,
   }),
+  // foobar2000 の既定列（D-58）: Artist/album = `%album artist% - %album%`、
+  // Title / track artist = `%title%[ // %track artist%]`（アーティストがアルバムアーティストと違うときだけ）
+  helper.accessor((r) => formatArtistAlbum(r), {
+    id: 'artist_album',
+    header: 'Artist/album',
+    size: 260,
+    minSize: 60,
+  }),
+  helper.accessor((r) => formatTitleArtist(r), {
+    id: 'title_artist',
+    header: 'Title / track artist',
+    size: 320,
+    minSize: 60,
+  }),
   helper.accessor('title', { id: 'title', header: 'Title', size: 280, minSize: 60 }),
   helper.accessor('artist_display', { id: 'artist', header: 'Artist', size: 200, minSize: 60 }),
   helper.accessor('album', { id: 'album', header: 'Album', size: 220, minSize: 60 }),
@@ -91,19 +107,31 @@ const columns = helper.columns([
 
 const DEFAULT_ORDER: ColumnOrderState = [
   'sel',
+  'artist_album',
   'no',
+  'title_artist',
+  'duration',
+  'badges',
   'title',
   'artist',
   'album',
   'albumartist',
   'date',
   'category',
-  'duration',
   'codec',
-  'badges',
   'rel_path',
 ]
-const DEFAULT_VISIBILITY: ColumnVisibilityState = { rel_path: false }
+/** 既定は foobar2000 の Playlist View と同じ 5 列 + バッジ。他は列選択で出す */
+const DEFAULT_VISIBILITY: ColumnVisibilityState = {
+  title: false,
+  artist: false,
+  album: false,
+  albumartist: false,
+  date: false,
+  category: false,
+  codec: false,
+  rel_path: false,
+}
 const ROW_HEIGHT = 28
 const EMPTY_ROWS: TrackRow[] = []
 
@@ -190,17 +218,17 @@ export function TrackTable(props: TrackTableProps) {
     else if (ev.key === 'Escape') setEditing(null)
   }
   const [columnVisibility, setColumnVisibility] = useLocalStorageState<ColumnVisibilityState>(
-    'columns.visibility',
+    'columns.v2.visibility',
     DEFAULT_VISIBILITY,
     isVisibility,
   )
   const [columnOrder, setColumnOrder] = useLocalStorageState<ColumnOrderState>(
-    'columns.order',
+    'columns.v2.order',
     DEFAULT_ORDER,
     isOrder,
   )
   const [columnSizing, setColumnSizing] = useLocalStorageState<ColumnSizingState>(
-    'columns.sizing',
+    'columns.v2.sizing',
     {},
     isSizing,
   )
@@ -475,7 +503,7 @@ export function TrackTable(props: TrackTableProps) {
                   onDrop={(e) => dropOnRow(e, track.id)}
                 >
                   {row
-                    ? row.getAllCells().map((cell) =>
+                    ? row.getVisibleCells().map((cell) =>
                         cell.column.id === 'sel' ? (
                           <div key={cell.id} className="td td-sel" style={{ width: cell.column.getSize() }}>
                             <input

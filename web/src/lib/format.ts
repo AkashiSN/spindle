@@ -19,3 +19,19 @@ export function formatTrackNo(disc: number | null, track: number | null): string
   const t = String(track).padStart(2, '0')
   return disc != null && disc > 1 ? `${disc}-${t}` : t
 }
+
+/** foobar2000 の Artist/album 列（`%album artist% - %album%`）。片方だけならそれだけ */
+export function formatArtistAlbum(r: { albumartist: string | null; album: string | null }): string {
+  return [r.albumartist, r.album].filter((v): v is string => !!v).join(' - ')
+}
+
+/** foobar2000 の Title / track artist 列（`%title%[ // %track artist%]`。アルバムアーティストと違うときだけ） */
+export function formatTitleArtist(r: {
+  title: string | null
+  artist_display: string | null
+  albumartist: string | null
+}): string {
+  const title = r.title ?? ''
+  const artist = r.artist_display
+  return artist && artist !== r.albumartist ? `${title} // ${artist}` : title
+}

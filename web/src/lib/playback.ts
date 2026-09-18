@@ -109,6 +109,15 @@ export function nextTrack(
   return exhausted ? null : 'unloaded'
 }
 
+/** 表の順で前の再生可能な行（missing は飛ばす）。先頭や表に無ければ null */
+export function prevTrack(rows: readonly TrackRow[], currentId: number): TrackRow | null {
+  const idx = rows.findIndex((r) => r.id === currentId)
+  for (let i = idx - 1; i >= 0; i--) {
+    if (rows[i].missing_since == null) return rows[i]
+  }
+  return null
+}
+
 /** `m:ss`（1 時間以上は `h:mm:ss`）。NaN / 負は `0:00` */
 export function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00'

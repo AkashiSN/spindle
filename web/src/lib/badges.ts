@@ -2,7 +2,7 @@
 
 import type { TrackRow, Verification } from '../api/types'
 
-const VERIFICATION: Record<Verification, { icon: string; label: string; cls: string }> = {
+export const VERIFICATION: Record<Verification, { icon: string; label: string; cls: string }> = {
   verified_ar: { icon: '✔', label: '検証済み（AccurateRip）', cls: 'v-ar' },
   verified_ctdb: { icon: '✔', label: '検証済み（CTDB）', cls: 'v-ctdb' },
   mismatch: { icon: '✘', label: '検証不一致', cls: 'v-mismatch' },

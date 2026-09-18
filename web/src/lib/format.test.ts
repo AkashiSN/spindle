@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, formatTrackNo } from './format'
+import { formatArtistAlbum, formatDuration, formatTitleArtist, formatTrackNo } from './format'
 
 describe('format', () => {
   it('duration', () => {
@@ -13,5 +13,16 @@ describe('format', () => {
     expect(formatTrackNo(1, 3)).toBe('03')
     expect(formatTrackNo(null, 12)).toBe('12')
     expect(formatTrackNo(2, 3)).toBe('2-03')
+  })
+
+  it('foobar の Artist/album と Title / track artist（D-58）', () => {
+    expect(formatArtistAlbum({ albumartist: 'A', album: 'X' })).toBe('A - X')
+    expect(formatArtistAlbum({ albumartist: 'A', album: null })).toBe('A')
+    expect(formatArtistAlbum({ albumartist: null, album: 'X' })).toBe('X')
+    expect(formatArtistAlbum({ albumartist: null, album: null })).toBe('')
+    expect(formatTitleArtist({ title: 'T', artist_display: 'B', albumartist: 'A' })).toBe('T // B')
+    expect(formatTitleArtist({ title: 'T', artist_display: 'A', albumartist: 'A' })).toBe('T')
+    expect(formatTitleArtist({ title: 'T', artist_display: null, albumartist: 'A' })).toBe('T')
+    expect(formatTitleArtist({ title: null, artist_display: 'B', albumartist: null })).toBe(' // B')
   })
 })

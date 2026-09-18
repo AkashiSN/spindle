@@ -378,6 +378,84 @@ async fn get_track_returns_full_row_with_session_and_limited_fields_from_trusted
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn get_track_with_session_carries_detail_but_trusted_cidr_does_not() {
+    let app = build(r#"trusted_cidrs = ["192.168.1.0/24"]"#).await;
+    let c = cookie(&app).await;
+    let conn = app.raw();
+    let id = insert_track(&conn, "x/2.flac", "two", None);
+    conn.execute(
+        "UPDATE tracks SET size = 123456, mtime_ns = 1700000000_500000000, sample_rate = 96000, bit_depth = 24,
+                channels = 2, bitrate = 2100, audio_md5 = x'00112233445566778899aabbccddeeff',
+                original_codec = 'wav', added_at = 1690000000
+         WHERE id = ?1",
+        [id],
+    )
+    .unwrap();
+    for (key, idx, value) in [
+        ("TITLE", 0, "two"),
+        ("ARTIST", 0, "A"),
+        ("ARTIST", 1, "B"),
+        ("MUSICBRAINZ_TRACKID", 0, "mbid"),
+    ] {
+        conn.execute(
+            "INSERT INTO track_tags (track_id, key, idx, value) VALUES (?1, ?2, ?3, ?4)",
+            params![id, key, idx, value],
+        )
+        .unwrap();
+    }
+
+    let (status, body) = get(&app, &c, &format!("/api/tracks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    // 一覧と同じ行のフィールドはそのまま
+    assert_eq!(body["rel_path"], "x/2.flac");
+    let d = &body["detail"];
+    assert_eq!(d["tags"]["TITLE"], serde_json::json!(["two"]));
+    assert_eq!(
+        d["tags"]["ARTIST"],
+        serde_json::json!(["A", "B"]),
+        "多値は idx 順"
+    );
+    assert_eq!(
+        d["tags"]["MUSICBRAINZ_TRACKID"],
+        serde_json::json!(["mbid"])
+    );
+    assert_eq!(d["size"], 123456);
+    assert_eq!(d["mtime"], 1700000000, "mtime は epoch 秒");
+    assert_eq!(d["sample_rate"], 96000);
+    assert_eq!(d["bit_depth"], 24);
+    assert_eq!(d["channels"], 2);
+    assert_eq!(d["bitrate"], 2100);
+    assert_eq!(d["audio_md5"], "00112233445566778899aabbccddeeff");
+    assert_eq!(d["original_codec"], "wav");
+    assert_eq!(d["added_at"], 1690000000);
+
+    // タグ無し・MD5 無しでも形は同じ（空オブジェクトと null）
+    let id2 = insert_track(&conn, "x/3.flac", "three", None);
+    let (_, body) = get(&app, &c, &format!("/api/tracks/{id2}")).await;
+    assert_eq!(body["detail"]["tags"], serde_json::json!({}));
+    assert!(body["detail"]["audio_md5"].is_null());
+
+    // 一覧には detail を付けない（行が重くなる）
+    let (_, body) = get(&app, &c, "/api/tracks").await;
+    assert!(body["items"][0].get("detail").is_none(), "{body}");
+
+    // CIDR 経由・セッション無しは限定フィールドのまま
+    let res = send(
+        &app,
+        req(Method::GET, &format!("/api/tracks/{id}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json(res).await;
+    assert!(
+        body.get("detail").is_none(),
+        "detail は CIDR 経由で見せない: {body}"
+    );
+}
+
 // ---------------------------------------------------------------- アルバム
 
 #[tokio::test]

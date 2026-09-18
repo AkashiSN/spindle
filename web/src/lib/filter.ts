@@ -32,6 +32,8 @@ export type Filter = {
   category?: string
   albumartist?: string
   album_id?: number
+  /** ツリーのノード配下の album id（D-58）。空配列は空集合 */
+  album_ids?: number[]
   playlist_id?: number
   flags?: Flag[]
   /** スマートプレイリスト DSL（WHERE だけ。ルール編集中のプレビュー用。D-39 / D-54） */
@@ -47,6 +49,7 @@ export function filterToParam(f: Filter): string {
   if (f.category) out.category = f.category
   if (f.albumartist) out.albumartist = f.albumartist
   if (f.album_id != null) out.album_id = f.album_id
+  if (f.album_ids) out.album_ids = [...new Set(f.album_ids)].sort((a, b) => a - b)
   if (f.playlist_id != null) out.playlist_id = f.playlist_id
   const flags = [...new Set(f.flags ?? [])].sort()
   if (flags.length > 0) out.flags = flags

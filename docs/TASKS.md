@@ -689,6 +689,27 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 完了条件: **新規 CD が検証付きで取り込め、既存 FLAC が格付けされる。**
 
+- [ ] **P1-12** UI の再構成と起動導線（foobar2000 のレイアウトに寄せる。D-58）。P1 の完了条件
+      「foobar2000 を開かずに日常運用が回る」に対して、API だけで UI が無い機能（リネーム / 正規化 /
+      RG / FLAC 検査 / GC）の起動導線と、ジョブ・設定画面を揃える
+      - [x] (a) レイアウト: ヘッダ → プレイヤーバー（下部バーを上へ）→ 左（ツリー + プレイリスト +
+            固定フィルタ / アルバムアート）・右（プロパティ領域 / 表）。境界はドラッグで可変・永続化。
+            ツリーの表示形式（パターン。組み込み 4 + ユーザ定義）、`filter.album_ids`、既定列
+      - [x] (b) プロパティタブ（Metadata / Location / General、共通値、ダブルクリック編集）と
+            `GET /api/tracks/:id` の `detail`
+      - [x] (c) 操作タブ（リネーム / 正規化の preview → 適用、RG 解析 / 書き込み、FLAC 検査、
+            プレイリストへ追加）
+      - [x] (d) ジョブ画面（SPEC §12.5）。`GET /api/jobs` に `concurrency`（種別ごとの並列度）を追加
+      - [x] (e) 設定画面（SPEC §12.6）: `GET /api/config`、再スキャン / deep scan、GC preview → 実行、
+            `GET /api/archive`
+
+      受け入れ: `web/src/lib/tree.test.ts`（パターンのパース・ツリーの構築・`album_ids`）、
+      `web/src/lib/properties.test.ts`（共通値の畳み込み）、`web/src/lib/operations.test.ts`（件数の
+      メッセージと 409 の日本語化）、`web/src/lib/jobs.test.ts`（種別集計・絞り込み）、`tests/jobs.rs`
+      （`concurrency`）、`web/src/lib/settings.test.ts`（GC preview の表）、`tests/tracks_query.rs`（`album_ids`）、
+      `tests/tracks_api.rs`（`detail`）、`tests/config_api.rs`、`tests/archive_api.rs`。
+      各段階で clippy / test / build / lint を通し、(a) はスクショで確認する
+
 - [ ] **P2-1** ドライブ制御（デバイス割当、`CDROM_DRIVE_STATUS` ポーリング、eject）
 - [ ] **P2-2** TOC 取得と各種 DiscID 算出（MusicBrainz / AccurateRip / FreeDB）
 - [ ] **P2-3** MusicBrainz 照会（UA 必須、1req/s）と候補選択 UI

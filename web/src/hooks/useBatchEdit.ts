@@ -39,6 +39,11 @@ export type BatchEdit = {
   dismissPending: () => void
   /** インライン編集: 1 件を preview → apply する。失敗の理由を返す（成功なら null） */
   applyInline: (trackId: number, columnId: string, value: string) => Promise<string | null>
+  /**
+   * プロパティタブの編集: 現在の選択全体に `set key = values` の 1 op を preview → apply する
+   * （D-58）。空の values は削除。失敗の理由を返す（成功なら null）
+   */
+  applyToSelection: (key: string, values: string[]) => Promise<string | null>
   lastBatchId: number | null
 }
 
@@ -137,20 +142,21 @@ export function useBatchEdit(selection: Selection, sortParam: string): BatchEdit
 
   const dismissPending = useCallback(() => setPendingPrompt(null), [])
 
-  const applyInline = useCallback(
-    async (trackId: number, columnId: string, value: string): Promise<string | null> => {
-      const inline = inlineEditOps(columnId, value)
-      if (!inline) return 'この列は編集できません'
+  /** preview → apply を続けて呼ぶ（インライン編集・プロパティ編集）。反映待ちを含む集合は断る */
+  const quickApply = useCallback(
+    async (
+      sel: { ids: number[] } | { filter: string; exclude_ids: number[] },
+      ops: OpRequest[],
+    ): Promise<string | null> => {
       try {
-        const pv = await apiPost<PreviewResponse>('/api/tracks/batch/preview', {
-          selection: { ids: [trackId] },
-          ops: inline,
-        })
-        if (pv.pending_excluded > 0) return '反映待ちの行は編集できません'
+        const pv = await apiPost<PreviewResponse>('/api/tracks/batch/preview', { selection: sel, ops })
+        if (pv.pending_excluded > 0) {
+          return `反映待ちの行（${pv.pending_excluded} 件）を含むので編集できません。一括編集タブから除外して適用できます`
+        }
         if (pv.changed === 0) return null
         const r = await parseErrorBody<ApplyResponse>('/api/tracks/batch', {
           method: 'PATCH',
-          body: JSON.stringify({ selection_token: pv.selection_token, ops: inline }),
+          body: JSON.stringify({ selection_token: pv.selection_token, ops }),
         })
         if (r.ok) {
           setLastBatchId(r.body.batch_id)
@@ -167,6 +173,30 @@ export function useBatchEdit(selection: Selection, sortParam: string): BatchEdit
     [],
   )
 
+  const applyInline = useCallback(
+    async (trackId: number, columnId: string, value: string): Promise<string | null> => {
+      const inline = inlineEditOps(columnId, value)
+      if (!inline) return 'この列は編集できません'
+      return quickApply({ ids: [trackId] }, inline)
+    },
+    [quickApply],
+  )
+
+  const applyToSelection = useCallback(
+    async (key: string, values: string[]): Promise<string | null> => {
+      const sel = toSelectionBody(selection)
+      if (!sel) return '行を選択してください'
+      const op: TagOp = { id: 'props', op: 'set', key, value: values.join('; ') }
+      const problem = validateOps([op])
+      if (problem) return problem.replace(/^1: /, '')
+      const req = opsToRequest([op])[0]
+      if (!req || req.op !== 'set') return '操作を組み立てられません'
+      // 多値は配列で送る
+      return quickApply(sel, [{ op: 'set', key: req.key, value: values }])
+    },
+    [selection, quickApply],
+  )
+
   return {
     ops,
     setOps,
@@ -178,6 +208,7 @@ export function useBatchEdit(selection: Selection, sortParam: string): BatchEdit
     apply,
     dismissPending,
     applyInline,
+    applyToSelection,
     lastBatchId,
   }
 }

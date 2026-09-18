@@ -39,5 +39,9 @@ pub async fn stream(
             }
         })
         .take_until(shutdown.cancelled_owned());
+    // 接続直後にコメント行を 1 つ流す。中継 proxy（開発時の Vite など）は最初のバイトが来るまで
+    // 応答ヘッダを返さないことがあり、クライアントの open が最初の keep-alive（15 秒）まで待たされる
+    let stream =
+        futures_util::stream::once(async { Ok(SseEvent::default().comment("open")) }).chain(stream);
     Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
 }

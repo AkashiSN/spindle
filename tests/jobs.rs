@@ -1193,6 +1193,12 @@ async fn jobs_list_returns_items_and_summary() {
     assert!(item.get("edit_batch_id").is_some());
     assert!(item.get("created_at").is_some());
     assert!(item.get("started_at").is_some());
+    // 種別ごとの並列度（SPEC §12.5 のジョブ画面が出す）。scan は常に 1、rg はコア数
+    let conc = body["concurrency"].as_object().unwrap();
+    assert_eq!(conc["scan"], 1);
+    assert_eq!(conc["gc"], 1);
+    assert!(conc["rg"].as_u64().unwrap() >= 1);
+    assert!(conc.contains_key("transcode"));
     assert!(item.get("last_error").is_some());
     assert!(item.get("progress").is_some());
     assert!(item.get("done").is_some());
