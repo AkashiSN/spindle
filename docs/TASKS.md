@@ -653,8 +653,8 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
             Derived 直送 / ffmpeg フォールバックと `start=` / ffmpeg 無し 503）、
             `web/src/lib/playback.test.ts`
 
-      未決: Safari 向けの AAC 変換（Safari 18.4+ は Ogg Opus をネイティブ再生するので、実機で確認して
-      不要なら閉じる。D-52）。閉じた未決（2026-09-18）: ハイレゾのサンプルレート変換。可逆は既定で Derived
+      閉じた未決（2026-09-18。D-52）: Safari 向けの AAC 変換（Safari 18.4+ は Ogg Opus をネイティブ
+      再生する。実機の Safari で確認済み）。ハイレゾのサンプルレート変換。可逆は既定で Derived
       の Opus（48 kHz）を再生するので、96 kHz（64 本）がそのまま流れるのは「原本」を選んだときだけ。原本を
       選んだ人にリサンプルを掛けるのは逆なので作らない
 - [x] **P1-10** Derived 自動生成と追随（`audio_version` / `tag_version` 差分判定、
