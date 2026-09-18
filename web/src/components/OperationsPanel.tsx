@@ -1,10 +1,12 @@
 // 右パネル「操作」タブ（D-58）: API だけあって UI が無かった機能の起動導線。
 // リネーム / 正規化は preview（old → new と衝突理由の一覧）→ 適用、RG 解析 / RG 書き込み / FLAC 検査は
-// 投入して件数を出す。プレイリストへ追加もここ。状態は hooks/useOperations
+// 投入して件数を出す。アートワークはアップロード → プレビュー → 選択の埋め込み画像を差し替え（D-60）。
+// プレイリストへ追加もここ。状態は hooks/useOperations
 
 import { useState } from 'react'
 import type { Playlist } from '../api/types'
 import type { Operations, PathKind } from '../hooks/useOperations'
+import { artworkUrl, uploadedSummary } from '../lib/artwork'
 import { formatCount } from '../lib/format'
 import { pathPreviewSummary } from '../lib/operations'
 
@@ -23,6 +25,7 @@ export function OperationsPanel({
   onAddToPlaylist: (playlistId: number) => void
 }) {
   const [description, setDescription] = useState('')
+  const [embedDescription, setEmbedDescription] = useState('')
   const [addTo, setAddTo] = useState<number | ''>('')
   const busy = ops.busy != null
   const pv = ops.pathPreview
@@ -111,6 +114,57 @@ export function OperationsPanel({
       </section>
 
       <section>
+        <h4>アートワーク</h4>
+        <div className="op-row">
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            aria-label="画像ファイル"
+            disabled={busy}
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              // 取り出したら値を空にする。同じファイルを選び直しても change が発火するように
+              // （404 artwork_not_found で「もう一度アップロード」を促す経路）
+              e.target.value = ''
+              if (f) void ops.uploadArtwork(f)
+            }}
+          />
+          <span className="muted small">JPEG / PNG / WebP。選択トラックの埋め込み画像をこの 1 枚に置き換える（巻き戻せる）</span>
+        </div>
+        {ops.uploaded && (
+          <div className="artwork-upload">
+            <img src={artworkUrl(ops.uploaded.sha256, 256)} alt="アップロードした画像" width={96} height={96} />
+            <div>
+              <div className="small">{uploadedSummary(ops.uploaded)}</div>
+              <div className="op-row">
+                <input
+                  placeholder="説明（任意。履歴に残る）"
+                  value={embedDescription}
+                  onChange={(e) => setEmbedDescription(e.target.value)}
+                  aria-label="差し替えの説明"
+                />
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy || !hasSelection}
+                  onClick={() => {
+                    void ops.embedArtwork(embedDescription).then((ok) => {
+                      if (ok) setEmbedDescription('')
+                    })
+                  }}
+                >
+                  {label('embed', '選択の埋め込み画像を差し替え')}
+                </button>
+                <button type="button" className="ghost" disabled={busy} onClick={ops.clearUploaded}>
+                  取り消し
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section>
         <h4>プレイリスト</h4>
         <div className="op-row add-to-playlist">
           <select
@@ -153,6 +207,10 @@ export function OperationsPanel({
                 })
               } else if (p.action === 'md5fill') {
                 void ops.startMd5Fill(true)
+              } else if (p.action === 'embed') {
+                void ops.embedArtwork(embedDescription, true).then((ok) => {
+                  if (ok) setEmbedDescription('')
+                })
               } else {
                 void ops.writeRg(true)
               }

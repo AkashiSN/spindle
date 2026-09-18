@@ -1490,8 +1490,7 @@ Archive から move で戻す（Archive の追記のみの原則に例外が増�
 unchanged なので二度と再試行されない）。Phase 5 の cancel / 失敗で run を cancelled / failed に
 上書きする（missing_since が立っているのに run が failed という矛盾。SPEC §7.1）。
 
-**未決**: 書き側（埋め込み → cover.jpg の抽出、画像アップロードによる一括差し替え）は別の作業で
-設計する（cover.jpg の書き換えを編集バッチでどう巻き戻すか、埋め込みを全トラックに書くか）。
+**未決**: 書き側は D-60（埋め込み統一。cover ファイルは書かず、抽出も作らない）。
 参照が無くなった `artwork` 行と `thumbs/` の回収は GC（P1-11）。スキャナが外部の埋め込み画像の
 変更を検出するのは tag_hash 経由（`PICTURE` 疑似キー）なので、画像だけ差し替えられた場合も
 Phase 5 に入る。
@@ -1846,7 +1845,7 @@ GC に委ねた事項の固定値と境界）:
   | B | missing アルバム | `missing_since <= now - retention` かつ構成トラック 0（A の削除後に判定） | 行のみ |
   | C | Archive の退避ファイル | `archived_files.state='held'` かつ `eligible_after <= now` | `Archive/<rel_path>` を unlink → `state='deleted'`。実体が既に無ければ warn して `deleted`。unlink がそれ以外で失敗したら `held` のまま次回 |
   | D | Derived の孤児 | `Derived/` 配下の実体で `derived_files` に `rel_path_key` が無いもの（A で行が消えた Derived もここで拾う）。`.spindle-tmp-*` と **mtime が 24 時間以内**の実体は除外 | unlink。空になったディレクトリも消す（root は残す） |
-  | E | アートワーク孤児 | `artwork` 行: `albums.artwork_id` から参照されない。`thumbs/<hex>/`: 行の無い hex（**mtime が 24 時間以内**の dir は除外。スキャン Phase 5 が原画像を置いてから行を入れるまでの間を守る） | 行を DELETE、dir を再帰削除 |
+  | E | アートワーク孤児 | `artwork` 行: `albums.artwork_id` から参照されず、`edits` の `PICTURE` 値（旧 / 新）にも現れない（D-60。巻き戻しに要る）。`thumbs/<hex>/` の mtime が 24 時間以内なら行も残す（アップロード直後・参照前を守る）。`thumbs/<hex>/`: 行の無い hex（**mtime が 24 時間以内**の dir は除外。スキャン Phase 5 が原画像を置いてから行を入れるまでの間を守る） | 行を DELETE、dir を再帰削除 |
   触らないもの: Archive 内の台帳に無いファイル、`Playlists/` の古い書き出し（D-53）、Library の
   同梱ファイル（D-43 の残課題）、`data/tmp`（起動時回収の領分）
 - **判定（`gc::plan`）と実行（`gc::execute`）を分け、dry-run は `GET /api/gc/preview` が `plan` を同期で
@@ -2034,3 +2033,70 @@ FLAC → FLAC に広げて補填する（2,000 行の壊れやすい経路を同
 （`jobs` 表の作り直しを伴う）。反映時に `flac -t` で再検査する（全部デコードして計算した時点で
 検査と同じことをしている）。
 
+
+## D-60 アートワークの書き側は埋め込み統一。差し替えは `PICTURE` の tags op で、cover ファイルは書かない
+
+**決定**（P1-3 書き側。D-49 の「未決」の具体化）:
+
+- **spindle は同梱の cover ファイルを書かない。画像はトラックへの埋め込みに統一する。** ライブラリは
+  既に全 album が埋め込みで（リハーサル環境 721 album 全部が `origin='embedded'`、同梱画像 0）、
+  album で共通の画像と、トラックごとに画像が違う album（神椿系）が混在しているため、埋め込みに
+  統一している。cover ファイルを併用すると正が 2 つになり（cover を置いた後の埋め込みが古いまま
+  残る、トラックごとに画像が違う album に誰かが cover.jpg を置くと D-49 の規則でそれが勝つ）、
+  読み側の規則も書き側の機構も 2 系統になる。読み側の同梱画像優先（D-49）は外部が置いたものを拾う
+  ためだけに残す。埋め込み → cover ファイルの「抽出」は作らない
+- **差し替えは `kind='tags'` の op で、キー `PICTURE` を変更する。** 値は `tag_hash` と同じ
+  `<mime>:<sha256hex>` の配列（無しは null）。`track_tags` は既にこの形で `PICTURE` を持つ
+  （スキャナが `TagSet` ごと保存する）ので、旧値・overlay・`tag_version`・差分・書き戻し確認
+  （`file_matches_new_values`）・巻き戻し（`revert_tags`）は既存のまま効く。新しい op 種別も
+  マイグレーションも要らない。ユーザの JSON タグ操作（`tagops::parse_ops`）は `PICTURE` を拒否した
+  ままで、画像 op は `Editor::prepare_picture(description, track_ids, sha256)` だけが作る
+  （`prepare_tags_with` に「`PICTURE` を `[<mime>:<hex>]` に置く」評価器を渡す）
+- **差し替えは「全画像を捨てて、上げた 1 枚を front cover として入れる」。** 裏ジャケ等の別種別を
+  残す案は、lofty の画像種別が形式ごとに揺れる（MP4 は種別を持たない）ので確実に動かず、
+  ライブラリの実態も 1 枚運用なので採らない。既に同じ 1 枚だけを持つ行は差分なし（unchanged）
+- **画像の実体は `ArtworkStore`（`thumbs/<hex>/orig.<ext>`）と `artwork` 行で持つ。** アップロード
+  （`POST /api/artwork/upload`。生のバイト列、`Content-Type: image/*`、上限 32 MiB = `MAX_COVER_BYTES`。
+  形式と寸法はヘッダで判別し JPEG / PNG / WebP 以外は 400）が新画像を置き、`thumbnail` ジョブを
+  投入する（UI のプレビューと album の解決に使う）。**tagwrite は書く前に、捨てる旧画像を同じ
+  store へ退避する**（`stage_tags` が `PICTURE` の変更を含む op で `read_parts` により実体ごと読む。
+  退避できなければ `failed` で何も書かない。`artwork` 行は `Staged::Written` で持ち帰り、finish_op
+  と同じトランザクションで upsert）。新画像のバイト列が store に無ければ `failed`（「画像が
+  キャッシュに無い」）。`AlreadyMatches`（外部が先に同じ画像を書いていた）は退避対象が無いので、
+  その op の巻き戻しは「画像がキャッシュに無い」で failed になり得る（正直にそう記録する）
+- **`write_tag_changes` は `pictures: Option<Vec<Picture>>` を取り、`Some` なら形式ごとに全画像を
+  除去して挿入する**（FLAC は PICTURE ブロック、Opus / Vorbis は VorbisComments、MP4 / MP3 等は
+  generic Tag）。`None` なら画像に触らない（既存のタグ編集はこれ）
+- **GC 区分 E は `edits` が参照する画像を回収しない。** `key='PICTURE'` の旧 / 新値に現れる hex の
+  `artwork` 行と `thumbs/<hex>/` は、履歴が残る限り巻き戻しに要る（画像は数百 KB なので履歴と同じ
+  寿命で良い）。加えて、アップロード直後・参照前の行が消えないよう、E(行) にも dir と同じ
+  **24 時間の猶予**を付ける（`thumbs/<hex>/` の mtime が猶予内なら行も消さない）。既にある画像の
+  再アップロードは `put_original` が dir を touch して猶予を数え直し、E(行) は計画の後・削除の直前にも
+  書き込みコネクションを持ったまま猶予を再確認する（アップロードは touch → 同じ writer で upsert の
+  順なので、touch が先なら残り、削除が先なら upsert が行を作り直す）
+- **applied のとき、そのトラックの album を `mark_unresolved` して増分スキャンを投入する**（dedup。
+  既に走っていれば予約が残り次回で拾う）。Phase 5 が D-49 の規則で album の絵を解決し直す。Derived は
+  `tag_version` が進むので既存の追随で再タグが走り、album の絵が変われば `src_artwork_id` の不一致で
+  もう 1 回走る（二重だが正しい）。トラック自身の画像を Derived に埋める・再生画面に出すのは
+  P1-3c（`tracks.artwork_id`、D-51 の改訂）
+- **API は `POST /api/artwork/embed { selection, sha256, description?, skip_pending? }`**（RG 書き込み・
+  MD5 補填と同型。preview は無い）。対象は selection の active 全行（形式は問わない）。`sha256` の
+  `artwork` 行か原画像が無ければ 404 `artwork_not_found`。UI は操作タブの「アートワーク」節
+  （ファイル選択 → アップロード → 256px のプレビュー → 「選択 N 件の埋め込み画像を差し替え」）。
+  履歴画面の `PICTURE` 値はサムネイルで出す
+
+**理由**: 埋め込み統一なら書き側は既存のタグ編集バッチに 1 キー足すだけで、事前条件・overlay・
+巻き戻し・リカバリ・stale ゲートの全部が流用できる。cover ファイルの実利は「差し替えが軽い
+（FLAC を書き直さない）」と「Explorer のフォルダサムネイル」だけで、差し替えは日常操作ではない
+（たまに 1 album 数百 MB の書き直しなら許容。CLAUDE.md が禁じるのは全件再エンコードの規模）。
+
+**却下**: cover ファイルの op（`kind='cover'`）を album の先頭トラックを「担い手」にして記録する
+（ディレクトリ単位の巻き戻し、cover と埋め込みの二重管理、GC との調停が丸ごと増える）。
+`edit_ops` に `album_id` を足して `track_id` を nullable にする（`edit_ops` の作り直しに加え、
+ロック・pending 一意性・履歴画面・リカバリの全部が「トラック or album」の分岐を持つ）。
+`kind='picture'` の専用 op（`tags` op と同じ事前条件・overlay・巻き戻しを二重に持つことになる。
+md5 op が専用なのは overlay も版も持たないから）。front cover だけ置き換えて他の種別を残す（上記）。
+古い画像を退避せず巻き戻し不可にする（不変条件 4）。
+
+**未決**: P1-3c（トラック単位のアートワーク）。アップロード画像の再エンコード（大きすぎる画像を
+縮めて埋める）は要望があれば。

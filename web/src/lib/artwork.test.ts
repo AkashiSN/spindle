@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AlbumRow } from '../api/types'
-import { albumTitle, artworkUrl, gridAlbums } from './artwork'
+import { albumTitle, artworkUrl, gridAlbums, parsePictureValue, uploadedSummary } from './artwork'
 
 const base: AlbumRow = {
   id: 1,
@@ -35,5 +35,30 @@ describe('artwork', () => {
     expect(albumTitle({ ...base, album: null })).toBe('Album')
     expect(albumTitle({ ...base, album: null, rel_dir: 'X/Y/Dir Name' })).toBe('Dir Name')
     expect(albumTitle({ ...base, album: '', rel_dir: 'Solo' })).toBe('Solo')
+  })
+})
+
+describe('parsePictureValue', () => {
+  it('<mime>:<sha256hex> を分解する', () => {
+    const hash = 'ab'.repeat(32)
+    expect(parsePictureValue(`image/jpeg:${hash}`)).toEqual({ mime: 'image/jpeg', hash })
+  })
+  it('形が違えば null', () => {
+    expect(parsePictureValue('image/jpeg:short')).toBeNull()
+    expect(parsePictureValue(':' + 'a'.repeat(64))).toBeNull()
+    expect(parsePictureValue('ab'.repeat(32))).toBeNull()
+    expect(parsePictureValue(null)).toBeNull()
+    expect(parsePictureValue(['image/jpeg:' + 'a'.repeat(64)])).toBeNull()
+  })
+})
+
+describe('uploadedSummary', () => {
+  it('形式・寸法・サイズ（KiB は切り上げ、MiB は小数 1 桁）', () => {
+    expect(uploadedSummary({ sha256: '', mime: 'image/jpeg', width: 1400, height: 1400, bytes: 250_000 })).toBe(
+      'JPEG 1400×1400 245 KiB',
+    )
+    expect(uploadedSummary({ sha256: '', mime: 'image/png', width: 3000, height: 3000, bytes: 5 * 1024 * 1024 })).toBe(
+      'PNG 3000×3000 5.0 MiB',
+    )
   })
 })

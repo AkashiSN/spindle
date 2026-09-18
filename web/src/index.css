@@ -1237,6 +1237,36 @@ button.primary {
 .operations table.path-items tr.conflict .reason {
   color: var(--error);
 }
+.operations .op-row input[type='file'] {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.operations .artwork-upload {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.operations .artwork-upload img {
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  flex: none;
+}
+.operations .artwork-upload > div {
+  flex: 1;
+  min-width: 0;
+}
+.history .picture-values img {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  vertical-align: middle;
+  border: 1px solid var(--border);
+  margin-right: 2px;
+}
 .operations .pending-prompt {
   border: 1px solid var(--accent);
   border-radius: 4px;

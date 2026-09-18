@@ -37,7 +37,9 @@ use crate::domain::tags::{
 };
 use crate::fsroot::{self, FileKind, FsError, RootDir, TMP_PREFIX};
 use crate::jobs::handlers::thumbnail::new_thumbnail_job;
-use crate::media::artwork::{cover_rank, pick_embedded, sniff, ArtworkStore, ImageInfo};
+use crate::media::artwork::{
+    cover_rank, pick_embedded, sniff, ArtworkStore, ImageInfo, MAX_COVER_BYTES,
+};
 use crate::media::fingerprint;
 
 pub use crate::db::scans::ScanKind;
@@ -670,9 +672,6 @@ struct ResolvedArtwork {
     /// 今回見つけた同梱カバー画像の stat（無ければ None）
     cover: Option<CoverStat>,
 }
-
-/// 同梱カバー画像として読む上限（D-49）。これより大きいファイルは画像とみなさない
-const MAX_COVER_BYTES: u64 = 32 * 1024 * 1024;
 
 /// 1 album のアートワークを決める（ブロッキング）。同梱カバー画像 → 構成トラック（順に）の
 /// 埋め込み画像。決められないとき（I/O 失敗、読んでいる間にファイルが変わった、構成トラックを

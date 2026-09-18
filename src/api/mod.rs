@@ -25,6 +25,7 @@ mod state;
 pub mod stream;
 pub mod tracks;
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, patch, post};
@@ -54,6 +55,11 @@ pub fn router(state: AppState) -> Router {
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))
         .route("/artwork/{hash}", get(artwork::get))
+        .route(
+            "/artwork/upload",
+            post(artwork::upload).layer(DefaultBodyLimit::max(artwork::UPLOAD_LIMIT)),
+        )
+        .route("/artwork/embed", post(artwork::embed))
         .route("/playlists", get(playlists::list).post(playlists::create))
         .route(
             "/playlists/import",

@@ -449,7 +449,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/rg_write_api.rs`
 
       未決: スキャナが外部のタグ変更を取り込んだときの `rg_written_at` の判定（D-48）
-- [ ] **P1-3** アートワーク（埋め込み / `cover.jpg` 両対応、抽出・一括差し替え、
+- [x] **P1-3** アートワーク（読みは埋め込み / 同梱画像の両対応、書きは埋め込み統一で一括差し替え、
       WebP サムネイル生成とキャッシュ。アルバムグリッド画面 → クリックで表を `album_id` に絞る）
       - [x] 読み側（D-49）: `media::artwork`（同梱画像の名前の優先順、ヘッダでの判別、埋め込みの選択、
             `ArtworkStore` = `<data>/thumbs/<hex>/orig.<ext>` + `<size>.webp`）
@@ -461,8 +461,20 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       - [x] `GET /api/artwork/:hash?size=`（`api::artwork`。未生成なら原画像へ倒す）、
             `GET /api/albums` の `artwork_hash`
       - [x] UI: アルバムグリッド（`AlbumGrid`）→ クリックで一覧を `album_id` に絞る
-      - [ ] 書き側: 埋め込み → `cover.jpg` の抽出、画像アップロードによる一括差し替え（設計を確認してから。
-            cover.jpg の書き換えの巻き戻し方、埋め込みを全トラックに書くか）
+      - [x] 書き側（D-60。埋め込み統一。cover ファイルは書かず抽出も作らない）: `POST /api/artwork/upload`
+            （ヘッダで判別、32 MiB、`ArtworkStore` + `artwork` 行 + thumbnail）→ `POST /api/artwork/embed`
+            （`Editor::prepare_picture`: `PICTURE` を `[<mime>:<hex>]` にする tags op。全画像を捨てて 1 枚）。
+            `stage_tags` は書く前に旧画像を store へ退避、`write_tag_changes` に `pictures` を足す。
+            GC 区分 E は `edits` の `PICTURE` 値が参照する画像を残し、行にも 24 時間の猶予。applied で
+            album を `mark_unresolved` して増分スキャンを投入。UI は操作タブの「アートワーク」節と
+            履歴の `PICTURE` サムネイル
+
+      受け入れ（書き側）: `tests/picture_write.rs`（FLAC / Opus / MP4 への差し替えと `tag_version` +1、旧画像の
+      退避、同じ画像は差分なし、巻き戻しで旧画像が戻る、外部変更で conflict、キャッシュ欠損で failed、
+      AlreadyMatches、album の予約）、`tests/artwork_api.rs`（upload の形式判定・上限・400、embed の 404 / 409）、
+      `tests/gc.rs`（`edits` が参照する画像は残す、行の 24 時間の猶予）、`web/src/lib/operations.test.ts`、
+      `web/src/lib/artwork.test.ts`（`PICTURE` 値の分解、アップロードの要約）。ローカル起動で upload →
+      差し替え → 履歴のサムネイル → 巻き戻しを agent-browser で確認済み（2026-09-18）
 
       受け入れ: `tests/artwork.rs`（名前の優先順、判別、埋め込みの選択、キャッシュの配置）、
       `tests/artwork_scan.rs`（同梱 > 埋め込み、最初のトラック、無し → NULL、名前の優先順、同梱画像の
@@ -470,6 +482,10 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       画像付きトラックの移動で新旧 album を解決、commit 後の cancel で run は completed のまま次回再開、
       キャッシュ書き込み失敗 / 読めないトラックで状態を動かさない、原画像の欠損を incremental で復旧）、
       `tests/thumbnail_job.rs`（寸法・アスペクト比・拡大なし・冪等・原画像なし）、`tests/artwork_api.rs`
+- [ ] **P1-3c** トラック単位のアートワーク（D-60 の未決。トラックごとに画像が違う album 向け）:
+      スキャンが各トラックの埋め込み画像を `tracks.artwork_id` に持つ（新マイグレーション）。再生画面 /
+      プロパティはトラック自身の画像を出し、Derived は album の絵ではなくトラック自身の画像を埋める
+      （D-51 の改訂。`src_artwork_id` の判定はそのまま）。album の絵（グリッド）は D-49 のまま
 - [x] **P1-4** ロスレス → FLAC 正規化（WAV / ALAC / AIFF。D-45 / D-46。変換前後の PCM MD5 照合。
       不一致なら中止。一致時は元ファイルを `Archive/` へ move し `edit_ops(kind='archive')` と
       `archived_files` 台帳に記録。**即時削除しない**。`audio_version` は据え置き。

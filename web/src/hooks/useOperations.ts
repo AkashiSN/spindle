@@ -4,17 +4,22 @@
 // - 409 `pending` は一括編集と同じ「M 件を除外して適用 / 待つ」の 2 択。除外して適用は同じ操作を
 //   `skip_pending` 付きでやり直す（リネーム / 正規化は同じ token、RG 書き込みは同じ selection）
 // - 投入系（RG 解析 / FLAC 検査）は preview が無い。結果は件数を notice に出す
+// - 埋め込み画像の差し替え（D-60）は upload → embed の 2 段。アップロード結果は選択に依らず残る
+//   （同じ画像を別の集合へ繰り返し適用できる）
 // - API はどれも既存（SPEC §9）。ここで新しい経路は作らない
 
 import { useCallback, useMemo, useState } from 'react'
 import { ApiError, parseErrorBody } from '../api/client'
 import type { PendingConflict } from '../api/types'
+import type { UploadedArtwork } from '../lib/artwork'
 import {
+  embedMessage,
   flaccheckStartedMessage,
   md5FillMessage,
   operationErrorMessage,
   rgStartedMessage,
   rgWrittenMessage,
+  type EmbedResponse,
   type FlaccheckStartResponse,
   type Md5FillResponse,
   type PathApplyResponse,
@@ -31,7 +36,7 @@ export type PathPreviewState = { kind: PathKind; key: string; preview: PathPrevi
 
 export type OperationPending = {
   /** 除外して適用したときにやり直す操作 */
-  action: 'paths' | 'rgwrite' | 'md5fill'
+  action: 'paths' | 'rgwrite' | 'md5fill' | 'embed'
   count: number
   trackIds: number[]
   /** 確認を出したときの選択・ソート。変わっていれば出さない（確認した対象と適用対象がずれる） */
@@ -54,6 +59,13 @@ export type Operations = {
   startFlaccheck: () => Promise<void>
   /** MD5 の補填（md5_missing の FLAC に編集バッチ。409 pending は 2 択） */
   startMd5Fill: (skipPending?: boolean) => Promise<void>
+  /** アップロード済みの画像（埋め込み差し替えの元）。無ければ null */
+  uploaded: UploadedArtwork | null
+  /** 画像をアップロードする（`POST /api/artwork/upload`）。成功すれば uploaded に入る */
+  uploadArtwork: (file: File) => Promise<void>
+  clearUploaded: () => void
+  /** 選択トラックの埋め込み画像を uploaded に差し替える編集バッチ（409 pending は 2 択） */
+  embedArtwork: (description: string, skipPending?: boolean) => Promise<boolean>
   dismissPending: () => void
   clearNotice: () => void
 }
@@ -66,6 +78,7 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
   const [error, setError] = useState<string | null>(null)
   const [stored, setStored] = useState<PathPreviewState | null>(null)
   const [storedPending, setPendingPrompt] = useState<OperationPending | null>(null)
+  const [uploaded, setUploaded] = useState<UploadedArtwork | null>(null)
 
   const sel = useMemo(() => toSelectionBody(selection), [selection])
   const selKey = useMemo(() => JSON.stringify([sel, sortParam]), [sel, sortParam])
@@ -255,6 +268,70 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     [sel, selKey, begin, fail],
   )
 
+  const uploadArtwork = useCallback(
+    async (file: File) => {
+      begin('upload')
+      try {
+        const r = await parseErrorBody<UploadedArtwork>('/api/artwork/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          body: file,
+        })
+        if (r.ok) setUploaded(r.body)
+        else setError(operationErrorMessage(r.status, r.body))
+      } catch (e) {
+        fail(e)
+      } finally {
+        setBusy(null)
+      }
+    },
+    [begin, fail],
+  )
+
+  const embedArtwork = useCallback(
+    async (description: string, skipPending = false): Promise<boolean> => {
+      if (!sel) {
+        setError('行を選択してください')
+        return false
+      }
+      if (!uploaded) {
+        setError('先に画像をアップロードしてください')
+        return false
+      }
+      begin('embed')
+      try {
+        const r = await parseErrorBody<EmbedResponse>('/api/artwork/embed', {
+          method: 'POST',
+          body: JSON.stringify({
+            selection: sel,
+            sha256: uploaded.sha256,
+            description: description || undefined,
+            skip_pending: skipPending,
+          }),
+        })
+        if (r.ok) {
+          setNotice(embedMessage(r.body))
+          return true
+        }
+        const body = r.body as { error?: string } | null
+        if (r.status === 409 && body?.error === 'pending') {
+          const p = r.body as PendingConflict
+          setPendingPrompt({ action: 'embed', count: p.count, trackIds: p.track_ids, key: selKey })
+          return false
+        }
+        // 画像がキャッシュから消えていた（GC 等）。アップロードし直してもらう
+        if (r.status === 404 && body?.error === 'artwork_not_found') setUploaded(null)
+        setError(operationErrorMessage(r.status, r.body))
+      } catch (e) {
+        fail(e)
+      } finally {
+        setBusy(null)
+      }
+      return false
+    },
+    [sel, selKey, uploaded, begin, fail],
+  )
+
   return {
     busy,
     notice,
@@ -267,6 +344,10 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     writeRg,
     startFlaccheck,
     startMd5Fill,
+    uploaded,
+    uploadArtwork,
+    clearUploaded: useCallback(() => setUploaded(null), []),
+    embedArtwork,
     dismissPending: useCallback(() => setPendingPrompt(null), []),
     clearNotice: useCallback(() => setNotice(null), []),
   }

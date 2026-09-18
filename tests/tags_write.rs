@@ -22,7 +22,7 @@ fn change(key: &str, values: Option<&[&str]>) -> TagChange {
 
 fn write(path: &Path, ext: &str, changes: &[TagChange]) {
     let mut f = File::options().read(true).write(true).open(path).unwrap();
-    write_tag_changes(&mut f, Some(ext), changes).unwrap();
+    write_tag_changes(&mut f, Some(ext), changes, None).unwrap();
 }
 
 #[test]

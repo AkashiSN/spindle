@@ -61,13 +61,19 @@ pub fn derived_keys(conn: &Connection, except: &HashSet<i64>) -> Result<HashSet<
     Ok(keys)
 }
 
-/// `albums.artwork_id` から参照されない `artwork` 行: `(id, sha256)`
+/// 「参照されている」の SQL 断片（`a` は `artwork`）: `albums.artwork_id` から参照されるか、
+/// 編集履歴の `PICTURE` 値（旧 / 新。`<mime>:<sha256hex>` の配列）に現れる（巻き戻しに要る。D-60）。
+/// 値は JSON 文字列なので hex の部分一致で引く（64 桁の hex は他の値と衝突しない）
+const ARTWORK_REFERENCED: &str = "EXISTS (SELECT 1 FROM albums b WHERE b.artwork_id = a.id)
+       OR EXISTS (SELECT 1 FROM edits e WHERE e.key = 'PICTURE'
+                    AND (instr(e.old_value, lower(hex(a.sha256))) > 0
+                      OR instr(e.new_value, lower(hex(a.sha256))) > 0))";
+
+/// どこからも参照されない `artwork` 行: `(id, sha256)`（[`ARTWORK_REFERENCED`] の否定）
 pub fn unreferenced_artwork(conn: &Connection) -> Result<Vec<(i64, Vec<u8>)>> {
-    let mut st = conn.prepare_cached(
-        "SELECT a.id, a.sha256 FROM artwork a
-         WHERE NOT EXISTS (SELECT 1 FROM albums b WHERE b.artwork_id = a.id)
-         ORDER BY a.id",
-    )?;
+    let mut st = conn.prepare_cached(&format!(
+        "SELECT a.id, a.sha256 FROM artwork a WHERE NOT ({ARTWORK_REFERENCED}) ORDER BY a.id"
+    ))?;
     let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -106,10 +112,10 @@ pub fn delete_albums(conn: &Connection, ids: &[i64], cutoff: i64) -> Result<usiz
 
 /// アートワーク行を消す。参照が無いことを再確認する。消した件数
 pub fn delete_artwork(conn: &Connection, ids: &[i64]) -> Result<usize> {
-    let mut st = conn.prepare_cached(
+    let mut st = conn.prepare_cached(&format!(
         "DELETE FROM artwork WHERE id = ?1
-           AND NOT EXISTS (SELECT 1 FROM albums b WHERE b.artwork_id = artwork.id)",
-    )?;
+           AND NOT EXISTS (SELECT 1 FROM artwork a WHERE a.id = artwork.id AND ({ARTWORK_REFERENCED}))"
+    ))?;
     let mut n = 0;
     for id in ids {
         n += st.execute([id])?;

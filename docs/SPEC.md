@@ -648,6 +648,13 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
     だけ立てる。逆バッチが partial なら立てず、再度 revert すると残りだけが対象になる
   - やり直し（redo）= 逆バッチを revert する。同じ規則で処理される
   - 巻き戻しも通常のバッチなので、対象トラックに pending があれば 409
+- **埋め込み画像の差し替えも tags op**（P1-3 書き側、D-60）。キー `PICTURE`（値は `tag_hash` と同じ
+  `<mime>:<sha256hex>` の配列。`track_tags` にもこの形で入っている）を `Editor::prepare_picture` が
+  「全画像を捨てて上げた 1 枚を front cover にする」変更として記録する。ユーザの JSON タグ操作は
+  `PICTURE` を受け付けない。実体は `ArtworkStore`（`thumbs/<hex>/orig.<ext>`）にあり、tagwrite は
+  **書く前に捨てる旧画像を同じ store へ退避**してから書く（退避できなければ `failed`。新画像が store に
+  無ければ `failed`）。巻き戻しは通常の逆 op（旧画像は退避済み）。applied のとき album の再解決を予約し
+  増分スキャンを投入する。spindle は同梱の cover ファイルを書かない（埋め込み統一。D-60）
 - リネーム（P0-11）と論理削除も同じ機構に乗せる（`kind = rename / delete`）。
   巻き戻しの対象は tag に限らない。**一括リネームは coordinator が 2 phase で行う**（D-43）:
   prepare で DB の `rel_path` を 2 段階更新で新値にし（overlay。`expected_rel_path` が記録時点の
@@ -826,6 +833,15 @@ GET    /api/stream/:id?transcode=opus             オンザフライ変換
 GET    /api/artwork/:hash?size=                   size = 256 | 768 で WebP のサムネイル、無しで原画像
                                                   （元の MIME）。hash は albums.artwork_hash。未生成なら
                                                   原画像へ倒す（no-cache）。ハッシュアドレスなので immutable
+POST   /api/artwork/upload                        生の画像バイト列（Content-Type: image/*、上限 32 MiB。形式は
+                                                  ヘッダで判別。JPEG / PNG / WebP 以外は 400 unsupported_image）を
+                                                  ArtworkStore と artwork 行に置き thumbnail ジョブを投入
+                                                  → 201 { sha256, mime, width, height, bytes }（D-60）
+POST   /api/artwork/embed                         { selection, sha256, description?, skip_pending? }。selection の
+                                                  active 全行の埋め込み画像をその 1 枚に差し替える tags op
+                                                  （PICTURE）の編集バッチを記録（§7.5、D-60）
+                                                  → 201 { batch_id, affected, unchanged, pending_excluded }
+                                                  → 404 artwork_not_found、409 pending | no_changes
 
 GET    /api/playlists, POST, PATCH, DELETE        プレイリストの CRUD（D-53）。POST / PATCH に rule があれば
                                                   スマート（D-54。評価結果は playlist_items に書く）。並びは
@@ -1245,6 +1261,9 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
 
 - **アルバム**（P1-3）: サムネイルグリッド（`/api/artwork/:hash?size=256`。missing は出さない）→
   クリックで表を `album_id` に絞る（一覧へ戻る）
+- **操作タブの「アートワーク」**（P1-3 書き側、D-60）: ファイル選択 → `POST /api/artwork/upload` →
+  256px のプレビュー（形式・寸法）→ 「選択 N 件の埋め込み画像を差し替え」（`POST /api/artwork/embed`。
+  反映待ちの 409 は他の操作と同じ「除外して適用」）。履歴画面の `PICTURE` 値はサムネイルで出す
 - **CD**（P2）: ウィザード。検出 → 候補選択 / 手入力 / トラックリスト貼り付け →
   オフセット確認 → 進捗。照会ゼロ件でも完走できる
 - **設定**: `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
@@ -1475,6 +1494,8 @@ src/
 │   │                    キャンセル・起動時リカバリ。D-24 / D-41）
 │   ├── rename.rs        一括リネームの計画・記録・2 phase 反映・album の追随（D-43）
 │   ├── normalize.rs     ロスレス → FLAC 正規化の計画・記録・反映・Archive 退避（D-46）
+│   ├── md5fill.rs       FLAC の MD5 補填（md5 op。D-59）
+│   ├── picture.rs       埋め込み画像の差し替え（`PICTURE` の tags op。画像の読み出し・退避。D-60）
 │   └── revert.rs        巻き戻し（対象集合・現在値の比較・逆バッチの記録。D-44）
 ├── media/
 │   ├── fingerprint.rs   STREAMINFO MD5 / デコード PCM MD5 / パケット列ハッシュ

@@ -17,6 +17,10 @@ use sha2::{Digest, Sha256};
 /// サムネイルの一辺（長辺をこの長さに縮める。小さい画像は拡大しない）
 pub const THUMB_SIZES: [u32; 2] = [256, 768];
 
+/// 受け入れる画像の上限（D-49 の同梱カバー画像、D-60 のアップロード）。これより大きいファイルは
+/// 画像とみなさない。退避した埋め込み画像（[`ArtworkStore::read_original`]）には適用しない
+pub const MAX_COVER_BYTES: u64 = 32 * 1024 * 1024;
+
 /// 同梱カバー画像として認識する基本名（優先順）
 const COVER_NAMES: [&str; 3] = ["cover", "folder", "front"];
 /// 同梱カバー画像として認識する拡張子（優先順）
@@ -149,12 +153,41 @@ impl ArtworkStore {
             .collect()
     }
 
+    /// 原画像を読む（サイズ上限なし。退避した埋め込み画像は [`MAX_COVER_BYTES`] を超えることが
+    /// あり、巻き戻しには全体が要る）。内容の SHA-256 が `hash` と違えば `None`（壊れている）。
+    /// 無ければ `None`
+    pub fn read_original(&self, hash: &[u8], mime: &str) -> std::io::Result<Option<Vec<u8>>> {
+        let path = self.original_path(hash, mime);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if Self::hash_of(&bytes) != hash {
+            tracing::warn!(path = %path.display(), "原画像の内容がハッシュと一致しない");
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
+    /// `thumbs/<hex>/` の mtime を今にする。GC 区分 E の猶予（dir の mtime から 24 時間）を
+    /// 延ばすために、既にある画像を置き直す側（アップロード）が呼ぶ。dir が無ければ何もしない
+    pub fn touch(&self, hash: &[u8]) -> std::io::Result<()> {
+        match File::open(self.entry_dir(hash)) {
+            Ok(dir) => dir.set_modified(std::time::SystemTime::now()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// 原画像を置く（tmp + rename）。既にあるファイルは**内容の SHA-256 が一致するときだけ**
-    /// 流用する（ハッシュアドレスの不変条件。長さが同じでも壊れていれば置き直す）。返り値は置いた先
+    /// 流用し、そのときも dir の mtime は今にする（GC 区分 E の猶予を置き直しの時点から数え直す）。
+    /// （ハッシュアドレスの不変条件。長さが同じでも壊れていれば置き直す）。返り値は置いた先
     pub fn put_original(&self, hash: &[u8], mime: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
         let path = self.original_path(hash, mime);
         if let Ok(existing) = std::fs::read(&path) {
             if Self::hash_of(&existing) == hash {
+                self.touch(hash)?;
                 return Ok(path);
             }
             tracing::warn!(path = %path.display(), "原画像の内容がハッシュと一致しないので置き直す");

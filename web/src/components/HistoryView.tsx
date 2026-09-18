@@ -4,6 +4,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import type { HistoryDetail, HistoryItem, OpView } from '../api/types'
 import type { HistoryState } from '../hooks/useHistory'
+import { artworkUrl, parsePictureValue } from '../lib/artwork'
 import { formatCount } from '../lib/format'
 import {
   batchLabel,
@@ -162,6 +163,27 @@ function BatchDetail({ detail }: { detail: HistoryDetail | undefined }) {
   )
 }
 
+/** edits の値。`PICTURE`（`<mime>:<sha256hex>` の配列）はサムネイルで出す（D-60）。それ以外は 1 行の文字列 */
+function EditValue({ k, v }: { k: string; v: unknown }) {
+  if (k === 'PICTURE' && Array.isArray(v) && v.length > 0) {
+    return (
+      <span className="picture-values">
+        {v.map((x, i) => {
+          const p = parsePictureValue(x)
+          return p ? (
+            <a key={i} href={artworkUrl(p.hash)} target="_blank" rel="noreferrer" title={String(x)}>
+              <img src={artworkUrl(p.hash, 256)} alt={p.mime} width={32} height={32} />
+            </a>
+          ) : (
+            <span key={i}>{String(x)}</span>
+          )
+        })}
+      </span>
+    )
+  }
+  return <>{formatValue(v)}</>
+}
+
 function OpRow({ op }: { op: OpView }) {
   const keys = Object.keys(op.edits)
   return (
@@ -172,7 +194,8 @@ function OpRow({ op }: { op: OpView }) {
       <td>
         {keys.map((k) => (
           <div key={k}>
-            <span className="muted">{k}:</span> {formatValue(op.edits[k].old)} → {formatValue(op.edits[k].new)}
+            <span className="muted">{k}:</span> <EditValue k={k} v={op.edits[k].old} /> →{' '}
+            <EditValue k={k} v={op.edits[k].new} />
           </div>
         ))}
       </td>
@@ -183,7 +206,7 @@ function OpRow({ op }: { op: OpView }) {
             <span className="muted">ファイルを再読込した現在値:</span>
             {Object.keys(op.current).map((k) => (
               <div key={k}>
-                <span className="muted">{k}:</span> {formatValue(op.current?.[k])}
+                <span className="muted">{k}:</span> <EditValue k={k} v={op.current?.[k]} />
               </div>
             ))}
           </div>

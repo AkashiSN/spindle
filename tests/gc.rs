@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use spindle::db::{now_epoch, Db};
 use spindle::fsroot::RootDir;
-use spindle::gc::{execute_all, plan, GcRoots, ORPHAN_GRACE_SECS};
+use spindle::gc::{execute_all, execute_rows, plan, GcRoots, ORPHAN_GRACE_SECS};
 use spindle::jobs::handlers::gc::{new_gc_job, GcHandler};
 use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};
 use spindle::media::artwork::ArtworkStore;
@@ -908,4 +908,122 @@ async fn recently_touched_thumbs_dir_without_row_is_kept() {
         vec![old.clone()],
         "スキャンが置いたばかりの dir は次回に回す"
     );
+}
+
+// ---------------------------------------------------------------- E: 編集履歴が参照する画像（D-60）
+
+/// `edits` の `PICTURE` 値（旧 / 新）に現れる画像は、行も dir も回収しない（巻き戻しに要る）
+#[tokio::test]
+async fn artwork_referenced_by_picture_edits_is_kept() {
+    let env = Env::new();
+    let old = env.artwork(1, 0x11);
+    let new = env.artwork(2, 0x22);
+    let unrelated = env.artwork(3, 0x33);
+    for d in [&old, &new, &unrelated] {
+        env.put(&format!("thumbs/{d}/orig.png"), b"x", 5 * DAY);
+        set_age(&env.path(&format!("thumbs/{d}")), 5 * DAY);
+    }
+    env.track(1, "A/t.flac", None, None);
+    let c = env.conn();
+    c.execute(
+        "INSERT INTO edit_batches (id, created_at, state) VALUES (1, 0, 'applied')",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO edit_ops (id, batch_id, ordinal, track_id, kind, result) VALUES (1, 1, 1, 1, 'tags', 'applied')",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO edits (op_id, key, old_value, new_value) VALUES (1, 'PICTURE', ?1, ?2)",
+        params![
+            format!("[\"image/png:{old}\"]"),
+            format!("[\"image/png:{new}\"]")
+        ],
+    )
+    .unwrap();
+    // 画像なし → 画像ありの op（旧値 null）も壊れない
+    c.execute(
+        "INSERT INTO edit_ops (id, batch_id, ordinal, track_id, kind, result) VALUES (2, 1, 2, 1, 'tags', 'applied')",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO edits (op_id, key, old_value, new_value) VALUES (2, 'PICTURE', 'null', ?1)",
+        [format!("[\"image/png:{new}\"]")],
+    )
+    .unwrap();
+    drop(c);
+
+    let p = plan(&env.db, &env.roots, RETENTION, env.now).await.unwrap();
+    assert_eq!(
+        p.artwork_rows.iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert_eq!(p.artwork_dirs, vec![unrelated.clone()]);
+    let s = run(&env).await;
+    assert_eq!((s.artwork_rows.deleted, s.artwork_dirs.deleted), (1, 1));
+    assert!(env.path(&format!("thumbs/{old}/orig.png")).exists());
+    assert!(env.path(&format!("thumbs/{new}/orig.png")).exists());
+    assert_eq!(env.count("SELECT count(*) FROM artwork"), 2);
+}
+
+/// アップロード直後（参照前）の行は dir と同じ 24 時間の猶予で残す
+#[tokio::test]
+async fn recently_uploaded_artwork_row_without_reference_is_kept() {
+    let env = Env::new();
+    let fresh = env.artwork(1, 0x11);
+    env.put(&format!("thumbs/{fresh}/orig.png"), b"f", 0);
+    let stale = env.artwork(2, 0x22);
+    env.put(&format!("thumbs/{stale}/orig.png"), b"s", 5 * DAY);
+    set_age(&env.path(&format!("thumbs/{stale}")), 5 * DAY);
+    // dir の無い行は猶予に関係なく消える（実体が無いので使えない）
+    env.artwork(3, 0x33);
+
+    let p = plan(&env.db, &env.roots, RETENTION, env.now).await.unwrap();
+    let mut rows: Vec<i64> = p.artwork_rows.iter().map(|a| a.id).collect();
+    rows.sort_unstable();
+    assert_eq!(rows, vec![2, 3]);
+    assert_eq!(p.artwork_dirs, vec![stale.clone()]);
+    let s = run(&env).await;
+    assert_eq!(s.artwork_rows.deleted, 2, "{s:?}");
+    assert_eq!(env.count("SELECT count(*) FROM artwork WHERE id = 1"), 1);
+}
+
+/// 計画の後に同じ画像が再アップロードされた（touch + upsert）行は、E(行) の削除直前の猶予の
+/// 再確認で残る（codex の指摘: 計画済み id を参照の有無だけで消すと、アップロード直後に行だけが
+/// 消えて GET / embed が artwork_not_found になる）
+#[tokio::test]
+async fn artwork_row_re_uploaded_after_planning_is_kept() {
+    let env = Env::new();
+    let stale = env.artwork(2, 0x22);
+    env.put(&format!("thumbs/{stale}/orig.png"), b"s", 5 * DAY);
+    set_age(&env.path(&format!("thumbs/{stale}")), 5 * DAY);
+    let gone = env.artwork(3, 0x33);
+    env.put(&format!("thumbs/{gone}/orig.png"), b"g", 5 * DAY);
+    set_age(&env.path(&format!("thumbs/{gone}")), 5 * DAY);
+
+    let p = plan(&env.db, &env.roots, RETENTION, env.now).await.unwrap();
+    let mut rows: Vec<i64> = p.artwork_rows.iter().map(|a| a.id).collect();
+    rows.sort_unstable();
+    assert_eq!(rows, vec![2, 3]);
+
+    // 計画の後にアップロード: put_original は既存と一致すれば dir を touch するだけなので、その
+    // 経路（touch）と同じ writer での upsert を模す
+    let hash = [0x22u8; 32];
+    env.roots.artwork.touch(&hash).unwrap();
+    env.db
+        .write(move |c| spindle::db::artwork::upsert(c, &hash, "image/png", None, None, 1, "file"))
+        .await
+        .unwrap();
+
+    let s = execute_rows(&env.db, &env.roots, &p).await.unwrap();
+    assert_eq!(
+        (s.artwork_rows.deleted, s.artwork_rows.skipped),
+        (1, 1),
+        "{s:?}"
+    );
+    assert_eq!(env.count("SELECT count(*) FROM artwork WHERE id = 2"), 1);
+    assert_eq!(env.count("SELECT count(*) FROM artwork WHERE id = 3"), 0);
 }

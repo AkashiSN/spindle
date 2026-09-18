@@ -111,6 +111,12 @@ async fn main() -> anyhow::Result<()> {
             shutdown.cancel();
         }
     });
+    // アートワークのキャッシュ（P1-3）。スキャナが原画像を置き、thumbnail ジョブが WebP を作る。
+    // 書き側（D-60）はアップロードと退避に使う
+    let artwork = Arc::new(ArtworkStore::new(
+        state.config.paths.data.join(THUMBS_DIR_NAME),
+    ));
+    state = state.with_artwork(Arc::clone(&artwork));
     // 編集バッチの coordinator。起動時リカバリ（pending op の track ジョブ再投入）は
     // ジョブのリカバリの後・ワーカー起動の前（SPEC §7.5）
     let editor = Arc::new(
@@ -131,14 +137,11 @@ async fn main() -> anyhow::Result<()> {
             retention_days: state.config.gc.retention_days,
         })
         // ReplayGain のタグ変換と rg_written_at の判定の基準（P1-2）
-        .with_replaygain_reference(state.config.replaygain.reference_lufs),
+        .with_replaygain_reference(state.config.replaygain.reference_lufs)
+        // 埋め込み画像の差し替え（P1-3 書き側、D-60）
+        .with_artwork(Arc::clone(&artwork)),
     );
     state = state.with_editor(Arc::clone(&editor));
-    // アートワークのキャッシュ（P1-3）。スキャナが原画像を置き、thumbnail ジョブが WebP を作る
-    let artwork = Arc::new(ArtworkStore::new(
-        state.config.paths.data.join(THUMBS_DIR_NAME),
-    ));
-    state = state.with_artwork(Arc::clone(&artwork));
     // 再生（P1-9）。原本と Derived を Range で直送する
     state = state.with_roots(Arc::clone(&library_root), Arc::clone(&derived_root));
     // プレイリストの書き出し先・取り込み元（P1-6）

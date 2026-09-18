@@ -24,6 +24,7 @@
 
 mod md5fill;
 mod normalize;
+mod picture;
 mod rename;
 mod revert;
 
@@ -41,14 +42,15 @@ use crate::db::{now_epoch, Db, DbError};
 use crate::domain::relpath::{RelPath, RelPathError};
 use crate::domain::replaygain::tag_changes as rg_tag_changes;
 use crate::domain::tags::{
-    normalize_tags, read_audio_file, tag_hash, write_tag_changes, Codec, TagReadError, TagSet,
-    TagWriteError,
+    normalize_tags, read_audio_file, read_audio_file_with_pictures, tag_hash, write_tag_changes,
+    Codec, TagReadError, TagSet, TagWriteError,
 };
 use crate::fsroot::{self, FsError, RootDir};
 use crate::import::scanner::{
     audio_changed, cache_columns, effective_fingerprint, read_fingerprint, track_content,
 };
 use crate::jobs::{BatchEvent, Event, JobState, JobType, Jobs, NewJob};
+use crate::media::artwork::ArtworkStore;
 
 pub use crate::domain::tags::TagChange;
 pub use md5fill::{hex as md5_hex, Md5FillPrepared, MD5_EDIT_KEY, MD5_ZERO_HEX};
@@ -57,6 +59,7 @@ pub use normalize::{
     NormalizeEnv, NormalizeHook, NormalizePlan, NormalizeStep, NormalizeTarget, PlannedNormalize,
     NORMALIZE_SOURCES, SOURCE_HASH_KEY, UNDO_QUARANTINE_PREFIX,
 };
+pub use picture::{parse_picture_value, picture_value, PicturePrepared, PICTURE_KEY};
 pub use rename::{
     in_progress_keys, rename_dedup_key, temp_rel_path, PlannedRename, RenameHook, RenameOutcome,
     RenameStep, RenameTarget,
@@ -118,6 +121,10 @@ pub enum EditError {
     OpNotFound(i64),
     #[error("この種別の op はまだ反映できない: {0:?}")]
     UnsupportedKind(OpKind),
+    #[error("アートワークのキャッシュが無い")]
+    ArtworkUnavailable,
+    #[error("画像が登録されていない")]
+    ArtworkNotFound,
     #[error("キャンセルされた")]
     Cancelled,
     #[error(transparent)]
@@ -194,6 +201,9 @@ pub struct Editor {
     /// ReplayGain の内部基準（LUFS。`[replaygain].reference_lufs`）。タグへの変換と
     /// `rg_written_at` の判定に使う（P1-2）
     rg_reference: f64,
+    /// アートワークのキャッシュ（P1-3 書き側、D-60）。埋め込み画像の差し替えで新画像を読み、
+    /// 捨てる旧画像を退避する。無ければ `PICTURE` の op は記録できず、反映も failed
+    artwork: Option<Arc<ArtworkStore>>,
 }
 
 /// tagwrite ジョブの dedup key（SPEC §8）
@@ -299,10 +309,17 @@ impl From<fsroot::Stat> for Physical {
 
 /// `apply_op` のファイル側の結果
 enum Staged {
-    /// 事前条件一致 → 書き込み・rename 済み。DB を追随させる
-    Written(FileState),
-    /// 事前条件不一致だがファイルの全フィールドが新値 → applied として確定
-    AlreadyMatches(FileState),
+    /// 事前条件一致 → 書き込み・rename 済み。DB を追随させる。`stashed` は書く前に退避した
+    /// 旧画像（`PICTURE` の op だけ。`artwork` 行にする）
+    Written {
+        fs: FileState,
+        stashed: Vec<picture::StashedPicture>,
+    },
+    /// 事前条件不一致だがファイルの全フィールドが新値 → applied として確定（退避は無い）
+    AlreadyMatches {
+        fs: FileState,
+        stashed: Vec<picture::StashedPicture>,
+    },
     /// 事前条件不一致 → conflict。`current` はファイルの現在値（読めなければ None）
     Conflict {
         reason: String,
@@ -327,6 +344,7 @@ impl Editor {
             normalize: None,
             normalize_hook: Mutex::new(None),
             rg_reference: -18.0,
+            artwork: None,
         }
     }
 
@@ -472,6 +490,7 @@ impl Editor {
 
         let staged = {
             let root = Arc::clone(&self.root);
+            let store = self.artwork.clone();
             let op = op.clone();
             let edits = edits.clone();
             let hook = self
@@ -480,13 +499,21 @@ impl Editor {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             tokio::task::spawn_blocking(move || {
-                stage_tags(&root, &op, &edits, &rel_path, hook.as_ref())
+                stage_tags(
+                    &root,
+                    store.as_deref(),
+                    &op,
+                    &edits,
+                    &rel_path,
+                    hook.as_ref(),
+                )
             })
             .await??
         };
 
         let batch_id = op.batch_id;
         let reference = self.rg_reference;
+        let has_picture = edits.iter().any(|e| e.key == PICTURE_KEY);
         let (outcome, event, followup_jobs) = self
             .db
             .write(move |c| {
@@ -494,7 +521,7 @@ impl Editor {
                 let now = now_epoch();
                 let mut followup_jobs: Vec<i64> = Vec::new();
                 let outcome = match staged {
-                    Staged::Written(fs) | Staged::AlreadyMatches(fs) => {
+                    Staged::Written { fs, stashed } | Staged::AlreadyMatches { fs, stashed } => {
                         history::finish_op(&tx, op.id, OpResult::Applied, None, job_id, now)?;
                         sync_track_to_file(&tx, op.track_id, &fs, reference, now)?;
                         // Derived の追随（D-51）。無い・版が古い・パスがずれていれば transcode を投入する
@@ -502,6 +529,17 @@ impl Editor {
                             crate::db::derived::enqueue_if_stale(&tx, op.track_id, now)?
                         {
                             followup_jobs.push(id);
+                        }
+                        if has_picture {
+                            // 埋め込み画像が変わった（D-60）: 退避した旧画像を artwork 行にし、album の
+                            // 再解決を予約して増分スキャンを投入する（Phase 5 が D-49 の規則で決め直す）
+                            picture::upsert_stashed(&tx, &stashed)?;
+                            let albums = scans::album_ids_of_tracks(&tx, &[op.track_id])?;
+                            crate::db::artwork::mark_unresolved(&tx, &albums)?;
+                            let scan = crate::jobs::handlers::scan::new_scan_job(
+                                crate::import::scanner::ScanKind::Incremental,
+                            );
+                            followup_jobs.push(dbjobs::enqueue(&tx, &scan, now)?.id());
                         }
                         OpOutcome::Applied
                     }
@@ -1277,6 +1315,7 @@ fn file_matches_new_values(tags: &TagSet, edits: &[history::Edit]) -> bool {
 
 fn stage_tags(
     root: &RootDir,
+    store: Option<&ArtworkStore>,
     op: &Op,
     edits: &[history::Edit],
     rel_path: &str,
@@ -1295,11 +1334,11 @@ fn stage_tags(
         Err(e) => return Err(e.into()),
     };
     let st = fsroot::fstat(&file)?;
-    let af = {
+    let (af, old_pictures) = {
         let mut reader = file.try_clone()?;
         reader.seek(SeekFrom::Start(0))?;
-        match read_audio_file(reader, ext) {
-            Ok(af) => af,
+        match read_audio_file_with_pictures(reader, ext) {
+            Ok(parts) => parts,
             Err(e) => {
                 return Ok(Staged::Conflict {
                     reason: format!("タグを読めない: {e}"),
@@ -1318,7 +1357,10 @@ fn stage_tags(
                 path = rel_path,
                 "事前条件は外れているがファイルは新値。applied として確定"
             );
-            return Ok(Staged::AlreadyMatches(state));
+            return Ok(Staged::AlreadyMatches {
+                fs: state,
+                stashed: Vec::new(),
+            });
         }
         return Ok(Staged::Conflict {
             reason: format!("事前条件不一致: {}", diff.join(", ")),
@@ -1326,9 +1368,35 @@ fn stage_tags(
         });
     }
 
+    // 画像の差し替え（D-60）: 新画像を store から読む。無ければ書けない（再試行しても直らない）
+    let picture_edit = edits.iter().find(|e| e.key == PICTURE_KEY);
+    let mut new_pictures: Option<Vec<lofty::picture::Picture>> = None;
+    if let Some(e) = picture_edit {
+        let Some(store) = store else {
+            return Ok(Staged::Failed {
+                reason: "アートワークのキャッシュが無いので画像を書けない".to_owned(),
+                current: Some(FileState::external(root, &rel, st, af)),
+            });
+        };
+        let mut pics = Vec::new();
+        for value in json_values(&e.new_value) {
+            match picture::load_picture(store, &value)? {
+                Some(p) => pics.push(p),
+                None => {
+                    return Ok(Staged::Failed {
+                        reason: format!("画像がキャッシュに無い: {value}"),
+                        current: Some(FileState::external(root, &rel, st, af)),
+                    })
+                }
+            }
+        }
+        new_pictures = Some(pics);
+    }
+
     // 一致: 親 dir に tmp を O_EXCL で作り、内容をコピーして全フィールドを書き、fsync → rename
     let changes: Vec<TagChange> = edits
         .iter()
+        .filter(|e| e.key != PICTURE_KEY)
         .map(|e| TagChange {
             key: e.key.clone(),
             values: match &e.new_value {
@@ -1340,11 +1408,16 @@ fn stage_tags(
     let parent = rel.parent();
     let (tmp_rel, mut tmp) = root.create_tmp(parent.as_ref())?;
     let written = (|| -> Result<Staged, EditError> {
+        // 捨てる旧画像を書く前に退避する（巻き戻しの素材。置けなければ何も書かない）
+        let stashed = match (&new_pictures, store) {
+            (Some(_), Some(store)) => picture::stash_pictures(store, &old_pictures)?,
+            _ => Vec::new(),
+        };
         file.seek(SeekFrom::Start(0))?;
         std::io::copy(&mut file, &mut tmp)?;
         // mode / 所有者 / xattr（ACL）を元ファイルから写す（D-41）
         fsroot::copy_attrs(&file, &tmp)?;
-        write_tag_changes(&mut tmp, ext, &changes)?;
+        write_tag_changes(&mut tmp, ext, &changes, new_pictures.as_deref())?;
         tmp.sync_all()?;
         // 書いた内容を同じ FD から読み戻して tag_hash を確定する（スキャナと同じ計算）。
         // 編集したキーが意図どおりに読めなければ、この形式には書けないので反映しない
@@ -1399,14 +1472,17 @@ fn stage_tags(
         root.replace_file(&tmp_rel, &rel)?;
         // rename は ctime を進めるので、rename 後に同じ FD を fstat する
         let st = fsroot::fstat(&tmp)?;
-        Ok(Staged::Written(FileState {
-            ph: st.into(),
-            content: track_content(written),
-            fp: None,
-        }))
+        Ok(Staged::Written {
+            fs: FileState {
+                ph: st.into(),
+                content: track_content(written),
+                fp: None,
+            },
+            stashed,
+        })
     })();
     // rename まで到達した Written 以外は tmp を消す
-    if !matches!(written, Ok(Staged::Written(_))) {
+    if !matches!(written, Ok(Staged::Written { .. })) {
         if let Err(u) = root.unlink(&tmp_rel) {
             if !matches!(u, FsError::NotFound) {
                 tracing::warn!(path = %tmp_rel, error = %u, "tmp を消せない");

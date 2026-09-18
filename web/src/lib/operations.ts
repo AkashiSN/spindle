@@ -81,6 +81,17 @@ export function md5FillMessage(r: Md5FillResponse): string {
   return `MD5 の補填を投入した: ${formatCount(r.affected)} 件（バッチ #${r.batch_id}）${tail ? `。${tail}` : ''}`
 }
 
+export type EmbedResponse = { batch_id: number; affected: number; unchanged: number; missing: number; pending_excluded: number }
+
+export function embedMessage(r: EmbedResponse): string {
+  const rest: string[] = []
+  if (r.unchanged > 0) rest.push(`既に同じ画像 ${formatCount(r.unchanged)}`)
+  if (r.missing > 0) rest.push(`欠落 ${formatCount(r.missing)}`)
+  if (r.pending_excluded > 0) rest.push(`反映待ちで除外 ${formatCount(r.pending_excluded)}`)
+  const tail = rest.join(' / ')
+  return `埋め込み画像の差し替えを投入した: ${formatCount(r.affected)} 件（バッチ #${r.batch_id}）${tail ? `。${tail}` : ''}`
+}
+
 const KNOWN: Record<string, string> = {
   no_changes: '対象がありません',
   preview_stale: 'プレビューが古くなりました。もう一度プレビューしてください',
@@ -88,6 +99,9 @@ const KNOWN: Record<string, string> = {
   rg_write_disabled: 'ReplayGain のタグ書き込みは設定で無効です（[replaygain].write_tags）',
   md5_fill_disabled: 'MD5 の補填は設定で無効です（[normalize].flac_fix_missing_md5）',
   editor_unavailable: '編集機能が使えません（読み取り専用で起動している）',
+  artwork_unavailable: 'アートワークのキャッシュが無いので画像を扱えません',
+  artwork_not_found: '画像が登録されていません。もう一度アップロードしてください',
+  unsupported_image: 'JPEG / PNG / WebP の画像だけを受け付けます',
 }
 
 /** エラー応答の本文を 1 行に。既知のコードは日本語、それ以外は message かコード + HTTP 状態 */

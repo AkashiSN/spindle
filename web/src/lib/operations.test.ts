@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  embedMessage,
   flaccheckStartedMessage,
   md5FillMessage,
   operationErrorMessage,
@@ -63,5 +64,21 @@ describe('operationErrorMessage', () => {
   it('未知のコードは message かコードと HTTP 状態', () => {
     expect(operationErrorMessage(400, { error: 'bad_request', message: 'x が不正' })).toBe('x が不正')
     expect(operationErrorMessage(500, null)).toBe('http_error (HTTP 500)')
+  })
+})
+
+describe('embedMessage', () => {
+  it('埋め込み画像の差し替えはバッチ・件数・既に同じ・欠落・反映待ち除外', () => {
+    expect(embedMessage({ batch_id: 4, affected: 12, unchanged: 3, missing: 1, pending_excluded: 2 })).toBe(
+      '埋め込み画像の差し替えを投入した: 12 件（バッチ #4）。既に同じ画像 3 / 欠落 1 / 反映待ちで除外 2',
+    )
+    expect(embedMessage({ batch_id: 4, affected: 1, unchanged: 0, missing: 0, pending_excluded: 0 })).toBe(
+      '埋め込み画像の差し替えを投入した: 1 件（バッチ #4）',
+    )
+  })
+  it('画像まわりのエラーコードは日本語', () => {
+    expect(operationErrorMessage(404, { error: 'artwork_not_found' })).toBe('画像が登録されていません。もう一度アップロードしてください')
+    expect(operationErrorMessage(400, { error: 'unsupported_image' })).toBe('JPEG / PNG / WebP の画像だけを受け付けます')
+    expect(operationErrorMessage(503, { error: 'artwork_unavailable' })).toBe('アートワークのキャッシュが無いので画像を扱えません')
   })
 })

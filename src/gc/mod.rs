@@ -8,7 +8,8 @@
 //! - C Archive: `archived_files` の `held` で期限超 → unlink して `deleted`
 //! - D Derived: `derived_files` に無い実体（A のトラックの行も無いものとして扱う）。
 //!   `.spindle-tmp-*` と [`ORPHAN_GRACE_SECS`] 以内の実体は除外 → unlink、空ディレクトリも消す
-//! - E artwork: `albums.artwork_id` から参照されない行と、行の無い `thumbs/<hex>/`
+//! - E artwork: `albums.artwork_id` からも編集履歴の `PICTURE` 値からも参照されない行（dir が
+//!   [`ORPHAN_GRACE_SECS`] 以内なら残す。D-60）と、行の無い `thumbs/<hex>/`
 //!
 //! 実行順は A → B → E(行) を 1 トランザクション → C → D → E(dir)。ファイル削除は 1 件ずつ、
 //! 失敗はログして続行し、最後に区分ごとの件数・バイト数を出す
@@ -177,19 +178,30 @@ pub async fn plan(
 
     // E: 行の無い hex と、この実行で行が消える hex
     let live: HashSet<String> = hashes.iter().map(|h| ArtworkStore::hex(h)).collect();
-    let artwork_rows: Vec<PlannedArtwork> = artwork_rows
+    let store = Arc::clone(&roots.artwork);
+    let unreferenced: Vec<PlannedArtwork> = artwork_rows
         .into_iter()
         .map(|(id, sha)| PlannedArtwork {
             id,
             hex: ArtworkStore::hex(&sha),
         })
         .collect();
+    let (aged_dirs, artwork_rows) = tokio::task::spawn_blocking(move || {
+        let aged = list_thumb_dirs(&store, now);
+        // 参照の無い行でも、dir が猶予内（アップロード直後・参照前）なら残す。dir が無い行は
+        // 実体が無く使えないので猶予に関係なく消す
+        let rows: Vec<PlannedArtwork> = unreferenced
+            .into_iter()
+            .filter(|a| aged.contains(&a.hex) || !store.dir().join(&a.hex).is_dir())
+            .collect();
+        (aged, rows)
+    })
+    .await?;
     let dropping: HashSet<&str> = artwork_rows.iter().map(|a| a.hex.as_str()).collect();
-    let store = Arc::clone(&roots.artwork);
-    let artwork_dirs = tokio::task::spawn_blocking(move || list_thumb_dirs(&store, now)).await?;
-    let artwork_dirs = artwork_dirs
-        .into_iter()
-        .filter(|hex| !live.contains(hex) || dropping.contains(hex.as_str()))
+    let artwork_dirs = aged_dirs
+        .iter()
+        .filter(|hex| !live.contains(*hex) || dropping.contains(hex.as_str()))
+        .cloned()
         .collect();
 
     Ok(Plan {
@@ -285,14 +297,28 @@ fn is_hex64(s: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+/// [`ORPHAN_GRACE_SECS`] の境界（これ以前に触られた実体は回収してよい）
+fn grace_boundary(now: i64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH
+        + std::time::Duration::from_secs(now.saturating_sub(ORPHAN_GRACE_SECS).max(0) as u64)
+}
+
+/// `thumbs/<hex>/` の行を消してよいか: dir が無い（実体が無く使えない）か、mtime が猶予を過ぎている。
+/// 猶予内（置いた・上げ直した直後）なら残す
+fn thumb_dir_is_collectable(store: &ArtworkStore, hex: &str, now: i64) -> bool {
+    match std::fs::metadata(store.dir().join(hex)) {
+        Ok(m) if m.is_dir() => m.modified().is_ok_and(|t| t <= grace_boundary(now)),
+        _ => true,
+    }
+}
+
 /// `thumbs/` 直下の hex 名のディレクトリ。[`ORPHAN_GRACE_SECS`] 以内に触られたものは除く
 /// （スキャンの Phase 5 が原画像を置いてから行を入れるまでの間に消さない）
 fn list_thumb_dirs(store: &ArtworkStore, now: i64) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(store.dir()) else {
         return Vec::new();
     };
-    let grace = std::time::UNIX_EPOCH
-        + std::time::Duration::from_secs(now.saturating_sub(ORPHAN_GRACE_SECS).max(0) as u64);
+    let grace = grace_boundary(now);
     rd.filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter(|e| {
@@ -352,16 +378,26 @@ fn cancelled(token: &CancellationToken) -> Result<(), GcError> {
     }
 }
 
-/// A → B → E(行) を 1 トランザクションで消す
-pub async fn execute_rows(db: &Db, plan: &Plan) -> Result<Summary, GcError> {
+/// A → B → E(行) を 1 トランザクションで消す。E(行) は削除の直前に、書き込みコネクションを
+/// 持ったまま `thumbs/<hex>/` の猶予を確認し直す（計画の後に同じ画像が再アップロードされていれば
+/// dir の mtime が今になっている）。アップロードは touch（FS）→ upsert（同じ writer）の順なので、
+/// touch が先なら fresh を見て残し、この commit が先なら後続の upsert が行を作り直す
+pub async fn execute_rows(db: &Db, roots: &GcRoots, plan: &Plan) -> Result<Summary, GcError> {
     let track_ids: Vec<i64> = plan.tracks.iter().map(|t| t.id).collect();
     let album_ids: Vec<i64> = plan.albums.iter().map(|a| a.id).collect();
-    let artwork_ids: Vec<i64> = plan.artwork_rows.iter().map(|a| a.id).collect();
+    let artwork: Vec<PlannedArtwork> = plan.artwork_rows.clone();
     let cutoff = plan.cutoff;
+    let now = plan.now;
+    let store = Arc::clone(&roots.artwork);
     let (t, a, w) = db
         .transaction(move |c| {
             let t = dbgc::delete_tracks(c, &track_ids, cutoff)?;
             let a = dbgc::delete_albums(c, &album_ids, cutoff)?;
+            let artwork_ids: Vec<i64> = artwork
+                .iter()
+                .filter(|a| thumb_dir_is_collectable(&store, &a.hex, now))
+                .map(|a| a.id)
+                .collect();
             let w = dbgc::delete_artwork(c, &artwork_ids)?;
             Ok((t, a, w))
         })
@@ -618,7 +654,7 @@ pub async fn execute_all(
     job_id: Option<i64>,
 ) -> Result<Summary, GcError> {
     cancelled(token)?;
-    let mut summary = execute_rows(db, plan).await?;
+    let mut summary = execute_rows(db, roots, plan).await?;
     summary.archived = execute_archive(db, roots, plan, token, job_id).await?;
     summary.derived = execute_derived(db, roots, plan, token, job_id).await?;
     summary.artwork_dirs = execute_artwork_dirs(db, roots, plan, token).await?;

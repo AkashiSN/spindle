@@ -81,7 +81,9 @@ impl GcHandler {
         );
         ctx.progress(0, total).await?;
         let token = ctx.cancel_token();
-        let mut summary = gc::execute_rows(&self.db, &plan).await.map_err(map_err)?;
+        let mut summary = gc::execute_rows(&self.db, &self.roots, &plan)
+            .await
+            .map_err(map_err)?;
         let mut done = (plan.tracks.len() + plan.albums.len() + plan.artwork_rows.len()) as i64;
         ctx.progress(done, total).await?;
         summary.archived =

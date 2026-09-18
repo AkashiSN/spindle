@@ -212,6 +212,15 @@ pub fn read_audio_file(file: File, ext: Option<&str>) -> Result<AudioFile, TagRe
     Ok(af)
 }
 
+/// [`read_audio_file`] に加えて埋め込み画像の実体も返す（画像の差し替えで、捨てる旧画像を
+/// 退避するために使う。D-60）
+pub fn read_audio_file_with_pictures(
+    file: File,
+    ext: Option<&str>,
+) -> Result<(AudioFile, Vec<lofty::picture::Picture>), TagReadError> {
+    read_parts(file, ext)
+}
+
 /// 形式をまたいで移すタグ（ロスレス正規化で元ファイルから FLAC へ写す。SPEC §7.4）。
 /// 項目は [`TagSet`] と同じ正規化済みの Vorbis 名・値（`PICTURE` 疑似キーは含まない）、
 /// 画像は実体ごと持つ
@@ -427,13 +436,15 @@ pub enum TagWriteError {
 }
 
 /// `file`（読み書きで開いた実体）のタグを `changes` のキーだけ置き換えて保存する。
-/// 他のキー・多値・画像は保つ。呼び出し側が tmp にコピーした上で呼ぶこと（対象を直接
+/// 他のキー・多値は保つ。`pictures` が `Some` なら埋め込み画像を全部捨ててその列に置き換え、
+/// `None` なら画像に触らない（D-60）。呼び出し側が tmp にコピーした上で呼ぶこと（対象を直接
 /// 書き換えない。SPEC §7.5 tmp + rename）。FLAC / Opus / Vorbis は VorbisComments を直接、
 /// 他は lofty の generic `Tag` に Vorbis 名を写像して書く
 pub fn write_tag_changes(
     file: &mut File,
     ext: Option<&str>,
     changes: &[TagChange],
+    pictures: Option<&[lofty::picture::Picture]>,
 ) -> Result<(), TagWriteError> {
     let changes: Vec<TagChange> = changes.iter().map(TagChange::normalized).collect();
     file.seek(SeekFrom::Start(0))?;
@@ -457,18 +468,28 @@ pub fn write_tag_changes(
             if let Some(vc) = f.vorbis_comments_mut() {
                 apply_vorbis(vc, &changes);
             }
+            if let Some(pics) = pictures {
+                // FLAC の画像は PICTURE ブロック（VorbisComments の METADATA_BLOCK_PICTURE ではない）
+                replace_ogg_pictures(&mut f, pics);
+            }
             file.seek(SeekFrom::Start(0))?;
             f.save_to(file, write_opts)?;
         }
         FileType::Opus => {
             let mut f = lofty::ogg::OpusFile::read_from(&mut *file, opts)?;
             apply_vorbis(f.vorbis_comments_mut(), &changes);
+            if let Some(pics) = pictures {
+                replace_ogg_pictures(f.vorbis_comments_mut(), pics);
+            }
             file.seek(SeekFrom::Start(0))?;
             f.save_to(file, write_opts)?;
         }
         FileType::Vorbis => {
             let mut f = lofty::ogg::VorbisFile::read_from(&mut *file, opts)?;
             apply_vorbis(f.vorbis_comments_mut(), &changes);
+            if let Some(pics) = pictures {
+                replace_ogg_pictures(f.vorbis_comments_mut(), pics);
+            }
             file.seek(SeekFrom::Start(0))?;
             f.save_to(file, write_opts)?;
         }
@@ -492,6 +513,16 @@ pub fn write_tag_changes(
             for tt in types {
                 if let Some(tag) = tagged.tag_mut(tt) {
                     apply_generic(tag, &changes);
+                    if let Some(pics) = pictures {
+                        // 読み側は最初に画像を持つブロックだけを採る。書きは全ブロックを揃える
+                        // （ID3v1 のように画像を持てないブロックは push が無視される）
+                        while !tag.pictures().is_empty() {
+                            tag.remove_picture(0);
+                        }
+                        for pic in pics {
+                            tag.push_picture(pic.clone());
+                        }
+                    }
                 }
             }
             file.seek(SeekFrom::Start(0))?;
@@ -500,6 +531,35 @@ pub fn write_tag_changes(
         other => return Err(TagWriteError::Unsupported(other)),
     }
     Ok(())
+}
+
+/// Ogg 系（FLAC の PICTURE ブロック / VorbisComments の METADATA_BLOCK_PICTURE）の画像を
+/// `pics` に置き換える。寸法はヘッダから読み（[`crate::media::artwork::sniff`]）、読めない形式は
+/// lofty に推定させる（PNG / JPEG 以外は 0×0。プレイヤーは画像本体を見る）。入らない画像は
+/// 警告して飛ばす（書き戻し確認で不一致になり op は failed に閉じる）
+fn replace_ogg_pictures<S: lofty::ogg::OggPictureStorage>(
+    storage: &mut S,
+    pics: &[lofty::picture::Picture],
+) {
+    use lofty::picture::PictureInformation;
+    while !storage.pictures().is_empty() {
+        storage.remove_picture(0);
+    }
+    for pic in pics {
+        // PNG / JPEG は lofty が色深度まで読む。それ以外（WebP 等）は寸法だけヘッダから補う
+        let info = match PictureInformation::from_picture(pic) {
+            Ok(i) if i.width > 0 && i.height > 0 => Some(i),
+            _ => crate::media::artwork::sniff(pic.data()).map(|i| PictureInformation {
+                width: i.width,
+                height: i.height,
+                color_depth: 0,
+                num_colors: 0,
+            }),
+        };
+        if let Err(e) = storage.insert_picture(pic.clone(), info) {
+            tracing::warn!(error = %e, "埋め込み画像を書けない");
+        }
+    }
 }
 
 fn apply_vorbis(vc: &mut VorbisComments, changes: &[TagChange]) {

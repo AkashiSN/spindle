@@ -2,7 +2,8 @@
 //! 埋め込み画像の選択、ハッシュアドレスのキャッシュ
 
 use spindle::media::artwork::{
-    cover_rank, ext_of_mime, pick_embedded, sniff, ArtworkStore, ImageInfo, THUMB_SIZES,
+    cover_rank, ext_of_mime, pick_embedded, sniff, ArtworkStore, ImageInfo, MAX_COVER_BYTES,
+    THUMB_SIZES,
 };
 
 /// 1x1 の JPEG（最小のヘッダ + SOF0）
@@ -162,4 +163,51 @@ fn store_paths_are_hash_addressed_and_put_is_idempotent() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(entries, vec!["orig.jpg".to_owned()]);
+}
+
+/// 退避した旧画像はアップロードの上限（`MAX_COVER_BYTES`）に縛られない。巻き戻しには全体が要るので
+/// 読み戻しも上限なし（D-60。codex の指摘: 切り詰めるとハッシュが合わず巻き戻しが必ず失敗する）
+#[test]
+fn read_original_returns_the_whole_image_even_beyond_the_upload_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ArtworkStore::new(dir.path().join("thumbs"));
+    let mut big = tiny_jpeg();
+    big.resize(MAX_COVER_BYTES as usize + 4096, 0x5a);
+    let hash = ArtworkStore::hash_of(&big);
+    store.put_original(&hash, "image/jpeg", &big).unwrap();
+    let got = store.read_original(&hash, "image/jpeg").unwrap().unwrap();
+    assert_eq!(got.len(), big.len());
+    assert_eq!(ArtworkStore::hash_of(&got), hash);
+    // 無ければ None、壊れていれば None
+    assert!(store
+        .read_original(&[9u8; 32], "image/jpeg")
+        .unwrap()
+        .is_none());
+    std::fs::write(store.original_path(&hash, "image/jpeg"), b"broken").unwrap();
+    assert!(store.read_original(&hash, "image/jpeg").unwrap().is_none());
+}
+
+/// 既にある画像を置き直したら dir の mtime は今になる（GC 区分 E の 24 時間の猶予を、アップロード
+/// し直した時点から数え直すため。codex の指摘: 早期 return だけだと古い未参照 dir が embed 前に消える）
+#[test]
+fn putting_an_existing_original_again_refreshes_the_entry_dir_mtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ArtworkStore::new(dir.path().join("thumbs"));
+    let bytes = tiny_jpeg();
+    let hash = ArtworkStore::hash_of(&bytes);
+    store.put_original(&hash, "image/jpeg", &bytes).unwrap();
+    let entry = store.dir().join(ArtworkStore::hex(&hash));
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 24 * 3600);
+    std::fs::File::open(&entry)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    store.put_original(&hash, "image/jpeg", &bytes).unwrap();
+    let mtime = std::fs::metadata(&entry).unwrap().modified().unwrap();
+    assert!(
+        mtime.duration_since(old).unwrap() > std::time::Duration::from_secs(4 * 24 * 3600),
+        "dir の mtime が更新されていない"
+    );
+    // 無い hash の touch は何もしない
+    store.touch(&[7u8; 32]).unwrap();
 }
