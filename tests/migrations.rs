@@ -136,3 +136,84 @@ fn upgrade_to_0006_backfills_name_key_with_canonical_key_and_renames_collisions(
     );
     assert!(dup.is_err());
 }
+
+#[test]
+fn upgrade_to_0011_widens_edit_ops_kind_and_keeps_referencing_rows() {
+    use rusqlite::Connection;
+
+    // 0011 は edit_ops の CHECK を広げるために表を作り直す。edits（ON DELETE CASCADE）と
+    // archived_files（ON DELETE SET NULL）が参照しているので、FK を切らずに DROP すると履歴が消える
+    let list = migrations::embedded().unwrap();
+    let upto10: Vec<_> = list.iter().take(10).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto10).unwrap();
+    conn.execute_batch(
+        "INSERT INTO edit_batches (id, created_at, state, affected) VALUES (1, 1, 'applied', 1);
+         INSERT INTO edit_ops (id, batch_id, ordinal, track_id, kind, result, expected_rel_path)
+           VALUES (10, 1, 0, 5, 'tags', 'applied', 'a/b.flac');
+         INSERT INTO edits (op_id, key, old_value, new_value) VALUES (10, 'TITLE', '[\"x\"]', '[\"y\"]');
+         INSERT INTO archived_files (id, track_id, op_id, rel_path, rel_path_key, source_rel_path, reason,
+                                     archived_at, eligible_after, state)
+           VALUES (1, 5, 10, 'a/b.wav', 'a/b.wav', 'a/b.wav', 'normalize', 1, 2, 'held');",
+    )
+    .unwrap();
+    // 0011 の前は md5 が通らない
+    assert!(conn
+        .execute(
+            "INSERT INTO edit_ops (batch_id, ordinal, track_id, kind) VALUES (1, 1, 6, 'md5')",
+            []
+        )
+        .is_err());
+
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 11);
+
+    // 参照している行が残っている（CASCADE / SET NULL が走っていない）
+    let edits: i64 = conn
+        .query_row("SELECT count(*) FROM edits WHERE op_id = 10", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(edits, 1);
+    let op_id: Option<i64> = conn
+        .query_row("SELECT op_id FROM archived_files WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(op_id, Some(10));
+    let (kind, path): (String, String) = conn
+        .query_row(
+            "SELECT kind, expected_rel_path FROM edit_ops WHERE id = 10",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((kind.as_str(), path.as_str()), ("tags", "a/b.flac"));
+    // FK は有効なまま（作り直しの後で戻っている）
+    let fk: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fk, 1);
+    // md5 が通り、索引（pending の一意制約）も生きている
+    conn.execute(
+        "INSERT INTO edit_ops (batch_id, ordinal, track_id, kind) VALUES (1, 1, 6, 'md5')",
+        [],
+    )
+    .unwrap();
+    assert!(
+        conn.execute(
+            "INSERT INTO edit_ops (batch_id, ordinal, track_id, kind) VALUES (1, 2, 6, 'md5')",
+            []
+        )
+        .is_err(),
+        "同じトラックの pending は 1 つ（idx_edit_ops_pending）"
+    );
+    // FK も効いている（無い batch）
+    assert!(conn
+        .execute(
+            "INSERT INTO edit_ops (batch_id, ordinal, track_id, kind) VALUES (99, 0, 7, 'tags')",
+            []
+        )
+        .is_err());
+}

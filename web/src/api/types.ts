@@ -157,7 +157,7 @@ export type PendingConflict = { error: 'pending'; count: number; track_ids: numb
 
 // 編集履歴（SPEC §9、P0-12）
 export type BatchState = 'prepared' | 'applying' | 'applied' | 'partial' | 'failed' | 'cancelled'
-export type OpKind = 'tags' | 'rename' | 'delete' | 'archive'
+export type OpKind = 'tags' | 'rename' | 'delete' | 'archive' | 'md5'
 export type OpResult = 'pending' | 'applied' | 'skipped_conflict' | 'failed' | 'superseded'
 
 export type HistoryItem = {

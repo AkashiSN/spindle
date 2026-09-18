@@ -524,9 +524,12 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `web/src/lib/badges.test.ts`
 
       未決: P1-5b（MD5 補填。STREAMINFO の 16 バイトを tmp + rename で書き換える編集 op）。UI の起動導線
-- [ ] **P1-5b** FLAC の MD5 補填（`flac_fix_missing_md5`）。`md5_missing` のトラックを選んで、デコードした
-      PCM MD5 を STREAMINFO に書く編集バッチ（`edit_ops.kind` に `md5` を足すマイグレーション、旧値 = 全ゼロ
-      を `edits` に残して巻き戻し可、`audio_version` 据え置き、inode / mtime は追随）。D-57
+- [x] **P1-5b** FLAC の MD5 補填（`flac_fix_missing_md5`）。`md5_missing` のトラックを選んで、デコードした
+      PCM MD5 を STREAMINFO に書く編集バッチ（`edit_ops.kind` に `md5` を足すマイグレーション 0011、旧値 = 全ゼロ
+      を `edits` に残して巻き戻し可、`audio_version` 据え置き、inode / mtime は追随）。D-57 / D-59。
+      `POST /api/md5fill`、操作タブの「MD5 を補填」。受け入れ: `tests/migrations.rs`（0011 で参照行が残る）、
+      `tests/fingerprint.rs`（MD5 の位置）、`tests/md5fill.rs`（補填 / 対象外 / 巻き戻し / conflict）、
+      `tests/md5fill_api.rs`（409 の各コード）
 - [x] **P1-6** プレイリスト（手動、並べ替え、m3u8 書き出し。D-53）
       - [x] `db::playlists`: CRUD（名前の一意性は `name_key` = canonical key。マイグレーション 0006）、
             項目の追加（同じトラックは 1 回）・除外・移動（`before` の直前 / 末尾）、`position` の振り直し、
@@ -689,7 +692,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 完了条件: **新規 CD が検証付きで取り込め、既存 FLAC が格付けされる。**
 
-- [ ] **P1-12** UI の再構成と起動導線（foobar2000 のレイアウトに寄せる。D-58）。P1 の完了条件
+- [x] **P1-12** UI の再構成と起動導線（foobar2000 のレイアウトに寄せる。D-58）。P1 の完了条件
       「foobar2000 を開かずに日常運用が回る」に対して、API だけで UI が無い機能（リネーム / 正規化 /
       RG / FLAC 検査 / GC）の起動導線と、ジョブ・設定画面を揃える
       - [x] (a) レイアウト: ヘッダ → プレイヤーバー（下部バーを上へ）→ 左（ツリー + プレイリスト +

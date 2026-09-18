@@ -299,18 +299,28 @@ impl EnqueueResult {
     }
 }
 
-/// 版付きジョブの payload から `(track_id, 版)` を取り出す。欠けていれば理由を返す
+/// 版付きジョブの payload から `(track_id, 版)` を取り出す。欠けていれば理由を返す。
+/// `unversioned: true` のジョブ（md5 op の tagwrite。D-59）は版を持たないので `track_id` だけを
+/// 要求し、版は `None`（stale 判定の対象外。`track_locks` は取る）。版を持たない種別は `None`
 pub fn versioned_payload(
     job_type: JobType,
     payload: &serde_json::Value,
-) -> Result<Option<(i64, i64)>> {
+) -> Result<Option<(i64, Option<i64>)>> {
     let Some((payload_key, _)) = job_type.version_field() else {
         return Ok(None);
     };
     let track_id = payload.get("track_id").and_then(|v| v.as_i64());
+    if is_unversioned(payload) {
+        return match track_id {
+            Some(t) => Ok(Some((t, None))),
+            None => Err(DbError::Internal(format!(
+                "{job_type} の payload に整数の track_id が必要: {payload}"
+            ))),
+        };
+    }
     let version = payload.get(payload_key).and_then(|v| v.as_i64());
     match (track_id, version) {
-        (Some(t), Some(v)) => Ok(Some((t, v))),
+        (Some(t), Some(v)) => Ok(Some((t, Some(v)))),
         _ => Err(DbError::Internal(format!(
             "{job_type} の payload に整数の track_id と {payload_key} が必要: {payload}"
         ))),
@@ -848,10 +858,21 @@ pub fn track_exists(conn: &Connection, track_id: i64) -> Result<bool> {
 
 /// 版付きジョブが stale か（payload の版 < 現在値、またはトラックが無い）。
 /// 版を持たない種別、payload に版が無いものは stale ではない
+/// 版付きジョブの payload に `"unversioned": true` があれば stale 判定をしない（同じ job type を
+/// 版に関係ない op に使うとき。md5 op の tagwrite がこれ。D-59）。`track_locks` は通常どおり取る
+pub const UNVERSIONED_KEY: &str = "unversioned";
+
+pub fn is_unversioned(payload: &serde_json::Value) -> bool {
+    payload.get(UNVERSIONED_KEY).and_then(|v| v.as_bool()) == Some(true)
+}
+
 pub fn is_stale(conn: &Connection, job: &Job) -> Result<bool> {
     let Some((payload_key, column)) = job.job_type.version_field() else {
         return Ok(false);
     };
+    if is_unversioned(&job.payload) {
+        return Ok(false);
+    }
     let (Some(track_id), Some(version)) = (
         job.payload.get("track_id").and_then(|v| v.as_i64()),
         job.payload.get(payload_key).and_then(|v| v.as_i64()),

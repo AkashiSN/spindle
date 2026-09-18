@@ -146,6 +146,19 @@ fn current_values(
                 .unwrap_or(None);
             out.insert("missing_since".to_owned(), serde_json::json!(missing));
         }
+        OpKind::Md5 => {
+            let md5: Option<Vec<u8>> = c
+                .query_row(
+                    "SELECT audio_md5 FROM tracks WHERE id = ?1",
+                    [op.track_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            out.insert(
+                "audio_md5".to_owned(),
+                serde_json::json!(md5.map(|m| crate::edit::md5_hex(&m))),
+            );
+        }
         OpKind::Archive => {
             out.insert("rel_path".to_owned(), serde_json::json!(rel_path));
             let codec: Option<String> = c

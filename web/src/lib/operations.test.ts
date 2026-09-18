@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   flaccheckStartedMessage,
+  md5FillMessage,
   operationErrorMessage,
   pathPreviewSummary,
   rgStartedMessage,
@@ -32,6 +33,14 @@ describe('開始・書き込みの結果メッセージ', () => {
       'FLAC 検査を投入した: 5 件（FLAC でない・欠落で対象外 2）',
     )
   })
+  it('MD5 補填はバッチ・件数・対象外・反映待ち除外', () => {
+    expect(md5FillMessage({ batch_id: 9, affected: 3, skipped: 2, pending_excluded: 1 })).toBe(
+      'MD5 の補填を投入した: 3 件（バッチ #9）。対象外 2 / 反映待ちで除外 1',
+    )
+    expect(md5FillMessage({ batch_id: 9, affected: 1, skipped: 0, pending_excluded: 0 })).toBe(
+      'MD5 の補填を投入した: 1 件（バッチ #9）',
+    )
+  })
   it('RG 書き込みはバッチと内訳。バッチが無ければ既に一致', () => {
     expect(
       rgWrittenMessage({ batch_id: 7, affected: 4, unchanged: 1, unscanned: 2, missing: 0, pending_excluded: 1 }),
@@ -48,6 +57,7 @@ describe('operationErrorMessage', () => {
     expect(operationErrorMessage(409, { error: 'preview_stale' })).toBe('プレビューが古くなりました。もう一度プレビューしてください')
     expect(operationErrorMessage(409, { error: 'normalize_disabled' })).toBe('正規化は設定で無効です（[normalize].wav_to_flac）')
     expect(operationErrorMessage(409, { error: 'rg_write_disabled' })).toBe('ReplayGain のタグ書き込みは設定で無効です（[replaygain].write_tags）')
+    expect(operationErrorMessage(409, { error: 'md5_fill_disabled' })).toBe('MD5 の補填は設定で無効です（[normalize].flac_fix_missing_md5）')
     expect(operationErrorMessage(503, { error: 'editor_unavailable' })).toBe('編集機能が使えません（読み取り専用で起動している）')
   })
   it('未知のコードは message かコードと HTTP 状態', () => {

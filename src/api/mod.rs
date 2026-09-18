@@ -13,6 +13,7 @@ pub mod gc;
 pub mod health;
 pub mod history;
 pub mod jobs;
+pub mod md5fill;
 pub mod normalize;
 pub mod playlists;
 pub mod rename;
@@ -48,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/rg", post(rg::start))
         .route("/rg/write", post(rg::write))
         .route("/flaccheck", post(flaccheck::start))
+        .route("/md5fill", post(md5fill::start))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))

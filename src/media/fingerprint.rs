@@ -41,7 +41,16 @@ pub enum FingerprintError {
 
 /// FLAC の STREAMINFO から非圧縮音声の MD5 を読む。全ゼロ（未設定）は `Ok(None)`。
 /// 先頭の ID3v2 タグは読み飛ばす
-pub fn flac_streaminfo_md5<R: Read + Seek>(mut r: R) -> Result<Option<[u8; 16]>, FingerprintError> {
+pub fn flac_streaminfo_md5<R: Read + Seek>(r: R) -> Result<Option<[u8; 16]>, FingerprintError> {
+    let (_, md5) = flac_streaminfo_md5_at(r)?;
+    Ok((md5 != [0u8; 16]).then_some(md5))
+}
+
+/// STREAMINFO の MD5 16 バイトの位置（ファイル先頭からのオフセット）と現在値。全ゼロもそのまま返す。
+/// MD5 の補填（P1-5b）はこの位置だけを書き換える
+pub fn flac_streaminfo_md5_at<R: Read + Seek>(
+    mut r: R,
+) -> Result<(u64, [u8; 16]), FingerprintError> {
     let mut marker = [0u8; 4];
     r.read_exact(&mut marker)?;
     if marker[..3] == *b"ID3" {
@@ -73,7 +82,9 @@ pub fn flac_streaminfo_md5<R: Read + Seek>(mut r: R) -> Result<Option<[u8; 16]>,
         .map_err(|_| FingerprintError::BadStreamInfo)?;
     let mut md5 = [0u8; 16];
     md5.copy_from_slice(&info[18..34]);
-    Ok((md5 != [0u8; 16]).then_some(md5))
+    // 読み終えた位置から 16 バイト戻ったところが MD5
+    let end = r.stream_position()?;
+    Ok((end - 16, md5))
 }
 
 fn open_format(file: File, ext: Option<&str>) -> Result<Box<dyn FormatReader>, FingerprintError> {

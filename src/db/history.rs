@@ -69,6 +69,8 @@ pub enum OpKind {
     Rename,
     Delete,
     Archive,
+    /// FLAC の STREAMINFO MD5 の補填（P1-5b。edits は `audio_md5` の hex）
+    Md5,
 }
 
 impl OpKind {
@@ -78,6 +80,7 @@ impl OpKind {
             OpKind::Rename => "rename",
             OpKind::Delete => "delete",
             OpKind::Archive => "archive",
+            OpKind::Md5 => "md5",
         }
     }
 }
@@ -90,6 +93,7 @@ impl FromStr for OpKind {
             "rename" => OpKind::Rename,
             "delete" => OpKind::Delete,
             "archive" => OpKind::Archive,
+            "md5" => OpKind::Md5,
             other => return Err(format!("不明な op 種別: {other:?}")),
         })
     }

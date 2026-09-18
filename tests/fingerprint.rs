@@ -13,7 +13,7 @@ mod common;
 use md5::{Digest, Md5};
 
 use spindle::media::fingerprint::{
-    decoded_pcm_md5, flac_streaminfo_md5, packet_fp, FingerprintError,
+    decoded_pcm_md5, flac_streaminfo_md5, flac_streaminfo_md5_at, packet_fp, FingerprintError,
 };
 
 // ---------------------------------------------------------------- 生成ヘルパ
@@ -65,6 +65,25 @@ fn flac_md5_skips_preceding_metadata_blocks() {
     v.extend_from_slice(&[0u8; 10]);
     v.extend_from_slice(&minimal_flac(md5));
     assert_eq!(flac_streaminfo_md5(Cursor::new(v)).unwrap(), Some(md5));
+}
+
+#[test]
+fn flac_md5_offset_points_at_the_16_bytes_in_streaminfo() {
+    // MD5 補填（P1-5b）はこの位置の 16 バイトだけを書き換える。ID3v2 が前置されていれば
+    // その分ずれる
+    let md5 = [0x33u8; 16];
+    let flac = minimal_flac(md5);
+    let (offset, current) = flac_streaminfo_md5_at(Cursor::new(&flac)).unwrap();
+    assert_eq!(offset, 4 + 4 + 18);
+    assert_eq!(current, md5);
+    assert_eq!(&flac[offset as usize..offset as usize + 16], &md5);
+
+    let mut v = b"ID3\x04\x00\x00\x00\x00\x00\x0a".to_vec();
+    v.extend_from_slice(&[0u8; 10]);
+    v.extend_from_slice(&minimal_flac([0u8; 16]));
+    let (offset, current) = flac_streaminfo_md5_at(Cursor::new(&v)).unwrap();
+    assert_eq!(offset, 20 + 26);
+    assert_eq!(current, [0u8; 16], "全ゼロもそのまま返す（None にしない）");
 }
 
 #[test]

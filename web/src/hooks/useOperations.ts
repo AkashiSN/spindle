@@ -11,10 +11,12 @@ import { ApiError, parseErrorBody } from '../api/client'
 import type { PendingConflict } from '../api/types'
 import {
   flaccheckStartedMessage,
+  md5FillMessage,
   operationErrorMessage,
   rgStartedMessage,
   rgWrittenMessage,
   type FlaccheckStartResponse,
+  type Md5FillResponse,
   type PathApplyResponse,
   type PathPreview,
   type RgStartResponse,
@@ -29,7 +31,7 @@ export type PathPreviewState = { kind: PathKind; key: string; preview: PathPrevi
 
 export type OperationPending = {
   /** 除外して適用したときにやり直す操作 */
-  action: 'paths' | 'rgwrite'
+  action: 'paths' | 'rgwrite' | 'md5fill'
   count: number
   trackIds: number[]
   /** 確認を出したときの選択・ソート。変わっていれば出さない（確認した対象と適用対象がずれる） */
@@ -50,6 +52,8 @@ export type Operations = {
   startRg: () => Promise<void>
   writeRg: (skipPending?: boolean) => Promise<void>
   startFlaccheck: () => Promise<void>
+  /** MD5 の補填（md5_missing の FLAC に編集バッチ。409 pending は 2 択） */
+  startMd5Fill: (skipPending?: boolean) => Promise<void>
   dismissPending: () => void
   clearNotice: () => void
 }
@@ -219,6 +223,38 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     }
   }, [sel, begin, fail])
 
+  const startMd5Fill = useCallback(
+    async (skipPending = false) => {
+      if (!sel) {
+        setError('行を選択してください')
+        return
+      }
+      begin('md5fill')
+      try {
+        const r = await parseErrorBody<Md5FillResponse>('/api/md5fill', {
+          method: 'POST',
+          body: JSON.stringify({ selection: sel, skip_pending: skipPending }),
+        })
+        if (r.ok) {
+          setNotice(md5FillMessage(r.body))
+          return
+        }
+        const body = r.body as { error?: string } | null
+        if (r.status === 409 && body?.error === 'pending') {
+          const p = r.body as PendingConflict
+          setPendingPrompt({ action: 'md5fill', count: p.count, trackIds: p.track_ids, key: selKey })
+          return
+        }
+        setError(operationErrorMessage(r.status, r.body))
+      } catch (e) {
+        fail(e)
+      } finally {
+        setBusy(null)
+      }
+    },
+    [sel, selKey, begin, fail],
+  )
+
   return {
     busy,
     notice,
@@ -230,6 +266,7 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     startRg,
     writeRg,
     startFlaccheck,
+    startMd5Fill,
     dismissPending: useCallback(() => setPendingPrompt(null), []),
     clearNotice: useCallback(() => setNotice(null), []),
   }

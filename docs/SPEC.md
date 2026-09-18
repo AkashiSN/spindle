@@ -717,7 +717,7 @@ Inbox/ に配置（ポーリング検出）
 
 ```
 flac -t で検証
-  ├ STREAMINFO MD5 が未設定（全ゼロ） → 再エンコードして補填
+  ├ STREAMINFO MD5 が未設定（全ゼロ） → デコードした PCM MD5 を STREAMINFO に補填（再エンコードしない）
   │    一部の古いエンコーダや配信由来の FLAC で実際に起きる。
   │    未設定だと同一性解決の第 2 手段が使えず、遡及照合も不可能
   ├ デコードエラー → 要対応としてフラグ
@@ -733,7 +733,10 @@ flac -t で検証
 MD5 補填のための書き換えでは `audio_version` を据え置く
 （音声内容が変わらないため Derived の再生成は不要）。inode と mtime は変わるので
 DB の追随は必要。補填は再エンコードではなく STREAMINFO の MD5 16 バイトだけを書き換える
-（P1-5b、D-57）。
+（P1-5b、D-57 / D-59）。補填は編集バッチ（`edit_ops.kind = 'md5'`、`edits.key = 'audio_md5'`、
+値は hex で全ゼロ = 未設定。`new_value` は反映時に計算値を書く）として記録し、tagwrite ジョブが
+tmp + rename で反映する。巻き戻しは全ゼロを書き戻す（`audio_md5` は NULL、`flac_check` は
+`md5_missing` に戻る）。
 
 検査（`flaccheck` ジョブ）は読むだけで、結果を `tracks.flac_check`（`ok` / `md5_missing` /
 `decode_error`）に検査時の `audio_version` 付きで記録する。版が進めば結果は古い扱いになり、
@@ -808,6 +811,10 @@ POST   /api/rg/write                              { selection, description?, ski
                                                   preview 段階は無い（値は DB から決まる）
 POST   /api/flaccheck                             { selection }。active な FLAC ごとに flaccheck ジョブを
                                                   投入（§7.9、D-57。読むだけで preview は無い）
+POST   /api/md5fill                               { selection, description?, skip_pending? }。flac_check = md5_missing
+                                                  の FLAC に md5 op の編集バッチを記録（§7.9、D-59）
+                                                  → 201 { batch_id, affected, skipped, pending_excluded }
+                                                  → 409 pending | no_changes | md5_fill_disabled
 
 GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
 GET    /api/categories, POST /api/categories

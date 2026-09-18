@@ -27,12 +27,14 @@ use crate::db::now_epoch;
 use crate::domain::tags::TagSet;
 use crate::jobs::Event;
 
+use super::md5fill::{hex as md5_hex, md5_job, MD5_EDIT_KEY, MD5_ZERO_HEX};
 use super::normalize::{prepare_normalize_tx, NormalizeTarget};
 use super::rename::{prepare_rename_tx, RenameTarget};
 use super::{
     batch_event, json_values, prepare_tags_tx, with_replaced, EditError, Editor, Evaluator,
     PlanTarget, Prepared,
 };
+use crate::db::jobs as dbjobs;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RevertError {
@@ -103,7 +105,93 @@ fn revert_tx(
         OpKind::Rename => revert_rename(conn, batch_id, description, targets, now),
         OpKind::Delete => revert_delete(conn, batch_id, description, targets, now),
         OpKind::Archive => revert_archive(conn, batch_id, description, targets, now),
+        OpKind::Md5 => revert_md5(conn, batch_id, description, targets, now),
     }
+}
+
+/// MD5 補填の巻き戻し（P1-5b）: 逆向きの md5 op（old = 補填した値、new = 全ゼロ）を記録して
+/// tagwrite ジョブを投入する。DB の `audio_md5` が元バッチの新値（補填した値）と違えば
+/// conflict（外部変更または後続の補填）。`new_value` が入っているので反映はデコードせずそれを書く
+fn revert_md5(
+    conn: &mut Connection,
+    batch_id: i64,
+    description: Option<&str>,
+    targets: Vec<Target>,
+    now: i64,
+) -> Result<Prepared, RevertError> {
+    let tx = conn.transaction()?;
+    let ids: Vec<i64> = targets.iter().map(|t| t.op.track_id).collect();
+    let pending = history::pending_track_ids(&tx, &ids)?;
+    if !pending.is_empty() {
+        return Err(EditError::Pending { track_ids: pending }.into());
+    }
+    let new_batch =
+        history::insert_batch(&tx, description, targets.len() as i64, Some(batch_id), now)?;
+    let mut conflict = 0usize;
+    let mut job_ids = Vec::new();
+    for (ordinal, t) in targets.iter().enumerate() {
+        let edit = t
+            .edits
+            .iter()
+            .find(|e| e.key == MD5_EDIT_KEY)
+            .ok_or_else(|| {
+                EditError::Internal(format!("op {} に {MD5_EDIT_KEY} の edit が無い", t.op.id))
+            })?;
+        let expected = history::precondition_of_track(&tx, t.op.track_id)?
+            .ok_or(EditError::TrackNotFound(t.op.track_id))?;
+        let op_id = history::insert_op(
+            &tx,
+            new_batch,
+            ordinal as i64,
+            t.op.track_id,
+            OpKind::Md5,
+            &expected,
+        )?;
+        history::insert_edit(&tx, op_id, MD5_EDIT_KEY, &edit.new_value, &edit.old_value)?;
+        // DB の現在値（ファイルのキャッシュ）が元バッチの新値と一致するときだけ戻す
+        let current: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT audio_md5 FROM tracks WHERE id = ?1",
+                [t.op.track_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let current_json = match current {
+            Some(m) => serde_json::json!(md5_hex(&m)),
+            None => serde_json::json!(MD5_ZERO_HEX),
+        };
+        if current_json != edit.new_value {
+            conflict += 1;
+            history::finish_op(
+                &tx,
+                op_id,
+                OpResult::SkippedConflict,
+                Some("現在値が元バッチの新値と違う（外部変更または後続の補填）: audio_md5"),
+                None,
+                now,
+            )?;
+            continue;
+        }
+        let job = md5_job(t.op.track_id, op_id, new_batch);
+        let job_id = dbjobs::enqueue(&tx, &job, now)?.id();
+        history::set_op_job(&tx, op_id, job_id)?;
+        job_ids.push(job_id);
+    }
+    let affected = targets.len();
+    let event = match history::aggregate_batch(&tx, new_batch, now)? {
+        Some(state) => Some(batch_event(&tx, new_batch, state)?),
+        None => None,
+    };
+    tx.commit()?;
+    Ok(Prepared {
+        batch_id: new_batch,
+        affected,
+        unchanged: 0,
+        conflict,
+        job_ids,
+        event,
+    })
 }
 
 /// ロスレス正規化の巻き戻し（SPEC §7.4、D-46）。同じ op 種別で向きを逆にする（`rel_path` 新→旧、

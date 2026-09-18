@@ -22,6 +22,7 @@
 //! だけ、記録時点の旧値（`edits.old_value`）と事前条件の物理属性へ戻す。物理属性を記録時点へ
 //! 戻すのは、その後ファイルが外部で変わっていればスキャンが差分として拾い直せるようにするため
 
+mod md5fill;
 mod normalize;
 mod rename;
 mod revert;
@@ -50,6 +51,7 @@ use crate::import::scanner::{
 use crate::jobs::{BatchEvent, Event, JobState, JobType, Jobs, NewJob};
 
 pub use crate::domain::tags::TagChange;
+pub use md5fill::{hex as md5_hex, Md5FillPrepared, MD5_EDIT_KEY, MD5_ZERO_HEX};
 pub use normalize::{
     flac_rel_path, normalize_dedup_key, normalize_in_progress_keys, normalize_temp_rel_path,
     NormalizeEnv, NormalizeHook, NormalizePlan, NormalizeStep, NormalizeTarget, PlannedNormalize,
@@ -458,8 +460,13 @@ impl Editor {
         if op.result != OpResult::Pending {
             return Ok(OpOutcome::AlreadyTerminal(op.result));
         }
-        if op.kind != OpKind::Tags {
-            return Err(EditError::UnsupportedKind(op.kind));
+        match op.kind {
+            OpKind::Tags => {}
+            OpKind::Md5 => {
+                self.mark_applying(op.batch_id).await?;
+                return self.apply_md5_op(op, edits, rel_path, job_id).await;
+            }
+            other => return Err(EditError::UnsupportedKind(other)),
         }
         self.mark_applying(op.batch_id).await?;
 
@@ -558,20 +565,24 @@ impl Editor {
             // rename op はパスが互いに絡む（swap / 循環）ので、バッチの pending を一度に閉じる
             return Ok(self.close_rename_ops(op.batch_id, job_id, error).await? > 0);
         }
-        // archive op は DB を先行更新しない（overlay が無い）ので、閉じるだけでよい。
-        // 再試行のために一時名へ退避したままの元ファイルがあれば元パスへ戻す
-        let has_overlay = op.kind != OpKind::Archive;
-        let current = if has_overlay {
-            let root = Arc::clone(&self.root);
-            tokio::task::spawn_blocking(move || read_file_state(&root, &rel_path)).await?
-        } else {
-            let root = Arc::clone(&self.root);
-            let (op_id, expected, edits) = (op.id, op.expected.clone(), edits.clone());
-            tokio::task::spawn_blocking(move || {
-                normalize::restore_staged_source_of(&root, op_id, &expected, &edits)
-            })
-            .await?;
-            None
+        // archive / md5 op は DB を先行更新しない（overlay が無い）ので、閉じるだけでよい。
+        // archive は再試行のために一時名へ退避したままの元ファイルがあれば元パスへ戻す
+        let has_overlay = !matches!(op.kind, OpKind::Archive | OpKind::Md5);
+        let current = match op.kind {
+            OpKind::Archive => {
+                let root = Arc::clone(&self.root);
+                let (op_id, expected, edits) = (op.id, op.expected.clone(), edits.clone());
+                tokio::task::spawn_blocking(move || {
+                    normalize::restore_staged_source_of(&root, op_id, &expected, &edits)
+                })
+                .await?;
+                None
+            }
+            OpKind::Md5 => None,
+            _ => {
+                let root = Arc::clone(&self.root);
+                tokio::task::spawn_blocking(move || read_file_state(&root, &rel_path)).await?
+            }
         };
         let error = error.to_owned();
         let batch_id = op.batch_id;
@@ -776,6 +787,8 @@ impl Editor {
                             };
                             tagwrite_job(op.track_id, tag_version, op.id, op.batch_id)
                         }
+                        // md5 op も tagwrite ジョブで反映する（版無し・key は op ごと）
+                        OpKind::Md5 => md5fill::md5_job(op.track_id, op.id, op.batch_id),
                         // rename はバッチ 1 つに 1 ジョブ。dedup で 2 件目以降は Duplicate になる
                         OpKind::Rename => rename::rename_job(op.batch_id),
                         OpKind::Archive => {

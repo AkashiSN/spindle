@@ -45,6 +45,8 @@ pub enum MigrationError {
     },
     #[error("schema_version の読み取りに失敗: {0}")]
     Version(#[source] rusqlite::Error),
+    #[error("マイグレーション {version:04} の後で外部キーの違反が {violations} 件ある（ロールバックした）")]
+    ForeignKeys { version: u32, violations: i64 },
 }
 
 /// `NNNN_name.sql` を `(version, name)` に分解する。規則に合わなければ `None`
@@ -224,28 +226,61 @@ pub fn apply_list(conn: &mut Connection, list: &[Migration]) -> Result<Vec<u32>,
     }
     let mut applied = Vec::new();
     for m in list.iter().filter(|m| m.version > current) {
-        let tx = conn.transaction().map_err(|source| MigrationError::Sql {
+        let sql_err = |source| MigrationError::Sql {
             version: m.version,
             source,
-        })?;
-        tx.execute_batch(&m.sql)
-            .and_then(|_| post_sql(&tx, m.version))
-            .and_then(|_| {
-                tx.execute(
-                    "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
-                    (m.version, super::now_epoch()),
-                )
-                .map(|_| ())
-            })
-            .map_err(|source| MigrationError::Sql {
-                version: m.version,
-                source,
-            })?;
-        tx.commit().map_err(|source| MigrationError::Sql {
-            version: m.version,
-            source,
-        })?;
+        };
+        // 参照されている表を作り直す版は FK を切って適用する（トランザクション中の PRAGMA は無視される
+        // ので外で切る）。commit 前に foreign_key_check で整合を確かめ、必ず ON へ戻す
+        let fk_off = FOREIGN_KEYS_OFF.contains(&m.version);
+        if fk_off {
+            conn.pragma_update(None, "foreign_keys", "OFF")
+                .map_err(sql_err)?;
+        }
+        let result = apply_one(conn, m, fk_off);
+        if fk_off {
+            // 適用に失敗しても ON に戻す（戻せなければそちらを優先して報告する）
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .map_err(sql_err)?;
+        }
+        result?;
         applied.push(m.version);
     }
     Ok(applied)
+}
+
+/// 参照されている表を作り直すため `foreign_keys=OFF` で適用する版（SQLite の 12 手順）
+const FOREIGN_KEYS_OFF: &[u32] = &[11];
+
+/// 1 版を 1 トランザクションで適用する。`check_fk` なら commit 前に `PRAGMA foreign_key_check` で
+/// 参照の整合を確かめる（違反があればロールバック）
+fn apply_one(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<(), MigrationError> {
+    let sql_err = |source| MigrationError::Sql {
+        version: m.version,
+        source,
+    };
+    let tx = conn.transaction().map_err(sql_err)?;
+    tx.execute_batch(&m.sql)
+        .and_then(|_| post_sql(&tx, m.version))
+        .and_then(|_| {
+            tx.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
+                (m.version, super::now_epoch()),
+            )
+            .map(|_| ())
+        })
+        .map_err(sql_err)?;
+    if check_fk {
+        let violations: i64 = tx
+            .prepare("PRAGMA foreign_key_check")
+            .and_then(|mut st| st.query_map([], |_| Ok(())).map(|rows| rows.count() as i64))
+            .map_err(sql_err)?;
+        if violations > 0 {
+            return Err(MigrationError::ForeignKeys {
+                version: m.version,
+                violations,
+            });
+        }
+    }
+    tx.commit().map_err(sql_err)
 }

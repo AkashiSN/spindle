@@ -71,11 +71,22 @@ export function rgWrittenMessage(r: RgWriteResponse): string {
   return `ReplayGain をタグに書く: ${formatCount(r.affected)} 件（バッチ #${r.batch_id}）${tail ? `。${tail}` : ''}`
 }
 
+export type Md5FillResponse = { batch_id: number; affected: number; skipped: number; pending_excluded: number }
+
+export function md5FillMessage(r: Md5FillResponse): string {
+  const rest: string[] = []
+  if (r.skipped > 0) rest.push(`対象外 ${formatCount(r.skipped)}`)
+  if (r.pending_excluded > 0) rest.push(`反映待ちで除外 ${formatCount(r.pending_excluded)}`)
+  const tail = rest.join(' / ')
+  return `MD5 の補填を投入した: ${formatCount(r.affected)} 件（バッチ #${r.batch_id}）${tail ? `。${tail}` : ''}`
+}
+
 const KNOWN: Record<string, string> = {
   no_changes: '対象がありません',
   preview_stale: 'プレビューが古くなりました。もう一度プレビューしてください',
   normalize_disabled: '正規化は設定で無効です（[normalize].wav_to_flac）',
   rg_write_disabled: 'ReplayGain のタグ書き込みは設定で無効です（[replaygain].write_tags）',
+  md5_fill_disabled: 'MD5 の補填は設定で無効です（[normalize].flac_fix_missing_md5）',
   editor_unavailable: '編集機能が使えません（読み取り専用で起動している）',
 }
 

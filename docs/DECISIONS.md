@@ -1992,3 +1992,45 @@ FLAC → FLAC に広げて補填する（2,000 行の壊れやすい経路を同
 拡張で足す）。ダークテーマ（別タスク）。
 
 **未決**: `by genre`（albums にジャンルが無い）。ダークテーマ。
+
+## D-59 MD5 の補填は md5 op の編集バッチにし、tagwrite ジョブで反映する
+
+**決定**（P1-5b。D-57 が「別タスク」とした補填の具体化）:
+
+- **op は `kind = 'md5'`、edits は `key = 'audio_md5'`**（値は 32 桁の hex。全ゼロ = 未設定）。
+  `old_value` は記録時の STREAMINFO の値（補填では全ゼロ）、`new_value` は記録時 null で、反映時に
+  デコードして計算した値を書き戻す。巻き戻しは逆向きの md5 op（old = 計算値、new = 全ゼロ。
+  `new_value` があれば計算せずそれを書く）。DB は先行更新しない（overlay 無し。archive op と同じ）
+- **反映は STREAMINFO の 16 バイトだけを tmp + rename で書き換える。** 補填は 2 段階: デコードして
+  計算した値をまず `edits.new_value` へ耐久化し（別トランザクション）、それから書く。rename 後・
+  DB 確定前にプロセスが落ちても、再実行で「事前条件は外れているがファイルは新値」と分かり applied に
+  確定できる（冪等・巻き戻し可）。事前条件は実体（dev / inode / size / mtime / ctime）と記録時の
+  MD5 値。どちらか外れていて新値でもなければ `skipped_conflict`（外部で補填・差し替え済み。
+  ファイルが正で、DB を現在値に揃える）。FLAC として読めない・デコードできないは
+  `failed`（再試行しても直らない）。同じトランザクションで `audio_md5`（全ゼロなら NULL）と
+  `flac_check`（値あり → `ok`、全ゼロ → `md5_missing`）を揃え、`audio_version` / `tag_version` は
+  据え置く（音声もタグも変わらない）
+- **ジョブは tagwrite を再利用する。** 契約（そのトラックの pending op をファイルへ反映する。
+  `track_locks`・stale ゲート・再試行・最終失敗で op を閉じる）が同じ。`Editor::apply_op` が
+  op の kind で分岐する。新しい job type を足すと `jobs` 表（4 表から参照）も作り直しになる。
+  payload は `{ track_id, op_id, batch_id, unversioned: true }` で dedup key は
+  `tagwrite:<id>:md5:<op_id>`。`unversioned` は jobs 層の明示的な契約（`db::jobs::UNVERSIONED_KEY`）で、
+  版付き種別でも stale 判定をせず `track_locks` だけ取る（md5 op は tags overlay を持たず版も進めない
+  ので、補填が queued の間に外部のタグ変更で `tag_version` が進んでも捨ててはいけない）。key を op ごとに
+  するのは、tags と同じ key だと元ジョブが running のうちに巻き戻したとき逆 op のジョブが Duplicate に
+  なって走らないため
+- **マイグレーション 0011 は `edit_ops` を作り直す。** SQLite は CHECK を ALTER できず、`edit_ops` は
+  `edits`（CASCADE）と `archived_files`（SET NULL）から参照されているので、FK を切らずに DROP すると
+  履歴が消える。runner に「FK を切って適用する版」（`FOREIGN_KEYS_OFF`）を持たせ、トランザクションの
+  外で `foreign_keys=OFF` → 適用 → commit 前に `foreign_key_check` → `ON` に戻す（SQLite の 12 手順）
+- **API は `POST /api/md5fill { selection, description?, skip_pending? }`**（RG 書き込みと同型。preview は
+  無い）。対象は selection の active な FLAC で `flac_check = 'md5_missing'`。`[normalize].flac_fix_missing_md5 = false`
+  なら 409 `md5_fill_disabled`。UI は操作タブの「MD5 を補填」
+
+**理由**: 補填は既存の編集バッチの性質（事前条件 → tmp + rename → DB 追随、巻き戻し）をそのまま
+使えるので、専用の小さな op にするのが最も安全。
+
+**却下**: `kind = 'tags'` に特別なキーで載せる（履歴の種別が嘘になる）。新 job type `md5fill`
+（`jobs` 表の作り直しを伴う）。反映時に `flac -t` で再検査する（全部デコードして計算した時点で
+検査と同じことをしている）。
+

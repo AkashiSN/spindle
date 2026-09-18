@@ -98,7 +98,15 @@ export function OperationsPanel({
           <button type="button" disabled={busy || !hasSelection} onClick={() => void ops.startFlaccheck()}>
             {label('flaccheck', 'FLAC を検査')}
           </button>
-          <span className="muted small">解析はアルバム単位のジョブ。書き込みは巻き戻せるバッチ</span>
+          <button
+            type="button"
+            disabled={busy || !hasSelection}
+            title="検査で MD5 無しだった FLAC の STREAMINFO に、デコードした PCM の MD5 を書く（巻き戻せる）"
+            onClick={() => void ops.startMd5Fill()}
+          >
+            {label('md5fill', 'MD5 を補填')}
+          </button>
+          <span className="muted small">解析はアルバム単位のジョブ。書き込みと補填は巻き戻せるバッチ</span>
         </div>
       </section>
 
@@ -143,6 +151,8 @@ export function OperationsPanel({
                 void ops.applyPaths(description, true).then((ok) => {
                   if (ok) setDescription('')
                 })
+              } else if (p.action === 'md5fill') {
+                void ops.startMd5Fill(true)
               } else {
                 void ops.writeRg(true)
               }
