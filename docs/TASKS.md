@@ -294,7 +294,7 @@ A↔B の swap と 3 件の循環リネームが完了し、phase 1 直後に ki
 （`tests/pathgen.rs` / `tests/rename.rs` / `tests/rename_api.rs`）
 
 未決: album 全体を動かした後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）の
-追随。rename op はトラックのパスだけを所有する（D-43）
+追随。rename op はトラックのパスだけを所有する（D-43）。Library に同梱ファイルを置き始める P2-8 で決める
 
 依存: P0-6, P0-9
 
@@ -423,14 +423,13 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
             `ExternalCommand::stdout_channel` で stdout をチャンクのまま受ける
       - [x] `jobs::handlers::rg`: `{"album_id"}` / `{"track_id"}`、構成トラックを id 昇順に全件ロック、
             2ch だけ album 集計、all-or-nothing、`rg_scanned_at` のみ更新
-      - [x] `POST /api/rg { selection }`（`api::rg`）。UI の起動ボタンは未着手
+      - [x] `POST /api/rg { selection }`（`api::rg`）。UI の起動導線は P1-12 の操作タブ
 
       受け入れ: `tests/replaygain.rs`（正弦波の LUFS / peak、album の電力平均、無音）、`tests/decode.rs`
       （FLAC / Opus / WavPack が同じ形で流れる、キャンセル、失敗）、`tests/rg_job.rs`（track / album の
       値、6ch の除外、missing の除外、album 無し、失敗で何も書かない、cancel）、`tests/rg_api.rs`
 
-      未決: `audio_version` が上がったときの `rg_scanned_at` の扱い（D-47）。UI の起動導線は P1-2 か
-      一括編集パネルの拡張で載せる
+      `audio_version` が上がったときの `rg_scanned_at` の扱い（D-47）は P1-13 で解決
 - [x] **P1-2** RG タグ書き込み（Opus のみ -23 LUFS 基準の Q7.8:
       `round((G18 - 5.0) * 256)` を符号付き 16bit に飽和。SPEC §6 のテストベクトルを
       単体テストに置く。`rg_scanned_at` と `rg_written_at` を分離。D-48）
@@ -441,14 +440,14 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       - [x] `rg_written_at` はファイルの現在値から判定（`db::replaygain::sync_written_at`。applied の追随・
             overlay の解消・巻き戻し・手編集で自動的に立つ / 消える）
       - [x] `POST /api/rg/write { selection, description?, skip_pending? }`（`api::rg::write`。missing は対象外）、
-            フィルタ `rg_unwritten`。UI の起動ボタンは未着手
+            フィルタ `rg_unwritten`。UI の起動導線は P1-12 の操作タブ
 
       受け入れ: `tests/replaygain.rs`（SPEC §6 のテストベクトル、飽和、書式、形式ごとのキー集合、
       `file_matches`）、`tests/rg_write.rs`（FLAC / Opus / MP4 への書き込みと `rg_written_at`、一致済みは
       バッチ無し、未解析の除外、pending、巻き戻し・手編集・conflict で NULL、再解析後の再書き込み）、
       `tests/rg_write_api.rs`
 
-      未決: スキャナが外部のタグ変更を取り込んだときの `rg_written_at` の判定（D-48）
+      スキャナが外部のタグ変更を取り込んだときの `rg_written_at` の判定（D-48）は P1-13 で解決
 - [x] **P1-3** アートワーク（読みは埋め込み / 同梱画像の両対応、書きは埋め込み統一で一括差し替え、
       WebP サムネイル生成とキャッシュ。アルバムグリッド画面 → クリックで表を `album_id` に絞る）
       - [x] 読み側（D-49）: `media::artwork`（同梱画像の名前の優先順、ヘッダでの判別、埋め込みの選択、
@@ -506,7 +505,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `archived_files` 台帳に記録。**即時削除しない**。`audio_version` は据え置き。
       移行で取り込んだ ALAC 7,572 本が主対象）
       - [x] `POST /api/normalize/preview` / `apply`（selection。rename と同型。`api::normalize`。
-            UI は未着手。`[normalize].wav_to_flac = false` で 409）
+            UI は P1-12 の操作タブ。`[normalize].wav_to_flac = false` で 409）
       - [x] `edit::normalize`: `edit_ops(kind='archive')` + `edits(rel_path / codec)`、DB は先行更新
             しない。track 単位の `normalize` ジョブ（並列 2、`jobs::handlers::normalize`）
       - [x] `media::encode::FlacEncoder`: ffmpeg デコード（root の FD を `/dev/stdin` で渡す）→
@@ -531,8 +530,9 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       壊れた状態からの復旧は conflict で何も消さない。I/O 失敗は生成物を消して再試行できる。作業中に
       走ったスキャンが宛先を新規登録せず、inventory 後に確定されても走査が失敗しない。
 
-      未決: 20 bit などの ffmpeg PCM エンコーダが無いビット深度は failed（ビット深度に合う
-      `pcm_s*le` を選ぶだけなので、必要なら raw → `flac --bps` の経路を足す）
+      閉じた未決（2026-09-18）: 20 bit などの ffmpeg PCM エンコーダが無いビット深度は failed のまま。
+      実データは 16 bit 7,447 / 24 bit 123 で 20 bit は 0 本、ALAC の正規化は全件完了済み、今後入るのは
+      主に CD（16 bit）。failed はデータを壊さないので、出てきたら raw → `flac --bps` の経路を足す
 - [x] **P1-5** FLAC 健全性チェック（`flac -t`、MD5 未設定の補填。
       補填時は `audio_version` 据え置き）。D-57。**補填は P1-5b に切り出し**（実データに FLAC が無く、
       今後の FLAC は自前の `flac -8 --verify` と CD リップで MD5 が付く）
@@ -546,7 +546,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       - [x] `POST /api/flaccheck { selection }`、一覧の `flac_check { status, checked_at, stale, error }`、
             フィルタ `flac_unchecked` / `flac_error`
       - [x] UI: バッジ（`decode_error` は赤、`md5_missing` は薄く、古い結果は点付き）とサイドバーの
-            固定フィルタ。起動ボタンは RG と同じく未着手
+            固定フィルタ。起動導線は P1-12 の操作タブ
 
       受け入れ: `tests/flaccheck_job.rs`（ok / md5_missing（ファイルを触らない）/ decode_error（stderr）/
       非 FLAC と missing は no-op / stale 版と差し替えは書かない / flac 無しで失敗 /
@@ -554,7 +554,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/flaccheck_api.rs`（投入件数・skip・重複・行の値・フィルタ・stale・409・401）、
       `web/src/lib/badges.test.ts`
 
-      未決: P1-5b（MD5 補填。STREAMINFO の 16 バイトを tmp + rename で書き換える編集 op）。UI の起動導線
+      P1-5b（MD5 補填）と UI の起動導線（P1-12）は実施済み
 - [x] **P1-5b** FLAC の MD5 補填（`flac_fix_missing_md5`）。`md5_missing` のトラックを選んで、デコードした
       PCM MD5 を STREAMINFO に書く編集バッチ（`edit_ops.kind` に `md5` を足すマイグレーション 0011、旧値 = 全ゼロ
       を `edits` に残して巻き戻し可、`audio_version` 据え置き、inode / mtime は追随）。D-57 / D-59。
@@ -592,7 +592,8 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       stem 一致で ALAC / Opus の Library 行に当たった）。`00_Anime` の android 書き出し 4,741 件も確認
       （`Playlists/android/00_Anime.m3u8`、`../../Derived/…`）
 
-      未決: 自動再書き出し（P1-7）。スマートの表示（`kind='smart'` は ⚙ で出すだけ）
+      自動再書き出しは P1-7（D-54 の `playlist::autoexport`）で実施済み。スマートの表示（`kind='smart'` は
+      ⚙ で出すだけ）
 - [x] **P1-7** スマートプレイリスト（`docs/DSL.md`。pest → AST → SQL。D-54）
       - [x] `playlist::dsl`: `dsl.pest` の文法（キーワードは大小文字無視、値は引用可、`NOT` > `AND` > `OR`）→
             AST（DSL.md の JSON 形で `rule_ast` に保存、原文は `rule_source`）、構文エラーは行・桁付き
@@ -615,8 +616,8 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/smart_playlists.rs`（作成で materialize、400 の位置、preview、refresh / ルール差し替え、
       項目操作の 409、autoexport のデバウンスと再書き出し・`auto_export = 0`）
 
-      未決: foobar Autoplaylist クエリ変換（P1-8）。`HAS` の語境界の実機突き合わせ。UI の並び替え
-      （smart は ORDER BY で決まるので表のソート変更は表示だけ）
+      foobar Autoplaylist クエリ変換は P1-8 で実施済み。未決: `HAS` の語境界の実機突き合わせ（P1-8 の
+      未決に集約）。UI の並び替え（smart は ORDER BY で決まるので表のソート変更は表示だけ）
 - [x] **P1-8** エクスポートプロファイル（foobar / android / internal、
       foobar Autoplaylist クエリ生成）。**依存: P1-10**（`delivery` プロファイルが Derived を前提）。
       タグ鮮度が必要な export / 同期は `stale_tags` の件数を明示するか追随ジョブの完了を待つ。D-55
@@ -652,7 +653,10 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
             Derived 直送 / ffmpeg フォールバックと `start=` / ffmpeg 無し 503）、
             `web/src/lib/playback.test.ts`
 
-      未決: Safari（Opus 不可）向けの AAC 変換、ハイレゾのサンプルレート変換（D-52）
+      未決: Safari 向けの AAC 変換（Safari 18.4+ は Ogg Opus をネイティブ再生するので、実機で確認して
+      不要なら閉じる。D-52）。閉じた未決（2026-09-18）: ハイレゾのサンプルレート変換。可逆は既定で Derived
+      の Opus（48 kHz）を再生するので、96 kHz（64 本）がそのまま流れるのは「原本」を選んだときだけ。原本を
+      選んだ人にリサンプルを掛けるのは逆なので作らない
 - [x] **P1-10** Derived 自動生成と追随（`audio_version` / `tag_version` 差分判定、
       Library の移動・削除への追随。`delivery` ビューの版一致フォールバックの結合テスト）。
       P1-8 の `delivery` プロファイルと Android 同期がこれを前提にするため P3 から前倒し。D-51
@@ -682,15 +686,17 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       含む）・move 失敗時の予約解放・
       画像キャッシュ欠損からの復旧・cancel・取り残し回収）、
       `tests/derived_sync.rs`
-      （4 つの契機と `delivery` の end-to-end）。UI の起動導線は未着手
+      （4 つの契機と `delivery` の end-to-end）。UI の起動導線は無し（scan 完了時の自動投入で足りる）
 
       計測（2026-09-17、リハーサル環境 9,098 トラック / 可逆は ALAC 7,570 本、12 コア、並列 11）:
       起動時スキャンの完了で 7,570 件を投入 → **39 分**で全件 done（failed 0、警告 0、tmp の残り 0）。
       Derived は 30 GB（全件に album の WebP カバー入り）。`delivery` は可逆 7,570 が Derived、
       非可逆 1,528 が Library 原本
 
-      未決: マルチチャンネルのダウンミックス、非可逆の `force_transcode`、Derived 側の `cover.jpg`
-      ミラー（D-51）
+      閉じた未決（2026-09-18。D-51）: マルチチャンネルのダウンミックス（全 9,098 トラックが 2ch）、
+      非可逆の `force_transcode`（非可逆は Opus 1,512 / MP3 14 / AAC 2。Opus は変換の意味が無く残りは
+      16 本）、Derived 側の `cover.jpg` ミラー（全件に WebP を埋め込み済み。Library は D-49 で同梱ファイルを
+      書かない方針なので Derived にだけ書くと方針が割れる）。需要が出たら再開
 - [x] **P1-11** GC ジョブ（`missing_since` 30 日超の行、`Archive/` へ退避した WAV、
       Derived の孤児。**物理削除を行う唯一の経路**。dry-run と削除件数のログを必須にする）。D-56
       - [x] `gc::plan`（読み取りのみ）: A missing トラック（`stat` で実体が無いことを再確認）、B missing
@@ -716,13 +722,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/gc_api.rs`
       （preview が何も消さない、POST の 202 / 409 / 401、root 無しの 503）
 
-      未決: 設定画面からの起動（SPEC §12.6）。Library の同梱ファイルの回収（D-43）
-
----
-
-## P2 — CD 取り込み
-
-完了条件: **新規 CD が検証付きで取り込め、既存 FLAC が格付けされる。**
+      設定画面からの起動は P1-12 (e) で実施済み。Library の同梱ファイルの回収（D-43）は P2-8 で決める
 
 - [x] **P1-13** スキャナの ReplayGain 追随（D-47 / D-48 の未決）: 外部で音声が差し替わった行は解析値を
       捨てる（`reset_analysis`。tagwrite の overlay 解消も同じ）、外部のタグ変更を取り込んだ行は
@@ -750,6 +750,12 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/tracks_api.rs`（`detail`）、`tests/config_api.rs`、`tests/archive_api.rs`。
       各段階で clippy / test / build / lint を通し、(a) はスクショで確認する
 
+---
+
+## P2 — CD 取り込み
+
+完了条件: **新規 CD が検証付きで取り込め、既存 FLAC が格付けされる。**
+
 - [ ] **P2-1** ドライブ制御（デバイス割当、`CDROM_DRIVE_STATUS` ポーリング、eject）
 - [ ] **P2-2** TOC 取得と各種 DiscID 算出（MusicBrainz / AccurateRip / FreeDB）
 - [ ] **P2-3** MusicBrainz 照会（UA 必須、1req/s）と候補選択 UI
@@ -757,7 +763,9 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - [ ] **P2-5** 吸い出し（全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割）
 - [ ] **P2-6** ARv1/v2 CRC と CTDB CRC32（先頭・末尾トラックの除外規則に注意）
 - [ ] **P2-7** CTDB 照会・修復適用、AccurateRip は補助
-- [ ] **P2-8** エンコードと配置、`rip.log` / `disc.cue` / `disc.toc` の出力
+- [ ] **P2-8** エンコードと配置、`rip.log` / `disc.cue` / `disc.toc` の出力。Library に同梱ファイルを
+      置き始めるので、一括リネーム後の旧ディレクトリに残る同梱ファイルと空ディレクトリの追随 / 回収
+      （D-43 の残課題。rename op はトラックのパスだけを所有する）をここで決めて D-43 に追記する
 - [ ] **P2-9** 遡及照合（44.1/16/2ch かつサンプル数が 588 の倍数のときのみ）
 - [ ] **P2-10** Inbox 取り込み（ステージング → 承認キュー → 配置）
 
@@ -785,4 +793,4 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
   フィールドの `PRESENT` / `MISSING`。違えば D-55 に追記する
 - Inbox のポーリング間隔
 - 一括リネーム後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）と
-  空ディレクトリの扱い（P0-11 では動かさない。D-43）
+  空ディレクトリの扱い（P0-11 では動かさない。D-43。P2-8 で決める）

@@ -688,11 +688,11 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
 | 判定 | `audio_version` 差分 → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）の差分のみ → タグ上書き / パスの差分のみ → rename |
 | 投入 | scan ジョブの完了時に食い違う全トラック、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（track 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める |
 | 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児は GC ジョブ |
-| マルチch | 既定で対象外（チャンネル数不明も対象外）。トラック単位で `-ac 2` ダウンミックスをオプトイン可（未実装） |
+| マルチch | 既定で対象外（チャンネル数不明も対象外）。トラック単位の `-ac 2` ダウンミックスは需要が出たら（D-51。実データは全件 2ch） |
 
 非可逆音源は Derived を作らず原本をそのまま配布する（多重劣化の回避）。
-容量逼迫時のみ、トラック単位で `force_transcode` を手動指定可能。
-ただし **元が 256kbps 以上の場合のみ許可**する。
+容量逼迫時のみ、トラック単位で `force_transcode` を手動指定可能（**元が 256kbps 以上の場合のみ**）
+という例外は、需要が出るまで実装しない（D-51。実データの非可逆は Opus が大半で削減にならない）。
 
 ### 7.7 ytmusic 統合
 
@@ -1135,11 +1135,11 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 | コーデック | ブラウザ | 方針 |
 |---|---|---|
 | FLAC | Chrome / Firefox / Safari 対応 | 直送 |
-| Opus | Chrome / Firefox 対応、Safari は限定的 | 直送、Safari のみ変換 |
+| Opus | Chrome / Firefox / Safari 18.4+ 対応 | 直送（Opus 不可のブラウザでは再生できない。AAC 変換は D-52 の未決） |
 | AAC (m4a) | 全対応 | 直送 |
 | WAV | 全対応 | 直送（サイズ大） |
 | **ALAC** | **Safari のみ** | **既定で Opus へ変換** |
-| ハイレゾ FLAC | 再生可だが帯域大 | クライアント設定で変換可 |
+| ハイレゾ FLAC | 再生可だが帯域大 | 既定の Derived（Opus 48 kHz）再生で吸収。「原本」を選んだときはそのまま送る（D-52） |
 
 - `GET /api/stream/:id` は原本を Range で直送。`?transcode=opus` は `delivery` が Derived を指せば
   Derived を Range で直送し、無いときだけ ffmpeg を `stdout` パイプで起動して chunked で返す（D-52）
@@ -1593,4 +1593,4 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 - [ ] Inbox のポーリング間隔（inotify はコンテナ越しに不安定なため既定はポーリング）
 - [ ] 一括リネームで album 全体を動かした後、旧ディレクトリに残る同梱ファイル（cover.jpg /
       disc.cue / rip.log 等）の追随と空ディレクトリの扱い（rename op はトラックのパスだけを
-      所有する。D-43）
+      所有する。D-43。Library に同梱ファイルを置き始める P2-8 で決める）
