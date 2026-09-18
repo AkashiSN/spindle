@@ -231,7 +231,8 @@ async fn cover_file_wins_over_embedded_and_is_cached_with_thumbnail_job() {
     lib.write_cover("A/cover.jpg", &cover);
     let report = lib.scan().await;
     assert_eq!(report.artwork_resolved, 1);
-    assert_eq!(report.enqueued_jobs.len(), 1);
+    // 同梱画像（album）とトラック自身の埋め込み（D-61）で thumbnail ジョブが 1 本ずつ
+    assert_eq!(report.enqueued_jobs.len(), 2);
 
     let a = lib.album("A");
     assert_eq!(a.cover_size, Some(cover.len() as i64));
@@ -257,13 +258,20 @@ async fn cover_file_wins_over_embedded_and_is_cached_with_thumbnail_job() {
             .join("orig.jpg")
     );
     assert_eq!(std::fs::read(&orig).unwrap(), cover);
-    assert_eq!(lib.thumbnail_jobs(), vec![format!("thumbnail:{}", art.id)]);
+    let embedded = lib.track_art("A/01.flac").unwrap();
+    assert_eq!(
+        lib.thumbnail_jobs(),
+        vec![
+            format!("thumbnail:{}", embedded.id),
+            format!("thumbnail:{}", art.id)
+        ]
+    );
 
     // 変化が無ければ次のスキャンでは解決し直さない
     let report = lib.scan().await;
     assert_eq!(report.artwork_resolved, 0);
     assert!(report.enqueued_jobs.is_empty());
-    assert_eq!(lib.artwork_count(), 1);
+    assert_eq!(lib.artwork_count(), 2, "同梱画像とトラックの埋め込み画像");
 }
 
 #[tokio::test]
@@ -336,7 +344,11 @@ async fn cover_change_is_detected_without_track_changes() {
         second.sha256,
         ArtworkStore::hash_of(&jpeg(b"v2-longer")).to_vec()
     );
-    assert_eq!(lib.thumbnail_jobs().len(), 2);
+    assert_eq!(
+        lib.thumbnail_jobs().len(),
+        3,
+        "v1 / v2 と、トラック自身の埋め込み画像"
+    );
 
     // 消えたら埋め込みへ戻る
     std::fs::remove_file(lib.lib().join("A/cover.jpg")).unwrap();
@@ -698,4 +710,249 @@ async fn cancel_between_phase4_commit_and_phase5_reservation_keeps_deep_reservat
 #[tokio::test]
 async fn cancel_after_phase5_reservation_keeps_reservation() {
     deep_cancel_at("after_reserve").await;
+}
+
+// ---------------------------------------------------------------- トラック自身の画像（D-61）
+
+impl Lib {
+    fn track_art(&self, rel: &str) -> Option<Art> {
+        let id: Option<i64> = self
+            .conn()
+            .query_row(
+                "SELECT artwork_id FROM tracks WHERE rel_path = ?1",
+                [rel],
+                |r| r.get(0),
+            )
+            .unwrap();
+        id.map(|id| self.art(id))
+    }
+}
+
+#[tokio::test]
+async fn each_track_gets_its_own_embedded_picture_and_shared_pictures_are_one_row() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/1.flac", 1, 1, Some(jpeg(b"one"))));
+    lib.add("A/2.flac", 2, 2, Some(jpeg(b"two"))).unwrap();
+    lib.add("A/3.flac", 3, 3, Some(jpeg(b"one"))).unwrap();
+    lib.add("A/4.flac", 4, 4, None).unwrap();
+    lib.scan().await;
+    let one = lib.track_art("A/1.flac").unwrap();
+    assert_eq!(one.sha256, ArtworkStore::hash_of(&jpeg(b"one")).to_vec());
+    assert_eq!(one.origin, "embedded");
+    assert_eq!(one.mime, "image/jpeg");
+    let two = lib.track_art("A/2.flac").unwrap();
+    assert_eq!(two.sha256, ArtworkStore::hash_of(&jpeg(b"two")).to_vec());
+    assert_eq!(
+        lib.track_art("A/3.flac").unwrap().id,
+        one.id,
+        "同じ画像は 1 行"
+    );
+    assert_eq!(lib.track_art("A/4.flac"), None);
+    assert!(lib.store.has_original(&one.sha256, "image/jpeg"));
+    assert!(lib.store.has_original(&two.sha256, "image/jpeg"));
+    // album の絵は D-49 のまま（最初のトラックの埋め込み）
+    assert_eq!(lib.art_of("A").unwrap().id, one.id);
+    assert_eq!(lib.artwork_count(), 2);
+}
+
+#[tokio::test]
+async fn track_picture_prefers_front_cover_over_the_first_picture() {
+    use lofty::picture::{MimeType, Picture, PictureType};
+    let lib = Lib::new();
+    let path = require_ffmpeg!(lib.add("A/1.flac", 1, 1, None));
+    let back = Picture::unchecked(jpeg(b"back"))
+        .pic_type(PictureType::CoverBack)
+        .mime_type(MimeType::Jpeg)
+        .build();
+    let front = Picture::unchecked(jpeg(b"front"))
+        .pic_type(PictureType::CoverFront)
+        .mime_type(MimeType::Jpeg)
+        .build();
+    common::retag(&path, |t| {
+        t.push_picture(back);
+        t.push_picture(front);
+    });
+    lib.scan().await;
+    assert_eq!(
+        lib.track_art("A/1.flac").unwrap().sha256,
+        ArtworkStore::hash_of(&jpeg(b"front")).to_vec()
+    );
+}
+
+#[tokio::test]
+async fn external_picture_change_updates_the_track_picture_and_removal_clears_it() {
+    let lib = Lib::new();
+    let path = require_ffmpeg!(lib.add("A/1.flac", 1, 1, Some(jpeg(b"one"))));
+    lib.scan().await;
+    set_picture(&path, jpeg(b"replaced"));
+    lib.scan().await;
+    assert_eq!(
+        lib.track_art("A/1.flac").unwrap().sha256,
+        ArtworkStore::hash_of(&jpeg(b"replaced")).to_vec()
+    );
+    common::retag(&path, |t| {
+        while !t.pictures().is_empty() {
+            t.remove_picture(0);
+        }
+    });
+    lib.scan().await;
+    assert_eq!(lib.track_art("A/1.flac"), None);
+}
+
+#[tokio::test]
+async fn scanner_without_store_leaves_track_picture_null_and_deep_scan_with_store_fills_it() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/1.flac", 1, 1, Some(jpeg(b"one"))));
+    let plain = Scanner::new(lib.db.clone(), lib.root.clone(), 2);
+    plain
+        .run(
+            ScanKind::Incremental,
+            Arc::new(|_, _, _| {}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lib.track_art("A/1.flac"), None);
+    // 変更なしの増分では読まないので NULL のまま
+    lib.scan().await;
+    assert_eq!(lib.track_art("A/1.flac"), None);
+    // deep で埋まる
+    lib.scan_kind(ScanKind::Deep).await;
+    assert_eq!(
+        lib.track_art("A/1.flac").unwrap().sha256,
+        ArtworkStore::hash_of(&jpeg(b"one")).to_vec()
+    );
+}
+
+fn is_root() -> bool {
+    std::fs::metadata("/proc/self").is_ok_and(|m| {
+        use std::os::unix::fs::MetadataExt;
+        m.uid() == 0
+    })
+}
+
+impl Lib {
+    fn artwork_dirty(&self, rel: &str) -> bool {
+        self.conn()
+            .query_row(
+                "SELECT artwork_dirty FROM tracks WHERE rel_path = ?1",
+                [rel],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    }
+
+    fn lock_store(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(self.store.dir(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+
+    fn unlock_store(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(self.store.dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// キャッシュへ置けない（store の I/O 失敗）ときは「画像なし」にせず、既存の `artwork_id` を保って
+/// `artwork_dirty` を立てる。次のスキャンは物理属性が同じでもその行を読み直して復旧する
+/// （codex の指摘: Absent に潰すと DB が NULL のまま固定され、stat 依存の再試行では変更なしの行や
+/// tagwrite 後の行が永久に直らない）
+#[tokio::test]
+async fn store_write_failure_keeps_the_old_track_picture_and_marks_it_for_reread() {
+    if is_root() {
+        eprintln!("root では書き込み禁止を作れないので skip");
+        return;
+    }
+    let lib = Lib::new();
+    let path = require_ffmpeg!(lib.add("A/1.flac", 1, 1, Some(jpeg(b"one"))));
+    lib.scan().await;
+    let first = lib.track_art("A/1.flac").unwrap();
+
+    // 画像を差し替え、store を書き込み禁止にしてスキャン
+    set_picture(&path, jpeg(b"two"));
+    lib.lock_store();
+    let report = lib.scan().await;
+    lib.unlock_store();
+    assert_eq!(report.errors, 0, "ファイルは読めている: {report:?}");
+    assert_eq!(
+        lib.track_art("A/1.flac").unwrap().id,
+        first.id,
+        "旧 id を保つ"
+    );
+    assert!(lib.artwork_dirty("A/1.flac"));
+
+    // 障害が直れば次の増分で読み直して埋まる（物理属性は前回で既に揃っている）
+    let report = lib.scan().await;
+    assert_eq!(report.updated, 1, "{report:?}");
+    assert_eq!(
+        lib.track_art("A/1.flac").unwrap().sha256,
+        ArtworkStore::hash_of(&jpeg(b"two")).to_vec()
+    );
+    assert!(!lib.artwork_dirty("A/1.flac"));
+    // 直った後は変更なし
+    let report = lib.scan().await;
+    assert_eq!(report.unchanged, 1);
+}
+
+/// 変更の無いファイルでも、deep が原画像の欠損を見つけて置き直せなかったら印が付き、
+/// 障害が直った後の増分で原画像が復旧する
+#[tokio::test]
+async fn unchanged_track_whose_original_is_lost_recovers_after_a_failed_deep_scan() {
+    if is_root() {
+        eprintln!("root では書き込み禁止を作れないので skip");
+        return;
+    }
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/1.flac", 1, 1, Some(jpeg(b"one"))));
+    lib.scan().await;
+    let art = lib.track_art("A/1.flac").unwrap();
+    let orig = lib.store.original_path(&art.sha256, "image/jpeg");
+    std::fs::remove_dir_all(orig.parent().unwrap()).unwrap();
+
+    lib.lock_store();
+    lib.scan_kind(ScanKind::Deep).await;
+    lib.unlock_store();
+    assert!(!orig.exists());
+    assert_eq!(
+        lib.track_art("A/1.flac").unwrap().id,
+        art.id,
+        "id は据え置き"
+    );
+    assert!(lib.artwork_dirty("A/1.flac"));
+
+    let report = lib.scan().await;
+    assert_eq!(report.updated, 1, "{report:?}");
+    assert_eq!(std::fs::read(&orig).unwrap(), jpeg(b"one"));
+    assert!(!lib.artwork_dirty("A/1.flac"));
+}
+
+/// 同じ長さの破損原画像は増分では stat だけで見逃すが、deep はハッシュを照合して置き直す
+/// （codex の指摘: album の絵に採用されない画像 — 同梱 cover のある album の 2 曲目 — は Phase 5 の
+/// `put_original` に届かないので、トラック側でも deep で直す必要がある）
+#[tokio::test]
+async fn deep_scan_repairs_a_same_length_corrupted_original_of_a_track_picture() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/01.flac", 1, 1, Some(jpeg(b"first"))));
+    lib.add("A/02.flac", 2, 2, Some(jpeg(b"second"))).unwrap();
+    lib.write_cover("A/cover.jpg", &jpeg(b"cover"));
+    lib.scan().await;
+    assert_eq!(
+        lib.art_of("A").unwrap().origin,
+        "file",
+        "同梱 cover が album の絵"
+    );
+    let second = lib.track_art("A/02.flac").unwrap();
+    let orig = lib.store.original_path(&second.sha256, "image/jpeg");
+    let good = std::fs::read(&orig).unwrap();
+    let mut broken = good.clone();
+    broken[3] ^= 0x01;
+    std::fs::write(&orig, &broken).unwrap();
+
+    // 増分は変更なしなので読まない（壊れたまま）
+    lib.scan().await;
+    assert_eq!(std::fs::read(&orig).unwrap(), broken);
+    // deep は照合して置き直す
+    lib.scan_kind(ScanKind::Deep).await;
+    assert_eq!(std::fs::read(&orig).unwrap(), good);
 }

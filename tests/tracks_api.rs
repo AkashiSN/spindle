@@ -558,3 +558,39 @@ async fn snapshot_fixes_the_selection_so_later_rows_are_not_included() {
     .unwrap();
     assert_eq!(snap.rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![b]);
 }
+
+/// 行と詳細にトラック自身の画像の hex（D-61）。無ければ null
+#[tokio::test]
+async fn rows_carry_the_tracks_own_artwork_hash() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    let (with, without) = {
+        let conn = app.raw();
+        conn.execute(
+            "INSERT INTO artwork (id, sha256, mime, bytes, origin)
+             VALUES (5, X'0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', 'image/jpeg', 1, 'embedded')",
+            [],
+        )
+        .unwrap();
+        let with = insert_track(&conn, "x/1.flac", "one", None);
+        conn.execute("UPDATE tracks SET artwork_id = 5 WHERE id = ?1", [with])
+            .unwrap();
+        let without = insert_track(&conn, "x/2.flac", "two", None);
+        (with, without)
+    };
+    let (status, body) = get(&app, &c, "/api/tracks?sort=title").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().unwrap();
+    let row = |id: i64| items.iter().find(|r| r["id"] == id).unwrap().clone();
+    assert_eq!(
+        row(with)["artwork_hash"],
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    );
+    assert_eq!(row(without)["artwork_hash"], serde_json::Value::Null);
+    let (status, body) = get(&app, &c, &format!("/api/tracks/{with}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["artwork_hash"],
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    );
+}

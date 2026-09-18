@@ -587,7 +587,7 @@ fn inspect_source(
                 current: None,
             });
         }
-        let Some(state) = read_file_state(root, dir.new.as_str()) else {
+        let Some(state) = read_file_state(root, None, dir.new.as_str()) else {
             return Ok(Inspected::Conflict {
                 reason: format!("宛先を読めない: {}", dir.new),
                 current: None,
@@ -615,7 +615,7 @@ fn inspect_source(
     // ctime の差を許す）
     let diff = mismatches(expected, &stat, &hash, source_rel.as_str());
     if !diff.is_empty() {
-        let current = FileState::external(root, &source_rel, stat, af);
+        let current = FileState::external(root, &source_rel, stat, af, &[], None);
         return Ok(Inspected::Conflict {
             reason: format!("事前条件不一致: {}", diff.join(", ")),
             current: Some(current),
@@ -628,7 +628,7 @@ fn inspect_source(
                 af.codec.as_str(),
                 dir.old_codec
             ),
-            current: Some(FileState::external(root, &source_rel, stat, af)),
+            current: Some(FileState::external(root, &source_rel, stat, af, &[], None)),
         });
     }
     let expected_md5 = {
@@ -1220,7 +1220,7 @@ fn phase_place(
     if !same_stat(&source_stat, &now_st) {
         return Ok(Err(Placed::Conflict {
             reason: "変換の間に元ファイルが外部で更新された".to_owned(),
-            current: read_file_state(root, source_rel.as_str()),
+            current: read_file_state(root, None, source_rel.as_str()),
         }));
     }
     let source_hash = sha256_of(&mut source)?;
@@ -1312,7 +1312,7 @@ fn phase_place(
                 undo.run(root, archive, dir, op_id, None, &source, true, None);
                 return Ok(Err(Placed::Conflict {
                     reason: format!("元ファイルを退避できない（一時名が塞がっている、または元が無い）: {tmp_rel}"),
-                    current: read_file_state(root, dir.old.as_str()),
+                    current: read_file_state(root, None, dir.old.as_str()),
                 }));
             }
             Err(e) => {
@@ -1335,7 +1335,7 @@ fn phase_place(
             );
             return Ok(Err(Placed::Conflict {
                 reason: "反映の直前に元ファイルが差し替えられた".to_owned(),
-                current: read_file_state(root, dir.old.as_str()),
+                current: read_file_state(root, None, dir.old.as_str()),
             }));
         }
     }
@@ -1423,7 +1423,7 @@ fn phase_verify(
             }))
         }
     }
-    let Some(state) = read_file_state(root, dir.new.as_str()) else {
+    let Some(state) = read_file_state(root, None, dir.new.as_str()) else {
         return Err(EditError::Internal(format!(
             "置いたファイルを読み直せない: {}",
             dir.new
@@ -1618,7 +1618,8 @@ impl Editor {
                             now,
                         )? {
                             if let Some(fs) = current.as_ref() {
-                                sync_track_to_file(&tx, op.track_id, fs, reference, now)?;
+                                // 正規化の元ファイルは画像を読まない（Unread）ので追随ジョブは出ない
+                                let _ = sync_track_to_file(&tx, op.track_id, fs, reference, now)?;
                             }
                         }
                         OpOutcome::Conflict(reason)
@@ -2013,7 +2014,8 @@ impl Editor {
             .await?;
         let current = {
             let (root, dir) = (Arc::clone(root), Arc::clone(dir));
-            tokio::task::spawn_blocking(move || read_file_state(&root, dir.old.as_str())).await?
+            tokio::task::spawn_blocking(move || read_file_state(&root, None, dir.old.as_str()))
+                .await?
         };
         Ok(match placed {
             Placed::Conflict { reason, .. } => {

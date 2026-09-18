@@ -1027,3 +1027,29 @@ async fn artwork_row_re_uploaded_after_planning_is_kept() {
     assert_eq!(env.count("SELECT count(*) FROM artwork WHERE id = 2"), 1);
     assert_eq!(env.count("SELECT count(*) FROM artwork WHERE id = 3"), 0);
 }
+
+/// `tracks.artwork_id` が参照する画像は回収しない（D-61。FK SET NULL で消すと増分では復旧しない）
+#[tokio::test]
+async fn artwork_referenced_by_a_track_is_kept() {
+    let env = Env::new();
+    let own = env.artwork(1, 0x11);
+    let orphan = env.artwork(2, 0x22);
+    for d in [&own, &orphan] {
+        env.put(&format!("thumbs/{d}/orig.png"), b"x", 5 * DAY);
+        set_age(&env.path(&format!("thumbs/{d}")), 5 * DAY);
+    }
+    env.track(1, "A/t.flac", None, None);
+    env.conn()
+        .execute("UPDATE tracks SET artwork_id = 1 WHERE id = 1", [])
+        .unwrap();
+    let p = plan(&env.db, &env.roots, RETENTION, env.now).await.unwrap();
+    assert_eq!(
+        p.artwork_rows.iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(p.artwork_dirs, vec![orphan.clone()]);
+    let s = run(&env).await;
+    assert_eq!((s.artwork_rows.deleted, s.artwork_dirs.deleted), (1, 1));
+    assert!(env.path(&format!("thumbs/{own}/orig.png")).exists());
+    assert_eq!(env.count("SELECT artwork_id FROM tracks WHERE id = 1"), 1);
+}

@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::Result;
 use crate::domain::relpath::canonical_key;
 use crate::domain::tags::TagSet;
+use crate::media::artwork::TrackPicture;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanKind {
@@ -96,6 +97,8 @@ pub struct TrackSnap {
     pub tag_version: i64,
     pub audio_version: i64,
     pub missing: bool,
+    /// 画像をキャッシュへ置けなかったので、変更が無くても次のスキャンで読み直す（D-61）
+    pub artwork_dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +121,7 @@ pub fn load_track_snapshot(conn: &Connection) -> Result<Vec<TrackSnap>> {
     let mut stmt = conn.prepare(
         "SELECT id, rel_path, rel_path_key, album_id, dev, inode, nlink, size,
                 mtime_ns, ctime_ns, audio_md5, audio_fp, tag_hash, codec,
-                tag_version, audio_version, missing_since
+                tag_version, audio_version, missing_since, artwork_dirty
          FROM tracks",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -140,6 +143,7 @@ pub fn load_track_snapshot(conn: &Connection) -> Result<Vec<TrackSnap>> {
             tag_version: r.get(14)?,
             audio_version: r.get(15)?,
             missing: r.get::<_, Option<i64>>(16)?.is_some(),
+            artwork_dirty: r.get::<_, i64>(17)? == 1,
         })
     })?;
     rows.map(|r| r.map_err(Into::into)).collect()
@@ -229,6 +233,53 @@ pub struct TrackContent {
     pub tags: TagSet,
     pub tag_hash: [u8; 32],
     pub cache: CacheColumns,
+    /// トラック自身の埋め込み画像（`tracks.artwork_id`。D-61）
+    pub picture: PictureState,
+}
+
+/// [`TrackContent::picture`]: 画像を実体ごと読んでキャッシュへ置いたかどうか
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PictureState {
+    /// 読んでいない（store が無い、画像を読まない経路）。`artwork_id` は触らない
+    #[default]
+    Unread,
+    /// 読んだが画像は無い（認識できないを含む）。`artwork_id` を NULL にする
+    Absent,
+    /// 読んでキャッシュへ置いた。`artwork` 行を upsert して `artwork_id` にする
+    Found(TrackPicture),
+    /// 読んだがキャッシュへ置けなかった（store の I/O 失敗）。`artwork_id` は触らず、
+    /// `artwork_dirty` を立てて次のスキャンに読み直させる（物理属性に依らない再試行。D-61）
+    Failed(String),
+}
+
+/// [`TrackContent::picture`] を `tracks.artwork_id` / `artwork_dirty` に反映する（`Unread` は何もしない）
+fn apply_picture(conn: &Connection, id: i64, picture: &PictureState) -> Result<()> {
+    let artwork_id = match picture {
+        PictureState::Unread => return Ok(()),
+        PictureState::Failed(_) => {
+            conn.execute(
+                "UPDATE tracks SET artwork_dirty = 1 WHERE id = ?1 AND artwork_dirty = 0",
+                [id],
+            )?;
+            return Ok(());
+        }
+        PictureState::Absent => None,
+        PictureState::Found(p) => Some(super::artwork::upsert(
+            conn,
+            &p.sha256,
+            p.mime,
+            Some(p.width),
+            Some(p.height),
+            p.bytes,
+            "embedded",
+        )?),
+    };
+    conn.execute(
+        "UPDATE tracks SET artwork_id = ?2, artwork_dirty = 0
+          WHERE id = ?1 AND (artwork_id IS NOT ?2 OR artwork_dirty = 1)",
+        params![id, artwork_id],
+    )?;
+    Ok(())
 }
 
 /// 音声フィンガープリント（可逆は md5、非可逆は fp）
@@ -306,7 +357,8 @@ pub fn update_content(
             c.cache.date,
         ],
     )?;
-    replace_tags(conn, id, &c.tags)
+    replace_tags(conn, id, &c.tags)?;
+    apply_picture(conn, id, &c.picture)
 }
 
 /// 音声フィンガープリントと版
@@ -401,6 +453,7 @@ pub fn insert_track(
     )?;
     let id = conn.last_insert_rowid();
     replace_tags(conn, id, &c.tags)?;
+    apply_picture(conn, id, &c.picture)?;
     Ok(id)
 }
 
@@ -665,4 +718,16 @@ pub fn finalize_missing(conn: &Connection, run_id: i64, now: i64) -> Result<Vec<
         [now],
     )?;
     Ok(tracks)
+}
+
+/// トラックの `artwork_id`（行が無ければ None）
+pub fn track_artwork_id(conn: &Connection, track_id: i64) -> Result<Option<i64>> {
+    let v: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT artwork_id FROM tracks WHERE id = ?1",
+            [track_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(v.flatten())
 }

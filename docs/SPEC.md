@@ -449,6 +449,9 @@ Phase 4  commit:     1 トランザクションで
   ときは埋め込みへ倒し、stat は記録する（変わるまで読み直さない）
 - Phase 4 の commit 後なので、Phase 5 の cancel / 失敗は run の状態（completed）と missing の確定を
   戻さない。予約が残るので次のスキャンで続きを行う
+- **トラック自身の画像**（D-61）: Phase 3 が各トラックの埋め込み画像（front cover 優先）を読んで
+  キャッシュへ置き、Phase 4 が `tracks.artwork_id` に記録する（無ければ NULL）。tagwrite の書き戻しも
+  同じ。変更なしの行は読まないので、既存行は deep scan で埋まる
 
 ### 7.2 CD 取り込み
 
@@ -677,7 +680,7 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
 | 出力 | Opus 128kbps VBR（`--vbr`, signal=music）。可逆200GBで約25GB |
 | パス | Library と完全ミラー（拡張子のみ `.opus`） |
 | RG | 再解析しない。Library 側の解析値を `R128_*` へ変換して埋める（`REPLAYGAIN_*` は書かない） |
-| 画像 | album のアートワーク（§7.1「アートワーク」で解決したもの）の長辺 768 の WebP を 1 枚だけ埋める。トラック自身の埋め込み画像は写さない（D-51） |
+| 画像 | トラック自身の埋め込み画像（`tracks.artwork_id`。D-61）、無ければ album のアートワーク（§7.1）の長辺 768 の WebP を 1 枚だけ埋める（D-51） |
 | 判定 | `audio_version` 差分 → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）の差分のみ → タグ上書き / パスの差分のみ → rename |
 | 投入 | scan ジョブの完了時に食い違う全トラック、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（track 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める |
 | 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児は GC ジョブ |
@@ -824,6 +827,8 @@ POST   /api/md5fill                               { selection, description?, ski
                                                   → 409 pending | no_changes | md5_fill_disabled
 
 GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
+                                                  /api/tracks の行と /api/tracks/:id には artwork_hash（トラック自身の
+                                                  埋め込み画像。無ければ null。D-61）
 GET    /api/categories, POST /api/categories
 GET    /api/search?q=                             FTS5 trigram（3 文字未満は LIKE）。/api/tracks と同じ
                                                   レスポンス形で、filter / sort / cursor / limit も受ける

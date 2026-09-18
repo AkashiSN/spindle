@@ -22,6 +22,7 @@ const base: TrackRow = {
   derived: null,
   flac_check: null,
   album_id: null,
+  artwork_hash: null,
   pending_batch_id: null,
   conflict_batch_id: null,
   duplicate_group: null,

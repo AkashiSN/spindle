@@ -37,18 +37,20 @@ use serde::Serialize;
 use crate::db::history::{self, BatchState, Op, OpKind, OpResult, Precondition, CANCELLED_ERROR};
 use crate::db::jobs as dbjobs;
 use crate::db::replaygain as dbrg;
-use crate::db::scans::{self, CacheColumns, Fingerprint, Physical, TrackContent};
+use crate::db::scans::{self, CacheColumns, Fingerprint, Physical, PictureState, TrackContent};
 use crate::db::{now_epoch, Db, DbError};
 use crate::domain::relpath::{RelPath, RelPathError};
 use crate::domain::replaygain::tag_changes as rg_tag_changes;
 use crate::domain::tags::{
-    normalize_tags, read_audio_file, read_audio_file_with_pictures, tag_hash, write_tag_changes,
-    Codec, TagReadError, TagSet, TagWriteError,
+    normalize_tags, read_audio_file_with_pictures, tag_hash, write_tag_changes, Codec,
+    TagReadError, TagSet, TagWriteError,
 };
 use crate::fsroot::{self, FsError, RootDir};
 use crate::import::scanner::{
-    audio_changed, cache_columns, effective_fingerprint, read_fingerprint, track_content,
+    audio_changed, cache_columns, effective_fingerprint, read_fingerprint,
+    track_content_with_pictures,
 };
+use crate::jobs::handlers::thumbnail::new_thumbnail_job;
 use crate::jobs::{BatchEvent, Event, JobState, JobType, Jobs, NewJob};
 use crate::media::artwork::ArtworkStore;
 
@@ -278,17 +280,20 @@ struct FileState {
 }
 
 impl FileState {
-    /// 外部の実体（事前条件不一致・overlay 解消・cancel）として読む。フィンガープリントも計算する
+    /// 外部の実体（事前条件不一致・overlay 解消・cancel）として読む。フィンガープリントも計算し、
+    /// `store` があればトラック自身の埋め込み画像も記録する（D-61。無ければ `artwork_id` は触らない）
     fn external(
         root: &RootDir,
         rel: &RelPath,
         st: fsroot::Stat,
         af: crate::domain::tags::AudioFile,
+        pictures: &[lofty::picture::Picture],
+        store: Option<&ArtworkStore>,
     ) -> Self {
         let fp = read_fingerprint(root, rel, &af);
         FileState {
             ph: st.into(),
-            content: track_content(af),
+            content: track_content_with_pictures(af, pictures, store, false),
             fp: Some(fp),
         }
     }
@@ -513,7 +518,6 @@ impl Editor {
 
         let batch_id = op.batch_id;
         let reference = self.rg_reference;
-        let has_picture = edits.iter().any(|e| e.key == PICTURE_KEY);
         let (outcome, event, followup_jobs) = self
             .db
             .write(move |c| {
@@ -523,23 +527,21 @@ impl Editor {
                 let outcome = match staged {
                     Staged::Written { fs, stashed } | Staged::AlreadyMatches { fs, stashed } => {
                         history::finish_op(&tx, op.id, OpResult::Applied, None, job_id, now)?;
-                        sync_track_to_file(&tx, op.track_id, &fs, reference, now)?;
+                        // 退避した旧画像を artwork 行にする（D-60。巻き戻しの素材）。画像が変わった
+                        // ときの album の再解決とサムネイルは sync_track_to_file が行う（D-61）
+                        picture::upsert_stashed(&tx, &stashed)?;
+                        followup_jobs.extend(sync_track_to_file(
+                            &tx,
+                            op.track_id,
+                            &fs,
+                            reference,
+                            now,
+                        )?);
                         // Derived の追随（D-51）。無い・版が古い・パスがずれていれば transcode を投入する
                         if let Some(id) =
                             crate::db::derived::enqueue_if_stale(&tx, op.track_id, now)?
                         {
                             followup_jobs.push(id);
-                        }
-                        if has_picture {
-                            // 埋め込み画像が変わった（D-60）: 退避した旧画像を artwork 行にし、album の
-                            // 再解決を予約して増分スキャンを投入する（Phase 5 が D-49 の規則で決め直す）
-                            picture::upsert_stashed(&tx, &stashed)?;
-                            let albums = scans::album_ids_of_tracks(&tx, &[op.track_id])?;
-                            crate::db::artwork::mark_unresolved(&tx, &albums)?;
-                            let scan = crate::jobs::handlers::scan::new_scan_job(
-                                crate::import::scanner::ScanKind::Incremental,
-                            );
-                            followup_jobs.push(dbjobs::enqueue(&tx, &scan, now)?.id());
                         }
                         OpOutcome::Applied
                     }
@@ -552,7 +554,14 @@ impl Editor {
                             job_id,
                             now,
                         )? {
-                            resolve_overlay(&tx, &op, &edits, current.as_ref(), reference, now)?;
+                            followup_jobs.extend(resolve_overlay(
+                                &tx,
+                                &op,
+                                &edits,
+                                current.as_ref(),
+                                reference,
+                                now,
+                            )?);
                         }
                         OpOutcome::Conflict(reason)
                     }
@@ -565,7 +574,14 @@ impl Editor {
                             job_id,
                             now,
                         )? {
-                            resolve_overlay(&tx, &op, &edits, current.as_ref(), reference, now)?;
+                            followup_jobs.extend(resolve_overlay(
+                                &tx,
+                                &op,
+                                &edits,
+                                current.as_ref(),
+                                reference,
+                                now,
+                            )?);
                         }
                         OpOutcome::Failed(reason)
                     }
@@ -619,30 +635,37 @@ impl Editor {
             OpKind::Md5 => None,
             _ => {
                 let root = Arc::clone(&self.root);
-                tokio::task::spawn_blocking(move || read_file_state(&root, &rel_path)).await?
+                let store = self.artwork.clone();
+                tokio::task::spawn_blocking(move || {
+                    read_file_state(&root, store.as_deref(), &rel_path)
+                })
+                .await?
             }
         };
         let error = error.to_owned();
         let batch_id = op.batch_id;
         let reference = self.rg_reference;
-        let (closed, event) = self
+        let (closed, event, followup_jobs) = self
             .db
             .write(move |c| {
                 let tx = c.transaction()?;
                 let now = now_epoch();
                 let closed =
                     history::finish_op(&tx, op.id, OpResult::Failed, Some(&error), job_id, now)?;
+                let mut followup_jobs = Vec::new();
                 if closed && has_overlay {
-                    resolve_overlay(&tx, &op, &edits, current.as_ref(), reference, now)?;
+                    followup_jobs =
+                        resolve_overlay(&tx, &op, &edits, current.as_ref(), reference, now)?;
                 }
                 let event = match history::aggregate_batch(&tx, batch_id, now)? {
                     Some(state) => Some(batch_event(&tx, batch_id, state)?),
                     None => None,
                 };
                 tx.commit()?;
-                Ok((closed, event))
+                Ok((closed, event, followup_jobs))
             })
             .await?;
+        self.jobs.notify_enqueued(&followup_jobs).await;
         if let Some(ev) = event {
             self.jobs.publish(Event::Batch(ev));
         }
@@ -1254,20 +1277,24 @@ fn ext_of(rel: &RelPath) -> Option<&str> {
     rel.file_name().rsplit_once('.').map(|(_, x)| x)
 }
 
-/// 開いたファイルの stat とタグ（読めなければ None）
-fn read_file_state(root: &RootDir, rel_path: &str) -> Option<FileState> {
+/// 開いたファイルの stat とタグ（読めなければ None）。`store` があれば埋め込み画像も記録する
+fn read_file_state(
+    root: &RootDir,
+    store: Option<&ArtworkStore>,
+    rel_path: &str,
+) -> Option<FileState> {
     let rel = RelPath::parse(rel_path).ok()?;
     let file = root
         .open_file(&rel)
         .map_err(|e| tracing::warn!(path = rel_path, error = %e, "overlay 解消のためにファイルを開けない"))
         .ok()?;
     let st = fsroot::fstat(&file).ok()?;
-    let af = read_audio_file(file, ext_of(&rel))
+    let (af, pictures) = read_audio_file_with_pictures(file, ext_of(&rel))
         .map_err(
             |e| tracing::warn!(path = rel_path, error = %e, "overlay 解消のためにタグを読めない"),
         )
         .ok()?;
-    Some(FileState::external(root, &rel, st, af))
+    Some(FileState::external(root, &rel, st, af, &pictures, store))
 }
 
 /// 事前条件と実体の差（一致なら空）。
@@ -1350,7 +1377,7 @@ fn stage_tags(
     let hash = tag_hash(&af.tags);
     let diff = mismatches(&op.expected, &st, &hash, rel_path);
     if !diff.is_empty() {
-        let state = FileState::external(root, &rel, st, af);
+        let state = FileState::external(root, &rel, st, af, &old_pictures, store);
         if file_matches_new_values(&state.content.tags, edits) {
             tracing::info!(
                 op_id = op.id,
@@ -1375,7 +1402,7 @@ fn stage_tags(
         let Some(store) = store else {
             return Ok(Staged::Failed {
                 reason: "アートワークのキャッシュが無いので画像を書けない".to_owned(),
-                current: Some(FileState::external(root, &rel, st, af)),
+                current: Some(FileState::external(root, &rel, st, af, &old_pictures, None)),
             });
         };
         let mut pics = Vec::new();
@@ -1385,7 +1412,14 @@ fn stage_tags(
                 None => {
                     return Ok(Staged::Failed {
                         reason: format!("画像がキャッシュに無い: {value}"),
-                        current: Some(FileState::external(root, &rel, st, af)),
+                        current: Some(FileState::external(
+                            root,
+                            &rel,
+                            st,
+                            af,
+                            &old_pictures,
+                            Some(store),
+                        )),
                     })
                 }
             }
@@ -1423,7 +1457,7 @@ fn stage_tags(
         // 編集したキーが意図どおりに読めなければ、この形式には書けないので反映しない
         let mut reader = tmp.try_clone()?;
         reader.seek(SeekFrom::Start(0))?;
-        let written = read_audio_file(reader, ext)?;
+        let (written, written_pictures) = read_audio_file_with_pictures(reader, ext)?;
         if !file_matches_new_values(&written.tags, edits) {
             let mismatched: Vec<&str> = edits
                 .iter()
@@ -1438,7 +1472,14 @@ fn stage_tags(
                     "書き込み結果が意図と一致しない（この形式では表現できない）: {}",
                     mismatched.join(", ")
                 ),
-                current: Some(FileState::external(root, &rel, st, af.clone())),
+                current: Some(FileState::external(
+                    root,
+                    &rel,
+                    st,
+                    af.clone(),
+                    &old_pictures,
+                    store,
+                )),
             });
         }
         if let Some(hook) = before_rename {
@@ -1460,9 +1501,9 @@ fn stage_tags(
         };
         let now_st = fsroot::fstat(&recheck)?;
         if !same_stat(&st, &now_st) {
-            let current = read_audio_file(recheck, ext)
+            let current = read_audio_file_with_pictures(recheck, ext)
                 .ok()
-                .map(|af| FileState::external(root, &rel, now_st, af));
+                .map(|(af, pics)| FileState::external(root, &rel, now_st, af, &pics, store));
             return Ok(Staged::Conflict {
                 reason: "反映の直前に外部で更新された".to_owned(),
                 current,
@@ -1475,7 +1516,7 @@ fn stage_tags(
         Ok(Staged::Written {
             fs: FileState {
                 ph: st.into(),
-                content: track_content(written),
+                content: track_content_with_pictures(written, &written_pictures, store, false),
                 fp: None,
             },
             stashed,
@@ -1516,11 +1557,13 @@ fn sync_track_to_file(
     fs: &FileState,
     reference: f64,
     now: i64,
-) -> crate::db::Result<()> {
+) -> crate::db::Result<Vec<i64>> {
     let row = scans::load_current_row(tx, track_id)?;
+    let artwork_before = scans::track_artwork_id(tx, track_id)?;
     history::set_track_physical(tx, track_id, &fs.ph)?;
     scans::update_content(tx, track_id, &fs.content, row.tag_version)?;
     dbrg::sync_written_at(tx, track_id, &fs.content.tags, reference, now)?;
+    let followups = follow_picture_change(tx, track_id, artwork_before, &fs.content.picture, now)?;
     if let Some(fp) = fs.fp {
         let audio_version = if audio_changed(fp, row.audio_md5, row.audio_fp) {
             tracing::info!(
@@ -1534,11 +1577,45 @@ fn sync_track_to_file(
         let fp = effective_fingerprint(fp, row.audio_md5, row.audio_fp);
         scans::update_fingerprint(tx, track_id, fp, audio_version)?;
     }
-    Ok(())
+    Ok(followups)
+}
+
+/// トラック自身の画像が変わったときの追随（D-61。ファイルの現在値を DB に揃えた直後に呼ぶ）:
+/// サムネイルがまだ無ければ thumbnail ジョブ、`artwork_id` が変わっていれば album の再解決を予約して
+/// 増分スキャンを投入する（Phase 5 が D-49 の規則で album の絵を決め直す）。物理属性を現在値に揃える
+/// ので次のスキャンには「変更なし」と見え、ここで予約しないと album の絵が古いまま固定される。
+/// 返り値は投入したジョブ id
+fn follow_picture_change(
+    tx: &Connection,
+    track_id: i64,
+    artwork_before: Option<i64>,
+    picture: &PictureState,
+    now: i64,
+) -> crate::db::Result<Vec<i64>> {
+    let mut jobs = Vec::new();
+    if let PictureState::Found(p) = picture {
+        if p.needs_thumbs {
+            if let Some(art) = crate::db::artwork::get_by_sha256(tx, &p.sha256)? {
+                jobs.push(dbjobs::enqueue(tx, &new_thumbnail_job(art.id), now)?.id());
+            }
+        }
+    }
+    if !matches!(picture, PictureState::Unread)
+        && scans::track_artwork_id(tx, track_id)? != artwork_before
+    {
+        let albums = scans::album_ids_of_tracks(tx, &[track_id])?;
+        crate::db::artwork::mark_unresolved(tx, &albums)?;
+        let scan = crate::jobs::handlers::scan::new_scan_job(
+            crate::import::scanner::ScanKind::Incremental,
+        );
+        jobs.push(dbjobs::enqueue(tx, &scan, now)?.id());
+    }
+    Ok(jobs)
 }
 
 /// applied 以外の終端になる op の overlay を解消する（SPEC §7.5）。ファイルの現在値があれば
-/// それに、無ければ記録時点の旧値と事前条件の物理属性に戻す。`tag_version` は据え置く
+/// それに、無ければ記録時点の旧値と事前条件の物理属性に戻す。`tag_version` は据え置く。
+/// 返り値は画像の追随で投入したジョブ id
 fn resolve_overlay(
     tx: &Connection,
     op: &Op,
@@ -1546,7 +1623,7 @@ fn resolve_overlay(
     current: Option<&FileState>,
     reference: f64,
     now: i64,
-) -> crate::db::Result<()> {
+) -> crate::db::Result<Vec<i64>> {
     if let Some(fs) = current {
         return sync_track_to_file(tx, op.track_id, fs, reference, now);
     }
@@ -1567,5 +1644,6 @@ fn resolve_overlay(
         &cache,
         tag_version,
     )?;
-    history::restore_track_precondition(tx, op.track_id, &op.expected)
+    history::restore_track_precondition(tx, op.track_id, &op.expected)?;
+    Ok(Vec::new())
 }

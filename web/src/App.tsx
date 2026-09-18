@@ -414,11 +414,12 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     axis: 'y',
     direction: -1,
   })
-  // アルバムアート: 選択行（先頭）のアルバム、無ければ再生中のアルバム
+  // アートワーク: 選択行（先頭）、無ければ再生中のトラック。表示はトラック自身の画像 → album の画像（D-61）
+  const artTrack = selectedRows[0] ?? player.track ?? null
   const artAlbum = useMemo(() => {
-    const albumId = selectedRows[0]?.album_id ?? player.track?.album_id ?? null
+    const albumId = artTrack?.album_id ?? null
     return albumId == null ? null : (albums.albums.find((a) => a.id === albumId) ?? null)
-  }, [selectedRows, player.track, albums.albums])
+  }, [artTrack, albums.albums])
 
   return (
     <div className="shell">
@@ -450,7 +451,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         onPlaylistNotice={setPlaylistNotice}
       />
       <div className="divider-h" onMouseDown={artDrag.onMouseDown} title="ドラッグで高さを変更" />
-      <AlbumArt album={artAlbum} />
+      <AlbumArt track={artTrack} album={artAlbum} />
       </div>
       <div className="divider-v" onMouseDown={sideDrag.onMouseDown} title="ドラッグで幅を変更" />
       <div className="right-col">

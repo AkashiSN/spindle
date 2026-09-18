@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AlbumRow } from '../api/types'
-import { albumTitle, artworkUrl, gridAlbums, parsePictureValue, uploadedSummary } from './artwork'
+import { albumTitle, artworkUrl, displayArtworkHash, gridAlbums, parsePictureValue, uploadedSummary } from './artwork'
 
 const base: AlbumRow = {
   id: 1,
@@ -60,5 +60,14 @@ describe('uploadedSummary', () => {
     expect(uploadedSummary({ sha256: '', mime: 'image/png', width: 3000, height: 3000, bytes: 5 * 1024 * 1024 })).toBe(
       'PNG 3000×3000 5.0 MiB',
     )
+  })
+})
+
+describe('displayArtworkHash', () => {
+  it('トラック自身の画像を優先し、無ければ album、どちらも無ければ null', () => {
+    expect(displayArtworkHash({ artwork_hash: 't' }, { artwork_hash: 'a' })).toBe('t')
+    expect(displayArtworkHash({ artwork_hash: null }, { artwork_hash: 'a' })).toBe('a')
+    expect(displayArtworkHash(null, { artwork_hash: 'a' })).toBe('a')
+    expect(displayArtworkHash({ artwork_hash: null }, null)).toBeNull()
   })
 })

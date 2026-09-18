@@ -15,7 +15,8 @@ pub fn load_target(conn: &Connection, track_id: i64) -> Result<Option<Target>> {
     Ok(conn
         .query_row(
             "SELECT t.id, t.lossless, t.missing_since IS NOT NULL, t.channels, t.rel_path,
-                    t.audio_version, t.tag_version, a.artwork_id, t.rg_scanned_at
+                    t.audio_version, t.tag_version, coalesce(t.artwork_id, a.artwork_id),
+                    t.rg_scanned_at
              FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
              WHERE t.id = ?1",
             [track_id],
@@ -257,8 +258,8 @@ pub fn enqueue_if_stale(conn: &Connection, track_id: i64, now: i64) -> Result<Op
 /// 期待パスの比較は SQL では書きにくいので行を取ってから Rust で判定する
 pub fn enqueue_all_stale(conn: &Connection, now: i64) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.channels, t.rel_path, t.audio_version, t.tag_version, a.artwork_id,
-                t.rg_scanned_at,
+        "SELECT t.id, t.channels, t.rel_path, t.audio_version, t.tag_version,
+                coalesce(t.artwork_id, a.artwork_id), t.rg_scanned_at,
                 d.rel_path, d.src_audio_version, d.src_tag_version, d.src_artwork_id,
                 d.src_rg_scanned_at
          FROM tracks t

@@ -217,3 +217,32 @@ fn upgrade_to_0011_widens_edit_ops_kind_and_keeps_referencing_rows() {
         )
         .is_err());
 }
+
+#[test]
+fn upgrade_to_0012_adds_track_artwork_with_set_null_on_delete() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 12);
+    conn.execute_batch(
+        "INSERT INTO artwork (id, sha256, mime, bytes, origin) VALUES (7, zeroblob(32), 'image/jpeg', 1, 'embedded');
+         INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                             audio_version, tag_version, seen_at, artwork_id)
+           VALUES (1, 'a.flac', 'a.flac', 1, 0, 0, 'flac', 1, 1, 1, 0, 7);",
+    )
+    .unwrap();
+    // 既定は NULL、artwork 行が消えれば NULL に戻る（行は消えない）。artwork_dirty の既定は 0
+    conn.execute("DELETE FROM artwork WHERE id = 7", [])
+        .unwrap();
+    let (v, dirty): (Option<i64>, i64) = conn
+        .query_row(
+            "SELECT artwork_id, artwork_dirty FROM tracks WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((v, dirty), (None, 0));
+}

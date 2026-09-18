@@ -96,6 +96,49 @@ pub fn pick_embedded(pictures: &[Picture]) -> Option<&Picture> {
         .or_else(|| pictures.first())
 }
 
+/// トラック自身の埋め込み画像（キャッシュへ置いた後。`tracks.artwork_id` の元。D-61）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackPicture {
+    pub sha256: [u8; 32],
+    pub mime: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: usize,
+    /// サムネイルがまだ無い（呼び出し側が thumbnail ジョブを投入する）
+    pub needs_thumbs: bool,
+}
+
+/// トラックの埋め込み画像から 1 枚（[`pick_embedded`]）を選び、ヘッダで判別してキャッシュへ置く。
+/// 画像が無い・認識できないときは `Ok(None)`。キャッシュへ置けない（I/O 失敗）ときは `Err`（呼び出し側が
+/// 「画像なし」と区別する: 既存の `artwork_id` を消してはいけない。D-61）。
+/// `verify` が偽なら、既に同じ長さの原画像があれば stat だけで済ませる（同じ画像を持つ数千トラックで
+/// 実体を読み直さない）。真なら [`ArtworkStore::put_original`] が内容のハッシュを照合して、同じ長さの
+/// 破損も置き直す（deep scan）
+pub fn register_track_picture(
+    store: &ArtworkStore,
+    pictures: &[Picture],
+    verify: bool,
+) -> std::io::Result<Option<TrackPicture>> {
+    let Some(pic) = pick_embedded(pictures) else {
+        return Ok(None);
+    };
+    let Some(info) = sniff(pic.data()) else {
+        return Ok(None);
+    };
+    let hash = ArtworkStore::hash_of(pic.data());
+    if verify || !store.has_original_of_len(&hash, info.mime, pic.data().len() as u64) {
+        store.put_original(&hash, info.mime, pic.data())?;
+    }
+    Ok(Some(TrackPicture {
+        sha256: hash,
+        mime: info.mime,
+        width: info.width,
+        height: info.height,
+        bytes: pic.data().len(),
+        needs_thumbs: !store.missing_thumbs(&hash).is_empty(),
+    }))
+}
+
 // ---------------------------------------------------------------- キャッシュ
 
 /// ハッシュアドレスのアートワーク置き場（`<data>/thumbs`）

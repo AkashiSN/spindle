@@ -482,10 +482,20 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       画像付きトラックの移動で新旧 album を解決、commit 後の cancel で run は completed のまま次回再開、
       キャッシュ書き込み失敗 / 読めないトラックで状態を動かさない、原画像の欠損を incremental で復旧）、
       `tests/thumbnail_job.rs`（寸法・アスペクト比・拡大なし・冪等・原画像なし）、`tests/artwork_api.rs`
-- [ ] **P1-3c** トラック単位のアートワーク（D-60 の未決。トラックごとに画像が違う album 向け）:
-      スキャンが各トラックの埋め込み画像を `tracks.artwork_id` に持つ（新マイグレーション）。再生画面 /
-      プロパティはトラック自身の画像を出し、Derived は album の絵ではなくトラック自身の画像を埋める
-      （D-51 の改訂。`src_artwork_id` の判定はそのまま）。album の絵（グリッド）は D-49 のまま
+- [x] **P1-3c** トラック単位のアートワーク（D-61。トラックごとに画像が違う album 向け）:
+      - [x] マイグレーション 0012 `tracks.artwork_id`。`TrackContent.picture`（Unread / Absent / Found）を
+            スキャナ Phase 3 と tagwrite の読み戻しが埋め、`insert_track` / `update_content` が記録する。
+            サムネイルが無い画像は Phase 4 が thumbnail ジョブを投入
+      - [x] Derived は `COALESCE(tracks.artwork_id, albums.artwork_id)` を埋める（D-51 の改訂）
+      - [x] GC 区分 E の参照に `tracks.artwork_id` を足す
+      - [x] `TrackRow` / `GET /api/tracks/:id` の `artwork_hash`、左下のアートワークはトラック自身 → album
+
+      受け入れ: `tests/artwork_scan.rs`（トラックごとの画像、front cover 優先、無しは NULL、同じ画像は 1 行、
+      store 無しは NULL のまま → deep で埋まる、外部差し替えで更新）、`tests/picture_write.rs`（差し替え・
+      巻き戻しで追随）、`tests/derived*.rs`（トラック自身 → album の順）、`tests/gc.rs`（参照の保護）、
+      `tests/tracks_api.rs`（`artwork_hash`）、`tests/migrations.rs`（0012）、`web/src/lib/artwork.test.ts`。
+      ローカル起動でトラックごとに違う画像の 2 曲について、左下の表示と Derived の埋め込み（ffprobe で
+      300×300 / 400×300）がそれぞれ自身の画像になることを確認済み（2026-09-18）
 - [x] **P1-4** ロスレス → FLAC 正規化（WAV / ALAC / AIFF。D-45 / D-46。変換前後の PCM MD5 照合。
       不一致なら中止。一致時は元ファイルを `Archive/` へ move し `edit_ops(kind='archive')` と
       `archived_files` 台帳に記録。**即時削除しない**。`audio_version` は据え置き。

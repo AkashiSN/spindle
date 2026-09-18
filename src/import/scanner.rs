@@ -26,19 +26,21 @@ use tokio_util::sync::CancellationToken;
 use crate::db::artwork::{self as dbart, AlbumArtworkState, CoverStat};
 use crate::db::jobs as dbjobs;
 use crate::db::scans::{
-    self, AlbumMeta, AlbumSnap, CacheColumns, Fingerprint, Physical, RunState, TrackContent,
-    TrackSnap,
+    self, AlbumMeta, AlbumSnap, CacheColumns, Fingerprint, Physical, PictureState, RunState,
+    TrackContent, TrackSnap,
 };
 use crate::db::{now_epoch, Db, DbError};
 use crate::domain::identity::{self, Decision, Entry, Identity, Via};
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::domain::tags::{
-    read_audio_file, read_transfer_tags, tag_hash, AudioFile, Codec, TagSet,
+    read_audio_file, read_audio_file_with_pictures, read_transfer_tags, tag_hash, AudioFile, Codec,
+    TagSet,
 };
 use crate::fsroot::{self, FileKind, FsError, RootDir, TMP_PREFIX};
 use crate::jobs::handlers::thumbnail::new_thumbnail_job;
 use crate::media::artwork::{
-    cover_rank, pick_embedded, sniff, ArtworkStore, ImageInfo, MAX_COVER_BYTES,
+    cover_rank, pick_embedded, register_track_picture, sniff, ArtworkStore, ImageInfo,
+    MAX_COVER_BYTES,
 };
 use crate::media::fingerprint;
 
@@ -325,6 +327,27 @@ impl Scanner {
             return Err(ScanError::Cancelled);
         }
 
+        // 画像をキャッシュへ置けなかった行（`artwork_dirty`）は、物理属性が同じでも読み直す（D-61）
+        let dirty_pictures: HashSet<i64> = tracks
+            .iter()
+            .filter(|t| t.artwork_dirty)
+            .map(|t| t.id)
+            .collect();
+        let decisions: Vec<Decision> = decisions
+            .into_iter()
+            .map(|mut d| {
+                if let Identity::Existing {
+                    track_id, changed, ..
+                } = &mut d.identity
+                {
+                    if dirty_pictures.contains(track_id) {
+                        *changed = true;
+                    }
+                }
+                d
+            })
+            .collect();
+
         // Phase 3: 読む必要があるエントリ
         let deep = kind == ScanKind::Deep;
         let need_read: Vec<usize> = decisions
@@ -348,9 +371,12 @@ impl Scanner {
             let hardlinks: Arc<Vec<bool>> =
                 Arc::new(decisions.iter().map(|d| d.hardlink).collect());
             let progress = Arc::clone(progress);
+            let store = self.artwork.clone();
             Arc::new(move |i: usize| {
                 let r = read_entry(
                     &root,
+                    store.as_deref(),
+                    deep,
                     &inv.entries[i],
                     md5_cache.get(&i).copied(),
                     hardlinks[i],
@@ -394,7 +420,7 @@ impl Scanner {
             match self.resolve_artwork(store, deep, covers, token).await {
                 Ok((resolved, jobs)) => {
                     report.artwork_resolved = resolved;
-                    report.enqueued_jobs = jobs;
+                    report.enqueued_jobs.extend(jobs);
                 }
                 Err(ScanError::Cancelled) => {
                     tracing::info!(
@@ -1073,26 +1099,29 @@ pub fn effective_fingerprint(
 
 fn read_entry(
     root: &RootDir,
+    store: Option<&ArtworkStore>,
+    verify_pictures: bool,
     e: &InvEntry,
     cached_md5: Option<Option<[u8; 16]>>,
     hardlink: bool,
 ) -> Result<ReadResult, String> {
     let ext = e.rel.file_name().rsplit_once('.').map(|(_, x)| x);
     let file = root.open_file(&e.rel).map_err(|err| err.to_string())?;
-    let af = read_audio_file(file, ext).map_err(|err| err.to_string())?;
+    let (af, pictures) = read_audio_file_with_pictures(file, ext).map_err(|err| err.to_string())?;
     let fp = match (af.lossless, cached_md5) {
         (true, Some(m)) => Fingerprint::Md5(m),
         (true, None) => Fingerprint::Md5(lossless_md5(root, &e.rel, e.ext_codec)),
         (false, _) => read_fingerprint(root, &e.rel, &af),
     };
     Ok(ReadResult {
-        content: track_content(af),
+        content: track_content_with_pictures(af, &pictures, store, verify_pictures),
         fp,
         hardlink,
     })
 }
 
-/// 読み取ったファイルのうち DB に書く内容（`tag_hash` とキャッシュ列を含む）
+/// 読み取ったファイルのうち DB に書く内容（`tag_hash` とキャッシュ列を含む）。画像は読んでいない
+/// 扱い（[`PictureState::Unread`]。`artwork_id` を触らない）
 pub fn track_content(af: AudioFile) -> TrackContent {
     let cache = cache_columns(&af.tags);
     TrackContent {
@@ -1106,7 +1135,32 @@ pub fn track_content(af: AudioFile) -> TrackContent {
         tag_hash: tag_hash(&af.tags),
         tags: af.tags,
         cache,
+        picture: PictureState::Unread,
     }
+}
+
+/// [`track_content`] に加えて、トラック自身の埋め込み画像をキャッシュへ置いて記録する（D-61）。
+/// `store` が無ければ画像は読んでいない扱い。キャッシュへ置けなければ [`PictureState::Failed`]
+/// （`artwork_id` は据え置き、`artwork_dirty` で次のスキャンが読み直す）。`verify` は
+/// [`register_track_picture`] を見よ
+pub fn track_content_with_pictures(
+    af: AudioFile,
+    pictures: &[lofty::picture::Picture],
+    store: Option<&ArtworkStore>,
+    verify: bool,
+) -> TrackContent {
+    let mut c = track_content(af);
+    if let Some(store) = store {
+        c.picture = match register_track_picture(store, pictures, verify) {
+            Ok(Some(p)) => PictureState::Found(p),
+            Ok(None) => PictureState::Absent,
+            Err(e) => {
+                tracing::warn!(error = %e, "埋め込み画像をキャッシュへ置けない。次のスキャンで読み直す");
+                PictureState::Failed(e.to_string())
+            }
+        };
+    }
+    c
 }
 
 /// 先頭の整数（"3/12" → 3）
@@ -1454,6 +1508,26 @@ impl Commit {
             // deep は全 album を解決し直す。Phase 5 の前（この commit の直後）に止まっても
             // 予約が残るよう、ここで active な album 全件を予約する
             dbart::mark_all_unresolved(&tx)?;
+        }
+        // トラック自身の画像でサムネイルがまだ無いものは thumbnail ジョブを投入する（D-61。
+        // dedup は artwork_id 単位なので同じ画像の数千トラックでも 1 本）
+        let mut want_thumbs: Vec<[u8; 32]> = self
+            .results
+            .values()
+            .filter_map(|r| r.as_ref().ok())
+            .filter_map(|r| match &r.content.picture {
+                PictureState::Found(p) if p.needs_thumbs => Some(p.sha256),
+                _ => None,
+            })
+            .collect();
+        want_thumbs.sort_unstable();
+        want_thumbs.dedup();
+        for sha in want_thumbs {
+            if let Some(art) = dbart::get_by_sha256(&tx, &sha)? {
+                report
+                    .enqueued_jobs
+                    .push(dbjobs::enqueue(&tx, &new_thumbnail_job(art.id), now)?.id());
+            }
         }
         scans::finish_run(
             &tx,

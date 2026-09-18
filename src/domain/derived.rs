@@ -41,7 +41,8 @@ pub struct Target {
     pub library_rel_path: String,
     pub audio_version: i64,
     pub tag_version: i64,
-    /// 所属 album の `artwork_id`（album が無い・画像が無ければ None）
+    /// 埋める画像: トラック自身の `artwork_id`、無ければ所属 album の `artwork_id`（D-61。どちらも
+    /// 無ければ None）
     pub artwork_id: Option<i64>,
     /// `tracks.rg_scanned_at`（未解析なら None）
     pub rg_scanned_at: Option<i64>,

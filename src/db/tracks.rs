@@ -52,6 +52,8 @@ pub struct TrackRow {
     pub rel_path: String,
     /// 所属アルバム（アルバムアートの解決に使う。P1-12）
     pub album_id: Option<i64>,
+    /// トラック自身の埋め込み画像の SHA-256（hex。無ければ None。D-61）
+    pub artwork_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -117,9 +119,10 @@ const ROW_COLUMNS: &str = "t.id, t.title, t.artist_display, t.album, t.albumarti
   t.nlink > 1, t.missing_since, t.rel_path,
   t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak,
   t.flac_check, t.flac_checked_at, t.flac_check_version <> t.audio_version, t.flac_check_error,
-  t.album_id";
+  t.album_id,
+  (SELECT lower(hex(aw.sha256)) FROM artwork aw WHERE aw.id = t.artwork_id)";
 /// `ROW_COLUMNS` の列数。ソートキーの値はこの位置から始まる
-const ROW_COLUMN_COUNT: usize = 32;
+const ROW_COLUMN_COUNT: usize = 33;
 
 const ROW_JOINS: &str = "FROM tracks t
 LEFT JOIN derived_files d ON d.track_id = t.id
@@ -179,6 +182,7 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
         missing_since: r.get(21)?,
         rel_path: r.get(22)?,
         album_id: r.get(31)?,
+        artwork_hash: r.get(32)?,
     })
 }
 

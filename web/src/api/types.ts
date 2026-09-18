@@ -45,6 +45,8 @@ export type TrackRow = {
   rel_path: string
   /** 所属アルバム（アルバムアートの解決に使う。P1-12） */
   album_id: number | null
+  /** トラック自身の埋め込み画像の SHA-256（hex）。無ければ null（D-61） */
+  artwork_hash: string | null
 }
 
 /** `GET /api/tracks/:id`（セッションあり）が行に加えて返す詳細（D-58）。一覧には付かない */

@@ -37,6 +37,7 @@ function row(over: Partial<TrackRow> = {}): TrackRow {
     missing_since: null,
     rel_path: 'Library/A/x.flac',
     album_id: null,
+    artwork_hash: null,
     ...over,
   }
 }

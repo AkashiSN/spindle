@@ -243,3 +243,38 @@ fn rg_store_advances_scanned_at_even_within_the_same_second() {
     dbrg::store(&c, &[(1, v(-8.0))], 500).unwrap();
     assert_eq!(scanned(&c), 500);
 }
+
+/// Derived に埋める画像はトラック自身の `artwork_id`、無ければ album の `artwork_id`（D-61）
+#[test]
+fn target_artwork_prefers_the_tracks_own_picture_over_the_album() {
+    let c = conn();
+    insert_artwork(&c, 7);
+    insert_artwork(&c, 8);
+    c.execute(
+        "INSERT INTO albums (id, rel_dir, rel_dir_key, album, artwork_id) VALUES (3, 'A', 'a', 'A', 7)",
+        [],
+    )
+    .unwrap();
+    insert_track(&c, 1, "A/01.flac", "flac", Some(2));
+    insert_track(&c, 2, "A/02.flac", "flac", Some(2));
+    c.execute(
+        "UPDATE tracks SET album_id = 3, artwork_id = CASE id WHEN 1 THEN 8 ELSE NULL END",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        derived::load_target(&c, 1).unwrap().unwrap().artwork_id,
+        Some(8)
+    );
+    assert_eq!(
+        derived::load_target(&c, 2).unwrap().unwrap().artwork_id,
+        Some(7)
+    );
+
+    // 一括投入も同じ判定: track 1 は Derived が album の絵（7）で作られていれば stale、
+    // track 2 は一致なので投入しない
+    derived::upsert(&c, 1, "A/01.opus", "opus", None, 1, tags(1, Some(7)), 0).unwrap();
+    derived::upsert(&c, 2, "A/02.opus", "opus", None, 1, tags(1, Some(7)), 0).unwrap();
+    let ids = derived::enqueue_all_stale(&c, 100).unwrap();
+    assert_eq!(job_track_ids(&c, &ids), vec![1]);
+}

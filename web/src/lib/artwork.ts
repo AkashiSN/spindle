@@ -1,6 +1,6 @@
 // アートワークの URL とグリッドの並び（SPEC §9 GET /api/artwork/:hash?size=、§12.6、P1-3）
 
-import type { AlbumRow } from '../api/types'
+import type { AlbumRow, TrackRow } from '../api/types'
 
 /** サーバが持つサムネイルの一辺（media::artwork::THUMB_SIZES と一致させる） */
 export const THUMB_SIZES = [256, 768] as const
@@ -45,4 +45,12 @@ export function uploadedSummary(u: UploadedArtwork): string {
   const kind = u.mime.replace(/^image\//, '').toUpperCase()
   const kb = u.bytes >= 1024 * 1024 ? `${(u.bytes / (1024 * 1024)).toFixed(1)} MiB` : `${Math.ceil(u.bytes / 1024)} KiB`
   return `${kind} ${u.width}×${u.height} ${kb}`
+}
+
+/** 左下に出す画像のハッシュ: トラック自身の埋め込み画像 → 無ければ album の画像（D-61）。どちらも無ければ null */
+export function displayArtworkHash(
+  track: Pick<TrackRow, 'artwork_hash'> | null,
+  album: Pick<AlbumRow, 'artwork_hash'> | null,
+): string | null {
+  return track?.artwork_hash ?? album?.artwork_hash ?? null
 }

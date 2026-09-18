@@ -1568,10 +1568,10 @@ STREAMINFO の MD5 を読むだけになる。
   （`create_tmp`）へコピー → `replace_file`。`derived_files` の upsert はファイル配置後
 - **タグは Library ファイルの `TransferTags` をそのまま写し、RG だけ DB の解析値から `R128_*` へ変換して
   差し替える**（`REPLAYGAIN_*` は消す。SPEC §7.6「再解析しない」。解析前なら RG タグは書かない）。
-  **画像は album の `artwork_id` の `768.webp`**（P1-3 のキャッシュ。無ければ thumbnail ジョブと同じ
-  変換で作る。原画像も無ければ画像なしで作り、次のスキャンが原画像を復旧したときに
-  `src_artwork_id` の不一致で書き直される）を `image/webp` の front cover 1 枚として埋める。
-  トラック自身の埋め込み画像は使わない
+  **画像はトラック自身の `artwork_id`、無ければ album の `artwork_id` の `768.webp`**（D-61 で改訂。
+  P1-3 のキャッシュ。無ければ thumbnail ジョブと同じ変換で作る。原画像も無ければ画像なしで作り、
+  次のスキャンが原画像を復旧したときに `src_artwork_id` の不一致で書き直される）を `image/webp` の
+  front cover 1 枚として埋める
 - **Derived の削除は行わない。** missing は可逆（SMB 切断）なので Derived を残し、
   `retention_days` 超の回収と孤児ファイルの回収は GC（P1-11）。期待パスを**別トラックの**
   `derived_files` 行が占有しているとき（A を消して B を A のパスへ移した: B は inode で追随し、A は
@@ -2100,3 +2100,62 @@ md5 op が専用なのは overlay も版も持たないから）。front cover �
 
 **未決**: P1-3c（トラック単位のアートワーク）。アップロード画像の再エンコード（大きすぎる画像を
 縮めて埋める）は要望があれば。
+
+## D-61 トラックは自身の埋め込み画像を持ち、Derived と再生表示はそれを優先する
+
+**決定**（P1-3c。D-60 の未決。トラックごとに画像が違う album 向け）:
+
+- **`tracks.artwork_id`（マイグレーション 0012。`artwork` への FK、`ON DELETE SET NULL`）はそのトラック
+  自身の埋め込み画像**（`pick_embedded`: front cover → 無ければ最初の 1 枚）。無ければ NULL。埋めるのは
+  ファイルの画像を実体ごと読む 2 か所: スキャナ Phase 3（`read_entry` が `read_audio_file_with_pictures`
+  で読み、選んだ 1 枚を `ArtworkStore` へ置く。既に同じ長さの原画像があれば stat だけで済ませる）と
+  tagwrite（`stage_tags` の書き戻し確認と外部変更の読み取り。store は `Editor::with_artwork`）。
+  `TrackContent.picture` は `Unread` / `Absent` / `Found` / `Failed` の 4 値で、`insert_track` /
+  `update_content` が同じトランザクションで反映する: `Unread`（読んでいない・store が無い）は何も
+  触らない、`Absent` は `artwork_id = NULL`、`Found` は `artwork` 行を upsert して `artwork_id` に
+  する（どちらも `artwork_dirty = 0`）、`Failed`（キャッシュへ置けない）は `artwork_id` を据え置いて
+  `artwork_dirty = 1`（次項）。normalize の経路は `Unread`（画像は変わらない）
+- **キャッシュへ置けない（store の I/O 失敗）は「画像なし」と区別し、`tracks.artwork_dirty`（0012）で
+  再試行する。** `register_track_picture` は `Err` を返し、`TrackContent.picture` は `Failed`: `artwork_id`
+  は据え置き、`artwork_dirty = 1` を立てる。スキャナは Phase 2 で `artwork_dirty` の行を（物理属性が
+  同じでも）読み直す対象に含め、`Found` / `Absent` を記録できたら 0 に戻す。物理属性に依らない印なのは、
+  deep で変更なしの行を検証して失敗した場合や、tagwrite が conflict / cancel で外部の画像を読んで
+  物理属性を現在値に揃えた場合は、stat では再試行の契機が残らないため。`Absent` に潰すと DB が NULL の
+  まま固定される
+- **deep scan はトラックの画像もハッシュを照合して置き直す。** 増分は同じ長さの原画像があれば stat だけ
+  （同じ画像を持つ数千トラックで実体を読み直さない）だが、同じ長さの破損は album の絵に採用されない
+  画像（同梱 cover のある album の 2 曲目以降）だと Phase 5 の `put_original` に届かないので、deep で
+  `register_track_picture(verify = true)` が直す
+- **tagwrite で画像が変わったときの追随は `sync_track_to_file` に集約する。** ファイルの現在値を DB に
+  揃えた直後に `artwork_id` の前後を比べ、変わっていれば album の再解決を予約して増分スキャンを投入し、
+  サムネイルが無ければ thumbnail ジョブを投入する。Applied / AlreadyMatches / Conflict / Failed / cancel
+  （`close_op`）の全経路が通る（外部の画像変更を conflict で読んだときも物理属性を現在値に揃えるので、
+  ここで予約しないと次の増分スキャンには「変更なし」と見えて album の絵が古いまま固定される）。
+  Phase 4 が pending の tags op のために `update_content` を飛ばした行も、その op の反映・conflict・
+  cancel のいずれかでここを通る
+- **既存行は deep scan 1 回で埋まる。** 変更なしの増分は最速パスでファイルを読まないので NULL のまま。
+  NULL の間は Derived も表示も album の絵へ倒れるので壊れない。専用のバックフィルジョブは作らない
+  （リハーサル環境はリリース時に再移行する）
+- **album の絵（D-49）は変えない。** グリッドと album 単位の表示は同梱画像 → 最初のトラックの埋め込み
+  のまま。Phase 5 が `tracks.artwork_id` でファイルの再読みを省く簡略化は別の改善
+- **Derived に埋める画像は `COALESCE(tracks.artwork_id, albums.artwork_id)`**（D-51 の「album の
+  `artwork_id`」を改訂）。`load_target` / `enqueue_all_stale` のクエリだけ変わり、`plan` と
+  `src_artwork_id`（実際に埋めた id）の意味はそのまま。album 共通の album は同じハッシュ → 同じ id
+  なので再タグは走らない
+- **GC 区分 E の「参照されている」に `tracks.artwork_id` を足す。** 忘れると FK SET NULL で消えた
+  `artwork_id` が増分では復旧しない
+- **API / UI**: `TrackRow` と `GET /api/tracks/:id` に `artwork_hash`（トラック自身。無ければ null）。
+  左下のアートワークは選択行（先頭）または再生中トラックの自身の画像 → 無ければ album の画像。
+  `AlbumGrid` は変えない
+
+**理由**: 埋め込み統一（D-60）のライブラリでは、トラックの絵はそのトラックの埋め込みが正。album 単位の
+解決（D-49）だけだと、トラックごとに画像が違う album で全曲が 1 曲目の絵になる（再生表示と Derived）。
+スキャナはもともと Phase 3 で画像を含むタグを読んでいるので、選んだ 1 枚をハッシュアドレスの store へ
+置くだけで済み、同じ画像を持つ数千トラックでも実体は 1 つ。
+
+**却下**: Phase 5 でトラックごとに画像を解決し直す（Phase 5 は album 単位の予約で回っており、トラック
+全件を再読みすることになる）。`track_tags` の `PICTURE` 値から `artwork_id` を導く（値はハッシュだけで
+実体が store に無いことがあり、front cover の種別も持たない）。バックフィルジョブ（deep scan で足りる）。
+Derived で album の絵を優先する（トラックごとに違う album で目的を果たせない）。
+
+**未決**: Phase 5 の簡略化（上記）。

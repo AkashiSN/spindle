@@ -580,10 +580,11 @@ async fn external_picture_change_between_prepare_and_apply_is_a_conflict() {
         lib.db_tag(id, "PICTURE"),
         vec![picture_value("image/jpeg", &external)]
     );
-    // 外部の画像は退避しない（何も書いていない）
-    assert!(!lib
-        .store
-        .has_original(&ArtworkStore::hash_of(&external), "image/jpeg"));
+    // 何も書いていないので「退避」は無いが、外部の画像はトラック自身の画像として記録される（D-61）
+    assert_eq!(
+        lib.track_artwork_sha(id),
+        Some(ArtworkStore::hash_of(&external).to_vec())
+    );
 }
 
 #[tokio::test]
@@ -657,4 +658,278 @@ async fn editor_without_artwork_store_cannot_prepare() {
         .await
         .unwrap_err();
     assert!(matches!(err, EditError::ArtworkUnavailable), "{err:?}");
+}
+
+// ---------------------------------------------------------------- tracks.artwork_id の追随（D-61）
+
+impl Lib {
+    fn track_artwork_sha(&self, id: i64) -> Option<Vec<u8>> {
+        self.conn()
+            .query_row(
+                "SELECT a.sha256 FROM tracks t LEFT JOIN artwork a ON a.id = t.artwork_id WHERE t.id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn track_artwork_follows_replace_revert_and_survives_other_tag_edits() {
+    let lib = Lib::new();
+    let old = jpeg(b"old");
+    let new = png();
+    let path = require_ffmpeg!(lib.add("A/1.flac", 1, std::slice::from_ref(&old)));
+    lib.scan().await;
+    let id = lib.track_id("A/1.flac");
+    assert_eq!(
+        lib.track_artwork_sha(id),
+        Some(ArtworkStore::hash_of(&old).to_vec())
+    );
+    let hash = lib.upload(&new).await;
+    lib.start();
+
+    let p = lib
+        .editor
+        .prepare_picture(None, vec![id], hash)
+        .await
+        .unwrap();
+    let batch_id = p.batch_id.unwrap();
+    assert_eq!(lib.wait_batch_terminal(batch_id).await, BatchState::Applied);
+    assert_eq!(lib.track_artwork_sha(id), Some(hash.to_vec()));
+    // 差し替えた画像のサムネイルは upload 時に投入済み。ここでは行が新画像を指すことだけ
+
+    // 画像に触らないタグ編集では据え置き
+    let t = lib
+        .editor
+        .prepare_tags(
+            None,
+            vec![spindle::edit::NewTagOp {
+                track_id: id,
+                changes: vec![spindle::edit::TagChange {
+                    key: "TITLE".to_owned(),
+                    values: Some(vec!["Renamed".to_owned()]),
+                }],
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        lib.wait_batch_terminal(t.batch_id).await,
+        BatchState::Applied
+    );
+    assert_eq!(lib.track_artwork_sha(id), Some(hash.to_vec()));
+    assert_eq!(file_pictures(&path), vec![new.clone()]);
+
+    // 巻き戻しで旧画像へ
+    let r = lib.editor.revert_batch(batch_id, None).await.unwrap();
+    assert_eq!(
+        lib.wait_batch_terminal(r.batch_id).await,
+        BatchState::Applied
+    );
+    assert_eq!(
+        lib.track_artwork_sha(id),
+        Some(ArtworkStore::hash_of(&old).to_vec())
+    );
+}
+
+#[tokio::test]
+async fn external_picture_change_seen_as_conflict_updates_track_artwork() {
+    let lib = Lib::new();
+    let old = jpeg(b"old");
+    let external = jpeg(b"external");
+    let path = require_ffmpeg!(lib.add("A/1.flac", 1, std::slice::from_ref(&old)));
+    lib.scan().await;
+    let id = lib.track_id("A/1.flac");
+    let hash = lib.upload(&jpeg(b"new")).await;
+    let p = lib
+        .editor
+        .prepare_picture(None, vec![id], hash)
+        .await
+        .unwrap();
+    set_pictures(&path, std::slice::from_ref(&external));
+    lib.start();
+    assert_eq!(
+        lib.wait_batch_terminal(p.batch_id.unwrap()).await,
+        BatchState::Failed
+    );
+    // overlay の解消はファイルの現在値に揃える（artwork_id も外部の画像になる）
+    assert_eq!(
+        lib.track_artwork_sha(id),
+        Some(ArtworkStore::hash_of(&external).to_vec())
+    );
+}
+
+impl Lib {
+    fn album_unresolved(&self, track_id: i64) -> bool {
+        !self.album_resolved(track_id)
+    }
+
+    fn job_types(&self) -> Vec<String> {
+        let c = self.conn();
+        let mut st = c
+            .prepare("SELECT type FROM jobs WHERE state IN ('queued', 'running') ORDER BY id")
+            .unwrap();
+        st.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// Phase 5 で album を解決し直したことにする（予約を消す）
+    fn mark_album_resolved(&self, track_id: i64) {
+        self.conn()
+            .execute(
+                "UPDATE albums SET artwork_resolved_at = 1 WHERE id = (SELECT album_id FROM tracks WHERE id = ?1)",
+                [track_id],
+            )
+            .unwrap();
+    }
+}
+
+/// 通常のタグ op の反映中に外部が画像を差し替えていた（conflict）: artwork_id に加えて、album の
+/// 再解決の予約と thumbnail ジョブも追随する（codex の指摘: 物理属性を現在値に揃えるので、ここで
+/// 予約しないと次の増分スキャンには「変更なし」と見えて album の絵が古いまま固定される）
+#[tokio::test]
+async fn external_picture_change_during_a_tag_op_reserves_album_and_thumbnail() {
+    let lib = Lib::new();
+    let old = jpeg(b"old");
+    let external = jpeg(b"external");
+    let path = require_ffmpeg!(lib.add("A/1.flac", 1, std::slice::from_ref(&old)));
+    lib.scan().await;
+    let id = lib.track_id("A/1.flac");
+    lib.mark_album_resolved(id);
+    // 画像に触らないタグ編集を記録してから、外部が画像を差し替える
+    let t = lib
+        .editor
+        .prepare_tags(
+            None,
+            vec![spindle::edit::NewTagOp {
+                track_id: id,
+                changes: vec![spindle::edit::TagChange {
+                    key: "TITLE".to_owned(),
+                    values: Some(vec!["Renamed".to_owned()]),
+                }],
+            }],
+        )
+        .await
+        .unwrap();
+    set_pictures(&path, std::slice::from_ref(&external));
+    lib.start();
+    assert_eq!(
+        lib.wait_batch_terminal(t.batch_id).await,
+        BatchState::Failed
+    );
+    assert_eq!(
+        lib.track_artwork_sha(id),
+        Some(ArtworkStore::hash_of(&external).to_vec())
+    );
+    assert!(lib.album_unresolved(id), "album の再解決を予約する");
+    let jobs = lib.job_types();
+    assert!(jobs.iter().any(|t| t == "thumbnail"), "{jobs:?}");
+    assert!(jobs.iter().any(|t| t == "scan"), "{jobs:?}");
+}
+
+/// pending の tags op がある間にスキャンが走った（Phase 4 は overlay を守るため update_content を
+/// 飛ばす）後、その op がキャンセルで閉じられる: overlay の解消がファイルの現在値（外部の画像）を
+/// artwork_id に反映し、album の再解決も予約する
+#[tokio::test]
+async fn cancel_after_a_scan_skipped_the_pending_row_follows_the_external_picture() {
+    let lib = Lib::new();
+    let old = jpeg(b"old");
+    let external = jpeg(b"external");
+    let path = require_ffmpeg!(lib.add("A/1.flac", 1, std::slice::from_ref(&old)));
+    lib.scan().await;
+    let id = lib.track_id("A/1.flac");
+    lib.mark_album_resolved(id);
+    let t = lib
+        .editor
+        .prepare_tags(
+            None,
+            vec![spindle::edit::NewTagOp {
+                track_id: id,
+                changes: vec![spindle::edit::TagChange {
+                    key: "TITLE".to_owned(),
+                    values: Some(vec!["Renamed".to_owned()]),
+                }],
+            }],
+        )
+        .await
+        .unwrap();
+    set_pictures(&path, std::slice::from_ref(&external));
+    // ワーカーを起こさずにスキャン: pending 行は overlay を守って content を書かない
+    lib.scan().await;
+    assert_eq!(
+        lib.track_artwork_sha(id),
+        Some(ArtworkStore::hash_of(&old).to_vec()),
+        "pending の間は据え置き"
+    );
+    lib.editor.cancel_batch(t.batch_id).await.unwrap();
+    assert_eq!(
+        lib.wait_batch_terminal(t.batch_id).await,
+        BatchState::Cancelled
+    );
+    assert_eq!(
+        lib.track_artwork_sha(id),
+        Some(ArtworkStore::hash_of(&external).to_vec())
+    );
+    assert!(lib.album_unresolved(id));
+}
+
+/// 通常のタグ op の反映中に外部が画像を差し替え、しかも store が書けない: 旧 `artwork_id` を保って
+/// `artwork_dirty` を立て、障害が直った後の増分スキャンが（物理属性は tagwrite が現在値に揃えて
+/// いても）読み直して追随する
+#[tokio::test]
+async fn store_failure_while_reading_an_external_picture_change_is_retried_by_the_next_scan() {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::metadata("/proc/self").is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0) {
+        eprintln!("root では書き込み禁止を作れないので skip");
+        return;
+    }
+    let lib = Lib::new();
+    let old = jpeg(b"old");
+    let external = jpeg(b"external");
+    let path = require_ffmpeg!(lib.add("A/1.flac", 1, std::slice::from_ref(&old)));
+    lib.scan().await;
+    let id = lib.track_id("A/1.flac");
+    let t = lib
+        .editor
+        .prepare_tags(
+            None,
+            vec![spindle::edit::NewTagOp {
+                track_id: id,
+                changes: vec![spindle::edit::TagChange {
+                    key: "TITLE".to_owned(),
+                    values: Some(vec!["Renamed".to_owned()]),
+                }],
+            }],
+        )
+        .await
+        .unwrap();
+    set_pictures(&path, std::slice::from_ref(&external));
+    std::fs::set_permissions(lib.store.dir(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    lib.start();
+    let state = lib.wait_batch_terminal(t.batch_id).await;
+    std::fs::set_permissions(lib.store.dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(state, BatchState::Failed);
+    assert_eq!(
+        lib.track_artwork_sha(id),
+        Some(ArtworkStore::hash_of(&old).to_vec()),
+        "旧 id を保つ"
+    );
+    let dirty: i64 = lib
+        .conn()
+        .query_row(
+            "SELECT artwork_dirty FROM tracks WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(dirty, 1);
+
+    lib.scan().await;
+    assert_eq!(
+        lib.track_artwork_sha(id),
+        Some(ArtworkStore::hash_of(&external).to_vec())
+    );
 }
