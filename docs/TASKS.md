@@ -496,6 +496,11 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/tracks_api.rs`（`artwork_hash`）、`tests/migrations.rs`（0012）、`web/src/lib/artwork.test.ts`。
       ローカル起動でトラックごとに違う画像の 2 曲について、左下の表示と Derived の埋め込み（ffprobe で
       300×300 / 400×300）がそれぞれ自身の画像になることを確認済み（2026-09-18）
+
+      計測（2026-09-18、リハーサル環境 9,098 トラック / 721 album、12 コア）: 0011 / 0012 適用後の deep scan
+      **568 秒**（P1-0 の 552 秒 + 3%）で全行に `artwork_id` が付き、`artwork` 2,241 行（+1,520。thumbs 2.1 GB）、
+      thumbnail 1,523 本・transcode 再タグ 35 本、errors 0。トラックごとに画像が違う album は 15
+      （神椿系「〜のお歌」9 dir が主。すべて Opus で Derived は無い）。UI で自身の画像が出ることを確認
 - [x] **P1-4** ロスレス → FLAC 正規化（WAV / ALAC / AIFF。D-45 / D-46。変換前後の PCM MD5 照合。
       不一致なら中止。一致時は元ファイルを `Archive/` へ move し `edit_ops(kind='archive')` と
       `archived_files` 台帳に記録。**即時削除しない**。`audio_version` は据え置き。
