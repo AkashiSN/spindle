@@ -34,6 +34,16 @@ pub fn find_by_key(conn: &Connection, name: &str) -> Result<Option<Category>> {
         .find(|c| canonical_key(&c.name) == key))
 }
 
+/// 同じ canonical key の語彙があればその id、無ければ追加して id を返す（メタデータプラグインの
+/// category など、外部の定義が正のとき。D-69）
+pub fn ensure(conn: &Connection, name: &str) -> Result<i64> {
+    if let Some(c) = find_by_key(conn, name)? {
+        return Ok(c.id);
+    }
+    conn.execute("INSERT INTO categories (name) VALUES (?1)", params![name])?;
+    Ok(conn.last_insert_rowid())
+}
+
 /// 追加する。canonical key が同じ語彙が既にあれば `None`
 pub fn insert(conn: &Connection, name: &str) -> Result<Option<i64>> {
     if find_by_key(conn, name)?.is_some() {

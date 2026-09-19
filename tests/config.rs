@@ -445,3 +445,30 @@ fn load_reports_missing_file_with_path() {
         "{err}"
     );
 }
+
+#[test]
+fn ytmusic_requires_a_metadata_command_when_enabled() {
+    let cfg = Config::parse(&replace_section(
+        "ytmusic",
+        "enabled = true\nmetadata_command = [\"/usr/local/bin/plugin\", \"metadata\"]",
+    ))
+    .unwrap();
+    assert_eq!(cfg.ytmusic.metadata_timeout_secs, 30);
+    assert_eq!(cfg.ytmusic.metadata_command.len(), 2);
+    // 無効なら無くてよい
+    assert!(Config::parse(&replace_section("ytmusic", "enabled = false")).is_ok());
+    // 有効なのに空 / 先頭が空 / タイムアウト 0
+    for body in [
+        "enabled = true",
+        "enabled = true\nmetadata_command = [\" \"]",
+        "enabled = true\nmetadata_command = [\"p\"]\nmetadata_timeout_secs = 0",
+    ] {
+        assert!(
+            matches!(
+                Config::parse(&replace_section("ytmusic", body)),
+                Err(ConfigError::Invalid(_))
+            ),
+            "{body}"
+        );
+    }
+}

@@ -877,9 +877,20 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 完了条件: **ytmusic CLI を廃止できる。**
 
-- [ ] **P3-1** タイトルパーサ移植（`fancy-regex`、規則は TOML 外出し、
-      83 件のフィクスチャを Python 版と共有）
-- [ ] **P3-2** チャンネル定義とカテゴリ写像（`config.toml` 互換維持）
+- [x] **P3-1** タイトルパーサ → **メタデータプラグインのプロトコル v1**。D-69。タイトルの慣習は spindle に
+      置かず、外部コマンド（`[ytmusic].metadata_command`。参照実装 `AkashiSN/spindle-ytmusic-meta`。Python 版
+      ytmusic のテスト 98 件から生成したフィクスチャで一致を保証）に JSON で問い合わせる。
+      `src/import/ytmusic/metadata.rs`（`Request` / `Response` / `Track`、`MetadataProvider::resolve`:
+      引数配列で起動 → stdin に Request → stdout の Response を検証。タイムアウト・非ゼロ終了・不正な JSON・
+      必須の値の欠落は `ProviderError`、`ok: false` は `Outcome::Declined { reason, message }`）。
+      受け入れ: `tests/ytmusic_metadata.rs`（偽のプラグインで: 往復と stdin の内容、`ok: false` の各 reason、
+      非ゼロ終了、不正な JSON、プロトコル違い、空の必須値、タイムアウト、起動失敗）、`tests/config.rs`、
+      `tests/docker_context.rs`（`include_str!` / rust-embed の埋め込み元が Dockerfile の build stage に
+      COPY されている）。`ExternalCommand::stdin_bytes`（stdin へ書いて閉じる）を追加
+- [x] **P3-2** チャンネル定義とカテゴリ写像 → チャンネル定義はプラグイン側（D-69）。spindle は `Track` を
+      タグ（`Track::tags(track_no)`: TITLE / ARTIST 多値 / ALBUM / ALBUMARTIST / DATE / TRACKNUMBER + 追加タグ）と
+      `pathgen::TrackFields`（`Track::track_fields`）に写し、`category` は `db::categories::ensure` で無ければ
+      語彙に追加する。受け入れ: `tests/ytmusic_metadata.rs`（写像）、`tests/categories_api.rs`（ensure）
 - [ ] **P3-3** ダウンローダ（yt-dlp を subprocess）
 - [ ] **P3-4** ytmusic ダウンロード後の Derived 投入（生成本体は P1-10、GC は P1-11）
 - [ ] **P3-5** 偽ハイレゾ検出（`rustfft`、任意機能）

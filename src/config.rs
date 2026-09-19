@@ -282,7 +282,15 @@ fn default_musicbrainz_url() -> String {
 #[serde(deny_unknown_fields)]
 pub struct YtmusicConfig {
     pub enabled: bool,
-    pub rules: PathBuf,
+    /// メタデータプラグイン（D-69。引数配列。`sh -c` は使わない）。`enabled` なら必須
+    #[serde(default)]
+    pub metadata_command: Vec<String>,
+    #[serde(default = "default_metadata_timeout")]
+    pub metadata_timeout_secs: u32,
+}
+
+fn default_metadata_timeout() -> u32 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -443,6 +451,24 @@ impl Config {
         for (key, value) in self.bin.entries() {
             if value.trim().is_empty() {
                 return invalid(format!("{key} は空にできない"));
+            }
+        }
+
+        // [ytmusic]: 有効ならプラグインのコマンドが要る
+        if self.ytmusic.enabled {
+            match self.ytmusic.metadata_command.first() {
+                None => {
+                    return invalid(
+                        "ytmusic.metadata_command が空（ytmusic.enabled のときは必須）".into(),
+                    )
+                }
+                Some(p) if p.trim().is_empty() => {
+                    return invalid("ytmusic.metadata_command の先頭（プログラム）が空".into())
+                }
+                Some(_) => {}
+            }
+            if self.ytmusic.metadata_timeout_secs == 0 {
+                return invalid("ytmusic.metadata_timeout_secs は 1 以上".into());
             }
         }
 

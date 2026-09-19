@@ -96,6 +96,8 @@ pub struct ExternalCommand {
     current_dir: Option<PathBuf>,
     timeout: Duration,
     stdin: Option<File>,
+    /// stdin に書き込むバイト列（`stdin` より優先）。書き終えたら閉じる
+    stdin_bytes: Option<Vec<u8>>,
     stdout_file: Option<File>,
     stdout_channel: Option<mpsc::Sender<Vec<u8>>>,
 }
@@ -110,6 +112,7 @@ impl ExternalCommand {
             current_dir: None,
             timeout: DEFAULT_TIMEOUT,
             stdin: None,
+            stdin_bytes: None,
             stdout_file: None,
             stdout_channel: None,
         }
@@ -180,6 +183,12 @@ impl ExternalCommand {
         self
     }
 
+    /// stdin にバイト列を書いて閉じる（小さな入力用。JSON のリクエストなど）
+    pub fn stdin_bytes(mut self, bytes: Vec<u8>) -> Self {
+        self.stdin_bytes = Some(bytes);
+        self
+    }
+
     /// stdout を開いたファイルへ書く。指定しなければメモリに取り込む
     pub fn stdout_file(mut self, file: File) -> Self {
         self.stdout_file = Some(file);
@@ -219,9 +228,10 @@ impl ExternalCommand {
 
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args).stderr(Stdio::piped());
-        cmd.stdin(match self.stdin {
-            Some(f) => Stdio::from(f),
-            None => Stdio::null(),
+        cmd.stdin(match (&self.stdin_bytes, self.stdin) {
+            (Some(_), _) => Stdio::piped(),
+            (None, Some(f)) => Stdio::from(f),
+            (None, None) => Stdio::null(),
         });
         let capture_stdout = self.stdout_file.is_none();
         cmd.stdout(match self.stdout_file {
@@ -249,6 +259,9 @@ impl ExternalCommand {
         } else {
             None
         };
+        let stdin_pipe = self
+            .stdin_bytes
+            .map(|bytes| (child.child_mut().stdin.take(), bytes));
 
         // タイムアウトは子 token で表現し、親 token の cancel と区別する
         let local = token.child_token();
@@ -289,8 +302,22 @@ impl ExternalCommand {
             }
             Ok::<_, std::io::Error>(buf)
         };
-        let (waited, stderr_buf, stdout_buf) =
-            tokio::join!(child.wait(local.clone()), stderr_task, stdout_task);
+        // stdin の書き込みは子が読まずに終わると EPIPE になる（Failed / stdout の判定に任せる）
+        let stdin_task = async {
+            if let Some((Some(mut pipe), bytes)) = stdin_pipe {
+                use tokio::io::AsyncWriteExt as _;
+                if let Err(e) = pipe.write_all(&bytes).await {
+                    tracing::debug!(error = %e, "stdin へ書き切れなかった");
+                }
+                drop(pipe);
+            }
+        };
+        let (waited, stderr_buf, stdout_buf, ()) = tokio::join!(
+            child.wait(local.clone()),
+            stderr_task,
+            stdout_task,
+            stdin_task
+        );
         timer.abort();
 
         let stderr = String::from_utf8_lossy(&stderr_buf.map_err(io_err)?)

@@ -69,7 +69,8 @@ ctdb_url = "http://db.cuetools.net/lookup2.php"
 
 [ytmusic]
 enabled = true
-rules = "rules/ytmusic.toml"
+metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
+metadata_timeout_secs = 30
 
 [bin]
 ffmpeg = "ffmpeg"

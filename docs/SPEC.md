@@ -761,17 +761,51 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
 
 | 元モジュール | 移行先 | 備考 |
 |---|---|---|
-| `parser.py` (17パターン) | Rust / fancy-regex | 正規表現は TOML に外出しし、ルールエンジン化 |
-| `models.py` 正規化 | Rust | 置換テーブルをそのまま TOML 化 |
+| `parser.py`（タイトルパーサ）/ チャンネル定義 | **外部のメタデータプラグイン**（別リポジトリ） | spindle はタイトルの慣習を知らない（D-69） |
+| `models.py` 正規化 | Rust | 置換テーブルは D-43 で 1 本化済み |
 | `tagger.py` (mutagen) | lofty | |
 | `audio.py` R128 | ebur128 | ffmpeg loudnorm より高精度 |
 | `organizer.py` / `playlist.py` | Rust | m3u8 生成は継続 |
 | `downloader.py` | Rust（yt-dlp を subprocess） | |
 | `sync.py` (ADB) | **移植しない** | NAS に端末を繋ぐ運用が不自然。Syncthing / SMB へ |
 
-移行の安全策として、**83 件のパーサテストケースを先に JSON フィクスチャへ切り出し**、
-Python 版と Rust 版の両方から同じファイルを読ませて差分を取る。
-`config.toml` のチャンネル定義スキーマは互換を維持する。
+**メタデータプラグインのプロトコル v1**（`src/import/ytmusic/metadata.rs`、P3-1 / P3-2、D-69）。
+動画のタイトルからトラックのメタデータ（タイトル・アーティスト・アルバム・category）を決める知識は
+利用者固有（チャンネル名、タイトルの慣習、パターンのルール）なので spindle には置かず、外部コマンドに
+問い合わせる。spindle が知る契約はこのプロトコルだけ。
+
+- **起動**: `[ytmusic].metadata_command`（引数配列。`sh -c` は使わない）をアイテム 1 件ごとに起動し、stdin に
+  Request を 1 つ書き、stdout の Response（JSON 1 つ）を読む。`metadata_timeout_secs`（既定 30）で kill。
+  stderr はログに出す。終了コードが非ゼロ・stdout が JSON でない・`protocol` が違う・必須の値が空
+  （`title` / `albumartist` / `album` / `artists`）は**プラグインの故障**として取り込みを止める
+- **Request**（未知のフィールドはプラグインが無視する。前方互換）
+  ```jsonc
+  { "protocol": 1, "op": "metadata",
+    "item": { "source": "youtube",            // 提供元
+              "channel": "<設定のチャンネル識別子>",
+              "channel_title": "…" | null,    // 提供元での表示名
+              "id": "<動画 id>" | null, "url": "…" | null,
+              "title": "<動画タイトル>",       // 必須
+              "uploaded_at": "YYYY-MM-DD" | null, "duration_ms": 123 | null } }
+  ```
+- **Response**（判定できたかに関わらず終了コード 0）
+  ```jsonc
+  { "protocol": 1, "ok": true,
+    "track": { "title": "…", "artists": ["…"], "albumartist": "…", "album": "…",
+               "category": "<統制語彙の名前>" | null,   // null は未分類（_Unsorted）
+               "date": "YYYY[-MM[-DD]]" | null,
+               "tags": [["ORIGINALARTIST", "…"]] } }   // 追加のタグ（キー, 値）
+  { "protocol": 1, "ok": false,
+    "reason": "unmatched" | "unknown_channel" | "skip" | "unsupported",
+    "message": "…" }   // unmatched / unknown_channel は要対応（メッセージをそのまま見せる）、skip は取り込まない
+  ```
+- **spindle 側の写像**: `track` → タグ（TITLE / ARTIST 多値 / ALBUM / ALBUMARTIST / DATE / TRACKNUMBER +
+  `tags`）と `pathgen::TrackFields`（category / albumartist / artist（先頭）/ album / title / track_no / year）。
+  `category` は `categories` に同じ canonical key の語彙が無ければ追加する（プラグインの定義が正。
+  初回起動の空 DB でも動く）。トラック番号（album の active な `track_no` の最大 + 1）と配置は
+  ダウンローダ（P3-3）が行う
+- 参照実装: `AkashiSN/spindle-ytmusic-meta`（private。ルール TOML + フィクスチャ + チャンネル定義を同梱した
+  Rust のバイナリ。新パターンは Claude がそのリポジトリでルールとフィクスチャを 1 件ずつ足す運用）
 
 ### 7.8 Inbox 取り込み
 
@@ -1492,7 +1526,8 @@ ctdb_url = "http://db.cuetools.net/lookup2.php"
 
 [ytmusic]
 enabled = true
-rules = "rules/ytmusic.toml"   # 17パターンの外出し
+metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
+metadata_timeout_secs = 30
 
 [bin]                          # 外部バイナリ。パスで上書き可
 ffmpeg = "ffmpeg"
@@ -1679,7 +1714,7 @@ src/
 │   │                    リリースキー再検証、行の登録 / 採用。D-67 / D-68）
 │   ├── inbox.rs         Inbox の走査（件 = ディレクトリ）、タグからの下書き、承認の検証、承認済みの配置
 │   │                    （補正をタグに書いて pathgen::plan の宛先へ。source_type = download。D-68）
-│   └── ytmusic/         parser.rs（ルール TOML）、downloader.rs
+│   └── ytmusic/         metadata.rs（メタデータプラグインのプロトコル v1 と呼び出し。D-69）、downloader.rs
 ├── jobs/
 │   ├── queue.rs  worker.rs  recovery.rs  scheduler.rs（backup / gc の周期投入。inbox は handlers/inbox.rs）
 │   └── handlers/
