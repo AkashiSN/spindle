@@ -113,9 +113,9 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 │   └── <Category>/<AlbumArtist>/<Album>/
 │       ├── 1-01 Title.flac
 │       ├── cover.jpg
-│       ├── disc.cue                   CD リップ時のみ
-│       ├── disc.toc                   CD リップ時のみ
-│       └── rip.log                    自前リップ時のみ
+│       ├── disc.cue                   CD リップ時のみ（複数枚組は disc<N>.cue。D-67）
+│       ├── disc.toc                   CD リップ時のみ（同 disc<N>.toc）
+│       └── rip.log                    自前リップ時のみ（同 rip<N>.log。先頭行 `spindle rip log v1`）
 ├── Derived/                           [dataset] snapshot: なし
 │   └── <Category>/<AlbumArtist>/<Album>/1-01 Title.opus
 ├── Archive/  → /mnt/hdd/media/Archive [dataset, hdd] snapshot: 週次
@@ -496,6 +496,25 @@ Phase 4  commit:     1 トランザクションで
    ↓
 [後続ジョブ投入] rg → transcode(Derived) → thumbnail
 ```
+
+配置（`src/cd/place.rs`、D-67）: rip ジョブの最終段。PCM を `TrackLayout` で切り、raw のまま
+`flac -8 --verify` でエンコード（PCM の MD5 と STREAMINFO の MD5 が一致するときだけ成果物）、
+タグは確定フォームの写像（D-65）+ `TRACKTOTAL` / `MUSICBRAINZ_DISCID`。パスは `[layout]` の
+テンプレート（確定フォームで選んだ category。無ければ `_Unsorted`）で `pathgen::plan` に通し、
+複数枚組の 2 枚目以降は宛先の同名 album に合流する。`job_mutexes` の `library` を取って
+tmp → fsync → `RENAME_NOREPLACE` で置き、1 トランザクションで `albums` / `tracks`
+（`source_type = 'cd_rip'`、`verification`）/ `track_tags` / `album_verifications`（`source = 'rip'`）/
+`track_verifications` を登録して `rg` と `transcode` を投入する。再実行は MD5 で自分の成果物を
+見分ける（宛先のファイル、スキャナが先に拾った行）。同梱ファイルは 1 枚なら `disc.cue` /
+`disc.toc` / `rip.log`、複数枚組は `disc<N>.cue` / `disc<N>.toc` / `rip<N>.log`。`disc.cue` は
+EAC 流の複数ファイル cue（ギャップは前トラック末尾。INDEX 00 は書かない）、`disc.toc` は `Toc` から
+cdrdao 構文で生成、`rip.log` は先頭行 `spindle rip log v1` の自前形式でドライブ・オフセット・
+トラックごとの CRC と照合結果を持つ。スキャナはこの rip.log のあるディレクトリで新規に登録する行を
+`cd_rip` にする（DB を消しても出自が戻る。検証は §7.3 で付け直す）。
+
+同梱ファイル（cover / disc.cue / disc.toc / rip.log）は album 全体の一括リネームに追随する: rename
+ジョブが phase 2 の commit 後に既知の名前のファイルを新ディレクトリへ移し、空になった旧ディレクトリを
+消す（D-67。`edits` には記録せず、巻き戻しは逆向きの移動で戻る）。
 
 不一致時の既定動作: 自動再リップ（最大2回）→ CTDB 修復データ適用 →
 それでも不一致なら `mismatch` フラグ付きで取り込み、UI で要確認表示。
@@ -881,7 +900,8 @@ POST   /api/verify                                { selection }。selection の�
 GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
                                                   /api/tracks の行と /api/tracks/:id には artwork_hash（トラック自身の
                                                   埋め込み画像。無ければ null。D-61）
-GET    /api/categories, POST /api/categories
+GET    /api/categories, POST /api/categories        統制語彙 { "items": [{ id, name }] }。POST は { name }（重複は 409）。
+                                                  CD 取り込みの確定フォームの category に使う（D-67）
 GET    /api/search?q=                             FTS5 trigram（3 文字未満は LIKE）。/api/tracks と同じ
                                                   レスポンス形で、filter / sort / cursor / limit も受ける
 
@@ -1665,6 +1685,6 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 - [ ] 偽ハイレゾ検出のしきい値設計（P3）
 - [ ] 移行後の NFSv4 ACL 再適用（rsync では引き継げない）
 - [ ] Inbox のポーリング間隔（inotify はコンテナ越しに不安定なため既定はポーリング）
-- [ ] 一括リネームで album 全体を動かした後、旧ディレクトリに残る同梱ファイル（cover.jpg /
-      disc.cue / rip.log 等）の追随と空ディレクトリの扱い（rename op はトラックのパスだけを
-      所有する。D-43。Library に同梱ファイルを置き始める P2-8 で決める）
+- [x] 一括リネームで album 全体を動かした後、旧ディレクトリに残る同梱ファイル（cover.jpg /
+      disc.cue / rip.log 等）の追随と空ディレクトリの扱い（2026-09-19。rename ジョブが commit 後に
+      既知の名前を追随させ、空なら rmdir。D-67）

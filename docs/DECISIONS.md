@@ -2257,7 +2257,7 @@ Library の root は 1 データセットであり、size / mtime / ctime（op �
 （CUETools の手法だが、累積和があれば全オフセットの完全な CRC を直接比べられる。crc450 は
 計算だけ残してある）。
 
-**未決**: verify.log の置き場は P2-8 で同梱ファイルの扱いが決まったら見直す。
+**未決**: ~~verify.log の置き場は P2-8 で同梱ファイルの扱いが決まったら見直す~~（D-67 で `data/verify` のままに確定）。
 
 ## D-64 MusicBrainz の候補は「リリース × medium」、TOC の入力源は差し替え可能にする
 
@@ -2392,3 +2392,83 @@ Cover Art Archive を引くか決める）。
 **未決**: オフセット探索を ±5879 に広げる（CrcTable の範囲も一緒に広げる必要がある）。
 80 分 3〜5 秒のシンドローム計算を SIMD で速める（吸い出しは 10 分かかるので今は要らない）。
 CTDB への提出（自分のシンドロームを面順にした `DbSyndromes::from_table` は用意してある）。
+
+---
+
+## D-67 CD の配置は rip ジョブが直接登録し、同梱ファイルは album 全体の移動に追随する
+
+**決定**（2026-09-19。P2-8。D-43 / D-63 / D-64 / D-65 の残課題を閉じる）:
+
+- **配置は `cd::place::place_disc` の 1 関数で、rip ジョブ（P2-5）の最終段として呼ぶ。** 入力は
+  `Toc`、`DiscMetadata`（D-65 の確定フォームと同じ形 + `category`）、`TrackLayout`、オフセット適用済みの
+  tmp の PCM（s16le / 2ch / 44.1k）、`RipReport`（ドライブ・オフセットと出所・試行回数・トラックごとの
+  再読み / C2 数・AccurateRip / CTDB の `MethodResult`・修復の適用数。P2-5 が埋める）。`POST /api/cd/rip`
+  と吸い出しは P2-5 で、P2-8 はテストから `place_disc` を直接呼んで固定する
+- **エンコードは raw PCM を `flac -8 --verify` に直接渡す**（ffmpeg を挟まない。正規化の `FlacEncoder`
+  はデコードが要るので経路が違う）。トラックごとに PCM の MD5 を取り、STREAMINFO の MD5 と一致する
+  ときだけ成果物にする。タグは D-65 の写像（`album_tags` / `track_tags` を Rust に移植）+ `TRACKTOTAL`
+  （TOC の音声トラック数）+ `MUSICBRAINZ_DISCID` を lofty で書く。`category` はタグに書かない（パス専用。
+  SPEC §5）
+- **パスは `pathgen::plan` を再利用する**（`[layout]`、category 無しなら `unsorted`、`disc_count > 1` なら
+  `multi_disc`。降格と衝突は D-43 の規則のまま）。リリースキーは `mb:<release_id>` → 無ければ、宛先
+  ディレクトリに albumartist と album が一致する `disc_count > 1` の album があり、その `disc_no` の
+  トラックがまだ無ければ**その album に合流**（複数枚組の手入力で 2 枚目が `({year})` に降格しない）
+  → それ以外は新規リリース
+- **配置は `job_mutexes` の `library` を取ってから**（scan / gc と同じ。取れなければ Requeue）。
+  トラックと同梱ファイルを tmp → fsync → `RENAME_NOREPLACE` → dir fsync で置き、1 トランザクションで
+  `albums`（無ければ作成。合流なら触らない）/ `tracks`（スキャナの `track_content` / `insert_track`。
+  `source_type = 'cd_rip'`、`verification`）/ `track_tags` / `album_verifications`（`source = 'rip'`、
+  手法ごと、`log_path` は Library 相対の rip.log）/ `track_verifications` を書く。`tracks.verification`
+  の写像は verify ジョブと同じ（CTDB 一致 → `verified_ctdb` → AR 一致 → `verified_ar` → 候補あり不一致 →
+  `mismatch` → 候補なし → `not_attempted`）。後続は `rg`（album）と `transcode`（`derived::enqueue_if_stale`）。
+  カバー画像は無いので thumbnail は出ない（Cover Art Archive は引かない。`/api/artwork/embed` で後から
+  埋め込む）
+- **冪等性は MD5 で判定する。** 宛先に既にファイルがあれば STREAMINFO の MD5 が自分の PCM の MD5 と
+  一致するときだけ自分の成果物とみなして配置を飛ばす。DB に同じ `rel_path` の行が既にあり `audio_md5`
+  も一致すれば（配置の後に落ちてスキャナが先に拾った）挿入せずその行を採用し、出自と検証だけ書く。
+  どちらでもなければ conflict で失敗し、Library は触らない
+- **同梱ファイルの名前は 1 枚なら `disc.cue` / `disc.toc` / `rip.log`、複数枚組は `disc<N>.cue` /
+  `disc<N>.toc` / `rip<N>.log`**（N = `disc_no`、0 埋めなし）。形式:
+  - `rip.log`: 先頭行 `spindle rip log v1`（スキャナの判定キー）。ドライブ / デバイス / 読み取り
+    オフセットと出所 / エンコーダ / 各種 DiscID と TOC 文字列 / アルバム情報 / トラック表（LBA・長さ・
+    再読み・C2・CRC32・ARv1・ARv2・CTDB CRC・照合結果・ファイル名）/ 手法ごとの結論と修復 / 総合結果
+  - `disc.cue`: EAC 流の複数ファイル cue（`REM DISCID` / `REM DATE` / `CATALOG`（バーコードが 13 桁の
+    とき）/ `TITLE` / `PERFORMER`、トラックごとに `FILE "…" WAVE` / `TRACK NN AUDIO` / `TITLE` /
+    `PERFORMER` / `ISRC` / `INDEX 01 00:00:00`）。ギャップは前トラック末尾に付く形（INDEX 00 は TOC から
+    分からない）。データトラックは `REM` で記す
+  - `disc.toc`: `Toc` から cdrdao 構文（`CD_DA` / `CATALOG` / `CD_TEXT` / `TRACK AUDIO` +
+    `FILE "…" 0 MM:SS:FF`）で生成。実ドライブの `cdrdao read-toc`（P2-2）も `Toc` にしてから同じ形で
+    書く（形式を 1 つに）
+- **同梱ファイルは album 全体の移動に追随する（D-43 の残課題）。** rename ジョブは phase 2 の commit
+  後、commit で `rel_dir` を書き換えた album ごとに、旧ディレクトリの**既知の名前**（`cover` / `folder` /
+  `front` × 画像拡張子、`disc*.cue` / `disc*.toc` / `rip*.log`）の通常ファイルを新ディレクトリへ
+  `RENAME_NOREPLACE` で移し（衝突は残して警告）、旧ディレクトリが空なら `rmdir`（`ENOTEMPTY` は無視）。
+  `edits` には記録しない。巻き戻しは逆向きの album 全体の移動になるので同じ経路で戻る。一部だけの
+  巻き戻しでは動かない（トラックが残る側に付いていく）。rename op がトラックのパスだけを所有する
+  原則（D-43）は変えない
+- **verify.log は `data/verify` のまま**（D-63 の未決を閉じる）。Library に置く同梱ファイルは rip 由来の
+  3 つだけ
+- **スキャナは spindle の rip.log から `source_type = 'cd_rip'` を復元する。** ディレクトリの inventory で
+  `rip.log` / `rip<N>.log` を見つけたら先頭行だけ読み、`spindle rip log v1` なら印を付け、**新規挿入する
+  行**だけ `cd_rip` にする（既存行は触らない。`verification` は復元せず遡及照合 §7.3 で付け直す）。
+  不変条件 1（DB はキャッシュ）を出自についても保つ
+- **`category` は確定フォームで選ぶ。** `GET /api/categories` / `POST /api/categories { name }`（SPEC §9 に
+  あって未実装だった）を足し、`DiscDraft` / `DiscMetadata` に `category`（語彙の名前。null なら
+  `_Unsorted`）を持たせる
+
+**理由**: スキャナ経由の登録（置いてから incremental scan）だと出自と検証結果を書く相手の行が
+いつ現れるか分からず、競合を避けるにはどのみち `library` の排他が要る。直接登録なら配置と登録が
+1 つのジョブに閉じ、冪等性の判定も MD5 の 1 規則で済む。同梱ファイルの追随を rename ジョブに置く
+のは、album 全体の移動を既に coordinator が判定していて、そこでしか「ディレクトリが空になる」
+ことが分からないため。出自を rip.log から復元するのは、DB を消しても `cd_rip` の絞り込みが戻る
+ように（検証は照会し直せば戻るが、出自は照会では戻らない）。
+
+**却下**: 置いてからスキャンで拾わせる（上記）。同梱ファイルの移動を op として記録する
+（rename の 2 phase に絡み、巻き戻しの対象が増える割に、ユーザが編集した値ではない）。同梱
+ファイルを残して GC に回収させる（旧ディレクトリに cover.jpg だけが 30 日残る）。verify.log を
+アルバムディレクトリへ移す（既存ログの移行が要り、Library に置く理由が無い）。Cover Art Archive の
+取得（同人 / 国内盤は無いことが多く、埋め込みは後からできる）。`SOURCEMEDIA=CD` のようなタグで出自を
+持つ（外部ツールが付けた同名タグと区別できない。rip.log は spindle の署名付き）。
+
+**未決**: 同梱ファイルの追随が衝突で残ったときの回収（今は警告だけ）。cdrdao の `read-toc` が持つ
+ISRC / pre-emphasis / CD-TEXT を `Toc` に持たせて disc.toc に書く（P2-2 のドライブ実装で決める）。
