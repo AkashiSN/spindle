@@ -762,7 +762,15 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - [ ] **P2-3** MusicBrainz 照会（UA 必須、1req/s）と候補選択 UI
 - [ ] **P2-4** **照会ゼロ件でも完走できる手入力経路**とトラックリスト貼り付け
 - [ ] **P2-5** 吸い出し（全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割）
-- [ ] **P2-6** ARv1/v2 CRC と CTDB CRC32（先頭・末尾トラックの除外規則に注意）
+- [x] **P2-6** ARv1/v2 CRC と CTDB CRC32（先頭・末尾トラックの除外規則に注意）。`src/cd/`
+      （`TrackLayout` にサンプルを順に流すストリーミング計算。吸い出し PCM と既存 FLAC のデコード結果の
+      両方に同じ形で使う。80 分のディスクで 0.3 秒）。定義は CUETools の `AccurateRip.cs` / `CDRepair.cs`
+      に合わせた: ARv1 は先頭トラックの頭 5×588−1、末尾トラックの尻 5×588 を除外（非対称）、
+      ARv2 は 64 bit 積の上位も加算、AccurateRip DB のプレス違い検出に使う crc450 も併せて算出。
+      CTDB は zlib CRC32 で、ディスクは頭 10 セクタと尻 (10 セクタ + 総数 mod 5880)、トラックは先頭の頭と
+      末尾の尻に同じ除外。受け入れ: `tests/cd_crc.rs`（手計算できる閉じた式での除外規則、v2 の上位加算、
+      語の詰め方、crc450、細切れ push の一致、奇数長の持ち越しと L 余りの拒否、サンプル数の過不足）と、CUETools の定義から独立に書いた
+      Python 実装（`scripts/gen_cd_crc_fixture.py` → `tests/fixtures/cd_crc_reference.json`）との突き合わせ
 - [ ] **P2-7** CTDB 照会・修復適用、AccurateRip は補助
 - [ ] **P2-8** エンコードと配置、`rip.log` / `disc.cue` / `disc.toc` の出力。Library に同梱ファイルを
       置き始めるので、一括リネーム後の旧ディレクトリに残る同梱ファイルと空ディレクトリの追随 / 回収

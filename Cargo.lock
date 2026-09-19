@@ -1224,6 +1224,7 @@ dependencies = [
  "axum",
  "base64",
  "caseless",
+ "crc32fast",
  "ebur128",
  "fancy-regex",
  "futures-core",

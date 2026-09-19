@@ -2,6 +2,7 @@
 //! 仕様は docs/SPEC.md、判断の理由は docs/DECISIONS.md
 
 pub mod api;
+pub mod cd;
 pub mod config;
 pub mod db;
 pub mod domain;
