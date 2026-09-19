@@ -1,7 +1,9 @@
 //! Inbox の下書きと承認の検証（`import::inbox::{InboxDraft, proposal, warnings}`。D-68、P2-10）
 
 use spindle::db::inbox::FileRow;
-use spindle::import::inbox::{proposal, warnings, DraftError, DraftTrack, InboxDraft};
+use spindle::import::inbox::{
+    merge_saved, number_missing, proposal, warnings, DraftError, DraftTrack, InboxDraft,
+};
 
 fn file(rel: &str, tags: &[(&str, &str)]) -> FileRow {
     FileRow {
@@ -204,4 +206,100 @@ fn proposal_takes_the_mode_of_tags_and_maps_genre_to_category() {
     // 語彙に無い GENRE は category にしない
     let fs = vec![file("C/x.flac", &[("TITLE", "x"), ("GENRE", "Nope")])];
     assert_eq!(proposal(&fs, &[(1, "Rock".into())], &[]).category, None);
+}
+
+// ---------------------------------------------------------------- 追記の採番と下書きの merge（D-70）
+
+#[test]
+fn number_missing_assigns_from_start_in_file_order_skipping_used_numbers() {
+    let mut d = InboxDraft {
+        category: None,
+        albumartist: "A".into(),
+        album: "B".into(),
+        date: None,
+        tracks: vec![
+            DraftTrack {
+                rel_path: "x/20260902 b.opus".into(),
+                disc_no: 1,
+                track_no: 0,
+                title: "b".into(),
+                artist: String::new(),
+            },
+            DraftTrack {
+                rel_path: "x/20260901 a.opus".into(),
+                disc_no: 1,
+                track_no: 0,
+                title: "a".into(),
+                artist: String::new(),
+            },
+            DraftTrack {
+                rel_path: "x/c.opus".into(),
+                disc_no: 1,
+                track_no: 14,
+                title: "c".into(),
+                artist: String::new(),
+            },
+        ],
+    };
+    // 既存 album の最大が 12 → 13 から。名前順（a, b）に振り、既に使われている 14 は飛ばす
+    number_missing(&mut d, 13);
+    let by_name = |n: &str| {
+        d.tracks
+            .iter()
+            .find(|t| t.rel_path.ends_with(n))
+            .unwrap()
+            .track_no
+    };
+    assert_eq!(by_name("a.opus"), 13);
+    assert_eq!(by_name("b.opus"), 15);
+    assert_eq!(by_name("c.opus"), 14);
+    // 順序は変えない
+    assert!(d.tracks[0].rel_path.ends_with("b.opus"));
+}
+
+#[test]
+fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
+    let saved = InboxDraft {
+        category: Some("Rock".into()),
+        albumartist: "Fixed".into(),
+        album: "Fixed Album".into(),
+        date: Some("2020".into()),
+        tracks: vec![
+            DraftTrack {
+                rel_path: "A/01.flac".into(),
+                disc_no: 1,
+                track_no: 7,
+                title: "Corrected".into(),
+                artist: String::new(),
+            },
+            DraftTrack {
+                rel_path: "A/gone.flac".into(),
+                disc_no: 1,
+                track_no: 8,
+                title: "Gone".into(),
+                artist: String::new(),
+            },
+        ],
+    };
+    let mut proposed = draft();
+    proposed.tracks.push(DraftTrack {
+        rel_path: "A/03.flac".into(),
+        disc_no: 1,
+        track_no: 0,
+        title: "Three".into(),
+        artist: String::new(),
+    });
+    let merged = merge_saved(&saved, &proposed);
+    // アルバム単位の補正は保存した下書き
+    assert_eq!(merged.category.as_deref(), Some("Rock"));
+    assert_eq!(merged.albumartist, "Fixed");
+    assert_eq!(merged.album, "Fixed Album");
+    assert_eq!(merged.date.as_deref(), Some("2020"));
+    // 既知のファイルは補正を保ち、消えたファイルは落ち、新しいファイルは提案のまま
+    let names: Vec<&str> = merged.tracks.iter().map(|t| t.rel_path.as_str()).collect();
+    assert_eq!(names, vec!["A/01.flac", "A/02.flac", "A/03.flac"]);
+    assert_eq!(merged.tracks[0].title, "Corrected");
+    assert_eq!(merged.tracks[0].track_no, 7);
+    assert_eq!(merged.tracks[1].title, "Two");
+    assert_eq!(merged.tracks[2].track_no, 0);
 }

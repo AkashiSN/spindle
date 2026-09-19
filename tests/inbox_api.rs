@@ -324,3 +324,230 @@ async fn inbox_requires_login() {
     let res = app.router.clone().oneshot(r).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ---------------------------------------------------------------- 追記先と判定（D-70）
+
+/// Library に album（`_Unsorted/Artist/Album`、#12 まで）を作る
+async fn seed_album(app: &App) -> i64 {
+    app.db
+        .write(|c| {
+            c.execute(
+                "INSERT INTO albums (id, rel_dir, rel_dir_key, album, albumartist)
+                 VALUES (7, '_Unsorted/Artist/Album', '_unsorted/artist/album', 'Album', 'Artist')",
+                [],
+            )?;
+            for (id, n) in [(1, 11), (2, 12)] {
+                c.execute(
+                    "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec,
+                                         lossless, title, artist_display, album, albumartist, seen_at,
+                                         album_id, disc_no, track_no)
+                     VALUES (?1, ?2, ?2, 0, 0, 0, 'flac', 1, 't', 'a', 'Album', 'Artist', 0, 7, 1, ?3)",
+                    rusqlite::params![id, format!("_Unsorted/Artist/Album/{n} t.flac"), n],
+                )?;
+            }
+            Ok(7)
+        })
+        .await
+        .unwrap()
+}
+
+/// TRACKNUMBER の無い 1 曲の件と、サイドカー（category と判定）
+async fn youtube_item(app: &App, rel_dir: &str, category: Option<&str>, verdict: &str) -> i64 {
+    use spindle::import::ytmusic::sidecar::{FileEntry, Sidecar};
+    let dir = spindle::domain::relpath::RelPath::parse(rel_dir).unwrap();
+    let root = RootDir::open(&app.dir.path().join("Inbox")).unwrap();
+    root.create_dir_all(&dir).unwrap();
+    Sidecar::upsert(
+        &root,
+        &dir,
+        category,
+        "20260901 New [abc].opus",
+        FileEntry {
+            source: "youtube".into(),
+            url: Some("https://www.youtube.com/watch?v=abc".into()),
+            channel: Some("CH".into()),
+            verdict: verdict.into(),
+            message: (verdict != "ok").then(|| "ルールを足してください".to_owned()),
+        },
+    )
+    .unwrap();
+    let rel_dir = rel_dir.to_owned();
+    app.db
+        .write(move |c| {
+            let id = inbox::insert_item(
+                c,
+                &rel_dir,
+                &spindle::domain::relpath::canonical_key(&rel_dir),
+                1000,
+            )?;
+            inbox::replace_files(
+                c,
+                id,
+                &[FileRow {
+                    rel_path: format!("{rel_dir}/20260901 New [abc].opus"),
+                    inode: 1,
+                    size: 1,
+                    mtime_ns: 0,
+                    ctime_ns: 0,
+                    codec: "opus".into(),
+                    lossless: false,
+                    sample_rate: Some(48000),
+                    bit_depth: None,
+                    channels: Some(2),
+                    duration_ms: Some(1000),
+                    tags: [
+                        ("TITLE", "New"),
+                        ("ALBUM", "Album"),
+                        ("ALBUMARTIST", "Artist"),
+                        ("SOURCE_URL", "https://www.youtube.com/watch?v=abc"),
+                    ]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect(),
+                }],
+            )?;
+            Ok(id)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn list_reports_destination_source_and_numbers_after_the_existing_album() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    seed_album(&app).await;
+    app.db
+        .write(|c| {
+            c.execute("INSERT INTO categories (name) VALUES ('Rock')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // category 無し（_Unsorted）で宛先 album 7 に当たる件
+    let id = youtube_item(&app, "youtube/Artist/Album", None, "unmatched").await;
+    let (st, body) = app.get(&c, "/api/inbox").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    assert_eq!(it["destination"]["album_id"], 7, "{it}");
+    assert_eq!(it["destination"]["album"], "Album");
+    assert_eq!(it["destination"]["track_count"], 2);
+    assert_eq!(it["destination"]["max_track_no"], 12);
+    assert!(it["destination"].get("numbers").is_none());
+    // 採番は 13 から
+    assert_eq!(it["proposal"]["tracks"][0]["track_no"], 13);
+    // 判定はトラック行に付く
+    assert_eq!(it["tracks"][0]["source"]["verdict"], "unmatched");
+    assert_eq!(it["tracks"][0]["source"]["source"], "youtube");
+    assert_eq!(
+        it["tracks"][0]["source"]["message"],
+        "ルールを足してください"
+    );
+    assert_eq!(
+        it["tracks"][0]["source"]["url"],
+        "https://www.youtube.com/watch?v=abc"
+    );
+
+    // サイドカーの category は提案に写る（語彙にあるとき）。宛先は変わるので destination は無い
+    let id2 = youtube_item(&app, "youtube/Artist/Other", Some("Rock"), "ok").await;
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id2)
+        .unwrap();
+    assert_eq!(it["proposal"]["category"], "Rock");
+    assert!(it["destination"].is_null());
+    assert_eq!(it["proposal"]["tracks"][0]["track_no"], 1);
+    assert_eq!(it["tracks"][0]["source"]["verdict"], "ok");
+    assert!(it["tracks"][0]["source"]["message"].is_null());
+    // 語彙に無い category は提案しない
+    let id3 = youtube_item(&app, "youtube/Artist/Third", Some("Nope"), "ok").await;
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id3)
+        .unwrap();
+    assert!(it["proposal"]["category"].is_null());
+    // 手で置いた件（サイドカー無し）は source が null
+    let id4 = app.item("AlbumA").await;
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id4)
+        .unwrap();
+    assert!(it["tracks"][0]["source"].is_null());
+}
+
+#[tokio::test]
+async fn approve_rejects_a_number_taken_in_the_destination_album() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    seed_album(&app).await;
+    let id = youtube_item(&app, "youtube/Artist/Album", None, "ok").await;
+    let draft = |n: u32| {
+        json!({
+            "category": null, "albumartist": "Artist", "album": "Album", "date": null,
+            "tracks": [{ "rel_path": "youtube/Artist/Album/20260901 New [abc].opus",
+                         "disc_no": 1, "track_no": n, "title": "New", "artist": "" }]
+        })
+    };
+    let (st, body) = app
+        .post(&c, &format!("/api/inbox/{id}/approve"), draft(12))
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["message"].as_str().unwrap().contains("track 12"),
+        "{body}"
+    );
+    assert_eq!(app.state(id).await, ItemState::Pending);
+    let (st, body) = app
+        .post(&c, &format!("/api/inbox/{id}/approve"), draft(13))
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+}
+
+#[tokio::test]
+async fn pending_item_with_a_saved_draft_proposes_the_merge() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = app.item("AlbumA").await;
+    let mut d = draft("AlbumA");
+    d["album"] = json!("Corrected Album");
+    d["tracks"][1]["title"] = json!("Two (fixed)");
+    let (st, _) = app.post(&c, &format!("/api/inbox/{id}/approve"), d).await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    // 走査が pending に戻し、ファイルが 1 本増えた状況
+    app.db
+        .write(move |c| {
+            inbox::set_state(c, id, ItemState::Pending, Some("ファイルが変わった"), 2)?;
+            let mut files = inbox::files(c, id)?;
+            let mut extra = files[0].clone();
+            extra.rel_path = "AlbumA/03.flac".into();
+            extra.tags = vec![("TITLE".to_owned(), "Three".to_owned())];
+            files.push(extra);
+            inbox::replace_files(c, id, &files)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = &body["items"][0];
+    assert_eq!(it["state"], "pending");
+    assert_eq!(it["proposal"]["album"], "Corrected Album");
+    assert_eq!(it["proposal"]["tracks"][1]["title"], "Two (fixed)");
+    assert_eq!(it["proposal"]["tracks"][2]["rel_path"], "AlbumA/03.flac");
+    assert_eq!(it["proposal"]["tracks"][2]["title"], "Three");
+    // 新しいファイルは既存の番号（1, 2）の続き
+    assert_eq!(it["proposal"]["tracks"][2]["track_no"], 3);
+}

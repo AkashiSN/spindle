@@ -271,6 +271,137 @@ pub fn proposal(
     }
 }
 
+/// `track_no` が 0（TRACKNUMBER 無し）のトラックに、`start` から順に番号を振る（D-70）。
+/// ファイル名順（`rel_path` の昇順。ダウンローダの命名は公開日順）に振り、下書きで既に使われて
+/// いる番号は飛ばす。トラックの並びは変えない。disc は下書きの値のまま
+pub fn number_missing(draft: &mut InboxDraft, start: u32) {
+    let mut used: HashSet<(u32, u32)> = draft
+        .tracks
+        .iter()
+        .filter(|t| t.track_no != 0)
+        .map(|t| (t.disc_no, t.track_no))
+        .collect();
+    let mut order: Vec<usize> = (0..draft.tracks.len())
+        .filter(|&i| draft.tracks[i].track_no == 0)
+        .collect();
+    order.sort_by(|&a, &b| draft.tracks[a].rel_path.cmp(&draft.tracks[b].rel_path));
+    let mut next = start.max(1);
+    for i in order {
+        let disc = draft.tracks[i].disc_no;
+        while used.contains(&(disc, next)) {
+            next += 1;
+        }
+        draft.tracks[i].track_no = next;
+        used.insert((disc, next));
+        next += 1;
+    }
+}
+
+/// 承認後にファイルが増えて `pending` に戻った件の提案（D-70）: アルバム単位の補正と、既知の
+/// ファイルのトラックは保存した下書きから、`proposed` にだけあるファイルは提案から。保存した
+/// 下書きにしか無いファイル（消えたもの）は落とす。並びは `proposed`（件のファイルの順）
+pub fn merge_saved(saved: &InboxDraft, proposed: &InboxDraft) -> InboxDraft {
+    let tracks = proposed
+        .tracks
+        .iter()
+        .map(|p| {
+            let key = canonical_key(&p.rel_path);
+            saved
+                .tracks
+                .iter()
+                .find(|s| canonical_key(&s.rel_path) == key)
+                .cloned()
+                .unwrap_or_else(|| p.clone())
+        })
+        .collect();
+    InboxDraft {
+        category: saved.category.clone(),
+        albumartist: saved.albumartist.clone(),
+        album: saved.album.clone(),
+        date: saved.date.clone(),
+        tracks,
+    }
+}
+
+/// `GET /api/inbox` が返す提案一式
+#[derive(Debug, Clone)]
+pub struct Proposed {
+    pub draft: InboxDraft,
+    /// 追記先の既存 album（D-70）
+    pub destination: Option<Destination>,
+    /// `files` と同じ順。サイドカーの項（無ければ None）
+    pub sources: Vec<Option<crate::import::ytmusic::sidecar::FileEntry>>,
+    pub warnings: Vec<String>,
+}
+
+/// 件の提案（D-68 / D-70）: タグからの下書き → サイドカーの category（語彙にあるとき）→ `pending` で
+/// 保存した下書きがあれば merge → 追記先の album を引き → TRACKNUMBER の無いトラックを採番。
+/// サイドカーが壊れていれば無いものとして扱い、警告に載せる
+pub fn propose(
+    conn: &rusqlite::Connection,
+    inbox: &RootDir,
+    layout: &LayoutConfig,
+    item: &Item,
+    files: &[FileRow],
+    categories: &[(i64, String)],
+    genre_map: &[(String, i64)],
+) -> Result<Proposed, InboxError> {
+    use crate::import::ytmusic::sidecar::Sidecar;
+    let mut warnings = Vec::new();
+    let mut draft = proposal(files, categories, genre_map);
+    let sidecar = if item.rel_dir.is_empty() {
+        None
+    } else {
+        match RelPath::parse(&item.rel_dir) {
+            Ok(dir) => match Sidecar::read(inbox, &dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    warnings.push(e.to_string());
+                    None
+                }
+            },
+            Err(_) => None,
+        }
+    };
+    if let Some(name) = sidecar.as_ref().and_then(|s| s.category.as_deref()) {
+        let key = canonical_key(name);
+        match categories.iter().find(|(_, n)| canonical_key(n) == key) {
+            Some((_, n)) => draft.category = Some(n.clone()),
+            None => warnings.push(format!("サイドカーの category が語彙に無い: {name}")),
+        }
+    }
+    if item.state == ItemState::Pending {
+        if let Some(saved) = item
+            .draft
+            .as_ref()
+            .and_then(|v| serde_json::from_value::<InboxDraft>(v.clone()).ok())
+        {
+            draft = merge_saved(&saved, &draft);
+        }
+    }
+    let destination = destination(conn, layout, &draft)?;
+    let start = destination
+        .as_ref()
+        .and_then(|d| u32::try_from(d.max_track_no).ok())
+        .unwrap_or(0)
+        + 1;
+    number_missing(&mut draft, start);
+    let sources = files
+        .iter()
+        .map(|f| {
+            let name = f.rel_path.rsplit('/').next().unwrap_or(&f.rel_path);
+            sidecar.as_ref().and_then(|s| s.files.get(name).cloned())
+        })
+        .collect();
+    warnings.extend(self::warnings(files, &draft));
+    Ok(Proposed {
+        draft,
+        destination,
+        sources,
+        warnings,
+    })
+}
+
 /// 下書きの問題を人間向けの文字列で
 pub fn warnings(files: &[FileRow], draft: &InboxDraft) -> Vec<String> {
     let names: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();

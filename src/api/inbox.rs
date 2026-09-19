@@ -11,7 +11,8 @@ use serde::Serialize;
 use crate::db::inbox::{self as dbinbox, FileRow, Item, ItemState};
 use crate::db::now_epoch;
 use crate::db::scans;
-use crate::import::inbox::{proposal, warnings, InboxDraft};
+use crate::import::inbox::{destination, propose, Destination, InboxDraft};
+use crate::import::ytmusic::sidecar::FileEntry;
 use crate::jobs::handlers::inbox::new_inbox_job;
 use crate::jobs::EnqueueResult;
 
@@ -19,12 +20,22 @@ use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 
 #[derive(Serialize)]
+pub struct TrackView {
+    #[serde(flatten)]
+    pub file: FileRow,
+    /// サイドカーの項（ダウンローダが置いた件。D-70）
+    pub source: Option<FileEntry>,
+}
+
+#[derive(Serialize)]
 pub struct ItemView {
     #[serde(flatten)]
     pub item: Item,
-    pub tracks: Vec<FileRow>,
+    pub tracks: Vec<TrackView>,
     pub proposal: InboxDraft,
     pub warnings: Vec<String>,
+    /// 追記先の既存 album（D-70）
+    pub destination: Option<Destination>,
 }
 
 #[derive(Serialize)]
@@ -48,9 +59,16 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
     if let Some(r) = unavailable(&state) {
         return Ok(r);
     }
+    let Some(inbox) = state.inbox.clone() else {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "inbox_unavailable",
+        ));
+    };
+    let layout = state.config.layout.clone();
     let items = state
         .db
-        .read(|c| {
+        .read(move |c| {
             // 表示名（`scans::load_categories` は照合用の canonical key を返す）
             let categories: Vec<(i64, String)> = crate::db::categories::list(c)?
                 .into_iter()
@@ -59,19 +77,28 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
             let genre_map = scans::load_genre_map(c)?;
             let mut out = Vec::new();
             for item in dbinbox::list(c)? {
-                let tracks = dbinbox::files(c, item.id)?;
-                let p = proposal(&tracks, &categories, &genre_map);
-                let w = warnings(&tracks, &p);
+                let files = dbinbox::files(c, item.id)?;
+                let p = match propose(c, &inbox, &layout, &item, &files, &categories, &genre_map) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(Err(e.to_string())),
+                };
+                let tracks = files
+                    .into_iter()
+                    .zip(p.sources)
+                    .map(|(file, source)| TrackView { file, source })
+                    .collect();
                 out.push(ItemView {
                     item,
                     tracks,
-                    proposal: p,
-                    warnings: w,
+                    proposal: p.draft,
+                    warnings: p.warnings,
+                    destination: p.destination,
                 });
             }
-            Ok(out)
+            Ok(Ok(out))
         })
-        .await?;
+        .await?
+        .map_err(ApiError::Internal)?;
     Ok(Json(ItemList { items }).into_response())
 }
 
@@ -97,6 +124,7 @@ pub async fn approve(
     }
     let value = serde_json::to_value(&draft)
         .map_err(|e| ApiError::Internal(format!("下書きを JSON にできない: {e}")))?;
+    let layout = state.config.layout.clone();
     // 状態の検査・下書きの検証・保存・遷移を 1 トランザクションで行い、遷移は CAS
     // （読んでから書くまでに worker / 走査 / 別の API が動かした件を上書きしない）
     let outcome = state
@@ -114,6 +142,23 @@ pub async fn approve(
                 .collect();
             if let Err(e) = draft.validate(&names) {
                 return Ok(Approve::Bad(e.to_string()));
+            }
+            // 追記先の active なトラックと番号が重ならないこと（配置で failed になる前に直させる。D-70）
+            let dest = match destination(c, &layout, &draft) {
+                Ok(d) => d,
+                Err(e) => return Ok(Approve::Bad(e.to_string())),
+            };
+            if let Some(d) = dest {
+                if let Some(t) = draft
+                    .tracks
+                    .iter()
+                    .find(|t| d.numbers.contains(&(t.disc_no, t.track_no)))
+                {
+                    return Ok(Approve::Bad(format!(
+                        "宛先の album に同じ番号のトラックがある: disc {} track {}",
+                        t.disc_no, t.track_no
+                    )));
+                }
             }
             dbinbox::set_draft(c, id, &value)?;
             let moved = dbinbox::transition(
