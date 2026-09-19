@@ -80,6 +80,7 @@ ident      = { (ASCII_ALPHANUMERIC | "_" | " ")+ }
 | `missing` | 真偽 | 論理削除されているか |
 | `hirescheck` | 文字列 | `ok` / `upsampled` / `padded` / `both` / `inconclusive` / `decode_error`（未検査は MISSING） |
 | `cutoff` | 数値 | 偽ハイレゾ検出のカットオフ周波数（Hz） |
+| `cliff` | 数値 | 偽ハイレゾ検出のカットオフ前後 1 kHz の落差（dB） |
 | `effectivebits` | 数値 | 偽ハイレゾ検出の実効ビット数 |
 
 ## AST
@@ -140,7 +141,7 @@ Autoplaylist はファイルとして保存できないため、クエリ文字�
 なので有無は問えない。
 
 spindle 固有のフィールド（`verification` `category` `source_type` `lossless`
-`added` `has_derived` `missing` `hirescheck` `cutoff` `effectivebits`）は foobar 側に存在しないため、その項を落として
+`added` `has_derived` `missing` `hirescheck` `cutoff` `cliff` `effectivebits`）は foobar 側に存在しないため、その項を落として
 `notes` に出す。`MATCHES` も同様。落ちて空になった `AND` / `OR` と、子が落ちた
 `NOT` も落とす（`OR` の 1 項が落ちると結果は狭まる。`notes` を見て手で直す）。
 

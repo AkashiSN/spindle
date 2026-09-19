@@ -915,19 +915,22 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - [ ] **P3-5** 偽ハイレゾ検出（`rustfft`、任意機能。SPEC §7.10、D-71。表示と絞り込みだけで、判定を消費する
       自動処理は無い）
       - [ ] `media/hires.rs`: `HiresSink`（PcmSink。Hann 8192 / ホップ 8192 の FFT をチャンネルごとに累積、
-            無音フレーム除外、サンプルの OR）→ `Measurement { cutoff_hz, cliff_db, effective_bits }` →
-            `[hires]` のしきい値で `Status`。合成信号の単体テスト（brickwall → upsampled、緩やかな
-            ロールオフ → inconclusive、全帯域 → ok、下位 8 bit ゼロ → padded、無音 → inconclusive）
-      - [ ] `db/migrations/0016_hires_check.sql`: `tracks.hires_check*` + `hires_cutoff_hz` / `hires_effective_bits`、
+            無音フレーム除外、サンプルの OR）→ `Measurement { cutoff_hz, cliff_db, effective_bits }`（探索は
+            1/3 オクターブ平滑化、崖は平滑化前。境界は SPEC §7.10）→ `[hires]` のしきい値で `Status`。
+            合成信号の単体テスト（brickwall → upsampled、緩やかなロールオフ → inconclusive、全帯域 → ok
+            （cutoff = Nyquist）、下位 8 bit ゼロ → padded、両方 → both、全無音 → inconclusive で
+            計測値 NULL、帯域外が完全ゼロでも有限、Nyquist 直下のカットオフで cliff NULL）
+      - [ ] `db/migrations/0016_hires_check.sql`: `tracks.hires_check*` + `hires_cutoff_hz` / `hires_cliff_db` / `hires_effective_bits`、
             `jobs.type` に `hirescheck`（0015 と同じ表の作り直し）。`db/hires.rs`（Status / Target / record /
             enqueue_all_unchecked / dedup_key）
-      - [ ] `jobs/handlers/hirescheck.rs`（並列 = CPU コア数、stale ゲート、track_locks、fstat 照合 → decode →
-            版付き record）。`[hires]` 設定。スキャン commit での自動投入。`POST /api/hirescheck`
+      - [ ] `jobs/handlers/hirescheck.rs`（並列 = max(1, コア数 / 2)、`version_field` に追加して stale ゲートと
+            track_locks を効かせる、fstat 照合 → decode → 版付き record）。`[hires]` 設定。スキャン commit での自動投入。`POST /api/hirescheck`
       - [ ] `tracks` の行に `hires_check`、`Flag::HiresUnchecked` / `HiresSuspect`、DSL の `hirescheck` /
-            `cutoff` / `effectivebits`
+            `cutoff` / `cliff` / `effectivebits`
       - [ ] UI: バッジ、プロパティ（判定 + 計測値）、フィルタ、操作タブの再投入
-      - [ ] 受け入れ: `tests/hires_check.rs`（合成 FLAC でジョブを通す。差し替え済みの Skipped、版が進んだ no-op、
-            対象条件）、`tests/hirescheck_api.rs`、`tests/config.rs`、`web/src/lib/*.test.ts`
+      - [ ] 受け入れ: `tests/hires_check.rs`（合成 FLAC でジョブを通す。差し替え済みは記録なしで Done、版が進んだ
+            no-op、対象条件。ffmpeg 経由（WavPack）の 24 bit で下位 8 bit ゼロ / 非ゼロ・最大正負が同じ
+            スケールで戻ること）、`tests/hirescheck_api.rs`、`tests/config.rs`、`web/src/lib/*.test.ts`
 
 ---
 

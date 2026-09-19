@@ -987,27 +987,38 @@ tmp + rename で反映する。巻き戻しは全ゼロを書き戻す（`audio_
 依らない。D-71）。非可逆由来の可逆（44.1 kHz の FLAC が 16 kHz で切れている等）は対象外。
 
 ```
-hirescheck ジョブ（読むだけ。track_id + audio_version、並列 = CPU コア数）
+hirescheck ジョブ（読むだけ。track_id + audio_version、並列 = max(1, CPU コア数 / 2)）
   root の dirfd で開き fstat を行と照合 → media::decode で PCM を流す（PcmSink）
   ├ スペクトル（sample_rate > 48000 のとき）
-  │   チャンネルごとに Hann 窓 8192 点 / ホップ 8192 の FFT（rustfft）、パワーを線形で累積
+  │   チャンネルごとに Hann 窓 8192 点 / ホップ 8192 の FFT（rustfft）。パワーはフルスケール正弦波が
+  │   0 dB になるよう正規化（|X_k|² × (2 / Σw)²）し、線形のまま累積して有音フレーム数で割る
   │   RMS が -70 dBFS 未満のフレームは無音として捨てる
-  │   終了時: 平均パワーを dB → 1/3 オクターブ幅で平滑化
-  │     noise floor = Nyquist 直下 5% のビンの中央値
-  │     cutoff_hz   = floor + 10 dB を上回る最高の周波数
-  │     cliff_db    = cutoff 直前 1 kHz の平均 − 直後 1 kHz の平均
+  │   終了時（有音フレームが 1 以上のとき）:
+  │     P[k]        = 平均線形パワー（未平滑）。dB は 10·log10(max(P, 1e-20))（下限 -200 dB）
+  │     S[k]        = 各ビンを中心に ±1/6 オクターブ（= 1/3 オクターブ幅）の P を線形平均して dB。
+  │                   窓は [0, Nyquist] で切る（端は片側だけ）
+  │     floor_db    = Nyquist 直下 5% のビンの S の中央値
+  │     cutoff_hz   = S[k] > floor_db + 10 dB を満たす最高ビンの周波数。
+  │                   該当ビンが無ければ（上端まで信号がある） cutoff_hz = Nyquist
+  │     cliff_db    = 10·log10(mean(P[cutoff−1 kHz, cutoff)) / mean(P[cutoff, cutoff+1 kHz]))。
+  │                   **平滑化前の P で測る**（S で測ると崖を自分でぼかす）。帯域は [0, Nyquist] で
+  │                   切り、どちらかの帯域にビンが無ければ（cutoff が Nyquist 直下・1 kHz 未満）NULL。
+  │                   分母が 0 なら +200 dB に飽和
   │   チャンネルが複数なら cutoff が最大のチャンネルを採る（片側だけ本物なら本物）
+  │   有音フレームが 0 なら cutoff_hz / cliff_db は NULL
   ├ ビット（bit_depth ≤ 24 のとき）
-  │   round(sample × 2^(bit_depth−1)) を i32 に戻して全サンプルを OR
-  │   effective_bits = bit_depth − 末尾ゼロビット数。32 bit は f32 で正確でないので NULL
-  └ 判定（計測しなかった側は NULL。上から順に最初に当たったもの）
+  │   round(sample × 2^(bit_depth−1)) を i32 に戻して全チャンネル・全サンプルを OR
+  │   effective_bits = bit_depth − OR の末尾ゼロビット数。OR = 0（全無音）なら NULL
+  │   32 bit は f32 で正確でないので NULL
+  └ 判定（上から順に最初に当たったもの。計測しなかった側は NULL）
       decode_error : デコード失敗（hires_check_error に stderr / メッセージの先頭 500 文字）
+      inconclusive : 計測できたものが無い（cutoff_hz と effective_bits がともに NULL。全無音、
+                     32 bit かつ ≤ 48 kHz）
       both         : upsampled かつ padded
       upsampled    : cutoff_hz ≤ [hires].cutoff_hz かつ cliff_db ≥ [hires].cliff_db
       padded       : effective_bits ≤ 16
-      inconclusive : cutoff_hz ≤ [hires].cutoff_hz だが崖が無い（自然なロールオフ。本物の可能性あり）、
-                     スペクトルを取る対象なのに有音フレームが 0、または両方とも計測できない
-                     （32 bit かつ ≤ 48 kHz）
+      inconclusive : cutoff_hz ≤ [hires].cutoff_hz だが崖が無い（cliff_db が NULL か閾値未満。
+                     自然なロールオフ。本物の可能性あり）
       ok           : いずれでもない
 ```
 
@@ -1016,16 +1027,17 @@ hirescheck ジョブ（読むだけ。track_id + audio_version、並列 = CPU �
 それを条件に加えて誤検出を避ける。崖の無いものは `inconclusive` として人が見る。
 
 結果は `tracks.hires_check` に検査時の `audio_version` 付きで記録し（`hires_checked_at` /
-`hires_check_version` / `hires_check_error`）、**計測値 `hires_cutoff_hz` / `hires_effective_bits`
-も残す**（しきい値を変えたときや目視の判断に使う。判定は検査時に確定し、しきい値の変更は既存の
+`hires_check_version` / `hires_check_error`）、**計測値 `hires_cutoff_hz` / `hires_cliff_db` /
+`hires_effective_bits` も残す**（しきい値を変えたときや目視の判断に使う。判定は検査時に確定し、しきい値の変更は既存の
 結果を書き換えない。再判定は手動投入）。版が進めば結果は古い扱い（`stale`）。
 `[hires].check_on_import` ならスキャン完了時に結果の無い対象を自動で投入する（flaccheck と同型）。
 手動は `POST /api/hirescheck { selection }`（対象外・missing は `skipped`）。
 一覧の固定フィルタ `hires_unchecked` / `hires_suspect`（`upsampled` / `padded` / `both`）。
-DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`effectivebits`（数値）。
+DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数値、dB）、`effectivebits`（数値）。
 
-開いた FD の fstat が行と一致しない・missing なら何も書かず Skipped（次のスキャンで版が進めば
-再投入される）。`record` は `WHERE audio_version = ?` で、検査中に版が進んでいれば書かない。
+開いた FD の fstat が行と一致しない・missing なら何も書かず `Outcome::Done` で終える（flaccheck と
+同じ。API の `skipped` は投入時に対象外だった数で、ジョブの終端とは別）。次のスキャンで版が進めば
+再投入される。`record` は `WHERE audio_version = ?` で、検査中に版が進んでいれば書かない。
 
 ---
 
@@ -1043,7 +1055,7 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`effectivebits
 | `normalize` | 2 | track_id + op_id（同じトラックの直列化は track_locks） |
 | `thumbnail` | 4 | artwork_id |
 | `flaccheck` | CPU コア数 | track_id + audio_version（版付き。D-57） |
-| `hirescheck` | CPU コア数 | track_id + audio_version（版付き。§7.10、D-71） |
+| `hirescheck` | max(1, CPU コア数 / 2) | track_id + audio_version（版付き。§7.10、D-71。rg / transcode / flaccheck と重なる分を抑える） |
 | `inbox` | 1 | 固定 |
 | `ytdl` | 1 | `ytdl:<url>`（playlist の展開で投入する分も同じ。D-70） |
 | `gc` | 1 | 固定（scan と同じ排他 `library` を取れなければ Requeue。D-56） |
@@ -1100,7 +1112,7 @@ POST   /api/flaccheck                             { selection }。active な FLA
                                                   投入（§7.9、D-57。読むだけで preview は無い）
 POST   /api/hirescheck                            { selection }。対象（可逆かつ >48 kHz または >16 bit）ごとに
                                                   hirescheck ジョブを投入（§7.10、D-71。読むだけで preview は無い）
-                                                  → 200 { tracks, skipped, duplicates, job_ids } | 409 no_changes
+                                                  → 202 { tracks, skipped, duplicates, job_ids } | 409 no_changes
 POST   /api/md5fill                               { selection, description?, skip_pending? }。flac_check = md5_missing
                                                   の FLAC に md5 op の編集バッチを記録（§7.9、D-59）
                                                   → 201 { batch_id, affected, skipped, pending_excluded }
@@ -1214,7 +1226,7 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "flac_check": { "status": "ok", "checked_at": 1700000000, "stale": false, "error": null },
                                                                        // 未検査なら null（§7.9）
                "hires_check": { "status": "upsampled", "checked_at": 1700000000, "stale": false,
-                                "error": null, "cutoff_hz": 22050, "effective_bits": 16 },
+                                "error": null, "cutoff_hz": 22050, "cliff_db": 48.3, "effective_bits": 16 },
                                                                        // 対象外・未検査なら null（§7.10）
                "pending_batch_id": 42,                                // または null
                "conflict_batch_id": 41,                               // または null
@@ -1377,7 +1389,8 @@ ORDER BY %date% DESC LIMIT 100
   `MISSING` / `PRESENT`
 - 論理: `AND` / `OR` / `NOT` / 括弧
 - 拡張フィールド: `verification` `lossless` `codec` `samplerate` `bitdepth`
-  `channels` `category` `added` `duration` `has_derived` `missing`
+  `channels` `category` `added` `duration` `has_derived` `missing` `hirescheck` `cutoff` `cliff`
+  `effectivebits`
 - 独自拡張（foobar に無い）: `MATCHES` / `LIMIT` / `ORDER BY random`
 - SQL 生成はホワイトリスト列へのマッピング。任意タグは
   `EXISTS (SELECT 1 FROM track_tags ...)` に展開。値は全てバインドパラメータ
@@ -1401,7 +1414,8 @@ ORDER BY %date% DESC LIMIT 100
 1. **フィールド名の写像。** foobar はスペース区切り: `ALBUMARTIST` → `%album artist%`、
    `TRACKNUMBER` → `%tracknumber%`。写像表を持つ（docs/DSL.md）。技術情報（`codec` `samplerate`
    `bitrate` `channels` `bitdepth` `duration`）は foobar の技術フィールドへ、spindle 固有
-   （`verification` `category` `source_type` `lossless` `added` `has_derived` `missing`）と `MATCHES` は
+   （`verification` `category` `source_type` `lossless` `added` `has_derived` `missing` `hirescheck`
+   `cutoff` `cliff` `effectivebits`）と `MATCHES` は
    変換不能としてその項を落とし `notes` に出す
 2. **`ORDER BY` は分離。** foobar の Autoplaylist はソートをクエリに書かず、
    別欄のタイトルフォーマット文字列で指定する。「クエリ」「ソートパターン」の
@@ -1850,7 +1864,7 @@ src/
 ├── media/
 │   ├── fingerprint.rs   STREAMINFO MD5 / デコード PCM MD5 / パケット列ハッシュ
 │   ├── decode.rs        symphonia / ffmpeg フォールバック
-│   ├── hires.rs         偽ハイレゾ検出の解析（PcmSink: FFT の累積とサンプル OR → 計測値 → 判定。§7.10、D-71）
+│   ├── hires.rs         偽ハイレゾ検出の解析（PcmSink: FFT の累積とサンプル OR → 計測値（cutoff / cliff / 実効ビット）→ 判定。§7.10、D-71）
 │   ├── encode.rs        flac（ffmpeg デコード → flac -8）/ opus
 │   └── artwork.rs       同梱 / 埋め込み画像の選択、判別、ハッシュアドレスのキャッシュ（P1-3）
 ├── cd/
@@ -1947,6 +1961,8 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 - [x] `HAS` 等の演算子の foobar 実機との挙動突き合わせ（2026-09-19。部分一致で一致。D-55）
 - [x] 偽ハイレゾ検出のしきい値設計（2026-09-20。カットオフ ≤ 24 kHz かつ崖 ≥ 30 dB / 実効 ≤ 16 bit。計測値も保存。§7.10、D-71）
 - [ ] 移行後の NFSv4 ACL 再適用（rsync では引き継げない）
+- [ ] CPU 系ジョブ（rg / transcode / flaccheck / hirescheck）に共通の並列予算。いまは種別ごとの Semaphore で
+      同時に走ると合計が CPU コア数を超える（D-71 で hirescheck の並列を半分にして緩和したのみ）
 - [x] Inbox のポーリング間隔（2026-09-19。`[inbox].poll_interval_secs` 既定 60 秒 + 手動。D-68）
 - [x] 一括リネームで album 全体を動かした後、旧ディレクトリに残る同梱ファイル（cover.jpg /
       disc.cue / rip.log 等）の追随と空ディレクトリの扱い（2026-09-19。rename ジョブが commit 後に
