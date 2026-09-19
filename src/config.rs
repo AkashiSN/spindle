@@ -245,6 +245,13 @@ impl Default for VerifyConfig {
 pub struct MusicBrainzConfig {
     pub user_agent: String,
     pub rate_limit_per_sec: u32,
+    /// `ws/2/` のベース URL（末尾 `/`）。テストと自前ミラー用に差し替え可
+    #[serde(default = "default_musicbrainz_url")]
+    pub url: String,
+}
+
+fn default_musicbrainz_url() -> String {
+    "https://musicbrainz.org/ws/2/".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]

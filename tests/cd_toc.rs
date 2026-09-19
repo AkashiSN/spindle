@@ -313,3 +313,57 @@ fn toc_rejects_a_leadout_that_cannot_take_the_pregap_offset() {
     assert_eq!(edge.musicbrainz_disc_id().len(), 28);
     assert_eq!(edge.accuraterip_id().audio_tracks, 1);
 }
+
+// ---------------------------------------------------------------- 文字列からの読み取り
+
+/// CTDB 形式は ctdb_toc() の逆。データトラックの `-` も戻る
+#[test]
+fn ctdb_toc_string_round_trips() {
+    for toc in [
+        mb_doc_disc(),
+        nevermind(),
+        hybrid_theory(),
+        mb_doc_cd_extra(),
+    ] {
+        assert_eq!(Toc::parse(&toc.ctdb_toc()).expect("parse"), toc);
+    }
+    assert_eq!(
+        Toc::parse(" 0 : 15213 :32164:46442:63264:80339:95312 ").expect("空白は許す"),
+        mb_doc_disc()
+    );
+}
+
+/// MusicBrainz 形式は musicbrainz_toc() の逆（+150 を戻す。音声のみ）
+#[test]
+fn musicbrainz_toc_string_round_trips() {
+    for toc in [mb_doc_disc(), nevermind()] {
+        assert_eq!(Toc::parse(&toc.musicbrainz_toc()).expect("parse"), toc);
+    }
+    // CD-Extra は音声セッションに戻る
+    assert_eq!(
+        Toc::parse(&mb_doc_cd_extra().musicbrainz_toc()).expect("parse"),
+        mb_doc_cd_extra().audio_session()
+    );
+}
+
+#[test]
+fn toc_string_parsing_rejects_garbage() {
+    for bad in [
+        "",
+        "abc",
+        "0:10:5:20",        // 昇順でない
+        "0:100",            // 1 トラックの CTDB 形式は OK なので次で確かめる
+        "1 2",              // MB 形式が短い
+        "1 3 1000 150 300", // オフセットの数が合わない
+        "1 2 1000 100 300", // 150 未満
+        "0 1 1000 150 300", // 先頭が 0
+        "1:2:x",
+    ] {
+        let r = Toc::parse(bad);
+        if bad == "0:100" {
+            assert!(r.is_ok(), "{bad}");
+        } else {
+            assert!(r.is_err(), "{bad}: {r:?}");
+        }
+    }
+}

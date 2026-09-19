@@ -14,7 +14,7 @@ import { AlbumArt } from './components/AlbumArt'
 import { HistoryView } from './components/HistoryView'
 import { JobsView } from './components/JobsView'
 import { Login } from './components/Login'
-import { Placeholder } from './components/Placeholder'
+import { CdView } from './components/CdView'
 import { SettingsView } from './components/SettingsView'
 import { PlayerBar } from './components/PlayerBar'
 import { RightPanel, type SelectionSummary } from './components/RightPanel'
@@ -32,6 +32,7 @@ import { useOperations } from './hooks/useOperations'
 import { usePlayer } from './hooks/usePlayer'
 import { usePlaylists } from './hooks/usePlaylists'
 import { useSettings } from './hooks/useSettings'
+import { useCdLookup } from './hooks/useCdLookup'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
@@ -122,6 +123,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     setView('history')
   }, [])
   const settings = useSettings(sseOpen && view === 'settings')
+  const cd = useCdLookup()
   const visibleEnd = useRef(0)
 
   // filter 形の選択の「うち反映待ち」。選択集合は immutable でも中の行の pending はバッチの進行で
@@ -518,7 +520,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             onOpen={(a) => handleScope({ album_id: a.id })}
           />
         ) : view === 'cd' ? (
-          <Placeholder title="CD" note="リッピングのウィザードは P2" />
+          <CdView cd={cd} />
         ) : view === 'jobs' ? (
           <JobsView
             jobs={jobs}

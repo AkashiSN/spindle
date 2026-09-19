@@ -2258,3 +2258,43 @@ Library の root は 1 データセットであり、size / mtime / ctime（op �
 計算だけ残してある）。
 
 **未決**: verify.log の置き場は P2-8 で同梱ファイルの扱いが決まったら見直す。
+
+## D-64 MusicBrainz の候補は「リリース × medium」、TOC の入力源は差し替え可能にする
+
+**決定**（2026-09-19。P2-3）:
+
+- **照会は DiscID → TOC の 2 段。** `ws/2/discid/<DiscID>` を引き、404 なら同じエンドポイントに
+  `?toc=`（MusicBrainz 形式の TOC）を付けて fuzzy に引く。MB 側がプレス違い・登録漏れの DiscID に
+  対して TOC の近いリリースを返す。fuzzy の結果は `exact = false` として区別する
+- **候補の単位はリリース × medium。** リリースの media のうち、自分の DiscID を `discs` に持つ
+  medium は exact、そうでなければ音声トラック数が同じ medium を近似の候補にする（複数枚組で
+  トラック数が同じディスクが複数あれば、それぞれが候補になる）。exact を先に並べ、MB の順は保つ。
+  fuzzy の応答にも自分の DiscID を持つ medium が混ざることがあり、それは exact
+- **`inc=recordings artist-credits labels release-groups isrcs`。** トラックのタイトル・アーティスト
+  表記（joinphrase で繋ぐ。トラック固有が無ければリリースのもの）・長さ・recording / track の id・
+  ISRC、リリースの日付・国・レーベルとカタログ番号・バーコード・注記・release-group id を候補に
+  持たせる。タグの写像（P2-8 の配置で書く）はこの候補から決める
+- **UA 必須・1 req/s はクライアント内で守る。** 直前の要求時刻を持ち、間隔が空くまで待つ
+  （ロックを持ったまま待つので並行する照会も直列）。503（負荷制限）は 1 度だけ間隔ぶん待って
+  再試行し、それでも 503 なら API は 503 `musicbrainz_unavailable`（一時的。届かない・壊れた応答の
+  502 `lookup_failed` とは分ける）。両方の要求に `cdstubs=no` を付ける（未登録 DiscID に CD stub が
+  あると 200 で別の形が返り、404 → fuzzy に進めない）。`[musicbrainz].url` で照会先を差し替えられる
+  （テストと自前ミラー）
+- **TOC の入力源は差し替え可能にし、ドライブが無い間は貼り付け。** `POST /api/cd/lookup { toc }` は
+  TOC 文字列（CTDB 形式か MusicBrainz 形式。`Toc::parse`）を受け、ドライブからの TOC
+  （P2-1 / P2-2 の `GET /api/cd/status`）も同じ文字列で渡す。CD 画面は今は貼り付け欄
+  （`cdrecord -toc` の出力も LBA を拾って受け付ける）を入力源にし、P2-1 で検出に差し替える。
+  貼り付けはデバッグ用に残す
+
+**理由**: 候補をリリース単位にすると複数枚組でどの medium かが決まらず、トラック対応も
+確認できない。DiscID だけで引くとプレス違いの盤（同じ内容で TOC が数セクタ違う）が 0 件になり、
+D-21 の「手入力」に落ちる場面が増える。TOC の入力源を API の境界で文字列に揃えておけば、
+ドライブの実装（P2-1）を待たずに照会と候補選択の全経路をテストでき、届いた後は検出を差し替える
+だけで済む。
+
+**却下**: libdiscid の FFI（TOC からの整数演算で足りる。P2-2）。CD stub（MB の cdstubs）を
+候補に含める（品質が低く、手入力経路があるので不要）。cover art の取得（P2-8 の配置で
+Cover Art Archive を引くか決める）。
+
+**未決**: fuzzy の候補が多いときの並べ方（今は MB の順）。P2-4 の手入力と候補の「補正」
+（候補を土台にタイトルを直す）は P2-4 で決める。

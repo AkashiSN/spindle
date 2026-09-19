@@ -38,6 +38,8 @@ pub struct AppState {
     pub gc: Option<Arc<GcRoots>>,
     /// オンザフライ変換の上限に足す猶予（トラック長 + これ。P1-9）
     pub transcode_grace: std::time::Duration,
+    /// MusicBrainz の照会（P2-3）。無いと `/api/cd/lookup` は 503
+    pub musicbrainz: Option<Arc<crate::cd::musicbrainz::MusicBrainzClient>>,
 }
 
 impl AppState {
@@ -57,7 +59,16 @@ impl AppState {
             playlists: None,
             gc: None,
             transcode_grace: super::stream::TRANSCODE_GRACE,
+            musicbrainz: None,
         }
+    }
+
+    pub fn with_musicbrainz(
+        mut self,
+        client: Arc<crate::cd::musicbrainz::MusicBrainzClient>,
+    ) -> Self {
+        self.musicbrainz = Some(client);
+        self
     }
 
     #[doc(hidden)]

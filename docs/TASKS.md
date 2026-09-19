@@ -770,7 +770,15 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
         受け入れ: `tests/cd_toc.rs`（MB ドキュメントの 6 トラック例と CD-Extra 例、Nevermind、
         Hybrid Theory JP Enhanced CD。DiscID は MB ドキュメント / `ws/2` で、AccurateRip ID は
         実サーバの `dBAR-*.bin` で照合した値。再構成、不正な TOC の拒否、u32 境界）
-- [ ] **P2-3** MusicBrainz 照会（UA 必須、1req/s）と候補選択 UI
+- [x] **P2-3** MusicBrainz 照会（UA 必須、1req/s）と候補選択 UI。D-64。`src/cd/musicbrainz.rs`
+      （`MusicBrainzClient`: DiscID → 404 なら `?toc=` の fuzzy、間隔待ち、503 の再試行。`parse_lookup`:
+      リリース × medium の候補、exact / 近似）、`Toc::parse`（CTDB 形式 / MusicBrainz 形式）、
+      `POST /api/cd/lookup { toc }`、設定 `[musicbrainz].url`。UI は CD タブ（`CdView` / `useCdLookup` /
+      `lib/cd.ts`）: ドライブが無い間は TOC の貼り付け（`cdrecord -toc` の出力も可）→ 候補一覧（DiscID 一致 /
+      近似、要約、曲数、長さ）→ 選択でトラック対応。受け入れ: `tests/cd_musicbrainz.rs`（実応答フィクスチャ
+      tests/fixtures/mb/ の解釈: exact / Enhanced CD / fuzzy / 0 件 / joinphrase / フォールバック、ローカル HTTP で
+      DiscID → toc の順・UA・inc・503 の再試行・間隔）、`tests/cd_lookup_api.rs`、`tests/cd_toc.rs`（文字列の往復）、
+      `web/src/lib/cd.test.ts`。残り: 検出（P2-1）で入力源を差し替える
 - [ ] **P2-4** **照会ゼロ件でも完走できる手入力経路**とトラックリスト貼り付け
 - [ ] **P2-5** 吸い出し（全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割）
 - [x] **P2-6** ARv1/v2 CRC と CTDB CRC32（先頭・末尾トラックの除外規則に注意）。`src/cd/`

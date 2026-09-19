@@ -72,6 +72,8 @@ pub enum TocError {
     TooLong,
     #[error("トラック {index} のサンプル数 {samples} が 588 の倍数でない（CD 由来でない）")]
     NotSectorAligned { index: usize, samples: u64 },
+    #[error("TOC 文字列を解釈できない: {0}")]
+    Unparsable(String),
 }
 
 /// AccurateRip の 3 つの ID。DB のパスは
@@ -203,6 +205,81 @@ impl Toc {
         }
         let leadout = u32::try_from(lba).map_err(|_| TocError::TooLong)?;
         Self::new(tracks, leadout)
+    }
+
+    /// TOC 文字列を読む。CTDB 形式 `start:start:…:-datastart:leadout`（LBA。データトラックは
+    /// `-` 前置。[`Toc::ctdb_toc`] の逆）か、MusicBrainz 形式 `first last leadout+150 offset+150 …`
+    /// （[`Toc::musicbrainz_toc`] の逆。全部音声トラック）。どちらかは区切り（`:` か空白）で見分ける
+    pub fn parse(s: &str) -> Result<Self, TocError> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(TocError::Unparsable("空".into()));
+        }
+        let num = |t: &str| -> Result<u32, TocError> {
+            t.parse()
+                .map_err(|_| TocError::Unparsable(format!("数でない: {t:?}")))
+        };
+        if s.contains(':') {
+            let parts: Vec<&str> = s.split(':').map(str::trim).collect();
+            let (&leadout, starts) = parts
+                .split_last()
+                .ok_or_else(|| TocError::Unparsable("短すぎる".into()))?;
+            if starts.is_empty() {
+                return Err(TocError::Unparsable("トラックが無い".into()));
+            }
+            let mut tracks = Vec::with_capacity(starts.len());
+            for (i, t) in starts.iter().enumerate() {
+                let (is_audio, t) = match t.strip_prefix('-') {
+                    Some(data) => (false, data),
+                    None => (true, *t),
+                };
+                tracks.push(TocTrack {
+                    number: u8::try_from(i + 1)
+                        .map_err(|_| TocError::TooManyTracks(starts.len()))?,
+                    start_lba: num(t)?,
+                    is_audio,
+                });
+            }
+            return Self::new(tracks, num(leadout)?);
+        }
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() < 4 {
+            return Err(TocError::Unparsable(
+                "MusicBrainz 形式は「先頭 末尾 リードアウト オフセット…」".into(),
+            ));
+        }
+        let first = num(parts[0])?;
+        let last = num(parts[1])?;
+        let leadout = num(parts[2])?;
+        let offsets = &parts[3..];
+        if first == 0 || last < first || last > MAX_TRACKS as u32 {
+            return Err(TocError::Unparsable(format!(
+                "トラック番号の範囲が不正: {first}..={last}"
+            )));
+        }
+        if offsets.len() != (last - first + 1) as usize {
+            return Err(TocError::Unparsable(format!(
+                "オフセットの数 {} がトラック数 {} と合わない",
+                offsets.len(),
+                last - first + 1
+            )));
+        }
+        let lba = |v: u32| -> Result<u32, TocError> {
+            v.checked_sub(PREGAP_SECTORS)
+                .ok_or_else(|| TocError::Unparsable(format!("オフセットが 150 未満: {v}")))
+        };
+        let tracks = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                Ok(TocTrack {
+                    number: first as u8 + i as u8,
+                    start_lba: lba(num(o)?)?,
+                    is_audio: true,
+                })
+            })
+            .collect::<Result<Vec<_>, TocError>>()?;
+        Self::new(tracks, lba(leadout)?)
     }
 
     pub fn tracks(&self) -> &[TocTrack] {

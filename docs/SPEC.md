@@ -469,6 +469,8 @@ Phase 4  commit:     1 トランザクションで
 [ID 算出]       MusicBrainz DiscID / AccurateRip id1,id2 / FreeDB ID
    ↓            すべて TOC からの整数演算。libdiscid FFI 不要
 [メタデータ照会] MusicBrainz → 候補提示 → ユーザ確認・手動補正
+   ↓            DiscID で ws/2/discid を引き、無ければ同じ TOC で fuzzy に引く。候補は
+   ↓            「リリース × medium」（DiscID を持つ medium は exact、トラック数の合う medium は近似。D-64）
    ↓            ※同人・VTuber・インディーズ国内盤は MusicBrainz 未登録が常態。
    ↓              照会結果ゼロでもウィザードが完走できることを必須要件とする。
    ↓              トラックリスト貼り付け（通販ページ等からのテキストを行解析して
@@ -900,8 +902,13 @@ GET    /api/playlists/:id/fb2k_query              foobar Autoplaylist 用の { q
 POST   /api/auth/login, POST /api/auth/logout
 GET    /api/auth/session
 
-GET    /api/cd/status                             ディスク有無・TOC
-POST   /api/cd/lookup                             MusicBrainz 照会
+GET    /api/cd/status                             ディスク有無・TOC（P2-1。TOC は下の lookup に渡す文字列と同じ形）
+POST   /api/cd/lookup                             { toc }。TOC 文字列（CTDB 形式 0:13915:…:leadout か MusicBrainz 形式
+                                                  1 12 leadout+150 offset+150…）から各種 DiscID を出し、MusicBrainz に
+                                                  照会（P2-3、D-21 / D-64）。→ 200 { discid, mb_toc, accuraterip_id,
+                                                  ctdb_toc_id, exact, candidates: [リリース × medium] }。
+                                                  400 bad_request（TOC）、502 lookup_failed（届かない・応答が壊れている）、
+                                                  503 musicbrainz_unavailable（再試行しても 503 の負荷制限、または未構成）
 POST   /api/cd/rip                                リップ開始
 POST   /api/cd/eject
 
@@ -1305,7 +1312,10 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   256px のプレビュー（形式・寸法）→ 「選択 N 件の埋め込み画像を差し替え」（`POST /api/artwork/embed`。
   反映待ちの 409 は他の操作と同じ「除外して適用」）。履歴画面の `PICTURE` 値はサムネイルで出す
 - **CD**（P2）: ウィザード。検出 → 候補選択 / 手入力 / トラックリスト貼り付け →
-  オフセット確認 → 進捗。照会ゼロ件でも完走できる
+  オフセット確認 → 進捗。照会ゼロ件でも完走できる。検出（P2-1）が入るまでは TOC の貼り付け
+  （CTDB 形式 / MusicBrainz 形式 / `cdrecord -toc` の出力）を入力源にする（P2-3、D-64。デバッグ用に残す）。
+  候補は DiscID 一致を先に出し、exact が 1 件なら選んでおく。選ぶとトラック対応（番号・タイトル・
+  アーティスト・長さ・ISRC）を確認できる
 - **設定**: `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
   退避 WAV（`archived_files`）の一覧と復元
 
@@ -1375,6 +1385,7 @@ fb2k_prefix = "\\\\TRUENAS\\music\\"
 [musicbrainz]
 user_agent = "spindle/0.1 (contact@example.com)"
 rate_limit_per_sec = 1
+url = "https://musicbrainz.org/ws/2/"   # 省略可。テストと自前ミラー用
 
 [verify]                       # 遡及照合 / リップ検証の照会先。UA は musicbrainz.user_agent を共用
 accuraterip_url = "http://www.accuraterip.com/accuraterip/"
@@ -1554,7 +1565,8 @@ src/
 │   ├── accuraterip.rs   ARv1/v2 CRC、DB の照会（dBAR-*.bin）、オフセット表
 │   ├── ctdb.rs          CRC32、照会（lookup2.php）、修復
 │   ├── crctable.rs      1 回流して任意オフセットのトラック CRC を出す表（累積和と CRC32 combine）
-│   └── verify.rs        DB の応答との照合（オフセット探索、トラックごとの一致）
+│   ├── verify.rs        DB の応答との照合（オフセット探索、トラックごとの一致）
+│   └── musicbrainz.rs   ws/2/discid の照会（UA、1 req/s、503 の再試行）と候補（リリース × medium）
 ├── import/
 │   ├── scanner.rs
 │   └── ytmusic/         parser.rs（ルール TOML）、downloader.rs

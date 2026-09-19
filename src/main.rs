@@ -8,6 +8,7 @@ use tracing::info;
 use spindle::api::{self, auth, AppState};
 use spindle::cd::accuraterip::AccurateRipClient;
 use spindle::cd::ctdb::CtdbClient;
+use spindle::cd::musicbrainz::MusicBrainzClient;
 use spindle::db::{migrations, Db};
 use spindle::edit::{Editor, NormalizeEnv};
 use spindle::fsroot::Roots;
@@ -238,6 +239,14 @@ async fn main() -> anyhow::Result<()> {
         artwork: Arc::clone(&artwork),
     });
     state = state.with_gc(Arc::clone(&gc_roots));
+    // MusicBrainz の照会（P2-3）。UA 必須・1 req/s
+    let mb = MusicBrainzClient::new(
+        &state.config.musicbrainz.url,
+        &state.config.musicbrainz.user_agent,
+        std::time::Duration::from_secs(1) / state.config.musicbrainz.rate_limit_per_sec.max(1),
+    )
+    .context("MusicBrainz クライアントの初期化に失敗")?;
+    state = state.with_musicbrainz(Arc::new(mb));
     registry.register(
         JobType::Gc,
         Arc::new(GcHandler::new(

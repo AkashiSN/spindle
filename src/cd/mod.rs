@@ -8,6 +8,7 @@
 pub mod accuraterip;
 pub mod crctable;
 pub mod ctdb;
+pub mod musicbrainz;
 pub mod toc;
 pub mod verify;
 

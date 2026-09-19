@@ -1423,3 +1423,71 @@ table.gc-table td.sample {
   max-height: 480px;
   white-space: pre;
 }
+
+/* CD 画面（P2-3）。設定画面と同じ骨格 */
+.cd {
+  padding: 0 12px 12px;
+  overflow: auto;
+  height: 100%;
+}
+.cd h1 {
+  font-size: 16px;
+  margin: 0;
+}
+.cd h2 {
+  font-size: 13px;
+  margin: 16px 0 6px;
+  color: var(--muted);
+}
+.cd .op-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.cd textarea {
+  width: 100%;
+  max-width: 720px;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+}
+.cd-ids {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 0 0 8px;
+}
+.cd-ids dt {
+  color: var(--muted);
+}
+.cd-ids dd {
+  margin: 0;
+}
+.cd-candidates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.cd-candidates li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cd-candidates label {
+  cursor: pointer;
+}
+.cd-candidates .badge {
+  margin-left: 8px;
+}
+table.cd-tracks {
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 8px;
+  width: 100%;
+}
+table.cd-tracks th,
+table.cd-tracks td {
+  text-align: left;
+  padding: 3px 12px 3px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
