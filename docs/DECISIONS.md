@@ -1121,6 +1121,8 @@ preview と apply の一致を保証できない）。preview の全行差分を
   パスだけを所有し、巻き戻しの対象もそれだけ。album 全体を動かした後の旧ディレクトリに残る
   同梱ファイルの扱い（追随・GC）は未決（残課題）。埋め込み統一（D-49 / D-60）で Library の同梱
   ファイルは実データで png 1 本しか無く、Library に `rip.log` / `disc.cue` を置き始める P2-8 で決める
+  → D-67 で決めた: rename ジョブが commit 後に、album 全体の移動で active な行が無くなった旧ディレクトリの
+  既知の名前のファイルを宛先へ移し、空なら rmdir する（op としては記録しない）
 - **API**（SPEC §9）: preview は選択を固定して token を返し、行ごとに `old` / `new`（衝突なら
   null と `reason`）。apply は token の集合で計画を取り直し、`affected` / `conflict` を返す。
   409 の規則は tags と同じ（`pending` / `preview_stale` / `no_changes`）

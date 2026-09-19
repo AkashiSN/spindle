@@ -974,6 +974,8 @@ struct Committed {
     outcome: RenameOutcome,
     event: Option<crate::jobs::BatchEvent>,
     derived_jobs: Vec<i64>,
+    /// album 全体が動いて active な行が無くなった旧ディレクトリと、その宛先（同梱ファイルの追随。D-67）
+    dir_moves: Vec<(RelPath, RelPath)>,
 }
 
 fn commit_settled(
@@ -988,9 +990,30 @@ fn commit_settled(
     let mut moves: Vec<(i64, String, String)> = Vec::new();
     let mut album_moves: Vec<(i64, String)> = Vec::new();
     let mut lost: Vec<(i64, String)> = Vec::new();
+    // 旧 dir key → (旧 dir, 宛先 dir の集合, 宛先 dir)。applied で物理的に別ディレクトリへ動いた op だけ
+    let mut dir_candidates: HashMap<String, (RelPath, HashSet<String>, RelPath)> = HashMap::new();
     for s in settled {
         if !history::finish_op(&tx, s.op.id, s.result, s.error.as_deref(), job_id, now)? {
             continue; // 既に終端（スキャナが衝突にした等）。所在は変えない
+        }
+        if s.result == OpResult::Applied {
+            if let (Some(old), Some((at, _))) = (
+                s.op.expected
+                    .rel_path
+                    .as_deref()
+                    .and_then(|p| RelPath::parse(p).ok())
+                    .and_then(|p| p.parent()),
+                &s.at,
+            ) {
+                if let Some(new_dir) = at.parent() {
+                    if old.key() != new_dir.key() {
+                        let entry = dir_candidates
+                            .entry(old.key())
+                            .or_insert_with(|| (old.clone(), HashSet::new(), new_dir.clone()));
+                        entry.1.insert(new_dir.key());
+                    }
+                }
+            }
         }
         match s.result {
             OpResult::Applied => outcome.applied += 1,
@@ -1061,6 +1084,19 @@ fn commit_settled(
         }
     }
     reassign_albums(&tx, &album_moves, now)?;
+    // 同梱ファイルの追随（D-67）: 宛先が 1 つで、旧ディレクトリに active な行が残らない場合だけ
+    let mut dir_moves = Vec::new();
+    let mut keys: Vec<&String> = dir_candidates.keys().collect();
+    keys.sort();
+    for key in keys {
+        let (old, dests, new_dir) = &dir_candidates[key];
+        if dests.len() != 1 {
+            continue;
+        }
+        if !dir_has_active_tracks(&tx, key)? {
+            dir_moves.push((old.clone(), new_dir.clone()));
+        }
+    }
     // Derived の追随（D-51）。パスが変わった（applied）トラックの Derived を rename させる
     let mut derived_jobs = Vec::new();
     for s in settled {
@@ -1079,7 +1115,98 @@ fn commit_settled(
         outcome,
         event,
         derived_jobs,
+        dir_moves,
     })
+}
+
+/// `dir_key` の直下（サブディレクトリを含む）に active なトラック行があるか
+fn dir_has_active_tracks(tx: &Connection, dir_key: &str) -> crate::db::Result<bool> {
+    let escaped = dir_key
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let n: i64 = tx.query_row(
+        "SELECT count(*) FROM tracks
+          WHERE missing_since IS NULL AND rel_path_key LIKE ?1 ESCAPE '\\'",
+        [format!("{escaped}/%")],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// 同梱ファイルの追随の結果
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompanionOutcome {
+    pub moved: usize,
+    /// 宛先に同名があって残したもの
+    pub left: usize,
+    pub removed_dirs: usize,
+}
+
+/// album 全体の移動で空になる旧ディレクトリの同梱ファイル（既知の名前だけ。
+/// [`crate::cd::riplog::is_companion_name`]）を宛先へ `RENAME_NOREPLACE` で移し、旧ディレクトリが
+/// 空なら消す（D-43 / D-67）。衝突は残して警告する。`edits` には記録しない（巻き戻しは逆向きの
+/// album 全体の移動で同じ経路を通る）
+pub fn follow_companions(root: &RootDir, moves: &[(RelPath, RelPath)]) -> CompanionOutcome {
+    let mut out = CompanionOutcome::default();
+    for (old, new) in moves {
+        let entries = match root.read_dir(Some(old)) {
+            Ok(e) => e,
+            Err(FsError::NotFound) => continue,
+            Err(e) => {
+                tracing::warn!(dir = %old, error = %e, "旧ディレクトリを読めない。同梱ファイルは追随させない");
+                continue;
+            }
+        };
+        let mut touched = false;
+        for e in entries {
+            if e.kind != fsroot::FileKind::File {
+                continue;
+            }
+            let Some(name) = e.name.to_str() else {
+                continue;
+            };
+            if !crate::cd::riplog::is_companion_name(name) {
+                continue;
+            }
+            let (Ok(from), Ok(to)) = (old.join(name), new.join(name)) else {
+                continue;
+            };
+            match root.rename_noreplace(&from, &to) {
+                Ok(()) => {
+                    out.moved += 1;
+                    touched = true;
+                    tracing::info!(from = %from, to = %to, "同梱ファイルを追随させた");
+                }
+                Err(FsError::Exists) => {
+                    out.left += 1;
+                    tracing::warn!(from = %from, to = %to, "宛先に同名の同梱ファイルがあるので残す");
+                }
+                Err(e) => {
+                    out.left += 1;
+                    tracing::warn!(from = %from, to = %to, error = %e, "同梱ファイルを移せない");
+                }
+            }
+        }
+        if touched {
+            for d in [old, new] {
+                if let Err(e) = root.fsync_dir(Some(d)) {
+                    tracing::warn!(dir = %d, error = %e, "ディレクトリを fsync できない");
+                }
+            }
+        }
+        match root.remove_dir(old) {
+            Ok(()) => {
+                out.removed_dirs += 1;
+                tracing::info!(dir = %old, "空になった旧ディレクトリを消した");
+            }
+            Err(FsError::NotFound) => {}
+            Err(FsError::Io(e))
+                if e.raw_os_error() == Some(rustix::io::Errno::NOTEMPTY.raw_os_error()) => {}
+            Err(e) => tracing::warn!(dir = %old, error = %e, "旧ディレクトリを消せない"),
+        }
+    }
+    out
 }
 
 impl Editor {
@@ -1346,6 +1473,19 @@ impl Editor {
 
     /// commit 後の後始末: 投入した Derived の追随ジョブでワーカーを起こし、バッチの終端を通知する
     async fn finish_commit(&self, c: Committed) -> RenameOutcome {
+        if !c.dir_moves.is_empty() {
+            let root = Arc::clone(&self.root);
+            let moves = c.dir_moves;
+            match tokio::task::spawn_blocking(move || follow_companions(&root, &moves)).await {
+                Ok(o) => tracing::info!(
+                    moved = o.moved,
+                    left = o.left,
+                    removed_dirs = o.removed_dirs,
+                    "同梱ファイルの追随"
+                ),
+                Err(e) => tracing::warn!(error = %e, "同梱ファイルの追随タスクが異常終了"),
+            }
+        }
         self.jobs.notify_enqueued(&c.derived_jobs).await;
         self.publish_batch(c.event);
         c.outcome

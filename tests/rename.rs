@@ -1315,3 +1315,119 @@ async fn rename_job_for_terminal_batch_is_a_noop() {
     assert_eq!(files_in(&lib.lib()), ["A/01.flac"]);
     assert_eq!(lib.rel_path(a), "A/01.flac");
 }
+
+// ---------------------------------------------------------------- 同梱ファイルの追随（D-43 / D-67）
+
+#[tokio::test]
+async fn whole_album_move_carries_companion_files_and_leaves_unknown_files() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/01.flac", 1, "a"));
+    lib.add("A/02.flac", 2, "b");
+    std::fs::write(lib.path("A/cover.jpg"), b"jpg").unwrap();
+    std::fs::write(lib.path("A/disc.cue"), b"cue").unwrap();
+    std::fs::write(lib.path("A/disc.toc"), b"toc").unwrap();
+    std::fs::write(lib.path("A/rip.log"), b"spindle rip log v1\n").unwrap();
+    // 未知の名前は動かさない
+    std::fs::write(lib.path("A/notes.txt"), b"keep").unwrap();
+    lib.scan().await;
+    let (a, b) = (lib.track_id("A/01.flac"), lib.track_id("A/02.flac"));
+    let prepared = lib
+        .editor
+        .prepare_rename(
+            None,
+            vec![target(a, "X/Y/01.flac"), target(b, "X/Y/02.flac")],
+        )
+        .await
+        .unwrap();
+    lib.start();
+    assert_eq!(
+        lib.wait_batch_terminal(prepared.batch_id).await,
+        BatchState::Applied
+    );
+    for n in ["cover.jpg", "disc.cue", "disc.toc", "rip.log"] {
+        assert!(
+            lib.path(&format!("X/Y/{n}")).exists(),
+            "{n} が追随していない"
+        );
+        assert!(
+            !lib.path(&format!("A/{n}")).exists(),
+            "{n} が旧ディレクトリに残っている"
+        );
+    }
+    // 未知のファイルが残るので旧ディレクトリは消さない
+    assert!(lib.path("A/notes.txt").exists());
+    assert!(lib.path("A").is_dir());
+}
+
+#[tokio::test]
+async fn partial_move_leaves_companions_and_last_track_move_carries_them_and_removes_dir() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/01.flac", 1, "a"));
+    lib.add("A/02.flac", 2, "b");
+    std::fs::write(lib.path("A/cover.jpg"), b"jpg").unwrap();
+    lib.scan().await;
+    let (a, b) = (lib.track_id("A/01.flac"), lib.track_id("A/02.flac"));
+    lib.start();
+    // 一部だけ動かす → 同梱ファイルは残る
+    let p1 = lib
+        .editor
+        .prepare_rename(None, vec![target(a, "B/01.flac")])
+        .await
+        .unwrap();
+    assert_eq!(
+        lib.wait_batch_terminal(p1.batch_id).await,
+        BatchState::Applied
+    );
+    assert!(lib.path("A/cover.jpg").exists());
+    assert!(!lib.path("B/cover.jpg").exists());
+    // 残りも同じ宛先へ → 旧ディレクトリから active な行が消えるので追随し、空になったので消える
+    let p2 = lib
+        .editor
+        .prepare_rename(None, vec![target(b, "B/02.flac")])
+        .await
+        .unwrap();
+    assert_eq!(
+        lib.wait_batch_terminal(p2.batch_id).await,
+        BatchState::Applied
+    );
+    assert!(lib.path("B/cover.jpg").exists());
+    assert!(!lib.path("A").exists());
+}
+
+#[tokio::test]
+async fn companion_conflict_is_left_in_place_and_revert_moves_back() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/01.flac", 1, "a"));
+    std::fs::write(lib.path("A/cover.jpg"), b"new").unwrap();
+    std::fs::write(lib.path("A/rip.log"), b"spindle rip log v1\n").unwrap();
+    std::fs::create_dir_all(lib.path("B")).unwrap();
+    std::fs::write(lib.path("B/cover.jpg"), b"old").unwrap();
+    lib.scan().await;
+    let a = lib.track_id("A/01.flac");
+    lib.start();
+    let p = lib
+        .editor
+        .prepare_rename(None, vec![target(a, "B/01.flac")])
+        .await
+        .unwrap();
+    assert_eq!(
+        lib.wait_batch_terminal(p.batch_id).await,
+        BatchState::Applied
+    );
+    // 宛先に同名があれば動かさず（警告）、旧ディレクトリも残る。他の同梱ファイルは動く
+    assert_eq!(std::fs::read(lib.path("A/cover.jpg")).unwrap(), b"new");
+    assert_eq!(std::fs::read(lib.path("B/cover.jpg")).unwrap(), b"old");
+    assert!(lib.path("B/rip.log").exists());
+    assert!(lib.path("A").is_dir());
+    // 巻き戻し（逆向きの album 全体の移動）: rip.log は戻り、B の cover は A に同名があるので残る
+    let r = lib.editor.revert_batch(p.batch_id, None).await.unwrap();
+    assert_eq!(
+        lib.wait_batch_terminal(r.batch_id).await,
+        BatchState::Applied
+    );
+    assert!(lib.path("A/01.flac").exists());
+    assert!(lib.path("A/rip.log").exists());
+    assert_eq!(std::fs::read(lib.path("A/cover.jpg")).unwrap(), b"new");
+    assert_eq!(std::fs::read(lib.path("B/cover.jpg")).unwrap(), b"old");
+    assert!(lib.path("B").is_dir());
+}
