@@ -2413,9 +2413,13 @@ CTDB への提出（自分のシンドロームを面順にした `DbSyndromes::
   SPEC §5）
 - **パスは `pathgen::plan` を再利用する**（`[layout]`、category 無しなら `unsorted`、`disc_count > 1` なら
   `multi_disc`。降格と衝突は D-43 の規則のまま）。リリースキーは `mb:<release_id>` → 無ければ、宛先
-  ディレクトリに albumartist と album が一致する `disc_count > 1` の album があり、その `disc_no` の
-  トラックがまだ無ければ**その album に合流**（複数枚組の手入力で 2 枚目が `({year})` に降格しない）
-  → それ以外は新規リリース
+  ディレクトリに albumartist と album が一致する複数枚組（`disc_count > 1` か構成トラックの `disc_no` の
+  最大が 2 以上）の album があり、入力も複数枚組で、その `disc_no` のトラックがまだ無ければ**その album に
+  合流**（複数枚組の手入力で 2 枚目が `({year})` に降格しない）→ それ以外は `disc:<DiscID>` の新規リリース。
+  `release_id` があるときは合流を探さない（別リリースなら降格し、降格先が album になる。合流先を持ったまま
+  降格すると「ディレクトリ = album」が壊れる）。計画はエンコードの前に一度（衝突を早く知る）と、
+  `library` の排他を取った後にもう一度行い、後者を確定にする（エンコードの間に scan / rename が album を
+  動かし得る）。登録では合流先の `rel_dir_key` が計画の宛先と一致し active であることを確かめる
 - **配置は `job_mutexes` の `library` を取ってから**（scan / gc と同じ。取れなければ Requeue）。
   トラックと同梱ファイルを tmp → fsync → `RENAME_NOREPLACE` → dir fsync で置き、1 トランザクションで
   `albums`（無ければ作成。合流なら触らない）/ `tracks`（スキャナの `track_content` / `insert_track`。
@@ -2441,13 +2445,16 @@ CTDB への提出（自分のシンドロームを面順にした `DbSyndromes::
   - `disc.toc`: `Toc` から cdrdao 構文（`CD_DA` / `CATALOG` / `CD_TEXT` / `TRACK AUDIO` +
     `FILE "…" 0 MM:SS:FF`）で生成。実ドライブの `cdrdao read-toc`（P2-2）も `Toc` にしてから同じ形で
     書く（形式を 1 つに）
-- **同梱ファイルは album 全体の移動に追随する（D-43 の残課題）。** rename ジョブは phase 2 の commit
-  後、commit で `rel_dir` を書き換えた album ごとに、旧ディレクトリの**既知の名前**（`cover` / `folder` /
-  `front` × 画像拡張子、`disc*.cue` / `disc*.toc` / `rip*.log`）の通常ファイルを新ディレクトリへ
-  `RENAME_NOREPLACE` で移し（衝突は残して警告）、旧ディレクトリが空なら `rmdir`（`ENOTEMPTY` は無視）。
-  `edits` には記録しない。巻き戻しは逆向きの album 全体の移動になるので同じ経路で戻る。一部だけの
-  巻き戻しでは動かない（トラックが残る側に付いていく）。rename op がトラックのパスだけを所有する
-  原則（D-43）は変えない
+- **同梱ファイルは album 全体の移動に追随する（D-43 の残課題）。** rename ジョブは phase 2 の後の
+  commit トランザクションの中（`tx.commit()` の前）で、applied の op の旧ディレクトリのうち宛先が 1 つで
+  active な行が残らないものについて、**既知の名前**（`cover` / `folder` / `front` × 画像拡張子、
+  `disc*.cue` / `disc*.toc` / `rip*.log`）の通常ファイルを新ディレクトリへ `RENAME_NOREPLACE` で移し
+  （衝突は残して警告）、旧ディレクトリが空なら `rmdir`（`ENOTEMPTY` は無視）。commit の前に動かすのは、
+  トラックの実体は phase 2 で既に宛先にあって commit はそれを記録するだけなので、途中で落ちても再実行が
+  同じ判定に至り（旧ディレクトリに同梱ファイルはもう無い）、commit の後に落ちて追随だけが永久に残る窓を
+  作らないため。終端を観測した側は追随済みの状態を見る。`edits` には記録しない。巻き戻しは逆向きの
+  album 全体の移動になるので同じ経路で戻る。一部だけの巻き戻しでは動かない（トラックが残る側に
+  付いていく）。rename op がトラックのパスだけを所有する原則（D-43）は変えない
 - **verify.log は `data/verify` のまま**（D-63 の未決を閉じる）。Library に置く同梱ファイルは rip 由来の
   3 つだけ
 - **スキャナは spindle の rip.log から `source_type = 'cd_rip'` を復元する。** ディレクトリの inventory で

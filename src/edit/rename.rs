@@ -977,12 +977,13 @@ struct Committed {
     outcome: RenameOutcome,
     event: Option<crate::jobs::BatchEvent>,
     derived_jobs: Vec<i64>,
-    /// album 全体が動いて active な行が無くなった旧ディレクトリと、その宛先（同梱ファイルの追随。D-67）
-    dir_moves: Vec<(RelPath, RelPath)>,
+    /// 同梱ファイルの追随の結果（commit の前に済ませている。D-67）
+    companions: CompanionOutcome,
 }
 
 fn commit_settled(
     conn: &mut Connection,
+    root: &RootDir,
     batch_id: i64,
     job_id: Option<i64>,
     settled: &[Settled],
@@ -1100,6 +1101,11 @@ fn commit_settled(
             dir_moves.push((old.clone(), new_dir.clone()));
         }
     }
+    // 追随は commit の**前**に行う。トラックの実体は phase 2 で既に宛先にあり、DB の commit は
+    // それを記録するだけなので、ここで動かしてから落ちても再実行が同じ判定に至り（旧ディレクトリに
+    // 同梱ファイルはもう無い）、commit の後に落ちて追随だけが永久に残る窓を作らない。終端を観測した
+    // 側は追随済みの状態を見る
+    let companions = follow_companions(root, &dir_moves);
     // Derived の追随（D-51）。パスが変わった（applied）トラックの Derived を rename させる
     let mut derived_jobs = Vec::new();
     for s in settled {
@@ -1118,7 +1124,7 @@ fn commit_settled(
         outcome,
         event,
         derived_jobs,
-        dir_moves,
+        companions,
     })
 }
 
@@ -1368,9 +1374,10 @@ impl Editor {
             .zip(locs)
             .map(|(r, loc)| settle(r, loc, "反映の途中で止まった"))
             .collect();
+        let root = Arc::clone(&self.root);
         let committed = self
             .db
-            .write(move |c| Ok(commit_settled(c, batch_id, job_id, &settled)))
+            .write(move |c| Ok(commit_settled(c, &root, batch_id, job_id, &settled)))
             .await??;
         let outcome = self.finish_commit(committed).await;
         tracing::info!(
@@ -1400,9 +1407,10 @@ impl Editor {
             };
             settled.push(settle(r, loc, CANCELLED_ERROR));
         }
+        let root = Arc::clone(&self.root);
         let committed = self
             .db
-            .write(move |c| Ok(commit_settled(c, batch_id, job_id, &settled)))
+            .write(move |c| Ok(commit_settled(c, &root, batch_id, job_id, &settled)))
             .await??;
         let mut outcome = self.finish_commit(committed).await;
         outcome.cancelled = true;
@@ -1431,9 +1439,10 @@ impl Editor {
             };
             settled.push(settle(r, loc, error));
         }
+        let root = Arc::clone(&self.root);
         let committed = self
             .db
-            .write(move |c| Ok(commit_settled(c, batch_id, job_id, &settled)))
+            .write(move |c| Ok(commit_settled(c, &root, batch_id, job_id, &settled)))
             .await??;
         let outcome = self.finish_commit(committed).await;
         Ok(outcome.applied + outcome.conflict + outcome.failed)
@@ -1476,18 +1485,13 @@ impl Editor {
 
     /// commit 後の後始末: 投入した Derived の追随ジョブでワーカーを起こし、バッチの終端を通知する
     async fn finish_commit(&self, c: Committed) -> RenameOutcome {
-        if !c.dir_moves.is_empty() {
-            let root = Arc::clone(&self.root);
-            let moves = c.dir_moves;
-            match tokio::task::spawn_blocking(move || follow_companions(&root, &moves)).await {
-                Ok(o) => tracing::info!(
-                    moved = o.moved,
-                    left = o.left,
-                    removed_dirs = o.removed_dirs,
-                    "同梱ファイルの追随"
-                ),
-                Err(e) => tracing::warn!(error = %e, "同梱ファイルの追随タスクが異常終了"),
-            }
+        if c.companions != CompanionOutcome::default() {
+            tracing::info!(
+                moved = c.companions.moved,
+                left = c.companions.left,
+                removed_dirs = c.companions.removed_dirs,
+                "同梱ファイルの追随"
+            );
         }
         self.jobs.notify_enqueued(&c.derived_jobs).await;
         self.publish_batch(c.event);

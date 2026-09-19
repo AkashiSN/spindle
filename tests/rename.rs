@@ -1431,3 +1431,52 @@ async fn companion_conflict_is_left_in_place_and_revert_moves_back() {
     assert_eq!(std::fs::read(lib.path("B/cover.jpg")).unwrap(), b"old");
     assert!(lib.path("B").is_dir());
 }
+
+#[tokio::test]
+async fn companions_follow_after_crash_before_commit_and_terminal_state_implies_followed() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/01.flac", 1, "a"));
+    lib.add("A/02.flac", 2, "b");
+    std::fs::write(lib.path("A/cover.jpg"), b"jpg").unwrap();
+    std::fs::write(lib.path("A/rip.log"), b"spindle rip log v1\n").unwrap();
+    lib.scan().await;
+    let (a, b) = (lib.track_id("A/01.flac"), lib.track_id("A/02.flac"));
+    let prepared = lib
+        .editor
+        .prepare_rename(None, vec![target(a, "B/01.flac"), target(b, "B/02.flac")])
+        .await
+        .unwrap();
+    let job_id = prepared.job_ids[0];
+    let second_op = lib.ops(prepared.batch_id)[1].id;
+    // 1 件目は最終名に置いた後、2 件目の直前で kill（commit 前。同梱ファイルはまだ動いていない）
+    lib.editor.set_rename_hook(Arc::new(move |step| {
+        if step == RenameStep::BeforeFinal(second_op) {
+            Err("killed".to_owned())
+        } else {
+            Ok(())
+        }
+    }));
+    lib.conn()
+        .execute("UPDATE jobs SET state = 'running' WHERE id = ?1", [job_id])
+        .unwrap();
+    lib.editor
+        .apply_rename_batch(prepared.batch_id, Some(job_id), None)
+        .await
+        .unwrap_err();
+    assert!(lib.path("A/cover.jpg").exists());
+    assert!(!lib.path("B/cover.jpg").exists());
+
+    let lib = lib.reopen();
+    spindle::jobs::recovery::run(&lib.db).await.unwrap();
+    lib.editor.recover().await.unwrap();
+    lib.start();
+    assert_eq!(
+        lib.wait_batch_terminal(prepared.batch_id).await,
+        BatchState::Applied
+    );
+    // 終端を観測した時点で追随は済んでいる（commit の前に動かす）
+    assert!(lib.path("B/cover.jpg").exists());
+    assert!(lib.path("B/rip.log").exists());
+    assert!(!lib.path("A").exists());
+    assert_eq!(files_in(&lib.lib()), ["B/01.flac", "B/02.flac"]);
+}

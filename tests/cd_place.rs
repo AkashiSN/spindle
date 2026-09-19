@@ -150,6 +150,7 @@ impl Lib {
                 single_disc: "{category}/{albumartist}/{album}/{track:02} {title}".into(),
                 unsorted: "_Unsorted/{albumartist}/{album}/{track:02} {title}".into(),
             },
+            before_lock: None,
         }
     }
 
@@ -185,12 +186,22 @@ impl Lib {
         pcm: &Path,
         r: &RipReport,
     ) -> Result<Placed, PlaceError> {
-        let t = toc();
+        self.place_with(self.env(), &toc(), m, pcm, r).await
+    }
+
+    async fn place_with(
+        &self,
+        env: PlaceEnv,
+        t: &Toc,
+        m: &DiscMetadata,
+        pcm: &Path,
+        r: &RipReport,
+    ) -> Result<Placed, PlaceError> {
         let job = self.running_job();
         place_disc(
-            &self.env(),
+            &env,
             PlaceInput {
-                toc: &t,
+                toc: t,
                 metadata: m,
                 pcm,
                 report: r,
@@ -673,4 +684,169 @@ async fn rejects_pcm_of_wrong_length_and_bad_metadata() {
     let err = lib.place(&m, &pcm, &report(true)).await.unwrap_err();
     assert!(matches!(err, PlaceError::Metadata(_)), "{err}");
     assert!(!lib.path("_Unsorted").exists());
+}
+
+/// 4 トラックの別ディスク（別の TOC → 別の DiscID）
+fn toc4() -> Toc {
+    Toc::from_audio_sample_counts([
+        700 * SECTOR as u64,
+        650 * SECTOR as u64,
+        800 * SECTOR as u64,
+        500 * SECTOR as u64,
+    ])
+    .unwrap()
+}
+
+fn meta4(category: Option<&str>) -> DiscMetadata {
+    let mut m = meta(category);
+    m.tracks.push(DiscTrackMetadata {
+        number: 4,
+        title: "Song 4".into(),
+        artist: String::new(),
+        mb: None,
+    });
+    m
+}
+
+#[tokio::test]
+async fn disc_with_other_release_id_does_not_join_and_is_demoted_consistently() {
+    require_flac!();
+    let lib = Lib::new();
+    lib.insert_category("Rock");
+    let t3 = toc();
+    let pcm = lib.write_pcm(&pcm_bytes(&t3));
+    let mut d1 = meta(Some("Rock"));
+    d1.disc_count = 2;
+    d1.release_id = Some("mb-A".into());
+    let first = lib.place(&d1, &pcm, &report(true)).await.unwrap();
+    // 同名・同アーティストの複数枚組だが別リリース（mb-B）の disc 2 → 合流せず ({year}) に降格し、
+    // album もその降格先のもの（「ディレクトリ = album」）
+    let t4 = toc4();
+    let pcm4 = lib.write_pcm(&pcm_bytes(&t4));
+    let mut d2 = meta4(Some("Rock"));
+    d2.disc_count = 2;
+    d2.disc_no = 2;
+    d2.release_id = Some("mb-B".into());
+    let second = lib
+        .place_with(lib.env(), &t4, &d2, &pcm4, &report(true))
+        .await
+        .unwrap();
+    assert_ne!(second.album_id, first.album_id);
+    assert_eq!(
+        second.rel_dir.as_str(),
+        "Rock/Test Artist/Test Album (2024)"
+    );
+    let (_, _, _, _, album_id) =
+        track_row(&lib, "Rock/Test Artist/Test Album (2024)/2-01 Song 1.flac");
+    assert_eq!(album_id, second.album_id);
+    let rel_dir: String = lib
+        .conn()
+        .query_row(
+            "SELECT rel_dir FROM albums WHERE id = ?1",
+            [second.album_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rel_dir, "Rock/Test Artist/Test Album (2024)");
+}
+
+#[tokio::test]
+async fn multi_disc_input_does_not_join_a_single_disc_album() {
+    require_flac!();
+    let lib = Lib::new();
+    lib.insert_category("Rock");
+    let t3 = toc();
+    let pcm = lib.write_pcm(&pcm_bytes(&t3));
+    // 1 枚組として置いた album
+    let first = lib
+        .place(&meta(Some("Rock")), &pcm, &report(true))
+        .await
+        .unwrap();
+    // 同名・同アーティストの「2 枚組の 2 枚目」（手入力、別 TOC）→ 1 枚組には合流しない。
+    // 別リリースなので ({year}) に降格し、新しい album になる
+    let t4 = toc4();
+    let pcm4 = lib.write_pcm(&pcm_bytes(&t4));
+    let mut d2 = meta4(Some("Rock"));
+    d2.disc_count = 2;
+    d2.disc_no = 2;
+    let second = lib
+        .place_with(lib.env(), &t4, &d2, &pcm4, &report(true))
+        .await
+        .unwrap();
+    assert_ne!(second.album_id, first.album_id);
+    assert_eq!(
+        second.rel_dir.as_str(),
+        "Rock/Test Artist/Test Album (2024)"
+    );
+    let disc_count: Option<i64> = lib
+        .conn()
+        .query_row(
+            "SELECT disc_count FROM albums WHERE id = ?1",
+            [first.album_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(disc_count, Some(1));
+}
+
+#[tokio::test]
+async fn plan_is_redone_under_the_lock_when_the_library_moved_during_encoding() {
+    require_flac!();
+    let lib = Lib::new();
+    lib.insert_category("Rock");
+    let t3 = toc();
+    let pcm = lib.write_pcm(&pcm_bytes(&t3));
+    let mut d1 = meta(Some("Rock"));
+    d1.disc_count = 2;
+    let first = lib.place(&d1, &pcm, &report(true)).await.unwrap();
+    // エンコードの間に album 全体が別ディレクトリへ動いた（rename ジョブの模擬: ファイルと DB）
+    let db_path = lib.db_path.clone();
+    let lib_dir = lib.dir.path().join("Library");
+    let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        std::fs::create_dir_all(lib_dir.join("Rock/Moved")).unwrap();
+        std::fs::rename(
+            lib_dir.join("Rock/Test Artist/Test Album"),
+            lib_dir.join("Rock/Moved/Test Album"),
+        )
+        .unwrap();
+        let c = Connection::open(&db_path).unwrap();
+        c.execute(
+            "UPDATE albums SET rel_dir = 'Rock/Moved/Test Album', rel_dir_key = 'rock/moved/test album'",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE tracks SET rel_path = replace(rel_path, 'Rock/Test Artist/', 'Rock/Moved/'),
+                               rel_path_key = replace(rel_path_key, 'rock/test artist/', 'rock/moved/')",
+            [],
+        )
+        .unwrap();
+    });
+    let mut env = lib.env();
+    env.before_lock = Some(hook);
+    let t4 = toc4();
+    let pcm4 = lib.write_pcm(&pcm_bytes(&t4));
+    let mut d2 = meta4(Some("Rock"));
+    d2.disc_count = 2;
+    d2.disc_no = 2;
+    let second = lib
+        .place_with(env, &t4, &d2, &pcm4, &report(true))
+        .await
+        .unwrap();
+    // 排他の中で取り直した計画: 元のディレクトリにはもう album が無いので新規 album になり、
+    // 動いた先の album には所属しない
+    assert_ne!(second.album_id, first.album_id);
+    assert_eq!(second.rel_dir.as_str(), "Rock/Test Artist/Test Album");
+    let (_, _, _, _, album_id) = track_row(&lib, "Rock/Test Artist/Test Album/2-01 Song 1.flac");
+    assert_eq!(album_id, second.album_id);
+    let rel_dir: String = lib
+        .conn()
+        .query_row(
+            "SELECT rel_dir FROM albums WHERE id = ?1",
+            [second.album_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rel_dir, "Rock/Test Artist/Test Album");
+    assert!(lib.path("Rock/Moved/Test Album/1-01 Song 1.flac").exists());
 }

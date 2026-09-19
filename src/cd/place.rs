@@ -75,7 +75,13 @@ pub struct PlaceEnv {
     /// エンコード出力の作業領域（`[paths].data/tmp`）
     pub tmp_dir: PathBuf,
     pub layout: LayoutConfig,
+    /// テスト用: エンコードの後・排他の前に呼ぶ（その間にライブラリが動いた状況を作る）
+    #[doc(hidden)]
+    pub before_lock: Option<PlaceHook>,
 }
+
+/// テスト用フック
+pub type PlaceHook = Arc<dyn Fn() + Send + Sync>;
 
 pub struct PlaceInput<'a> {
     pub toc: &'a Toc,
@@ -229,9 +235,15 @@ pub fn plan_paths(
         .render(first, AlbumVariant::Plain)
         .map_err(|e| PlaceError::Conflict(e.to_string()))?
         .parent();
+    // 合流は release_id の無い（手入力の）複数枚組だけ。release_id があれば同一性は `mb:` で決まり、
+    // 別リリースなら降格する（合流先を持ったまま降格すると「ディレクトリ = album」が壊れる）
+    let has_release_id = meta
+        .release_id
+        .as_deref()
+        .is_some_and(|r| !r.trim().is_empty());
     let join = match &plain_dir {
-        Some(dir) => find_join_album(conn, dir, meta)?,
-        None => None,
+        Some(dir) if !has_release_id => find_join_album(conn, dir, meta)?,
+        _ => None,
     };
     // リリースキーは既存行の規則（`load_occupancy`: mb → disc → album）に揃える。自分が登録した
     // album も `discid` を持つので、再実行で自分の成果物を別リリースと見ない
@@ -347,8 +359,15 @@ fn find_join_album(
     {
         return Ok(None);
     }
-    let multi = meta.disc_count > 1 || disc_count.is_some_and(|n| n > 1);
-    if !multi {
+    // 宛先の既存 album が複数枚組であること（D-67。`disc_count > 1`、または active な構成トラックの
+    // disc_no の最大が 2 以上。D-43 の multi_disc 判定と同じ）。1 枚組の album には合流しない
+    let max_disc: Option<i64> = conn.query_row(
+        "SELECT max(disc_no) FROM tracks WHERE album_id = ?1 AND missing_since IS NULL",
+        [id],
+        |r| r.get(0),
+    )?;
+    let existing_multi = disc_count.is_some_and(|n| n > 1) || max_disc.is_some_and(|n| n > 1);
+    if meta.disc_count <= 1 || !existing_multi {
         return Ok(None);
     }
     let n: i64 = conn.query_row(
@@ -669,7 +688,27 @@ fn register(
     let key = plan.rel_dir.key();
     // album: 合流 → 既存（missing なら復活）→ 新規
     let album_id = match plan.join_album {
-        Some(id) => id,
+        Some(id) => {
+            // 合流先が計画どおりの場所に active であること（計画と登録は同じ排他の中だが、
+            // 「ディレクトリ = album」を登録の時点でも確かめる）
+            let at: Option<(String, Option<i64>)> = tx
+                .query_row(
+                    "SELECT rel_dir_key, missing_since FROM albums WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            match at {
+                Some((dir_key, None)) if dir_key == key => id,
+                _ => {
+                    drop(tx);
+                    return Ok(Err(PlaceError::Conflict(format!(
+                        "合流先の album {id} が {} に無い",
+                        plan.rel_dir
+                    ))));
+                }
+            }
+        }
         None => {
             let existing: Option<(i64, Option<i64>)> = tx
                 .query_row(
@@ -818,46 +857,13 @@ pub async fn place_disc(
             .await
             .map_err(|e| std::io::Error::other(format!("MD5 タスクが異常終了: {e}")))??
     };
-    let plan = {
-        let (layout_cfg, toc, meta, md5s) =
-            (env.layout.clone(), toc.clone(), meta.clone(), md5s.clone());
-        env.db
-            .read(move |c| Ok(plan_paths(c, &layout_cfg, &toc, &meta, &md5s)))
-            .await??
-    };
+    // エンコード（数分〜数十分）の前に一度計画して、衝突ならその前に止める。確定する計画は排他の
+    // 中で取り直す（その間に scan / rename が album を動かし得る）
+    plan_for(env, &toc, &meta, &md5s).await?;
     let encoded = encode_tracks(env, input.pcm, &layout, &toc, &meta, &md5s, token).await?;
-    let file_names: Vec<String> = plan
-        .paths
-        .iter()
-        .map(|p| p.file_name().to_owned())
-        .collect();
-    let names = companion_names(meta.disc_no, meta.disc_count);
-    let states: Vec<&str> = (0..plan.paths.len())
-        .map(|i| {
-            track_state(
-                input.report.ctdb.as_ref(),
-                input.report.accuraterip.as_ref(),
-                i,
-            )
-            .map(|s| s.as_str())
-            .unwrap_or("not_attempted")
-        })
-        .collect();
-    let companions = vec![
-        Companion {
-            name: names.cue.clone(),
-            body: render_cue(&toc, &meta, &file_names),
-        },
-        Companion {
-            name: names.toc.clone(),
-            body: render_toc(&toc, &meta, &file_names),
-        },
-        Companion {
-            name: names.log.clone(),
-            body: render_log(&toc, &meta, &file_names, input.report, &states),
-        },
-    ];
-    let log_rel = format!("{}/{}", plan.rel_dir, names.log);
+    if let Some(hook) = &env.before_lock {
+        hook();
+    }
     if token.is_cancelled() {
         return Err(PlaceError::Cancelled);
     }
@@ -870,19 +876,7 @@ pub async fn place_disc(
     if !acquired {
         return Err(PlaceError::Busy);
     }
-    let result = place_locked(
-        env,
-        &plan,
-        &toc,
-        &meta,
-        input.report,
-        &encoded,
-        &md5s,
-        companions,
-        &log_rel,
-        job_id,
-    )
-    .await;
+    let result = place_locked(env, &toc, &meta, input.report, &encoded, &md5s, job_id).await;
     if let Err(e) = env
         .db
         .write(move |c| dbjobs::release_mutexes(c, job_id))
@@ -890,7 +884,7 @@ pub async fn place_disc(
     {
         tracing::warn!(job_id, error = %e, "library の排他を解放できない");
     }
-    let registered = result?;
+    let (plan, registered) = result?;
     drop(encoded);
     env.jobs.notify_enqueued(&registered.job_ids).await;
     // rip には走査が無いので scan_run_id は 0
@@ -916,20 +910,59 @@ pub async fn place_disc(
     })
 }
 
-/// `library` の排他を持っている間の処理: 配置 → 登録
-#[allow(clippy::too_many_arguments)]
+/// 計画（読み取りのみ）
+async fn plan_for(
+    env: &PlaceEnv,
+    toc: &Toc,
+    meta: &DiscMetadata,
+    md5s: &[[u8; 16]],
+) -> Result<Plan, PlaceError> {
+    let (layout_cfg, toc, meta, md5s) =
+        (env.layout.clone(), toc.clone(), meta.clone(), md5s.to_vec());
+    env.db
+        .read(move |c| Ok(plan_paths(c, &layout_cfg, &toc, &meta, &md5s)))
+        .await?
+}
+
+/// `library` の排他を持っている間の処理: 計画の取り直し → 同梱ファイルの描画 → 配置 → 登録
 async fn place_locked(
     env: &PlaceEnv,
-    plan: &Plan,
     toc: &Toc,
     meta: &DiscMetadata,
     report: &RipReport,
     encoded: &[TempGuard],
     md5s: &[[u8; 16]],
-    companions: Vec<Companion>,
-    log_rel: &str,
     job_id: i64,
-) -> Result<Registered, PlaceError> {
+) -> Result<(Plan, Registered), PlaceError> {
+    let plan = plan_for(env, toc, meta, md5s).await?;
+    let file_names: Vec<String> = plan
+        .paths
+        .iter()
+        .map(|p| p.file_name().to_owned())
+        .collect();
+    let names = companion_names(meta.disc_no, meta.disc_count);
+    let states: Vec<&str> = (0..plan.paths.len())
+        .map(|i| {
+            track_state(report.ctdb.as_ref(), report.accuraterip.as_ref(), i)
+                .map(|s| s.as_str())
+                .unwrap_or("not_attempted")
+        })
+        .collect();
+    let companions = vec![
+        Companion {
+            name: names.cue.clone(),
+            body: render_cue(toc, meta, &file_names),
+        },
+        Companion {
+            name: names.toc.clone(),
+            body: render_toc(toc, meta, &file_names),
+        },
+        Companion {
+            name: names.log.clone(),
+            body: render_log(toc, meta, &file_names, report, &states),
+        },
+    ];
+    let log_rel = format!("{}/{}", plan.rel_dir, names.log);
     let placed = {
         let root = Arc::clone(&env.root);
         let plan = plan.clone();
@@ -940,22 +973,21 @@ async fn place_locked(
             .map_err(|e| std::io::Error::other(format!("配置タスクが異常終了: {e}")))??
     };
     let reused_files = placed.reused_files;
-    let (plan, toc, meta, report, md5s, log_rel) = (
+    let (plan_tx, toc, meta, report, md5s) = (
         plan.clone(),
         toc.clone(),
         meta.clone(),
         report.clone(),
         md5s.to_vec(),
-        log_rel.to_owned(),
     );
     let mut registered = env
         .db
         .write(move |c| {
             register(
-                c, &plan, &toc, &meta, &report, &placed, &md5s, &log_rel, job_id,
+                c, &plan_tx, &toc, &meta, &report, &placed, &md5s, &log_rel, job_id,
             )
         })
         .await??;
     registered.reused_files = reused_files;
-    Ok(registered)
+    Ok((plan, registered))
 }
