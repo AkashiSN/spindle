@@ -2,5 +2,6 @@
 //! spindle はプロトコルの往復とメタデータの写像だけを持つ（D-69）
 
 pub mod metadata;
+pub mod sidecar;
 
 pub use metadata::{Item, MetadataProvider, Outcome, ProviderError, Track};
