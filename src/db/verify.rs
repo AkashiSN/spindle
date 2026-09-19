@@ -111,6 +111,22 @@ impl Method {
     }
 }
 
+/// 記録の出所（`album_verifications.source`）。自前のリップか遡及照合か
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifySource {
+    Rip,
+    Retro,
+}
+
+impl VerifySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VerifySource::Rip => "rip",
+            VerifySource::Retro => "retro",
+        }
+    }
+}
+
 /// ディスク単位の結論（`album_verifications.result`）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscResult {
@@ -210,6 +226,7 @@ pub fn record_album(
     conn: &Connection,
     album_id: i64,
     job_id: i64,
+    source: VerifySource,
     expected: &[(i64, i64)],
     discs: &[DiscRecord],
     log_path: Option<&str>,
@@ -234,6 +251,7 @@ pub fn record_album(
                 conn,
                 album_id,
                 job_id,
+                source,
                 d.disc_no,
                 m.method,
                 m.result,
@@ -254,12 +272,13 @@ pub fn record_album(
     Ok(RecordOutcome::Recorded(ids))
 }
 
-/// 1 ディスク × 1 手法の結果を履歴として積む（source = 'retro'）。返り値は `album_verifications.id`
+/// 1 ディスク × 1 手法の結果を履歴として積む。返り値は `album_verifications.id`
 #[allow(clippy::too_many_arguments)]
 fn record_disc(
     conn: &Connection,
     album_id: i64,
     job_id: i64,
+    source: VerifySource,
     disc_no: i64,
     method: Method,
     result: DiscResult,
@@ -273,7 +292,7 @@ fn record_disc(
         "INSERT INTO album_verifications
            (album_id, method, result, source, drive_offset, detected_offset, confidence,
             verified_at, log_path, disc_no, job_id)
-         VALUES (?1, ?2, ?3, 'retro', NULL, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?10, NULL, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             album_id,
             method.as_str(),
@@ -283,7 +302,8 @@ fn record_disc(
             now,
             log_path,
             disc_no,
-            job_id
+            job_id,
+            source.as_str()
         ],
     )?;
     let id = conn.last_insert_rowid();

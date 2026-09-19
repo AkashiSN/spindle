@@ -32,7 +32,7 @@ use crate::cd::SECTOR_SAMPLES;
 use crate::db::now_epoch;
 use crate::db::verify::{
     self as dbv, AlbumInfo, DiscRecord, DiscResult, Method, MethodRecord, RecordOutcome,
-    TrackRecord, TrackState, VerifyTrack,
+    TrackRecord, TrackState, VerifySource, VerifyTrack,
 };
 use crate::domain::relpath::RelPath;
 use crate::fsroot::{self, RootDir};
@@ -225,6 +225,7 @@ impl VerifyHandler {
                     c,
                     album_id,
                     job_id,
+                    VerifySource::Retro,
                     &expected,
                     &discs,
                     Some(&log_path_str),

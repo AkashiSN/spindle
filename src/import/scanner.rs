@@ -1483,7 +1483,7 @@ impl Commit {
                                 &e.ph,
                                 &r.content,
                                 r.fp,
-                                run_id,
+                                Some(run_id),
                                 now,
                             )?;
                             if r.hardlink {

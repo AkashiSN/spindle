@@ -401,6 +401,8 @@ pub fn replace_tags(conn: &Connection, id: i64, tags: &TagSet) -> Result<()> {
 
 /// 新規トラック。`album_id` は後で album 照合が設定する
 #[allow(clippy::too_many_arguments)]
+/// 新規トラックを登録する。`run_id` はスキャンの走査（rip の配置には走査が無いので `None`。
+/// 次のスキャンが inode で見つけて claim する）
 pub fn insert_track(
     conn: &Connection,
     rel_path: &str,
@@ -408,7 +410,7 @@ pub fn insert_track(
     ph: &Physical,
     c: &TrackContent,
     fp: Fingerprint,
-    run_id: i64,
+    run_id: Option<i64>,
     now: i64,
 ) -> Result<i64> {
     let (md5, afp) = match fp {
