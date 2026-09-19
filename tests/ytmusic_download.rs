@@ -590,3 +590,16 @@ fn inbox_names_are_sanitized_and_bounded() {
         "youtube/_unmatched/_"
     );
 }
+
+#[test]
+fn sweep_tmp_removes_leftover_work_dirs() {
+    use spindle::import::ytmusic::downloader::sweep_tmp;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("ytdl");
+    std::fs::create_dir_all(root.join("12")).unwrap();
+    std::fs::write(root.join("12/v.webm"), b"x").unwrap();
+    assert_eq!(sweep_tmp(&root), 1);
+    assert!(!root.join("12").exists());
+    // 無ければ 0
+    assert_eq!(sweep_tmp(&dir.path().join("none")), 0);
+}

@@ -575,3 +575,28 @@ impl Drop for WorkDir {
         }
     }
 }
+
+/// 起動時: 前のプロセスが残した作業領域（`<tmp_root>/<job_id>/`）を消す。消した数を返す。
+/// running だったジョブは queued に戻り、走り直せば作業領域を作り直す
+pub fn sweep_tmp(tmp_root: &Path) -> usize {
+    let entries = match std::fs::read_dir(tmp_root) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        let p = e.path();
+        let result = if p.is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(err) => {
+                tracing::warn!(path = %p.display(), error = %err, "作業領域の残りを消せない")
+            }
+        }
+    }
+    removed
+}

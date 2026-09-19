@@ -28,6 +28,7 @@ mod state;
 pub mod stream;
 pub mod tracks;
 pub mod verify;
+pub mod ytmusic;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
@@ -112,6 +113,7 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox/{id}/approve", post(inbox::approve))
         .route("/inbox/{id}/reject", post(inbox::reject))
         .route("/inbox/{id}/reopen", post(inbox::reopen))
+        .route("/ytmusic/download", post(ytmusic::download))
         .fallback(api_not_found);
 
     let protected = Router::new()

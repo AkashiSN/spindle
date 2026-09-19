@@ -15,6 +15,8 @@ use spindle::fsroot::Roots;
 use spindle::gc::GcRoots;
 use spindle::import::inbox::PlaceItemEnv;
 use spindle::import::scanner::Scanner;
+use spindle::import::ytmusic::downloader::DownloaderEnv;
+use spindle::import::ytmusic::MetadataProvider;
 use spindle::jobs::handlers::backup::{self, BackupHandler};
 use spindle::jobs::handlers::flaccheck::FlaccheckHandler;
 use spindle::jobs::handlers::gc::{self as gc_job, GcHandler};
@@ -27,6 +29,7 @@ use spindle::jobs::handlers::tagwrite::TagwriteHandler;
 use spindle::jobs::handlers::thumbnail::ThumbnailHandler;
 use spindle::jobs::handlers::transcode::{self, TranscodeHandler};
 use spindle::jobs::handlers::verify::VerifyHandler;
+use spindle::jobs::handlers::ytdl::YtdlHandler;
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
 use spindle::media::artwork::ArtworkStore;
 use spindle::media::decode::Decoder;
@@ -303,6 +306,35 @@ async fn main() -> anyhow::Result<()> {
             before_place: None,
         })),
     );
+    // YouTube のダウンロード（P3-3、D-70）。Inbox に置くところまで。無効なら登録しない（API は 404）
+    if state.config.ytmusic.enabled {
+        let ytdl_tmp = state.config.paths.data.join(TMP_DIR_NAME).join("ytdl");
+        let swept = spindle::import::ytmusic::downloader::sweep_tmp(&ytdl_tmp);
+        if swept > 0 {
+            info!(swept, "ytdl の作業領域の残りを消した");
+        }
+        let provider = MetadataProvider::new(
+            &state.config.ytmusic.metadata_command,
+            std::time::Duration::from_secs(u64::from(state.config.ytmusic.metadata_timeout_secs)),
+        )
+        .context("ytmusic.metadata_command が空")?;
+        registry.register(
+            JobType::Ytdl,
+            Arc::new(YtdlHandler::new(DownloaderEnv {
+                db: Arc::clone(&state.db),
+                inbox: Arc::clone(&inbox_root),
+                archive: Arc::clone(&archive_root),
+                jobs: Arc::clone(&state.jobs),
+                provider,
+                ytdlp: vec![state.config.bin.ytdlp.clone()],
+                ffmpeg: PathBuf::from(&state.config.bin.ffmpeg),
+                tmp_root: ytdl_tmp,
+                download_timeout: std::time::Duration::from_secs(u64::from(
+                    state.config.ytmusic.download_timeout_secs,
+                )),
+            })),
+        );
+    }
     let worker = state.jobs.start(registry, shutdown.clone());
     // Inbox の周期検出（0 で無し）
     let inbox_scheduler = inbox_job::spawn_scheduler(
