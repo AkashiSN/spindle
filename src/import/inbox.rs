@@ -295,6 +295,8 @@ pub enum InboxError {
     #[error(transparent)]
     Db(#[from] DbError),
     #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("キャンセルされた")]
     Cancelled,
@@ -540,4 +542,760 @@ pub async fn scan_inbox(
         })
         .await?;
     Ok(outcome)
+}
+
+// ---------------------------------------------------------------- 配置
+
+use std::fs::File;
+use std::io::Read as _;
+
+use rusqlite::OptionalExtension as _;
+use tokio_util::sync::CancellationToken;
+
+use crate::config::LayoutConfig;
+use crate::db::now_epoch;
+use crate::db::scans::{self, AlbumMeta, Fingerprint, PictureState};
+use crate::domain::pathgen::{self, PlanItem, Planned, Template, TrackFields};
+use crate::domain::tags::{write_tag_changes, TagChange};
+use crate::edit::Editor;
+use crate::import::placement::{
+    find_or_create_album, place_one, register_track, remove_placed, PlacedFile, PlacementError,
+};
+use crate::import::scanner::{read_fingerprint, track_content};
+use crate::jobs::handlers::rg::new_album_job;
+use crate::jobs::{Event, Jobs, LibraryEvent};
+
+/// 配置に要する環境
+pub struct PlaceItemEnv {
+    pub db: Arc<Db>,
+    pub library: Arc<RootDir>,
+    pub inbox: Arc<RootDir>,
+    pub jobs: Arc<Jobs>,
+    pub layout: LayoutConfig,
+    /// 無ければ normalize は投入しない
+    pub editor: Option<Arc<Editor>>,
+    pub wav_to_flac: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemPlaced {
+    pub album_id: i64,
+    pub rel_dir: RelPath,
+    /// draft の順
+    pub track_ids: Vec<i64>,
+    pub job_ids: Vec<i64>,
+    /// 投入した normalize の編集バッチ
+    pub normalize_batch: Option<i64>,
+}
+
+/// 計画（draft の順）
+#[derive(Debug, Clone)]
+struct ItemPlan {
+    paths: Vec<RelPath>,
+    rel_dir: RelPath,
+    release: String,
+    category_id: Option<i64>,
+}
+
+/// 配置前に Inbox 側で読んだ 1 ファイル（draft の順）
+#[derive(Debug, Clone)]
+struct Source {
+    rel: RelPath,
+    ext: Option<String>,
+    fp: Fingerprint,
+    changes: Vec<TagChange>,
+}
+
+fn parse_template(name: &str, s: &str) -> Result<Template, InboxError> {
+    Template::parse(s).map_err(|e| InboxError::Conflict(format!("[layout].{name} が不正: {e}")))
+}
+
+/// 補正で変わるタグ（現在値と違うキーだけ）
+fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -> Vec<TagChange> {
+    let t = &draft.tracks[index];
+    let mut desired: Vec<(&str, String)> = vec![
+        ("ALBUMARTIST", draft.albumartist.trim().to_owned()),
+        ("ALBUM", draft.album.trim().to_owned()),
+        ("TITLE", t.title.trim().to_owned()),
+        ("ARTIST", draft.track_artist(index).to_owned()),
+        ("TRACKNUMBER", t.track_no.to_string()),
+        ("DISCNUMBER", t.disc_no.to_string()),
+    ];
+    if let Some(d) = draft
+        .date
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        desired.push(("DATE", d.to_owned()));
+    }
+    if draft.disc_count() > 1 {
+        desired.push(("DISCTOTAL", draft.disc_count().to_string()));
+    }
+    desired
+        .into_iter()
+        .filter(|(k, v)| {
+            let now: Vec<&str> = current
+                .iter()
+                .filter(|(ck, _)| ck == k)
+                .map(|(_, cv)| cv.as_str())
+                .collect();
+            now != [v.as_str()]
+        })
+        .map(|(k, v)| TagChange {
+            key: k.to_owned(),
+            values: Some(vec![v]),
+        })
+        .collect()
+}
+
+/// Inbox 側を読む（配置の前）: 行と stat が一致することを確かめ、音声のフィンガープリントと
+/// 補正で変わるタグを出す
+fn read_sources(
+    inbox: &RootDir,
+    draft: &InboxDraft,
+    files: &HashMap<String, FileRow>,
+) -> Result<Vec<Source>, InboxError> {
+    let mut out = Vec::with_capacity(draft.tracks.len());
+    for (i, t) in draft.tracks.iter().enumerate() {
+        let row = files
+            .get(&canonical_key(&t.rel_path))
+            .ok_or_else(|| InboxError::Draft(DraftError::UnknownFile(t.rel_path.clone())))?;
+        let rel = RelPath::parse(&t.rel_path)
+            .map_err(|e| InboxError::Conflict(format!("{}: {e}", t.rel_path)))?;
+        let st = inbox.stat(&rel)?;
+        if !stat_matches(row, &st) {
+            return Err(InboxError::Changed(t.rel_path.clone()));
+        }
+        let ext = rel
+            .file_name()
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase());
+        let af = read_audio_file(inbox.open_file(&rel)?, ext.as_deref())
+            .map_err(|e| InboxError::Conflict(format!("{}: {e}", t.rel_path)))?;
+        let fp = read_fingerprint(inbox, &rel, &af);
+        out.push(Source {
+            rel,
+            ext,
+            fp,
+            changes: tag_changes(draft, i, &row.tags),
+        });
+    }
+    Ok(out)
+}
+
+/// 自分の成果物（同じ音声の active な行。再実行で見分ける）
+#[derive(Debug, Default)]
+struct SelfRows {
+    /// 行が属する album とそのリリースキー（最初に見つかったもの）
+    album: Option<(i64, String)>,
+    /// 行の rel_path_key
+    keys: HashSet<String>,
+}
+
+/// 同じ音声（フィンガープリント一致）の active な行と、その album
+fn self_album(conn: &rusqlite::Connection, sources: &[Source]) -> Result<SelfRows, InboxError> {
+    let mut keys = HashSet::new();
+    let mut album: Option<(i64, String)> = None;
+    let mut st = conn.prepare_cached(
+        "SELECT t.rel_path_key, t.album_id, a.mb_release_id, a.discid
+           FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
+          WHERE t.missing_since IS NULL AND ((?1 IS NOT NULL AND t.audio_md5 = ?1)
+                                           OR (?2 IS NOT NULL AND t.audio_fp = ?2))",
+    )?;
+    for src in sources {
+        let (md5, afp): (Option<Vec<u8>>, Option<Vec<u8>>) = match src.fp {
+            Fingerprint::Md5(Some(m)) => (Some(m.to_vec()), None),
+            Fingerprint::Fp(Some(f)) => (None, Some(f.to_vec())),
+            _ => continue,
+        };
+        let rows = st
+            .query_map(rusqlite::params![md5, afp], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (key, album_id, mb, discid) in rows {
+            keys.insert(key);
+            if album.is_none() {
+                if let Some(id) = album_id {
+                    album = Some((
+                        id,
+                        crate::import::placement::release_key(id, mb.as_deref(), discid.as_deref()),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(SelfRows { album, keys })
+}
+
+fn plan_item(
+    conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    item: &Item,
+    draft: &InboxDraft,
+    files: &[FileRow],
+    sources: &[Source],
+) -> Result<ItemPlan, InboxError> {
+    let category = match draft.category.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => crate::db::categories::find_by_key(conn, name)?,
+        _ => None,
+    };
+    let template = if category.is_none() {
+        parse_template("unsorted", &layout.unsorted)?
+    } else if draft.disc_count() > 1 {
+        parse_template("multi_disc", &layout.multi_disc)?
+    } else {
+        parse_template("single_disc", &layout.single_disc)?
+    };
+    // 自分の成果物（同じ音声の行）は占有から外し、その album のリリースキーに揃える（再実行）
+    let SelfRows {
+        album: self_album,
+        keys: self_keys,
+    } = self_album(conn, sources)?;
+    // リリースキー: MUSICBRAINZ_ALBUMID の最頻値があれば mb:、自分の成果物の album があればそれ、
+    // 無ければ件ごとの新規
+    let release = mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")))
+        .map(|m| format!("mb:{m}"))
+        .or_else(|| self_album.map(|(_, k)| k))
+        .unwrap_or_else(|| format!("inbox:{}", item.id));
+    let items: Vec<PlanItem> = draft
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let (stem, ext) = match t
+                .rel_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&t.rel_path)
+                .rsplit_once('.')
+            {
+                Some((s, e)) => (s.to_owned(), e.to_ascii_lowercase()),
+                None => (t.rel_path.clone(), String::new()),
+            };
+            PlanItem {
+                track_id: -(i as i64) - 1,
+                template: template.clone(),
+                fields: TrackFields {
+                    category: category.as_ref().map(|c| c.name.clone()),
+                    albumartist: Some(draft.albumartist.trim().to_owned()),
+                    artist: Some(draft.track_artist(i).to_owned()),
+                    album: Some(draft.album.trim().to_owned()),
+                    title: Some(t.title.trim().to_owned()),
+                    disc_no: Some(i64::from(t.disc_no)),
+                    track_no: Some(i64::from(t.track_no)),
+                    year: draft.year(),
+                    edition: None,
+                    ext,
+                    stem,
+                },
+                release: release.clone(),
+                current_rel_path: String::new(),
+            }
+        })
+        .collect();
+    let mut occ = crate::edit::rename::load_occupancy(conn, &HashSet::new())?;
+    for k in &self_keys {
+        occ.path_keys.remove(k);
+    }
+    let mut paths = Vec::with_capacity(items.len());
+    for (planned, t) in pathgen::plan(&items, &occ).into_iter().zip(&draft.tracks) {
+        match planned {
+            Planned::Path(p) => paths.push(p),
+            Planned::Conflict(r) => {
+                return Err(InboxError::Conflict(format!("{}: {r}", t.rel_path)))
+            }
+            Planned::Unchanged => {
+                return Err(InboxError::Conflict(format!(
+                    "{}: パスを決められない",
+                    t.rel_path
+                )))
+            }
+        }
+    }
+    let Some(rel_dir) = paths.first().and_then(RelPath::parent) else {
+        return Err(InboxError::Conflict("宛先が root 直下になる".into()));
+    };
+    if paths.iter().any(|p| p.parent().as_ref() != Some(&rel_dir)) {
+        return Err(InboxError::Conflict(
+            "トラックの宛先が 1 つのディレクトリに揃わない".into(),
+        ));
+    }
+    Ok(ItemPlan {
+        paths,
+        rel_dir,
+        release,
+        category_id: category.map(|c| c.id),
+    })
+}
+
+/// 置いた結果（登録の材料）
+struct Placed {
+    tracks: Vec<(scans::Physical, scans::TrackContent, Fingerprint)>,
+    placed_new: Vec<RelPath>,
+    /// 作ったディレクトリのうち最上位（無ければ全部既存）。失敗時にここまで消す
+    created_top: Option<RelPath>,
+    /// 移した同梱ファイル（Inbox 側の rel）
+    companions: Vec<RelPath>,
+}
+
+fn same_audio(a: Fingerprint, b: Fingerprint) -> bool {
+    match (a, b) {
+        (Fingerprint::Md5(Some(x)), Fingerprint::Md5(Some(y))) => x == y,
+        (Fingerprint::Fp(Some(x)), Fingerprint::Fp(Some(y))) => x == y,
+        _ => false,
+    }
+}
+
+/// `dir` までを作り、新しく作った最上位のディレクトリを返す（失敗時の後始末に使う）
+fn create_dirs(root: &RootDir, dir: &RelPath) -> Result<Option<RelPath>, FsError> {
+    let mut top: Option<RelPath> = None;
+    let mut prefix: Option<RelPath> = None;
+    for name in dir.components() {
+        let next = match &prefix {
+            Some(p) => p.join(name),
+            None => RelPath::parse(name),
+        }
+        .map_err(|e| FsError::Io(std::io::Error::other(e)))?;
+        if top.is_none() && matches!(root.stat(&next), Err(FsError::NotFound)) {
+            top = Some(next.clone());
+        }
+        prefix = Some(next);
+    }
+    root.create_dir_all(dir)?;
+    Ok(top)
+}
+
+/// 失敗時の後始末: 置いたファイルを消し、作ったディレクトリを `created_top` まで消す
+fn cleanup(root: &RootDir, dir: &RelPath, placed_new: &[RelPath], created_top: Option<&RelPath>) {
+    remove_placed(root, dir, placed_new);
+    let Some(top) = created_top else {
+        return;
+    };
+    let mut cur = dir.parent();
+    while let Some(d) = cur {
+        if d.key().len() < top.key().len() {
+            break;
+        }
+        let _ = root.remove_dir(&d);
+        cur = d.parent();
+    }
+}
+
+/// Inbox からコピーし、補正タグを書き、Library に置く
+fn place_files(
+    library: &RootDir,
+    inbox: &RootDir,
+    item: &Item,
+    plan: &ItemPlan,
+    sources: &[Source],
+) -> Result<Placed, InboxError> {
+    let created_top = create_dirs(library, &plan.rel_dir)?;
+    let mut placed_new: Vec<RelPath> = Vec::new();
+    let result = (|| -> Result<Placed, InboxError> {
+        let mut tracks = Vec::with_capacity(plan.paths.len());
+        for (target, src) in plan.paths.iter().zip(sources) {
+            let ext_for_write = src.ext.clone();
+            let changes = src.changes.clone();
+            let src_fp = src.fp;
+            let outcome = place_one(
+                library,
+                &plan.rel_dir,
+                target,
+                inbox.open_file(&src.rel)?,
+                move |tmp: &mut File| {
+                    if !changes.is_empty() {
+                        write_tag_changes(tmp, ext_for_write.as_deref(), &changes, None).map_err(
+                            |e| PlacementError::Io(std::io::Error::other(e.to_string())),
+                        )?;
+                    }
+                    Ok(())
+                },
+                |_existing: File| {
+                    // 宛先に既にあるファイルが同じ音声なら自分の成果物（再実行）
+                    let ext = target.file_name().rsplit_once('.').map(|(_, e)| e);
+                    let af = match read_audio_file(library.open_file(target)?, ext) {
+                        Ok(af) => af,
+                        Err(_) => return Ok(false),
+                    };
+                    Ok(same_audio(read_fingerprint(library, target, &af), src_fp))
+                },
+            )?;
+            if outcome == PlacedFile::New {
+                placed_new.push(target.clone());
+            }
+            let file = library.open_file(target)?;
+            let ph = crate::fsroot::fstat(&file)?;
+            let af = read_audio_file(file, src.ext.as_deref())
+                .map_err(|e| InboxError::Conflict(format!("{target}: {e}")))?;
+            let fp = read_fingerprint(library, target, &af);
+            let mut content = track_content(af);
+            content.picture = PictureState::Unread;
+            tracks.push((ph.into(), content, fp));
+        }
+        // 既知の同梱ファイル（cover 画像 / cue / toc / log）
+        let mut companions = Vec::new();
+        if !item.rel_dir.is_empty() {
+            let dir =
+                RelPath::parse(&item.rel_dir).map_err(|e| InboxError::Conflict(e.to_string()))?;
+            for e in inbox.read_dir(Some(&dir))? {
+                let Some(name) = e.name.to_str() else {
+                    continue;
+                };
+                if e.kind != FileKind::File || !crate::cd::riplog::is_companion_name(name) {
+                    continue;
+                }
+                let (Ok(from), Ok(to)) = (dir.join(name), plan.rel_dir.join(name)) else {
+                    continue;
+                };
+                let mut body = Vec::new();
+                inbox.open_file(&from)?.read_to_end(&mut body)?;
+                let expected = body.clone();
+                match place_one(
+                    library,
+                    &plan.rel_dir,
+                    &to,
+                    body.as_slice(),
+                    |_| Ok(()),
+                    move |mut f: File| {
+                        let mut existing = Vec::new();
+                        f.read_to_end(&mut existing)?;
+                        Ok(existing == expected)
+                    },
+                ) {
+                    Ok(PlacedFile::New) => {
+                        placed_new.push(to);
+                        companions.push(from);
+                    }
+                    Ok(PlacedFile::Reused) => companions.push(from),
+                    Err(PlacementError::Conflict(r)) => {
+                        tracing::warn!(reason = %r, "同梱ファイルは宛先に別の内容があるので Inbox に残す")
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        library.fsync_dir(Some(&plan.rel_dir))?;
+        Ok(Placed {
+            tracks,
+            placed_new: std::mem::take(&mut placed_new),
+            created_top: created_top.clone(),
+            companions,
+        })
+    })();
+    match result {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            cleanup(library, &plan.rel_dir, &placed_new, created_top.as_ref());
+            Err(e)
+        }
+    }
+}
+
+struct RegisteredItem {
+    album_id: i64,
+    track_ids: Vec<i64>,
+    job_ids: Vec<i64>,
+}
+
+fn register_item(
+    conn: &mut rusqlite::Connection,
+    plan: &ItemPlan,
+    draft: &InboxDraft,
+    placed: &Placed,
+    files: &HashMap<String, FileRow>,
+) -> Result<Result<RegisteredItem, InboxError>, DbError> {
+    let tx = conn.transaction()?;
+    let now = now_epoch();
+    let mb = mode(files.values().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")));
+    let meta = AlbumMeta {
+        category_id: plan.category_id,
+        albumartist: Some(draft.albumartist.trim().to_owned()),
+        album: Some(draft.album.trim().to_owned()),
+        date: draft
+            .date
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_owned),
+        original_date: None,
+        mb_release_id: mb,
+        discid: None,
+        disc_count: Some(i64::from(draft.disc_count())),
+    };
+    let album_id = match find_or_create_album(&tx, &plan.rel_dir, &plan.release, &meta) {
+        Ok(Ok(id)) => id,
+        Ok(Err(reason)) => {
+            drop(tx);
+            return Ok(Err(InboxError::Conflict(reason)));
+        }
+        Err(e) => {
+            drop(tx);
+            return Ok(Err(e.into()));
+        }
+    };
+    let album_name: Option<String> = tx
+        .query_row("SELECT album FROM albums WHERE id = ?1", [album_id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten();
+    let mut track_ids = Vec::with_capacity(plan.paths.len());
+    for (rel, (ph, content, fp)) in plan.paths.iter().zip(&placed.tracks) {
+        let id = match register_track(&tx, rel, ph, content, *fp, now) {
+            Ok(Ok(r)) => r.id,
+            Ok(Err(reason)) => {
+                drop(tx);
+                return Ok(Err(InboxError::Conflict(reason)));
+            }
+            Err(e) => {
+                drop(tx);
+                return Ok(Err(e.into()));
+            }
+        };
+        scans::set_track_album(&tx, id, album_id, album_name.as_deref())?;
+        scans::set_source_type(&tx, id, "download")?;
+        track_ids.push(id);
+    }
+    let mut job_ids = vec![crate::db::jobs::enqueue(&tx, &new_album_job(album_id), now)?.id()];
+    for &id in &track_ids {
+        if let Some(j) = crate::db::derived::enqueue_if_stale(&tx, id, now)? {
+            job_ids.push(j);
+        }
+    }
+    tx.commit()?;
+    Ok(Ok(RegisteredItem {
+        album_id,
+        track_ids,
+        job_ids,
+    }))
+}
+
+/// Inbox 側を消す（コピー中に変わっていなければ）。空になったディレクトリも消す
+fn consume_inbox(
+    inbox: &RootDir,
+    item: &Item,
+    files: &HashMap<String, FileRow>,
+    sources: &[Source],
+    companions: &[RelPath],
+) {
+    for src in sources {
+        let unchanged = files
+            .get(&src.rel.key())
+            .zip(inbox.stat(&src.rel).ok())
+            .is_some_and(|(row, st)| stat_matches(row, &st));
+        if !unchanged {
+            tracing::warn!(path = %src.rel, "Inbox のファイルが配置の間に変わったので残す");
+            continue;
+        }
+        if let Err(e) = inbox.unlink(&src.rel) {
+            tracing::warn!(path = %src.rel, error = %e, "Inbox のファイルを消せない");
+        }
+    }
+    for rel in companions {
+        if let Err(e) = inbox.unlink(rel) {
+            tracing::warn!(path = %rel, error = %e, "Inbox の同梱ファイルを消せない");
+        }
+    }
+    if !item.rel_dir.is_empty() {
+        if let Ok(dir) = RelPath::parse(&item.rel_dir) {
+            match inbox.remove_dir(&dir) {
+                Ok(()) | Err(FsError::NotFound) => {}
+                Err(FsError::Io(e))
+                    if e.raw_os_error() == Some(rustix::io::Errno::NOTEMPTY.raw_os_error()) => {}
+                Err(e) => tracing::warn!(dir = %dir, error = %e, "Inbox のディレクトリを消せない"),
+            }
+        }
+    }
+}
+
+/// approved の件を Library に配置して登録する。`library` の排他は呼び出し側（ハンドラ）が取る
+pub async fn place_item(
+    env: &PlaceItemEnv,
+    item: &Item,
+    token: &CancellationToken,
+) -> Result<ItemPlaced, InboxError> {
+    let draft: InboxDraft = match &item.draft {
+        Some(v) => serde_json::from_value(v.clone())
+            .map_err(|e| InboxError::Conflict(format!("下書きを読めない: {e}")))?,
+        None => return Err(InboxError::Conflict("下書きが無い".into())),
+    };
+    let item_id = item.id;
+    let rows = env.db.read(move |c| dbinbox::files(c, item_id)).await?;
+    let names: Vec<String> = rows.iter().map(|f| f.rel_path.clone()).collect();
+    draft.validate(&names)?;
+    let files: Arc<HashMap<String, FileRow>> = Arc::new(
+        rows.into_iter()
+            .map(|f| (canonical_key(&f.rel_path), f))
+            .collect(),
+    );
+    // 1. Inbox 側を読む（stat の照合、フィンガープリント、補正）
+    let sources: Arc<Vec<Source>> = {
+        let (inbox, draft, files) = (Arc::clone(&env.inbox), draft.clone(), Arc::clone(&files));
+        Arc::new(
+            tokio::task::spawn_blocking(move || read_sources(&inbox, &draft, &files))
+                .await
+                .map_err(|e| {
+                    std::io::Error::other(format!("Inbox の読み取りタスクが異常終了: {e}"))
+                })??,
+        )
+    };
+    // 2. 計画
+    let plan = {
+        let (layout, item, draft, files, sources) = (
+            env.layout.clone(),
+            item.clone(),
+            draft.clone(),
+            Arc::clone(&files),
+            Arc::clone(&sources),
+        );
+        env.db
+            .read(move |c| {
+                let list: Vec<FileRow> = files.values().cloned().collect();
+                Ok(plan_item(c, &layout, &item, &draft, &list, &sources))
+            })
+            .await??
+    };
+    if token.is_cancelled() {
+        return Err(InboxError::Cancelled);
+    }
+    // 3. 配置
+    let placed = {
+        let (library, inbox, item, plan, sources) = (
+            Arc::clone(&env.library),
+            Arc::clone(&env.inbox),
+            item.clone(),
+            plan.clone(),
+            Arc::clone(&sources),
+        );
+        tokio::task::spawn_blocking(move || place_files(&library, &inbox, &item, &plan, &sources))
+            .await
+            .map_err(|e| std::io::Error::other(format!("配置タスクが異常終了: {e}")))??
+    };
+    let placed_new = placed.placed_new.clone();
+    let created_top = placed.created_top.clone();
+    let companions = placed.companions.clone();
+    // 4. 登録
+    let registered = {
+        let (plan_tx, draft_tx, files_tx) = (plan.clone(), draft.clone(), Arc::clone(&files));
+        env.db
+            .write(move |c| register_item(c, &plan_tx, &draft_tx, &placed, &files_tx))
+            .await
+    };
+    let registered: Result<RegisteredItem, InboxError> = match registered {
+        Ok(inner) => inner,
+        Err(e) => Err(InboxError::Db(e)),
+    };
+    let registered = match registered {
+        Ok(r) => r,
+        Err(e) => {
+            let library = Arc::clone(&env.library);
+            let dir = plan.rel_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                cleanup(&library, &dir, &placed_new, created_top.as_ref())
+            })
+            .await;
+            return Err(e);
+        }
+    };
+    // 5. Inbox 側を消す
+    {
+        let (inbox, item, files, sources) = (
+            Arc::clone(&env.inbox),
+            item.clone(),
+            Arc::clone(&files),
+            Arc::clone(&sources),
+        );
+        let _ = tokio::task::spawn_blocking(move || {
+            consume_inbox(&inbox, &item, &files, &sources, &companions)
+        })
+        .await;
+    }
+    // 6. 後続: normalize（WAV / ALAC / AIFF）
+    let mut normalize_batch = None;
+    if env.wav_to_flac {
+        if let Some(editor) = &env.editor {
+            let ids: Vec<i64> = registered
+                .track_ids
+                .iter()
+                .zip(&draft.tracks)
+                .filter(|(_, t)| {
+                    files
+                        .get(&canonical_key(&t.rel_path))
+                        .is_some_and(|f| matches!(f.codec.as_str(), "wav" | "alac" | "aiff"))
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            if !ids.is_empty() {
+                normalize_batch = enqueue_normalize(editor, &ids).await;
+            }
+        }
+    }
+    env.jobs.notify_enqueued(&registered.job_ids).await;
+    env.jobs.publish(Event::Library(LibraryEvent::Ids {
+        scan_run_id: 0,
+        track_ids: registered.track_ids.clone(),
+    }));
+    tracing::info!(
+        item_id = item.id,
+        album_id = registered.album_id,
+        dir = %plan.rel_dir,
+        tracks = registered.track_ids.len(),
+        "Inbox の件を配置した"
+    );
+    Ok(ItemPlaced {
+        album_id: registered.album_id,
+        rel_dir: plan.rel_dir,
+        track_ids: registered.track_ids,
+        job_ids: registered.job_ids,
+        normalize_batch,
+    })
+}
+
+/// 可逆（WAV / ALAC / AIFF）を FLAC に正規化する編集バッチを作る（D-46 の予告）。失敗は警告だけ
+async fn enqueue_normalize(editor: &Editor, ids: &[i64]) -> Option<i64> {
+    use crate::edit::{NormalizePlan, NormalizeTarget};
+    let planned = match editor.plan_normalize(ids).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "normalize の計画に失敗");
+            return None;
+        }
+    };
+    let targets: Vec<NormalizeTarget> = planned
+        .into_iter()
+        .filter_map(|p| match p.planned {
+            NormalizePlan::Path(new_rel_path) => Some(NormalizeTarget {
+                track_id: p.track_id,
+                new_rel_path,
+                new_codec: "flac".to_owned(),
+                expected: None,
+                planned_conflict: None,
+            }),
+            NormalizePlan::Unchanged => None,
+            NormalizePlan::Conflict(r) => {
+                tracing::warn!(track_id = p.track_id, reason = %r, "normalize の宛先が衝突");
+                None
+            }
+        })
+        .collect();
+    if targets.is_empty() {
+        return None;
+    }
+    match editor
+        .prepare_normalize(Some("Inbox 取り込み"), targets)
+        .await
+    {
+        Ok(p) => Some(p.batch_id),
+        Err(e) => {
+            tracing::warn!(error = %e, "normalize を投入できない");
+            None
+        }
+    }
 }

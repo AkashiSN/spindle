@@ -4,6 +4,7 @@
 pub mod backup;
 pub mod flaccheck;
 pub mod gc;
+pub mod inbox;
 pub mod normalize;
 pub mod rename;
 pub mod rg;

@@ -13,10 +13,12 @@ use spindle::db::{migrations, Db};
 use spindle::edit::{Editor, NormalizeEnv};
 use spindle::fsroot::Roots;
 use spindle::gc::GcRoots;
+use spindle::import::inbox::PlaceItemEnv;
 use spindle::import::scanner::Scanner;
 use spindle::jobs::handlers::backup::{self, BackupHandler};
 use spindle::jobs::handlers::flaccheck::FlaccheckHandler;
 use spindle::jobs::handlers::gc::{self as gc_job, GcHandler};
+use spindle::jobs::handlers::inbox::{self as inbox_job, InboxHandler};
 use spindle::jobs::handlers::normalize::NormalizeHandler;
 use spindle::jobs::handlers::rename::RenameHandler;
 use spindle::jobs::handlers::rg::RgHandler;
@@ -59,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
     let archive_root = Arc::new(roots.archive);
     let derived_root = Arc::new(roots.derived);
     let playlists_root = Arc::new(roots.playlists);
+    let inbox_root = Arc::new(roots.inbox);
 
     let db_path = config.paths.data.join(DB_FILE_NAME);
     let db = {
@@ -208,7 +211,10 @@ async fn main() -> anyhow::Result<()> {
         JobType::Rename,
         Arc::new(RenameHandler::new(Arc::clone(&editor))),
     );
-    registry.register(JobType::Normalize, Arc::new(NormalizeHandler::new(editor)));
+    registry.register(
+        JobType::Normalize,
+        Arc::new(NormalizeHandler::new(Arc::clone(&editor))),
+    );
     // ReplayGain 解析（P1-1）。Opus は ffmpeg でデコードする
     registry.register(
         JobType::Rg,
@@ -278,7 +284,27 @@ async fn main() -> anyhow::Result<()> {
             state.config.backup.retention_generations,
         )),
     );
+    // Inbox 取り込み（P2-10、D-68）。走査と承認済みの配置を 1 本のジョブで
+    state = state.with_inbox(Arc::clone(&inbox_root));
+    registry.register(
+        JobType::Inbox,
+        Arc::new(InboxHandler::new(PlaceItemEnv {
+            db: Arc::clone(&state.db),
+            library: Arc::clone(&library_root),
+            inbox: Arc::clone(&inbox_root),
+            jobs: Arc::clone(&state.jobs),
+            layout: state.config.layout.clone(),
+            editor: Some(Arc::clone(&editor)),
+            wav_to_flac: state.config.normalize.wav_to_flac,
+        })),
+    );
     let worker = state.jobs.start(registry, shutdown.clone());
+    // Inbox の周期検出（0 で無し）
+    let inbox_scheduler = inbox_job::spawn_scheduler(
+        Arc::clone(&state.jobs),
+        i64::from(state.config.inbox.poll_interval_secs),
+        shutdown.clone(),
+    );
     // 定期バックアップ（SPEC §14）。最後の終端 backup から interval_hours 経っていれば投入する
     let backup_scheduler = backup::spawn_scheduler(
         Arc::clone(&state.jobs),
@@ -317,6 +343,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = worker.await;
     let _ = backup_scheduler.await;
     let _ = gc_scheduler.await;
+    let _ = inbox_scheduler.await;
     let _ = autoexport.await;
     info!("停止した");
     Ok(())
