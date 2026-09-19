@@ -14,6 +14,7 @@ pub mod flaccheck;
 pub mod gc;
 pub mod health;
 pub mod history;
+pub mod inbox;
 pub mod jobs;
 pub mod md5fill;
 pub mod normalize;
@@ -106,6 +107,11 @@ pub fn router(state: AppState) -> Router {
         .route("/scan", post(scan::start))
         .route("/gc", post(gc::start))
         .route("/gc/preview", get(gc::preview))
+        .route("/inbox", get(inbox::list))
+        .route("/inbox/scan", post(inbox::scan))
+        .route("/inbox/{id}/approve", post(inbox::approve))
+        .route("/inbox/{id}/reject", post(inbox::reject))
+        .route("/inbox/{id}/reopen", post(inbox::reopen))
         .fallback(api_not_found);
 
     let protected = Router::new()
