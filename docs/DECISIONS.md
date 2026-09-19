@@ -2520,7 +2520,8 @@ ISRC / pre-emphasis / CD-TEXT を `Toc` に持たせて disc.toc に書く（P2-
   `approved → placing` は `UPDATE … WHERE state IN (…)`（`db::inbox::transition`）で、読んでから書くまでに
   他が動かした件を上書きしない。配置の途中でプロセスが落ちて `placing` のまま残った件は次の `inbox`
   ジョブが `approved` に戻して配置し直す（並列 1 なのでジョブ開始時の `placing` は必ず前の実行の残り。
-  配置は冪等）。`placed` の件のディレクトリに走査で音声が見えたら `pending` に戻す（消せなかった原本や
+  配置は冪等）。件の `placed` は登録トランザクションの中で確定する（commit 後に落ちても `placing` が
+  残らない）。`placed` の件のディレクトリに走査で音声が見えたら `pending` に戻す（消せなかった原本や
   配置後に置かれたファイルを `placed` の裏に隠さない）
 - **後続は rg / transcode に加えて normalize。** WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら
   `Editor::prepare_normalize` で編集バッチを作って投入する（D-46 で P2-10 に先送りしていた自動投入）。

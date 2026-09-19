@@ -1046,6 +1046,7 @@ struct RegisteredItem {
 
 fn register_item(
     conn: &mut rusqlite::Connection,
+    item_id: i64,
     plan: &ItemPlan,
     draft: &InboxDraft,
     placed: &Placed,
@@ -1109,6 +1110,9 @@ fn register_item(
             job_ids.push(j);
         }
     }
+    // 件の placed も同じトランザクションで確定する。commit の直後に落ちても placing のまま残らず
+    // （Inbox の原本が残っていれば走査が pending に戻す）、24 時間の placed 表示も失わない
+    dbinbox::set_placed(&tx, item_id, album_id, now)?;
     tx.commit()?;
     Ok(Ok(RegisteredItem {
         album_id,
@@ -1231,7 +1235,7 @@ pub async fn place_item(
     let registered = {
         let (plan_tx, draft_tx, files_tx) = (plan.clone(), draft.clone(), Arc::clone(&files));
         env.db
-            .write(move |c| register_item(c, &plan_tx, &draft_tx, &placed, &files_tx))
+            .write(move |c| register_item(c, item_id, &plan_tx, &draft_tx, &placed, &files_tx))
             .await
     };
     let registered: Result<RegisteredItem, InboxError> = match registered {

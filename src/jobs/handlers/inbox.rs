@@ -130,10 +130,8 @@ impl InboxHandler {
             };
             match result {
                 Ok(p) => {
-                    let album_id = p.album_id;
-                    ctx.db()
-                        .write(move |c| dbinbox::set_placed(c, id, album_id, now_epoch()))
-                        .await?;
+                    // placed は登録トランザクションの中で確定済み（place_item）
+                    tracing::info!(job_id, item_id = id, album_id = p.album_id, "配置済み");
                 }
                 Err(InboxError::Cancelled) => {
                     ctx.db()

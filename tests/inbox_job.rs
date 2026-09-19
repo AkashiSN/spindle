@@ -727,3 +727,35 @@ async fn audio_left_in_a_placed_directory_reopens_the_item() {
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].rel_path, "AlbumA/02.flac");
 }
+
+/// 「登録も Inbox の消費も済んだが、ジョブが件を placed にする前に落ちた」境界: 登録トランザクションが
+/// 件の placed も確定するので、再起動後も placed のまま（approved に戻されて failed になったり、
+/// 走査で消えたりしない）
+#[tokio::test]
+async fn crash_after_register_keeps_the_item_placed() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    inbox::set_state(&lib.conn(), a.id, ItemState::Placing, None, 2).unwrap();
+    let env = lib.env(false);
+    let item = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    // place_item は登録 + 消費まで。handler の後処理をせずに落ちたことにする
+    let placed = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    let it = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed);
+    assert_eq!(it.placed_album_id, Some(placed.album_id));
+    assert!(!lib.inbox_path("AlbumA/01.flac").exists());
+    // 次のジョブ（回復 + 走査）でも placed のまま残り、二重登録もしない
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 1);
+}
