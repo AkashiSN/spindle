@@ -7,6 +7,7 @@
 
 pub mod accuraterip;
 pub mod ctdb;
+pub mod toc;
 
 /// 1 セクタ（CD フレーム）のサンプル数。1 サンプル = 2ch × 16 bit
 pub const SECTOR_SAMPLES: u64 = 588;

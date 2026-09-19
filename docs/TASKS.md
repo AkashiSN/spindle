@@ -759,6 +759,17 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 - [ ] **P2-1** ドライブ制御（デバイス割当、`CDROM_DRIVE_STATUS` ポーリング、eject）
 - [ ] **P2-2** TOC 取得と各種 DiscID 算出（MusicBrainz / AccurateRip / FreeDB）
+  - [ ] TOC 取得（`cdrdao read-toc` / SG_IO READ TOC → `Toc`）。ドライブが要る
+  - [x] ID 算出（`src/cd/toc.rs`。ドライブ不要）: `Toc`（LBA、データトラックのフラグ、リードアウト）から
+        MusicBrainz DiscID と `?toc=` 文字列、FreeDB ID、AccurateRip id1 / id2、CTDB の TOC 文字列と TOCID、
+        CRC 用の `TrackLayout`。§7.3 の `from_audio_sample_counts`（588 の倍数でなければ拒否）。
+        Enhanced CD は音声部分の終端をデータトラック開始 − 11400 とし、MB / CTDB はデータトラックを
+        数えない。AccurateRip は CUETools 式（id1 / id2 は音声だけ、リードアウトは実値、FreeDB は
+        データトラックも数える）を既定とし、データトラックを落とした `audio_session()` から作る
+        libdiscid 式の ID も AccurateRip DB に別キーとしてあることを実サーバで確認した。
+        受け入れ: `tests/cd_toc.rs`（MB ドキュメントの 6 トラック例と CD-Extra 例、Nevermind、
+        Hybrid Theory JP Enhanced CD。DiscID は MB ドキュメント / `ws/2` で、AccurateRip ID は
+        実サーバの `dBAR-*.bin` で照合した値。再構成、不正な TOC の拒否、u32 境界）
 - [ ] **P2-3** MusicBrainz 照会（UA 必須、1req/s）と候補選択 UI
 - [ ] **P2-4** **照会ゼロ件でも完走できる手入力経路**とトラックリスト貼り付け
 - [ ] **P2-5** 吸い出し（全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割）
