@@ -2,7 +2,8 @@
 // 検出（P2-1）が入るまでは TOC を貼り付けて照会する。候補を選ぶとフォームに写り、そこから直せる。
 // 候補ゼロ件でも空のフォームで完走できる（D-21）。吸い出し（P2-5）は後続
 
-import { Fragment } from 'react'
+import { Fragment, useState } from 'react'
+import { useCategories } from '../hooks/useCategories'
 import type { CdLookupState } from '../hooks/useCdLookup'
 import { albumTags, candidateLengthMs, candidateSummary, lookupHeadline, trackTags, type DiscMetadata } from '../lib/cd'
 import { formatDuration } from '../lib/format'
@@ -148,6 +149,7 @@ function DraftForm({ cd }: { cd: CdLookupState }) {
         {text('JAN/UPC', 'barcode')}
         {num('ディスク', 'disc_no')}
         {num('枚数', 'disc_count')}
+        <CategoryField value={d.category} onChange={(v) => cd.updateDraft({ category: v })} />
       </div>
 
       <h2>トラックリスト貼り付け</h2>
@@ -245,6 +247,47 @@ function DraftForm({ cd }: { cd: CdLookupState }) {
   )
 }
 
+/** 配置先の category（統制語彙から選ぶ。無ければ _Unsorted。その場で語彙を足せる） */
+function CategoryField({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
+  const cats = useCategories(true)
+  const [adding, setAdding] = useState('')
+  const add = async () => {
+    const name = adding.trim()
+    if (name === '') return
+    const c = await cats.create(name)
+    if (c != null) {
+      onChange(c.name)
+      setAdding('')
+    }
+  }
+  return (
+    <label className="cd-field cd-field-category">
+      <span>category（配置先。未選択なら _Unsorted）</span>
+      <select value={value ?? ''} onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}>
+        <option value="">（未分類 → _Unsorted）</option>
+        {cats.items.map((c) => (
+          <option key={c.id} value={c.name}>
+            {c.name}
+          </option>
+        ))}
+      </select>
+      <span className="cd-category-add">
+        <input
+          type="text"
+          aria-label="新しい category"
+          placeholder="語彙に追加"
+          value={adding}
+          onChange={(e) => setAdding(e.target.value)}
+        />
+        <button type="button" disabled={adding.trim() === ''} onClick={add}>
+          追加
+        </button>
+      </span>
+      {cats.error != null && <span className="error">{cats.error}</span>}
+    </label>
+  )
+}
+
 function Confirmed({ meta, onEdit }: { meta: DiscMetadata; onEdit: () => void }) {
   return (
     <>
@@ -252,6 +295,7 @@ function Confirmed({ meta, onEdit }: { meta: DiscMetadata; onEdit: () => void })
         確定: {meta.album_artist} — {meta.album}{' '}
         {meta.source === 'musicbrainz' ? <span className="badge">MusicBrainz</span> : <span className="badge muted">手入力</span>}
       </h2>
+      <p className="muted small">配置先の category: {meta.category ?? '_Unsorted'}</p>
       <dl className="cd-ids small">
         {albumTags(meta).map(([k, values]) => (
           <Fragment key={k}>

@@ -1519,6 +1519,18 @@ table.cd-tracks-edit td:nth-child(3) {
 .cd-field-num {
   max-width: 90px;
 }
+.cd-field-category {
+  grid-column: 1 / -1;
+  max-width: 480px;
+}
+.cd-category-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.cd-category-add input {
+  flex: 1;
+}
 .cd-warnings,
 .cd-errors {
   margin: 4px 0 0;

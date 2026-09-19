@@ -154,6 +154,8 @@ export type DiscDraft = {
   barcode: string
   disc_no: number
   disc_count: number
+  /** 配置先の category（統制語彙の名前）。null なら _Unsorted。タグには書かない（D-67） */
+  category: string | null
   tracks: DiscTrackDraft[]
 }
 
@@ -177,6 +179,7 @@ export type DiscMetadata = {
   barcode: string | null
   disc_no: number
   disc_count: number
+  category: string | null
   tracks: DiscTrackMetadata[]
 }
 
@@ -198,6 +201,7 @@ export function emptyDraft(toc: TocTrackInfo[]): DiscDraft {
     barcode: '',
     disc_no: 1,
     disc_count: 1,
+    category: null,
     tracks: blankRows(toc),
   }
 }
@@ -220,6 +224,7 @@ export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[]): Di
     barcode: c.barcode ?? '',
     disc_no: c.medium_position,
     disc_count: c.medium_count,
+    category: null,
     tracks: blankRows(toc).map((row, i) => {
       const t = c.tracks[i]
       if (t == null) return row
@@ -307,6 +312,7 @@ export function finalizeDraft(d: DiscDraft): DiscMetadata {
     barcode: orNull(d.barcode),
     disc_no: d.disc_no,
     disc_count: d.disc_count,
+    category: orNull(d.category ?? ''),
     tracks: d.tracks.map((t) => ({
       number: t.number,
       title: t.title.trim(),

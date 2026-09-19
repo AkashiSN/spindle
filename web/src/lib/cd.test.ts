@@ -303,3 +303,25 @@ describe('albumTags / trackTags', () => {
     ])
   })
 })
+
+describe('category（配置先。D-67）', () => {
+  it('空のフォームと候補の写しは category を持たない', () => {
+    expect(emptyDraft(toc).category).toBeNull()
+    expect(draftFromCandidate(base, toc).category).toBeNull()
+  })
+  it('確定で category をそのまま持ち越し、タグには写さない', () => {
+    const d: DiscDraft = {
+      ...emptyDraft(toc),
+      album: 'X',
+      album_artist: 'Y',
+      category: 'J-Pop',
+      tracks: emptyDraft(toc).tracks.map((t) => ({ ...t, title: 't' })),
+    }
+    const m = finalizeDraft(d)
+    expect(m.category).toBe('J-Pop')
+    expect(albumTags(m).some(([k]) => k === 'CATEGORY')).toBe(false)
+    // 無ければ null（_Unsorted に置かれる）。空文字も null
+    expect(finalizeDraft({ ...d, category: null }).category).toBeNull()
+    expect(finalizeDraft({ ...d, category: '' }).category).toBeNull()
+  })
+})
