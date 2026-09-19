@@ -344,7 +344,7 @@ impl ExternalCommand {
                     after: timeout,
                 });
             }
-            Err(JobError::Failed(e)) => {
+            Err(JobError::Failed(e) | JobError::Fatal(e)) => {
                 return Err(ProcessError::Io {
                     program,
                     source: std::io::Error::other(e),

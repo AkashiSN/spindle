@@ -279,6 +279,14 @@ async fn run_one(
                 dbjobs::mark_cancelled(&tx, id, now)?;
                 info!(job_id = id, %ty, "キャンセルされた");
             }
+            Err(JobError::Fatal(e)) => {
+                let message = format!("{e:#}");
+                if dbjobs::mark_failed_fatally(&tx, id, &message, now)? {
+                    warn!(job_id = id, %ty, error = %message, "失敗。再試行しても変わらないので failed");
+                } else {
+                    warn!(job_id = id, %ty, error = %message, "失敗したが running ではなかった");
+                }
+            }
             Err(JobError::Failed(e)) => {
                 let message = format!("{e:#}");
                 match dbjobs::mark_failed(&tx, id, &message, now)? {

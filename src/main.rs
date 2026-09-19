@@ -55,6 +55,10 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(&config_path)
         .with_context(|| format!("設定の読み込みに失敗: {}", config_path.display()))?;
     info!(config = %config_path.display(), library = %config.paths.library.display(), "設定を読み込んだ");
+    // 外部プログラムの実行可否（無くても起動は通す。使うジョブが失敗する。D-70）
+    for missing in config.probe_executables() {
+        tracing::warn!("{missing}");
+    }
     // 全 root を dirfd で開く。openat2 が無い（Linux 5.6 未満）ならここで止まる（D-31）
     let roots = Roots::open(&config.paths).context("ライブラリの root を開けない")?;
     let library_root = Arc::new(roots.library);

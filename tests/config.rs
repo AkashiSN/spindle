@@ -455,6 +455,15 @@ fn ytmusic_requires_a_metadata_command_when_enabled() {
     .unwrap();
     assert_eq!(cfg.ytmusic.metadata_timeout_secs, 30);
     assert_eq!(cfg.ytmusic.metadata_command.len(), 2);
+    // ダウンロードの上限は既定 900 秒（D-70）。example と一致する
+    assert_eq!(cfg.ytmusic.download_timeout_secs, 900);
+    assert_eq!(
+        Config::parse(EXAMPLE)
+            .unwrap()
+            .ytmusic
+            .download_timeout_secs,
+        900
+    );
     // 無効なら無くてよい
     assert!(Config::parse(&replace_section("ytmusic", "enabled = false")).is_ok());
     // 有効なのに空 / 先頭が空 / タイムアウト 0
@@ -462,6 +471,7 @@ fn ytmusic_requires_a_metadata_command_when_enabled() {
         "enabled = true",
         "enabled = true\nmetadata_command = [\" \"]",
         "enabled = true\nmetadata_command = [\"p\"]\nmetadata_timeout_secs = 0",
+        "enabled = true\nmetadata_command = [\"p\"]\ndownload_timeout_secs = 0",
     ] {
         assert!(
             matches!(
@@ -471,4 +481,46 @@ fn ytmusic_requires_a_metadata_command_when_enabled() {
             "{body}"
         );
     }
+}
+
+#[test]
+fn probe_executables_reports_missing_binaries_and_plugin() {
+    // 起動時診断（D-70）: [bin] と [ytmusic].metadata_command[0] の実行可否。無くても起動は通す
+    let cfg = Config::parse(&replace_section(
+        "ytmusic",
+        "enabled = true\nmetadata_command = [\"/nonexistent/spindle-ytmusic-meta\", \"metadata\"]",
+    ))
+    .unwrap();
+    let missing = cfg.probe_executables();
+    assert!(
+        missing
+            .iter()
+            .any(|m| m.contains("ytmusic.metadata_command")
+                && m.contains("/nonexistent/spindle-ytmusic-meta")),
+        "{missing:?}"
+    );
+    // PATH に無い名前も報告する
+    let text = replace_section(
+        "bin",
+        "ffmpeg = \"spindle-no-such-binary\"\nflac = \"sh\"\nopusenc = \"sh\"\ncdparanoia = \"sh\"\ncdrdao = \"sh\"\nytdlp = \"sh\"",
+    );
+    let mut root: toml::Table = toml::from_str(&text).unwrap();
+    root.insert(
+        "ytmusic".into(),
+        toml::Value::Table(toml::from_str("enabled = false").unwrap()),
+    );
+    let cfg = Config::parse(&toml::to_string(&root).unwrap()).unwrap();
+    let missing = cfg.probe_executables();
+    assert_eq!(missing.len(), 1, "{missing:?}");
+    assert!(missing[0].contains("bin.ffmpeg"), "{missing:?}");
+    // 無効なら metadata_command は見ない
+    let cfg = Config::parse(&replace_section(
+        "ytmusic",
+        "enabled = false\nmetadata_command = [\"/nonexistent/x\"]",
+    ))
+    .unwrap();
+    assert!(cfg
+        .probe_executables()
+        .iter()
+        .all(|m| !m.contains("metadata_command")));
 }

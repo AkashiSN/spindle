@@ -287,10 +287,17 @@ pub struct YtmusicConfig {
     pub metadata_command: Vec<String>,
     #[serde(default = "default_metadata_timeout")]
     pub metadata_timeout_secs: u32,
+    /// yt-dlp のダウンロード 1 件の上限秒（D-70）
+    #[serde(default = "default_download_timeout")]
+    pub download_timeout_secs: u32,
 }
 
 fn default_metadata_timeout() -> u32 {
     30
+}
+
+fn default_download_timeout() -> u32 {
+    900
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -470,9 +477,34 @@ impl Config {
             if self.ytmusic.metadata_timeout_secs == 0 {
                 return invalid("ytmusic.metadata_timeout_secs は 1 以上".into());
             }
+            if self.ytmusic.download_timeout_secs == 0 {
+                return invalid("ytmusic.download_timeout_secs は 1 以上".into());
+            }
         }
 
         Ok(())
+    }
+
+    /// 起動時診断（D-70）: `[bin]` の各プログラムと、`[ytmusic].enabled` なら `metadata_command[0]` が
+    /// 実行できるかを確かめ、できないものを人間向けの文字列で返す。無くても起動は通す（ジョブが
+    /// 使うときに失敗する）ので、呼び出し側は警告を出すだけ
+    pub fn probe_executables(&self) -> Vec<String> {
+        let mut candidates: Vec<(String, &str)> = self
+            .bin
+            .entries()
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v))
+            .collect();
+        if self.ytmusic.enabled {
+            if let Some(program) = self.ytmusic.metadata_command.first() {
+                candidates.push(("ytmusic.metadata_command".to_owned(), program.as_str()));
+            }
+        }
+        candidates
+            .into_iter()
+            .filter(|(_, program)| !executable_exists(program))
+            .map(|(key, program)| format!("{key} が実行できない: {program}"))
+            .collect()
     }
 
     fn validate_roots_exist(&self) -> Result<(), ConfigError> {
@@ -513,4 +545,20 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// `program` が実行できるか。`/` を含めばそのパス、含まなければ PATH を順に見る（`Command` と同じ規則）
+fn executable_exists(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    let is_exec = |p: &Path| {
+        std::fs::metadata(p)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    };
+    if program.contains('/') {
+        return is_exec(Path::new(program));
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| is_exec(&dir.join(program))))
+        .unwrap_or(false)
 }

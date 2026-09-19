@@ -325,6 +325,44 @@ async fn failure_persists_run_after_and_becomes_failed_after_max_attempts() {
 }
 
 #[tokio::test]
+async fn fatal_failure_is_failed_immediately_without_backoff() {
+    // 再試行しても変わらない失敗（取り込み済み等。D-70）は max_attempts に関わらず即 failed
+    let h = Harness::new();
+    let job = NewJob::new(JobType::Ytdl, serde_json::json!({ "url": "u" }))
+        .dedup_key("ytdl:u")
+        .max_attempts(5);
+    let EnqueueResult::Inserted(id) = h.jobs.enqueue(job).await.unwrap() else {
+        panic!()
+    };
+    let mut reg = Registry::new();
+    reg.register_fn(JobType::Ytdl, |_ctx| async {
+        Err(JobError::Fatal(anyhow::anyhow!("取り込み済み: A/1.opus")))
+    });
+    h.start(reg);
+    wait_state(&h, id, JobState::Failed).await;
+    let conn = h.raw();
+    let (attempts, run_after, last_error, finished): (i64, Option<i64>, String, Option<i64>) = conn
+        .query_row(
+            "SELECT attempts, run_after, last_error, finished_at FROM jobs WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(attempts, 1);
+    assert!(run_after.is_none(), "バックオフを予約しない: {run_after:?}");
+    assert!(last_error.contains("取り込み済み"));
+    assert!(finished.is_some());
+}
+
+#[test]
+fn ytdl_job_type_is_serial_and_round_trips() {
+    assert_eq!(JobType::Ytdl.as_str(), "ytdl");
+    assert_eq!("ytdl".parse::<JobType>().unwrap(), JobType::Ytdl);
+    assert_eq!(JobType::Ytdl.concurrency(8), 1);
+    assert!(JobType::ALL.contains(&JobType::Ytdl));
+}
+
+#[tokio::test]
 async fn queued_job_with_future_run_after_is_not_claimed() {
     let h = Harness::new();
     let job = scan_job().run_after(now_epoch() + 3600);

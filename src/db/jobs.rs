@@ -28,12 +28,13 @@ pub enum JobType {
     Thumbnail,
     Flaccheck,
     Inbox,
+    Ytdl,
     Gc,
     Backup,
 }
 
 impl JobType {
-    pub const ALL: [JobType; 13] = [
+    pub const ALL: [JobType; 14] = [
         JobType::Scan,
         JobType::Rip,
         JobType::Verify,
@@ -45,6 +46,7 @@ impl JobType {
         JobType::Thumbnail,
         JobType::Flaccheck,
         JobType::Inbox,
+        JobType::Ytdl,
         JobType::Gc,
         JobType::Backup,
     ];
@@ -62,6 +64,7 @@ impl JobType {
             JobType::Thumbnail => "thumbnail",
             JobType::Flaccheck => "flaccheck",
             JobType::Inbox => "inbox",
+            JobType::Ytdl => "ytdl",
             JobType::Gc => "gc",
             JobType::Backup => "backup",
         }
@@ -82,6 +85,7 @@ impl JobType {
             JobType::Thumbnail => 4,
             JobType::Flaccheck => cpus,
             JobType::Inbox => 1,
+            JobType::Ytdl => 1,
             JobType::Gc => 1,
             JobType::Backup => 1,
         }
@@ -621,6 +625,18 @@ pub enum RequeueOutcome {
 pub fn mark_failed_permanently(conn: &Connection, id: i64, error: &str, now: i64) -> Result<bool> {
     let changed = conn.execute(
         "UPDATE jobs SET state = 'failed', last_error = ?2, finished_at = ?3
+         WHERE id = ?1 AND state = 'running'",
+        params![id, error, now],
+    )?;
+    Ok(changed > 0)
+}
+
+/// ハンドラが `JobError::Fatal` で終わった: 試行回数を 1 進めて即 `failed`（バックオフを予約しない。
+/// D-70）。`mark_failed_permanently` と違い、走った 1 回を `attempts` に数える
+pub fn mark_failed_fatally(conn: &Connection, id: i64, error: &str, now: i64) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE jobs SET state = 'failed', attempts = attempts + 1, last_error = ?2,
+                         run_after = NULL, finished_at = ?3
          WHERE id = ?1 AND state = 'running'",
         params![id, error, now],
     )?;

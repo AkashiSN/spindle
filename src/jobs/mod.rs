@@ -53,6 +53,9 @@ pub enum JobError {
     /// 失敗。バックオフして再試行し、上限で `failed`
     #[error(transparent)]
     Failed(#[from] anyhow::Error),
+    /// 再試行しても変わらない失敗（取り込み済み等。D-70）。バックオフせず直ちに `failed`
+    #[error(transparent)]
+    Fatal(anyhow::Error),
 }
 
 impl From<crate::db::DbError> for JobError {
