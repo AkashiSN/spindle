@@ -1,7 +1,6 @@
 //! メタデータプラグインのプロトコル v1（SPEC §7.7、D-69）。偽のプラグイン（シェルスクリプト）で
 //! 往復・判定なし・故障・タイムアウトを確かめる。実タイトルや固有名詞は使わない
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -14,24 +13,26 @@ struct Fake {
 }
 
 impl Fake {
-    /// `script` は bash の本文。stdin は $IN に保存されてから実行される
+    /// `script` は bash の本文。stdin は $IN に保存されてから実行される。
+    /// スクリプトを直接 exec せず `bash <path>` で起動する: テストは並列に走るので、別スレッドの
+    /// fork と書き込み中のスクリプトが重なると exec が ETXTBSY で落ちる
     fn new(script: &str) -> Fake {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plugin.sh");
         std::fs::write(
             &path,
             format!(
-                "#!/bin/bash\nIN=\"{}/stdin.json\"\ncat > \"$IN\"\n{script}\n",
+                "IN=\"{}/stdin.json\"\ncat > \"$IN\"\n{script}\n",
                 dir.path().display()
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         Fake { dir }
     }
 
     fn provider(&self, timeout_secs: u64) -> MetadataProvider {
         let cmd = vec![
+            "/bin/bash".to_owned(),
             self.dir.path().join("plugin.sh").display().to_string(),
             "metadata".to_owned(),
         ];
@@ -119,7 +120,7 @@ async fn declined_reasons_are_reported_not_errors() {
             .provider(10)
             .resolve(&item(), &CancellationToken::new())
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{reason}: {e}"));
         assert_eq!(
             out,
             Outcome::Declined {
