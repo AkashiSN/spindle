@@ -12,6 +12,7 @@ pub mod derived;
 pub mod flaccheck;
 pub mod gc;
 pub mod history;
+pub mod inbox;
 pub mod jobs;
 pub mod migrations;
 pub mod playlists;
