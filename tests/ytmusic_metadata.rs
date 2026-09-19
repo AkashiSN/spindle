@@ -200,6 +200,10 @@ async fn plugin_faults_are_errors() {
         // 追加タグ: 予約キー / 不正なキー / 空の値 / 制御文字
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["title","X"]]}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["TRACKNUMBER","9"]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["PICTURE","text"]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["metadata_block_picture","x"]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["R128_TRACK_GAIN","-1"]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["REPLAYGAIN_TRACK_GAIN","-1 dB"]]}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["A=B","x"]]}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["キー","x"]]}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["COMMENT",""]]}}"#,

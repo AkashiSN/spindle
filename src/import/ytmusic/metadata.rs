@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::pathgen::{sanitize_component, TrackFields};
+use crate::domain::replaygain::RG_KEYS;
+use crate::edit::PICTURE_KEY;
 use crate::jobs::process::{ExternalCommand, ProcessError};
 
 pub const PROTOCOL: u32 = 1;
@@ -259,9 +261,12 @@ fn validate(t: &Track) -> Result<(), ProviderError> {
                 "tags のキーに使えない文字がある: {k:?}"
             )));
         }
-        if RESERVED_TAG_KEYS.contains(&key.as_str()) {
+        if RESERVED_TAG_KEYS.contains(&key.as_str())
+            || key == PICTURE_KEY
+            || RG_KEYS.contains(&key.as_str())
+        {
             return Err(ProviderError::Invalid(format!(
-                "tags に spindle が決めるキーがある: {key}（track の各フィールドで渡す）"
+                "tags に spindle が決めるキーがある: {key}（track の各フィールド / 画像 / ReplayGain は spindle が書く）"
             )));
         }
         if v.trim().is_empty() || v.chars().any(char::is_control) {
@@ -273,7 +278,8 @@ fn validate(t: &Track) -> Result<(), ProviderError> {
     Ok(())
 }
 
-/// `Track` の各フィールドから spindle が書くタグ。追加タグでは渡せない
+/// `Track` の各フィールドから spindle が書くタグ。追加タグでは渡せない（画像の疑似キー `PICTURE` と
+/// ReplayGain のキーも spindle の責務なので予約）
 const RESERVED_TAG_KEYS: &[&str] = &[
     "TITLE",
     "ARTIST",

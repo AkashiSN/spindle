@@ -780,7 +780,8 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
   必須の値が空（`title` / `albumartist` / `album` / `artists`）・`ok: false` なのに `reason` / `message` が
   無い・`category` がディレクトリ名として不正（`POST /api/categories` と同じ規則: 前後の空白、禁止文字、
   末尾のドット、予約名は不可）・`tags` に spindle が決めるキー（TITLE / ARTIST / ALBUM / ALBUMARTIST /
-  DATE / TRACKNUMBER / DISCNUMBER / METADATA_BLOCK_PICTURE）や不正なキー・空の値があるものは
+  DATE / TRACKNUMBER / DISCNUMBER、画像の PICTURE / METADATA_BLOCK_PICTURE、ReplayGain の
+  REPLAYGAIN_* / R128_*）や不正なキー・空の値があるものは
   **プラグインの故障**として取り込みを止める
 - **Request**（未知のフィールドはプラグインが無視する。前方互換）
   ```jsonc
