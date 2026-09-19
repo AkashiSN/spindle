@@ -25,7 +25,7 @@
 mod md5fill;
 mod normalize;
 mod picture;
-mod rename;
+pub(crate) mod rename;
 mod revert;
 
 use std::io::{Seek, SeekFrom};

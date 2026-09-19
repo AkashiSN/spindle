@@ -27,7 +27,7 @@ use crate::cd::accuraterip::{AccurateRipClient, ArDiscEntry};
 use crate::cd::crctable::{CrcSampler, CrcTable};
 use crate::cd::ctdb::{CtdbClient, CtdbEntry};
 use crate::cd::toc::{Toc, TocError};
-use crate::cd::verify::{match_accuraterip, match_ctdb, MethodResult, Outcome};
+use crate::cd::verify::{match_accuraterip, match_ctdb, track_state, MethodResult, Outcome};
 use crate::cd::SECTOR_SAMPLES;
 use crate::db::now_epoch;
 use crate::db::verify::{
@@ -558,24 +558,11 @@ fn disc_record(r: &DiscReport) -> Option<DiscRecord> {
                     })
                     .collect(),
             };
-            let any_candidates =
-                ctdb.outcome != Outcome::NotFound || ar.outcome != Outcome::NotFound;
             let states = r
                 .tracks
                 .iter()
                 .enumerate()
-                .filter_map(|(i, t)| {
-                    let state = if ctdb.tracks[i].matched {
-                        TrackState::VerifiedCtdb
-                    } else if ar.tracks[i].matched {
-                        TrackState::VerifiedAr
-                    } else if any_candidates {
-                        TrackState::Mismatch
-                    } else {
-                        return None;
-                    };
-                    Some((t.id, state))
-                })
+                .filter_map(|(i, t)| track_state(Some(ctdb), Some(ar), i).map(|s| (t.id, s)))
                 .collect();
             Some(DiscRecord {
                 disc_no: r.disc_no,

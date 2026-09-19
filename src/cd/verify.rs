@@ -41,6 +41,34 @@ pub struct TrackVerdict {
     pub crc_v2: Option<u32>,
 }
 
+/// トラック `index` の `tracks.verification`: CTDB 一致 → `verified_ctdb`、AccurateRip 一致 →
+/// `verified_ar`、どちらかに候補があって不一致 → `mismatch`、候補なし → `None`（据え置き）。
+/// verify ジョブ（§7.3）と rip の配置（§7.2）で同じ写像を使う
+pub fn track_state(
+    ctdb: Option<&MethodResult>,
+    ar: Option<&MethodResult>,
+    index: usize,
+) -> Option<crate::db::verify::TrackState> {
+    use crate::db::verify::TrackState;
+    if ctdb
+        .and_then(|m| m.tracks.get(index))
+        .is_some_and(|v| v.matched)
+    {
+        return Some(TrackState::VerifiedCtdb);
+    }
+    if ar
+        .and_then(|m| m.tracks.get(index))
+        .is_some_and(|v| v.matched)
+    {
+        return Some(TrackState::VerifiedAr);
+    }
+    let any = [ctdb, ar]
+        .into_iter()
+        .flatten()
+        .any(|m| m.outcome != Outcome::NotFound);
+    any.then_some(TrackState::Mismatch)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodResult {
     pub outcome: Outcome,

@@ -10,6 +10,7 @@ pub mod crctable;
 pub mod ctdb;
 pub mod metadata;
 pub mod musicbrainz;
+pub mod place;
 pub mod repair;
 pub mod riplog;
 pub mod toc;

@@ -207,7 +207,10 @@ fn load_track_for_plan(conn: &Connection, id: i64) -> crate::db::Result<Option<T
 }
 
 /// 選択外の active トラックの占有状況
-fn load_occupancy(conn: &Connection, selected: &HashSet<i64>) -> crate::db::Result<Occupancy> {
+pub(crate) fn load_occupancy(
+    conn: &Connection,
+    selected: &HashSet<i64>,
+) -> crate::db::Result<Occupancy> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.rel_path_key, t.album_id, a.mb_release_id, a.discid, a.rel_dir_key
          FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
