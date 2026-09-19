@@ -832,9 +832,11 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
      `Inbox/youtube/_unmatched/<channel>/`（受け皿）。プラグインの故障（`ProviderError`）→ `Fatal`。
      ここで Inbox のファイル名（8.）まで決まる
   3. 取り込み済みチェック: `SOURCE_URL = webpage_url` が Library（`track_tags`）にあれば `Fatal`（再試行
-     なし。`last_error` にそのパス）。Inbox（`inbox_files.tags`）にあり、それが自分の宛先そのものなら
-     「置いた後に落ちて走査が先に拾った」再実行なので、ダウンロードせずに 8. の仕上げ（サイドカーと投入）
-     だけ済ませて `done`。Inbox の別の場所なら `Fatal`
+     なし。`last_error` にそのパス）。Inbox（`inbox_files.tags`）にあり、それが自分の宛先そのもの
+     （`rel_path_key` で比べる）なら「置いた後に落ちて走査が先に拾った」再実行の可能性があるので、
+     **実ファイルの `SOURCE_URL` を読み直して**同じならダウンロードせずに 8. の仕上げ（サイドカーと投入）
+     だけ済ませて `done`。違えば `Fatal`（同名で別の内容）、ファイルが消えていれば普通に置き直す
+     （行はキャッシュ、ファイルが正）。Inbox の別の場所なら `Fatal`
   4. `yt-dlp -f "ba[ext=webm]" --no-playlist --write-thumbnail --convert-thumbnails jpg -o <tmp>/%(id)s.%(ext)s -- <url>`
      （`[ytmusic].download_timeout_secs`、既定 900）。webm の音声が無ければ `Fatal`。ネットワーク等の失敗は
      `Failed`（再試行）

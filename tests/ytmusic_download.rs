@@ -490,6 +490,59 @@ async fn rerun_after_the_scan_registered_the_file_completes_without_downloading(
     );
 }
 
+/// 走査済みの採用は rel_path_key で比べ（大小文字 / NFD 違いでも自分の宛先）、DB を信じず実ファイルの
+/// SOURCE_URL を読み直す（走査後に差し替えられていれば採用しない）
+#[tokio::test]
+async fn adoption_of_a_scanned_file_uses_the_path_key_and_rereads_the_file() {
+    let lib = lib!();
+    lib.video(U1, "v1", "KnownCh", "Song One", true);
+    lib.start();
+    let (id, st) = lib.run(U1).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    let rel = "youtube/Artist A/Songs of A/20260901 Song One [v1].opus";
+    std::fs::remove_file(lib.inbox_path("youtube/Artist A/Songs of A/spindle-inbox.json")).unwrap();
+    lib.conn().execute("DELETE FROM jobs", []).unwrap();
+    spindle::import::inbox::scan_inbox(&lib.db, &lib.inbox, 1000)
+        .await
+        .unwrap();
+    // (1) 走査が持つ rel_path の表記が違っても（大小文字）、key が同じなら自分の宛先
+    lib.conn()
+        .execute("UPDATE inbox_files SET rel_path = ?1", [rel.to_uppercase()])
+        .unwrap();
+    let calls_before = lib.calls().len();
+    let (id, st) = lib.run(U1).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    assert_eq!(lib.calls().len(), calls_before + 1, "download しない");
+
+    // (2) 走査の後に実ファイルの SOURCE_URL が差し替えられていれば、DB が旧値でも採用しない
+    std::fs::remove_file(lib.inbox_path("youtube/Artist A/Songs of A/spindle-inbox.json")).unwrap();
+    lib.conn().execute("DELETE FROM jobs", []).unwrap();
+    set_tags(
+        &lib.inbox_path(rel),
+        "opus",
+        &[("SOURCE_URL", &["https://other"])],
+    );
+    let (id, st) = lib.run(U1).await;
+    assert_eq!(st, JobState::Failed, "{:?}", lib.job(id));
+    assert!(
+        lib.job(id).1.as_deref().unwrap_or("").contains("同名"),
+        "{:?}",
+        lib.job(id)
+    );
+    assert!(!lib
+        .inbox_path("youtube/Artist A/Songs of A/spindle-inbox.json")
+        .exists());
+
+    // (3) DB にはあるが実ファイルが消えていれば、普通にダウンロードして置き直す
+    lib.conn().execute("DELETE FROM jobs", []).unwrap();
+    std::fs::remove_file(lib.inbox_path(rel)).unwrap();
+    let calls_before = lib.calls().len();
+    let (id, st) = lib.run(U1).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    assert_eq!(lib.calls().len(), calls_before + 2, "dump と download");
+    assert!(lib.inbox_path(rel).exists());
+}
+
 #[tokio::test]
 async fn already_imported_url_is_fatal() {
     let lib = lib!();

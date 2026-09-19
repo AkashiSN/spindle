@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::db::inbox::{find_source_url, SourceLocated};
 use crate::db::Db;
 use crate::domain::pathgen::sanitize_component;
-use crate::domain::relpath::RelPath;
+use crate::domain::relpath::{canonical_key, RelPath};
 use crate::domain::tags::{write_tag_changes, TagChange};
 use crate::fsroot::{FsError, RootDir};
 use crate::import::ytmusic::metadata::SOURCE_URL_KEY;
@@ -391,8 +391,9 @@ pub async fn download_one(
         message,
     };
     let category = track.as_ref().and_then(|t| t.category.clone());
-    // 3. 取り込み済み。Inbox の自分の宛先にあるなら「置いた後に落ちて走査が先に拾った」再実行なので、
-    //    ダウンロードせずに続き（サイドカーと投入）だけ済ませる
+    // 3. 取り込み済み。Inbox の自分の宛先（rel_path_key で比べる）にあるなら「置いた後に落ちて走査が
+    //    先に拾った」再実行の可能性があるので、実ファイルの SOURCE_URL を読み直して自分の成果物なら
+    //    ダウンロードせずに続き（サイドカーと投入）だけ済ませる。行はキャッシュで、ファイルが正
     let canonical = video.webpage_url.clone();
     match env.db.read(move |c| find_source_url(c, &canonical)).await? {
         Some(SourceLocated::Library(p)) => {
@@ -400,13 +401,24 @@ pub async fn download_one(
                 "取り込み済み（Library）: {p}"
             )));
         }
-        Some(SourceLocated::Inbox(p)) if p == target.as_str() => {
-            tracing::info!(url, path = %target, "Inbox に置いた自分の成果物があるので続きだけ済ませる");
-            finish_staging(env, &dir, &name, category.as_deref(), entry).await?;
-            return Ok(Downloaded::Staged {
-                rel_path: target,
-                verdict,
-            });
+        Some(SourceLocated::Inbox(p)) if canonical_key(&p) == target.key() => {
+            if is_own_product(&env.inbox, &target, &video.webpage_url) {
+                tracing::info!(url, path = %target, "Inbox に置いた自分の成果物があるので続きだけ済ませる");
+                finish_staging(env, &dir, &name, category.as_deref(), entry).await?;
+                return Ok(Downloaded::Staged {
+                    rel_path: target,
+                    verdict,
+                });
+            }
+            match env.inbox.stat(&target) {
+                // 行だけ残って実ファイルが無い（消された）: 普通に置き直す
+                Err(FsError::NotFound) => {}
+                _ => {
+                    return Err(DownloadError::Fatal(format!(
+                        "Inbox に同名で別の内容のファイルがある: {target}"
+                    )))
+                }
+            }
         }
         Some(SourceLocated::Inbox(p)) => {
             return Err(DownloadError::Fatal(format!("取り込み済み（Inbox）: {p}")));
