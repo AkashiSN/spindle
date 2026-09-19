@@ -790,6 +790,33 @@ Inbox/ に配置（ポーリング検出）
 
 承認キューを挟むことが要点で、これがないと `_Unsorted` が際限なく育つ。
 
+実装（`src/import/inbox.rs`、`inbox` ジョブ、D-68）:
+
+- **検出**は `inbox` ジョブ（並列 1・固定キー）が `[inbox].poll_interval_secs`（既定 60、0 で自動なし）で
+  周期投入されるほか、`POST /api/inbox/scan` で手動。Inbox を歩き、音声ファイルのあるディレクトリを
+  1 件（アルバム候補。root 直下の音声は `""` の 1 件）として `inbox_items` / `inbox_files` に写す。
+  stat（inode / size / mtime / ctime）が変わったファイルだけタグを読み直す。**正は Inbox のファイル**で、
+  行はキャッシュ: ディレクトリが消えれば行も消す（`placed` は 24 時間残して結果を見せる）。`approved` の件で
+  ファイルが変わっていたら `pending` に戻す（再承認）
+- **承認キュー**は `GET /api/inbox`。件ごとにタグから作った下書き（`proposal`: albumartist / album / date の
+  最頻値、category は GENRE → `genre_category_map`、トラックは TRACKNUMBER / DISCNUMBER / TITLE / ARTIST）と
+  不足の警告を返し、UI の Inbox タブで category / albumartist / album / date と各トラックの
+  disc_no / track_no / title / artist を補正して `POST /api/inbox/:id/approve { draft }`。検証（album /
+  albumartist / 各 title が空でない、`(disc_no, track_no)` が 1 以上で重複なし、rel_path が件のファイルと
+  一致）に通らなければ 400 で、メタデータ不足のまま Library に入れない。`reject` / `reopen` で状態を戻す
+- **配置**は `approved` の件を `inbox` ジョブが順に処理する。`library` の排他（scan / gc / CD の配置と
+  同じ）を取れなければ Requeue。draft から各ファイルの `TrackFields` を作り `pathgen::plan`（category 無しは
+  `_Unsorted`、`disc_no` の最大 ≥ 2 なら `multi_disc`、リリースキーは MUSICBRAINZ_ALBUMID の最頻値があれば
+  `mb:`、無ければ件ごとの新規）→ Inbox からハッシュを取りながら Library の tmp へコピー → 補正で変わる
+  タグだけ `write_tag_changes` で書く（ファイルが正のまま再スキャンしても DB と一致する）→ fsync →
+  `RENAME_NOREPLACE` → 読み戻して 1 トランザクション登録（`source_type = 'download'`。宛先 album の
+  リリースキー再検証と同パス行の MD5 検証は §7.2 の配置と同じ）→ Inbox 側を unlink（コピー中に stat が
+  変わっていたら失敗）→ 既知の同梱ファイル（cover 画像 / cue / toc / log）も移し、空になった Inbox の
+  ディレクトリを消す。衝突・不足は件を `failed` にして理由を残し、この呼び出しで置いたファイルは片付ける。
+  Inbox は Library と別データセットなので move は実コピー（§5）
+- **後続**は `rg`（album）と `transcode`。WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら `normalize` の
+  編集バッチを作って投入する（D-46 の予告）。thumbnail は埋め込み画像があればスキャンと同じ経路で出る
+
 ### 7.9 FLAC 健全性チェック（移行時 + 任意）
 
 ```
@@ -953,6 +980,13 @@ GET    /api/config                                読み込んだ config.toml �
 GET    /api/archive                                退避台帳 { "items": [ archived_files の行 + "batch_id" ] }（新しい順。復元は batch の巻き戻し）
 POST   /api/scan                                  {"kind": "incremental" | "deep"}。scan ジョブを投入
 GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件。何も消さない。D-56）
+GET    /api/inbox                                 承認キュー { "items": [{ id, rel_dir, state, detected_at, error, placed_album_id,
+                                                  proposal, draft, warnings, tracks: [{ rel_path, codec, lossless, sample_rate,
+                                                  bit_depth, channels, duration_ms, tags }] }] }（§7.8、D-68）
+POST   /api/inbox/scan                            inbox ジョブを投入（202 + job_id。queued / running があれば 409 duplicate）
+POST   /api/inbox/:id/approve                     { category, albumartist, album, date, tracks: [{ rel_path, disc_no, track_no,
+                                                  title, artist }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved + ジョブ投入
+POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
 POST   /api/gc                                    gc ジョブを投入（未完了があれば 409）
                                                   （202 + job_id。queued / running があれば 409 duplicate）
 GET    /api/events                                SSE: ジョブ進捗・ライブラリ変更
@@ -1407,6 +1441,9 @@ flac_recompress_all = false   # 圧縮レベル統一のための一括再エン
 [scan]
 deep_interval_days = 30        # deep scan（tag_hash / audio_md5 全再計算）の間隔。0 で自動実行なし
 
+[inbox]
+poll_interval_secs = 60        # Inbox の検出間隔（inotify はコンテナ越しに不安定なのでポーリング）。0 で自動なし
+
 [gc]
 retention_days = 30            # 物理削除までの猶予（missing_since / 退避 WAV / Derived 孤児）
 
@@ -1689,7 +1726,7 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 - [x] `HAS` 等の演算子の foobar 実機との挙動突き合わせ（2026-09-19。部分一致で一致。D-55）
 - [ ] 偽ハイレゾ検出のしきい値設計（P3）
 - [ ] 移行後の NFSv4 ACL 再適用（rsync では引き継げない）
-- [ ] Inbox のポーリング間隔（inotify はコンテナ越しに不安定なため既定はポーリング）
+- [x] Inbox のポーリング間隔（2026-09-19。`[inbox].poll_interval_secs` 既定 60 秒 + 手動。D-68）
 - [x] 一括リネームで album 全体を動かした後、旧ディレクトリに残る同梱ファイル（cover.jpg /
       disc.cue / rip.log 等）の追随と空ディレクトリの扱い（2026-09-19。rename ジョブが commit 後に
       既知の名前を追随させ、空なら rmdir。D-67）

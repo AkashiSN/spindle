@@ -38,6 +38,9 @@ flac_recompress_all = false     # 圧縮レベル統一のための一括再エ�
 [scan]
 deep_interval_days = 30         # tag_hash / audio_md5 を全件再計算する deep scan の間隔。0 で自動実行なし
 
+[inbox]
+poll_interval_secs = 60         # Inbox の検出間隔（秒）。0 で自動なし（UI の「今すぐ確認」だけ）
+
 [gc]
 retention_days = 30             # missing_since / 退避 WAV / Derived 孤児を物理削除するまでの日数
 

@@ -2486,3 +2486,48 @@ CTDB への提出（自分のシンドロームを面順にした `DbSyndromes::
 
 **未決**: 同梱ファイルの追随が衝突で残ったときの回収（今は警告だけ）。cdrdao の `read-toc` が持つ
 ISRC / pre-emphasis / CD-TEXT を `Toc` に持たせて disc.toc に書く（P2-2 のドライブ実装で決める）。
+
+---
+
+## D-68 Inbox は 1 ディレクトリ = 1 件の承認キューにし、配置は CD と同じ経路で登録する
+
+**決定**（2026-09-19。P2-10。D-20 の具体化）:
+
+- **件 = 音声ファイルのあるディレクトリ。** `inbox` ジョブ（並列 1・固定キー）が Inbox を歩いて
+  `inbox_items`（`rel_dir_key` で一意。状態 `pending` → `approved` → `placing` → `placed` | `failed`、
+  `rejected`）と `inbox_files`（stat・コーデック・表示用タグ列・全タグ JSON）に写す。**正は Inbox の
+  ファイルで行はキャッシュ**: stat が変わったファイルだけタグを読み直し、ディレクトリが消えれば行も消す
+  （`placed` は 24 時間残す）。`approved` の件でファイルが変わっていたら `pending` に戻す。検出は
+  `[inbox].poll_interval_secs`（既定 60、0 で自動なし）の周期投入と `POST /api/inbox/scan`
+- **補正はアルバム単位とトラック単位の両方**（category / albumartist / album / date と、各トラックの
+  disc_no / track_no / title / artist）。下書き（`proposal`）はタグから作る（最頻値、category は GENRE →
+  `genre_category_map`）。承認の検証は CD の確定（D-65）と同じ厳しさ: album / albumartist / 各 title が
+  空でない、`(disc_no, track_no)` は 1 以上で重複なし。不足のまま Library に入れない（D-20）
+- **補正はファイルのタグに書く。** Library へコピーする tmp に、補正で変わるキーだけ
+  `write_tag_changes` で書いてから置く。ファイルが正のまま再スキャンしても DB と一致する。Inbox の原本は
+  move で消えるので、この書き込みは編集バッチ（巻き戻し）の対象にしない（Library のデータの書き換えでは
+  なく、Library に入る前の整形）
+- **配置は CD の配置（D-67）と同じ経路。** `pathgen::plan`（category 無しは `unsorted`、`disc_no` の
+  最大 ≥ 2 なら `multi_disc`、リリースキーは MUSICBRAINZ_ALBUMID の最頻値があれば `mb:`、無ければ件ごとの
+  新規キー）→ `library` の排他 → tmp + `RENAME_NOREPLACE` → 1 トランザクション登録（`source_type =
+  'download'`、宛先 album のリリースキー再検証、同パス行の MD5 検証）→ 失敗時はこの呼び出しで置いた
+  ファイルだけ片付ける。共通部分（1 ファイルの配置・後始末・リリースキー・album の検索 / 作成・行の
+  登録）は `src/import/placement.rs` に置き、`cd::place` と `import::inbox` が使う。Inbox 側の unlink は
+  コピー中に stat が変わっていなかったときだけ（コピー = ハッシュ済みの複製）。既知の同梱ファイル
+  （cover 画像 / cue / toc / log）も移し、空になった Inbox のディレクトリを消す
+- **後続は rg / transcode に加えて normalize。** WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら
+  `Editor::prepare_normalize` で編集バッチを作って投入する（D-46 で P2-10 に先送りしていた自動投入）。
+  既存ライブラリの一括変換はこれまでどおり手動
+
+**理由**: 承認キューの単位をディレクトリにするのは、購入分の zip を展開した形がそのまま 1 アルバムで、
+Library と同じ「ディレクトリ = album」の規則に乗るため。トラック単位の補正を入れるのは、配信購入分の
+TITLE / TRACKNUMBER の欠落や表記揺れが CD と同じくらい多く、外部ツールで直してから戻る往復が承認の
+価値を削ぐため。配置を CD と共通化するのは、排他・冪等性・再検証・後始末の規則を 2 か所で別々に
+守らないため。
+
+**却下**: Inbox を直接スキャン対象にする（D-20）。補正を DB だけに持つ（再スキャンで元のタグ値に戻り、
+不変条件 1 と矛盾する）。inotify（コンテナ越しに不安定）。件ごとに別のジョブ（並列 1 の固定キーで走査と
+配置を 1 本にすれば、配置中の件を走査が触る競合が無い）。
+
+**未決**: `placed` の行を残す期間（今は 24 時間）。Inbox のサブディレクトリを 1 件にまとめる規則
+（ディスクごとのサブディレクトリ `Disc 1` / `Disc 2` を 1 アルバムに束ねる。今はディレクトリごとに別の件）。
