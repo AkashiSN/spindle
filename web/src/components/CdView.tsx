@@ -247,8 +247,8 @@ function DraftForm({ cd }: { cd: CdLookupState }) {
   )
 }
 
-/** 配置先の category（統制語彙から選ぶ。無ければ _Unsorted。その場で語彙を足せる） */
-function CategoryField({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
+/** 配置先の category（統制語彙から選ぶ。無ければ _Unsorted。その場で語彙を足せる）。Inbox タブでも使う */
+export function CategoryField({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
   const cats = useCategories(true)
   const [adding, setAdding] = useState('')
   const add = async () => {

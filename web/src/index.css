@@ -1539,3 +1539,70 @@ table.cd-tracks-edit td:nth-child(3) {
 .cd-warnings li {
   color: var(--muted);
 }
+
+/* Inbox タブ（P2-10）。CD 画面の骨格 + 左に件の一覧、右に補正フォーム */
+.inbox-body {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-top: 8px;
+}
+.inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 280px;
+  max-width: 40%;
+}
+.inbox-list li {
+  border-bottom: 1px solid var(--border);
+}
+.inbox-list li.selected {
+  background: var(--accent-bg);
+}
+.inbox-list button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.inbox-title {
+  font-weight: 600;
+  word-break: break-all;
+}
+.inbox-form {
+  flex: 1;
+  min-width: 0;
+}
+.inbox-form h2:first-child {
+  margin-top: 0;
+}
+.inbox-state-placed {
+  color: var(--accent);
+}
+.inbox-state-failed {
+  color: var(--error);
+}
+.inbox-state-rejected,
+.inbox-state-placing {
+  color: var(--muted);
+}
+table.inbox-tracks td.inbox-num {
+  width: 56px;
+}
+table.inbox-tracks td.inbox-num input {
+  width: 100%;
+  box-sizing: border-box;
+}
+table.inbox-tracks td:nth-child(3),
+table.inbox-tracks td:nth-child(4) {
+  width: 30%;
+}

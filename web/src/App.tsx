@@ -15,6 +15,7 @@ import { HistoryView } from './components/HistoryView'
 import { JobsView } from './components/JobsView'
 import { Login } from './components/Login'
 import { CdView } from './components/CdView'
+import { InboxView } from './components/InboxView'
 import { SettingsView } from './components/SettingsView'
 import { PlayerBar } from './components/PlayerBar'
 import { RightPanel, type SelectionSummary } from './components/RightPanel'
@@ -33,6 +34,7 @@ import { usePlayer } from './hooks/usePlayer'
 import { usePlaylists } from './hooks/usePlaylists'
 import { useSettings } from './hooks/useSettings'
 import { useCdLookup } from './hooks/useCdLookup'
+import { useInbox } from './hooks/useInbox'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
@@ -124,6 +126,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   }, [])
   const settings = useSettings(sseOpen && view === 'settings')
   const cd = useCdLookup()
+  // Inbox は画面を開いたときに取り、開いている間は inbox ジョブの job イベントで取り直す
+  const inbox = useInbox(sseOpen && view === 'inbox')
   const visibleEnd = useRef(0)
 
   // filter 形の選択の「うち反映待ち」。選択集合は immutable でも中の行の pending はバッチの進行で
@@ -213,6 +217,9 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     onJob: (e) => {
       jobs.refresh()
       if (e.state === 'done' || e.state === 'failed') scheduleRowRefresh()
+      // inbox ジョブの完了は件の状態（走査の結果、placed / failed）を変える。job イベントに種別は
+      // 無いので、Inbox を開いている間は完了のたびに取り直す（hook 側で 250ms に間引く）
+      if (view === 'inbox' && (e.state === 'done' || e.state === 'failed')) inbox.refresh()
     },
     onBatch: () => {
       jobs.refresh()
@@ -519,6 +526,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             error={albums.error}
             onOpen={(a) => handleScope({ album_id: a.id })}
           />
+        ) : view === 'inbox' ? (
+          <InboxView inbox={inbox} onOpenAlbum={(id) => handleScope({ album_id: id })} />
         ) : view === 'cd' ? (
           <CdView cd={cd} />
         ) : view === 'jobs' ? (
