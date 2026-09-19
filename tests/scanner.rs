@@ -1620,3 +1620,36 @@ async fn cancel_during_phase2_drains_running_md5_work_before_returning() {
     assert_eq!(state, "cancelled");
     assert!(lib.track("C/01.flac").is_none(), "commit していない");
 }
+
+#[tokio::test]
+async fn rip_log_marks_new_rows_as_cd_rip_but_not_existing_rows() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/01.flac", 1, "a", "A", 1));
+    lib.scan().await;
+    let src = |rel: &str| -> String {
+        lib.conn()
+            .query_row(
+                "SELECT source_type FROM tracks WHERE rel_path = ?1",
+                [rel],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    // 既存行のあるディレクトリに後から rip.log が置かれても既存行は触らない（D-67）
+    std::fs::write(lib.path("A/rip.log"), "spindle rip log v1\nドライブ: x\n").unwrap();
+    lib.add("A/02.flac", 2, "b", "A", 2);
+    lib.add("B/01.flac", 3, "c", "B", 1);
+    std::fs::write(lib.path("B/rip2.log"), "spindle rip log v1\n").unwrap();
+    lib.add("C/01.flac", 4, "d", "C", 1);
+    // 他ツールのログは spindle の署名が無いので対象外
+    std::fs::write(lib.path("C/rip.log"), "Exact Audio Copy V1.6\n").unwrap();
+    lib.scan().await;
+    assert_eq!(src("A/01.flac"), "unknown");
+    assert_eq!(src("A/02.flac"), "cd_rip");
+    assert_eq!(src("B/01.flac"), "cd_rip");
+    assert_eq!(src("C/01.flac"), "unknown");
+    // 再スキャンで変わらない
+    lib.scan().await;
+    assert_eq!(src("A/01.flac"), "unknown");
+    assert_eq!(src("A/02.flac"), "cd_rip");
+}

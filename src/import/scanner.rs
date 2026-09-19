@@ -176,6 +176,9 @@ struct Inventory {
     tmp_removed: u64,
     /// dir_key → 同梱カバー画像
     covers: HashMap<String, CoverEntry>,
+    /// spindle の rip.log（先頭行が署名）があるディレクトリの dir_key。ここに新規登録する行は
+    /// `source_type = 'cd_rip'`（DB を消しても出自が戻る。D-67）
+    rip_dirs: HashSet<String>,
 }
 
 /// Phase 3 の読み取り結果
@@ -922,6 +925,13 @@ fn walk(root: &RootDir, token: &CancellationToken) -> Result<Inventory, ScanErro
             if name.starts_with('.') {
                 continue;
             }
+            if crate::cd::riplog::is_rip_log_name(name) {
+                let dir_key = dir.as_ref().map(RelPath::key).unwrap_or_default();
+                if !inv.rip_dirs.contains(&dir_key) && is_spindle_rip_log(root, &child) {
+                    inv.rip_dirs.insert(dir_key);
+                }
+                continue;
+            }
             if let Some(rank) = cover_rank(name) {
                 // 同梱カバー画像。ディレクトリごとに最も優先度の高い 1 つだけ覚える
                 let dir_key = dir.as_ref().map(RelPath::key).unwrap_or_default();
@@ -1012,6 +1022,31 @@ fn join_display(dir: &str, name: &str) -> String {
 }
 
 /// 取り残された tmp を回収する。新しいものは並走中の書き込みかもしれないので残す
+/// 先頭行が spindle の署名（[`crate::cd::riplog::RIP_LOG_SIGNATURE`]）の rip.log か。
+/// 読めなければ false（出自を推定しないだけで、走査は止めない）
+fn is_spindle_rip_log(root: &RootDir, rel: &RelPath) -> bool {
+    use std::io::Read as _;
+    let sig = crate::cd::riplog::RIP_LOG_SIGNATURE.as_bytes();
+    let mut head = vec![0u8; sig.len() + 1];
+    match root.open_file(rel) {
+        Ok(mut f) => {
+            let mut n = 0;
+            while n < head.len() {
+                match f.read(&mut head[n..]) {
+                    Ok(0) => break,
+                    Ok(k) => n += k,
+                    Err(_) => return false,
+                }
+            }
+            n > sig.len() && &head[..sig.len()] == sig && matches!(head[sig.len()], b'\n' | b'\r')
+        }
+        Err(e) => {
+            tracing::debug!(path = %rel, error = %e, "rip.log を読めない");
+            false
+        }
+    }
+}
+
 fn reclaim_tmp(root: &RootDir, rel: &RelPath, now: i64, inv: &mut Inventory) {
     let Ok(st) = root.stat(rel) else {
         return;
@@ -1486,6 +1521,9 @@ impl Commit {
                                 Some(run_id),
                                 now,
                             )?;
+                            if self.inv.rip_dirs.contains(&e.dir_key) {
+                                scans::set_source_type(&tx, id, "cd_rip")?;
+                            }
                             if r.hardlink {
                                 tracing::warn!(track_id = id, path = %e.rel, "hardlink（nlink > 1）の新規トラック");
                             }

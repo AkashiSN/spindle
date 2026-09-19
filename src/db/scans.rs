@@ -459,6 +459,15 @@ pub fn insert_track(
     Ok(id)
 }
 
+/// `tracks.source_type` を書く（`cd_rip` / `download` / `youtube` / `unknown`）
+pub fn set_source_type(conn: &Connection, id: i64, source_type: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE tracks SET source_type = ?2 WHERE id = ?1",
+        params![id, source_type],
+    )?;
+    Ok(())
+}
+
 /// 予約済み一時 key。NUL は `RelPath` が拒否するので実 key と衝突しない
 fn reserved_key(prefix: &str, id: i64) -> String {
     format!("\0{prefix}:{id}")
