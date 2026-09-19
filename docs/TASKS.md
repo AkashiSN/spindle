@@ -917,8 +917,9 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       - [ ] `media/hires.rs`: `HiresSink`（PcmSink。Hann 8192 / ホップ 8192 の FFT をチャンネルごとに累積、
             無音フレーム除外、サンプルの OR）→ `Measurement { cutoff_hz, cliff_db, effective_bits }`（探索は
             1/3 オクターブ平滑化、崖は平滑化前。境界は SPEC §7.10）→ `[hires]` のしきい値で `Status`。
-            合成信号の単体テスト（brickwall → upsampled、緩やかなロールオフ → inconclusive、全帯域 → ok
-            （cutoff = Nyquist）、下位 8 bit ゼロ → padded、両方 → both、全無音 → inconclusive で
+            合成信号の単体テスト（96 kHz で 22.05 kHz と 24 kHz の brickwall → upsampled で cutoff が
+            エッジ ± 数百 Hz、緩やかなロールオフ → inconclusive、全帯域 → ok（cutoff = Nyquist）、
+            L だけ全帯域の 2ch → ok で cliff は同じ ch、下位 8 bit ゼロ → padded、両方 → both、全無音 → inconclusive で
             計測値 NULL、帯域外が完全ゼロでも有限、Nyquist 直下のカットオフで cliff NULL）
       - [ ] `db/migrations/0016_hires_check.sql`: `tracks.hires_check*` + `hires_cutoff_hz` / `hires_cliff_db` / `hires_effective_bits`、
             `jobs.type` に `hirescheck`（0015 と同じ表の作り直し）。`db/hires.rs`（Status / Target / record /
