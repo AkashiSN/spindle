@@ -1578,6 +1578,7 @@ src/
 │   ├── migrations.rs    リポジトリ直下 db/migrations/*.sql の埋め込みと適用
 │   ├── tracks.rs        一覧（キーセット）・検索・selection 解決・アルバム一覧（D-39）
 │   ├── archive.rs       archived_files 台帳（退避・復元・GC の根拠）
+│   ├── categories.rs    統制語彙（canonical key で一意）
 │   ├── playlists.rs  jobs.rs  history.rs
 ├── domain/
 │   ├── identity.rs      inode / audio_md5 による同一性解決
@@ -1609,8 +1610,12 @@ src/
 │   ├── ctdb.rs          CRC32、照会（lookup2.php）、パリティファイルの取得
 │   ├── repair.rs        CTDB の修復（GF(2^16) RS: シンドローム表、オフセット探索、復号、適用。D-66）
 │   ├── crctable.rs      1 回流して任意オフセットのトラック CRC を出す表（累積和と CRC32 combine）
-│   ├── verify.rs        DB の応答との照合（オフセット探索、トラックごとの一致）
-│   └── musicbrainz.rs   ws/2/discid の照会（UA、1 req/s、503 の再試行）と候補（リリース × medium）
+│   ├── verify.rs        DB の応答との照合（オフセット探索、トラックごとの一致、`tracks.verification` の写像）
+│   ├── musicbrainz.rs   ws/2/discid の照会（UA、1 req/s、503 の再試行）と候補（リリース × medium）
+│   ├── metadata.rs      確定フォームの DiscMetadata（検証、タグ写像 + TRACKTOTAL / MUSICBRAINZ_DISCID。D-65 / D-67）
+│   ├── riplog.rs        RipReport と rip.log / disc.cue / disc.toc の描画、同梱ファイルの名前（D-67）
+│   └── place.rs         配置（分割 MD5 → flac → pathgen::plan → library 排他 → tmp + RENAME_NOREPLACE →
+│                        1 トランザクション登録 → rg / transcode。MD5 で冪等。D-67）
 ├── import/
 │   ├── scanner.rs
 │   └── ytmusic/         parser.rs（ルール TOML）、downloader.rs
@@ -1625,8 +1630,8 @@ src/
 │   ├── fb2k.rs          AST → foobar クエリ + ソートパターン
 │   └── export.rs        m3u8 / pls / パスマッピング
 ├── api/
-│   ├── mod.rs  tracks.rs  albums.rs  selection.rs  batch.rs  rename.rs  normalize.rs  history.rs
-│   │   stream.rs  cd.rs  events.rs
+│   ├── mod.rs  tracks.rs  albums.rs  categories.rs  selection.rs  batch.rs  rename.rs  normalize.rs
+│   │   history.rs  stream.rs  cd.rs  events.rs
 │   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
 │   ├── state.rs  error.rs   AppState、`{ "error": code }` 応答
 └── web/                 SPA を rust-embed で同梱

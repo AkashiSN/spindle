@@ -814,9 +814,26 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       CRC 不一致、範囲外の誤り、乱数ストレス、本番 stride で 1 セクタ丸ごと）、`tests/cd_lookup.rs`
       （Range の 206 / 200、列 0 の検証、npar 超え、404。実サーバは `#[ignore]`）。残り: 吸い出し（P2-5）で
       2 回の走査に配線し、直せなければ再リップ / `mismatch`
-- [ ] **P2-8** エンコードと配置、`rip.log` / `disc.cue` / `disc.toc` の出力。Library に同梱ファイルを
-      置き始めるので、一括リネーム後の旧ディレクトリに残る同梱ファイルと空ディレクトリの追随 / 回収
-      （D-43 の残課題。rename op はトラックのパスだけを所有する）をここで決めて D-43 に追記する
+- [x] **P2-8** エンコードと配置、`rip.log` / `disc.cue` / `disc.toc` の出力。D-67。
+      `src/cd/place.rs`（`place_disc`: `DiscMetadata` の検証 → トラックごとの PCM MD5 → `pathgen::plan`
+      （category 無しは `unsorted`、複数枚組は `multi_disc`。2 枚目以降は宛先の同名 album に合流）→
+      raw PCM を `flac -N --verify --skip/--until` で tmp へ（STREAMINFO の MD5 が PCM と一致するときだけ）
+      → lofty でタグ → `library` の排他 → tmp + `RENAME_NOREPLACE` で配置 → 1 トランザクションで `albums` /
+      `tracks`（`source_type = cd_rip`、`verification`）/ `track_tags` / `album_verifications`（`source = rip`）/
+      `track_verifications` → `rg` と `transcode` を投入。再実行は MD5 で自分の成果物を見分ける）、
+      `src/cd/metadata.rs`（web の `DiscMetadata` と同じ形 + `category`。検証とタグ写像）、
+      `src/cd/riplog.rs`（`RipReport`、`rip.log` / `disc.cue` / `disc.toc` の描画。複数枚組は `disc<N>.*` /
+      `rip<N>.log`）、`GET/POST /api/categories` と確定フォームの category（`useCategories`）。
+      D-43 の残課題: rename ジョブが commit 後に、album 全体の移動で active な行が無くなった旧ディレクトリの
+      既知の同梱ファイルを宛先へ移し、空なら rmdir（`edit::rename::follow_companions`）。スキャナは spindle の
+      rip.log（先頭行の署名）があるディレクトリの新規行を `cd_rip` にする。verify.log は `data/verify` のまま。
+      受け入れ: `tests/cd_place.rs`（配置・タグ・同梱 3 ファイル・DB 行・後続ジョブ・次のスキャンで不変、
+      not_attempted、複数枚組の合流、別リリースの `({year})` 降格、同じ盤の再実行の冪等性と別音声の衝突、
+      配置後に落ちてスキャナが拾った行の採用、排他中の Busy、PCM 長 / メタデータの拒否）、
+      `tests/cd_metadata.rs`、`tests/cd_riplog.rs`、`tests/scanner.rs`（rip.log → cd_rip）、`tests/rename.rs`
+      （同梱ファイルの追随・衝突・巻き戻し）、`tests/categories_api.rs`、`web/src/lib/cd.test.ts`。
+      残り: P2-5 で `PlaceEnv` を `AppState` から組み立てて `place_disc` を配線する（`Busy` は Requeue、
+      `Conflict` は最終失敗で tmp の PCM を残す）。`POST /api/cd/rip` も P2-5
 - [x] **P2-9** 遡及照合（44.1/16/2ch かつサンプル数が 588 の倍数のときのみ）。D-63。
       `verify` ジョブ（album 単位、並列 2。`src/jobs/handlers/verify.rs`）: ディスクごとに STREAMINFO の
       サンプル数から TOC を再構成 → デコードして CRC 表（`src/cd/crctable.rs`。1 回流して ±2939 の
