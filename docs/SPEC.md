@@ -1393,6 +1393,14 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   （空のタイトルは「Track NN で埋める」ボタン）、確定したメタデータをタグ名で見せる（`albumTags` /
   `trackTags`。MUSICBRAINZ_TRACKID は recording、MUSICBRAINZ_RELEASETRACKID は track）。吸い出し（P2-5）は
   この DiscMetadata を受ける。遷移は `lib/cdState.ts` の reducer（TOC の編集と「結果を消す」で結果より下が全部消える）
+- **Inbox**（P2-10、D-68）: 左に件（= `[paths].inbox` の音声ファイルのあるディレクトリ）の一覧
+  （状態バッジ・ファイル数・コーデック・検出時刻・失敗理由）と「今すぐ確認」（`POST /api/inbox/scan`）、
+  右に選んだ件の補正フォーム: アルバムアーティスト / アルバム / 日付 / category（CD の確定フォームと同じ
+  `CategoryField`）と、トラックごとの disc / # / タイトル / アーティスト（ファイル名・コーデック・長さは
+  表示のみ）。初期値はタグからの提案（`proposal`）、承認済み・失敗の件は保存した下書き。検証はサーバと
+  同じ規則（`lib/inbox.ts` の `validateDraft`）で、問題が無いときだけ「承認して配置」が押せる。
+  「却下」はファイルを残したまま一覧から外し、「下書きに戻す」で pending に戻る。placed の件は 24 時間
+  残り、「アルバムを開く」で表を `album_id` に絞る。inbox ジョブの完了で一覧を取り直す
 - **設定**: `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
   退避 WAV（`archived_files`）の一覧と復元
 
@@ -1616,6 +1624,7 @@ src/
 │   ├── tracks.rs        一覧（キーセット）・検索・selection 解決・アルバム一覧（D-39）
 │   ├── archive.rs       archived_files 台帳（退避・復元・GC の根拠）
 │   ├── categories.rs    統制語彙（canonical key で一意）
+│   ├── inbox.rs         inbox_items / inbox_files（承認キューの状態機械。D-68）
 │   ├── playlists.rs  jobs.rs  history.rs
 ├── domain/
 │   ├── identity.rs      inode / audio_md5 による同一性解決
@@ -1655,9 +1664,13 @@ src/
 │                        1 トランザクション登録 → rg / transcode。MD5 で冪等。D-67）
 ├── import/
 │   ├── scanner.rs
+│   ├── placement.rs     CD / Inbox 共通の配置（tmp + RENAME_NOREPLACE、album の解決と登録トランザクションでの
+│   │                    リリースキー再検証、行の登録 / 採用。D-67 / D-68）
+│   ├── inbox.rs         Inbox の走査（件 = ディレクトリ）、タグからの下書き、承認の検証、承認済みの配置
+│   │                    （補正をタグに書いて pathgen::plan の宛先へ。source_type = download。D-68）
 │   └── ytmusic/         parser.rs（ルール TOML）、downloader.rs
 ├── jobs/
-│   ├── queue.rs  worker.rs  recovery.rs  scheduler.rs（backup / gc の周期投入）
+│   ├── queue.rs  worker.rs  recovery.rs  scheduler.rs（backup / gc の周期投入。inbox は handlers/inbox.rs）
 │   └── handlers/
 ├── gc/
 │   └── mod.rs           物理削除の唯一の経路。plan（判定・dry-run）と execute_*（5 区分。D-56）
@@ -1668,7 +1681,7 @@ src/
 │   └── export.rs        m3u8 / pls / パスマッピング
 ├── api/
 │   ├── mod.rs  tracks.rs  albums.rs  categories.rs  selection.rs  batch.rs  rename.rs  normalize.rs
-│   │   history.rs  stream.rs  cd.rs  events.rs
+│   │   history.rs  stream.rs  cd.rs  inbox.rs  events.rs
 │   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
 │   ├── state.rs  error.rs   AppState、`{ "error": code }` 応答
 └── web/                 SPA を rust-embed で同梱

@@ -849,7 +849,26 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/verify_job.rs`（ffmpeg で作った FLAC で verified / offset / AR のみ / mismatch / not_found /
       unverifiable / 不完全 / 複数ディスク / 照会失敗 / 再照合の履歴 / 照合中の版更新・差し替え・
       キャンセル / 原子性 / ログ確定失敗の巻き戻し / commit 後の再実行の冪等性）、`tests/verify_api.rs`
-- [ ] **P2-10** Inbox 取り込み（ステージング → 承認キュー → 配置）
+- [x] **P2-10** Inbox 取り込み（ステージング → 承認キュー → 配置）。D-68。
+      `src/import/inbox.rs`（`scan_inbox`: `[paths].inbox` を走査して音声のあるディレクトリを 1 件として
+      `inbox_items` / `inbox_files` に登録（root 直下は rel_dir ""）。ファイルが変われば読み直して pending に
+      戻し、消えた件は行ごと消す。`proposal`: タグから下書き（albumartist / album / date / category は
+      genre 写像、トラックは DISCNUMBER / TRACKNUMBER / TITLE / ARTIST、無ければファイル名順）。
+      `InboxDraft::problems`: 承認の検証。`place_item`: 承認済みの件を `library` の排他の下で配置
+      （MUSICBRAINZ_ALBUMID → 自分の成果物の album のキー → `inbox:<id>` のリリースキーで `pathgen::plan` →
+      tmp + `RENAME_NOREPLACE`、補正はファイルのタグに書く → 1 トランザクションで `albums` / `tracks`
+      （`source_type = download`）/ `track_tags` → Inbox 側を消す → `rg` / `transcode`、wav / alac / aiff は
+      `[normalize].wav_to_flac` なら normalize バッチも投入。再実行は音声の指紋で自分の成果物を見分ける）、
+      `src/import/placement.rs`（CD の配置と共通の tmp + rename / album の解決 / 行の登録。リリースキーは
+      登録トランザクションで再検証）、`src/jobs/handlers/inbox.rs`（`inbox` ジョブ = 走査 + 承認済みの配置。
+      `[inbox].poll_interval_secs`（既定 60、0 で自動なし）の周期投入と「今すぐ確認」）、`db/migrations/0014`、
+      `src/db/inbox.rs`、`src/api/inbox.rs`（`GET /api/inbox`、`POST /api/inbox/scan`、
+      `POST /api/inbox/{id}/approve|reject|reopen`）、web の Inbox タブ（`lib/inbox.ts` / `useInbox` /
+      `InboxView`: 件の一覧とアルバム単位 + トラック単位の補正フォーム、placed からアルバムへ）。
+      受け入れ: `tests/inbox_job.rs`（検出、変更の読み直しと承認の取り消し、消えた件、placed の期限切れ、
+      補正付きの配置と同梱ファイル・DB 行・後続ジョブ・Inbox の消費、wav の normalize 投入の有無、
+      衝突 → failed と後始末、排他が取れないときの再投入、配置中の変更、再実行の冪等性）、
+      `tests/inbox_draft.rs`、`tests/inbox_db.rs`、`tests/inbox_api.rs`、`web/src/lib/inbox.test.ts`
 
 ---
 
