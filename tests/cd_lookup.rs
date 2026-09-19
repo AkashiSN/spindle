@@ -9,14 +9,17 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use base64::Engine;
 use tokio::sync::Mutex;
 
 use spindle::cd::accuraterip::{parse_response as parse_ar, AccurateRipClient, ArDiscEntry};
 use spindle::cd::ctdb::{parse_response as parse_ctdb, CtdbClient, CtdbEntry};
 use spindle::cd::toc::{AccurateRipId, Toc, TocTrack};
+use spindle::cd::LookupError;
 
 const AR_BIN: &[u8] = include_bytes!("fixtures/cd/dBAR-012-0013f127-00b61059-a109fe0c.bin");
 const CTDB_XML: &str = include_str!("fixtures/cd/ctdb_hybrid_theory.xml");
@@ -104,6 +107,73 @@ struct Seen {
     ar_paths: Vec<String>,
     ctdb_queries: Vec<Vec<(String, String)>>,
     user_agents: Vec<String>,
+    parity_ranges: Vec<Option<String>>,
+}
+
+/// 模擬のパリティファイル: 16 面 × 11760 語、面 i 列 c の値は i·7919 + c
+fn parity_word(i: usize, c: usize) -> u16 {
+    (i * 7919 + c) as u16
+}
+
+fn parity_file() -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 * 11760 * 2);
+    for i in 0..16 {
+        for c in 0..11760 {
+            out.extend_from_slice(&parity_word(i, c).to_le_bytes());
+        }
+    }
+    out
+}
+
+/// 列 0 のシンドローム属性（面 i の先頭語）
+fn parity_syndrome_attr(npar: usize) -> String {
+    let mut bytes = Vec::new();
+    for i in 0..npar {
+        bytes.extend_from_slice(&parity_word(i, 0).to_le_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// `Range: bytes=a-b` を受けて 206、無ければ 200 で全部。id 404 は無い
+async fn parity_handler(
+    State(seen): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    seen.lock().await.parity_ranges.push(range.clone());
+    if id == "404" {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let file = parity_file();
+    // "full": Range を無視して 200 で全体（8 面のファイル）。"short": 206 だが本文が足りない。
+    // "badrange": 206 で本文は要求どおりだが Content-Range の終端が違う
+    if id == "full" {
+        return (StatusCode::OK, file[..8 * 11760 * 2].to_vec()).into_response();
+    }
+    let Some(r) = range else {
+        return (StatusCode::OK, file).into_response();
+    };
+    let (a, b) = r
+        .strip_prefix("bytes=")
+        .and_then(|s| s.split_once('-'))
+        .map(|(a, b)| (a.parse::<usize>().unwrap(), b.parse::<usize>().unwrap()))
+        .unwrap();
+    let b = b.min(file.len() - 1);
+    let mut body = file[a..=b].to_vec();
+    if id == "short" {
+        body.truncate(body.len() - 2);
+    }
+    let mut resp = (StatusCode::PARTIAL_CONTENT, body).into_response();
+    let end = if id == "badrange" { 999 } else { b };
+    resp.headers_mut().insert(
+        header::CONTENT_RANGE,
+        HeaderValue::from_str(&format!("bytes {a}-{end}/{}", file.len())).unwrap(),
+    );
+    resp
 }
 
 type Shared = Arc<Mutex<Seen>>;
@@ -163,6 +233,7 @@ async fn serve() -> (String, Shared) {
     let app = Router::new()
         .route("/accuraterip/{*path}", get(ar_handler))
         .route("/lookup2.php", get(ctdb_handler))
+        .route("/parity/{id}", get(parity_handler))
         .with_state(Arc::clone(&seen));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -259,4 +330,119 @@ async fn lookup_errors_are_reported_not_swallowed() {
     let client =
         CtdbClient::new("http://127.0.0.1:9/lookup2.php", "spindle-test/0.1").expect("client");
     assert!(client.lookup(&hybrid_theory()).await.is_err());
+}
+
+fn parity_entry(base: &str, id: &str, npar: u32) -> CtdbEntry {
+    CtdbEntry {
+        id: 1,
+        confidence: 1,
+        crc32: 0,
+        track_crcs: vec![],
+        toc: "0:100".to_owned(),
+        npar,
+        stride: 5880,
+        has_parity: Some(format!("{base}/parity/{id}")),
+        syndrome: Some(parity_syndrome_attr(npar as usize)),
+        parity: None,
+    }
+}
+
+/// パリティファイル（`hasparity`）は Range で先頭 npar 面だけ取る（CUETools は 4 → 8 → 16 と広げる）。
+/// 列 0 が XML の `syndrome` と合わなければ拒む
+#[tokio::test]
+async fn ctdb_client_fetches_the_first_npar_planes_of_the_parity_file() {
+    let (base, seen) = serve().await;
+    let client =
+        CtdbClient::new(format!("{base}/lookup2.php"), "spindle-test/0.1").expect("client");
+    let entry = parity_entry(&base, "70967", 16);
+    let db = client.fetch_syndromes(&entry, 8).await.expect("fetch");
+    assert_eq!(db.npar(), 8);
+    assert_eq!(db.stride(), 11760);
+    assert_eq!(
+        db.column(0),
+        &(0..8).map(|i| parity_word(i, 0)).collect::<Vec<_>>()[..]
+    );
+    assert_eq!(db.column(11759)[7], parity_word(7, 11759));
+    let db16 = client.fetch_syndromes(&entry, 16).await.expect("fetch");
+    assert_eq!(db16.npar(), 16);
+    assert_eq!(db16.column(3)[15], parity_word(15, 3));
+    {
+        let s = seen.lock().await;
+        assert_eq!(
+            s.parity_ranges,
+            vec![
+                Some("bytes=0-188159".to_owned()),
+                Some("bytes=0-376319".to_owned())
+            ]
+        );
+        assert!(s.user_agents.iter().all(|ua| ua == "spindle-test/0.1"));
+    }
+    // エントリの npar を超える要求は拒む
+    let entry8 = parity_entry(&base, "70967", 8);
+    assert!(client.fetch_syndromes(&entry8, 16).await.is_err());
+    // 列 0 が syndrome と合わない
+    let mut bad = parity_entry(&base, "70967", 8);
+    bad.syndrome = Some(parity_syndrome_attr(8).replace('A', "B"));
+    assert!(matches!(
+        client.fetch_syndromes(&bad, 8).await,
+        Err(LookupError::Parse(_))
+    ));
+    // 200 でファイル全体が返るサーバ: 全体の長さがエントリの npar 面ぶんなら受け、先頭 npar 面を使う
+    let full = parity_entry(&base, "full", 8);
+    let db4 = client.fetch_syndromes(&full, 4).await.expect("fetch");
+    assert_eq!(db4.npar(), 4);
+    assert_eq!(db4.column(5)[3], parity_word(3, 5));
+    // 200 なのに全体の長さがエントリと合わない（npar 16 のエントリに 8 面のファイル）
+    let full16 = parity_entry(&base, "full", 16);
+    assert!(matches!(
+        client.fetch_syndromes(&full16, 8).await,
+        Err(LookupError::Parse(_))
+    ));
+    // 206 の Content-Range の終端が要求と違う（本文の長さは合っている）
+    let badrange = parity_entry(&base, "badrange", 8);
+    assert!(matches!(
+        client.fetch_syndromes(&badrange, 8).await,
+        Err(LookupError::Parse(_))
+    ));
+    // 206 の本文が短い
+    let short = parity_entry(&base, "short", 8);
+    assert!(matches!(
+        client.fetch_syndromes(&short, 8).await,
+        Err(LookupError::Parse(_))
+    ));
+    // stride が 5880 でない
+    let mut odd = parity_entry(&base, "70967", 8);
+    odd.stride = 0;
+    assert!(matches!(
+        client.fetch_syndromes(&odd, 8).await,
+        Err(LookupError::Parse(_))
+    ));
+    // hasparity 無し、404
+    let mut none = parity_entry(&base, "70967", 8);
+    none.has_parity = None;
+    assert!(matches!(
+        client.fetch_syndromes(&none, 8).await,
+        Err(LookupError::NoParity)
+    ));
+    let missing = parity_entry(&base, "404", 8);
+    assert!(matches!(
+        client.fetch_syndromes(&missing, 8).await,
+        Err(LookupError::Status(404))
+    ));
+}
+
+/// 実サーバ（ネットワーク要。CI では走らせない）: Hybrid Theory JP のエントリ 315515（npar 8）の
+/// パリティファイルを Range で取り、列 0 が XML の syndrome と一致する
+#[tokio::test]
+#[ignore]
+async fn real_ctdb_parity_file_matches_the_xml_syndrome() {
+    let entries = parse_ctdb(CTDB_XML).expect("xml");
+    let entry = entries.iter().find(|e| e.id == 315515).expect("entry");
+    let client = CtdbClient::new("http://db.cuetools.net/lookup2.php", "spindle/0.1 (test)")
+        .expect("client");
+    let db = client.fetch_syndromes(entry, 4).await.expect("fetch");
+    assert_eq!(db.npar(), 4);
+    assert_eq!(db.column(0), &[0xad5d, 0xe41e, 0x2c99, 0x7fc3]);
+    let db = client.fetch_syndromes(entry, 8).await.expect("fetch");
+    assert_eq!(db.column(0)[7], 0x904b);
 }

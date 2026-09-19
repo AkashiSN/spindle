@@ -803,7 +803,17 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       末尾の尻に同じ除外。受け入れ: `tests/cd_crc.rs`（手計算できる閉じた式での除外規則、v2 の上位加算、
       語の詰め方、crc450、細切れ push の一致、奇数長の持ち越しと L 余りの拒否、サンプル数の過不足）と、CUETools の定義から独立に書いた
       Python 実装（`scripts/gen_cd_crc_fixture.py` → `tests/fixtures/cd_crc_reference.json`）との突き合わせ
-- [ ] **P2-7** CTDB 照会・修復適用、AccurateRip は補助
+- [x] **P2-7** CTDB 照会・修復適用、AccurateRip は補助。照会は P2-9 で済み。修復は `src/cd/repair.rs`
+      （D-66。CUETools `CDRepair` / `RsDecode` / `Parity2Syndrome` の定義: GF(2^16) 0x1100B、stride 11760 語、
+      `SyndromeSampler` → `SyndromeTable`（80 分 3〜5 秒）、`find_offset`（列 0、±2939）、`plan`（BM → Chien →
+      Forney、列あたり npar/2 個まで、直した後の CRC が合うときだけ）、`RepairApplier`（2 回目の走査で XOR）、
+      `decode_entry_syndrome`（`syndrome` / 旧 `parity` 属性）、`DbSyndromes::parse`（面順）)と
+      `CtdbClient::fetch_syndromes`（`hasparity` を Range で先頭 npar 面）。受け入れ: `tests/cd_repair.rs`
+      （表を使わない GF 演算との一致、直接の定義との一致、ずらした列の再計算との一致、LFSR パリティ →
+      シンドローム、実応答の `syndrome` 属性、面順、列ごとの能力内の修復とオフセット付き修復、能力超え、
+      CRC 不一致、範囲外の誤り、乱数ストレス、本番 stride で 1 セクタ丸ごと）、`tests/cd_lookup.rs`
+      （Range の 206 / 200、列 0 の検証、npar 超え、404。実サーバは `#[ignore]`）。残り: 吸い出し（P2-5）で
+      2 回の走査に配線し、直せなければ再リップ / `mismatch`
 - [ ] **P2-8** エンコードと配置、`rip.log` / `disc.cue` / `disc.toc` の出力。Library に同梱ファイルを
       置き始めるので、一括リネーム後の旧ディレクトリに残る同梱ファイルと空ディレクトリの追随 / 回収
       （D-43 の残課題。rename op はトラックのパスだけを所有する）をここで決めて D-43 に追記する

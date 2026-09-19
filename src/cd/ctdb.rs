@@ -1,5 +1,5 @@
 //! CUETools DB（CTDB）の CRC32（SPEC §7.2「CRC 計算」、D-13 で主）。
-//! 照会と修復適用は P2-7。
+//! 照会は P2-9 で、修復（パリティの取得 [`CtdbClient::fetch_syndromes`] と適用 [`super::repair`]）は P2-7。
 //!
 //! 定義は CUETools（`CUETools.AccurateRip/AccurateRip.cs` の `CTDBCRC`、
 //! `CUETools.AccurateRip/CDRepair.cs` の `stride` / `laststride`、
@@ -15,6 +15,7 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+use super::repair::{decode_entry_syndrome, DbSyndromes, MAX_NPAR, STRIDE_WORDS};
 use super::toc::Toc;
 use super::{CrcError, FrameCursor, LookupError, TrackLayout, SECTOR_SAMPLES};
 
@@ -235,9 +236,9 @@ pub struct CtdbEntry {
     pub npar: u32,
     /// パリティの stride（16 bit 単位ではなくサンプル数で返る。既定 5880）
     pub stride: u32,
-    /// パリティデータの URL（あれば修復に使える。P2-7）
+    /// パリティファイルの URL（あれば修復に使える。[`CtdbClient::fetch_syndromes`]）
     pub has_parity: Option<String>,
-    /// シンドローム / パリティ（base64 のまま。P2-7 で解釈する）
+    /// 列 0 のシンドローム / パリティ（base64 のまま。[`super::repair::decode_entry_syndrome`]）
     pub syndrome: Option<String>,
     pub parity: Option<String>,
 }
@@ -336,6 +337,18 @@ pub fn parse_response(xml: &str) -> Result<Vec<CtdbEntry>, CtdbParseError> {
     Ok(entries)
 }
 
+/// `Content-Range: bytes a-b/total` を (a, b, total) に。全長が `*`（不明）なら None
+fn parse_content_range(value: &str) -> Option<(usize, usize, Option<usize>)> {
+    let rest = value.strip_prefix("bytes ")?;
+    let (range, total) = rest.split_once('/')?;
+    let (a, b) = range.split_once('-')?;
+    let total = match total.trim() {
+        "*" => None,
+        t => Some(t.parse().ok()?),
+    };
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?, total))
+}
+
 /// CTDB の照会。`endpoint` は `http://db.cuetools.net/lookup2.php`（設定で差し替え可）
 #[derive(Debug, Clone)]
 pub struct CtdbClient {
@@ -370,5 +383,85 @@ impl CtdbClient {
         }
         let text = resp.text().await?;
         parse_response(&text).map_err(|e| LookupError::Parse(e.to_string()))
+    }
+
+    /// エントリのパリティファイル（`hasparity` の URL。各列のシンドロームを面順に持つ）から先頭
+    /// `npar` 面を `Range` で取る（CUETools は 4 → 8 → 16 と広げて足りる所で止める）。
+    /// 列 0 が XML の `syndrome` 属性と一致しなければ拒む（別のファイルを掴んでいる）
+    pub async fn fetch_syndromes(
+        &self,
+        entry: &CtdbEntry,
+        npar: usize,
+    ) -> Result<DbSyndromes, LookupError> {
+        let url = entry.has_parity.as_deref().ok_or(LookupError::NoParity)?;
+        let entry_npar = (entry.npar as usize).min(MAX_NPAR);
+        if npar == 0 || npar > entry_npar {
+            return Err(LookupError::Parse(format!(
+                "npar {npar} はエントリの {} を超える",
+                entry.npar
+            )));
+        }
+        // stride は自分の表（[`STRIDE_WORDS`]）と同じでなければ突き合わせられない（CUETools も同じ）
+        let stride = entry.stride as usize * 2;
+        if stride != STRIDE_WORDS {
+            return Err(LookupError::Parse(format!(
+                "エントリの stride {} が {} でない",
+                entry.stride,
+                STRIDE_WORDS / 2
+            )));
+        }
+        let len = stride * npar * 2;
+        let full_len = stride * entry_npar * 2;
+        let resp = self
+            .http
+            .get(url)
+            .header(reqwest::header::RANGE, format!("bytes=0-{}", len - 1))
+            .send()
+            .await?;
+        let status = resp.status();
+        // 206 は要求した区間そのもの（先頭から len バイト）、200 はファイル全体（entry.npar 面）だけ受ける
+        let expected_len = match status {
+            reqwest::StatusCode::PARTIAL_CONTENT => {
+                let range = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                // `bytes 0-<len−1>/<全長>`。区間は要求どおり、全長（分かれば）は区間を含むこと
+                let ok = matches!(
+                    parse_content_range(range),
+                    Some((0, end, total)) if end == len - 1 && total.is_none_or(|t| t >= len)
+                );
+                if !ok {
+                    return Err(LookupError::Parse(format!(
+                        "パリティファイルの Content-Range が要求（0-{}）と合わない: {range:?}",
+                        len - 1
+                    )));
+                }
+                len
+            }
+            reqwest::StatusCode::OK => full_len,
+            other => return Err(LookupError::Status(other.as_u16())),
+        };
+        let bytes = resp.bytes().await?;
+        if bytes.len() != expected_len {
+            return Err(LookupError::Parse(format!(
+                "パリティファイルの長さが違う（期待 {expected_len}、受信 {}）",
+                bytes.len()
+            )));
+        }
+        let db = DbSyndromes::parse(&bytes, stride, npar)
+            .map_err(|e| LookupError::Parse(e.to_string()))?;
+        if let Some(expected) =
+            decode_entry_syndrome(entry).map_err(|e| LookupError::Parse(e.to_string()))?
+        {
+            let n = expected.len().min(npar);
+            if db.column(0)[..n] != expected[..n] {
+                return Err(LookupError::Parse(
+                    "パリティファイルの列 0 が syndrome 属性と合わない".to_owned(),
+                ));
+            }
+        }
+        Ok(db)
     }
 }

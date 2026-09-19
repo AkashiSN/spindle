@@ -500,6 +500,17 @@ Phase 4  commit:     1 トランザクションで
 不一致時の既定動作: 自動再リップ（最大2回）→ CTDB 修復データ適用 →
 それでも不一致なら `mismatch` フラグ付きで取り込み、UI で要確認表示。
 
+CTDB の修復（`src/cd/repair.rs`、D-66）: ディスクの 16 bit 語を 11760 語ずつの行に並べ、列ごとに
+GF(2^16) の Reed-Solomon 符号語とみなす（データ行は先頭 1 行と末尾 1 行 + 端数を除く。CTDB の
+ディスク CRC の範囲と同じ）。1 回目の走査でシンドローム表（`SyndromeSampler` → `SyndromeTable`。
+80 分で 3〜5 秒）を作り、エントリの `syndrome`（列 0）でオフセットを探す（`find_offset`、±2939）。
+誤りがあれば `hasparity` のパリティファイル（各列のシンドローム。`CtdbClient::fetch_syndromes` が
+Range で先頭 npar 面だけ取る）と突き合わせ、列ごとに Berlekamp-Massey → Chien → Forney で位置と値を
+出す（列あたり npar/2 個まで。1 セクタ丸ごとの傷は 1176 列に 1 個ずつなので直る）。直した後の
+ディスク CRC がエントリの値に一致するときだけ計画（`RepairPlan`）を採用し、2 回目の走査で
+`RepairApplier` が語を XOR する。直せなければ再リップ / `mismatch` へ。吸い出しジョブへの配線は
+P2-5 で行う
+
 **ドライブは物理的に1台なので rip キューの並列度は 1 に固定する。**
 
 ### 7.3 遡及照合（ログなし既存 FLAC）
@@ -1575,7 +1586,8 @@ src/
 │   ├── toc.rs           TOC の検証、各種 DiscID 算出、サンプル数からの再構成（§7.3）
 │   ├── rip.rs           cd-paranoia、オフセット、分割
 │   ├── accuraterip.rs   ARv1/v2 CRC、DB の照会（dBAR-*.bin）、オフセット表
-│   ├── ctdb.rs          CRC32、照会（lookup2.php）、修復
+│   ├── ctdb.rs          CRC32、照会（lookup2.php）、パリティファイルの取得
+│   ├── repair.rs        CTDB の修復（GF(2^16) RS: シンドローム表、オフセット探索、復号、適用。D-66）
 │   ├── crctable.rs      1 回流して任意オフセットのトラック CRC を出す表（累積和と CRC32 combine）
 │   ├── verify.rs        DB の応答との照合（オフセット探索、トラックごとの一致）
 │   └── musicbrainz.rs   ws/2/discid の照会（UA、1 req/s、503 の再試行）と候補（リリース × medium）

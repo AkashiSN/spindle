@@ -9,6 +9,7 @@ pub mod accuraterip;
 pub mod crctable;
 pub mod ctdb;
 pub mod musicbrainz;
+pub mod repair;
 pub mod toc;
 pub mod verify;
 
@@ -24,6 +25,8 @@ pub enum LookupError {
     Status(u16),
     #[error("応答を解釈できない: {0}")]
     Parse(String),
+    #[error("エントリにパリティデータが無い")]
+    NoParity,
 }
 
 /// 照会用の HTTP クライアント。UA を必ず付け、接続 10 秒 / 全体 60 秒で諦める。
