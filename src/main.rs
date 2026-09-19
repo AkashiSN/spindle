@@ -6,6 +6,8 @@ use anyhow::Context;
 use tracing::info;
 
 use spindle::api::{self, auth, AppState};
+use spindle::cd::accuraterip::AccurateRipClient;
+use spindle::cd::ctdb::CtdbClient;
 use spindle::db::{migrations, Db};
 use spindle::edit::{Editor, NormalizeEnv};
 use spindle::fsroot::Roots;
@@ -21,6 +23,7 @@ use spindle::jobs::handlers::scan::{self, ScanHandler};
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
 use spindle::jobs::handlers::thumbnail::ThumbnailHandler;
 use spindle::jobs::handlers::transcode::{self, TranscodeHandler};
+use spindle::jobs::handlers::verify::VerifyHandler;
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
 use spindle::media::artwork::ArtworkStore;
 use spindle::media::decode::Decoder;
@@ -179,6 +182,21 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(FlaccheckHandler::new(
             Arc::clone(&library_root),
             &state.config.bin.flac,
+        )),
+    );
+    // 遡及照合（P2-9、D-13 / D-63）。読むだけ。ログは data/verify/
+    let ua = &state.config.musicbrainz.user_agent;
+    let ar_client = AccurateRipClient::new(&state.config.verify.accuraterip_url, ua)
+        .context("AccurateRip クライアントの初期化に失敗")?;
+    let ctdb_client = CtdbClient::new(&state.config.verify.ctdb_url, ua)
+        .context("CTDB クライアントの初期化に失敗")?;
+    registry.register(
+        JobType::Verify,
+        Arc::new(VerifyHandler::new(
+            Arc::clone(&library_root),
+            &state.config.paths.data,
+            ar_client,
+            ctdb_client,
         )),
     );
     registry.register(

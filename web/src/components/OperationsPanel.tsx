@@ -111,6 +111,17 @@ export function OperationsPanel({
           </button>
           <span className="muted small">解析はアルバム単位のジョブ。書き込みと補填は巻き戻せるバッチ</span>
         </div>
+        <div className="op-row">
+          <button
+            type="button"
+            disabled={busy || !hasSelection}
+            title="選択したトラックのアルバムを CTDB / AccurateRip に照会し、CD 由来の FLAC を格付けする（アルバム単位のジョブ。ログは data/verify/）"
+            onClick={() => void ops.startVerify()}
+          >
+            {label('verify', '遡及照合')}
+          </button>
+          <span className="muted small">44.1kHz/16bit/2ch の FLAC だけが対象。不一致は「要確認」で不良ではない</span>
+        </div>
       </section>
 
       <section>

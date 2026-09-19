@@ -6,8 +6,40 @@
 //! ディスク全体（最大 80 分 ≒ 850 MB）をメモリに置かない
 
 pub mod accuraterip;
+pub mod crctable;
 pub mod ctdb;
 pub mod toc;
+pub mod verify;
+
+use std::sync::OnceLock;
+use std::time::Duration;
+
+/// 照会（AccurateRip / CTDB）の失敗。応答が無い・壊れている・サーバが拒んだ
+#[derive(Debug, thiserror::Error)]
+pub enum LookupError {
+    #[error("HTTP: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("HTTP {0}")]
+    Status(u16),
+    #[error("応答を解釈できない: {0}")]
+    Parse(String),
+}
+
+/// 照会用の HTTP クライアント。UA を必ず付け、接続 10 秒 / 全体 60 秒で諦める。
+/// TLS の暗号プロバイダ（ring）はプロセスで 1 度だけ登録する（reqwest は `rustls-no-provider`。
+/// aws-lc を避けるため。ビルドに cmake が要らない）
+pub fn http_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
+    static PROVIDER: OnceLock<()> = OnceLock::new();
+    PROVIDER.get_or_init(|| {
+        // 既に別の場所で登録済みなら Err が返るが、それで構わない
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    reqwest::Client::builder()
+        .user_agent(user_agent)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()
+}
 
 /// 1 セクタ（CD フレーム）のサンプル数。1 サンプル = 2ch × 16 bit
 pub const SECTOR_SAMPLES: u64 = 588;

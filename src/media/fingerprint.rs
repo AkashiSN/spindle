@@ -37,6 +37,8 @@ pub enum FingerprintError {
     Decode(#[from] SymphoniaError),
     #[error("読み取りに失敗: {0}")]
     Io(#[from] std::io::Error),
+    #[error("受け手が失敗: {0}")]
+    Sink(anyhow::Error),
 }
 
 /// FLAC の STREAMINFO から非圧縮音声の MD5 を読む。全ゼロ（未設定）は `Ok(None)`。
@@ -46,11 +48,57 @@ pub fn flac_streaminfo_md5<R: Read + Seek>(r: R) -> Result<Option<[u8; 16]>, Fin
     Ok((md5 != [0u8; 16]).then_some(md5))
 }
 
+/// STREAMINFO の内容（デコード不要）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlacStreamInfo {
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub bits_per_sample: u32,
+    /// チャンネルをまたがないサンプル数。0 は不明
+    pub total_samples: u64,
+    /// 全ゼロは未設定
+    pub md5: [u8; 16],
+    /// MD5 16 バイトのファイル内オフセット
+    pub md5_offset: u64,
+}
+
+/// STREAMINFO を読む。先頭の ID3v2 タグは読み飛ばす
+pub fn flac_streaminfo<R: Read + Seek>(mut r: R) -> Result<FlacStreamInfo, FingerprintError> {
+    let (info, end) = read_streaminfo(&mut r)?;
+    // 10..18: sample rate 20 bit、channels−1 3 bit、bps−1 5 bit、total samples 36 bit
+    let packed = u64::from_be_bytes([
+        info[10], info[11], info[12], info[13], info[14], info[15], info[16], info[17],
+    ]);
+    let sample_rate = (packed >> 44) as u32;
+    let channels = ((packed >> 41) & 0x7) as u32 + 1;
+    let bits_per_sample = ((packed >> 36) & 0x1f) as u32 + 1;
+    let total_samples = packed & 0xf_ffff_ffff;
+    let mut md5 = [0u8; 16];
+    md5.copy_from_slice(&info[18..34]);
+    Ok(FlacStreamInfo {
+        sample_rate,
+        channels,
+        bits_per_sample,
+        total_samples,
+        md5,
+        md5_offset: end - 16,
+    })
+}
+
 /// STREAMINFO の MD5 16 バイトの位置（ファイル先頭からのオフセット）と現在値。全ゼロもそのまま返す。
 /// MD5 の補填（P1-5b）はこの位置だけを書き換える
 pub fn flac_streaminfo_md5_at<R: Read + Seek>(
     mut r: R,
 ) -> Result<(u64, [u8; 16]), FingerprintError> {
+    let (info, end) = read_streaminfo(&mut r)?;
+    let mut md5 = [0u8; 16];
+    md5.copy_from_slice(&info[18..34]);
+    // 読み終えた位置から 16 バイト戻ったところが MD5
+    Ok((end - 16, md5))
+}
+
+/// STREAMINFO の 34 バイトと、読み終えた位置
+fn read_streaminfo<R: Read + Seek>(mut r: R) -> Result<([u8; 34], u64), FingerprintError> {
     let mut marker = [0u8; 4];
     r.read_exact(&mut marker)?;
     if marker[..3] == *b"ID3" {
@@ -80,11 +128,8 @@ pub fn flac_streaminfo_md5_at<R: Read + Seek>(
     let mut info = [0u8; 34];
     r.read_exact(&mut info)
         .map_err(|_| FingerprintError::BadStreamInfo)?;
-    let mut md5 = [0u8; 16];
-    md5.copy_from_slice(&info[18..34]);
-    // 読み終えた位置から 16 バイト戻ったところが MD5
     let end = r.stream_position()?;
-    Ok((end - 16, md5))
+    Ok((info, end))
 }
 
 fn open_format(file: File, ext: Option<&str>) -> Result<Box<dyn FormatReader>, FingerprintError> {
@@ -100,6 +145,57 @@ fn open_format(file: File, ext: Option<&str>) -> Result<Box<dyn FormatReader>, F
         MetadataOptions::default(),
     )?;
     Ok(reader)
+}
+
+/// 16 bit の可逆ファイルをプロセス内でデコードし、インターリーブ i16 をチャンクごとに `sink` に渡す
+/// （CD の CRC 計算用。P2-9）。bps が 16 でなければ `Unsupported`。返り値はフレーム数
+/// （チャンネルをまたがないサンプル数）。ブロッキングなので `spawn_blocking` で呼ぶ
+pub fn decode_s16(
+    file: File,
+    ext: Option<&str>,
+    mut sink: impl FnMut(&[i16]) -> anyhow::Result<()>,
+) -> Result<u64, FingerprintError> {
+    let mut reader = open_format(file, ext)?;
+    let track = reader
+        .default_track(TrackType::Audio)
+        .ok_or(FingerprintError::NoAudioTrack)?;
+    let track_id = track.id;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .ok_or(FingerprintError::NoAudioTrack)?
+        .clone();
+    let bits = params.bits_per_sample.or_else(|| alac_bit_depth(&params));
+    if bits != Some(16) {
+        return Err(FingerprintError::Unsupported(format!(
+            "16 bit ではない: {}",
+            bits.map(|b| b.to_string()).unwrap_or_else(|| "不明".into())
+        )));
+    }
+    let channels = params.channels.as_ref().map(|c| c.count()).unwrap_or(0) as u64;
+    if channels == 0 {
+        return Err(FingerprintError::Unsupported("チャンネル数が不明".into()));
+    }
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
+        .map_err(|e| FingerprintError::Unsupported(e.to_string()))?;
+    let mut interleaved: Vec<i32> = Vec::new();
+    let mut out: Vec<i16> = Vec::new();
+    let mut frames = 0u64;
+    while let Some(packet) = reader.next_packet()? {
+        if packet.track_id != track_id {
+            continue;
+        }
+        let buf = decoder.decode(&packet)?;
+        // デコーダは 32 bit 左詰めで返すので 16 bit へ戻す
+        buf.copy_to_vec_interleaved(&mut interleaved);
+        out.clear();
+        out.extend(interleaved.iter().map(|&s| (s >> 16) as i16));
+        frames += out.len() as u64 / channels;
+        sink(&out).map_err(FingerprintError::Sink)?;
+    }
+    Ok(frames)
 }
 
 /// ALAC / WAV をデコードし、PCM の MD5 を FLAC の STREAMINFO と同じ流儀で算出する

@@ -17,6 +17,7 @@ pub mod playlists;
 pub mod replaygain;
 pub mod scans;
 pub mod tracks;
+pub mod verify;
 
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};

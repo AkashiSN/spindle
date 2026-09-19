@@ -59,6 +59,10 @@ fb2k_prefix = "\\\\TRUENAS\\music\\"
 user_agent = "spindle/0.1 (contact@example.com)"
 rate_limit_per_sec = 1
 
+[verify]                       # 遡及照合 / リップ検証の照会先。UA は musicbrainz.user_agent を共用
+accuraterip_url = "http://www.accuraterip.com/accuraterip/"
+ctdb_url = "http://db.cuetools.net/lookup2.php"
+
 [ytmusic]
 enabled = true
 rules = "rules/ytmusic.toml"

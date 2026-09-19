@@ -15,12 +15,14 @@ import type { UploadedArtwork } from '../lib/artwork'
 import {
   embedMessage,
   flaccheckStartedMessage,
+  verifyStartedMessage,
   md5FillMessage,
   operationErrorMessage,
   rgStartedMessage,
   rgWrittenMessage,
   type EmbedResponse,
   type FlaccheckStartResponse,
+  type VerifyStartResponse,
   type Md5FillResponse,
   type PathApplyResponse,
   type PathPreview,
@@ -57,6 +59,7 @@ export type Operations = {
   startRg: () => Promise<void>
   writeRg: (skipPending?: boolean) => Promise<void>
   startFlaccheck: () => Promise<void>
+  startVerify: () => Promise<void>
   /** MD5 の補填（md5_missing の FLAC に編集バッチ。409 pending は 2 択） */
   startMd5Fill: (skipPending?: boolean) => Promise<void>
   /** アップロード済みの画像（埋め込み差し替えの元）。無ければ null */
@@ -236,6 +239,26 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     }
   }, [sel, begin, fail])
 
+  const startVerify = useCallback(async () => {
+    if (!sel) {
+      setError('行を選択してください')
+      return
+    }
+    begin('verify')
+    try {
+      const r = await parseErrorBody<VerifyStartResponse>('/api/verify', {
+        method: 'POST',
+        body: JSON.stringify({ selection: sel }),
+      })
+      if (r.ok) setNotice(verifyStartedMessage(r.body))
+      else setError(operationErrorMessage(r.status, r.body))
+    } catch (e) {
+      fail(e)
+    } finally {
+      setBusy(null)
+    }
+  }, [sel, begin, fail])
+
   const startMd5Fill = useCallback(
     async (skipPending = false) => {
       if (!sel) {
@@ -343,6 +366,7 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     startRg,
     writeRg,
     startFlaccheck,
+    startVerify,
     startMd5Fill,
     uploaded,
     uploadArtwork,

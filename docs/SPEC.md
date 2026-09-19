@@ -115,8 +115,7 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 │       ├── cover.jpg
 │       ├── disc.cue                   CD リップ時のみ
 │       ├── disc.toc                   CD リップ時のみ
-│       ├── rip.log                    自前リップ時のみ
-│       └── verify.log                 遡及照合を行った場合
+│       └── rip.log                    自前リップ時のみ
 ├── Derived/                           [dataset] snapshot: なし
 │   └── <Category>/<AlbumArtist>/<Album>/1-01 Title.opus
 ├── Archive/  → /mnt/hdd/media/Archive [dataset, hdd] snapshot: 週次
@@ -132,6 +131,7 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 ├── spindle.db                        SQLite
 ├── backup/                            VACUUM INTO による日次バックアップ
 ├── thumbs/                            ハッシュアドレスのサムネイルキャッシュ
+├── verify/<album_id>.log              遡及照合の verify.log（Library には置かない。D-63）
 ├── tmp/                               リップ・変換の作業領域
 └── config.toml
 ```
@@ -501,23 +501,43 @@ Phase 4  commit:     1 トランザクションで
 CUETools の "verify from files" 相当。
 
 ```
-アルバム全トラックが揃っているか確認
-  → 各トラックのサンプル数から TOC 再構成
+アルバムをディスク（disc_no）ごとに分け、全トラックが揃っているか確認
+  → 各トラックのサンプル数（STREAMINFO）から TOC 再構成
      offset = 150 + Σ(前トラックのセクタ数)
   → AccurateRip DiscID / MusicBrainz DiscID を算出
-  → CRC 計算 → CTDB / AccurateRip 照会
-  → verify.log 出力（rip.log とは別物）
+  → デコードして CRC 表を作る（1 回流すだけで ±2939 サンプルの全オフセットの CRC が出る）
+  → CTDB / AccurateRip 照会 → オフセットを探して照合
+  → verify.log 出力（data/verify/<album_id>.log。rip.log とは別物）
 ```
+
+`verify` ジョブ（album 単位、並列 2。`POST /api/verify { selection }`）。読むだけでファイルは
+書かない。ファイルは root の FD を fstat して DB の行と照合してから読む（D-62）。
 
 適用条件:
 
-- **44.1kHz / 16bit / 2ch のみ。** ハイレゾは対象外
+- **44.1kHz / 16bit / 2ch の FLAC のみ。** それ以外を含むディスクは `unverifiable`
+  （TOC が存在しない音源。品質の劣後ではない）
 - 各トラックのサンプル数が **588 の倍数**（1セクタ）であること。
-  端数があれば CD 由来でないか加工済みと判定してスキップ
-- 一致 → `verified_ctdb` に昇格
-- **不一致は不良を意味しない。** ドライブオフセット差、ギャップ処理差、隠しトラック、
-  データトラックの存在で普通に外れる。`mismatch` は「要確認」として扱い、
-  警告色で表示しない
+  端数があれば CD 由来でないか加工済みと判定して `unverifiable`
+- トラック番号が 1 から連続していること（不完全なディスクは TOC を作れないので何もしない）
+- **オフセットは探す**（D-63）。DB に登録された値は他人のドライブで吸ったもので、読み取り
+  オフセットの補正が違えば同じ盤でも数十サンプルずれる。CUETools と同じ ±(5×588−1) の範囲で
+  「一致したトラック数 → 信頼度の和 → 0 に近い」順に 1 つ選び、`detected_offset` に残す
+  （ディスクで 1 つ。トラックごとに別のオフセットは採らない）。AccurateRip v2 はオフセットに
+  対して線形でないので 0 だけ、それ以外は v1 で比べる
+- CTDB は `fuzzy=1` で別リリースも返るので、音声部分の長さと音声トラック数が同じエントリだけを
+  候補にする。AccurateRip の ID は CUETools / dBpoweramp 式（Enhanced CD でも実リードアウト）
+- トラックごとに: CTDB 一致 → `verified_ctdb`、AccurateRip だけ一致 → `verified_ar`、
+  候補はあるが不一致 → `mismatch`、どちらにも候補なし → 据え置き（`not_attempted`）。
+  結果は `album_verifications`（手法 × ディスク。履歴として積む）と `track_verifications`
+  （自分の CRC と一致の有無）に残す
+- 照会に失敗したらジョブを失敗させて再試行し、何も記録しない（不一致を「照会できなかった」で
+  汚さない）。記録は 1 トランザクション（ディスク × 手法の行、トラックの行、`tracks.verification`）で、
+  照合を始めたときの `audio_version` が 1 本でも進んでいれば何も書かない。verify.log は tmp に書き、
+  トランザクションの中で本来の名前に rename してから commit する。`album_verifications.job_id` で
+  同じジョブの再実行（commit の後に落ちた場合）を見分け、何もしない（履歴もログも初回のまま）
+- **不一致は不良を意味しない。** ギャップ処理差、隠しトラック、データトラックの存在で
+  普通に外れる。`mismatch` は「要確認」として扱い、警告色で表示しない
 
 ### 7.4 ロスレス正規化（WAV / ALAC / AIFF → FLAC）
 
@@ -836,6 +856,10 @@ POST   /api/md5fill                               { selection, description?, ski
                                                   の FLAC に md5 op の編集バッチを記録（§7.9、D-59）
                                                   → 201 { batch_id, affected, skipped, pending_excluded }
                                                   → 409 pending | no_changes | md5_fill_disabled
+POST   /api/verify                                { selection }。selection のトラックが属する album ごとに
+                                                  verify ジョブ（遡及照合）を投入（§7.3、D-13 / D-63。読むだけ）
+                                                  → 202 { albums, duplicates, job_ids }
+                                                  → 409 no_changes
 
 GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
                                                   /api/tracks の行と /api/tracks/:id には artwork_hash（トラック自身の
@@ -1352,6 +1376,10 @@ fb2k_prefix = "\\\\TRUENAS\\music\\"
 user_agent = "spindle/0.1 (contact@example.com)"
 rate_limit_per_sec = 1
 
+[verify]                       # 遡及照合 / リップ検証の照会先。UA は musicbrainz.user_agent を共用
+accuraterip_url = "http://www.accuraterip.com/accuraterip/"
+ctdb_url = "http://db.cuetools.net/lookup2.php"
+
 [ytmusic]
 enabled = true
 rules = "rules/ytmusic.toml"   # 17パターンの外出し
@@ -1519,11 +1547,14 @@ src/
 │   ├── encode.rs        flac（ffmpeg デコード → flac -8）/ opus
 │   └── artwork.rs       同梱 / 埋め込み画像の選択、判別、ハッシュアドレスのキャッシュ（P1-3）
 ├── cd/
+│   ├── mod.rs           TrackLayout（サンプル単位のトラック列）、照会用 HTTP クライアント
 │   ├── device.rs        ioctl / SG_IO / ポーリング
-│   ├── toc.rs           TOC パース、各種 DiscID 算出
+│   ├── toc.rs           TOC の検証、各種 DiscID 算出、サンプル数からの再構成（§7.3）
 │   ├── rip.rs           cd-paranoia、オフセット、分割
-│   ├── accuraterip.rs   ARv1/v2 CRC、オフセット表
-│   └── ctdb.rs          CRC32、照会、修復
+│   ├── accuraterip.rs   ARv1/v2 CRC、DB の照会（dBAR-*.bin）、オフセット表
+│   ├── ctdb.rs          CRC32、照会（lookup2.php）、修復
+│   ├── crctable.rs      1 回流して任意オフセットのトラック CRC を出す表（累積和と CRC32 combine）
+│   └── verify.rs        DB の応答との照合（オフセット探索、トラックごとの一致）
 ├── import/
 │   ├── scanner.rs
 │   └── ytmusic/         parser.rs（ルール TOML）、downloader.rs

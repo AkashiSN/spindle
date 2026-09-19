@@ -24,6 +24,7 @@ pub mod spa;
 mod state;
 pub mod stream;
 pub mod tracks;
+pub mod verify;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
@@ -51,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .route("/rg/write", post(rg::write))
         .route("/flaccheck", post(flaccheck::start))
         .route("/md5fill", post(md5fill::start))
+        .route("/verify", post(verify::start))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route("/albums/{id}", get(albums::get))

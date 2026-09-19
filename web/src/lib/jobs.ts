@@ -5,7 +5,7 @@ import type { Job, JobState } from '../api/types'
 const TYPE_LABEL: Record<string, string> = {
   scan: 'スキャン',
   rip: 'CD リッピング',
-  verify: 'AccurateRip 検証',
+  verify: '遡及照合',
   rg: 'ReplayGain 解析',
   transcode: 'Derived 生成',
   tagwrite: 'タグ書き込み',

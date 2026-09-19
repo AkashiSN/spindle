@@ -11,3 +11,4 @@ pub mod scan;
 pub mod tagwrite;
 pub mod thumbnail;
 pub mod transcode;
+pub mod verify;

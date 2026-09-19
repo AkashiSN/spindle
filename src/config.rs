@@ -49,6 +49,9 @@ pub struct Config {
     pub backup: BackupConfig,
     pub export: ExportConfig,
     pub musicbrainz: MusicBrainzConfig,
+    /// 遡及照合 / リップ検証の照会先（P2-9）。省略時は公式サーバ
+    #[serde(default)]
+    pub verify: VerifyConfig,
     pub ytmusic: YtmusicConfig,
     pub bin: BinConfig,
 }
@@ -206,6 +209,35 @@ pub struct BackupConfig {
 pub struct ExportConfig {
     pub autoexport_debounce_sec: u32,
     pub fb2k_prefix: String,
+}
+
+/// AccurateRip / CTDB の照会先。UA は `[musicbrainz].user_agent` を共用する
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyConfig {
+    /// `dBAR-*.bin` を置いている場所（末尾 `/`）
+    #[serde(default = "default_accuraterip_url")]
+    pub accuraterip_url: String,
+    /// CTDB の `lookup2.php`
+    #[serde(default = "default_ctdb_url")]
+    pub ctdb_url: String,
+}
+
+fn default_accuraterip_url() -> String {
+    "http://www.accuraterip.com/accuraterip/".to_owned()
+}
+
+fn default_ctdb_url() -> String {
+    "http://db.cuetools.net/lookup2.php".to_owned()
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self {
+            accuraterip_url: default_accuraterip_url(),
+            ctdb_url: default_ctdb_url(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

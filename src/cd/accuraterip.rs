@@ -12,7 +12,8 @@
 //!   AccurateRip DB の応答に入っていて、プレス違い（オフセット差）の検出に使う。
 //!   トラックが 451 セクタ未満なら無し
 
-use super::{CrcError, FrameCursor, TrackLayout, SECTOR_SAMPLES};
+use super::toc::AccurateRipId;
+use super::{CrcError, FrameCursor, LookupError, TrackLayout, SECTOR_SAMPLES};
 
 /// 先頭トラックで除外する頭のサンプル数（5 セクタ − 1）
 pub const SKIP_HEAD_SAMPLES: u64 = 5 * SECTOR_SAMPLES - 1;
@@ -124,5 +125,125 @@ impl ArCalculator {
                 crc450: (len >= CRC450_START + SECTOR_SAMPLES).then_some(s.crc450),
             })
             .collect())
+    }
+}
+
+// ---------------------------------------------------------------- DB の照会
+
+/// DB の 1 エントリ（プレスごと）の 1 トラック分
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArTrackEntry {
+    /// このプレスで同じ CRC を提出した人数
+    pub confidence: u8,
+    /// v1 か v2（エントリによって違い、区別されない）
+    pub crc: u32,
+    pub crc450: u32,
+}
+
+/// DB の 1 エントリ。同じ ID の下に複数のプレスが並ぶ
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArDiscEntry {
+    pub id: AccurateRipId,
+    pub tracks: Vec<ArTrackEntry>,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ArParseError {
+    #[error("応答が途中で切れている（{at} バイト目）")]
+    Truncated { at: usize },
+}
+
+/// `dBAR-*.bin` の解釈。エントリの並び: トラック数 u8、id1 / id2 / cddb の u32 LE、
+/// トラックごとに confidence u8、crc u32 LE、crc450 u32 LE
+pub fn parse_response(bytes: &[u8]) -> Result<Vec<ArDiscEntry>, ArParseError> {
+    let mut entries = Vec::new();
+    let mut at = 0usize;
+    let take = |at: &mut usize, n: usize| -> Result<&[u8], ArParseError> {
+        let end = at
+            .checked_add(n)
+            .ok_or(ArParseError::Truncated { at: *at })?;
+        let s = bytes
+            .get(*at..end)
+            .ok_or(ArParseError::Truncated { at: *at })?;
+        *at = end;
+        Ok(s)
+    };
+    let u32le = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    while at < bytes.len() {
+        let n = take(&mut at, 1)?[0];
+        let id1 = u32le(take(&mut at, 4)?);
+        let id2 = u32le(take(&mut at, 4)?);
+        let cddb = u32le(take(&mut at, 4)?);
+        let mut tracks = Vec::with_capacity(usize::from(n));
+        for _ in 0..n {
+            let confidence = take(&mut at, 1)?[0];
+            let crc = u32le(take(&mut at, 4)?);
+            let crc450 = u32le(take(&mut at, 4)?);
+            tracks.push(ArTrackEntry {
+                confidence,
+                crc,
+                crc450,
+            });
+        }
+        entries.push(ArDiscEntry {
+            id: AccurateRipId {
+                id1,
+                id2,
+                cddb,
+                audio_tracks: n,
+            },
+            tracks,
+        });
+    }
+    Ok(entries)
+}
+
+/// DB 上のパス: id1 の下位 4 bit から順に 3 段のディレクトリ + `dBAR-<音声トラック数>-<id1>-<id2>-<cddb>.bin`
+pub fn db_path(id: &AccurateRipId) -> String {
+    format!(
+        "{:x}/{:x}/{:x}/dBAR-{:03}-{:08x}-{:08x}-{:08x}.bin",
+        id.id1 & 0xf,
+        (id.id1 >> 4) & 0xf,
+        (id.id1 >> 8) & 0xf,
+        id.audio_tracks,
+        id.id1,
+        id.id2,
+        id.cddb
+    )
+}
+
+/// AccurateRip DB の照会。`base` は `http://www.accuraterip.com/accuraterip/` のように
+/// `/` で終わる URL（設定で差し替え可）
+#[derive(Debug, Clone)]
+pub struct AccurateRipClient {
+    base: String,
+    http: reqwest::Client,
+}
+
+impl AccurateRipClient {
+    pub fn new(base: impl Into<String>, user_agent: &str) -> Result<Self, LookupError> {
+        let mut base = base.into();
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        Ok(Self {
+            base,
+            http: super::http_client(user_agent)?,
+        })
+    }
+
+    /// ID のエントリを取る。DB に無ければ（404）空
+    pub async fn lookup(&self, id: &AccurateRipId) -> Result<Vec<ArDiscEntry>, LookupError> {
+        let url = format!("{}{}", self.base, db_path(id));
+        let resp = self.http.get(&url).send().await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !status.is_success() {
+            return Err(LookupError::Status(status.as_u16()));
+        }
+        let bytes = resp.bytes().await?;
+        parse_response(&bytes).map_err(|e| LookupError::Parse(e.to_string()))
     }
 }

@@ -786,7 +786,21 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - [ ] **P2-8** エンコードと配置、`rip.log` / `disc.cue` / `disc.toc` の出力。Library に同梱ファイルを
       置き始めるので、一括リネーム後の旧ディレクトリに残る同梱ファイルと空ディレクトリの追随 / 回収
       （D-43 の残課題。rename op はトラックのパスだけを所有する）をここで決めて D-43 に追記する
-- [ ] **P2-9** 遡及照合（44.1/16/2ch かつサンプル数が 588 の倍数のときのみ）
+- [x] **P2-9** 遡及照合（44.1/16/2ch かつサンプル数が 588 の倍数のときのみ）。D-63。
+      `verify` ジョブ（album 単位、並列 2。`src/jobs/handlers/verify.rs`）: ディスクごとに STREAMINFO の
+      サンプル数から TOC を再構成 → デコードして CRC 表（`src/cd/crctable.rs`。1 回流して ±2939 の
+      全オフセットの CRC が出る）→ CTDB / AccurateRip に照会（`CtdbClient` / `AccurateRipClient`。
+      **P2-7 の照会部分はここで実装済み**、残りは修復適用）→ オフセットを探して照合
+      （`src/cd/verify.rs`）→ `album_verifications`（手法 × ディスク。migration 0013 で `disc_no` と、
+      再実行の冪等キー `job_id`）/ `track_verifications` / `tracks.verification` と
+      `data/verify/<album_id>.log`（1 トランザクション。`audio_version` と fstat の再照合が通るときだけ）。
+      `POST /api/verify { selection }` と操作タブの「遡及照合」、設定 `[verify]`（照会先の URL）。
+      受け入れ: `tests/cd_crctable.rs`（ずらした列への直接計算と全オフセットで一致、crc32 combine）、
+      `tests/cd_lookup.rs`（実サーバから保存した bin / XML の解釈、ローカル HTTP でパス・クエリ・
+      UA・404）、`tests/cd_verify.rs`（合成エントリでのオフセット検出、壊れたトラック、候補の絞り込み）、
+      `tests/verify_job.rs`（ffmpeg で作った FLAC で verified / offset / AR のみ / mismatch / not_found /
+      unverifiable / 不完全 / 複数ディスク / 照会失敗 / 再照合の履歴 / 照合中の版更新・差し替え・
+      キャンセル / 原子性 / ログ確定失敗の巻き戻し / commit 後の再実行の冪等性）、`tests/verify_api.rs`
 - [ ] **P2-10** Inbox 取り込み（ステージング → 承認キュー → 配置）
 
 ---

@@ -28,6 +28,7 @@ export type PathApplyResponse = { batch_id: number; affected: number; conflict: 
 
 export type RgStartResponse = { albums: number; tracks: number; duplicates: number; job_ids: number[] }
 export type FlaccheckStartResponse = { tracks: number; skipped: number; duplicates: number; job_ids: number[] }
+export type VerifyStartResponse = { albums: number; duplicates: number; job_ids: number[] }
 export type RgWriteResponse = {
   batch_id: number | null
   affected: number
@@ -58,6 +59,11 @@ export function flaccheckStartedMessage(r: FlaccheckStartResponse): string {
   if (r.skipped > 0) notes.push(`FLAC でない・欠落で対象外 ${formatCount(r.skipped)}`)
   if (r.duplicates > 0) notes.push(`既に投入済み ${formatCount(r.duplicates)}`)
   return `FLAC 検査を投入した: ${formatCount(r.tracks)} 件${notes.length > 0 ? `（${notes.join(' / ')}）` : ''}`
+}
+
+export function verifyStartedMessage(r: VerifyStartResponse): string {
+  const dup = r.duplicates > 0 ? `（既に投入済み ${formatCount(r.duplicates)}）` : ''
+  return `遡及照合を投入した: アルバム ${formatCount(r.albums)}${dup}`
 }
 
 export function rgWrittenMessage(r: RgWriteResponse): string {
