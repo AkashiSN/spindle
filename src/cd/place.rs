@@ -53,6 +53,10 @@ use crate::domain::pathgen::{
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::domain::tags::{read_audio_file, write_flac_tags, TagWriteError, TransferTags};
 use crate::fsroot::{self, FsError, RootDir};
+use crate::import::placement::{
+    find_or_create_album, place_one, register_track, release_key, remove_placed, PlacedFile,
+    PlacementError,
+};
 use crate::import::scanner::track_content;
 use crate::jobs::handlers::rg::new_album_job;
 use crate::jobs::process::{ExternalCommand, PathStyle, ProcessError};
@@ -132,9 +136,20 @@ pub enum PlaceError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
+    Placement(PlacementError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("キャンセルされた")]
     Cancelled,
+}
+
+impl From<PlacementError> for PlaceError {
+    fn from(e: PlacementError) -> Self {
+        match e {
+            PlacementError::Conflict(r) => PlaceError::Conflict(r),
+            other => PlaceError::Placement(other),
+        }
+    }
 }
 
 // ---------------------------------------------------------------- MD5
@@ -387,15 +402,6 @@ fn find_join_album(
     )))
 }
 
-/// 既存 album のリリースキー（`load_occupancy` と同じ規則: mb → disc → album）
-fn release_key(id: i64, mb: Option<&str>, discid: Option<&str>) -> String {
-    match (mb, discid) {
-        (Some(m), _) if !m.is_empty() => format!("mb:{m}"),
-        (_, Some(d)) if !d.is_empty() => format!("disc:{d}"),
-        _ => format!("album:{id}"),
-    }
-}
-
 // ---------------------------------------------------------------- エンコード
 
 fn tmp_path(dir: &Path, ext: &str) -> Result<PathBuf, PlaceError> {
@@ -479,69 +485,12 @@ pub async fn encode_tracks(
 
 // ---------------------------------------------------------------- 配置
 
-/// 配置したファイル 1 本の結果
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlacedFile {
-    New,
-    Reused,
-}
-
-/// tmp の内容を `dir` 内の tmp へ写し、`target` へ `RENAME_NOREPLACE`。既にあれば `verify_existing`
-/// で自分の成果物か判定する
-fn place_one(
-    root: &RootDir,
-    dir: &RelPath,
-    target: &RelPath,
-    mut content: impl Read,
-    verify_existing: impl FnOnce(File) -> Result<bool, PlaceError>,
-) -> Result<PlacedFile, PlaceError> {
-    let (tmp_rel, mut tmp) = root.create_tmp(Some(dir))?;
-    let written = (|| -> Result<(), PlaceError> {
-        std::io::copy(&mut content, &mut tmp)?;
-        tmp.sync_all()?;
-        Ok(())
-    })();
-    if let Err(e) = written {
-        let _ = root.unlink(&tmp_rel);
-        return Err(e);
-    }
-    match root.rename_noreplace(&tmp_rel, target) {
-        Ok(()) => Ok(PlacedFile::New),
-        Err(FsError::Exists) => {
-            let _ = root.unlink(&tmp_rel);
-            let existing = root.open_file(target)?;
-            if verify_existing(existing)? {
-                Ok(PlacedFile::Reused)
-            } else {
-                Err(PlaceError::Conflict(format!(
-                    "{target}: 別の内容のファイルが既にある"
-                )))
-            }
-        }
-        Err(e) => {
-            let _ = root.unlink(&tmp_rel);
-            Err(e.into())
-        }
-    }
-}
-
 /// 配置の結果（登録の材料）
 struct PlacedFiles {
     tracks: Vec<(scans::Physical, scans::TrackContent)>,
     reused_files: usize,
     /// この呼び出しで新しく置いたファイル（登録に失敗したら消す）
     placed_new: Vec<RelPath>,
-}
-
-/// この呼び出しで新しく置いたファイルを消し、ディレクトリが空なら消す（登録に失敗したとき）
-fn remove_placed(root: &RootDir, dir: &RelPath, placed_new: &[RelPath]) {
-    for rel in placed_new {
-        match root.unlink(rel) {
-            Ok(()) | Err(FsError::NotFound) => {}
-            Err(u) => tracing::warn!(path = %rel, error = %u, "配置したファイルを消せない"),
-        }
-    }
-    let _ = root.remove_dir(dir);
 }
 
 struct Companion {
@@ -565,11 +514,18 @@ fn place_files(
         for (i, target) in plan.paths.iter().enumerate() {
             let src = File::open(&encoded[i])?;
             let expected = md5s[i];
-            let outcome = place_one(root, &plan.rel_dir, target, src, move |mut f| {
-                let md5 = flac_streaminfo_md5(&mut f)
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                Ok(md5 == Some(expected))
-            })?;
+            let outcome = place_one(
+                root,
+                &plan.rel_dir,
+                target,
+                src,
+                |_| Ok(()),
+                move |mut f| {
+                    let md5 = flac_streaminfo_md5(&mut f)
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    Ok(md5 == Some(expected))
+                },
+            )?;
             match outcome {
                 PlacedFile::New => placed_new.push(target.clone()),
                 PlacedFile::Reused => reused_files += 1,
@@ -593,6 +549,7 @@ fn place_files(
                 &plan.rel_dir,
                 &target,
                 c.body.as_bytes(),
+                |_| Ok(()),
                 move |mut f| {
                     let mut existing = String::new();
                     f.read_to_string(&mut existing)?;
@@ -729,77 +686,26 @@ fn register(
             }
         }
         None => {
-            // 計画の後に宛先へ別の album が入っていないか（rename は `library` の排他を取らない）。
-            // active な album があればリリースキーが計画と同じときだけ使い、違えば衝突。missing の
-            // album は同じキーなら復活、違えば退かせて新規（rename の coordinator と同じ）
-            struct Existing {
-                id: i64,
-                missing: bool,
-                mb: Option<String>,
-                discid: Option<String>,
-            }
-            let existing: Option<Existing> = tx
-                .query_row(
-                    "SELECT id, missing_since, mb_release_id, discid FROM albums WHERE rel_dir_key = ?1",
-                    [&key],
-                    |r| {
-                        Ok(Existing {
-                            id: r.get(0)?,
-                            missing: r.get::<_, Option<i64>>(1)?.is_some(),
-                            mb: r.get(2)?,
-                            discid: r.get(3)?,
-                        })
-                    },
-                )
-                .optional()?;
-            let insert = |tx: &Connection| -> crate::db::Result<i64> {
-                scans::insert_album(
-                    tx,
-                    plan.rel_dir.as_str(),
-                    &key,
-                    &AlbumMeta {
-                        category_id: plan.category.as_ref().map(|(id, _)| *id),
-                        albumartist: Some(meta.album_artist.trim().to_owned()),
-                        album: Some(meta.album.trim().to_owned()),
-                        date: meta.date.clone(),
-                        original_date: None,
-                        mb_release_id: meta.release_id.clone(),
-                        discid: Some(toc.musicbrainz_disc_id()),
-                        disc_count: Some(i64::from(meta.disc_count)),
-                    },
-                )
+            let meta_row = AlbumMeta {
+                category_id: plan.category.as_ref().map(|(id, _)| *id),
+                albumartist: Some(meta.album_artist.trim().to_owned()),
+                album: Some(meta.album.trim().to_owned()),
+                date: meta.date.clone(),
+                original_date: None,
+                mb_release_id: meta.release_id.clone(),
+                discid: Some(toc.musicbrainz_disc_id()),
+                disc_count: Some(i64::from(meta.disc_count)),
             };
-            match existing {
-                Some(e) => {
-                    let same =
-                        release_key(e.id, e.mb.as_deref(), e.discid.as_deref()) == plan.release;
-                    match (e.missing, same) {
-                        (false, true) => e.id,
-                        (false, false) => {
-                            drop(tx);
-                            return Ok(Err(PlaceError::Conflict(format!(
-                                "{}: 計画の後に別のリリースの album {} が入った",
-                                plan.rel_dir, e.id
-                            ))));
-                        }
-                        (true, true) => {
-                            tx.execute(
-                                "UPDATE albums SET missing_since = NULL WHERE id = ?1",
-                                [e.id],
-                            )?;
-                            e.id
-                        }
-                        (true, false) => {
-                            let displaced = format!("\0displaced:{}", e.id);
-                            tx.execute(
-                                "UPDATE albums SET rel_dir = ?2, rel_dir_key = ?2 WHERE id = ?1",
-                                params![e.id, displaced],
-                            )?;
-                            insert(&tx)?
-                        }
-                    }
+            match find_or_create_album(&tx, &plan.rel_dir, &plan.release, &meta_row) {
+                Ok(Ok(id)) => id,
+                Ok(Err(reason)) => {
+                    drop(tx);
+                    return Ok(Err(PlaceError::Conflict(reason)));
                 }
-                None => insert(&tx)?,
+                Err(e) => {
+                    drop(tx);
+                    return Ok(Err(e.into()));
+                }
             }
         }
     };
@@ -815,40 +721,21 @@ fn register(
     let mut adopted = 0;
     for (i, rel) in plan.paths.iter().enumerate() {
         let (ph, content) = &placed.tracks[i];
-        let rel_key = rel.key();
-        let existing: Option<(i64, Option<Vec<u8>>, i64)> = tx
-            .query_row(
-                "SELECT id, audio_md5, audio_version FROM tracks
-                  WHERE rel_path_key = ?1 AND missing_since IS NULL",
-                [&rel_key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        let id = match existing {
-            Some((id, md5, version)) if md5.as_deref() == Some(md5s[i].as_slice()) => {
-                adopted += 1;
-                expected.push((id, version));
-                id
+        let id = match register_track(&tx, rel, ph, content, Fingerprint::Md5(Some(md5s[i])), now) {
+            Ok(Ok(r)) => {
+                if r.adopted {
+                    adopted += 1;
+                }
+                expected.push((r.id, r.audio_version));
+                r.id
             }
-            Some((id, _, _)) => {
+            Ok(Err(reason)) => {
                 drop(tx);
-                return Ok(Err(PlaceError::Conflict(format!(
-                    "{rel}: 別の音声の行（track {id}）が既にある"
-                ))));
+                return Ok(Err(PlaceError::Conflict(reason)));
             }
-            None => {
-                let id = scans::insert_track(
-                    &tx,
-                    rel.as_str(),
-                    &rel_key,
-                    ph,
-                    content,
-                    Fingerprint::Md5(Some(md5s[i])),
-                    None,
-                    now,
-                )?;
-                expected.push((id, 1));
-                id
+            Err(e) => {
+                drop(tx);
+                return Ok(Err(e.into()));
             }
         };
         scans::set_track_album(&tx, id, album_id, album_name.as_deref())?;

@@ -52,6 +52,9 @@ pub struct Config {
     /// 遡及照合 / リップ検証の照会先（P2-9）。省略時は公式サーバ
     #[serde(default)]
     pub verify: VerifyConfig,
+    /// Inbox の検出（P2-10、D-68）。省略時は 60 秒
+    #[serde(default)]
+    pub inbox: InboxConfig,
     pub ytmusic: YtmusicConfig,
     pub bin: BinConfig,
 }
@@ -181,6 +184,27 @@ pub struct NormalizeConfig {
 #[serde(deny_unknown_fields)]
 pub struct ScanConfig {
     pub deep_interval_days: u32,
+}
+
+/// Inbox のポーリング（inotify はコンテナ越しに不安定なので周期投入。D-68）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboxConfig {
+    /// 検出間隔（秒）。0 で自動なし（UI / API の手動だけ）
+    #[serde(default = "default_inbox_poll")]
+    pub poll_interval_secs: u32,
+}
+
+fn default_inbox_poll() -> u32 {
+    60
+}
+
+impl Default for InboxConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: default_inbox_poll(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

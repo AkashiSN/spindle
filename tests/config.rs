@@ -42,6 +42,18 @@ fn example_config_parses_and_validates() {
     assert_eq!(cfg.auth.session_days, 30);
     assert!(cfg.auth.trusted_cidrs.is_empty());
     assert_eq!(cfg.bin.cdparanoia, "cd-paranoia");
+    assert_eq!(cfg.inbox.poll_interval_secs, 60);
+}
+
+#[test]
+fn inbox_section_is_optional_and_accepts_zero() {
+    let mut root: toml::Table = toml::from_str(EXAMPLE).unwrap();
+    root.remove("inbox");
+    let cfg = Config::parse(&toml::to_string(&root).unwrap()).unwrap();
+    assert_eq!(cfg.inbox.poll_interval_secs, 60);
+    let cfg = Config::parse(&with_override("inbox", "poll_interval_secs = 0")).unwrap();
+    assert_eq!(cfg.inbox.poll_interval_secs, 0);
+    assert!(Config::parse(&with_override("inbox", "interval = 5")).is_err());
 }
 
 #[test]
