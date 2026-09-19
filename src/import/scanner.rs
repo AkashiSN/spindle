@@ -697,6 +697,128 @@ impl Scanner {
     }
 }
 
+/// 1 album のアートワークを**今**解決する（Inbox の配置直後に呼ぶ。P3-4、D-68）。スキャンの Phase 5 と
+/// 同じ規則（同梱カバー画像 → 構成トラックの埋め込み画像）で、同じ DB 反映（`artwork` の upsert、
+/// thumbnail の投入、`set_album_artwork`）をその album だけに行う。始める前に予約
+/// （`artwork_resolved_at = NULL`）するので、途中で失敗しても次のスキャンが拾う。投入した job id を返す
+pub async fn resolve_album_artwork_now(
+    db: &Db,
+    root: &Arc<RootDir>,
+    store: &Arc<ArtworkStore>,
+    album_id: i64,
+) -> Result<Vec<i64>, DbError> {
+    let (rel_dir, tracks) = db
+        .write(move |c| {
+            let tx = c.transaction()?;
+            let rel_dir: Option<String> = tx
+                .query_row(
+                    "SELECT rel_dir FROM albums WHERE id = ?1 AND missing_since IS NULL",
+                    [album_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(rel_dir) = rel_dir else {
+                return Ok(None);
+            };
+            dbart::mark_unresolved(&tx, &[album_id])?;
+            let tracks = dbart::album_track_paths(&tx, album_id)?;
+            tx.commit()?;
+            Ok(Some((rel_dir, tracks)))
+        })
+        .await?
+        .unzip();
+    let Some(rel_dir) = rel_dir else {
+        return Ok(Vec::new());
+    };
+    let tracks = tracks.unwrap_or_default();
+    let root = Arc::clone(root);
+    let store = Arc::clone(store);
+    let resolved = tokio::task::spawn_blocking(move || {
+        let cover = find_cover(&root, &rel_dir);
+        resolve_album_artwork(&root, &store, album_id, cover, &tracks)
+    })
+    .await?;
+    let Some(r) = resolved else {
+        // 決められなかった（読めない・読んでいる間に変わった）。予約のまま残し、次のスキャンで続き
+        return Ok(Vec::new());
+    };
+    db.write(move |c| {
+        let tx = c.transaction()?;
+        let now = now_epoch();
+        let mut job_ids = Vec::new();
+        let artwork_id = match &r.found {
+            Some(f) => {
+                let id = dbart::upsert(
+                    &tx,
+                    &f.hash,
+                    f.info.mime,
+                    Some(f.info.width),
+                    Some(f.info.height),
+                    f.bytes,
+                    f.origin,
+                )?;
+                if f.needs_thumbs {
+                    if let dbjobs::EnqueueResult::Inserted(job_id) =
+                        dbjobs::enqueue(&tx, &new_thumbnail_job(id), now)?
+                    {
+                        job_ids.push(job_id);
+                    }
+                }
+                Some(id)
+            }
+            None => None,
+        };
+        dbart::set_album_artwork(&tx, r.album_id, artwork_id, r.cover.as_ref(), now)?;
+        tx.commit()?;
+        Ok(job_ids)
+    })
+    .await
+}
+
+/// `rel_dir` にある同梱カバー画像のうち最も優先度の高い 1 つ（Phase 1 と同じ規則）
+fn find_cover(root: &RootDir, rel_dir: &str) -> Option<CoverEntry> {
+    let dir = if rel_dir.is_empty() {
+        None
+    } else {
+        Some(RelPath::parse(rel_dir).ok()?)
+    };
+    let mut best: Option<CoverEntry> = None;
+    for e in root.read_dir(dir.as_ref()).ok()? {
+        if e.kind != FileKind::File {
+            continue;
+        }
+        let Some(name) = e.name.to_str() else {
+            continue;
+        };
+        let Some(rank) = cover_rank(name) else {
+            continue;
+        };
+        if best.as_ref().is_some_and(|c| rank >= c.rank) {
+            continue;
+        }
+        let rel = match &dir {
+            Some(d) => d.join(name),
+            None => RelPath::parse(name),
+        };
+        let Ok(rel) = rel else {
+            continue;
+        };
+        if let Ok(st) = root.stat(&rel) {
+            best = Some(CoverEntry {
+                rel,
+                rank,
+                stat: CoverStat {
+                    inode: st.inode as i64,
+                    size: st.size as i64,
+                    mtime_ns: st.mtime_ns,
+                    ctime_ns: st.ctime_ns,
+                },
+            });
+        }
+    }
+    best
+}
+
 /// 解決した画像（キャッシュに置いた後）
 struct FoundArtwork {
     hash: [u8; 32],

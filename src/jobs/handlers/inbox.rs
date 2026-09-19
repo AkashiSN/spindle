@@ -16,6 +16,7 @@ use crate::db::inbox::{self as dbinbox, ItemState};
 use crate::db::jobs as dbjobs;
 use crate::db::now_epoch;
 use crate::import::inbox::{place_item, scan_inbox, InboxError, PlaceItemEnv};
+use crate::import::scanner::resolve_album_artwork_now;
 use crate::jobs::{
     BoxFuture, Handler, HandlerResult, JobContext, JobError, JobType, NewJob, Outcome,
 };
@@ -132,6 +133,25 @@ impl InboxHandler {
                 Ok(p) => {
                     // placed は登録トランザクションの中で確定済み（place_item）
                     tracing::info!(job_id, item_id = id, album_id = p.album_id, "配置済み");
+                    // アートワークは次のスキャンを待たずに決める（失敗しても予約が残り、スキャンが拾う）
+                    if let Some(store) = &self.env.artwork {
+                        match resolve_album_artwork_now(
+                            &self.env.db,
+                            &self.env.library,
+                            store,
+                            p.album_id,
+                        )
+                        .await
+                        {
+                            Ok(jobs) => self.env.jobs.notify_enqueued(&jobs).await,
+                            Err(e) => tracing::warn!(
+                                job_id,
+                                album_id = p.album_id,
+                                error = %e,
+                                "配置した album のアートワークを解決できない（次のスキャンで続き）"
+                            ),
+                        }
+                    }
                 }
                 Err(InboxError::Cancelled) => {
                     ctx.db()

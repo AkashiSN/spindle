@@ -725,6 +725,8 @@ pub struct PlaceItemEnv {
     /// テスト用: Inbox 側を読んだ後・配置の前に呼ぶ（その間に原本が差し替えられた状況を作る）
     #[doc(hidden)]
     pub before_place: Option<crate::cd::place::PlaceHook>,
+    /// 配置直後に album のアートワークを解決するためのキャッシュ（無ければ次のスキャンに任せる。P3-4）
+    pub artwork: Option<Arc<crate::media::artwork::ArtworkStore>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

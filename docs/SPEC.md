@@ -919,7 +919,10 @@ Inbox/ に配置（ポーリング検出）
   配置の後に置かれたファイル）`pending` に戻して件として出し直す。
   Inbox は Library と別データセットなので move は実コピー（§5）
 - **後続**は `rg`（album）と `transcode`。WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら `normalize` の
-  編集バッチを作って投入する（D-46 の予告）。thumbnail は埋め込み画像があればスキャンと同じ経路で出る
+  編集バッチを作って投入する（D-46 の予告）。**アートワークは配置の直後にその album だけ解決する**
+  （`scanner::resolve_album_artwork_now`。同梱カバー画像 → 構成トラックの埋め込み画像というスキャンの
+  Phase 5 と同じ規則・同じ DB 反映で、thumbnail もここで投入。始める前に `artwork_resolved_at = NULL` で
+  予約するので、決められなくても次のスキャンが拾う。P3-4）
 - **既存の album への追記**（D-70）: リリースキーは MUSICBRAINZ_ALBUMID の最頻値があれば `mb:`、自分の成果物の
   album があればそれ、**無ければ宛先ディレクトリに active な album があり、その album にも MB キー / DiscID が
   無ければその album を採用**（`album:<id>`）、それも無ければ件ごとの新規。MB キー同士が違えば従来どおり

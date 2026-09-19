@@ -279,7 +279,7 @@ async fn main() -> anyhow::Result<()> {
                 state.config.encode.derived_bitrate,
                 state.config.paths.data.join(TMP_DIR_NAME),
             ),
-            artwork,
+            Arc::clone(&artwork),
             &state.config.bin.ffmpeg,
             state.config.replaygain.reference_lufs,
         )),
@@ -304,6 +304,7 @@ async fn main() -> anyhow::Result<()> {
             editor: Some(Arc::clone(&editor)),
             wav_to_flac: state.config.normalize.wav_to_flac,
             before_place: None,
+            artwork: Some(Arc::clone(&artwork)),
         })),
     );
     // YouTube のダウンロード（P3-3、D-70）。Inbox に置くところまで。無効なら登録しない（API は 404）

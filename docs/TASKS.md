@@ -907,8 +907,11 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
             `tests/ytmusic_api.rs`、`tests/ytmusic_sidecar.rs`、`tests/inbox_job.rs`（追記・番号の再検証・
             サイドカーの削除）、`tests/inbox_api.rs`（destination / source / 採番 / 400 / merge）、
             `tests/inbox_draft.rs`、`tests/jobs.rs`（Fatal）、`tests/config.rs`（起動時診断）
-- [ ] **P3-4** ytmusic ダウンロード後の Derived 投入（生成本体は P1-10、GC は P1-11）。Opus 原本に Derived は
-      無く（非可逆 → 非可逆禁止）、rg / thumbnail は Inbox の配置の後続で出るため、P3-3 の後に「完了 or 縮小」を判断
+- [x] **P3-4** ~~ytmusic ダウンロード後の Derived 投入~~ → **配置直後のアートワーク解決**に縮小。Opus 原本に
+      Derived は無く（非可逆 → 非可逆禁止）、rg は Inbox の配置で投入済み。残っていた「次のスキャンまで画像が
+      出ない」を、配置の直後にその album だけ解決して thumbnail を投入する形で埋めた
+      （`scanner::resolve_album_artwork_now`、`PlaceItemEnv.artwork`。D-68 追記）。受け入れ:
+      `tests/inbox_job.rs`（埋め込み画像から解決して thumbnail 投入、画像なしは「なし」で解決）
 - [ ] **P3-5** 偽ハイレゾ検出（`rustfft`、任意機能）
 
 ---

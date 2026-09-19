@@ -22,6 +22,7 @@ use spindle::fsroot::RootDir;
 use spindle::import::inbox::{scan_inbox, DraftTrack, InboxDraft, PlaceItemEnv};
 use spindle::jobs::handlers::inbox::{new_inbox_job, InboxHandler};
 use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};
+use spindle::media::artwork::ArtworkStore;
 use spindle::media::encode::FlacEncoder;
 
 struct Lib {
@@ -85,6 +86,7 @@ impl Lib {
             editor: Some(self.editor.clone()),
             wav_to_flac,
             before_place,
+            artwork: Some(Arc::new(ArtworkStore::new(self.dir.path().join("thumbs")))),
         }
     }
 
@@ -1071,4 +1073,97 @@ async fn unedited_multi_valued_artist_is_preserved_on_placement() {
         )
         .unwrap();
     assert!(disp.contains('B'), "{disp}");
+}
+
+// ---------------------------------------------------------------- 配置直後のアートワーク解決（P3-4、D-68）
+
+/// 最小の JPEG（SOF0 1x1 + COM）。内容は `tag` で変える
+fn jpeg(tag: &[u8]) -> Vec<u8> {
+    let mut v = vec![0xFF, 0xD8];
+    v.extend_from_slice(&[
+        0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+    ]);
+    let len = (tag.len() + 2) as u16;
+    v.extend_from_slice(&[0xFF, 0xFE]);
+    v.extend_from_slice(&len.to_be_bytes());
+    v.extend_from_slice(tag);
+    v.extend_from_slice(&[0xFF, 0xD9]);
+    v
+}
+
+fn set_picture(path: &std::path::Path, bytes: Vec<u8>) {
+    use lofty::picture::{MimeType, Picture, PictureType};
+    let pic = Picture::unchecked(bytes)
+        .pic_type(PictureType::CoverFront)
+        .mime_type(MimeType::Jpeg)
+        .build();
+    common::retag(path, |t| {
+        while !t.pictures().is_empty() {
+            t.remove_picture(0);
+        }
+        t.push_picture(pic);
+    });
+}
+
+/// 配置の直後に、その album のアートワークを埋め込み画像から解決して thumbnail を投入する
+/// （次のスキャンを待たない）
+#[tokio::test]
+async fn placement_resolves_album_artwork_and_enqueues_thumbnail() {
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    let pic = jpeg(b"front");
+    set_picture(&p, pic.clone());
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let (artwork_id, resolved_at, sha): (Option<i64>, Option<i64>, Option<Vec<u8>>) = lib
+        .conn()
+        .query_row(
+            "SELECT a.artwork_id, a.artwork_resolved_at, w.sha256
+               FROM albums a LEFT JOIN artwork w ON w.id = a.artwork_id
+              WHERE a.rel_dir = '_Unsorted/Artist/Album'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert!(artwork_id.is_some(), "配置直後にアートワークが決まる");
+    assert!(resolved_at.is_some());
+    assert_eq!(sha, Some(ArtworkStore::hash_of(&pic).to_vec()));
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'thumbnail' AND state = 'queued'"),
+        1
+    );
+    assert!(
+        lib.dir.path().join("thumbs").exists(),
+        "原画像がキャッシュに置かれる"
+    );
+
+    // 画像の無い件は「画像なし」で解決され、thumbnail は投入されない（次のスキャンで読み直さない）
+    lib.add("AlbumB/01.flac", 2, "One", "B", 1);
+    lib.scan(2000).await;
+    let b = lib.item("AlbumB").unwrap();
+    lib.approve(
+        b.id,
+        &draft_for(&[("AlbumB/01.flac", 1, "One")], None, "Album B"),
+    );
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let (artwork_id, resolved_at): (Option<i64>, Option<i64>) = lib
+        .conn()
+        .query_row(
+            "SELECT artwork_id, artwork_resolved_at FROM albums WHERE rel_dir = '_Unsorted/Artist/Album B'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(artwork_id.is_none());
+    assert!(resolved_at.is_some());
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'thumbnail'"),
+        1
+    );
 }
