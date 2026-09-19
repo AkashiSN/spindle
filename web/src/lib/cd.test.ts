@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import {
+  albumTags,
+  applyTracklist,
   candidateLengthMs,
   candidateSummary,
+  draftFromCandidate,
+  emptyDraft,
+  fillEmptyTitles,
+  finalizeDraft,
   initialSelection,
   lookupHeadline,
   normalizeTocInput,
   outcomeAfterTocEdit,
+  trackTags,
+  validateDraft,
+  type DiscDraft,
   type ReleaseCandidate,
 } from './cd'
 
@@ -76,7 +85,7 @@ describe('candidateLengthMs / lookupHeadline', () => {
     expect(candidateLengthMs({ ...base, tracks: [{ ...base.tracks[0]!, length_ms: null }] })).toBeNull()
   })
   it('見出しは exact / fuzzy / 0 件で変える', () => {
-    const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: true, candidates: [base] }
+    const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: true, candidates: [base], tracks: [] }
     expect(lookupHeadline(r)).toBe('DiscID が一致: 1 件')
     expect(lookupHeadline({ ...r, exact: false, candidates: [{ ...base, exact: false }] })).toBe(
       'TOC の近い候補（DiscID は未登録）: 1 件',
@@ -85,12 +94,12 @@ describe('candidateLengthMs / lookupHeadline', () => {
     expect(lookupHeadline({ ...r, exact: false, candidates: [base, { ...base, exact: false }] })).toBe(
       'TOC で照会（DiscID の一致する候補 1 件を含む）: 2 件',
     )
-    expect(lookupHeadline({ ...r, exact: false, candidates: [] })).toBe('MusicBrainz に見つからない（手入力へ。P2-4）')
+    expect(lookupHeadline({ ...r, exact: false, candidates: [] })).toBe('MusicBrainz に見つからない（手入力へ）')
   })
 })
 
 describe('状態遷移', () => {
-  const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: true, candidates: [base] }
+  const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: true, candidates: [base], tracks: [] }
   it('TOC を編集したら結果と選択を捨てる。同じ入力なら保つ', () => {
     const outcome = { result: r, selected: 0, error: null }
     expect(outcomeAfterTocEdit('a', 'b', outcome)).toEqual({ result: null, selected: null, error: null })
@@ -106,5 +115,191 @@ describe('状態遷移', () => {
     expect(initialSelection({ ...r, candidates: [base, base] })).toBeNull()
     expect(initialSelection({ ...r, candidates: [{ ...base, exact: false }] })).toBeNull()
     expect(initialSelection({ ...r, candidates: [{ ...base, exact: false }, base] })).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------- 手入力（P2-4）
+
+const toc = [
+  { number: 1, length_ms: 1000 },
+  { number: 2, length_ms: 2500 },
+  { number: 3, length_ms: 4000 },
+]
+
+describe('draftFromCandidate / emptyDraft', () => {
+  it('行は TOC の音声トラック数。候補のトラックは位置で写し、足りない行は空', () => {
+    const d = draftFromCandidate(base, toc)
+    expect(d.source).toBe('musicbrainz')
+    expect(d.release_id).toBe('r')
+    expect(d.album).toBe('T')
+    expect(d.album_artist).toBe('A')
+    expect(d.date).toBe('1991-09-24')
+    expect(d.label).toBe('DGC Records')
+    expect(d.catalog_number).toBe('DGCD-24425')
+    expect(d.barcode).toBe('720642442524')
+    expect(d.disc_no).toBe(1)
+    expect(d.disc_count).toBe(1)
+    expect(d.tracks.map((t) => [t.number, t.title, t.artist, t.length_ms])).toEqual([
+      [1, 'a', 'A', 1000],
+      [2, 'b', 'A', 2500],
+      [3, '', '', 4000],
+    ])
+    expect(d.tracks[0]!.mb).toEqual({ recording_id: 'x', track_id: 'y', isrcs: [] })
+    expect(d.tracks[2]!.mb).toBeNull()
+  })
+  it('候補が TOC より多いトラックを持っていても TOC の行数に切る（警告は validate で出す）', () => {
+    const d = draftFromCandidate(base, [toc[0]!])
+    expect(d.tracks).toHaveLength(1)
+  })
+  it('空のフォーム: 手入力、アルバム欄は空、行は TOC から', () => {
+    const d = emptyDraft(toc)
+    expect(d.source).toBe('manual')
+    expect(d.release_id).toBeNull()
+    expect(d.album).toBe('')
+    expect(d.disc_no).toBe(1)
+    expect(d.disc_count).toBe(1)
+    expect(d.tracks.map((t) => [t.number, t.title, t.artist, t.length_ms, t.mb])).toEqual([
+      [1, '', '', 1000, null],
+      [2, '', '', 2500, null],
+      [3, '', '', 4000, null],
+    ])
+  })
+})
+
+describe('applyTracklist', () => {
+  it('番号で行に写す。アーティストが無い行は既存を保つ', () => {
+    const d: DiscDraft = { ...emptyDraft(toc), album_artist: 'AA' }
+    d.tracks[1]!.artist = 'keep'
+    const r = applyTracklist(d, [
+      { no: 1, title: 'one', artist: 'X' },
+      { no: 2, title: 'two', artist: null },
+    ])
+    expect(r.draft.tracks.map((t) => [t.title, t.artist])).toEqual([
+      ['one', 'X'],
+      ['two', 'keep'],
+      ['', ''],
+    ])
+    expect(r.draft.album_artist).toBe('AA')
+    expect(r.warnings).toEqual(['貼り付けの行数 2 が TOC の 3 と違う', '未設定の行: 3'])
+    // 元は変えない
+    expect(d.tracks[0]!.title).toBe('')
+  })
+  it('TOC に無い番号は捨てて警告', () => {
+    const r = applyTracklist(emptyDraft(toc), [
+      { no: 1, title: 'one', artist: null },
+      { no: 2, title: 'two', artist: null },
+      { no: 3, title: 'three', artist: null },
+      { no: 4, title: 'four', artist: null },
+    ])
+    expect(r.draft.tracks.map((t) => t.title)).toEqual(['one', 'two', 'three'])
+    expect(r.warnings).toEqual(['貼り付けの行数 4 が TOC の 3 と違う', 'TOC に無い番号: 4'])
+  })
+  it('全部そろえば警告なし', () => {
+    const r = applyTracklist(emptyDraft(toc), [
+      { no: 1, title: 'one', artist: null },
+      { no: 2, title: 'two', artist: null },
+      { no: 3, title: 'three', artist: null },
+    ])
+    expect(r.warnings).toEqual([])
+  })
+})
+
+describe('validateDraft / fillEmptyTitles / finalizeDraft', () => {
+  it('アルバム名・アルバムアーティスト・各トラック名が要る。日付は YYYY[-MM[-DD]]', () => {
+    const d = emptyDraft(toc)
+    expect(validateDraft(d)).toEqual(['アルバム名が空', 'アルバムアーティストが空', 'タイトルが空: 1, 2, 3'])
+    const ok: DiscDraft = {
+      ...d,
+      album: 'X',
+      album_artist: 'Y',
+      tracks: d.tracks.map((t) => ({ ...t, title: 't' })),
+    }
+    expect(validateDraft(ok)).toEqual([])
+    expect(validateDraft({ ...ok, date: '2024' })).toEqual([])
+    expect(validateDraft({ ...ok, date: '2024-03' })).toEqual([])
+    expect(validateDraft({ ...ok, date: '2024-03-09' })).toEqual([])
+    expect(validateDraft({ ...ok, date: '2024/03/09' })).toEqual(['日付は YYYY / YYYY-MM / YYYY-MM-DD'])
+    expect(validateDraft({ ...ok, album: '  ' })).toEqual(['アルバム名が空'])
+    expect(validateDraft({ ...ok, disc_no: 3, disc_count: 2 })).toEqual(['ディスク番号 3 が枚数 2 を超える'])
+  })
+  it('空のタイトルを Track NN で埋める（入力済みは触らない）', () => {
+    const d = emptyDraft(toc)
+    d.tracks[1]!.title = 'two'
+    expect(fillEmptyTitles(d).tracks.map((t) => t.title)).toEqual(['Track 01', 'two', 'Track 03'])
+  })
+  it('確定: 前後の空白を落とし、トラックのアーティストが空ならアルバムアーティスト', () => {
+    const d: DiscDraft = {
+      ...emptyDraft(toc),
+      album: ' X ',
+      album_artist: ' Y ',
+      date: '',
+      label: ' L ',
+      tracks: emptyDraft(toc).tracks.map((t, i) => ({ ...t, title: ` t${i} `, artist: i === 0 ? ' Z ' : '' })),
+    }
+    const m = finalizeDraft(d)
+    expect(m.album).toBe('X')
+    expect(m.album_artist).toBe('Y')
+    expect(m.date).toBeNull()
+    expect(m.label).toBe('L')
+    expect(m.catalog_number).toBeNull()
+    expect(m.tracks.map((t) => [t.number, t.title, t.artist])).toEqual([
+      [1, 't0', 'Z'],
+      [2, 't1', 'Y'],
+      [3, 't2', 'Y'],
+    ])
+    expect(m.source).toBe('manual')
+    expect(m.release_id).toBeNull()
+  })
+  it('候補からの確定は MusicBrainz の ID を持ち越す', () => {
+    const m = finalizeDraft(draftFromCandidate({ ...base, tracks: base.tracks.slice(0, 1) }, [toc[0]!]))
+    expect(m.source).toBe('musicbrainz')
+    expect(m.release_id).toBe('r')
+    expect(m.tracks[0]!.mb).toEqual({ recording_id: 'x', track_id: 'y', isrcs: [] })
+  })
+})
+
+describe('albumTags / trackTags', () => {
+  it('MusicBrainz の id の写像: recording → MUSICBRAINZ_TRACKID、track → MUSICBRAINZ_RELEASETRACKID', () => {
+    const m = finalizeDraft(
+      draftFromCandidate({ ...base, tracks: [{ ...base.tracks[0]!, isrcs: ['USGF19942501', 'JPX'] }] }, [toc[0]!]),
+    )
+    // ISRC は多値のまま（Vorbis コメントは同じキーを反復する。`;` で繋がない）
+    expect(trackTags(m.tracks[0]!)).toEqual([
+      ['TRACKNUMBER', ['1']],
+      ['TITLE', ['a']],
+      ['ARTIST', ['A']],
+      ['MUSICBRAINZ_TRACKID', ['x']],
+      ['MUSICBRAINZ_RELEASETRACKID', ['y']],
+      ['ISRC', ['USGF19942501', 'JPX']],
+    ])
+    expect(albumTags(m)).toEqual([
+      ['ALBUM', ['T']],
+      ['ALBUMARTIST', ['A']],
+      ['DATE', ['1991-09-24']],
+      ['LABEL', ['DGC Records']],
+      ['CATALOGNUMBER', ['DGCD-24425']],
+      ['BARCODE', ['720642442524']],
+      ['DISCNUMBER', ['1']],
+      ['DISCTOTAL', ['1']],
+      ['MUSICBRAINZ_ALBUMID', ['r']],
+    ])
+  })
+  it('手入力なら MusicBrainz の行は出ない。ISRC が空なら行ごと出ない', () => {
+    const d = { ...emptyDraft([toc[0]!]), album: 'X', album_artist: 'Y' }
+    d.tracks[0]!.title = 't'
+    const m = finalizeDraft(d)
+    expect(albumTags(m).map(([k]) => k)).toEqual(['ALBUM', 'ALBUMARTIST', 'DISCNUMBER', 'DISCTOTAL'])
+    expect(trackTags(m.tracks[0]!)).toEqual([
+      ['TRACKNUMBER', ['1']],
+      ['TITLE', ['t']],
+      ['ARTIST', ['Y']],
+    ])
+    expect(trackTags({ ...m.tracks[0]!, mb: { recording_id: 'x', track_id: 'y', isrcs: [] } }).map(([k]) => k)).toEqual([
+      'TRACKNUMBER',
+      'TITLE',
+      'ARTIST',
+      'MUSICBRAINZ_TRACKID',
+      'MUSICBRAINZ_RELEASETRACKID',
+    ])
   })
 })

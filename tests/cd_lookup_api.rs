@@ -136,6 +136,13 @@ async fn lookup_returns_discid_and_candidates() {
         "1 12 192030 150 22743 41850 58283 72070 91348 104618 115338 132138 143908 159828 174565"
     );
     assert_eq!(body["accuraterip_id"], "0013f127-00b61059-a109fe0c");
+    // 手入力フォーム（P2-4）の行数と長さの元: TOC から出した音声トラック（75 セクタ = 1 秒）
+    let tracks = body["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 12);
+    assert_eq!(tracks[0]["number"], 1);
+    assert_eq!(tracks[0]["length_ms"], 22593 * 1000 / 75);
+    assert_eq!(tracks[11]["number"], 12);
+    assert_eq!(tracks[11]["length_ms"], (191880 - 174415) * 1000 / 75);
     let cands = body["candidates"].as_array().unwrap();
     assert_eq!(cands.len(), 2);
     assert_eq!(cands[0]["title"], "Nevermind");
@@ -169,6 +176,8 @@ async fn unknown_disc_yields_no_candidates() {
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["exact"], false);
     assert_eq!(body["candidates"].as_array().unwrap().len(), 0);
+    // 候補が無くても手入力へ進めるようにトラックは返す
+    assert_eq!(body["tracks"].as_array().unwrap().len(), 3);
 }
 
 #[tokio::test]

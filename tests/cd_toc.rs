@@ -205,6 +205,21 @@ fn track_layout_covers_audio_tracks_only() {
     assert_eq!(lay.lengths()[11], (191880 - 174415) * 588);
 }
 
+/// 手入力フォーム（P2-4）向け: 音声トラックの番号とセクタ長。Enhanced CD の末尾はセッション間隙を
+/// 引いた長さ、Mixed Mode の先頭データトラックは番号を飛ばす
+#[test]
+fn audio_track_sectors_lists_number_and_length() {
+    let t = hybrid_theory().audio_track_sectors();
+    assert_eq!(t.len(), 14);
+    assert_eq!(t[0], (1, 13915));
+    assert_eq!(t[13], (14, 218477 - 11400 - 190165));
+    let t = nevermind().audio_track_sectors();
+    assert_eq!(t[11], (12, 191880 - 174415));
+    // Mixed Mode: 先頭がデータ
+    let toc = Toc::new(vec![data(1, 0), audio(2, 20000), audio(3, 30000)], 45000).expect("TOC");
+    assert_eq!(toc.audio_track_sectors(), vec![(2, 10000), (3, 15000)]);
+}
+
 /// §7.3: サンプル数から TOC を再構成。先頭は LBA 0、以降は前トラックのセクタ数の累積
 #[test]
 fn toc_is_reconstructed_from_audio_sample_counts() {

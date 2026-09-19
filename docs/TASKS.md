@@ -779,7 +779,20 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       tests/fixtures/mb/ の解釈: exact / Enhanced CD / fuzzy / 0 件 / joinphrase / フォールバック、ローカル HTTP で
       DiscID → toc の順・UA・inc・503 の再試行・間隔）、`tests/cd_lookup_api.rs`、`tests/cd_toc.rs`（文字列の往復）、
       `web/src/lib/cd.test.ts`。残り: 検出（P2-1）で入力源を差し替える
-- [ ] **P2-4** **照会ゼロ件でも完走できる手入力経路**とトラックリスト貼り付け
+- [x] **P2-4** **照会ゼロ件でも完走できる手入力経路**とトラックリスト貼り付け。D-65。候補も手入力も
+      同じフォーム（`DiscDraft`。`lib/cd.ts` の `draftFromCandidate` / `emptyDraft`）に写して直し、確定で
+      `DiscMetadata`（`validateDraft` / `finalizeDraft`。P2-5 / P2-8 の入力）。行は TOC の音声トラックと 1:1
+      （`POST /api/cd/lookup` の応答に `tracks: [{ number, length_ms }]`。`Toc::audio_track_sectors`）。
+      貼り付けの行解析は `web/src/lib/tracklist.ts`（番号・時間・アーティストの区切り・表・見出し）で、
+      番号で行に写す（`applyTracklist`。行数の違い・TOC に無い番号・未設定の行を警告）。UI は `CdView` の
+      フォーム（候補ゼロ件なら空のフォームに直行、「候補を使わず手入力」、「空のタイトルを Track NN で埋める」、
+      確定後はタグ名で表示。遷移は `lib/cdState.ts` の reducer）。受け入れ: `web/src/lib/tracklist.test.ts`
+      （番号の形 10 種と全角、年 / 100 以上は番号にしない、番号の重複・飛びの警告、見出し、時間の形と全角、
+      区切りの優先と端・ぶら下がり、artistFirst、タブ区切り）、`web/src/lib/cd.test.ts`（候補の写し・空フォーム・
+      貼り付けの適用と警告・検証・埋め・確定・タグ名の写像）、`web/src/lib/cdState.test.ts`（照会 → 選択 / 手入力 →
+      編集・貼り付け → 確定 → TOC 編集 / reset で下の段が消える）、
+      `tests/cd_toc.rs` / `tests/cd_lookup_api.rs`（`tracks`）。残り: 検出（P2-1）で TOC の入力源を差し替え、
+      吸い出し（P2-5）で `DiscMetadata` を受ける
 - [ ] **P2-5** 吸い出し（全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割）
 - [x] **P2-6** ARv1/v2 CRC と CTDB CRC32（先頭・末尾トラックの除外規則に注意）。`src/cd/`
       （`TrackLayout` にサンプルを順に流すストリーミング計算。吸い出し PCM と既存 FLAC のデコード結果の

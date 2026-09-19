@@ -1,13 +1,14 @@
-// CD 画面（SPEC §12.6 のウィザード。P2-3 は「候補選択」まで）。
-// 検出（P2-1）が入るまでは TOC を貼り付けて照会する。候補を選ぶとトラック対応を確認できる。
-// 吸い出し（P2-5）と手入力（P2-4）は後続
+// CD 画面（SPEC §12.6 のウィザード。P2-3 の「候補選択」と P2-4 の「手入力 / トラックリスト貼り付け」まで）。
+// 検出（P2-1）が入るまでは TOC を貼り付けて照会する。候補を選ぶとフォームに写り、そこから直せる。
+// 候補ゼロ件でも空のフォームで完走できる（D-21）。吸い出し（P2-5）は後続
 
+import { Fragment } from 'react'
 import type { CdLookupState } from '../hooks/useCdLookup'
-import { candidateLengthMs, candidateSummary, lookupHeadline } from '../lib/cd'
+import { albumTags, candidateLengthMs, candidateSummary, lookupHeadline, trackTags, type DiscMetadata } from '../lib/cd'
 import { formatDuration } from '../lib/format'
 
 export function CdView({ cd }: { cd: CdLookupState }) {
-  const { result, chosen } = cd
+  const { result, draft, confirmed } = cd
   return (
     <section className="cd">
       <div className="table-toolbar">
@@ -60,6 +61,8 @@ export function CdView({ cd }: { cd: CdLookupState }) {
             <dd>
               <code>{result.ctdb_toc_id}</code>
             </dd>
+            <dt>音声トラック</dt>
+            <dd>{result.tracks.length} 曲</dd>
           </dl>
           {result.candidates.length > 0 && (
             <ul className="cd-candidates">
@@ -70,6 +73,7 @@ export function CdView({ cd }: { cd: CdLookupState }) {
                       type="radio"
                       name="cd-candidate"
                       checked={cd.selected === i}
+                      disabled={confirmed != null}
                       onChange={() => cd.select(i)}
                     />{' '}
                     <strong>{c.artist}</strong> — {c.title}
@@ -83,48 +87,211 @@ export function CdView({ cd }: { cd: CdLookupState }) {
               ))}
             </ul>
           )}
+          {confirmed == null && (
+            <div className="op-row">
+              <button type="button" disabled={draft?.source === 'manual'} onClick={cd.startManual}>
+                {result.candidates.length > 0 ? '候補を使わず手入力' : '手入力'}
+              </button>
+              {result.candidates.length > 0 && (
+                <span className="muted small">候補を選ぶとフォームに写る（編集中の内容は写し直しで消える）</span>
+              )}
+            </div>
+          )}
         </>
       )}
 
-      {chosen != null && (
-        <>
-          <h2>
-            選択中: {chosen.artist} — {chosen.title}
-          </h2>
-          <table className="cd-tracks">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>タイトル</th>
-                <th>アーティスト</th>
-                <th>長さ</th>
-                <th>ISRC</th>
-              </tr>
-            </thead>
-            <tbody>
-              {chosen.tracks.map((t) => (
-                <tr key={t.track_id}>
-                  <td>{t.number}</td>
-                  <td>{t.title}</td>
-                  <td>{t.artist}</td>
-                  <td>{formatDuration(t.length_ms)}</td>
-                  <td className="muted small">{t.isrcs.join(', ')}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="muted small">
-            Release <code>{chosen.release_id}</code>
-            {chosen.release_group_id ? (
-              <>
-                {' '}
-                / Release group <code>{chosen.release_group_id}</code>
-              </>
-            ) : null}
-            。吸い出しと配置は P2-5 / P2-8
-          </p>
-        </>
-      )}
+      {draft != null && confirmed == null && <DraftForm cd={cd} />}
+      {confirmed != null && <Confirmed meta={confirmed} onEdit={cd.unconfirm} />}
     </section>
+  )
+}
+
+function DraftForm({ cd }: { cd: CdLookupState }) {
+  const d = cd.draft!
+  const text = (label: string, key: 'album' | 'album_artist' | 'date' | 'label' | 'catalog_number' | 'barcode', hint?: string) => (
+    <label className="cd-field">
+      <span>{label}</span>
+      <input type="text" value={d[key]} placeholder={hint} onChange={(e) => cd.updateDraft({ [key]: e.target.value })} />
+    </label>
+  )
+  const num = (label: string, key: 'disc_no' | 'disc_count') => (
+    <label className="cd-field cd-field-num">
+      <span>{label}</span>
+      <input
+        type="number"
+        min={1}
+        max={99}
+        value={d[key]}
+        onChange={(e) => {
+          const v = Number.parseInt(e.target.value, 10)
+          if (Number.isFinite(v) && v >= 1) cd.updateDraft({ [key]: v })
+        }}
+      />
+    </label>
+  )
+  return (
+    <>
+      <h2>
+        メタデータ{' '}
+        {d.source === 'musicbrainz' ? (
+          <span className="badge">MusicBrainz の候補を土台に編集</span>
+        ) : (
+          <span className="badge muted">手入力</span>
+        )}
+      </h2>
+      <div className="cd-form">
+        {text('アルバム', 'album')}
+        {text('アルバムアーティスト', 'album_artist')}
+        {text('日付', 'date', 'YYYY-MM-DD')}
+        {text('レーベル', 'label')}
+        {text('カタログ番号', 'catalog_number')}
+        {text('JAN/UPC', 'barcode')}
+        {num('ディスク', 'disc_no')}
+        {num('枚数', 'disc_count')}
+      </div>
+
+      <h2>トラックリスト貼り付け</h2>
+      <p className="muted small">
+        通販ページ等のテキストを 1 行 1 曲で貼る。行頭の番号（<code>1.</code> <code>01</code> <code>M-1</code>）と行末の時間は
+        外し、<code>タイトル / アーティスト</code>（<code>／</code> <code>|</code> <code>-</code> も）で分ける。表（タブ区切り）も可。
+        番号で行に写すので、番号が無ければ上から順
+      </p>
+      <div className="op-row">
+        <textarea
+          aria-label="トラックリスト"
+          rows={6}
+          value={cd.paste}
+          placeholder={'1. タイトル / アーティスト 4:32\n2. …'}
+          onChange={(e) => cd.setPaste(e.target.value)}
+        />
+      </div>
+      <div className="op-row">
+        <button type="button" disabled={cd.paste.trim() === ''} onClick={cd.applyPaste}>
+          行に写す
+        </button>
+        <label className="small">
+          <input
+            type="checkbox"
+            checked={cd.pasteArtistFirst}
+            onChange={(e) => cd.setPasteArtistFirst(e.target.checked)}
+          />{' '}
+          アーティスト / タイトル の順で書かれている
+        </label>
+      </div>
+      {cd.pasteWarnings.length > 0 && (
+        <ul className="cd-warnings small">
+          {cd.pasteWarnings.map((w) => (
+            <li key={w}>{w}</li>
+          ))}
+        </ul>
+      )}
+
+      <h2>トラック（番号と長さは TOC から）</h2>
+      <table className="cd-tracks cd-tracks-edit">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>タイトル</th>
+            <th>アーティスト（空ならアルバムアーティスト）</th>
+            <th>長さ</th>
+            <th>ISRC</th>
+          </tr>
+        </thead>
+        <tbody>
+          {d.tracks.map((t, i) => (
+            <tr key={t.number}>
+              <td>{t.number}</td>
+              <td>
+                <input
+                  type="text"
+                  aria-label={`トラック ${t.number} のタイトル`}
+                  value={t.title}
+                  onChange={(e) => cd.updateTrack(i, { title: e.target.value })}
+                />
+              </td>
+              <td>
+                <input
+                  type="text"
+                  aria-label={`トラック ${t.number} のアーティスト`}
+                  value={t.artist}
+                  placeholder={d.album_artist}
+                  onChange={(e) => cd.updateTrack(i, { artist: e.target.value })}
+                />
+              </td>
+              <td>{formatDuration(t.length_ms)}</td>
+              <td className="muted small">{t.mb?.isrcs.join(', ') ?? ''}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="op-row">
+        <button type="button" className="primary" onClick={cd.confirm}>
+          この内容で確定
+        </button>
+        <button type="button" onClick={cd.fillTitles}>
+          空のタイトルを Track NN で埋める
+        </button>
+      </div>
+      {cd.draftErrors.length > 0 && (
+        <ul className="cd-errors small">
+          {cd.draftErrors.map((e) => (
+            <li key={e} className="error">
+              {e}
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  )
+}
+
+function Confirmed({ meta, onEdit }: { meta: DiscMetadata; onEdit: () => void }) {
+  return (
+    <>
+      <h2>
+        確定: {meta.album_artist} — {meta.album}{' '}
+        {meta.source === 'musicbrainz' ? <span className="badge">MusicBrainz</span> : <span className="badge muted">手入力</span>}
+      </h2>
+      <dl className="cd-ids small">
+        {albumTags(meta).map(([k, values]) => (
+          <Fragment key={k}>
+            <dt>{k}</dt>
+            <dd>{values.join(' / ')}</dd>
+          </Fragment>
+        ))}
+      </dl>
+      <table className="cd-tracks">
+        <thead>
+          <tr>
+            <th>TRACKNUMBER</th>
+            <th>TITLE</th>
+            <th>ARTIST</th>
+            <th>MUSICBRAINZ_TRACKID / RELEASETRACKID / ISRC</th>
+          </tr>
+        </thead>
+        <tbody>
+          {meta.tracks.map((t) => {
+            // 表示だけ（書き込みの写像は trackTags そのもの。多値の ISRC は列内で , 区切り）
+            const tags = trackTags(t).filter(([k]) => k.startsWith('MUSICBRAINZ_') || k === 'ISRC')
+            return (
+              <tr key={t.number}>
+                <td>{t.number}</td>
+                <td>{t.title}</td>
+                <td>{t.artist}</td>
+                <td className="muted small">{tags.map(([, values]) => values.join(', ')).join(' / ')}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      <div className="op-row">
+        <button type="button" onClick={onEdit}>
+          編集に戻る
+        </button>
+        <span className="muted small">
+          吸い出しと配置は P2-5 / P2-8。この内容がそのままタグになる（TRACKTOTAL と MUSICBRAINZ_DISCID は TOC から）
+        </span>
+      </div>
+    </>
   )
 }

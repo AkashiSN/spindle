@@ -1491,3 +1491,39 @@ table.cd-tracks td {
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
+table.cd-tracks-edit input[type='text'] {
+  width: 100%;
+  box-sizing: border-box;
+}
+table.cd-tracks-edit td:nth-child(2),
+table.cd-tracks-edit td:nth-child(3) {
+  width: 40%;
+}
+.cd-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px 12px;
+  max-width: 960px;
+}
+.cd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.cd-field input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.cd-field-num {
+  max-width: 90px;
+}
+.cd-warnings,
+.cd-errors {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.cd-warnings li {
+  color: var(--muted);
+}

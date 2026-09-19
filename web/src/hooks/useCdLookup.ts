@@ -1,28 +1,28 @@
-// CD 画面（SPEC §12.6、P2-3）の状態: TOC の入力 → MusicBrainz 照会 → 候補の選択。
-// TOC の取得元はドライブ（P2-1 の GET /api/cd/status）に差し替える前提で、今は貼り付け
+// CD 画面（SPEC §12.6、P2-3 / P2-4）の状態: 遷移は lib/cdState.ts の reducer（vitest で固定）。
+// ここは非同期の照会（POST /api/cd/lookup）と dispatch の束ね。TOC の取得元はドライブ（P2-1 の
+// GET /api/cd/status）に差し替える前提で、今は貼り付け。確定したメタデータは吸い出し（P2-5）に渡す
 
-import { useCallback, useState } from 'react'
+import { useCallback, useReducer } from 'react'
 import { ApiError, apiPost } from '../api/client'
-import {
-  initialSelection,
-  normalizeTocInput,
-  outcomeAfterTocEdit,
-  type LookupResponse,
-  type ReleaseCandidate,
-} from '../lib/cd'
+import { normalizeTocInput, type DiscDraft, type DiscTrackDraft, type LookupResponse, type ReleaseCandidate } from '../lib/cd'
+import { cdReducer, initialCdState, type CdState } from '../lib/cdState'
 
-export type CdLookupState = {
-  toc: string
+export type CdLookupState = CdState & {
   setToc: (v: string) => void
-  busy: boolean
-  error: string | null
-  result: LookupResponse | null
-  /** 選んだ候補（result.candidates の添字） */
-  selected: number | null
-  select: (i: number | null) => void
+  select: (i: number) => void
   chosen: ReleaseCandidate | null
   lookup: () => Promise<void>
   reset: () => void
+  startManual: () => void
+  updateDraft: (patch: Partial<DiscDraft>) => void
+  updateTrack: (index: number, patch: Partial<DiscTrackDraft>) => void
+  fillTitles: () => void
+  setPaste: (v: string) => void
+  setPasteArtistFirst: (v: boolean) => void
+  applyPaste: () => void
+  confirm: () => void
+  /** 確定を取り消してフォームに戻る */
+  unconfirm: () => void
 }
 
 function describe(e: unknown): string {
@@ -37,54 +37,42 @@ function describe(e: unknown): string {
 }
 
 export function useCdLookup(): CdLookupState {
-  const [toc, setTocRaw] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [result, setResult] = useState<LookupResponse | null>(null)
-  const [selected, setSelected] = useState<number | null>(null)
+  const [s, dispatch] = useReducer(cdReducer, initialCdState)
 
   const lookup = useCallback(async () => {
-    const normalized = normalizeTocInput(toc)
+    const normalized = normalizeTocInput(s.toc)
     if (normalized === '') {
-      setError('TOC を貼り付けてください')
+      dispatch({ type: 'lookup_error', error: 'TOC を貼り付けてください' })
       return
     }
-    setBusy(true)
-    setError(null)
-    setResult(null)
-    setSelected(null)
+    dispatch({ type: 'lookup_start' })
     try {
       const r = await apiPost<LookupResponse>('/api/cd/lookup', { toc: normalized })
-      setResult(r)
-      setSelected(initialSelection(r))
+      dispatch({ type: 'lookup_ok', result: r })
     } catch (e) {
-      setError(describe(e))
-    } finally {
-      setBusy(false)
+      dispatch({ type: 'lookup_error', error: describe(e) })
     }
-  }, [toc])
+  }, [s.toc])
 
-  // TOC を編集したら古い候補を残さない（新しい入力の下に前の結果が見えるのを防ぐ）
-  const setToc = useCallback(
-    (v: string) => {
-      const prev = { result, selected, error }
-      const next = outcomeAfterTocEdit(toc, v, prev)
-      setTocRaw(v)
-      if (next !== prev) {
-        setResult(next.result)
-        setSelected(next.selected)
-        setError(next.error)
-      }
-    },
-    [toc, result, selected, error],
-  )
-
-  const reset = useCallback(() => {
-    setResult(null)
-    setSelected(null)
-    setError(null)
-  }, [])
-
-  const chosen = result != null && selected != null ? (result.candidates[selected] ?? null) : null
-  return { toc, setToc, busy, error, result, selected, select: setSelected, chosen, lookup, reset }
+  const chosen = s.result != null && s.selected != null ? (s.result.candidates[s.selected] ?? null) : null
+  return {
+    ...s,
+    chosen,
+    lookup,
+    setToc: useCallback((toc: string) => dispatch({ type: 'set_toc', toc }), []),
+    select: useCallback((index: number) => dispatch({ type: 'select', index }), []),
+    reset: useCallback(() => dispatch({ type: 'reset' }), []),
+    startManual: useCallback(() => dispatch({ type: 'start_manual' }), []),
+    updateDraft: useCallback((patch: Partial<DiscDraft>) => dispatch({ type: 'update_draft', patch }), []),
+    updateTrack: useCallback(
+      (index: number, patch: Partial<DiscTrackDraft>) => dispatch({ type: 'update_track', index, patch }),
+      [],
+    ),
+    fillTitles: useCallback(() => dispatch({ type: 'fill_titles' }), []),
+    setPaste: useCallback((text: string) => dispatch({ type: 'set_paste', text }), []),
+    setPasteArtistFirst: useCallback((value: boolean) => dispatch({ type: 'set_paste_artist_first', value }), []),
+    applyPaste: useCallback(() => dispatch({ type: 'apply_paste' }), []),
+    confirm: useCallback(() => dispatch({ type: 'confirm' }), []),
+    unconfirm: useCallback(() => dispatch({ type: 'unconfirm' }), []),
+  }
 }

@@ -337,6 +337,17 @@ impl Toc {
         }
     }
 
+    /// 音声トラックの（番号, セクタ長）。手入力フォームの行数と長さの表示に使う（P2-4）。
+    /// 終端の規則は [`Self::track_layout`] と同じ（Enhanced CD の末尾はセッション間隙を引く）
+    pub fn audio_track_sectors(&self) -> Vec<(u8, u32)> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.is_audio)
+            .map(|(i, t)| (t.number, self.track_end_lba(i) - t.start_lba))
+            .collect()
+    }
+
     /// CRC 計算用のレイアウト（音声トラックだけ、サンプル単位）
     pub fn track_layout(&self) -> Result<TrackLayout, LayoutError> {
         let lengths = self

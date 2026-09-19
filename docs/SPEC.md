@@ -473,8 +473,12 @@ Phase 4  commit:     1 トランザクションで
    ↓            「リリース × medium」（DiscID を持つ medium は exact、トラック数の合う medium は近似。D-64）
    ↓            ※同人・VTuber・インディーズ国内盤は MusicBrainz 未登録が常態。
    ↓              照会結果ゼロでもウィザードが完走できることを必須要件とする。
+   ↓              候補も手入力も同じフォーム（候補を写して直す。D-65）に収束し、確定で
+   ↓              DiscMetadata（album / album_artist / date / label / catalog_number / barcode /
+   ↓              disc_no / disc_count / tracks[{ number, title, artist, mb }]、source）になる。
    ↓              トラックリスト貼り付け（通販ページ等からのテキストを行解析して
-   ↓              トラック番号・タイトル・アーティストへ割り付け）を一級の入力経路とする
+   ↓              トラック番号・タイトル・アーティストへ割り付け。web/src/lib/tracklist.ts）を
+   ↓              一級の入力経路とする。行は TOC の音声トラックと 1:1 で、番号と長さは TOC から
    ↓
 [オフセット決定] INQUIRY でドライブ型番取得 → 同梱オフセット表を引く
    ↓            UI に必ず表示。手動上書き可
@@ -906,7 +910,8 @@ GET    /api/cd/status                             ディスク有無・TOC（P2-
 POST   /api/cd/lookup                             { toc }。TOC 文字列（CTDB 形式 0:13915:…:leadout か MusicBrainz 形式
                                                   1 12 leadout+150 offset+150…）から各種 DiscID を出し、MusicBrainz に
                                                   照会（P2-3、D-21 / D-64）。→ 200 { discid, mb_toc, accuraterip_id,
-                                                  ctdb_toc_id, exact, candidates: [リリース × medium] }。
+                                                  ctdb_toc_id, exact, candidates: [リリース × medium],
+                                                  tracks: [{ number, length_ms }]（TOC の音声トラック。手入力フォームの行。D-65）}。
                                                   400 bad_request（TOC）、502 lookup_failed（届かない・応答が壊れている）、
                                                   503 musicbrainz_unavailable（再試行しても 503 の負荷制限、または未構成）
 POST   /api/cd/rip                                リップ開始
@@ -1314,8 +1319,15 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
 - **CD**（P2）: ウィザード。検出 → 候補選択 / 手入力 / トラックリスト貼り付け →
   オフセット確認 → 進捗。照会ゼロ件でも完走できる。検出（P2-1）が入るまでは TOC の貼り付け
   （CTDB 形式 / MusicBrainz 形式 / `cdrecord -toc` の出力）を入力源にする（P2-3、D-64。デバッグ用に残す）。
-  候補は DiscID 一致を先に出し、exact が 1 件なら選んでおく。選ぶとトラック対応（番号・タイトル・
-  アーティスト・長さ・ISRC）を確認できる
+  候補は DiscID 一致を先に出し、exact が 1 件なら選んでおく。選ぶとフォームに写り（アルバム・
+  アルバムアーティスト・日付・レーベル・カタログ番号・JAN/UPC・ディスク番号 / 枚数・各トラックの
+  タイトル / アーティスト。番号と長さは TOC から）、そこから直せる。候補ゼロ件なら空のフォームに直行、
+  「候補を使わず手入力」で空にもできる（P2-4、D-65）。トラックリスト貼り付け欄（行頭の番号・行末の時間を
+  外し、`タイトル / アーティスト` で分ける。逆順のチェック、表の貼り付け可）から番号で行に写し、
+  行数の違いや未設定の行は警告。「確定」でアルバム名・アルバムアーティスト・各トラック名を検証し
+  （空のタイトルは「Track NN で埋める」ボタン）、確定したメタデータをタグ名で見せる（`albumTags` /
+  `trackTags`。MUSICBRAINZ_TRACKID は recording、MUSICBRAINZ_RELEASETRACKID は track）。吸い出し（P2-5）は
+  この DiscMetadata を受ける。遷移は `lib/cdState.ts` の reducer（TOC の編集と「結果を消す」で結果より下が全部消える）
 - **設定**: `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
   退避 WAV（`archived_files`）の一覧と復元
 

@@ -34,6 +34,25 @@ pub struct LookupResponse {
     /// DiscID そのもので引けた（false なら TOC の fuzzy 照会）
     pub exact: bool,
     pub candidates: Vec<ReleaseCandidate>,
+    /// TOC の音声トラック（番号と長さ）。候補が無くても手入力フォーム（P2-4）の行数と長さの元になる
+    pub tracks: Vec<TocTrackInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TocTrackInfo {
+    pub number: u8,
+    /// セクタ数から（75 セクタ = 1 秒）
+    pub length_ms: u64,
+}
+
+fn toc_tracks(toc: &Toc) -> Vec<TocTrackInfo> {
+    toc.audio_track_sectors()
+        .into_iter()
+        .map(|(number, sectors)| TocTrackInfo {
+            number,
+            length_ms: u64::from(sectors) * 1000 / 75,
+        })
+        .collect()
 }
 
 pub async fn lookup(
@@ -93,6 +112,7 @@ pub async fn lookup(
         ctdb_toc_id: toc.ctdb_toc_id(),
         exact: result.exact,
         candidates: result.candidates,
+        tracks: toc_tracks(&toc),
     })
     .into_response())
 }
