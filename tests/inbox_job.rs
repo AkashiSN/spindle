@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension as _};
 use tokio_util::sync::CancellationToken;
 
 use spindle::cd::place::PlaceHook;
@@ -73,6 +73,15 @@ impl Lib {
     }
 
     fn env_with(&self, wav_to_flac: bool, before_place: Option<PlaceHook>) -> PlaceItemEnv {
+        self.env_full(wav_to_flac, before_place, None)
+    }
+
+    fn env_full(
+        &self,
+        wav_to_flac: bool,
+        before_place: Option<PlaceHook>,
+        before_artwork: Option<PlaceHook>,
+    ) -> PlaceItemEnv {
         PlaceItemEnv {
             db: self.db.clone(),
             library: self.library.clone(),
@@ -87,15 +96,17 @@ impl Lib {
             wav_to_flac,
             before_place,
             artwork: Some(Arc::new(ArtworkStore::new(self.dir.path().join("thumbs")))),
+            before_artwork,
         }
     }
 
     fn start(&self, wav_to_flac: bool) {
+        self.start_with(self.env(wav_to_flac));
+    }
+
+    fn start_with(&self, env: PlaceItemEnv) {
         let mut reg = Registry::new();
-        reg.register(
-            JobType::Inbox,
-            Arc::new(InboxHandler::new(self.env(wav_to_flac))),
-        );
+        reg.register(JobType::Inbox, Arc::new(InboxHandler::new(env)));
         self.jobs.start(reg, self.shutdown.clone());
     }
 
@@ -1166,4 +1177,137 @@ async fn placement_resolves_album_artwork_and_enqueues_thumbnail() {
         lib.count("SELECT count(*) FROM jobs WHERE type = 'thumbnail'"),
         1
     );
+}
+
+/// 同梱カバー画像は埋め込み画像より優先され、名前の優先順位（cover > folder）も Phase 1 と同じ
+#[tokio::test]
+async fn placement_prefers_the_bundled_cover_over_embedded_pictures() {
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    set_picture(&p, jpeg(b"embedded"));
+    let cover = jpeg(b"cover");
+    std::fs::write(lib.inbox_path("AlbumA/folder.jpg"), jpeg(b"folder")).unwrap();
+    std::fs::write(lib.inbox_path("AlbumA/cover.jpg"), &cover).unwrap();
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let (sha, origin, cover_size): (Vec<u8>, String, Option<i64>) = lib
+        .conn()
+        .query_row(
+            "SELECT w.sha256, w.origin, a.cover_size FROM albums a JOIN artwork w ON w.id = a.artwork_id
+              WHERE a.rel_dir = '_Unsorted/Artist/Album'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(sha, ArtworkStore::hash_of(&cover).to_vec());
+    assert_eq!(origin, "file");
+    assert_eq!(cover_size, Some(cover.len() as i64));
+}
+
+/// 解決は library の排他を持ったまま行う（並行する scan の Phase 4 / 5 と結果が交錯しない）。
+/// 探索が I/O で失敗したら「なし」と確定せず、予約（artwork_resolved_at = NULL）を残す
+#[tokio::test]
+async fn artwork_is_resolved_under_the_library_mutex_and_io_failure_keeps_the_reservation() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    set_picture(&p, jpeg(b"front"));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    // 解決の直前: 排他がまだ取られていることを見て、ディレクトリを読めなくする
+    let db_path = lib.db_path.clone();
+    let album_dir = lib.lib_path("_Unsorted/Artist/Album");
+    let held = Arc::new(std::sync::atomic::AtomicI64::new(-1));
+    let held_in = held.clone();
+    let hook: PlaceHook = Arc::new(move || {
+        let n: i64 = Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM job_mutexes WHERE name = 'library'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        held_in.store(n, std::sync::atomic::Ordering::SeqCst);
+        std::fs::set_permissions(&album_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    });
+    lib.start_with(lib.env_full(true, None, Some(hook)));
+    let st = lib.run_job().await;
+    std::fs::set_permissions(
+        lib.lib_path("_Unsorted/Artist/Album"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(st, JobState::Done);
+    assert_eq!(
+        held.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "排他を持ったまま解決する"
+    );
+    let (artwork_id, resolved_at): (Option<i64>, Option<i64>) = lib
+        .conn()
+        .query_row(
+            "SELECT artwork_id, artwork_resolved_at FROM albums WHERE rel_dir = '_Unsorted/Artist/Album'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(artwork_id.is_none());
+    assert!(
+        resolved_at.is_none(),
+        "I/O で失敗したら予約を残す（次のスキャンが拾う）"
+    );
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'thumbnail'"),
+        0
+    );
+    // 排他は解放されている
+    assert_eq!(lib.count("SELECT count(*) FROM job_mutexes"), 0);
+}
+
+/// 既存 album への追記でも解決し直す（画像が無かった album に画像付きの曲が入れば付く）
+#[tokio::test]
+async fn appending_a_track_with_a_picture_resolves_an_album_without_one() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let p = lib.add("AlbumB/02.flac", 2, "Two", "Album", 2).unwrap();
+    let pic = jpeg(b"second");
+    set_picture(&p, pic.clone());
+    lib.scan(2000).await;
+    let b = lib.item("AlbumB").unwrap();
+    lib.approve(
+        b.id,
+        &draft_for(&[("AlbumB/02.flac", 2, "Two")], None, "Album"),
+    );
+    assert_eq!(lib.run_job().await, JobState::Done);
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 1);
+    let sha: Option<Vec<u8>> = lib
+        .conn()
+        .query_row(
+            "SELECT w.sha256 FROM albums a JOIN artwork w ON w.id = a.artwork_id
+              WHERE a.rel_dir = '_Unsorted/Artist/Album'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert_eq!(sha, Some(ArtworkStore::hash_of(&pic).to_vec()));
 }

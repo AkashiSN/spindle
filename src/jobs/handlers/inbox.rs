@@ -119,6 +119,33 @@ impl InboxHandler {
                 tracing::info!(job_id, item_id = id, "承認が取り消されたので配置しない");
                 None
             };
+            // アートワークは次のスキャンを待たずに決める（P3-4）。**library の排他を持ったまま**行う:
+            // 解放してからだと、並行する scan が同じ album を予約 → 解決した後に、こちらの古い読み取り
+            // 結果で上書きし得る（ファイルはロックしないので、その間の外部の書き換えは scan だけが見る）。
+            // 失敗しても予約が残り、次のスキャンが拾う
+            if let Some(Ok(p)) = &result {
+                if let Some(store) = &self.env.artwork {
+                    if let Some(hook) = &self.env.before_artwork {
+                        hook();
+                    }
+                    match resolve_album_artwork_now(
+                        &self.env.db,
+                        &self.env.library,
+                        store,
+                        p.album_id,
+                    )
+                    .await
+                    {
+                        Ok(jobs) => self.env.jobs.notify_enqueued(&jobs).await,
+                        Err(e) => tracing::warn!(
+                            job_id,
+                            album_id = p.album_id,
+                            error = %e,
+                            "配置した album のアートワークを解決できない（次のスキャンで続き）"
+                        ),
+                    }
+                }
+            }
             if let Err(e) = ctx
                 .db()
                 .write(move |c| dbjobs::release_mutexes(c, job_id))
@@ -133,25 +160,6 @@ impl InboxHandler {
                 Ok(p) => {
                     // placed は登録トランザクションの中で確定済み（place_item）
                     tracing::info!(job_id, item_id = id, album_id = p.album_id, "配置済み");
-                    // アートワークは次のスキャンを待たずに決める（失敗しても予約が残り、スキャンが拾う）
-                    if let Some(store) = &self.env.artwork {
-                        match resolve_album_artwork_now(
-                            &self.env.db,
-                            &self.env.library,
-                            store,
-                            p.album_id,
-                        )
-                        .await
-                        {
-                            Ok(jobs) => self.env.jobs.notify_enqueued(&jobs).await,
-                            Err(e) => tracing::warn!(
-                                job_id,
-                                album_id = p.album_id,
-                                error = %e,
-                                "配置した album のアートワークを解決できない（次のスキャンで続き）"
-                            ),
-                        }
-                    }
                 }
                 Err(InboxError::Cancelled) => {
                     ctx.db()

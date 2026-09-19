@@ -305,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
             wav_to_flac: state.config.normalize.wav_to_flac,
             before_place: None,
             artwork: Some(Arc::clone(&artwork)),
+            before_artwork: None,
         })),
     );
     // YouTube のダウンロード（P3-3、D-70）。Inbox に置くところまで。無効なら登録しない（API は 404）

@@ -727,6 +727,9 @@ pub struct PlaceItemEnv {
     pub before_place: Option<crate::cd::place::PlaceHook>,
     /// 配置直後に album のアートワークを解決するためのキャッシュ（無ければ次のスキャンに任せる。P3-4）
     pub artwork: Option<Arc<crate::media::artwork::ArtworkStore>>,
+    /// テスト用: 配置の後・アートワーク解決の前に呼ぶ（排他の保持と I/O 失敗の状況を作る）
+    #[doc(hidden)]
+    pub before_artwork: Option<crate::cd::place::PlaceHook>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

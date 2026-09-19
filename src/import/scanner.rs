@@ -734,7 +734,14 @@ pub async fn resolve_album_artwork_now(
     let root = Arc::clone(root);
     let store = Arc::clone(store);
     let resolved = tokio::task::spawn_blocking(move || {
-        let cover = find_cover(&root, &rel_dir);
+        let cover = match find_cover(&root, &rel_dir) {
+            Ok(c) => c,
+            Err(e) => {
+                // 探索の I/O 失敗は「同梱カバーなし」ではない（Phase 1 なら Walk で止まる）。決めない
+                tracing::warn!(album_id, dir = rel_dir, error = %e, "同梱カバー画像を探せない");
+                return None;
+            }
+        };
         resolve_album_artwork(&root, &store, album_id, cover, &tracks)
     })
     .await?;
@@ -775,15 +782,21 @@ pub async fn resolve_album_artwork_now(
     .await
 }
 
-/// `rel_dir` にある同梱カバー画像のうち最も優先度の高い 1 つ（Phase 1 と同じ規則）
-fn find_cover(root: &RootDir, rel_dir: &str) -> Option<CoverEntry> {
+/// `rel_dir` にある同梱カバー画像のうち最も優先度の高い 1 つ（Phase 1 と同じ規則）。ディレクトリが
+/// 無ければ `Ok(None)`、一覧や stat の I/O 失敗は Err（Phase 1 の `Walk` に相当。「なし」とは区別する）
+fn find_cover(root: &RootDir, rel_dir: &str) -> Result<Option<CoverEntry>, FsError> {
     let dir = if rel_dir.is_empty() {
         None
     } else {
-        Some(RelPath::parse(rel_dir).ok()?)
+        Some(RelPath::parse(rel_dir).map_err(|e| FsError::Io(std::io::Error::other(e)))?)
+    };
+    let entries = match root.read_dir(dir.as_ref()) {
+        Ok(e) => e,
+        Err(FsError::NotFound) => return Ok(None),
+        Err(e) => return Err(e),
     };
     let mut best: Option<CoverEntry> = None;
-    for e in root.read_dir(dir.as_ref()).ok()? {
+    for e in entries {
         if e.kind != FileKind::File {
             continue;
         }
@@ -799,24 +812,27 @@ fn find_cover(root: &RootDir, rel_dir: &str) -> Option<CoverEntry> {
         let rel = match &dir {
             Some(d) => d.join(name),
             None => RelPath::parse(name),
-        };
-        let Ok(rel) = rel else {
-            continue;
-        };
-        if let Ok(st) = root.stat(&rel) {
-            best = Some(CoverEntry {
-                rel,
-                rank,
-                stat: CoverStat {
-                    inode: st.inode as i64,
-                    size: st.size as i64,
-                    mtime_ns: st.mtime_ns,
-                    ctime_ns: st.ctime_ns,
-                },
-            });
+        }
+        .map_err(|e| FsError::Io(std::io::Error::other(e)))?;
+        match root.stat(&rel) {
+            Ok(st) if st.kind == FileKind::File => {
+                best = Some(CoverEntry {
+                    rel,
+                    rank,
+                    stat: CoverStat {
+                        inode: st.inode as i64,
+                        size: st.size as i64,
+                        mtime_ns: st.mtime_ns,
+                        ctime_ns: st.ctime_ns,
+                    },
+                });
+            }
+            // 一覧と stat の間に消えた
+            Ok(_) | Err(FsError::NotFound) => {}
+            Err(e) => return Err(e),
         }
     }
-    best
+    Ok(best)
 }
 
 /// 解決した画像（キャッシュに置いた後）
