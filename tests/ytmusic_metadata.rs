@@ -112,6 +112,9 @@ async fn declined_reasons_are_reported_not_errors() {
         ("unmatched", false),
         ("unknown_channel", false),
         ("skip", true),
+        ("unsupported", false),
+        // 未知の reason は前方互換で通す
+        ("something_new", false),
     ] {
         let fake = Fake::new(&format!(
             r#"echo '{{"protocol":1,"ok":false,"reason":"{reason}","message":"why"}}'"#
@@ -130,6 +133,20 @@ async fn declined_reasons_are_reported_not_errors() {
         );
         assert_eq!(out.is_skip(), skip);
     }
+    // reason / message の欠落・空はプロトコル不正
+    for body in [
+        r#"{"protocol":1,"ok":false}"#,
+        r#"{"protocol":1,"ok":false,"reason":"","message":"x"}"#,
+        r#"{"protocol":1,"ok":false,"reason":"skip"}"#,
+        r#"{"protocol":1,"ok":false,"reason":"skip","message":" "}"#,
+    ] {
+        let fake = Fake::new(&format!("echo '{body}'"));
+        let r = fake
+            .provider(10)
+            .resolve(&item(), &CancellationToken::new())
+            .await;
+        assert!(matches!(r, Err(ProviderError::Invalid(_))), "{body}: {r:?}");
+    }
 }
 
 #[tokio::test]
@@ -143,8 +160,17 @@ async fn plugin_faults_are_errors() {
         .unwrap_err();
     assert!(matches!(e, ProviderError::Process(_)), "{e}");
     assert!(e.to_string().contains("boom"));
-    // JSON でない
+    // JSON でない / UTF-8 でない（文字列の中の不正バイトを置換して受理しない）
     let fake = Fake::new("echo not-json");
+    assert!(matches!(
+        fake.provider(10)
+            .resolve(&item(), &CancellationToken::new())
+            .await,
+        Err(ProviderError::Json(_))
+    ));
+    let fake = Fake::new(
+        r#"printf '{"protocol":1,"ok":true,"track":{"title":"T\xff","artists":["A"],"albumartist":"A","album":"B"}}'"#,
+    );
     assert!(matches!(
         fake.provider(10)
             .resolve(&item(), &CancellationToken::new())
@@ -166,6 +192,18 @@ async fn plugin_faults_are_errors() {
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":[],"albumartist":"A","album":"B"}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","date":"2024-13"}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","category":" "}}"#,
+        // category は API と同じ規則（パスの 1 要素として妥当）
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","category":"a/b"}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","category":"CON"}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","category":"Pop."}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","category":" Pop"}}"#,
+        // 追加タグ: 予約キー / 不正なキー / 空の値 / 制御文字
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["title","X"]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["TRACKNUMBER","9"]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["A=B","x"]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["キー","x"]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["COMMENT",""]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["COMMENT","a\u0001b"]]}}"#,
     ] {
         let fake = Fake::new(&format!("echo '{body}'"));
         let r = fake

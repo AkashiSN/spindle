@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::pathgen::TrackFields;
+use crate::domain::pathgen::{sanitize_component, TrackFields};
 use crate::jobs::process::{ExternalCommand, ProcessError};
 
 pub const PROTOCOL: u32 = 1;
@@ -181,21 +181,31 @@ impl MetadataProvider {
             .stdin_bytes(request)
             .run(token)
             .await?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let res: Response = serde_json::from_str(text.trim()).map_err(|e| {
-            ProviderError::Json(format!(
-                "{e}: {}",
-                text.chars().take(200).collect::<String>()
-            ))
-        })?;
+        // 厳密な UTF-8 で読む（不正なバイトを U+FFFD に置換して受理しない）。抜粋の表示だけ lossy
+        let excerpt = || {
+            String::from_utf8_lossy(&out.stdout)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        };
+        let text = std::str::from_utf8(&out.stdout)
+            .map_err(|e| ProviderError::Json(format!("UTF-8 でない: {e}: {}", excerpt())))?;
+        let res: Response = serde_json::from_str(text.trim())
+            .map_err(|e| ProviderError::Json(format!("{e}: {}", excerpt())))?;
         if res.protocol != PROTOCOL {
             return Err(ProviderError::Protocol(res.protocol));
         }
         if !res.ok {
-            return Ok(Outcome::Declined {
-                reason: res.reason.unwrap_or_else(|| "unmatched".to_owned()),
-                message: res.message.unwrap_or_default(),
-            });
+            // reason / message の欠落と空はプロトコル不正（未知の reason は前方互換で通す）
+            let reason = res
+                .reason
+                .filter(|r| !r.trim().is_empty())
+                .ok_or_else(|| ProviderError::Invalid("ok: false なのに reason が無い".into()))?;
+            let message = res
+                .message
+                .filter(|m| !m.trim().is_empty())
+                .ok_or_else(|| ProviderError::Invalid("ok: false なのに message が無い".into()))?;
+            return Ok(Outcome::Declined { reason, message });
         }
         let track = res
             .track
@@ -219,8 +229,17 @@ fn validate(t: &Track) -> Result<(), ProviderError> {
     if t.artists.is_empty() || t.artists.iter().any(|a| a.trim().is_empty()) {
         return Err(empty("artists"));
     }
-    if t.category.as_deref().is_some_and(|c| c.trim().is_empty()) {
-        return Err(empty("category"));
+    // category は統制語彙 = パスの 1 要素。API（POST /api/categories）と同じ規則で、
+    // 置換・切り詰めが要る名前は受け付けない（DB の語彙と実パス名がずれて衝突する）
+    if let Some(c) = &t.category {
+        if c.trim().is_empty() {
+            return Err(empty("category"));
+        }
+        if c.trim() != c || sanitize_component(c) != *c {
+            return Err(ProviderError::Invalid(format!(
+                "category がディレクトリ名として不正: {c:?}（前後の空白、`/` 等の禁止文字、末尾のドット、予約名は不可）"
+            )));
+        }
     }
     if let Some(d) = &t.date {
         if !is_valid_date(d) {
@@ -229,11 +248,42 @@ fn validate(t: &Track) -> Result<(), ProviderError> {
             )));
         }
     }
-    if t.tags.iter().any(|(k, _)| k.trim().is_empty()) {
-        return Err(empty("tags のキー"));
+    for (k, v) in &t.tags {
+        let key = k.trim().to_uppercase();
+        if key.is_empty() {
+            return Err(empty("tags のキー"));
+        }
+        // Vorbis Comment で使えない文字（`=`、制御文字、非 ASCII）
+        if !key.chars().all(|c| (' '..='}').contains(&c) && c != '=') {
+            return Err(ProviderError::Invalid(format!(
+                "tags のキーに使えない文字がある: {k:?}"
+            )));
+        }
+        if RESERVED_TAG_KEYS.contains(&key.as_str()) {
+            return Err(ProviderError::Invalid(format!(
+                "tags に spindle が決めるキーがある: {key}（track の各フィールドで渡す）"
+            )));
+        }
+        if v.trim().is_empty() || v.chars().any(char::is_control) {
+            return Err(ProviderError::Invalid(format!(
+                "tags の値が空か制御文字を含む: {key}"
+            )));
+        }
     }
     Ok(())
 }
+
+/// `Track` の各フィールドから spindle が書くタグ。追加タグでは渡せない
+const RESERVED_TAG_KEYS: &[&str] = &[
+    "TITLE",
+    "ARTIST",
+    "ALBUM",
+    "ALBUMARTIST",
+    "DATE",
+    "TRACKNUMBER",
+    "DISCNUMBER",
+    "METADATA_BLOCK_PICTURE",
+];
 
 /// `YYYY[-MM[-DD]]` か
 fn is_valid_date(s: &str) -> bool {

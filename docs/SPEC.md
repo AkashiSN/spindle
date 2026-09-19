@@ -776,8 +776,12 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
 
 - **起動**: `[ytmusic].metadata_command`（引数配列。`sh -c` は使わない）をアイテム 1 件ごとに起動し、stdin に
   Request を 1 つ書き、stdout の Response（JSON 1 つ）を読む。`metadata_timeout_secs`（既定 30）で kill。
-  stderr はログに出す。終了コードが非ゼロ・stdout が JSON でない・`protocol` が違う・必須の値が空
-  （`title` / `albumartist` / `album` / `artists`）は**プラグインの故障**として取り込みを止める
+  stderr はログに出す。終了コードが非ゼロ・stdout が JSON（厳密な UTF-8）でない・`protocol` が違う・
+  必須の値が空（`title` / `albumartist` / `album` / `artists`）・`ok: false` なのに `reason` / `message` が
+  無い・`category` がディレクトリ名として不正（`POST /api/categories` と同じ規則: 前後の空白、禁止文字、
+  末尾のドット、予約名は不可）・`tags` に spindle が決めるキー（TITLE / ARTIST / ALBUM / ALBUMARTIST /
+  DATE / TRACKNUMBER / DISCNUMBER / METADATA_BLOCK_PICTURE）や不正なキー・空の値があるものは
+  **プラグインの故障**として取り込みを止める
 - **Request**（未知のフィールドはプラグインが無視する。前方互換）
   ```jsonc
   { "protocol": 1, "op": "metadata",
@@ -796,8 +800,9 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
                "date": "YYYY[-MM[-DD]]" | null,
                "tags": [["ORIGINALARTIST", "…"]] } }   // 追加のタグ（キー, 値）
   { "protocol": 1, "ok": false,
-    "reason": "unmatched" | "unknown_channel" | "skip" | "unsupported",
-    "message": "…" }   // unmatched / unknown_channel は要対応（メッセージをそのまま見せる）、skip は取り込まない
+    "reason": "unmatched" | "unknown_channel" | "skip" | "unsupported",   // 未知の値も通す（前方互換）
+    "message": "…" }   // unmatched / unknown_channel は要対応（メッセージをそのまま見せる）、skip は取り込まない。
+                       // reason / message は必須
   ```
 - **spindle 側の写像**: `track` → タグ（TITLE / ARTIST 多値 / ALBUM / ALBUMARTIST / DATE / TRACKNUMBER +
   `tags`）と `pathgen::TrackFields`（category / albumartist / artist（先頭）/ album / title / track_no / year）。
