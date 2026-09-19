@@ -151,6 +151,7 @@ impl Lib {
                 unsorted: "_Unsorted/{albumartist}/{album}/{track:02} {title}".into(),
             },
             before_lock: None,
+            before_register: None,
         }
     }
 
@@ -849,4 +850,135 @@ async fn plan_is_redone_under_the_lock_when_the_library_moved_during_encoding() 
         .unwrap();
     assert_eq!(rel_dir, "Rock/Test Artist/Test Album");
     assert!(lib.path("Rock/Moved/Test Album/1-01 Song 1.flac").exists());
+}
+
+/// 配置先のディレクトリにある自分（disc 2）以外のファイル名
+fn files_of(lib: &Lib, rel_dir: &str) -> Vec<String> {
+    match std::fs::read_dir(lib.path(rel_dir)) {
+        Ok(rd) => {
+            let mut v: Vec<String> = rd
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn join_album_moved_between_place_and_register_cleans_up_own_files() {
+    require_flac!();
+    let lib = Lib::new();
+    lib.insert_category("Rock");
+    let t3 = toc();
+    let pcm = lib.write_pcm(&pcm_bytes(&t3));
+    let mut d1 = meta(Some("Rock"));
+    d1.disc_count = 2;
+    let first = lib.place(&d1, &pcm, &report(true)).await.unwrap();
+    // 配置の後・登録の前に rename ジョブが disc 1 の album を丸ごと動かした（トラックと同梱ファイル、DB）
+    let db_path = lib.db_path.clone();
+    let lib_dir = lib.dir.path().join("Library");
+    let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let from = lib_dir.join("Rock/Test Artist/Test Album");
+        let to = lib_dir.join("Rock/Moved/Test Album");
+        std::fs::create_dir_all(&to).unwrap();
+        for n in [
+            "1-01 Song 1.flac",
+            "1-02 Song 2.flac",
+            "1-03 Song 3.flac",
+            "disc1.cue",
+            "disc1.toc",
+            "rip1.log",
+        ] {
+            std::fs::rename(from.join(n), to.join(n)).unwrap();
+        }
+        let c = Connection::open(&db_path).unwrap();
+        c.execute(
+            "UPDATE albums SET rel_dir = 'Rock/Moved/Test Album', rel_dir_key = 'rock/moved/test album'",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE tracks SET rel_path = replace(rel_path, 'Rock/Test Artist/', 'Rock/Moved/'),
+                               rel_path_key = replace(rel_path_key, 'rock/test artist/', 'rock/moved/')",
+            [],
+        )
+        .unwrap();
+    });
+    let mut env = lib.env();
+    env.before_register = Some(hook);
+    let t4 = toc4();
+    let pcm4 = lib.write_pcm(&pcm_bytes(&t4));
+    let mut d2 = meta4(Some("Rock"));
+    d2.disc_count = 2;
+    d2.disc_no = 2;
+    let err = lib
+        .place_with(env, &t4, &d2, &pcm4, &report(true))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlaceError::Conflict(_)), "{err}");
+    // 自分の成果物（FLAC 4 本と disc2.* / rip2.log）は残らず、空になった宛先も消える
+    assert!(!lib.path("Rock/Test Artist/Test Album").exists());
+    assert_eq!(
+        files_of(&lib, "Rock/Moved/Test Album"),
+        [
+            "1-01 Song 1.flac",
+            "1-02 Song 2.flac",
+            "1-03 Song 3.flac",
+            "disc1.cue",
+            "disc1.toc",
+            "rip1.log"
+        ]
+    );
+    assert_eq!(count(&lib, "SELECT count(*) FROM tracks"), 3);
+    assert_eq!(count(&lib, "SELECT count(*) FROM albums"), 1);
+    assert_eq!(count(&lib, "SELECT count(*) FROM job_mutexes"), 0);
+    let _ = first;
+}
+
+#[tokio::test]
+async fn other_release_arriving_at_the_destination_before_register_is_a_conflict() {
+    require_flac!();
+    let lib = Lib::new();
+    lib.insert_category("Rock");
+    let t3 = toc();
+    let pcm = lib.write_pcm(&pcm_bytes(&t3));
+    // 配置の後・登録の前に、空だった宛先へ別リリース（別 MB id）の album が rename で入った
+    // （ファイル名は衝突しない）
+    let db_path = lib.db_path.clone();
+    let lib_dir = lib.dir.path().join("Library");
+    let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let dir = lib_dir.join("Rock/Test Artist/Test Album");
+        std::fs::write(dir.join("09 Other.flac"), b"not really flac").unwrap();
+        let c = Connection::open(&db_path).unwrap();
+        c.execute(
+            "INSERT INTO albums (rel_dir, rel_dir_key, albumartist, album, mb_release_id)
+             VALUES ('Rock/Test Artist/Test Album', 'rock/test artist/test album', 'Test Artist', 'Test Album', 'mb-other')",
+            [],
+        )
+        .unwrap();
+        let album_id = c.last_insert_rowid();
+        c.execute(
+            "INSERT INTO tracks (album_id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless, seen_at)
+             VALUES (?1, 'Rock/Test Artist/Test Album/09 Other.flac', 'rock/test artist/test album/09 other.flac', 15, 0, 0, 'flac', 1, 0)",
+            [album_id],
+        )
+        .unwrap();
+    });
+    let mut env = lib.env();
+    env.before_register = Some(hook);
+    let err = lib
+        .place_with(env, &t3, &meta(Some("Rock")), &pcm, &report(true))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlaceError::Conflict(_)), "{err}");
+    // 別リリースの album には合流せず、自分の成果物だけ消えている
+    assert_eq!(
+        files_of(&lib, "Rock/Test Artist/Test Album"),
+        ["09 Other.flac"]
+    );
+    assert_eq!(count(&lib, "SELECT count(*) FROM tracks"), 1);
+    assert_eq!(count(&lib, "SELECT count(*) FROM albums"), 1);
+    assert_eq!(count(&lib, "SELECT count(*) FROM album_verifications"), 0);
 }

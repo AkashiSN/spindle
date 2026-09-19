@@ -78,6 +78,9 @@ pub struct PlaceEnv {
     /// テスト用: エンコードの後・排他の前に呼ぶ（その間にライブラリが動いた状況を作る）
     #[doc(hidden)]
     pub before_lock: Option<PlaceHook>,
+    /// テスト用: 配置の後・登録の前に呼ぶ（rename が並走した状況を作る）
+    #[doc(hidden)]
+    pub before_register: Option<PlaceHook>,
 }
 
 /// テスト用フック
@@ -378,12 +381,19 @@ fn find_join_album(
     if n > 0 {
         return Ok(None);
     }
-    let release = match (mb, discid) {
+    Ok(Some((
+        id,
+        release_key(id, mb.as_deref(), discid.as_deref()),
+    )))
+}
+
+/// 既存 album のリリースキー（`load_occupancy` と同じ規則: mb → disc → album）
+fn release_key(id: i64, mb: Option<&str>, discid: Option<&str>) -> String {
+    match (mb, discid) {
         (Some(m), _) if !m.is_empty() => format!("mb:{m}"),
         (_, Some(d)) if !d.is_empty() => format!("disc:{d}"),
         _ => format!("album:{id}"),
-    };
-    Ok(Some((id, release)))
+    }
 }
 
 // ---------------------------------------------------------------- エンコード
@@ -519,6 +529,19 @@ fn place_one(
 struct PlacedFiles {
     tracks: Vec<(scans::Physical, scans::TrackContent)>,
     reused_files: usize,
+    /// この呼び出しで新しく置いたファイル（登録に失敗したら消す）
+    placed_new: Vec<RelPath>,
+}
+
+/// この呼び出しで新しく置いたファイルを消し、ディレクトリが空なら消す（登録に失敗したとき）
+fn remove_placed(root: &RootDir, dir: &RelPath, placed_new: &[RelPath]) {
+    for rel in placed_new {
+        match root.unlink(rel) {
+            Ok(()) | Err(FsError::NotFound) => {}
+            Err(u) => tracing::warn!(path = %rel, error = %u, "配置したファイルを消せない"),
+        }
+    }
+    let _ = root.remove_dir(dir);
 }
 
 struct Companion {
@@ -588,14 +611,10 @@ fn place_files(
         Ok(tracks) => Ok(PlacedFiles {
             tracks,
             reused_files,
+            placed_new,
         }),
         Err(e) => {
-            for rel in placed_new {
-                if let Err(u) = root.unlink(&rel) {
-                    tracing::warn!(path = %rel, error = %u, "配置に失敗したファイルを消せない");
-                }
-            }
-            let _ = root.remove_dir(&plan.rel_dir);
+            remove_placed(root, &plan.rel_dir, &placed_new);
             Err(e)
         }
     }
@@ -710,22 +729,32 @@ fn register(
             }
         }
         None => {
-            let existing: Option<(i64, Option<i64>)> = tx
+            // 計画の後に宛先へ別の album が入っていないか（rename は `library` の排他を取らない）。
+            // active な album があればリリースキーが計画と同じときだけ使い、違えば衝突。missing の
+            // album は同じキーなら復活、違えば退かせて新規（rename の coordinator と同じ）
+            struct Existing {
+                id: i64,
+                missing: bool,
+                mb: Option<String>,
+                discid: Option<String>,
+            }
+            let existing: Option<Existing> = tx
                 .query_row(
-                    "SELECT id, missing_since FROM albums WHERE rel_dir_key = ?1",
+                    "SELECT id, missing_since, mb_release_id, discid FROM albums WHERE rel_dir_key = ?1",
                     [&key],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| {
+                        Ok(Existing {
+                            id: r.get(0)?,
+                            missing: r.get::<_, Option<i64>>(1)?.is_some(),
+                            mb: r.get(2)?,
+                            discid: r.get(3)?,
+                        })
+                    },
                 )
                 .optional()?;
-            match existing {
-                Some((id, missing)) => {
-                    if missing.is_some() {
-                        tx.execute("UPDATE albums SET missing_since = NULL WHERE id = ?1", [id])?;
-                    }
-                    id
-                }
-                None => scans::insert_album(
-                    &tx,
+            let insert = |tx: &Connection| -> crate::db::Result<i64> {
+                scans::insert_album(
+                    tx,
                     plan.rel_dir.as_str(),
                     &key,
                     &AlbumMeta {
@@ -738,7 +767,39 @@ fn register(
                         discid: Some(toc.musicbrainz_disc_id()),
                         disc_count: Some(i64::from(meta.disc_count)),
                     },
-                )?,
+                )
+            };
+            match existing {
+                Some(e) => {
+                    let same =
+                        release_key(e.id, e.mb.as_deref(), e.discid.as_deref()) == plan.release;
+                    match (e.missing, same) {
+                        (false, true) => e.id,
+                        (false, false) => {
+                            drop(tx);
+                            return Ok(Err(PlaceError::Conflict(format!(
+                                "{}: 計画の後に別のリリースの album {} が入った",
+                                plan.rel_dir, e.id
+                            ))));
+                        }
+                        (true, true) => {
+                            tx.execute(
+                                "UPDATE albums SET missing_since = NULL WHERE id = ?1",
+                                [e.id],
+                            )?;
+                            e.id
+                        }
+                        (true, false) => {
+                            let displaced = format!("\0displaced:{}", e.id);
+                            tx.execute(
+                                "UPDATE albums SET rel_dir = ?2, rel_dir_key = ?2 WHERE id = ?1",
+                                params![e.id, displaced],
+                            )?;
+                            insert(&tx)?
+                        }
+                    }
+                }
+                None => insert(&tx)?,
             }
         }
     };
@@ -972,7 +1033,11 @@ async fn place_locked(
             .await
             .map_err(|e| std::io::Error::other(format!("配置タスクが異常終了: {e}")))??
     };
+    if let Some(hook) = &env.before_register {
+        hook();
+    }
     let reused_files = placed.reused_files;
+    let placed_new = placed.placed_new.clone();
     let (plan_tx, toc, meta, report, md5s) = (
         plan.clone(),
         toc.clone(),
@@ -980,14 +1045,30 @@ async fn place_locked(
         report.clone(),
         md5s.to_vec(),
     );
-    let mut registered = env
+    let registered = env
         .db
         .write(move |c| {
             register(
                 c, &plan_tx, &toc, &meta, &report, &placed, &md5s, &log_rel, job_id,
             )
         })
-        .await??;
+        .await;
+    // 登録できなかったら（衝突・DB エラー）この呼び出しで新しく置いたファイルを Library に残さない
+    let registered: Result<Registered, PlaceError> = match registered {
+        Ok(inner) => inner,
+        Err(e) => Err(PlaceError::Db(e)),
+    };
+    let registered = match registered {
+        Ok(r) => r,
+        Err(e) => {
+            let root = Arc::clone(&env.root);
+            let dir = plan.rel_dir.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || remove_placed(&root, &dir, &placed_new)).await;
+            return Err(e);
+        }
+    };
+    let mut registered = registered;
     registered.reused_files = reused_files;
     Ok((plan, registered))
 }

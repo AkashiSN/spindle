@@ -2419,7 +2419,12 @@ CTDB への提出（自分のシンドロームを面順にした `DbSyndromes::
   `release_id` があるときは合流を探さない（別リリースなら降格し、降格先が album になる。合流先を持ったまま
   降格すると「ディレクトリ = album」が壊れる）。計画はエンコードの前に一度（衝突を早く知る）と、
   `library` の排他を取った後にもう一度行い、後者を確定にする（エンコードの間に scan / rename が album を
-  動かし得る）。登録では合流先の `rel_dir_key` が計画の宛先と一致し active であることを確かめる
+  動かし得る）。rename は `library` の排他を取らない（track_locks だけ。D-38 の並走前提）ので、登録の
+  トランザクション（writer で直列）でも全経路を再検証する: 合流先は `rel_dir_key` が計画の宛先と一致し
+  active であること、宛先の既存 album はリリースキーが計画と同じであること（違えば衝突。missing の
+  album は同じキーなら復活、違えば `\0displaced:` へ退かせて新規）、同じパスの行は `audio_md5` が
+  一致すること。検証に失敗したら、この呼び出しで**新しく置いた**ファイルだけを消し（既存の成果物と
+  他人のファイルは触らない）、空になったディレクトリを消してから Conflict にする
 - **配置は `job_mutexes` の `library` を取ってから**（scan / gc と同じ。取れなければ Requeue）。
   トラックと同梱ファイルを tmp → fsync → `RENAME_NOREPLACE` → dir fsync で置き、1 トランザクションで
   `albums`（無ければ作成。合流なら触らない）/ `tracks`（スキャナの `track_content` / `insert_track`。
