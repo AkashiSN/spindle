@@ -891,19 +891,22 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       タグ（`Track::tags(track_no)`: TITLE / ARTIST 多値 / ALBUM / ALBUMARTIST / DATE / TRACKNUMBER + 追加タグ）と
       `pathgen::TrackFields`（`Track::track_fields`）に写し、`category` は `db::categories::ensure` で無ければ
       語彙に追加する。受け入れ: `tests/ytmusic_metadata.rs`（写像）、`tests/categories_api.rs`（ensure）
-- [ ] **P3-3** ダウンローダ（yt-dlp を subprocess）→ **Inbox に置くところまで**（D-70。配置・採番・後続は Inbox）
-      - [ ] ジョブ基盤: `JobError::Fatal`（バックオフせず `failed`）、`JobType::Ytdl`（並列 1）
-      - [ ] `[ytmusic].download_timeout_secs`、起動時診断（`metadata_command[0]` と yt-dlp の実行可否を警告）
-      - [ ] サイドカー `spindle-inbox.json` の読み書き（`import/ytmusic/sidecar.rs`。merge は tmp + rename）
-      - [ ] Inbox: 既存 album の採用（MB キー無し同士）、TRACKNUMBER 無しの採番（max + 1 から名前順）、承認と
+- [x] **P3-3** ダウンローダ（yt-dlp を subprocess）→ **Inbox に置くところまで**（D-70。配置・採番・後続は Inbox）
+      - [x] ジョブ基盤: `JobError::Fatal`（バックオフせず `failed`）、`JobType::Ytdl`（並列 1）
+      - [x] `[ytmusic].download_timeout_secs`、起動時診断（`metadata_command[0]` と yt-dlp の実行可否を警告）
+      - [x] サイドカー `spindle-inbox.json` の読み書き（`import/ytmusic/sidecar.rs`。merge は tmp + rename）
+      - [x] Inbox: 既存 album の採用（MB キー無し同士）、TRACKNUMBER 無しの採番（max + 1 から名前順）、承認と
             登録トランザクションでの `(disc_no, track_no)` の重複検証、`destination` / `source` の応答、
             サイドカーの category 提案と配置成功時の削除、pending に戻った件の下書き merge
-      - [ ] `downloader.rs` + `handlers/ytdl.rs`: dump（playlist 展開）→ SOURCE_URL の重複 → プラグイン →
+      - [x] `downloader.rs` + `handlers/ytdl.rs`: dump（playlist 展開）→ SOURCE_URL の重複 → プラグイン →
             download → remux → タグ（PICTURE / SOURCE_URL）→ Archive/youtube/<id>.webm → Inbox + サイドカー → inbox 投入
-      - [ ] `POST /api/ytmusic/download`、操作タブの「YouTube」節、Inbox タブの宛先表示と判定バッジ / message
-      - [ ] Dockerfile に deno（yt-dlp の JS ランタイム）。compose のプラグインのマウント例
-      - [ ] 受け入れ: 偽 yt-dlp（bash）+ 偽プラグインで ok / unmatched / skip / playlist / 重複 / Fatal と Failed の
-            区別、Inbox の追記（採番の続き・重複の 400・登録時の再検証）、サイドカーの merge と削除
+      - [x] `POST /api/ytmusic/download`、操作タブの「YouTube」節、Inbox タブの宛先表示と判定バッジ / message
+      - [x] Dockerfile に deno（yt-dlp の JS ランタイム）。compose のプラグインのマウント例
+      - [x] 受け入れ: `tests/ytmusic_download.rs`（偽 yt-dlp（bash）+ 偽プラグインで ok / unmatched / skip /
+            playlist / 重複 / Fatal と Failed の区別、dump の解釈、ファイル名。実 yt-dlp の通しは `#[ignore]`）、
+            `tests/ytmusic_api.rs`、`tests/ytmusic_sidecar.rs`、`tests/inbox_job.rs`（追記・番号の再検証・
+            サイドカーの削除）、`tests/inbox_api.rs`（destination / source / 採番 / 400 / merge）、
+            `tests/inbox_draft.rs`、`tests/jobs.rs`（Fatal）、`tests/config.rs`（起動時診断）
 - [ ] **P3-4** ytmusic ダウンロード後の Derived 投入（生成本体は P1-10、GC は P1-11）。Opus 原本に Derived は
       無く（非可逆 → 非可逆禁止）、rg / thumbnail は Inbox の配置の後続で出るため、P3-3 の後に「完了 or 縮小」を判断
 - [ ] **P3-5** 偽ハイレゾ検出（`rustfft`、任意機能）

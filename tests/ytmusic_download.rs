@@ -603,3 +603,45 @@ fn sweep_tmp_removes_leftover_work_dirs() {
     // 無ければ 0
     assert_eq!(sweep_tmp(&dir.path().join("none")), 0);
 }
+
+/// 実 yt-dlp（と JS ランタイム）で短い動画を 1 本取る。ネットワークが要るので CI では走らせない:
+/// `cargo test --test ytmusic_download -- --ignored real_ytdlp`
+#[tokio::test]
+#[ignore]
+async fn real_ytdlp_end_to_end() {
+    let lib = lib!();
+    let mut env = lib.env();
+    env.ytdlp = vec!["yt-dlp".to_owned()];
+    env.download_timeout = Duration::from_secs(300);
+    let mut reg = Registry::new();
+    reg.register(JobType::Ytdl, Arc::new(YtdlHandler::new(env)));
+    lib.jobs.start(reg, lib.shutdown.clone());
+    // 「Me at the zoo」（YouTube 最初の動画。19 秒）。uploader は偽プラグインに無いので受け皿へ
+    let url = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+    let (id, st) = lib.run(url).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    let dir = lib.inbox_path("youtube/_unmatched/jawed");
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.ends_with(" [jNQXAC9IVRw].opus")),
+        "{names:?}"
+    );
+    assert!(lib
+        .dir
+        .path()
+        .join("Archive/youtube/jNQXAC9IVRw.webm")
+        .exists());
+    let opus = names.iter().find(|n| n.ends_with(".opus")).unwrap();
+    let (af, pictures) = spindle::domain::tags::read_audio_file_with_pictures(
+        std::fs::File::open(dir.join(opus)).unwrap(),
+        Some("opus"),
+    )
+    .unwrap();
+    assert_eq!(af.tags.first("TITLE"), Some("Me at the zoo"));
+    assert_eq!(af.tags.first("SOURCE_URL"), Some(url));
+    assert_eq!(pictures.len(), 1);
+    assert!(af.duration_ms.unwrap_or(0) > 15_000);
+}
