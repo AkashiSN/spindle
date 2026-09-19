@@ -153,7 +153,9 @@ impl Lib {
     }
 
     async fn wait_job(&self, id: i64) -> JobState {
-        for _ in 0..3000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let s: String = self
                 .conn()
                 .query_row("SELECT state FROM jobs WHERE id = ?1", [id], |r| r.get(0))

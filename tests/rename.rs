@@ -199,7 +199,9 @@ impl Lib {
     }
 
     async fn wait_batch_terminal(&self, id: i64) -> BatchState {
-        for _ in 0..1000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let st = self.batch_state(id);
             if !matches!(st, BatchState::Prepared | BatchState::Applying) {
                 return st;
@@ -210,7 +212,9 @@ impl Lib {
     }
 
     async fn wait_job_terminal(&self, id: i64) -> JobState {
-        for _ in 0..1000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let st = self.job_state(id);
             if st.is_terminal() {
                 return st;

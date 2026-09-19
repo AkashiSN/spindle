@@ -157,7 +157,9 @@ impl Lib {
     }
 
     async fn wait_batch_terminal(&self, id: i64) -> BatchState {
-        for _ in 0..1000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let st = self.batch_state(id);
             if !matches!(st, BatchState::Prepared | BatchState::Applying) {
                 return st;
@@ -618,13 +620,22 @@ async fn md5_job_is_not_stale_gated_by_tag_version() {
         flac_streaminfo_md5(File::open(&path).unwrap()).unwrap(),
         Some(expected)
     );
-    let job_state: String = lib
-        .conn()
-        .query_row(
-            "SELECT state FROM jobs WHERE id = ?1",
-            [p.job_ids[0]],
-            |r| r.get(0),
-        )
-        .unwrap();
+    // バッチの終端化とジョブ行の done は別の書き込みなので、ジョブ行の終端も待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut job_state = String::new();
+    while std::time::Instant::now() < deadline {
+        job_state = lib
+            .conn()
+            .query_row(
+                "SELECT state FROM jobs WHERE id = ?1",
+                [p.job_ids[0]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if job_state != "queued" && job_state != "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(job_state, "done");
 }

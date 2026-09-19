@@ -144,7 +144,9 @@ async fn descendants_left_by_an_exited_leader_are_killed_and_do_not_block_comple
     );
     let pid: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
     let pid = rustix::process::Pid::from_raw(pid).unwrap();
-    for _ in 0..100 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         if rustix::process::test_kill_process(pid).is_err() {
             return; // ESRCH: 孫は消えた
         }

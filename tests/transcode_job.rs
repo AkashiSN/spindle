@@ -281,7 +281,9 @@ impl Lib {
     }
 
     async fn wait_job(&self, id: i64) -> JobState {
-        for _ in 0..6000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let s: String = self
                 .conn()
                 .query_row("SELECT state FROM jobs WHERE id = ?1", [id], |r| r.get(0))
@@ -989,7 +991,9 @@ async fn running_retag_blocks_a_new_claimant_until_it_finishes() {
     armed.store(true, std::sync::atomic::Ordering::SeqCst);
     let (av, tv) = lib.versions(a);
     let ja = lib.enqueue(a, av, tv).await;
-    for _ in 0..500 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         if !armed.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }

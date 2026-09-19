@@ -128,7 +128,9 @@ impl App {
     }
 
     async fn wait_batch_terminal(&self, id: i64) -> String {
-        for _ in 0..1000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let st = self.batch_state(id);
             if st != "prepared" && st != "applying" {
                 return st;

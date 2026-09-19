@@ -67,7 +67,9 @@ impl Harness {
     }
 
     async fn wait_terminal(&self, id: i64) -> JobState {
-        for _ in 0..1000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let job = self.jobs.get(id).await.unwrap().unwrap();
             if job.state.is_terminal() {
                 return job.state;
@@ -293,7 +295,9 @@ async fn cancelling_a_running_scan_marks_the_run_cancelled() {
         panic!()
     };
     // 走り出したらすぐキャンセル
-    for _ in 0..500 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         let job = h.jobs.get(id).await.unwrap().unwrap();
         if job.state == JobState::Running {
             break;

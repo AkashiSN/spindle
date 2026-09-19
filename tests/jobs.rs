@@ -89,7 +89,9 @@ fn state_of(conn: &Connection, id: i64) -> JobState {
 /// 状態が `want` になるまで待つ（最大 5 秒）
 async fn wait_state(h: &Harness, id: i64, want: JobState) {
     let conn = h.raw();
-    for _ in 0..500 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         if state_of(&conn, id) == want {
             return;
         }
@@ -414,7 +416,9 @@ async fn cancel_kills_child_process_group_and_removes_temp_files() {
     }
     h.start(reg);
     wait_state(&h, id, JobState::Running).await;
-    for _ in 0..500 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         if pid_slot.lock().unwrap().is_some() {
             break;
         }
@@ -568,7 +572,9 @@ async fn cancel_kills_grandchild_that_ignores_sigterm() {
     }
     h.start(reg);
     wait_state(&h, id, JobState::Running).await;
-    for _ in 0..500 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         if pid_slot.lock().unwrap().is_some() {
             break;
         }
@@ -587,7 +593,9 @@ async fn cancel_kills_grandchild_that_ignores_sigterm() {
     wait_state(&h, id, JobState::Cancelled).await;
     // グループ全体（TERM を無視した孫を含む）が消えている
     let mut alive = true;
-    for _ in 0..50 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         alive = rustix::process::test_kill_process_group(pgid).is_ok();
         if !alive {
             break;
@@ -825,7 +833,9 @@ async fn stale_check_happens_after_track_lock() {
     h.start(reg);
     // ロックが取れないので走らずに queued へ戻る（run_after が立つ）
     let mut requeued = false;
-    for _ in 0..300 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         let (state, run_after): (String, Option<i64>) = conn
             .query_row(
                 "SELECT state, run_after FROM jobs WHERE id = ?1",

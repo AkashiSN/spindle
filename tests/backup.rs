@@ -138,7 +138,9 @@ impl Lib {
     }
 
     async fn wait_terminal(&self, id: i64) -> JobState {
-        for _ in 0..1000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let job = self.jobs.get(id).await.unwrap().unwrap();
             if job.state.is_terminal() {
                 return job.state;
@@ -149,7 +151,9 @@ impl Lib {
     }
 
     async fn wait_batch_terminal(&self, id: i64) -> BatchState {
-        for _ in 0..1000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let st = db::history::get_batch(&self.conn(), id)
                 .unwrap()
                 .unwrap()
@@ -439,7 +443,9 @@ async fn scheduler_waits_for_the_interval_after_a_terminal_backup() {
         shutdown.clone(),
     );
     let mut second = None;
-    for _ in 0..200 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         if let Some(j) = backup_jobs(&lib.conn()).iter().find(|j| j.0 != first) {
             second = Some(j.0);
             break;

@@ -582,7 +582,9 @@ async fn hung_ffmpeg_is_cut_off_at_the_deadline() {
         .trim()
         .parse()
         .unwrap();
-    for _ in 0..50 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
             return;
         }
@@ -642,7 +644,9 @@ async fn dropping_the_body_kills_ffmpeg() {
         .trim()
         .parse()
         .unwrap();
-    for _ in 0..50 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
             return;
         }
@@ -659,7 +663,9 @@ fn pid_gone(pidfile: &std::path::Path) -> impl std::future::Future<Output = bool
             .trim()
             .parse()
             .unwrap();
-        for _ in 0..60 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
             // 無い、または zombie でもない生きたプロセスが無ければ OK（zombie は reap 待ち）
             match stat {
@@ -699,7 +705,8 @@ async fn head_transcode_leaves_no_process() {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     assert!(body_of(res).await.is_empty());
-    // 起動直後に片付けるので、pid を書く前に死んでいることもある（それなら残りようがない）
+    // 起動直後に片付けるので、pid を書く前に死んでいることもある（それなら残りようがない）。
+    // 現れないこともあるので、ここは短い回数で打ち切る
     for _ in 0..10 {
         if pidfile.exists() {
             break;

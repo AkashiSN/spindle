@@ -189,7 +189,9 @@ impl App {
     }
 
     async fn wait_batch(&self, id: i64) -> BatchState {
-        for _ in 0..3000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let st = history::get_batch(&self.conn(), id).unwrap().unwrap().state;
             if st.is_terminal() {
                 return st;
@@ -765,7 +767,9 @@ async fn restart_in_the_middle_of_tagwrite_applies_the_rest_without_double_versi
     // 途中まで反映したところで止める（プロセス kill の模擬）
     app.start_worker();
     let mut applied = 0;
-    for _ in 0..1000 {
+    // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         applied = history::batch_counts(&app.conn(), batch_id)
             .unwrap()
             .applied;

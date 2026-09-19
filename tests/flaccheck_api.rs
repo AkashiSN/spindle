@@ -161,7 +161,9 @@ impl App {
     }
 
     async fn wait_all_terminal(&self) {
-        for _ in 0..3000 {
+        // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             let pending: i64 = self
                 .conn()
                 .query_row(
