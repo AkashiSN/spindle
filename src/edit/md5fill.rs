@@ -400,12 +400,9 @@ fn stage_md5(
         }
         Err(e) => return Err(EditError::Internal(e.to_string())),
     };
-    // 事前条件: 実体（dev / inode / size / mtime / ctime）と、記録時の MD5 値。
-    // 外部で補填・差し替えされていればファイルが正（conflict。DB を現在値に揃える）
+    // 事前条件: 実体（inode / size / mtime / ctime。dev は再起動で変わるので見ない、D-62）と、
+    // 記録時の MD5 値。外部で補填・差し替えされていればファイルが正（conflict。DB を現在値に揃える）
     let mut diff: Vec<&str> = Vec::new();
-    if op.expected.dev != Some(st.dev as i64) {
-        diff.push("dev");
-    }
     if op.expected.inode != Some(st.inode as i64) {
         diff.push("inode");
     }

@@ -654,6 +654,34 @@ async fn precondition_mismatch_skips_op_without_touching_file_and_resolves_overl
     assert_eq!(lib.phys(id).title.as_deref(), Some("外部の題"));
 }
 
+/// バッチ準備の後にホストを再起動すると dev 番号が振り直される。`expected_dev` の不一致だけでは
+/// conflict にしない（inode / size / mtime / ctime / tag_hash で同じ実体と分かる。D-62）
+#[tokio::test]
+async fn expected_dev_mismatch_alone_is_not_a_conflict() {
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("A/01.flac", 1, "旧い題"));
+    lib.scan().await;
+    let id = lib.track_id("A/01.flac");
+
+    let prepared = lib
+        .editor
+        .prepare_tags(None, vec![three_field_edit(id)])
+        .await
+        .unwrap();
+    lib.conn()
+        .execute(
+            "UPDATE edit_ops SET expected_dev = expected_dev + 1 WHERE batch_id = ?1",
+            [prepared.batch_id],
+        )
+        .unwrap();
+
+    let op_id = lib.ops(prepared.batch_id)[0].id;
+    let outcome = lib.editor.apply_op(op_id, None).await.unwrap();
+    assert!(matches!(outcome, OpOutcome::Applied), "{outcome:?}");
+    assert_eq!(file_tags(&p, "TITLE"), ["新しい題"]);
+    assert_eq!(lib.ops(prepared.batch_id)[0].result, OpResult::Applied);
+}
+
 #[tokio::test]
 async fn in_place_update_preserving_mtime_is_detected_by_ctime() {
     let lib = Lib::new();

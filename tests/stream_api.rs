@@ -367,6 +367,22 @@ async fn stale_row_missing_and_unknown() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// 行の dev だけが古い（ホスト再起動で振り直された）ときは stale にしない（D-62）
+#[tokio::test]
+async fn row_with_stale_dev_only_streams() {
+    require_ffmpeg!();
+    let app = App::new().await;
+    app.add("A/01.flac", "flac", 1);
+    app.scan().await;
+    let id = app.track_id("A/01.flac");
+    let c = app.cookie().await;
+    app.conn()
+        .execute("UPDATE tracks SET dev = dev + 1 WHERE id = ?1", [id])
+        .unwrap();
+    let res = app.get(Some(&c), &format!("/api/stream/{id}"), &[]).await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn trusted_cidr_streams_without_session() {
     require_ffmpeg!();

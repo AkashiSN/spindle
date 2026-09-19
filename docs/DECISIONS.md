@@ -2181,3 +2181,35 @@ md5 op が専用なのは overlay も版も持たないから）。front cover �
 Derived で album の絵を優先する（トラックごとに違う album で目的を果たせない）。
 
 **未決**: Phase 5 の簡略化（上記）。
+
+## D-62 dev 番号は識別子の一部として永続化しない（dev の付け替えは「変更なし」）
+
+**決定**（2026-09-19。TrueNAS 実機のホスト再起動で起動時スキャンが全件を読み直した事故から）:
+
+- **同一性解決の inode 段に「dev の付け替え」を足す。** 同じ `(dev, inode)` の候補が無いとき、別の
+  dev に同じ inode を持つ行が**ちょうど 1 つ**あり、`size` / `mtime_ns` / `ctime_ns` が**すべて**一致
+  すれば同じ実体とみなす。`changed = false`（タグもフィンガープリントも読み直さない）で、commit の
+  最速パスが `dev` だけを現在値へ直す（`update_physical`）。属性が 1 つでも違えば採らない（inode 再利用
+  と区別できないので、次の段 = md5 / path へ落ちて読み直す）。候補が複数なら曖昧として採らない
+- **編集の事前条件と「行と FD の照合」から `dev` を外す。** `edit_ops.expected_dev` は記録するが、
+  tags / rename / md5 op の照合、rename と normalize の所在判定（`same_inode`）、flaccheck / RG /
+  再生（`/api/stream`）の `matches` は inode / size / mtime_ns / ctime_ns（op はさらに `tag_hash` /
+  MD5 値）で判定する。列とスナップショットの `dev` は残す（inode 段の最速パスの索引 `(dev, inode)`
+  はそのまま）
+
+**理由**: Linux の `st_dev` はマウント時に割り当てる番号で、ZFS データセットはホスト再起動で変わる
+（実機で `ssd/media` が 79 → 80）。SPEC は `(dev, inode)` を安定したものとして書いていたため、
+再起動後の起動時スキャンで全行が inode 段を外れ、path 段で `physically_changed = true` となって
+9,098 件全部のタグ読みと可逆デコード（`lossless_md5`）が走った。データは壊れない（`audio_md5` は
+一致するので版は動かない）が、再起動のたびに CPU 全コアで約 10 分・ライブラリ全読み（約 200 GB）を
+払う。編集の事前条件も同じ前提だったので、バッチ準備と反映の間に再起動が入ると全 op が
+`skipped_conflict` になるはずだった。dev が守るのは「別ファイルシステムの同じ inode 番号」だけで、
+Library の root は 1 データセットであり、size / mtime / ctime（op は tag_hash も）を併せれば
+取り違えの余地は実質無い。
+
+**却下**: 起動時に dev の対応表を作って DB を一括更新する（root 配下に複数データセットがあると
+対応が一意に決まらない。行ごとの照合で十分）。`dev` 列を落とす（inode 段の索引として有用で、hardlink
+判定にも使う。走査中は安定している）。dev 不一致を「変更あり」のまま md5 だけで確認する（可逆の
+デコードが要り、避けたいコストそのもの）。
+
+**未決**: なし。

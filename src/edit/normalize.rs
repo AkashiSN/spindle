@@ -1177,10 +1177,9 @@ pub(super) fn restore_staged_source_of(
     let Some(tmp) = normalize_temp_rel_path(op_id, &dir.old) else {
         return;
     };
+    // dev は照合しない（マウントのたびに振り直されうる。D-62）
     match root.stat(&tmp) {
-        Ok(st)
-            if expected.dev == Some(st.dev as i64) && expected.inode == Some(st.inode as i64) =>
-        {
+        Ok(st) if expected.inode == Some(st.inode as i64) => {
             let _ = rename_back(root, &tmp, &dir.old);
         }
         Ok(_) => {

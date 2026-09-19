@@ -55,7 +55,7 @@ pub enum Identity {
         track_id: i64,
         via: Via,
         /// `(dev, inode, size, mtime_ns, ctime_ns)` のいずれかが行と違う（タグ読込と
-        /// フィンガープリント再計算が必要）
+        /// フィンガープリント再計算が必要）。dev だけの違い（付け替え、D-62）は `false`
         changed: bool,
         /// 行が missing だった（`missing_since` を NULL に戻す）
         revived: bool,
@@ -95,11 +95,13 @@ pub fn resolve(
     let inventory_keys: HashSet<&str> = inventory.iter().map(|e| e.key.as_str()).collect();
 
     let mut by_inode: HashMap<(u64, u64), Vec<usize>> = HashMap::new();
+    let mut by_inode_any_dev: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut by_md5: HashMap<[u8; 16], Vec<usize>> = HashMap::new();
     let mut by_key: HashMap<&str, usize> = HashMap::new();
     for (r, row) in rows.iter().enumerate() {
         if let (Some(dev), Some(inode)) = (row.dev, row.inode) {
             by_inode.entry((dev, inode)).or_default().push(r);
+            by_inode_any_dev.entry(inode).or_default().push(r);
         }
         if let Some(m) = row.audio_md5 {
             by_md5.entry(m).or_default().push(r);
@@ -127,6 +129,27 @@ pub fn resolve(
         }
         let e = &inventory[i];
         let Some(cands) = by_inode.get(&(e.dev, e.inode)) else {
+            // 段 1'（dev の付け替え、D-62）: dev 番号はマウントのたびに振り直されうる（ZFS は
+            // ホスト再起動で変わる）。同じ dev の候補が無いとき、別 dev に同じ inode を持つ行が
+            // ちょうど 1 つあり、size / mtime / ctime が**すべて**一致すれば同じ実体とみなす。
+            // 属性が 1 つでも違えば inode 再利用と区別できないので採らない（次の段へ）
+            if let Some([r]) = by_inode_any_dev.get(&e.inode).map(Vec::as_slice) {
+                let r = *r;
+                let row = &rows[r];
+                if !claimed[r]
+                    && row.size == e.size
+                    && row.mtime_ns == e.mtime_ns
+                    && row.ctime_ns == e.ctime_ns
+                {
+                    claimed[r] = true;
+                    decided[i] = Some(Identity::Existing {
+                        track_id: row.id,
+                        via: Via::Inode,
+                        changed: false,
+                        revived: row.missing,
+                    });
+                }
+            }
             continue;
         };
         let [r] = cands.as_slice() else {

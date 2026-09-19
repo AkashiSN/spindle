@@ -773,8 +773,9 @@ fn stat_if_exists(root: &RootDir, rel: &RelPath) -> Result<Option<fsroot::Stat>,
     }
 }
 
+/// 記録した実体か。dev は照合しない（マウントのたびに振り直されうる。D-62）
 fn same_inode(expected: &Precondition, st: &fsroot::Stat) -> bool {
-    expected.dev == Some(st.dev as i64) && expected.inode == Some(st.inode as i64)
+    expected.inode == Some(st.inode as i64)
 }
 
 /// 所在をファイルから判定する（何度呼んでも同じ）

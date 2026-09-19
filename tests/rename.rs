@@ -587,6 +587,33 @@ async fn externally_moved_source_conflicts_and_restores_db_path() {
     assert_eq!(lib.rel_path(a), "A/moved.flac");
 }
 
+/// 記録の後にホストを再起動して dev 番号が変わっても、inode 以下が同じなら同じ実体（D-62）
+#[tokio::test]
+async fn expected_dev_mismatch_alone_does_not_block_rename() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/01.flac", 1, "a"));
+    lib.scan().await;
+    let a = lib.track_id("A/01.flac");
+    let prepared = lib
+        .editor
+        .prepare_rename(None, vec![target(a, "B/01.flac")])
+        .await
+        .unwrap();
+    lib.conn()
+        .execute(
+            "UPDATE edit_ops SET expected_dev = expected_dev + 1 WHERE batch_id = ?1",
+            [prepared.batch_id],
+        )
+        .unwrap();
+    lib.start();
+    assert_eq!(
+        lib.wait_batch_terminal(prepared.batch_id).await,
+        BatchState::Applied
+    );
+    assert_eq!(files_in(&lib.lib()), ["B/01.flac"]);
+    assert_eq!(lib.rel_path(a), "B/01.flac");
+}
+
 #[tokio::test]
 async fn externally_modified_source_conflicts_and_is_not_moved() {
     let lib = Lib::new();

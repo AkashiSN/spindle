@@ -283,6 +283,25 @@ async fn non_flac_and_missing_tracks_are_no_ops() {
     assert_eq!(lib.result("A/gone.flac").status, None);
 }
 
+/// 行の dev だけが古い（ホスト再起動で振り直された）ときは同じ実体として結果を書く（D-62）
+#[tokio::test]
+async fn row_with_stale_dev_only_is_still_checked() {
+    let _ffmpeg = require_ffmpeg!(common::ffmpeg());
+    if !flac_available() {
+        return;
+    }
+    let lib = Lib::new();
+    lib.add("A/d.flac", 6);
+    lib.scan().await;
+    let (id, _) = lib.track("A/d.flac");
+    lib.conn()
+        .execute("UPDATE tracks SET dev = dev + 1 WHERE id = ?1", [id])
+        .unwrap();
+    lib.start();
+    assert_eq!(lib.run("A/d.flac").await, JobState::Done);
+    assert_eq!(lib.result("A/d.flac").status.as_deref(), Some("ok"));
+}
+
 #[tokio::test]
 async fn stale_version_and_replaced_file_do_not_write_a_result() {
     let _ffmpeg = require_ffmpeg!(common::ffmpeg());

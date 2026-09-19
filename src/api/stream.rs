@@ -62,7 +62,6 @@ struct StreamRow {
     codec: String,
     lossless: bool,
     missing: bool,
-    dev: Option<i64>,
     inode: Option<i64>,
     size: i64,
     mtime_ns: i64,
@@ -76,7 +75,7 @@ fn load_row(conn: &Connection, id: i64) -> DbResult<Option<StreamRow>> {
     Ok(conn
         .query_row(
             "SELECT t.rel_path, t.codec, t.lossless, t.missing_since IS NOT NULL,
-                    t.dev, t.inode, t.size, t.mtime_ns, t.ctime_ns, t.duration_ms,
+                    t.inode, t.size, t.mtime_ns, t.ctime_ns, t.duration_ms,
                     COALESCE(d.path, 'Library/' || t.rel_path)
              FROM tracks t LEFT JOIN delivery d ON d.track_id = t.id
              WHERE t.id = ?1",
@@ -87,13 +86,12 @@ fn load_row(conn: &Connection, id: i64) -> DbResult<Option<StreamRow>> {
                     codec: r.get(1)?,
                     lossless: r.get::<_, i64>(2)? == 1,
                     missing: r.get::<_, i64>(3)? == 1,
-                    dev: r.get(4)?,
-                    inode: r.get(5)?,
-                    size: r.get(6)?,
-                    mtime_ns: r.get(7)?,
-                    ctime_ns: r.get(8)?,
-                    duration_ms: r.get(9)?,
-                    delivery_path: r.get(10)?,
+                    inode: r.get(4)?,
+                    size: r.get(5)?,
+                    mtime_ns: r.get(6)?,
+                    ctime_ns: r.get(7)?,
+                    duration_ms: r.get(8)?,
+                    delivery_path: r.get(9)?,
                 })
             },
         )
@@ -101,10 +99,10 @@ fn load_row(conn: &Connection, id: i64) -> DbResult<Option<StreamRow>> {
 }
 
 impl StreamRow {
-    /// 開いた FD がこの行の実体か（同じ実体で、DB に取り込んだ後に書かれていない）
+    /// 開いた FD がこの行の実体か（同じ実体で、DB に取り込んだ後に書かれていない）。
+    /// dev は照合しない（マウントのたびに振り直されうる。D-62）
     fn matches(&self, st: &fsroot::Stat) -> bool {
-        self.dev == Some(st.dev as i64)
-            && self.inode == Some(st.inode as i64)
+        self.inode == Some(st.inode as i64)
             && self.size == st.size as i64
             && self.mtime_ns == st.mtime_ns
             && self.ctime_ns == st.ctime_ns

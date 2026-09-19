@@ -1285,8 +1285,11 @@ impl Commit {
                 continue;
             };
             let row = snap[&track_id];
-            let path_differs = row.rel_path != self.inv.entries[i].rel.as_str();
-            if !(changed || self.deep || path_differs) {
+            let e = &self.inv.entries[i];
+            let path_differs = row.rel_path != e.rel.as_str();
+            // dev の付け替え（D-62）は changed = false でも物理属性を書くので照合が要る
+            let dev_differs = row.dev != Some(e.ph.dev);
+            if !(changed || self.deep || path_differs || dev_differs) {
                 continue; // 最速パスは seen だけなので照合不要
             }
             let current = scans::load_current_row(&tx, track_id)?;
@@ -1417,7 +1420,13 @@ impl Commit {
                         report.changed_ids.push(*track_id);
                     }
                     if !*changed && !self.deep {
-                        scans::touch_seen(&tx, *track_id, run_id, now)?;
+                        if row.dev != Some(e.ph.dev) {
+                            // dev の付け替え（D-62）: 同じ実体なので読み直さないが、次回の段 1 が
+                            // 引けるよう dev を現在値へ直す（他の物理属性は一致している）
+                            scans::update_physical(&tx, *track_id, &e.ph, run_id, now)?;
+                        } else {
+                            scans::touch_seen(&tx, *track_id, run_id, now)?;
+                        }
                         if *revived || moved_ids.contains(track_id) || *via != Via::Inode {
                             group.dirty = true;
                         } else {

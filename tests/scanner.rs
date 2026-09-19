@@ -339,6 +339,52 @@ async fn second_scan_takes_the_fast_path_and_only_touches_seen_columns() {
     );
 }
 
+/// ホスト再起動で dev 番号が振り直された（DB の dev だけが古い）。inode / size / mtime / ctime が
+/// 同じなら最速パスで済ませ、dev だけ現在値へ直す（D-62）
+#[tokio::test]
+async fn dev_renumbering_after_reboot_takes_the_fast_path_and_updates_dev() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/B/01.flac", 1, "t", "B", 1));
+    lib.add("A/B/02.opus", 2, "t2", "B", 2);
+    lib.scan().await;
+    let before = lib.track("A/B/01.flac").unwrap();
+    let live_dev: i64 = lib
+        .conn()
+        .query_row("SELECT dev FROM tracks WHERE id = ?1", [before.id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    lib.conn()
+        .execute("UPDATE tracks SET dev = dev + 1", [])
+        .unwrap();
+
+    let r = lib.scan().await;
+    assert_eq!(r.unchanged, 2, "{r:?}");
+    assert_eq!(r.updated + r.new + r.moved, 0, "{r:?}");
+    let after = lib.track("A/B/01.flac").unwrap();
+    assert_eq!(
+        TrackRow {
+            seen_run_id: before.seen_run_id,
+            ..after.clone()
+        },
+        before,
+        "dev 以外の列は触らない"
+    );
+    let devs: Vec<i64> = lib
+        .conn()
+        .prepare("SELECT dev FROM tracks ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(devs, [live_dev, live_dev], "dev を現在値へ直す");
+
+    // 直った後はふつうの最速パス
+    let r = lib.scan().await;
+    assert_eq!(r.unchanged, 2);
+}
+
 // ---------------------------------------------------------------- 移動・rename
 
 #[tokio::test]
@@ -1084,6 +1130,81 @@ async fn album_without_majority_in_its_directory_cannot_be_taken_by_another_dire
     assert_eq!(lib.track("A/X/01.flac").unwrap().album_id, Some(xid));
     assert_eq!(lib.track("A/X/05.flac").unwrap().album_id, Some(xid));
     assert_eq!(lib.track("A/Y/02.flac").unwrap().album_id, Some(yid));
+}
+
+/// dev の付け替え（D-62）の最速パスは `update_physical` で inode 以下も書く。Phase 2 の
+/// スナップショット後に tagwrite（tmp + rename）が完了していたら、古い inventory の属性で
+/// 巻き戻してはいけない（overtaken として seen だけにする）
+#[tokio::test]
+async fn dev_remap_fast_path_does_not_roll_back_a_tagwrite_completed_after_snapshot() {
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("A/B/01.flac", 1, "t", "B", 1));
+    lib.scan().await;
+    use std::os::unix::fs::MetadataExt;
+    let id = lib.track("A/B/01.flac").unwrap().id;
+    let old_inode = std::fs::metadata(&p).unwrap().ino();
+    // 再起動で dev が振り直された状態（DB の dev だけ古い）
+    lib.conn()
+        .execute("UPDATE tracks SET dev = dev + 1 WHERE id = ?1", [id])
+        .unwrap();
+
+    // Phase 3 の仕事は無い（changed = false）ので、Read 相の進捗は (0, 0) が 1 回だけ来る。
+    // そこで tagwrite 相当を完了させる: tmp + rename で新 inode、DB は新しい物理属性で更新済み
+    let db_path = lib.db_path.clone();
+    let file = p.clone();
+    let fired = Arc::new(AtomicU64::new(0));
+    let f = fired.clone();
+    let progress = Arc::new(move |phase, _done: u64, total: u64| {
+        if phase == ScanPhase::Read && total == 0 && f.fetch_add(1, Ordering::SeqCst) == 0 {
+            let tmp = file.with_file_name(".spindle-tmp-test.flac");
+            std::fs::copy(&file, &tmp).unwrap();
+            common::retag(&tmp, |tag| tag.set_title("written".to_owned()));
+            std::fs::rename(&tmp, &file).unwrap();
+            let meta = std::fs::metadata(&file).unwrap();
+            use std::os::unix::fs::MetadataExt;
+            let c = Connection::open(&db_path).unwrap();
+            c.execute(
+                "UPDATE tracks SET dev = ?2, inode = ?3, size = ?4, mtime_ns = ?5, ctime_ns = ?6,
+                        title = 'written', tag_hash = zeroblob(32), tag_version = tag_version + 1
+                 WHERE id = ?1",
+                params![
+                    id,
+                    meta.dev() as i64,
+                    meta.ino() as i64,
+                    meta.len() as i64,
+                    meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
+                    meta.ctime() * 1_000_000_000 + meta.ctime_nsec(),
+                ],
+            )
+            .unwrap();
+        }
+    });
+    let r = lib
+        .scanner
+        .run(ScanKind::Incremental, progress, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(fired.load(Ordering::SeqCst), 1);
+    assert_eq!(r.overtaken, 1, "{r:?}");
+
+    let meta = std::fs::metadata(&p).unwrap();
+    let new_inode = meta.ino();
+    assert_ne!(new_inode, old_inode);
+    let (dev, inode, title, seen): (i64, i64, String, Option<i64>) = lib
+        .conn()
+        .query_row(
+            "SELECT dev, inode, title, seen_run_id FROM tracks WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (dev, inode),
+        (meta.dev() as i64, new_inode as i64),
+        "tagwrite の値を巻き戻さない"
+    );
+    assert_eq!(title, "written");
+    assert_eq!(seen, Some(r.run_id));
 }
 
 #[tokio::test]

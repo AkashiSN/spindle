@@ -245,6 +245,7 @@ Archive / Inbox / Playlists のいずれか）からの相対パス**で、次�
 | 段 | 候補の採用条件 | 外れる例 |
 |---|---|---|
 | inode | inventory 内でその `(dev, inode)` を持つパスが **1 つだけ**（2 つ以上なら hardlink とみなし、全候補で inode 段を無効化）、候補行が未 claim、`nlink = 1`、かつ `size` か `mtime_ns` のどちらかが一致。両方違えば `audio_md5` を計算して一致を要求 | inode 再利用（削除後に別ファイルが同じ inode を得る）、hardlink |
+| inode（dev の付け替え） | 同じ `dev` の候補が無いとき、**別の `dev` に同じ `inode` を持つ行がちょうど 1 つ**あり、`size` / `mtime_ns` / `ctime_ns` が**すべて**一致。同じ実体とみなし「変更なし」で `dev` だけ現在値へ直す（D-62） | 属性が 1 つでも違う（inode 再利用と区別できない）、候補が複数 |
 | audio_md5 | 候補が**ちょうど 1 行**で、その行の `rel_path_key` が **inventory 全体に存在しない**（= 移動元が消えている。走査途中の未訪問ではなく、全 stat が終わった後に判定する） | コピー元が残っている、ベスト盤との重複、無音トラック |
 | rel_path_key | 候補が未 claim | — |
 
@@ -275,6 +276,7 @@ Archive / Inbox / Playlists のいずれか）からの相対パス**で、次�
 | 観測 | 判定 | 版 |
 |---|---|---|
 | `(dev, inode, size, mtime_ns, ctime_ns)` すべて一致 | 変更なし | `seen_at` / `seen_run_id` のみ |
+| `dev` だけ違う（inode 段の「dev の付け替え」で採用） | 変更なし | `dev` を現在値へ直し、`seen_at` / `seen_run_id` |
 | いずれか変化 → タグを読み `tag_hash` を再計算、音声フィンガープリントを再計算 | どちらも同じ | 版は動かさない |
 | 〃 | `tag_hash` のみ変化 | `tag_version++` |
 | 〃 | 音声フィンガープリントのみ変化 | `audio_version++` |
@@ -589,8 +591,8 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
        → DB（track_tags / キャッシュ列）を新値へ更新、tag_version をトラックごとに 1 回 ++
        → track 単位の tagwrite ジョブを投入（edit_batch_id で紐づけ）
   → 各 tagwrite ジョブ（並列 4）:  バッチを state='applying' に
-       rel_path で open → その FD の fstat で dev/inode/size/mtime_ns/ctime_ns を確認、
-       同じ FD からタグを読んで tag_hash を確認
+       rel_path で open → その FD の fstat で inode/size/mtime_ns/ctime_ns を確認
+       （dev は照合しない。D-62）、同じ FD からタグを読んで tag_hash を確認
          ├ いずれか不一致 → result='skipped_conflict'。ファイルは触らない。
          │                  同一トランザクションでその FD の内容から DB を戻す（下記「overlay の解消」）
          ├ rel_path のみ不一致（外部 rename。スキャナが inode で新パスを追随済み）
@@ -614,6 +616,10 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
   更新（`touch -r` を伴うタグツール）は dev/inode/mtime では見えない。ただし外部 rename も
   ctime を進めるため、rel_path が記録時点と違う（スキャナが追随した）ときに限り ctime_ns だけの
   不一致は許容する（D-41）
+- **`expected_dev` は記録するが照合しない。** dev 番号はマウントのたびに振り直されうる（ZFS は
+  ホスト再起動で変わる）ので、記録の後に再起動があると全 op が外れる。実体の同一性は
+  inode / size / mtime_ns / ctime_ns / tag_hash で確認する。rename / normalize の所在判定
+  （`same_inode`）、flaccheck / RG / 再生の「行と FD の照合」も同じ扱い（D-62）
 - **DB 先行更新 + pending 記録**を採る。DB の値は「確定した真実」ではなく
   **書き込み意図のオーバーレイ**で、ファイル反映が終わるまで暫定。UI は pending を
   バッジで見せる。DB を失うと未反映の意図も失われる（ファイルは旧値のまま残るので
@@ -667,7 +673,8 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
   prepare で DB の `rel_path` を 2 段階更新で新値にし（overlay。`expected_rel_path` が記録時点の
   物理パス）、album の所属も追随させ、**バッチ 1 つに `rename` ジョブ 1 つ**を投入する。ジョブは
   phase 1 で全 op の source を同じディレクトリの一時名 `spindle-rename-<op_id>.<ext>` へ
-  `RENAME_NOREPLACE` で退避（事前条件は dev / inode / size / mtime_ns / ctime_ns。外れていれば
+  `RENAME_NOREPLACE` で退避（事前条件は inode / size / mtime_ns / ctime_ns。dev は照合しない、
+  D-62。外れていれば
   `skipped_conflict` で触らない）、phase 2 で `ordinal` 順に最終名へ置く（宛先ディレクトリは作る。
   宛先が取られていれば source へ戻して `skipped_conflict`）。最後に 1 トランザクションで op を
   終端にし、`rel_path` をファイルの所在へ揃え、物理属性を追随し、バッチを集計する。

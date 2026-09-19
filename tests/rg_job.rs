@@ -261,6 +261,24 @@ async fn album_job_writes_track_and_album_values() {
     }
 }
 
+/// 行の dev だけが古い（ホスト再起動で振り直された）ときは同じ実体として測る（D-62）
+#[tokio::test]
+async fn member_with_stale_dev_only_is_still_scanned() {
+    let _ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let lib = Lib::new();
+    lib.add("D/01.flac", -20.0, "loud");
+    lib.scan().await;
+    let album = lib.album_id("D/01.flac");
+    let tid = lib.track_id("D/01.flac");
+    lib.conn()
+        .execute("UPDATE tracks SET dev = dev + 1 WHERE id = ?1", [tid])
+        .unwrap();
+    lib.start();
+    let id = lib.jobs.enqueue(new_album_job(album)).await.unwrap().id();
+    assert_eq!(lib.wait_job(id).await, JobState::Done);
+    assert!(lib.rg("D/01.flac").scanned_at.is_some());
+}
+
 #[tokio::test]
 async fn opus_member_is_decoded_via_ffmpeg() {
     let _ffmpeg = require_ffmpeg!(common::ffmpeg());

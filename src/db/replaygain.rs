@@ -27,10 +27,10 @@ pub struct Member {
 
 impl Member {
     /// 開いた FD の stat がこの行と一致するか（同じ実体で、DB に取り込んだ後に書かれていない）。
-    /// 音声が同じでもタグの書き換えで size / mtime は動くので、一致しなければ再スキャン待ち
+    /// 音声が同じでもタグの書き換えで size / mtime は動くので、一致しなければ再スキャン待ち。
+    /// dev は照合しない（マウントのたびに振り直されうる。D-62）
     pub fn matches(&self, st: &crate::fsroot::Stat) -> bool {
-        self.dev == Some(st.dev as i64)
-            && self.inode == Some(st.inode as i64)
+        self.inode == Some(st.inode as i64)
             && self.size == st.size as i64
             && self.mtime_ns == st.mtime_ns
             && self.ctime_ns == st.ctime_ns

@@ -1302,7 +1302,9 @@ fn read_file_state(
 /// `rel_path` が記録時点と違う（外部 rename をスキャナが `(dev, inode)` で追随した）ときは、
 /// tags op はそのまま続行してよい（SPEC §7.5）。Linux の rename は ctime を進めるので、
 /// その場合に限り **ctime_ns だけの不一致**は rename によるものとみなして許容する
-/// （タグ内容は同じ FD から読んだ `tag_hash` で別に確認している）
+/// （タグ内容は同じ FD から読んだ `tag_hash` で別に確認している）。
+/// `expected_dev` は照合しない: dev 番号はマウントのたびに振り直されうる（ZFS はホスト再起動で
+/// 変わる）ので、記録の後に再起動があると全 op が外れる。実体は inode 以下で確認する（D-62）
 fn mismatches(
     expected: &Precondition,
     st: &fsroot::Stat,
@@ -1311,9 +1313,6 @@ fn mismatches(
 ) -> Vec<&'static str> {
     let mut out = Vec::new();
     let renamed = expected.rel_path.as_deref() != Some(rel_path);
-    if expected.dev != Some(st.dev as i64) {
-        out.push("dev");
-    }
     if expected.inode != Some(st.inode as i64) {
         out.push("inode");
     }

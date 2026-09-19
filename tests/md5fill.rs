@@ -334,6 +334,41 @@ async fn fill_skips_non_targets_and_refuses_pending() {
     ));
 }
 
+/// 記録の後にホストを再起動して dev 番号が変わっても補填は進む（D-62）
+#[tokio::test]
+async fn expected_dev_mismatch_alone_does_not_block_fill() {
+    let lib = Lib::new();
+    let Some(path) = lib.add("A/a.flac", 1) else {
+        eprintln!("ffmpeg が無いので skip");
+        return;
+    };
+    let real = flac_streaminfo_md5(File::open(&path).unwrap())
+        .unwrap()
+        .unwrap();
+    overwrite_md5(&path, [0u8; 16]);
+    lib.scan().await;
+    let id = lib.track_id("A/a.flac");
+    lib.set_check(id, "md5_missing");
+    let p = lib.editor.prepare_md5_fill(None, vec![id]).await.unwrap();
+    let batch_id = p.batch_id.unwrap();
+    lib.conn()
+        .execute(
+            "UPDATE edit_ops SET expected_dev = expected_dev + 1 WHERE batch_id = ?1",
+            [batch_id],
+        )
+        .unwrap();
+    let op_id = lib.ops(batch_id)[0].id;
+    let outcome = lib.editor.apply_op(op_id, None).await.unwrap();
+    assert!(
+        matches!(outcome, spindle::edit::OpOutcome::Applied),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        flac_streaminfo_md5(File::open(&path).unwrap()).unwrap(),
+        Some(real)
+    );
+}
+
 #[tokio::test]
 async fn fill_conflicts_when_file_already_has_md5_or_changed() {
     let lib = Lib::new();

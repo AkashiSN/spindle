@@ -161,6 +161,66 @@ fn inode_stage_runs_for_all_entries_before_path_stage() {
     assert_eq!(existing(&d[1]).1, Via::Inode);
 }
 
+// ---------------------------------------------------------------- dev の付け替え（D-62）
+
+#[test]
+fn dev_change_with_same_inode_and_attributes_is_unchanged() {
+    // ホスト再起動で ZFS の dev 番号が変わった。inode / size / mtime / ctime が全部同じなら
+    // 同じ実体とみなし、読み直さない（changed = false）
+    let mut e = entry("a/x.flac", 1);
+    e.dev = DEV + 1;
+    let rows = [row(10, "a/x.flac", 1, Some(md5(1)))];
+    let t = Md5Table::new(&[("a/x.flac", md5(1))]);
+    let d = t.resolve(&[e], &rows);
+    assert_eq!(existing(&d[0]), (10, Via::Inode, false));
+    assert!(
+        t.calls.borrow().is_empty(),
+        "dev の付け替えでは md5 を読まない"
+    );
+}
+
+#[test]
+fn dev_change_follows_the_inode_even_if_the_path_moved() {
+    // 再起動と外部 rename が同時に起きても inode で追える
+    let mut e = entry("b/y.flac", 1);
+    e.dev = DEV + 1;
+    let rows = [row(10, "a/x.flac", 1, Some(md5(1)))];
+    let d = Md5Table::new(&[]).resolve(&[e], &rows);
+    assert_eq!(existing(&d[0]), (10, Via::Inode, false));
+}
+
+#[test]
+fn dev_change_requires_size_mtime_and_ctime_to_all_match() {
+    // dev が違ううえに属性も違えば inode 再利用と区別できないので inode 段では採らない。
+    // 同じパスなら path 段で「変更あり」として読み直す
+    for bump in [0usize, 1, 2] {
+        let mut e = entry("a/x.flac", 1);
+        e.dev = DEV + 1;
+        match bump {
+            0 => e.size += 1,
+            1 => e.mtime_ns += 1,
+            _ => e.ctime_ns += 1,
+        }
+        let rows = [row(10, "a/x.flac", 1, Some(md5(1)))];
+        let t = Md5Table::new(&[("a/x.flac", md5(1))]);
+        let d = t.resolve(&[e], &rows);
+        assert_eq!(existing(&d[0]), (10, Via::Path, true), "bump={bump}");
+        assert!(t.calls.borrow().is_empty(), "bump={bump}");
+    }
+}
+
+#[test]
+fn dev_change_is_ambiguous_when_two_rows_share_the_inode_on_other_devs() {
+    // 別 dev に同じ inode を持つ行が 2 つ → 曖昧。inode 段では採らず path 段へ
+    let mut e = entry("a/x.flac", 1);
+    e.dev = DEV + 2;
+    let mut other = row(11, "c/z.flac", 1, None);
+    other.dev = Some(DEV + 1);
+    let rows = [row(10, "a/x.flac", 1, Some(md5(1))), other];
+    let d = Md5Table::new(&[]).resolve(&[e], &rows);
+    assert_eq!(existing(&d[0]), (10, Via::Path, true));
+}
+
 // ---------------------------------------------------------------- audio_md5 段
 
 #[test]
