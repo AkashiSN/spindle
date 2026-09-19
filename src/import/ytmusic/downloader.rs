@@ -1,0 +1,577 @@
+//! YouTube のダウンロード（SPEC §7.7、D-70、P3-3）。Library には触らず、**Inbox に置くところまで**。
+//!
+//! ```text
+//! dump      yt-dlp --dump-single-json --flat-playlist（playlist なら entries ごとに ytdl を投入して終わり）
+//! dedup     SOURCE_URL が Library / Inbox にあれば Fatal
+//! plugin    メタデータプラグイン（ok → youtube/<albumartist>/<album>、skip → 終わり、他 → youtube/_unmatched/<channel>）
+//! download  yt-dlp -f "ba[ext=webm]" --write-thumbnail
+//! remux     ffmpeg -c:a copy → .opus（再エンコードなし）
+//! tags      lofty（TRACKNUMBER は書かない。採番は Inbox）+ PICTURE + SOURCE_URL
+//! archive   Archive/youtube/<id>.webm
+//! inbox     <YYYYMMDD> <title> [<id>].opus と spindle-inbox.json → inbox ジョブを投入
+//! ```
+//!
+//! 失敗の区分: 再試行しても変わらないもの（取り込み済み・webm の音声なし・プラグインの故障・宛先の
+//! 同名ファイル）は [`DownloadError::Fatal`]、それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O）は
+//! [`DownloadError::Failed`] で指数バックオフ
+
+use std::fs::File;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
+
+use crate::db::inbox::{find_source_url, SourceLocated};
+use crate::db::Db;
+use crate::domain::pathgen::sanitize_component;
+use crate::domain::relpath::RelPath;
+use crate::domain::tags::{write_tag_changes, TagChange};
+use crate::fsroot::{FsError, RootDir};
+use crate::import::ytmusic::metadata::SOURCE_URL_KEY;
+use crate::import::ytmusic::sidecar::{FileEntry, Sidecar};
+use crate::import::ytmusic::{Item, MetadataProvider, Outcome, ProviderError, Track};
+use crate::jobs::process::{ExternalCommand, PathStyle, ProcessError};
+use crate::jobs::{Jobs, NewJob};
+
+/// `ytdl` ジョブの dedup キーの接頭辞（`ytdl:<url>`）
+pub const DEDUP_PREFIX: &str = "ytdl:";
+/// Inbox / Archive の中で YouTube 由来を置くディレクトリ
+pub const SUBDIR: &str = "youtube";
+/// 判定できなかったものの受け皿（`youtube/_unmatched/<channel>/`）
+pub const UNMATCHED_DIR: &str = "_unmatched";
+/// dump（メタデータの取得）の上限
+const DUMP_TIMEOUT: Duration = Duration::from_secs(120);
+/// remux の上限
+const REMUX_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub fn new_ytdl_job(url: &str) -> NewJob {
+    NewJob::new(
+        crate::jobs::JobType::Ytdl,
+        serde_json::json!({ "url": url }),
+    )
+    .dedup_key(format!("{DEDUP_PREFIX}{url}"))
+}
+
+pub struct DownloaderEnv {
+    pub db: Arc<Db>,
+    pub inbox: Arc<RootDir>,
+    pub archive: Arc<RootDir>,
+    pub jobs: Arc<Jobs>,
+    pub provider: MetadataProvider,
+    /// yt-dlp（引数配列。先頭がプログラム）
+    pub ytdlp: Vec<String>,
+    pub ffmpeg: PathBuf,
+    /// 作業領域の親（`<tmp_root>/<job_id>/`）
+    pub tmp_root: PathBuf,
+    pub download_timeout: Duration,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DownloadError {
+    /// 再試行しても変わらない
+    #[error("{0}")]
+    Fatal(String),
+    #[error(transparent)]
+    Failed(anyhow::Error),
+    #[error("キャンセルされた")]
+    Cancelled,
+}
+
+impl From<ProcessError> for DownloadError {
+    fn from(e: ProcessError) -> Self {
+        match e {
+            ProcessError::Cancelled => DownloadError::Cancelled,
+            other => DownloadError::Failed(other.into()),
+        }
+    }
+}
+
+impl From<std::io::Error> for DownloadError {
+    fn from(e: std::io::Error) -> Self {
+        DownloadError::Failed(e.into())
+    }
+}
+
+impl From<FsError> for DownloadError {
+    fn from(e: FsError) -> Self {
+        DownloadError::Failed(e.into())
+    }
+}
+
+impl From<crate::db::DbError> for DownloadError {
+    fn from(e: crate::db::DbError) -> Self {
+        DownloadError::Failed(e.into())
+    }
+}
+
+/// ジョブ 1 件の結果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Downloaded {
+    /// playlist を展開して entries ごとのジョブを投入した
+    Playlist { enqueued: usize },
+    /// プラグインが `skip`。ダウンロードしていない
+    Skipped { message: String },
+    /// Inbox に置いた（Inbox 相対）
+    Staged { rel_path: RelPath, verdict: String },
+}
+
+// ---------------------------------------------------------------- dump の解釈
+
+/// `--dump-single-json` の結果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dump {
+    /// entries の URL（`--flat-playlist`）
+    Playlist(Vec<String>),
+    Video(VideoInfo),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoInfo {
+    pub id: String,
+    /// 正規形の URL（`SOURCE_URL` に書く）
+    pub webpage_url: String,
+    /// プラグインに渡す channel（`uploader`。無ければ `channel`）
+    pub uploader: Option<String>,
+    pub channel: Option<String>,
+    pub title: String,
+    /// `YYYYMMDD`
+    pub upload_date: Option<String>,
+    pub duration_ms: Option<u64>,
+    /// `ba[ext=webm]` で取れる音声があるか
+    pub has_webm_audio: bool,
+}
+
+#[derive(Deserialize)]
+struct RawDump {
+    #[serde(default, rename = "_type")]
+    kind: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    webpage_url: Option<String>,
+    #[serde(default)]
+    uploader: Option<String>,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    upload_date: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    formats: Vec<RawFormat>,
+    #[serde(default)]
+    entries: Vec<RawEntry>,
+}
+
+#[derive(Deserialize)]
+struct RawFormat {
+    #[serde(default)]
+    ext: Option<String>,
+    #[serde(default)]
+    acodec: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawEntry {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    webpage_url: Option<String>,
+}
+
+/// yt-dlp の dump（JSON 1 つ）を解釈する。playlist は entries の URL だけ、動画は必要な値だけ取る
+pub fn parse_dump(bytes: &[u8]) -> Result<Dump, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| format!("UTF-8 でない: {e}"))?;
+    let raw: RawDump = serde_json::from_str(text.trim()).map_err(|e| e.to_string())?;
+    if raw.kind.as_deref() == Some("playlist") || raw.kind.as_deref() == Some("multi_video") {
+        let urls = raw
+            .entries
+            .into_iter()
+            .filter_map(|e| e.url.or(e.webpage_url))
+            .filter(|u| !u.trim().is_empty())
+            .collect();
+        return Ok(Dump::Playlist(urls));
+    }
+    let id = raw.id.filter(|s| !s.trim().is_empty()).ok_or("id が無い")?;
+    let webpage_url = raw
+        .webpage_url
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("webpage_url が無い")?;
+    let title = raw
+        .title
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("title が無い")?;
+    let has_webm_audio = raw.formats.iter().any(|f| {
+        f.ext.as_deref() == Some("webm")
+            && f.acodec
+                .as_deref()
+                .is_some_and(|c| c != "none" && !c.is_empty())
+    });
+    Ok(Dump::Video(VideoInfo {
+        id,
+        webpage_url,
+        uploader: raw.uploader.filter(|s| !s.trim().is_empty()),
+        channel: raw.channel.filter(|s| !s.trim().is_empty()),
+        title,
+        upload_date: raw
+            .upload_date
+            .filter(|d| d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit())),
+        duration_ms: raw
+            .duration
+            .filter(|d| d.is_finite() && *d >= 0.0)
+            .map(|d| (d * 1000.0).round() as u64),
+        has_webm_audio,
+    }))
+}
+
+impl VideoInfo {
+    /// プラグインの channel（`uploader` が無ければ `channel`、それも無ければ空）
+    pub fn channel_key(&self) -> &str {
+        self.uploader
+            .as_deref()
+            .or(self.channel.as_deref())
+            .unwrap_or("")
+    }
+
+    /// プラグインへの Request
+    pub fn item(&self) -> Item {
+        Item {
+            source: "youtube".into(),
+            channel: self.channel_key().to_owned(),
+            channel_title: self.channel.clone(),
+            id: Some(self.id.clone()),
+            url: Some(self.webpage_url.clone()),
+            title: self.title.clone(),
+            uploaded_at: self
+                .upload_date
+                .as_deref()
+                .map(|d| format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..8])),
+            duration_ms: self.duration_ms,
+        }
+    }
+
+    /// Inbox に置くファイル名 `<YYYYMMDD> <title> [<id>].opus`（名前順 = 公開順 = 採番順。
+    /// 日付が無ければ日付なし）。`title` は判定できたトラック名か動画タイトル
+    pub fn inbox_file_name(&self, title: &str) -> String {
+        let id = sanitize_component(&self.id);
+        // 切り詰めは title だけに効かせる（id と日付は落とさない）
+        let suffix = format!(" [{id}].opus");
+        let prefix = self
+            .upload_date
+            .as_deref()
+            .map(|d| format!("{d} "))
+            .unwrap_or_default();
+        let budget = crate::domain::relpath::MAX_COMPONENT_BYTES
+            .saturating_sub(prefix.len() + suffix.len())
+            .max(1);
+        let mut title = sanitize_component(title);
+        while title.len() > budget {
+            title.pop();
+        }
+        let title = title.trim_end();
+        let title = if title.is_empty() { "_" } else { title };
+        format!("{prefix}{title}{suffix}")
+    }
+}
+
+/// Inbox のディレクトリ: `youtube/<albumartist>/<album>`（判定できたとき）か
+/// `youtube/_unmatched/<channel>`（受け皿）
+pub fn inbox_dir(track: Option<&Track>, channel: &str) -> Result<RelPath, String> {
+    let (a, b) = match track {
+        Some(t) => (
+            sanitize_component(&t.albumartist),
+            sanitize_component(&t.album),
+        ),
+        None => (UNMATCHED_DIR.to_owned(), sanitize_component(channel)),
+    };
+    let b = if b.is_empty() { "_".to_owned() } else { b };
+    RelPath::parse(&format!("{SUBDIR}/{a}/{b}")).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------- 本体
+
+/// URL 1 件を処理する。`job_id` は作業領域の名前に使う
+pub async fn download_one(
+    env: &DownloaderEnv,
+    job_id: i64,
+    url: &str,
+    token: &CancellationToken,
+) -> Result<Downloaded, DownloadError> {
+    let check_cancel = || {
+        if token.is_cancelled() {
+            Err(DownloadError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    // 1. dump
+    let out = ytdlp(env)
+        .args([
+            "--dump-single-json",
+            "--flat-playlist",
+            "--no-download",
+            "--no-warnings",
+        ])
+        .timeout(DUMP_TIMEOUT)
+        .arg("--")
+        .arg(url)
+        .run(token)
+        .await?;
+    let video = match parse_dump(&out.stdout)
+        .map_err(|e| DownloadError::Fatal(format!("yt-dlp の出力を読めない: {e}")))?
+    {
+        Dump::Playlist(urls) => {
+            let mut enqueued = 0;
+            for u in urls {
+                check_cancel()?;
+                if let crate::jobs::EnqueueResult::Inserted(_) =
+                    env.jobs.enqueue(new_ytdl_job(&u)).await?
+                {
+                    enqueued += 1;
+                }
+            }
+            tracing::info!(url, enqueued, "playlist を展開した");
+            return Ok(Downloaded::Playlist { enqueued });
+        }
+        Dump::Video(v) => v,
+    };
+    // 2. 取り込み済み
+    let canonical = video.webpage_url.clone();
+    if let Some(located) = env.db.read(move |c| find_source_url(c, &canonical)).await? {
+        let (place, rel) = match located {
+            SourceLocated::Library(p) => ("Library", p),
+            SourceLocated::Inbox(p) => ("Inbox", p),
+        };
+        return Err(DownloadError::Fatal(format!(
+            "取り込み済み（{place}）: {rel}"
+        )));
+    }
+    check_cancel()?;
+    // 3. プラグイン
+    let item = video.item();
+    let (track, verdict, message) = match env.provider.resolve(&item, token).await {
+        Ok(Outcome::Track(t)) => (Some(t), "ok".to_owned(), None),
+        Ok(Outcome::Declined { reason, message }) if reason == "skip" => {
+            tracing::info!(url, message, "プラグインが skip");
+            return Ok(Downloaded::Skipped { message });
+        }
+        Ok(Outcome::Declined { reason, message }) => {
+            tracing::info!(url, reason, "判定できないので受け皿へ");
+            (None, reason, Some(message))
+        }
+        Err(ProviderError::Process(ProcessError::Cancelled)) => {
+            return Err(DownloadError::Cancelled)
+        }
+        Err(e) => return Err(DownloadError::Fatal(e.to_string())),
+    };
+    if !video.has_webm_audio {
+        return Err(DownloadError::Fatal(
+            "webm の音声形式（ba[ext=webm]）が無い動画".into(),
+        ));
+    }
+    // 4. download（作業領域はどの終わり方でも消す）
+    let work = WorkDir::create(&env.tmp_root, job_id)?;
+    let template = work.path.join("%(id)s.%(ext)s");
+    ytdlp(env)
+        .args([
+            "-f",
+            "ba[ext=webm]",
+            "--no-playlist",
+            "--no-warnings",
+            "--write-thumbnail",
+            "--convert-thumbnails",
+            "jpg",
+            "-o",
+        ])
+        .arg(&template)
+        .timeout(env.download_timeout)
+        .arg("--")
+        .arg(url)
+        .run(token)
+        .await?;
+    let webm = work.path.join(format!("{}.webm", video.id));
+    if !webm.is_file() {
+        return Err(DownloadError::Failed(anyhow::anyhow!(
+            "yt-dlp は成功したが {} が無い",
+            webm.display()
+        )));
+    }
+    let thumb = work.path.join(format!("{}.jpg", video.id));
+    check_cancel()?;
+    // 5. remux
+    let opus = work.path.join(format!("{}.opus", video.id));
+    ExternalCommand::new(&env.ffmpeg)
+        .path_style(PathStyle::DotSlash)
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .path_arg(&webm)
+        .args(["-vn", "-c:a", "copy", "-map_metadata", "-1"])
+        .path_arg(&opus)
+        .timeout(REMUX_TIMEOUT)
+        .run(token)
+        .await?;
+    // 6. タグ
+    let title = track
+        .as_ref()
+        .map(|t| t.title.clone())
+        .unwrap_or_else(|| video.title.clone());
+    let changes = tag_changes(track.as_ref(), &video);
+    let picture = match std::fs::read(&thumb) {
+        Ok(bytes) if !bytes.is_empty() => Some(
+            lofty::picture::Picture::unchecked(bytes)
+                .pic_type(lofty::picture::PictureType::CoverFront)
+                .mime_type(lofty::picture::MimeType::Jpeg)
+                .build(),
+        ),
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    {
+        let mut f = File::options().read(true).write(true).open(&opus)?;
+        write_tag_changes(
+            &mut f,
+            Some("opus"),
+            &changes,
+            picture.as_ref().map(std::slice::from_ref),
+        )
+        .map_err(|e| DownloadError::Failed(anyhow::anyhow!("タグを書けない: {e}")))?;
+        f.sync_all()?;
+    }
+    check_cancel()?;
+    // 7. category の語彙（プラグインの定義が正。D-69）
+    if let Some(cat) = track.as_ref().and_then(|t| t.category.clone()) {
+        env.db
+            .write(move |c| crate::db::categories::ensure(c, &cat).map(|_| ()))
+            .await?;
+    }
+    // 8. Archive/youtube/<id>.webm
+    let archive_dir = RelPath::parse(SUBDIR).map_err(|e| DownloadError::Fatal(e.to_string()))?;
+    let archive_rel = archive_dir
+        .join(&format!("{}.webm", sanitize_component(&video.id)))
+        .map_err(|e| DownloadError::Fatal(e.to_string()))?;
+    env.archive.create_dir_all(&archive_dir)?;
+    match put_file(&env.archive, &archive_dir, &archive_rel, &webm) {
+        Ok(()) | Err(FsError::Exists) => {}
+        Err(e) => return Err(e.into()),
+    }
+    // 9. Inbox
+    let dir = inbox_dir(track.as_ref(), video.channel_key()).map_err(DownloadError::Fatal)?;
+    let name = video.inbox_file_name(&title);
+    let target = dir
+        .join(&name)
+        .map_err(|e| DownloadError::Fatal(e.to_string()))?;
+    env.inbox.create_dir_all(&dir)?;
+    match put_file(&env.inbox, &dir, &target, &opus) {
+        Ok(()) => {}
+        Err(FsError::Exists) => {
+            return Err(DownloadError::Fatal(format!(
+                "Inbox に同名のファイルがある: {target}"
+            )))
+        }
+        Err(e) => return Err(e.into()),
+    }
+    let entry = FileEntry {
+        source: "youtube".into(),
+        url: Some(video.webpage_url.clone()),
+        channel: Some(video.channel_key().to_owned()),
+        verdict: verdict.clone(),
+        message,
+    };
+    let category = track.as_ref().and_then(|t| t.category.as_deref());
+    if let Err(e) = Sidecar::upsert(&env.inbox, &dir, category, &name, entry) {
+        // ファイルは置けている。判定が付かないだけなので止めない
+        tracing::warn!(dir = %dir, error = %e, "spindle-inbox.json を更新できない");
+    }
+    env.inbox.fsync_dir(Some(&dir))?;
+    env.jobs
+        .enqueue(crate::jobs::handlers::inbox::new_inbox_job())
+        .await?;
+    tracing::info!(url, path = %target, verdict, "Inbox に置いた");
+    Ok(Downloaded::Staged {
+        rel_path: target,
+        verdict,
+    })
+}
+
+fn ytdlp(env: &DownloaderEnv) -> ExternalCommand {
+    let program = env.ytdlp.first().map(String::as_str).unwrap_or("yt-dlp");
+    ExternalCommand::new(program).args(env.ytdlp.iter().skip(1))
+}
+
+/// ファイルに書くタグ。判定できたら `Track::tags(None)`（TRACKNUMBER 無し）、できなければ TITLE に
+/// 動画タイトル。どちらも `SOURCE_URL`
+fn tag_changes(track: Option<&Track>, video: &VideoInfo) -> Vec<TagChange> {
+    let pairs: Vec<(String, String)> = match track {
+        Some(t) => t.tags(None),
+        None => vec![("TITLE".to_owned(), video.title.clone())],
+    };
+    let mut changes: Vec<TagChange> = Vec::new();
+    for (k, v) in pairs {
+        match changes.iter_mut().find(|c| c.key == k) {
+            Some(c) => c.values.get_or_insert_with(Vec::new).push(v),
+            None => changes.push(TagChange {
+                key: k,
+                values: Some(vec![v]),
+            }),
+        }
+    }
+    changes.push(TagChange {
+        key: SOURCE_URL_KEY.to_owned(),
+        values: Some(vec![video.webpage_url.clone()]),
+    });
+    changes
+}
+
+/// `src` の内容を `root` の `dir` 内 tmp へ写して `target` に `RENAME_NOREPLACE`
+fn put_file(root: &RootDir, dir: &RelPath, target: &RelPath, src: &Path) -> Result<(), FsError> {
+    let (tmp_rel, mut tmp) = root.create_tmp(Some(dir))?;
+    let written = (|| -> std::io::Result<()> {
+        let mut from = File::open(src)?;
+        std::io::copy(&mut from, &mut tmp)?;
+        tmp.flush()?;
+        tmp.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = root.unlink(&tmp_rel);
+        return Err(e.into());
+    }
+    if let Err(e) = root.rename_noreplace(&tmp_rel, target) {
+        let _ = root.unlink(&tmp_rel);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// 作業領域（`<tmp_root>/<job_id>/`）。drop で消す
+struct WorkDir {
+    path: PathBuf,
+}
+
+impl WorkDir {
+    fn create(root: &Path, job_id: i64) -> std::io::Result<WorkDir> {
+        let path = root.join(job_id.to_string());
+        // 前回の残り（再試行）は消してから
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        std::fs::create_dir_all(&path)?;
+        Ok(WorkDir { path })
+    }
+}
+
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %self.path.display(), error = %e, "作業領域を消せない");
+            }
+        }
+    }
+}

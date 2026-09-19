@@ -64,8 +64,9 @@ pub struct Track {
 }
 
 impl Track {
-    /// ファイルに書くタグ（Vorbis Comment 流のキー。多値は反復）
-    pub fn tags(&self, track_no: i64) -> Vec<(String, String)> {
+    /// ファイルに書くタグ（Vorbis Comment 流のキー。多値は反復）。`track_no` が None なら
+    /// TRACKNUMBER を書かない（採番は Inbox。D-70）
+    pub fn tags(&self, track_no: Option<i64>) -> Vec<(String, String)> {
         let mut out = vec![("TITLE".to_owned(), self.title.clone())];
         for a in &self.artists {
             out.push(("ARTIST".to_owned(), a.clone()));
@@ -75,7 +76,9 @@ impl Track {
         if let Some(d) = &self.date {
             out.push(("DATE".to_owned(), d.clone()));
         }
-        out.push(("TRACKNUMBER".to_owned(), track_no.to_string()));
+        if let Some(n) = track_no {
+            out.push(("TRACKNUMBER".to_owned(), n.to_string()));
+        }
         for (k, v) in &self.tags {
             out.push((k.to_ascii_uppercase(), v.clone()));
         }
@@ -289,7 +292,11 @@ const RESERVED_TAG_KEYS: &[&str] = &[
     "TRACKNUMBER",
     "DISCNUMBER",
     "METADATA_BLOCK_PICTURE",
+    SOURCE_URL_KEY,
 ];
+
+/// ダウンローダが書く提供元の URL（yt-dlp の `webpage_url`）。重複取り込みの判定に使う（D-70）
+pub const SOURCE_URL_KEY: &str = "SOURCE_URL";
 
 /// `YYYY[-MM[-DD]]` か
 fn is_valid_date(s: &str) -> bool {

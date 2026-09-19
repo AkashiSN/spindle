@@ -83,7 +83,7 @@ async fn round_trip_sends_request_and_reads_track() {
     assert_eq!(req["item"]["uploaded_at"], "2024-05-06");
     assert!(req["item"]["url"].is_null());
     // タグと配置のフィールド
-    let tags = t.tags(3);
+    let tags = t.tags(Some(3));
     assert_eq!(
         tags,
         [
@@ -98,6 +98,8 @@ async fn round_trip_sends_request_and_reads_track() {
         ]
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
     );
+    // 採番を Inbox に任せるときは TRACKNUMBER を書かない（D-70）
+    assert!(t.tags(None).iter().all(|(k, _)| k != "TRACKNUMBER"));
     let f = t.track_fields(3, "opus", "vid1");
     assert_eq!(f.category.as_deref(), Some("Pop"));
     assert_eq!(f.artist.as_deref(), Some("Artist A"));
@@ -204,6 +206,7 @@ async fn plugin_faults_are_errors() {
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["metadata_block_picture","x"]]}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["R128_TRACK_GAIN","-1"]]}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["REPLAYGAIN_TRACK_GAIN","-1 dB"]]}}"#,
+        r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["source_url","https://x"]]}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["A=B","x"]]}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["キー","x"]]}}"#,
         r#"{"protocol":1,"ok":true,"track":{"title":"T","artists":["A"],"albumartist":"A","album":"B","tags":[["COMMENT",""]]}}"#,

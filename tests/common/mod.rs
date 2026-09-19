@@ -79,6 +79,7 @@ pub fn encode_args(ext: &str) -> &'static [&'static str] {
     match ext {
         "flac" => &["-c:a", "flac"],
         "opus" => &["-c:a", "libopus", "-b:a", "96k"],
+        "webm" => &["-c:a", "libopus", "-b:a", "96k"],
         "mp3" => &["-c:a", "libmp3lame", "-b:a", "128k"],
         "m4a" => &["-c:a", "aac", "-b:a", "128k"],
         "alac.m4a" => &["-c:a", "alac"],

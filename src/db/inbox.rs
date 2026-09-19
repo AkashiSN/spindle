@@ -321,3 +321,42 @@ pub fn expire_placed(conn: &Connection, placed_before: i64) -> Result<usize> {
         [placed_before],
     )?)
 }
+
+// ---------------------------------------------------------------- 重複取り込みの判定（D-70）
+
+/// `SOURCE_URL` タグが同じ値のファイルの所在
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceLocated {
+    /// Library の active なトラック（rel_path）
+    Library(String),
+    /// Inbox の件のファイル（Inbox 相対）
+    Inbox(String),
+}
+
+/// `SOURCE_URL = url` を持つファイルが Library（`track_tags`）か Inbox（`inbox_files.tags`）にあれば
+/// その所在。ダウンローダが同じ動画を二度取り込まないための判定
+pub fn find_source_url(conn: &Connection, url: &str) -> Result<Option<SourceLocated>> {
+    let lib: Option<String> = conn
+        .query_row(
+            "SELECT t.rel_path FROM track_tags tt JOIN tracks t ON t.id = tt.track_id
+              WHERE tt.key = 'SOURCE_URL' AND tt.value = ?1 AND t.missing_since IS NULL
+              ORDER BY t.id LIMIT 1",
+            [url],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(p) = lib {
+        return Ok(Some(SourceLocated::Library(p)));
+    }
+    let inbox: Option<String> = conn
+        .query_row(
+            "SELECT f.rel_path FROM inbox_files f, json_each(f.tags) je
+              WHERE json_extract(je.value, '$[0]') = 'SOURCE_URL'
+                AND json_extract(je.value, '$[1]') = ?1
+              ORDER BY f.item_id LIMIT 1",
+            [url],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(inbox.map(SourceLocated::Inbox))
+}

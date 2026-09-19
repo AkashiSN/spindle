@@ -13,3 +13,4 @@ pub mod tagwrite;
 pub mod thumbnail;
 pub mod transcode;
 pub mod verify;
+pub mod ytdl;
