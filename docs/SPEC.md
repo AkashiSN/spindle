@@ -976,6 +976,59 @@ tmp + rename で反映する。巻き戻しは全ゼロを書き戻す（`audio_
 
 ---
 
+### 7.10 偽ハイレゾ検出（任意）
+
+配信で買ったハイレゾ音源には、CD 由来の AccurateRip / CTDB のような品質の裏付けが無い
+（`verification` は `unverifiable` のまま）。44.1 kHz / 16 bit のマスターをアップサンプリング・
+ビット深度の水増しで「24/96」として売る例があり、移行データにも `Album/Hi-Res/01.m4a`（24/96）と
+アルバム直下の 16/44 が別トラックとして両方入っている。どちらを残すかの判断材料として、
+可逆かつ **`sample_rate > 48000` または `bit_depth > 16`** のトラックを解析し、結果を表示と
+絞り込みに出す。**判定を消費する自動処理は無い**（Derived・配布ビュー・RG・リネームは判定に
+依らない。D-71）。非可逆由来の可逆（44.1 kHz の FLAC が 16 kHz で切れている等）は対象外。
+
+```
+hirescheck ジョブ（読むだけ。track_id + audio_version、並列 = CPU コア数）
+  root の dirfd で開き fstat を行と照合 → media::decode で PCM を流す（PcmSink）
+  ├ スペクトル（sample_rate > 48000 のとき）
+  │   チャンネルごとに Hann 窓 8192 点 / ホップ 8192 の FFT（rustfft）、パワーを線形で累積
+  │   RMS が -70 dBFS 未満のフレームは無音として捨てる
+  │   終了時: 平均パワーを dB → 1/3 オクターブ幅で平滑化
+  │     noise floor = Nyquist 直下 5% のビンの中央値
+  │     cutoff_hz   = floor + 10 dB を上回る最高の周波数
+  │     cliff_db    = cutoff 直前 1 kHz の平均 − 直後 1 kHz の平均
+  │   チャンネルが複数なら cutoff が最大のチャンネルを採る（片側だけ本物なら本物）
+  ├ ビット（bit_depth ≤ 24 のとき）
+  │   round(sample × 2^(bit_depth−1)) を i32 に戻して全サンプルを OR
+  │   effective_bits = bit_depth − 末尾ゼロビット数。32 bit は f32 で正確でないので NULL
+  └ 判定（計測しなかった側は NULL。上から順に最初に当たったもの）
+      decode_error : デコード失敗（hires_check_error に stderr / メッセージの先頭 500 文字）
+      both         : upsampled かつ padded
+      upsampled    : cutoff_hz ≤ [hires].cutoff_hz かつ cliff_db ≥ [hires].cliff_db
+      padded       : effective_bits ≤ 16
+      inconclusive : cutoff_hz ≤ [hires].cutoff_hz だが崖が無い（自然なロールオフ。本物の可能性あり）、
+                     スペクトルを取る対象なのに有音フレームが 0、または両方とも計測できない
+                     （32 bit かつ ≤ 48 kHz）
+      ok           : いずれでもない
+```
+
+カットオフだけで判定しない理由: アナログテープ起こしや静かなアコースティックは本物でも
+22 kHz 前後から自然に減衰する。SRC のローパスは 1 kHz 以内で 30 dB 以上落ちる「崖」を作るので、
+それを条件に加えて誤検出を避ける。崖の無いものは `inconclusive` として人が見る。
+
+結果は `tracks.hires_check` に検査時の `audio_version` 付きで記録し（`hires_checked_at` /
+`hires_check_version` / `hires_check_error`）、**計測値 `hires_cutoff_hz` / `hires_effective_bits`
+も残す**（しきい値を変えたときや目視の判断に使う。判定は検査時に確定し、しきい値の変更は既存の
+結果を書き換えない。再判定は手動投入）。版が進めば結果は古い扱い（`stale`）。
+`[hires].check_on_import` ならスキャン完了時に結果の無い対象を自動で投入する（flaccheck と同型）。
+手動は `POST /api/hirescheck { selection }`（対象外・missing は `skipped`）。
+一覧の固定フィルタ `hires_unchecked` / `hires_suspect`（`upsampled` / `padded` / `both`）。
+DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`effectivebits`（数値）。
+
+開いた FD の fstat が行と一致しない・missing なら何も書かず Skipped（次のスキャンで版が進めば
+再投入される）。`record` は `WHERE audio_version = ?` で、検査中に版が進んでいれば書かない。
+
+---
+
 ## 8. ジョブシステム
 
 | type | 並列度 | 冪等キー |
@@ -990,6 +1043,7 @@ tmp + rename で反映する。巻き戻しは全ゼロを書き戻す（`audio_
 | `normalize` | 2 | track_id + op_id（同じトラックの直列化は track_locks） |
 | `thumbnail` | 4 | artwork_id |
 | `flaccheck` | CPU コア数 | track_id + audio_version（版付き。D-57） |
+| `hirescheck` | CPU コア数 | track_id + audio_version（版付き。§7.10、D-71） |
 | `inbox` | 1 | 固定 |
 | `ytdl` | 1 | `ytdl:<url>`（playlist の展開で投入する分も同じ。D-70） |
 | `gc` | 1 | 固定（scan と同じ排他 `library` を取れなければ Requeue。D-56） |
@@ -1044,6 +1098,9 @@ POST   /api/rg/write                              { selection, description?, ski
                                                   preview 段階は無い（値は DB から決まる）
 POST   /api/flaccheck                             { selection }。active な FLAC ごとに flaccheck ジョブを
                                                   投入（§7.9、D-57。読むだけで preview は無い）
+POST   /api/hirescheck                            { selection }。対象（可逆かつ >48 kHz または >16 bit）ごとに
+                                                  hirescheck ジョブを投入（§7.10、D-71。読むだけで preview は無い）
+                                                  → 200 { tracks, skipped, duplicates, job_ids } | 409 no_changes
 POST   /api/md5fill                               { selection, description?, skip_pending? }。flac_check = md5_missing
                                                   の FLAC に md5 op の編集バッチを記録（§7.9、D-59）
                                                   → 201 { batch_id, affected, skipped, pending_excluded }
@@ -1144,7 +1201,7 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //     "playlist_id": 3,                // プレイリスト所属
 //     "flags": ["missing", "pending"], // 固定フィルタ（AND）: unverified | duplicate | missing |
 //                                      //   no_rg | rg_unwritten | pending | conflict | hardlink |
-//                                      //   flac_unchecked | flac_error（§7.9）
+//                                      //   flac_unchecked | flac_error（§7.9）| hires_unchecked | hires_suspect（§7.10）
 //     "q": "情緒" }                    // 検索語（3 文字以上 FTS5 / 未満 LIKE）
 //   cursor は前ページの next_cursor をそのまま返す不透明文字列（キーセット）。sort が変わったら
 //   捨てる（別ソートで発行したカーソルは 400）。
@@ -1156,6 +1213,9 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "derived": { "codec": "opus", "stale_tags": false },   // または null
                "flac_check": { "status": "ok", "checked_at": 1700000000, "stale": false, "error": null },
                                                                        // 未検査なら null（§7.9）
+               "hires_check": { "status": "upsampled", "checked_at": 1700000000, "stale": false,
+                                "error": null, "cutoff_hz": 22050, "effective_bits": 16 },
+                                                                       // 対象外・未検査なら null（§7.10）
                "pending_batch_id": 42,                                // または null
                "conflict_batch_id": 41,                               // または null
                "duplicate_group": "a1b2…",                            // audio_md5 hex または null
@@ -1622,6 +1682,11 @@ metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メ�
 metadata_timeout_secs = 30
 download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
 
+[hires]                        # 偽ハイレゾ検出（§7.10、D-71）
+check_on_import = true         # スキャン完了時に未検査の対象（可逆かつ >48 kHz または >16 bit）を自動投入
+cutoff_hz = 24000              # カットオフがこれ以下なら「上げただけ」の疑い
+cliff_db = 30.0                # カットオフ前後 1 kHz の落差がこれ以上なら SRC の崖とみなす
+
 [bin]                          # 外部バイナリ。パスで上書き可
 ffmpeg = "ffmpeg"
 flac = "flac"
@@ -1785,6 +1850,7 @@ src/
 ├── media/
 │   ├── fingerprint.rs   STREAMINFO MD5 / デコード PCM MD5 / パケット列ハッシュ
 │   ├── decode.rs        symphonia / ffmpeg フォールバック
+│   ├── hires.rs         偽ハイレゾ検出の解析（PcmSink: FFT の累積とサンプル OR → 計測値 → 判定。§7.10、D-71）
 │   ├── encode.rs        flac（ffmpeg デコード → flac -8）/ opus
 │   └── artwork.rs       同梱 / 埋め込み画像の選択、判別、ハッシュアドレスのキャッシュ（P1-3）
 ├── cd/
@@ -1879,7 +1945,7 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 - [ ] Discogs / VGMdb 連携（P3 以降の任意。国内盤カタログ番号とアートワーク補完）
 - [ ] `.fpl` 書き出し（P4 の任意。バイナリ形式の解析コストに見合うか要判断）
 - [x] `HAS` 等の演算子の foobar 実機との挙動突き合わせ（2026-09-19。部分一致で一致。D-55）
-- [ ] 偽ハイレゾ検出のしきい値設計（P3）
+- [x] 偽ハイレゾ検出のしきい値設計（2026-09-20。カットオフ ≤ 24 kHz かつ崖 ≥ 30 dB / 実効 ≤ 16 bit。計測値も保存。§7.10、D-71）
 - [ ] 移行後の NFSv4 ACL 再適用（rsync では引き継げない）
 - [x] Inbox のポーリング間隔（2026-09-19。`[inbox].poll_interval_secs` 既定 60 秒 + 手動。D-68）
 - [x] 一括リネームで album 全体を動かした後、旧ディレクトリに残る同梱ファイル（cover.jpg /
