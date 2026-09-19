@@ -28,6 +28,8 @@ import {
   type PathPreview,
   type RgStartResponse,
   type RgWriteResponse,
+  type YoutubeStartResponse,
+  youtubeStartedMessage,
 } from '../lib/operations'
 import type { Selection } from '../lib/selection'
 import { toSelectionBody } from '../lib/selection'
@@ -62,6 +64,8 @@ export type Operations = {
   startVerify: () => Promise<void>
   /** MD5 の補填（md5_missing の FLAC に編集バッチ。409 pending は 2 択） */
   startMd5Fill: (skipPending?: boolean) => Promise<void>
+  /** YouTube の URL を ytdl ジョブに投入する（D-70）。投入できたら true */
+  startYoutube: (urls: string[]) => Promise<boolean>
   /** アップロード済みの画像（埋め込み差し替えの元）。無ければ null */
   uploaded: UploadedArtwork | null
   /** 画像をアップロードする（`POST /api/artwork/upload`）。成功すれば uploaded に入る */
@@ -291,6 +295,34 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     [sel, selKey, begin, fail],
   )
 
+  const startYoutube = useCallback(
+    async (urls: string[]) => {
+      if (urls.length === 0) {
+        setError('URL を 1 行に 1 つ入れてください')
+        return false
+      }
+      begin('youtube')
+      try {
+        const r = await parseErrorBody<YoutubeStartResponse>('/api/ytmusic/download', {
+          method: 'POST',
+          body: JSON.stringify({ urls }),
+        })
+        if (r.ok) {
+          setNotice(youtubeStartedMessage(r.body))
+          return true
+        }
+        setError(operationErrorMessage(r.status, r.body))
+        return false
+      } catch (e) {
+        fail(e)
+        return false
+      } finally {
+        setBusy(null)
+      }
+    },
+    [begin, fail],
+  )
+
   const uploadArtwork = useCallback(
     async (file: File) => {
       begin('upload')
@@ -368,6 +400,7 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     startFlaccheck,
     startVerify,
     startMd5Fill,
+    startYoutube,
     uploaded,
     uploadArtwork,
     clearUploaded: useCallback(() => setUploaded(null), []),

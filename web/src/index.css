@@ -1606,3 +1606,36 @@ table.inbox-tracks td:nth-child(3),
 table.inbox-tracks td:nth-child(4) {
   width: 30%;
 }
+/* 操作タブの YouTube（D-70） */
+.operations textarea.youtube-urls {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  resize: vertical;
+}
+/* ダウンローダの判定（D-70） */
+.inbox-destination {
+  cursor: default;
+}
+.inbox-verdict-ok {
+  color: var(--accent);
+}
+.inbox-verdict-ng {
+  color: var(--error);
+}
+table.inbox-tracks tr.inbox-unmatched td {
+  background: var(--pending-bg);
+}
+.inbox-verdict-details summary {
+  cursor: pointer;
+  list-style: none;
+}
+.inbox-verdict-message {
+  margin: 4px 0;
+  max-width: 480px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: var(--bg-alt);
+  padding: 4px 6px;
+}

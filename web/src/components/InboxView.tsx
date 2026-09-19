@@ -8,15 +8,18 @@ import { formatDuration } from '../lib/format'
 import { formatDateTime } from '../lib/history'
 import {
   codecSummary,
+  destinationLabel,
   draftForSubmit,
   draftFrom,
   isEditable,
   itemTitle,
   stateLabel,
   validateDraft,
+  verdictLabel,
   type DraftTrack,
   type InboxDraft,
   type InboxItem,
+  type InboxSource,
 } from '../lib/inbox'
 import { CategoryField } from './CdView'
 
@@ -62,6 +65,9 @@ export function InboxView({ inbox, onOpenAlbum }: { inbox: InboxState; onOpenAlb
                   <span className="muted small">
                     {it.tracks.length} ファイル · {codecSummary(it.tracks)} · 検出 {formatDateTime(it.detected_at)}
                   </span>
+                  {unmatchedCount(it) > 0 && (
+                    <span className="badge inbox-verdict-ng">未判定 {unmatchedCount(it)}</span>
+                  )}
                   {it.error != null && <span className="error small">{it.error}</span>}
                 </button>
               </li>
@@ -102,6 +108,8 @@ function ItemForm({
   const problems = useMemo(() => validateDraft(draft, files), [draft, files])
   const editable = isEditable(item.state)
   const placedAlbumId = item.placed_album_id
+  // ダウンローダが置いた件（サイドカーあり）だけ判定の列を出す
+  const hasSource = item.tracks.some((f) => f.source != null)
 
   const update = (patch: Partial<InboxDraft>) => setDraft((d) => ({ ...d, ...patch }))
   const updateTrack = (i: number, patch: Partial<DraftTrack>) =>
@@ -159,6 +167,9 @@ function ItemForm({
           ))}
         </ul>
       )}
+      {destinationLabel(item.destination) != null && (
+        <p className="notice small inbox-destination">{destinationLabel(item.destination)}</p>
+      )}
 
       <div className="cd-form">
         {text('アルバムアーティスト', 'albumartist')}
@@ -193,13 +204,14 @@ function ItemForm({
             <th>アーティスト（空ならアルバムアーティスト）</th>
             <th>ファイル</th>
             <th>長さ</th>
+            {hasSource && <th>判定</th>}
           </tr>
         </thead>
         <tbody>
           {draft.tracks.map((t, i) => {
             const f = byPath.get(t.rel_path)
             return (
-              <tr key={t.rel_path}>
+              <tr key={t.rel_path} className={f?.source != null && f.source.verdict !== 'ok' ? 'inbox-unmatched' : ''}>
                 <td className="inbox-num">{num(t, i, 'disc_no', 'ディスク番号')}</td>
                 <td className="inbox-num">{num(t, i, 'track_no', 'トラック番号')}</td>
                 <td>
@@ -226,6 +238,7 @@ function ItemForm({
                   {f != null ? ` · ${f.codec}${f.lossless ? '' : '（非可逆）'}` : ''}
                 </td>
                 <td className="muted small">{f != null ? formatDuration(f.duration_ms) : ''}</td>
+                {hasSource && <td className="inbox-verdict">{f?.source != null && <VerdictCell source={f.source} />}</td>}
               </tr>
             )
           })}
@@ -262,7 +275,31 @@ function ItemForm({
   )
 }
 
+/** 判定バッジ。判定できなかったものは行を開くと message（ルールの足し方）と URL が読める */
+function VerdictCell({ source }: { source: InboxSource }) {
+  const v = verdictLabel(source)
+  const badge = <span className={`badge ${v.ok ? 'inbox-verdict-ok' : 'inbox-verdict-ng'}`}>{v.text}</span>
+  if (v.ok && source.url == null) return badge
+  return (
+    <details className="inbox-verdict-details">
+      <summary>{badge}</summary>
+      {source.message != null && <pre className="inbox-verdict-message small">{source.message}</pre>}
+      {source.url != null && (
+        <a className="small" href={source.url} target="_blank" rel="noreferrer">
+          {source.url}
+        </a>
+      )}
+      {source.channel != null && <div className="muted small">channel: {source.channel}</div>}
+    </details>
+  )
+}
+
 const NO_ITEMS: InboxItem[] = []
+
+/** 判定できなかったトラックの数（一覧のバッジ） */
+function unmatchedCount(item: InboxItem): number {
+  return item.tracks.filter((f) => f.source != null && f.source.verdict !== 'ok').length
+}
 
 /** 件のファイル集合の鍵（走査で変わったかの判定に使う） */
 function filesKey(item: InboxItem): string {

@@ -79,6 +79,13 @@ export function rgWrittenMessage(r: RgWriteResponse): string {
 
 export type Md5FillResponse = { batch_id: number; affected: number; skipped: number; pending_excluded: number }
 
+export type YoutubeStartResponse = { job_ids: number[] }
+
+/** `POST /api/ytmusic/download` の結果（D-70） */
+export function youtubeStartedMessage(r: YoutubeStartResponse): string {
+  return `ダウンロードを ${formatCount(r.job_ids.length)} 件投入した（job ${r.job_ids.join(', ')}）。進捗はジョブ、結果は Inbox タブ`
+}
+
 export function md5FillMessage(r: Md5FillResponse): string {
   const rest: string[] = []
   if (r.skipped > 0) rest.push(`対象外 ${formatCount(r.skipped)}`)
@@ -105,6 +112,7 @@ const KNOWN: Record<string, string> = {
   rg_write_disabled: 'ReplayGain のタグ書き込みは設定で無効です（[replaygain].write_tags）',
   md5_fill_disabled: 'MD5 の補填は設定で無効です（[normalize].flac_fix_missing_md5）',
   editor_unavailable: '編集機能が使えません（読み取り専用で起動している）',
+  not_found: 'この機能は設定で無効です（[ytmusic].enabled）',
   artwork_unavailable: 'アートワークのキャッシュが無いので画像を扱えません',
   artwork_not_found: '画像が登録されていません。もう一度アップロードしてください',
   unsupported_image: 'JPEG / PNG / WebP の画像だけを受け付けます',

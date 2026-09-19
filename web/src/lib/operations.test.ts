@@ -8,7 +8,17 @@ import {
   pathPreviewSummary,
   rgStartedMessage,
   rgWrittenMessage,
+  youtubeStartedMessage,
 } from './operations'
+
+describe('youtubeStartedMessage（D-70）', () => {
+  it('投入したジョブの数と、結果が Inbox に出ることを伝える', () => {
+    expect(youtubeStartedMessage({ job_ids: [3, 4] })).toBe(
+      'ダウンロードを 2 件投入した（job 3, 4）。進捗はジョブ、結果は Inbox タブ',
+    )
+    expect(youtubeStartedMessage({ job_ids: [9] })).toBe('ダウンロードを 1 件投入した（job 9）。進捗はジョブ、結果は Inbox タブ')
+  })
+})
 
 describe('pathPreviewSummary', () => {
   it('変更・変更なし・衝突・反映待ち除外を件数で並べる（0 は省く）', () => {

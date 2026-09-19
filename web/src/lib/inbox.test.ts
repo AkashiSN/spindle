@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   codecSummary,
+  destinationLabel,
   draftForSubmit,
   draftFrom,
   itemTitle,
+  parseUrlLines,
   stateLabel,
   validateDraft,
+  verdictLabel,
   type InboxDraft,
   type InboxFile,
   type InboxItem,
@@ -25,6 +28,7 @@ function file(rel_path: string, codec = 'flac'): InboxFile {
     channels: 2,
     duration_ms: 1000,
     tags: [],
+    source: null,
   }
 }
 
@@ -54,6 +58,7 @@ function item(over: Partial<InboxItem> = {}): InboxItem {
     tracks: [file('d/01.flac'), file('d/02.flac')],
     proposal,
     warnings: [],
+    destination: null,
     ...over,
   }
 }
@@ -182,5 +187,33 @@ describe('表示', () => {
   it('コーデックの集合', () => {
     expect(codecSummary([file('a', 'wav'), file('b', 'flac'), file('c', 'flac')])).toBe('flac / wav')
     expect(codecSummary([])).toBe('')
+  })
+})
+
+describe('destinationLabel / verdictLabel（D-70）', () => {
+  it('追記先があれば「既存の『…』（N 曲）に追加」', () => {
+    expect(
+      destinationLabel({ album_id: 7, album: 'Songs of A', track_count: 12, max_track_no: 12 }),
+    ).toBe('宛先: 既存の『Songs of A』（12 曲）に追加。番号は 13 から')
+    expect(destinationLabel({ album_id: 7, album: null, track_count: 0, max_track_no: 0 })).toBe(
+      '宛先: 既存のアルバム（0 曲）に追加。番号は 1 から',
+    )
+    expect(destinationLabel(null)).toBeNull()
+  })
+  it('判定は ok なら「判定済み」、それ以外は reason 付きの「未判定」', () => {
+    const src = (verdict: string) => ({ source: 'youtube', url: null, channel: null, verdict, message: null })
+    expect(verdictLabel(src('ok'))).toEqual({ text: '判定済み', ok: true })
+    expect(verdictLabel(src('unmatched'))).toEqual({ text: '未判定（unmatched）', ok: false })
+    expect(verdictLabel(src('unknown_channel'))).toEqual({ text: '未判定（unknown_channel）', ok: false })
+  })
+})
+
+describe('parseUrlLines（操作タブの YouTube）', () => {
+  it('1 行 1 URL。空行と前後の空白を落とし、重複は 1 つにする', () => {
+    expect(parseUrlLines(' https://youtu.be/a \n\nhttps://youtu.be/b\r\nhttps://youtu.be/a\n')).toEqual([
+      'https://youtu.be/a',
+      'https://youtu.be/b',
+    ])
+    expect(parseUrlLines('\n  \n')).toEqual([])
   })
 })

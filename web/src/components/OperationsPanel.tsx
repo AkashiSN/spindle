@@ -8,6 +8,7 @@ import type { Playlist } from '../api/types'
 import type { Operations, PathKind } from '../hooks/useOperations'
 import { artworkUrl, uploadedSummary } from '../lib/artwork'
 import { formatCount } from '../lib/format'
+import { parseUrlLines } from '../lib/inbox'
 import { pathPreviewSummary } from '../lib/operations'
 
 const PATH_LABEL: Record<PathKind, string> = { rename: 'リネーム', normalize: '正規化（→ FLAC）' }
@@ -27,6 +28,7 @@ export function OperationsPanel({
   const [description, setDescription] = useState('')
   const [embedDescription, setEmbedDescription] = useState('')
   const [addTo, setAddTo] = useState<number | ''>('')
+  const [urls, setUrls] = useState('')
   const busy = ops.busy != null
   const pv = ops.pathPreview
   const manual = playlists.filter((p) => p.kind === 'manual')
@@ -173,6 +175,36 @@ export function OperationsPanel({
             </div>
           </div>
         )}
+      </section>
+
+      <section>
+        <h4>YouTube</h4>
+        <textarea
+          className="youtube-urls"
+          aria-label="YouTube の URL（1 行 1 つ）"
+          placeholder={'動画か playlist の URL を 1 行に 1 つ'}
+          rows={3}
+          value={urls}
+          disabled={busy}
+          onChange={(e) => setUrls(e.target.value)}
+        />
+        <div className="op-row">
+          <button
+            type="button"
+            className="primary"
+            disabled={busy || parseUrlLines(urls).length === 0}
+            onClick={() => {
+              void ops.startYoutube(parseUrlLines(urls)).then((ok) => {
+                if (ok) setUrls('')
+              })
+            }}
+          >
+            {label('youtube', 'ダウンロード')}
+          </button>
+          <span className="muted small">
+            音声を取って Inbox に置く（メタデータプラグインの判定付き。判定できないものは youtube/_unmatched）。承認は Inbox タブ
+          </span>
+        </div>
       </section>
 
       <section>

@@ -38,6 +38,27 @@ export type InboxFile = {
   duration_ms: number | null
   /** 正規化済みタグ（キーは大文字。多値は反復） */
   tags: Array<[string, string]>
+  /** サイドカー spindle-inbox.json の項（ダウンローダが置いた件。D-70）。手で置いた件は null */
+  source: InboxSource | null
+}
+
+/** ダウンローダの判定（spindle-inbox.json の 1 項） */
+export type InboxSource = {
+  source: string
+  url: string | null
+  channel: string | null
+  /** `ok` か、判定できなかった reason（unmatched / unknown_channel / …） */
+  verdict: string
+  /** 判定できなかった理由（参照実装ならルールの足し方）。ok なら null */
+  message: string | null
+}
+
+/** 追記先の既存 album（GET /api/inbox の destination。D-70） */
+export type InboxDestination = {
+  album_id: number
+  album: string | null
+  track_count: number
+  max_track_no: number
 }
 
 /** GET /api/inbox の 1 件 */
@@ -57,6 +78,8 @@ export type InboxItem = {
   /** タグから作った提案（毎回作り直される） */
   proposal: InboxDraft
   warnings: string[]
+  /** 下書きの category / albumartist / album から引いた追記先。無ければ null */
+  destination: InboxDestination | null
 }
 
 export const STATE_LABELS: Record<InboxState, string> = {
@@ -190,4 +213,26 @@ export function draftForSubmit(d: InboxDraft): InboxDraft {
 /** 下書きの編集ができる状態か（承認 / 却下の対象になる状態） */
 export function isEditable(state: InboxState): boolean {
   return state === 'pending' || state === 'failed'
+}
+
+/** 追記先の表示（D-70）。無ければ null */
+export function destinationLabel(d: InboxDestination | null): string | null {
+  if (d == null) return null
+  const name = d.album == null ? '既存のアルバム' : `既存の『${d.album}』`
+  return `宛先: ${name}（${d.track_count} 曲）に追加。番号は ${d.max_track_no + 1} から`
+}
+
+/** 判定バッジの文言（D-70） */
+export function verdictLabel(s: InboxSource): { text: string; ok: boolean } {
+  return s.verdict === 'ok' ? { text: '判定済み', ok: true } : { text: `未判定（${s.verdict}）`, ok: false }
+}
+
+/** 操作タブの「YouTube」の入力（1 行 1 URL）を URL の配列にする。空行を落とし、重複は 1 つ */
+export function parseUrlLines(text: string): string[] {
+  const out: string[] = []
+  for (const line of text.split(/\r?\n/)) {
+    const u = line.trim()
+    if (u !== '' && !out.includes(u)) out.push(u)
+  }
+  return out
 }
