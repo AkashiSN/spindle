@@ -810,9 +810,19 @@ Inbox/ に配置（ポーリング検出）
   `mb:`、無ければ件ごとの新規）→ Inbox からハッシュを取りながら Library の tmp へコピー → 補正で変わる
   タグだけ `write_tag_changes` で書く（ファイルが正のまま再スキャンしても DB と一致する）→ fsync →
   `RENAME_NOREPLACE` → 読み戻して 1 トランザクション登録（`source_type = 'download'`。宛先 album の
-  リリースキー再検証と同パス行の MD5 検証は §7.2 の配置と同じ）→ Inbox 側を unlink（コピー中に stat が
-  変わっていたら失敗）→ 既知の同梱ファイル（cover 画像 / cue / toc / log）も移し、空になった Inbox の
-  ディレクトリを消す。衝突・不足は件を `failed` にして理由を残し、この呼び出しで置いたファイルは片付ける。
+  リリースキー再検証と同パス行の MD5 検証は §7.2 の配置と同じ）→ Inbox 側を unlink → 既知の同梱ファイル
+  （cover 画像 / cue / toc / log）も移し、空になった Inbox のディレクトリを消す。コピーに使う FD を
+  fstat して承認時の行（inode / size / mtime / ctime）と照合し、コピーの後にも同じ FD を照合し、置いた
+  ファイルの音声の指紋が承認時に読んだものと一致することを確かめる。どれかが外れたら `Changed`（件は
+  `pending` に戻して再承認）。衝突・不足は件を `failed` にして理由を残し、この呼び出しで置いたファイルは
+  片付ける。
+- **状態遷移は CAS。** `approve` / `reject` / `reopen` と worker の `approved → placing` は
+  `UPDATE … WHERE id = ? AND state IN (…)` で行い（`db::inbox::transition`）、読んでから書くまでの間に
+  他（API / worker / 走査）が動かした件を上書きしない（API は 409 `state`、worker はその件を飛ばす）。
+  前のプロセスが配置の途中で落ちて `placing` のまま残った件は、次の `inbox` ジョブの先頭で `approved` に
+  戻して配置し直す（並列 1 なので、そこで見える `placing` は必ず前の実行の残り。配置は音声の指紋で自分の
+  成果物を採用するので冪等）。`placed` の件のディレクトリに走査で音声が見えたら（消せなかった原本、
+  配置の後に置かれたファイル）`pending` に戻して件として出し直す。
   Inbox は Library と別データセットなので move は実コピー（§5）
 - **後続**は `rg`（album）と `transcode`。WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら `normalize` の
   編集バッチを作って投入する（D-46 の予告）。thumbnail は埋め込み画像があればスキャンと同じ経路で出る

@@ -296,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
             layout: state.config.layout.clone(),
             editor: Some(Arc::clone(&editor)),
             wav_to_flac: state.config.normalize.wav_to_flac,
+            before_place: None,
         })),
     );
     let worker = state.jobs.start(registry, shutdown.clone());

@@ -232,6 +232,54 @@ pub fn set_state(
     Ok(())
 }
 
+/// 状態遷移の CAS: 今の状態が `from` のどれかであるときだけ `to` にする。変えたら true。
+/// 状態検査と更新を 1 文にして、読んでから書くまでの間に他（API / worker / 走査）が動かした
+/// 件を上書きしない
+pub fn transition(
+    conn: &Connection,
+    id: i64,
+    from: &[ItemState],
+    to: ItemState,
+    error: Option<&str>,
+    now: i64,
+) -> Result<bool> {
+    if from.is_empty() {
+        return Ok(false);
+    }
+    // プレースホルダの数だけを組み立てる（値は全部バインド）
+    let marks = (0..from.len())
+        .map(|i| format!("?{}", i + 5))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "UPDATE inbox_items
+            SET state = ?2, error = ?3,
+                approved_at = CASE WHEN ?2 = 'approved' THEN ?4 ELSE approved_at END
+          WHERE id = ?1 AND state IN ({marks})"
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(id),
+        Box::new(to.as_str()),
+        Box::new(error.map(str::to_owned)),
+        Box::new(now),
+    ];
+    for f in from {
+        params.push(Box::new(f.as_str()));
+    }
+    let n = conn.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+    Ok(n == 1)
+}
+
+/// 起動 / ジョブ開始時の回復: 前のプロセスが配置の途中で落ちて `placing` のまま残った件を
+/// `approved` に戻す（配置は冪等なので再実行してよい）。戻した件数を返す
+pub fn recover_placing(conn: &Connection) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE inbox_items SET state = 'approved', error = NULL WHERE state = 'placing'",
+        [],
+    )?;
+    Ok(n)
+}
+
 pub fn set_draft(conn: &Connection, id: i64, draft: &serde_json::Value) -> Result<()> {
     conn.execute(
         "UPDATE inbox_items SET draft = ?2 WHERE id = ?1",

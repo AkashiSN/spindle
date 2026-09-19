@@ -108,6 +108,16 @@ fn validate_accepts_complete_draft_and_reports_each_defect() {
         d.validate(&files()),
         Err(DraftError::MissingFile("A/02.flac".into()))
     );
+    // 全ファイルを含んだ上で同じファイルをもう 1 行（別の番号で）足しても通さない
+    let mut d = draft();
+    let mut dup = d.tracks[0].clone();
+    dup.rel_path = "a/01.FLAC".into();
+    dup.track_no = 3;
+    d.tracks.push(dup);
+    assert_eq!(
+        d.validate(&files()),
+        Err(DraftError::DuplicateFile("a/01.FLAC".into()))
+    );
     let mut d = draft();
     d.date = Some("2024/01".into());
     assert_eq!(

@@ -133,6 +133,12 @@ describe('validateDraft', () => {
       ],
     }
     expect(validateDraft(d, files)).toEqual(['件に無いファイル: d/03.flac', '下書きに無いファイル: d/02.flac'])
+    // 全ファイルを含んだ上で同じファイルをもう 1 行足しても通さない
+    const dup: InboxDraft = {
+      ...proposal,
+      tracks: [...proposal.tracks, { rel_path: 'D/01.FLAC', disc_no: 1, track_no: 3, title: 'c', artist: '' }],
+    }
+    expect(validateDraft(dup, files)).toEqual(['下書きに同じファイルが 2 回: D/01.FLAC'])
   })
 
   it('日付は YYYY / YYYY-MM / YYYY-MM-DD だけ。category は空文字を許さない', () => {

@@ -149,6 +149,7 @@ export function validateDraft(d: InboxDraft, files: string[]): string[] {
   for (const t of d.tracks) {
     const key = pathKey(t.rel_path)
     if (!known.has(key)) out.push(`件に無いファイル: ${t.rel_path}`)
+    if (seen.has(key)) out.push(`下書きに同じファイルが 2 回: ${t.rel_path}`)
     seen.add(key)
     if (t.title.trim() === '') out.push(`タイトルが空: ${t.rel_path}`)
     if (!(t.disc_no >= 1) || !(t.track_no >= 1)) {

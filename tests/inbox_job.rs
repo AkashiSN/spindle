@@ -13,6 +13,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 use tokio_util::sync::CancellationToken;
 
+use spindle::cd::place::PlaceHook;
 use spindle::config::LayoutConfig;
 use spindle::db::inbox::{self, ItemState};
 use spindle::db::Db;
@@ -67,6 +68,10 @@ impl Lib {
     }
 
     fn env(&self, wav_to_flac: bool) -> PlaceItemEnv {
+        self.env_with(wav_to_flac, None)
+    }
+
+    fn env_with(&self, wav_to_flac: bool, before_place: Option<PlaceHook>) -> PlaceItemEnv {
         PlaceItemEnv {
             db: self.db.clone(),
             library: self.library.clone(),
@@ -79,6 +84,7 @@ impl Lib {
             },
             editor: Some(self.editor.clone()),
             wav_to_flac,
+            before_place,
         }
     }
 
@@ -584,4 +590,140 @@ async fn rerun_after_partial_placement_reuses_files_and_adopts_rows() {
     assert_eq!(second.track_ids, first.track_ids);
     assert_eq!(lib.count("SELECT count(*) FROM tracks"), 1);
     assert!(!lib.inbox_path("AlbumA/01.flac").exists());
+}
+
+// ---------------------------------------------------------------- クラッシュ境界と競合
+
+/// 前のプロセスが placing のまま落ちた件（ファイルはまだ何も置いていない）は、次のジョブが
+/// approved に戻してそのまま配置する
+#[tokio::test]
+async fn placing_left_by_a_crash_is_recovered_and_placed() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    inbox::set_state(&lib.conn(), a.id, ItemState::Placing, None, 2).unwrap();
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert!(lib.lib_path("_Unsorted/Artist/Album/01 One.flac").exists());
+    assert!(!lib.inbox_path("AlbumA/01.flac").exists());
+}
+
+/// 「ファイルは置いたが登録の前に落ちた」: Library に補正済みのファイルだけがあり、DB に行が無く、
+/// Inbox に原本が残っている。再実行は宛先を自分の成果物として採用し、行を作り、Inbox を消す
+#[tokio::test]
+async fn crash_after_copy_before_register_is_completed_by_the_next_job() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    let draft = draft_for(&[("AlbumA/01.flac", 1, "One!")], None, "Album");
+    lib.approve(a.id, &draft);
+    let env = lib.env(false);
+    let item = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    let first = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    // 登録を無かったことにし（行は消す）、Inbox に原本を戻し、placing のまま落ちたことにする
+    let c = lib.conn();
+    c.execute("DELETE FROM tracks WHERE id = ?1", [first.track_ids[0]])
+        .unwrap();
+    c.execute("DELETE FROM albums WHERE id = ?1", [first.album_id])
+        .unwrap();
+    c.execute("DELETE FROM jobs WHERE type IN ('rg', 'transcode')", [])
+        .unwrap();
+    drop(c);
+    std::fs::create_dir_all(lib.inbox_path("AlbumA")).unwrap();
+    lib.add("AlbumA/01.flac", 1, "One", "A", 1).unwrap();
+    lib.scan(1001).await;
+    let a2 = lib.item("AlbumA").unwrap();
+    lib.approve(a2.id, &draft);
+    inbox::set_state(&lib.conn(), a2.id, ItemState::Placing, None, 2).unwrap();
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), a2.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 1);
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 1);
+    let p = lib.lib_path("_Unsorted/Artist/Album/01 One!.flac");
+    assert!(p.exists());
+    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
+        .unwrap();
+    assert_eq!(af.tags.first("TITLE"), Some("One!"));
+    assert!(!lib.inbox_path("AlbumA/01.flac").exists());
+}
+
+/// Inbox 側を読んだ後・コピーの前に原本が差し替えられたら Changed で、Library には何も残らない
+#[tokio::test]
+async fn source_replaced_before_copy_is_detected_and_cleaned_up() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    let inbox_dir = lib.inbox_path("AlbumA");
+    let hook: PlaceHook = Arc::new(move || {
+        // 別の音声で差し替える（inode が変わる）
+        std::fs::remove_file(inbox_dir.join("01.flac")).unwrap();
+        common::make_audio(&inbox_dir, "01.flac", "flac", 9).unwrap();
+        common::set_basic_tags(
+            &inbox_dir.join("01.flac"),
+            "One",
+            "Artist",
+            "A",
+            "Artist",
+            1,
+            1,
+        );
+    });
+    let env = lib.env_with(false, Some(hook));
+    let item = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    let err = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, spindle::import::inbox::InboxError::Changed(_)),
+        "{err}"
+    );
+    assert!(!lib.lib_path("_Unsorted").exists());
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 0);
+    assert!(lib.inbox_path("AlbumA/01.flac").exists());
+}
+
+/// 配置の後も Inbox に音声が残っていれば（消せなかった / 置き直された）、placed の裏に隠さず
+/// 次の走査で pending に戻す
+#[tokio::test]
+async fn audio_left_in_a_placed_directory_reopens_the_item() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    assert_eq!(
+        inbox::get(&lib.conn(), a.id).unwrap().unwrap().state,
+        ItemState::Placed
+    );
+    // 配置の後に同じディレクトリへ別の音声が置かれた
+    lib.add("AlbumA/02.flac", 2, "Two", "A", 2).unwrap();
+    lib.scan(2000).await;
+    let it = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Pending);
+    assert!(it.error.is_some());
+    let files = inbox::files(&lib.conn(), a.id).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].rel_path, "AlbumA/02.flac");
 }

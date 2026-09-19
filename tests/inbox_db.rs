@@ -130,3 +130,64 @@ fn stale_and_expire_and_cascade() {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+#[test]
+fn transition_is_a_compare_and_set() {
+    let c = open_memory_connection().unwrap();
+    let a = inbox::insert_item(&c, "AlbumA", "albuma", 100).unwrap();
+    // from に今の状態が無ければ何も変えない
+    assert!(
+        !inbox::transition(&c, a, &[ItemState::Approved], ItemState::Placing, None, 1).unwrap()
+    );
+    assert_eq!(
+        inbox::get(&c, a).unwrap().unwrap().state,
+        ItemState::Pending
+    );
+    // pending | failed → approved（approved_at が入る）
+    assert!(inbox::transition(
+        &c,
+        a,
+        &[ItemState::Pending, ItemState::Failed],
+        ItemState::Approved,
+        None,
+        7
+    )
+    .unwrap());
+    let got = inbox::get(&c, a).unwrap().unwrap();
+    assert_eq!(got.state, ItemState::Approved);
+    assert_eq!(got.approved_at, Some(7));
+    // 却下された後の worker の approved → placing は外れる
+    assert!(
+        inbox::transition(&c, a, &[ItemState::Approved], ItemState::Rejected, None, 8).unwrap()
+    );
+    assert!(
+        !inbox::transition(&c, a, &[ItemState::Approved], ItemState::Placing, None, 9).unwrap()
+    );
+    assert_eq!(
+        inbox::get(&c, a).unwrap().unwrap().state,
+        ItemState::Rejected
+    );
+    // 無い id / 空の from
+    assert!(
+        !inbox::transition(&c, 999, &[ItemState::Rejected], ItemState::Pending, None, 9).unwrap()
+    );
+    assert!(!inbox::transition(&c, a, &[], ItemState::Pending, None, 9).unwrap());
+}
+
+#[test]
+fn recover_placing_returns_stuck_items_to_approved() {
+    let c = open_memory_connection().unwrap();
+    let a = inbox::insert_item(&c, "AlbumA", "albuma", 100).unwrap();
+    let b = inbox::insert_item(&c, "AlbumB", "albumb", 100).unwrap();
+    inbox::set_state(&c, a, ItemState::Placing, Some("途中"), 1).unwrap();
+    inbox::set_state(&c, b, ItemState::Pending, None, 1).unwrap();
+    assert_eq!(inbox::recover_placing(&c).unwrap(), 1);
+    let got = inbox::get(&c, a).unwrap().unwrap();
+    assert_eq!(got.state, ItemState::Approved);
+    assert!(got.error.is_none());
+    assert_eq!(
+        inbox::get(&c, b).unwrap().unwrap().state,
+        ItemState::Pending
+    );
+    assert_eq!(inbox::recover_placing(&c).unwrap(), 0);
+}

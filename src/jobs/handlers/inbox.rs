@@ -59,6 +59,16 @@ impl InboxHandler {
     async fn run_inner(&self, ctx: &JobContext) -> HandlerResult {
         let job_id = ctx.job.id;
         let token = ctx.cancel_token();
+        // 前のプロセスが配置の途中で落ちた件（placing）を approved に戻す。inbox ジョブは並列 1 なので、
+        // ここで見える placing は必ず前の実行の残り。配置は冪等（音声の指紋で自分の成果物を採用する）
+        let recovered = ctx.db().write(|c| dbinbox::recover_placing(c)).await?;
+        if recovered > 0 {
+            tracing::warn!(
+                job_id,
+                recovered,
+                "配置の途中で止まっていた Inbox の件を配置待ちに戻した"
+            );
+        }
         let out = scan_inbox(&self.env.db, &self.env.inbox, now_epoch())
             .await
             .map_err(|e| JobError::Failed(anyhow::anyhow!("Inbox の走査に失敗: {e}")))?;
@@ -87,10 +97,27 @@ impl InboxHandler {
                 );
                 return Ok(Outcome::Requeue);
             }
-            ctx.db()
-                .write(move |c| dbinbox::set_state(c, id, ItemState::Placing, None, now_epoch()))
+            // approved → placing は CAS。一覧を読んでから排他を取るまでの間に却下 / 再開 / 走査で
+            // 動かされた件はここで外れる（上書きして配置しない）
+            let claimed = ctx
+                .db()
+                .write(move |c| {
+                    dbinbox::transition(
+                        c,
+                        id,
+                        &[ItemState::Approved],
+                        ItemState::Placing,
+                        None,
+                        now_epoch(),
+                    )
+                })
                 .await?;
-            let result = place_item(&self.env, &item, &token).await;
+            let result = if claimed {
+                Some(place_item(&self.env, &item, &token).await)
+            } else {
+                tracing::info!(job_id, item_id = id, "承認が取り消されたので配置しない");
+                None
+            };
             if let Err(e) = ctx
                 .db()
                 .write(move |c| dbjobs::release_mutexes(c, job_id))
@@ -98,6 +125,9 @@ impl InboxHandler {
             {
                 tracing::warn!(job_id, error = %e, "library の排他を解放できない");
             }
+            let Some(result) = result else {
+                continue;
+            };
             match result {
                 Ok(p) => {
                     let album_id = p.album_id;

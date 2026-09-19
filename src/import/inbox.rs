@@ -67,6 +67,8 @@ pub enum DraftError {
     UnknownFile(String),
     #[error("下書きに無いファイル: {0}")]
     MissingFile(String),
+    #[error("下書きに同じファイルが 2 回: {0}")]
+    DuplicateFile(String),
     #[error("日付の形が不正: {0}（YYYY / YYYY-MM / YYYY-MM-DD）")]
     BadDate(String),
     #[error("category が空")]
@@ -124,7 +126,10 @@ impl InboxDraft {
             if !known.contains(&key) {
                 out.push(DraftError::UnknownFile(t.rel_path.clone()));
             }
-            seen_files.insert(key);
+            if !seen_files.insert(key) {
+                // 同じ音声を複数の行として配置させない
+                out.push(DraftError::DuplicateFile(t.rel_path.clone()));
+            }
             if t.title.trim().is_empty() {
                 out.push(DraftError::EmptyTitle {
                     rel_path: t.rel_path.clone(),
@@ -513,11 +518,11 @@ pub async fn scan_inbox(
                         })?
                     }
                 };
+                if item.state == ItemState::Placing {
+                    // 配置中の件は触らない（同じジョブの中でしか placing にならない）
+                    continue;
+                }
                 if let Some(files) = &s.files {
-                    if item.state == ItemState::Placing {
-                        // 配置中の件は触らない（同じジョブの中でしか placing にならない）
-                        continue;
-                    }
                     dbinbox::replace_files(c, item.id, files)?;
                     if item.state == ItemState::Approved {
                         dbinbox::set_state(
@@ -528,6 +533,17 @@ pub async fn scan_inbox(
                             now,
                         )?;
                     }
+                }
+                if item.state == ItemState::Placed {
+                    // 配置済みの件のディレクトリに音声がある = 消せなかった原本か、配置の後に
+                    // 置かれた（または差し替えられた）ファイル。placed の裏に隠さず件として出し直す
+                    dbinbox::set_state(
+                        c,
+                        item.id,
+                        ItemState::Pending,
+                        Some("配置の後も Inbox に音声が残っている（再承認で配置し直す）"),
+                        now,
+                    )?;
                 }
             }
             for it in dbinbox::stale_items(c, now)? {
@@ -575,6 +591,9 @@ pub struct PlaceItemEnv {
     /// 無ければ normalize は投入しない
     pub editor: Option<Arc<Editor>>,
     pub wav_to_flac: bool,
+    /// テスト用: Inbox 側を読んだ後・配置の前に呼ぶ（その間に原本が差し替えられた状況を作る）
+    #[doc(hidden)]
+    pub before_place: Option<crate::cd::place::PlaceHook>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -894,6 +913,7 @@ fn place_files(
     inbox: &RootDir,
     item: &Item,
     plan: &ItemPlan,
+    files: &HashMap<String, FileRow>,
     sources: &[Source],
 ) -> Result<Placed, InboxError> {
     let created_top = create_dirs(library, &plan.rel_dir)?;
@@ -904,11 +924,22 @@ fn place_files(
             let ext_for_write = src.ext.clone();
             let changes = src.changes.clone();
             let src_fp = src.fp;
+            // コピーに使う FD そのものを承認時の行（inode / size / mtime / ctime）と照合する。
+            // read_sources の stat からここまでの間に差し替えられていれば Changed（D-68「コピー中に
+            // stat が変わったら失敗」）。コピーの後にも同じ FD を見て、読んでいる間の変更を弾く
+            let src_file = inbox.open_file(&src.rel)?;
+            let before = crate::fsroot::fstat(&src_file)?;
+            let row = files
+                .get(&src.rel.key())
+                .ok_or_else(|| InboxError::Changed(src.rel.to_string()))?;
+            if !stat_matches(row, &before) {
+                return Err(InboxError::Changed(src.rel.to_string()));
+            }
             let outcome = place_one(
                 library,
                 &plan.rel_dir,
                 target,
-                inbox.open_file(&src.rel)?,
+                &src_file,
                 move |tmp: &mut File| {
                     if !changes.is_empty() {
                         write_tag_changes(tmp, ext_for_write.as_deref(), &changes, None).map_err(
@@ -930,11 +961,20 @@ fn place_files(
             if outcome == PlacedFile::New {
                 placed_new.push(target.clone());
             }
+            let after = crate::fsroot::fstat(&src_file)?;
+            if !stat_matches(row, &after) {
+                return Err(InboxError::Changed(src.rel.to_string()));
+            }
             let file = library.open_file(target)?;
             let ph = crate::fsroot::fstat(&file)?;
             let af = read_audio_file(file, src.ext.as_deref())
                 .map_err(|e| InboxError::Conflict(format!("{target}: {e}")))?;
             let fp = read_fingerprint(library, target, &af);
+            // 置いたものの音声が承認時に読んだ音声と同じことを確かめる（コピー中の書き換え、
+            // 宛先の既存ファイルの採用、いずれも指紋で閉じる）
+            if !same_audio(fp, src_fp) {
+                return Err(InboxError::Changed(src.rel.to_string()));
+            }
             let mut content = track_content(af);
             content.picture = PictureState::Unread;
             tracks.push((ph.into(), content, fp));
@@ -1165,18 +1205,24 @@ pub async fn place_item(
     if token.is_cancelled() {
         return Err(InboxError::Cancelled);
     }
+    if let Some(hook) = &env.before_place {
+        hook();
+    }
     // 3. 配置
     let placed = {
-        let (library, inbox, item, plan, sources) = (
+        let (library, inbox, item, plan, files, sources) = (
             Arc::clone(&env.library),
             Arc::clone(&env.inbox),
             item.clone(),
             plan.clone(),
+            Arc::clone(&files),
             Arc::clone(&sources),
         );
-        tokio::task::spawn_blocking(move || place_files(&library, &inbox, &item, &plan, &sources))
-            .await
-            .map_err(|e| std::io::Error::other(format!("配置タスクが異常終了: {e}")))??
+        tokio::task::spawn_blocking(move || {
+            place_files(&library, &inbox, &item, &plan, &files, &sources)
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("配置タスクが異常終了: {e}")))??
     };
     let placed_new = placed.placed_new.clone();
     let created_top = placed.created_top.clone();

@@ -2512,9 +2512,16 @@ ISRC / pre-emphasis / CD-TEXT を `Toc` に持たせて disc.toc に書く（P2-
   新規キー）→ `library` の排他 → tmp + `RENAME_NOREPLACE` → 1 トランザクション登録（`source_type =
   'download'`、宛先 album のリリースキー再検証、同パス行の MD5 検証）→ 失敗時はこの呼び出しで置いた
   ファイルだけ片付ける。共通部分（1 ファイルの配置・後始末・リリースキー・album の検索 / 作成・行の
-  登録）は `src/import/placement.rs` に置き、`cd::place` と `import::inbox` が使う。Inbox 側の unlink は
-  コピー中に stat が変わっていなかったときだけ（コピー = ハッシュ済みの複製）。既知の同梱ファイル
-  （cover 画像 / cue / toc / log）も移し、空になった Inbox のディレクトリを消す
+  登録）は `src/import/placement.rs` に置き、`cd::place` と `import::inbox` が使う。コピーに使う FD を
+  fstat で承認時の行と照合し、コピーの後にも同じ FD を照合し、置いたファイルの音声の指紋が承認時に読んだ
+  ものと一致することを確かめる（外れたら `Changed` → `pending` に戻して再承認。コピー = 検証済みの複製）。
+  既知の同梱ファイル（cover 画像 / cue / toc / log）も移し、空になった Inbox のディレクトリを消す
+- **状態遷移は CAS、`placing` はジョブの先頭で回復する。** `approve` / `reject` / `reopen` と worker の
+  `approved → placing` は `UPDATE … WHERE state IN (…)`（`db::inbox::transition`）で、読んでから書くまでに
+  他が動かした件を上書きしない。配置の途中でプロセスが落ちて `placing` のまま残った件は次の `inbox`
+  ジョブが `approved` に戻して配置し直す（並列 1 なのでジョブ開始時の `placing` は必ず前の実行の残り。
+  配置は冪等）。`placed` の件のディレクトリに走査で音声が見えたら `pending` に戻す（消せなかった原本や
+  配置後に置かれたファイルを `placed` の裏に隠さない）
 - **後続は rg / transcode に加えて normalize。** WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら
   `Editor::prepare_normalize` で編集バッチを作って投入する（D-46 で P2-10 に先送りしていた自動投入）。
   既存ライブラリの一括変換はこれまでどおり手動

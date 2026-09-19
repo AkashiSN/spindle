@@ -95,43 +95,59 @@ pub async fn approve(
     if let Some(r) = unavailable(&state) {
         return Ok(r);
     }
-    let (item, files) = state
-        .db
-        .read(move |c| {
-            let item = dbinbox::get(c, id)?;
-            let files = match &item {
-                Some(_) => dbinbox::files(c, id)?,
-                None => Vec::new(),
-            };
-            Ok((item, files))
-        })
-        .await?;
-    let Some(item) = item else {
-        return Ok(error_response(StatusCode::NOT_FOUND, "not_found"));
-    };
-    if !matches!(item.state, ItemState::Pending | ItemState::Failed) {
-        return Ok(error_response(StatusCode::CONFLICT, "state"));
-    }
-    let names: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();
-    if let Err(e) = draft.validate(&names) {
-        return Ok(error_response_with_message(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            e.to_string(),
-        ));
-    }
     let value = serde_json::to_value(&draft)
         .map_err(|e| ApiError::Internal(format!("下書きを JSON にできない: {e}")))?;
-    state
+    // 状態の検査・下書きの検証・保存・遷移を 1 トランザクションで行い、遷移は CAS
+    // （読んでから書くまでに worker / 走査 / 別の API が動かした件を上書きしない）
+    let outcome = state
         .db
         .transaction(move |c| {
+            let Some(item) = dbinbox::get(c, id)? else {
+                return Ok(Approve::NotFound);
+            };
+            if !matches!(item.state, ItemState::Pending | ItemState::Failed) {
+                return Ok(Approve::State);
+            }
+            let names: Vec<String> = dbinbox::files(c, id)?
+                .into_iter()
+                .map(|f| f.rel_path)
+                .collect();
+            if let Err(e) = draft.validate(&names) {
+                return Ok(Approve::Bad(e.to_string()));
+            }
             dbinbox::set_draft(c, id, &value)?;
-            dbinbox::set_state(c, id, ItemState::Approved, None, now_epoch())?;
-            Ok(())
+            let moved = dbinbox::transition(
+                c,
+                id,
+                &[ItemState::Pending, ItemState::Failed],
+                ItemState::Approved,
+                None,
+                now_epoch(),
+            )?;
+            Ok(if moved { Approve::Ok } else { Approve::State })
         })
         .await?;
+    match outcome {
+        Approve::NotFound => return Ok(error_response(StatusCode::NOT_FOUND, "not_found")),
+        Approve::State => return Ok(error_response(StatusCode::CONFLICT, "state")),
+        Approve::Bad(msg) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                msg,
+            ))
+        }
+        Approve::Ok => {}
+    }
     let job_id = state.jobs.enqueue(new_inbox_job()).await?.id();
     Ok((StatusCode::ACCEPTED, Json(Accepted { job_id })).into_response())
+}
+
+enum Approve {
+    NotFound,
+    State,
+    Bad(String),
+    Ok,
 }
 
 async fn transition(
@@ -143,18 +159,22 @@ async fn transition(
     if let Some(r) = unavailable(state) {
         return Ok(r);
     }
-    let item = state.db.read(move |c| dbinbox::get(c, id)).await?;
-    let Some(item) = item else {
-        return Ok(error_response(StatusCode::NOT_FOUND, "not_found"));
-    };
-    if !from.contains(&item.state) {
-        return Ok(error_response(StatusCode::CONFLICT, "state"));
-    }
-    state
+    // 遷移は CAS（今の状態が `from` のどれかのときだけ）。外れたら 404 か 409 を状態で分ける
+    let from = from.to_vec();
+    let moved = state
         .db
-        .write(move |c| dbinbox::set_state(c, id, to, None, now_epoch()))
+        .transaction(move |c| {
+            if dbinbox::transition(c, id, &from, to, None, now_epoch())? {
+                return Ok(Some(true));
+            }
+            Ok(dbinbox::get(c, id)?.map(|_| false))
+        })
         .await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(match moved {
+        Some(true) => StatusCode::NO_CONTENT.into_response(),
+        Some(false) => error_response(StatusCode::CONFLICT, "state"),
+        None => error_response(StatusCode::NOT_FOUND, "not_found"),
+    })
 }
 
 pub async fn reject(
