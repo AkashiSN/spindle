@@ -804,3 +804,158 @@ async fn normalize_batch_is_recorded_atomically_with_registration() {
         1
     );
 }
+
+// ---------------------------------------------------------------- 既存 album への追記（D-70）
+
+fn sidecar_entry() -> spindle::import::ytmusic::sidecar::FileEntry {
+    spindle::import::ytmusic::sidecar::FileEntry {
+        source: "youtube".into(),
+        url: Some("https://www.youtube.com/watch?v=abc".into()),
+        channel: Some("CH".into()),
+        verdict: "ok".into(),
+        message: None,
+    }
+}
+
+/// 1 件目を配置した後、同じ category / albumartist / album への 2 件目は既存の album に追記される。
+/// サイドカーは Library に持っていかず、配置の成功で消える
+#[tokio::test]
+async fn second_item_appends_to_the_existing_album_and_removes_the_sidecar() {
+    use spindle::import::ytmusic::sidecar::{Sidecar, SIDECAR_NAME};
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.conn()
+        .execute("INSERT INTO categories (name) VALUES ('Rock')", [])
+        .unwrap();
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], Some("Rock"), "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let album_id: i64 = lib
+        .conn()
+        .query_row(
+            "SELECT id FROM albums WHERE rel_dir = 'Rock/Artist/Album'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // 2 件目（TRACKNUMBER 無し、サイドカー付き）。承認の下書きで #2 を振る
+    lib.add(
+        "youtube/Artist/Album/20260901 Two [abc].flac",
+        2,
+        "Two",
+        "Album",
+        0,
+    );
+    let dir = spindle::domain::relpath::RelPath::parse("youtube/Artist/Album").unwrap();
+    Sidecar::upsert(
+        &lib.inbox,
+        &dir,
+        Some("Rock"),
+        "20260901 Two [abc].flac",
+        sidecar_entry(),
+    )
+    .unwrap();
+    lib.scan(2000).await;
+    let b = lib.item("youtube/Artist/Album").unwrap();
+    lib.approve(
+        b.id,
+        &draft_for(
+            &[("youtube/Artist/Album/20260901 Two [abc].flac", 2, "Two")],
+            Some("Rock"),
+            "Album",
+        ),
+    );
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), b.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert_eq!(it.placed_album_id, Some(album_id));
+    assert!(lib.lib_path("Rock/Artist/Album/02 Two.flac").exists());
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 1);
+    assert_eq!(
+        lib.count(&format!(
+            "SELECT count(*) FROM tracks WHERE album_id = {album_id} AND missing_since IS NULL"
+        )),
+        2
+    );
+    // サイドカーは Library に無く、Inbox からも消えてディレクトリごと無くなる
+    assert!(!lib
+        .lib_path(&format!("Rock/Artist/Album/{SIDECAR_NAME}"))
+        .exists());
+    assert!(!lib.inbox_path("youtube/Artist/Album").exists());
+}
+
+/// 承認と配置の間に番号が埋まっていたら、登録で弾いて failed（置いたファイルは片付ける）
+#[tokio::test]
+async fn append_with_a_taken_number_fails_at_registration() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+
+    // 2 件目が #1 を名乗る（API の検証を通らないが、承認後に 1 件目が入った状況と同じ）
+    lib.add("AlbumB/01.flac", 2, "Other", "Album", 1);
+    lib.scan(2000).await;
+    let b = lib.item("AlbumB").unwrap();
+    lib.approve(
+        b.id,
+        &draft_for(&[("AlbumB/01.flac", 1, "Other")], None, "Album"),
+    );
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), b.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Failed);
+    assert!(
+        it.error.as_deref().unwrap_or("").contains("track 1"),
+        "{:?}",
+        it.error
+    );
+    assert!(!lib
+        .lib_path("_Unsorted/Artist/Album/01 Other.flac")
+        .exists());
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 1);
+    assert!(lib.inbox_path("AlbumB/01.flac").exists());
+}
+
+/// MB リリースの album には追記しない（従来どおり別リリースとして降格）
+#[tokio::test]
+async fn album_with_a_release_id_is_not_adopted() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    lib.conn()
+        .execute("UPDATE albums SET mb_release_id = 'mbid-1'", [])
+        .unwrap();
+
+    lib.add("AlbumB/02.flac", 2, "Two", "Album", 2);
+    lib.scan(2000).await;
+    let b = lib.item("AlbumB").unwrap();
+    lib.approve(
+        b.id,
+        &draft_for(&[("AlbumB/02.flac", 2, "Two")], None, "Album"),
+    );
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), b.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 2);
+    assert!(lib
+        .lib_path("_Unsorted/Artist/Album (2024)/02 Two.flac")
+        .exists());
+}

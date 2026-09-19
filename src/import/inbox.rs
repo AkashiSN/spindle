@@ -753,14 +753,65 @@ fn self_album(conn: &rusqlite::Connection, sources: &[Source]) -> Result<SelfRow
     Ok(SelfRows { album, keys })
 }
 
-fn plan_item(
+/// 下書きの宛先ディレクトリに既にある album（追記先。D-70）。MB リリース / DiscID の album は
+/// 別リリースなので対象にしない（従来どおり降格か衝突）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Destination {
+    pub album_id: i64,
+    pub album: Option<String>,
+    /// active なトラック数
+    pub track_count: i64,
+    /// active な `track_no` の最大（採番の起点）
+    pub max_track_no: i64,
+    /// active なトラックの `(disc_no, track_no)`（承認の検証に使う。応答には出さない）
+    #[serde(skip)]
+    pub numbers: HashSet<(u32, u32)>,
+}
+
+impl Destination {
+    pub fn release_key(&self) -> String {
+        format!("album:{}", self.album_id)
+    }
+}
+
+/// ファイル名を stem と拡張子（小文字）に分ける
+fn split_name(rel_path: &str) -> (String, String) {
+    match rel_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(rel_path)
+        .rsplit_once('.')
+    {
+        Some((s, e)) => (s.to_owned(), e.to_ascii_lowercase()),
+        None => (rel_path.to_owned(), String::new()),
+    }
+}
+
+/// 下書きのトラック `i` のテンプレート値
+fn track_fields(draft: &InboxDraft, category: Option<&str>, i: usize) -> TrackFields {
+    let t = &draft.tracks[i];
+    let (stem, ext) = split_name(&t.rel_path);
+    TrackFields {
+        category: category.map(str::to_owned),
+        albumartist: Some(draft.albumartist.trim().to_owned()),
+        artist: Some(draft.track_artist(i).to_owned()),
+        album: Some(draft.album.trim().to_owned()),
+        title: Some(t.title.trim().to_owned()),
+        disc_no: Some(i64::from(t.disc_no)),
+        track_no: Some(i64::from(t.track_no)),
+        year: draft.year(),
+        edition: None,
+        ext,
+        stem,
+    }
+}
+
+/// 下書きの category（統制語彙に無ければ None = `_Unsorted`）とテンプレート
+fn resolve_template(
     conn: &rusqlite::Connection,
     layout: &LayoutConfig,
-    item: &Item,
     draft: &InboxDraft,
-    files: &[FileRow],
-    sources: &[Source],
-) -> Result<ItemPlan, InboxError> {
+) -> Result<(Option<crate::db::categories::Category>, Template), InboxError> {
     let category = match draft.category.as_deref().map(str::trim) {
         Some(name) if !name.is_empty() => crate::db::categories::find_by_key(conn, name)?,
         _ => None,
@@ -772,51 +823,99 @@ fn plan_item(
     } else {
         parse_template("single_disc", &layout.single_disc)?
     };
+    Ok((category, template))
+}
+
+/// 下書きの宛先ディレクトリ（降格前の素のパス）に active な album があり、それが MB リリースでも
+/// DiscID でもなければ返す（追記先）。トラックが無い下書きは None
+pub fn destination(
+    conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    draft: &InboxDraft,
+) -> Result<Option<Destination>, InboxError> {
+    if draft.tracks.is_empty() {
+        return Ok(None);
+    }
+    let (category, template) = resolve_template(conn, layout, draft)?;
+    let fields = track_fields(draft, category.as_ref().map(|c| c.name.as_str()), 0);
+    let Ok(path) = template.render(&fields, pathgen::AlbumVariant::Plain) else {
+        return Ok(None);
+    };
+    let Some(rel_dir) = path.parent() else {
+        return Ok(None);
+    };
+    let found: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT id, album FROM albums
+              WHERE rel_dir_key = ?1 AND missing_since IS NULL
+                AND (mb_release_id IS NULL OR mb_release_id = '')
+                AND (discid IS NULL OR discid = '')",
+            [rel_dir.key()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((album_id, album)) = found else {
+        return Ok(None);
+    };
+    let mut st = conn.prepare_cached(
+        "SELECT disc_no, track_no FROM tracks WHERE album_id = ?1 AND missing_since IS NULL",
+    )?;
+    let mut numbers = HashSet::new();
+    let mut track_count = 0;
+    let mut max_track_no = 0;
+    for row in st.query_map([album_id], |r| {
+        Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))
+    })? {
+        let (disc_no, track_no) = row?;
+        track_count += 1;
+        let track_no = track_no.unwrap_or(0);
+        max_track_no = max_track_no.max(track_no);
+        if let (Ok(d), Ok(t)) = (u32::try_from(disc_no.unwrap_or(1)), u32::try_from(track_no)) {
+            numbers.insert((d, t));
+        }
+    }
+    Ok(Some(Destination {
+        album_id,
+        album,
+        track_count,
+        max_track_no,
+        numbers,
+    }))
+}
+
+fn plan_item(
+    conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    item: &Item,
+    draft: &InboxDraft,
+    files: &[FileRow],
+    sources: &[Source],
+) -> Result<ItemPlan, InboxError> {
+    let (category, template) = resolve_template(conn, layout, draft)?;
     // 自分の成果物（同じ音声の行）は占有から外し、その album のリリースキーに揃える（再実行）
     let SelfRows {
         album: self_album,
         keys: self_keys,
     } = self_album(conn, sources)?;
     // リリースキー: MUSICBRAINZ_ALBUMID の最頻値があれば mb:、自分の成果物の album があればそれ、
-    // 無ければ件ごとの新規
-    let release = mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")))
+    // 宛先に追記できる album があればそれ（D-70）、無ければ件ごとの新規
+    let release = match mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")))
         .map(|m| format!("mb:{m}"))
         .or_else(|| self_album.map(|(_, k)| k))
-        .unwrap_or_else(|| format!("inbox:{}", item.id));
-    let items: Vec<PlanItem> = draft
-        .tracks
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let (stem, ext) = match t
-                .rel_path
-                .rsplit('/')
-                .next()
-                .unwrap_or(&t.rel_path)
-                .rsplit_once('.')
-            {
-                Some((s, e)) => (s.to_owned(), e.to_ascii_lowercase()),
-                None => (t.rel_path.clone(), String::new()),
-            };
-            PlanItem {
-                track_id: -(i as i64) - 1,
-                template: template.clone(),
-                fields: TrackFields {
-                    category: category.as_ref().map(|c| c.name.clone()),
-                    albumartist: Some(draft.albumartist.trim().to_owned()),
-                    artist: Some(draft.track_artist(i).to_owned()),
-                    album: Some(draft.album.trim().to_owned()),
-                    title: Some(t.title.trim().to_owned()),
-                    disc_no: Some(i64::from(t.disc_no)),
-                    track_no: Some(i64::from(t.track_no)),
-                    year: draft.year(),
-                    edition: None,
-                    ext,
-                    stem,
-                },
-                release: release.clone(),
-                current_rel_path: String::new(),
-            }
+    {
+        Some(k) => k,
+        None => match destination(conn, layout, draft)? {
+            Some(d) => d.release_key(),
+            None => format!("inbox:{}", item.id),
+        },
+    };
+    let items: Vec<PlanItem> = (0..draft.tracks.len())
+        .map(|i| PlanItem {
+            track_id: -(i as i64) - 1,
+            template: template.clone(),
+            fields: track_fields(draft, category.as_ref().map(|c| c.name.as_str()), i),
+            release: release.clone(),
+            current_rel_path: String::new(),
         })
         .collect();
     let mut occ = crate::edit::rename::load_occupancy(conn, &HashSet::new())?;
@@ -1093,6 +1192,12 @@ fn register_item(
         })
         .optional()?
         .flatten();
+    // 追記先の active なトラックと番号が重ならないこと（承認の検証と同じ。承認と配置の間に足された
+    // 分を弾く。自分の成果物 = 同じパスの行は除く。D-70）
+    if let Err(reason) = check_numbers_free(&tx, album_id, plan, draft)? {
+        drop(tx);
+        return Ok(Err(InboxError::Conflict(reason)));
+    }
     let mut track_ids = Vec::with_capacity(plan.paths.len());
     for (rel, (ph, content, fp)) in plan.paths.iter().zip(&placed.tracks) {
         let id = match register_track(&tx, rel, ph, content, *fp, now) {
@@ -1160,6 +1265,42 @@ fn register_item(
     }))
 }
 
+/// `album_id` の active なトラック（計画のパスにある行 = 自分の成果物を除く）に、下書きと同じ
+/// `(disc_no, track_no)` があれば Err(理由)
+fn check_numbers_free(
+    tx: &rusqlite::Connection,
+    album_id: i64,
+    plan: &ItemPlan,
+    draft: &InboxDraft,
+) -> Result<Result<(), String>, DbError> {
+    let own: HashSet<String> = plan.paths.iter().map(RelPath::key).collect();
+    let mut st = tx.prepare_cached(
+        "SELECT disc_no, track_no, rel_path_key FROM tracks
+          WHERE album_id = ?1 AND missing_since IS NULL",
+    )?;
+    let taken: HashSet<(i64, i64)> = st
+        .query_map([album_id], |r| {
+            Ok((
+                r.get::<_, Option<i64>>(0)?.unwrap_or(1),
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .filter(|(_, _, key)| !own.contains(key))
+        .map(|(d, t, _)| (d, t))
+        .collect();
+    for t in &draft.tracks {
+        if taken.contains(&(i64::from(t.disc_no), i64::from(t.track_no))) {
+            return Ok(Err(format!(
+                "宛先の album に同じ番号のトラックがある: disc {} track {}",
+                t.disc_no, t.track_no
+            )));
+        }
+    }
+    Ok(Ok(()))
+}
+
 /// 可逆（WAV / ALAC / AIFF）を FLAC に正規化する編集バッチを、登録のトランザクションの中で記録する。
 /// 宛先が衝突するトラックは警告して外す。記録する対象が無ければ None
 fn record_normalize(
@@ -1225,6 +1366,13 @@ fn consume_inbox(
     }
     if !item.rel_dir.is_empty() {
         if let Ok(dir) = RelPath::parse(&item.rel_dir) {
+            // サイドカー（D-70）は Library に持っていかず、配置の成功で役目を終える
+            if let Ok(sidecar) = dir.join(crate::import::ytmusic::sidecar::SIDECAR_NAME) {
+                match inbox.unlink(&sidecar) {
+                    Ok(()) | Err(FsError::NotFound) => {}
+                    Err(e) => tracing::warn!(path = %sidecar, error = %e, "サイドカーを消せない"),
+                }
+            }
             match inbox.remove_dir(&dir) {
                 Ok(()) | Err(FsError::NotFound) => {}
                 Err(FsError::Io(e))
