@@ -17,6 +17,7 @@ services:
       - /mnt/ssd/media/Inbox:/inbox
       - /mnt/ssd/media/Playlists:/playlists
       - /mnt/ssd/apps/spindle:/data
+      - /mnt/ssd/apps/spindle/bin/spindle-ytmusic-meta:/usr/local/bin/spindle-ytmusic-meta:ro   # メタデータプラグイン（D-70）
     environment:
       # 初回起動時のみ読まれ、argon2id でハッシュして DB に保存される。以後は無視。
       # 既定値は置かない: 与えなければ compose が起動を拒む（既知パスワードでの初期化を防ぐ）。

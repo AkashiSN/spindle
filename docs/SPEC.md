@@ -119,10 +119,12 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 ├── Derived/                           [dataset] snapshot: なし
 │   └── <Category>/<AlbumArtist>/<Album>/1-01 Title.opus
 ├── Archive/  → /mnt/hdd/media/Archive [dataset, hdd] snapshot: 週次
-│   └── <Category>/<AlbumArtist>/<Album>/Title.webm
-│       （FLAC 正規化で退避した WAV / ALAC / AIFF もここ。GC まで保持）
+│   ├── youtube/<id>.webm              YouTube の原本（id 名。DB に行は作らない。D-70）
+│   └── （FLAC 正規化で退避した WAV / ALAC / AIFF もここ。GC まで保持）
 ├── Inbox/                             [dataset] snapshot: なし
-│   └── （承認前の一時領域。ハイレゾ購入分などをここへ置く）
+│   ├── （承認前の一時領域。ハイレゾ購入分などをここへ置く）
+│   └── youtube/<AlbumArtist>/<Album>/ ytdl ジョブが置く（判定できないものは youtube/_unmatched/<channel>/。
+│       spindle-inbox.json を同梱。D-70）
 └── Playlists/
     ├── m3u8/                          旧ライブラリから移した m3u8（取り込み元）
     └── <profile>/<name>.m3u8          書き出し（internal / android / foobar。D-53）
@@ -808,10 +810,49 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
 - **spindle 側の写像**: `track` → タグ（TITLE / ARTIST 多値 / ALBUM / ALBUMARTIST / DATE / TRACKNUMBER +
   `tags`）と `pathgen::TrackFields`（category / albumartist / artist（先頭）/ album / title / track_no / year）。
   `category` は `categories` に同じ canonical key の語彙が無ければ追加する（プラグインの定義が正。
-  初回起動の空 DB でも動く）。トラック番号（album の active な `track_no` の最大 + 1）と配置は
-  ダウンローダ（P3-3）が行う
+  初回起動の空 DB でも動く）。トラック番号と配置は Inbox が行う（下記、§7.8、D-70）
 - 参照実装: `AkashiSN/spindle-ytmusic-meta`（private。ルール TOML + フィクスチャ + チャンネル定義を同梱した
-  Rust のバイナリ。新パターンは Claude がそのリポジトリでルールとフィクスチャを 1 件ずつ足す運用）
+  Rust のバイナリ。新パターンは Claude がそのリポジトリでルールとフィクスチャを 1 件ずつ足す運用）。
+  イメージには同梱せず、static バイナリをホストに置いて compose でマウントする（§14、D-70）
+
+**ダウンローダ**（`src/import/ytmusic/downloader.rs`、`ytdl` ジョブ、P3-3、D-70）。Library には触らず、
+**Inbox に置くところまで**。配置・登録・後続ジョブは Inbox（§7.8）が担い、プラグインが判定したものも
+人が一度見てから Library に入る。
+
+- **入口**: `POST /api/ytmusic/download { urls }` が URL ごとに `ytdl` ジョブ（並列 1、dedup `ytdl:<url>`）を
+  投入。操作タブの「YouTube」節（1 行 1 URL）から呼ぶ
+- **手順**（ジョブ 1 件 = URL 1 件。作業領域は `[paths].data/tmp/ytdl/<job_id>/`。全部引数配列、`--` の後に URL）
+  1. `yt-dlp --dump-single-json --flat-playlist --no-download -- <url>`（120 秒）。`_type` が playlist なら
+     `entries` の URL ごとに `ytdl` を投入して終わり（展開だけ）。動画なら `id` / `webpage_url` / `uploader`
+     （channel）/ `channel`（channel_title）/ `title` / `upload_date` / `duration` を取る
+  2. 取り込み済みチェック: `SOURCE_URL = webpage_url` が Library（`track_tags`）か Inbox（`inbox_files.tags`）に
+     あれば `Fatal`（再試行なし。`last_error` にそのパス）
+  3. プラグインに問い合わせ（Request は上記。`channel` は `uploader`）。`ok` → 宛先
+     `Inbox/youtube/<albumartist>/<album>/`（`sanitize_component`）。`ok: false` の `skip` → ダウンロードせず
+     `done`（ログに message）。それ以外の reason（`unmatched` / `unknown_channel` / 未知）→ 宛先
+     `Inbox/youtube/_unmatched/<channel>/`（受け皿）。プラグインの故障（`ProviderError`）→ `Fatal`
+  4. `yt-dlp -f "ba[ext=webm]" --no-playlist --write-thumbnail --convert-thumbnails jpg -o <tmp>/%(id)s.%(ext)s -- <url>`
+     （`[ytmusic].download_timeout_secs`、既定 900）。webm の音声が無ければ `Fatal`。ネットワーク等の失敗は
+     `Failed`（再試行）
+  5. `ffmpeg -nostdin -y -i <tmp>/<id>.webm -vn -c:a copy -map_metadata -1 <tmp>/<id>.opus`（再エンコードなし）
+  6. lofty でタグ。`ok`: `Track::tags(なし)` の TITLE / ARTIST / ALBUM / ALBUMARTIST / DATE / 追加 tags
+     （TRACKNUMBER は書かない。採番は Inbox）+ PICTURE（サムネイル jpg）+ `SOURCE_URL`。`ok: false`: TITLE =
+     動画タイトル + PICTURE + `SOURCE_URL` だけ（他は Inbox の警告で人が埋める）
+  7. webm を `Archive/youtube/<id>.webm` へ（tmp + `RENAME_NOREPLACE`。既にあれば同じ id なので採用）
+  8. `.opus` を宛先へ `<YYYYMMDD> <title> [<id>].opus`（title は `sanitize_component`。名前順 = 公開順 =
+     採番順。`RENAME_NOREPLACE`、既にあれば `Fatal`）。同じディレクトリの `spindle-inbox.json` を読んで
+     このファイルの項を足し tmp + rename で書く → `inbox` ジョブを投入（すぐ件が出る）
+- **サイドカー `spindle-inbox.json`**（タグに載らない情報を Inbox へ渡す。Inbox の DB には書かない）
+  ```jsonc
+  { "version": 1,
+    "category": "<統制語彙の名前>" | null,          // 件の category（プラグインの判定。最後に書いたものが勝つ）
+    "files": { "<ファイル名>": { "source": "youtube", "url": "<webpage_url>", "channel": "<uploader>",
+                                 "verdict": "ok" | "unmatched" | "unknown_channel" | "<未知の reason>",
+                                 "message": "…" | null } } }
+  ```
+- **失敗の区分**: `Fatal`（再試行なし）は取り込み済み・webm の音声なし・プラグインの故障・宛先の同名ファイル。
+  それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O）は `Failed` で指数バックオフ。作業領域はどの終わり方でも消す
+- yt-dlp は YouTube の抽出に JS ランタイムを要求する版があるため、runtime イメージに deno を同梱する（§14）
 
 ### 7.8 Inbox 取り込み
 
@@ -867,6 +908,21 @@ Inbox/ に配置（ポーリング検出）
   Inbox は Library と別データセットなので move は実コピー（§5）
 - **後続**は `rg`（album）と `transcode`。WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら `normalize` の
   編集バッチを作って投入する（D-46 の予告）。thumbnail は埋め込み画像があればスキャンと同じ経路で出る
+- **既存の album への追記**（D-70）: リリースキーは MUSICBRAINZ_ALBUMID の最頻値があれば `mb:`、自分の成果物の
+  album があればそれ、**無ければ宛先ディレクトリに active な album があり、その album にも MB キーが無ければ
+  その album を採用**（`album:<id>`）、それも無ければ件ごとの新規。MB キー同士が違えば衝突（`failed`）。
+  採用する album は `GET /api/inbox` の `destination`（`{ album_id, title, track_count, max_track_no }` | null。
+  下書きの category / albumartist / album から引く）で見せる
+- **採番**: 下書きの提案で TRACKNUMBER の無いファイルは、採用する album の active な `track_no` の最大 + 1 から
+  ファイル名順に振る（無ければ 1 から）。承認の検証に「採用する album の active なトラックと `(disc_no, track_no)`
+  が重ならない」を加え、配置で失敗する前に 400 で直させる。配置の登録トランザクションでも同じ検証をする
+  （承認と配置の間に足された分。外れたら `failed`）
+- **サイドカー `spindle-inbox.json`**（§7.7、D-70）: 件のディレクトリにあれば `GET /api/inbox` が読み、
+  `category` を提案の category（語彙に同じ canonical key があるときだけ）に、`files` の `verdict` / `message` /
+  `url` / `channel` を各トラックに付ける。走査は音声でないので無視し、配置の成功時に消す（Library へ
+  持っていかない）。壊れていれば無いものとして扱い、件の `warnings` に載せる
+- **承認後にファイルが増えた件**（同じ album への追加ダウンロード）は既存の規則で `pending` に戻る。そのとき
+  提案は「保存した下書き（既知のファイルの分）+ 新しいファイルの提案」を merge して返す（補正をやり直させない）
 
 ### 7.9 FLAC 健全性チェック（移行時 + 任意）
 
@@ -915,6 +971,7 @@ tmp + rename で反映する。巻き戻しは全ゼロを書き戻す（`audio_
 | `thumbnail` | 4 | artwork_id |
 | `flaccheck` | CPU コア数 | track_id + audio_version（版付き。D-57） |
 | `inbox` | 1 | 固定 |
+| `ytdl` | 1 | `ytdl:<url>`（playlist の展開で投入する分も同じ。D-70） |
 | `gc` | 1 | 固定（scan と同じ排他 `library` を取れなければ Requeue。D-56） |
 | `backup` | 1 | 固定 |
 
@@ -927,7 +984,8 @@ tmp + rename で反映する。巻き戻しは全ゼロを書き戻す（`audio_
   手動再試行）を永久に投入できない。キーは `type` を含めて構成する
   （`tagwrite:<track_id>:<tag_version>` 等）
 - 失敗は `attempts` をインクリメントし、`run_after` に次回時刻を書いて指数バックオフ
-  （再起動を跨いでも待ち時間が保たれる）。`attempts >= max_attempts` で `failed`
+  （再起動を跨いでも待ち時間が保たれる）。`attempts >= max_attempts` で `failed`。再試行しても変わらない
+  失敗（`JobError::Fatal`。取り込み済み等）はバックオフせず直ちに `failed`（D-70）
 - キャンセルは `cancel_requested_at` を立てる協調方式。ハンドラは進捗更新のたびに
   確認して自発的に止め、`cancelled` へ遷移する。外部プロセス（ffmpeg 等）は
   子プロセスグループごと kill し、tmp の成果物を消す
@@ -1032,12 +1090,16 @@ GET    /api/archive                                退避台帳 { "items": [ arc
 POST   /api/scan                                  {"kind": "incremental" | "deep"}。scan ジョブを投入
 GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件。何も消さない。D-56）
 GET    /api/inbox                                 承認キュー { "items": [{ id, rel_dir, state, detected_at, error, placed_album_id,
-                                                  proposal, draft, warnings, tracks: [{ rel_path, codec, lossless, sample_rate,
-                                                  bit_depth, channels, duration_ms, tags }] }] }（§7.8、D-68）
+                                                  proposal, draft, warnings, destination, tracks: [{ rel_path, codec, lossless,
+                                                  sample_rate, bit_depth, channels, duration_ms, tags, source }] }] }
+                                                  （§7.8、D-68。destination と source は D-70: source は spindle-inbox.json の
+                                                  項 { source, url, channel, verdict, message } | null）
 POST   /api/inbox/scan                            inbox ジョブを投入（202 + job_id。queued / running があれば 409 duplicate）
 POST   /api/inbox/:id/approve                     { category, albumartist, album, date, tracks: [{ rel_path, disc_no, track_no,
                                                   title, artist }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved + ジョブ投入
 POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
+POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
+                                                  → 202 { job_ids }。`[ytmusic].enabled` でなければ 404（§7.7、D-70）
 POST   /api/gc                                    gc ジョブを投入（未完了があれば 409）
                                                   （202 + job_id。queued / running があれば 409 duplicate）
 GET    /api/events                                SSE: ジョブ進捗・ライブラリ変更
@@ -1451,7 +1513,11 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   表示のみ）。初期値はタグからの提案（`proposal`）、承認済み・失敗の件は保存した下書き。検証はサーバと
   同じ規則（`lib/inbox.ts` の `validateDraft`）で、問題が無いときだけ「承認して配置」が押せる。
   「却下」はファイルを残したまま一覧から外し、「下書きに戻す」で pending に戻る。placed の件は 24 時間
-  残り、「アルバムを開く」で表を `album_id` に絞る。inbox ジョブの完了で一覧を取り直す
+  残り、「アルバムを開く」で表を `album_id` に絞る。inbox ジョブの完了で一覧を取り直す。
+  `destination` があれば「宛先: 既存の『…』（N 曲）に追加」と出す。`source` のあるトラック行は判定バッジ
+  （ok / 未判定）を出し、行を開くと `message`（参照実装ならルールの足し方）と URL が読める（D-70）
+- **操作タブの「YouTube」**（P3-3、D-70）: 1 行 1 URL のテキストエリアと「ダウンロード」
+  （`POST /api/ytmusic/download`）。投入した job_id を出し、進捗と失敗は Jobs タブ、結果は Inbox タブ
 - **設定**: `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
   退避 WAV（`archived_files`）の一覧と復元
 
@@ -1534,6 +1600,7 @@ ctdb_url = "http://db.cuetools.net/lookup2.php"
 enabled = true
 metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
 metadata_timeout_secs = 30
+download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
 
 [bin]                          # 外部バイナリ。パスで上書き可
 ffmpeg = "ffmpeg"
@@ -1572,6 +1639,7 @@ services:
       - /mnt/ssd/media/Inbox:/inbox
       - /mnt/ssd/media/Playlists:/playlists
       - /mnt/ssd/apps/spindle:/data
+      - /mnt/ssd/apps/spindle/bin/spindle-ytmusic-meta:/usr/local/bin/spindle-ytmusic-meta:ro   # メタデータプラグイン（D-70）
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -1720,7 +1788,9 @@ src/
 │   │                    リリースキー再検証、行の登録 / 採用。D-67 / D-68）
 │   ├── inbox.rs         Inbox の走査（件 = ディレクトリ）、タグからの下書き、承認の検証、承認済みの配置
 │   │                    （補正をタグに書いて pathgen::plan の宛先へ。source_type = download。D-68）
-│   └── ytmusic/         metadata.rs（メタデータプラグインのプロトコル v1 と呼び出し。D-69）、downloader.rs
+│   └── ytmusic/         metadata.rs（メタデータプラグインのプロトコル v1 と呼び出し。D-69）、
+│                        downloader.rs（yt-dlp の dump / download、remux、タグ、Archive、Inbox への配置と
+│                        spindle-inbox.json。D-70）、sidecar.rs（spindle-inbox.json の読み書き。Inbox と共有）
 ├── jobs/
 │   ├── queue.rs  worker.rs  recovery.rs  scheduler.rs（backup / gc の周期投入。inbox は handlers/inbox.rs）
 │   └── handlers/

@@ -71,6 +71,7 @@ ctdb_url = "http://db.cuetools.net/lookup2.php"
 enabled = true
 metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
 metadata_timeout_secs = 30
+download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
 
 [bin]
 ffmpeg = "ffmpeg"
