@@ -1042,8 +1042,13 @@ struct RegisteredItem {
     album_id: i64,
     track_ids: Vec<i64>,
     job_ids: Vec<i64>,
+    /// 同じトランザクションで記録した normalize バッチ（WAV / ALAC / AIFF があり、有効なとき）
+    normalize_batch: Option<i64>,
+    batch_event: Option<crate::jobs::BatchEvent>,
 }
 
+/// 登録（1 トランザクション）: album / tracks / track_tags、rg / transcode の投入、WAV / ALAC / AIFF の
+/// normalize バッチ（`normalize` のとき）、件の placed。commit の後に落ちても投入が欠けない
 fn register_item(
     conn: &mut rusqlite::Connection,
     item_id: i64,
@@ -1051,6 +1056,7 @@ fn register_item(
     draft: &InboxDraft,
     placed: &Placed,
     files: &HashMap<String, FileRow>,
+    normalize: bool,
 ) -> Result<Result<RegisteredItem, InboxError>, DbError> {
     let tx = conn.transaction()?;
     let now = now_epoch();
@@ -1110,6 +1116,37 @@ fn register_item(
             job_ids.push(j);
         }
     }
+    // 後続の normalize（D-46 の予告。WAV / ALAC / AIFF を FLAC へ）も同じトランザクションで記録する。
+    // 別トランザクションにすると、登録の commit からその間に落ちたとき投入が永久に欠ける
+    let mut normalize_batch = None;
+    let mut batch_event = None;
+    if normalize {
+        let ids: Vec<i64> = track_ids
+            .iter()
+            .zip(&draft.tracks)
+            .filter(|(_, t)| {
+                files
+                    .get(&canonical_key(&t.rel_path))
+                    .is_some_and(|f| matches!(f.codec.as_str(), "wav" | "alac" | "aiff"))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        if !ids.is_empty() {
+            match record_normalize(&tx, &ids, now) {
+                Ok(Some(p)) => {
+                    job_ids.extend(p.job_ids);
+                    normalize_batch = Some(p.batch_id);
+                    batch_event = p.event;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Ok(Err(InboxError::Conflict(format!(
+                        "normalize を投入できない: {e}"
+                    ))))
+                }
+            }
+        }
+    }
     // 件の placed も同じトランザクションで確定する。commit の直後に落ちても placing のまま残らず
     // （Inbox の原本が残っていれば走査が pending に戻す）、24 時間の placed 表示も失わない
     dbinbox::set_placed(&tx, item_id, album_id, now)?;
@@ -1118,7 +1155,46 @@ fn register_item(
         album_id,
         track_ids,
         job_ids,
+        normalize_batch,
+        batch_event,
     }))
+}
+
+/// 可逆（WAV / ALAC / AIFF）を FLAC に正規化する編集バッチを、登録のトランザクションの中で記録する。
+/// 宛先が衝突するトラックは警告して外す。記録する対象が無ければ None
+fn record_normalize(
+    tx: &rusqlite::Connection,
+    ids: &[i64],
+    now: i64,
+) -> Result<Option<crate::edit::Prepared>, crate::edit::EditError> {
+    use crate::edit::{
+        plan_normalize_tx, prepare_normalize_in, EditError, NormalizePlan, NormalizeTarget,
+    };
+    let targets: Vec<NormalizeTarget> = plan_normalize_tx(tx, ids)?
+        .into_iter()
+        .filter_map(|p| match p.planned {
+            NormalizePlan::Path(new_rel_path) => Some(NormalizeTarget {
+                track_id: p.track_id,
+                new_rel_path,
+                new_codec: "flac".to_owned(),
+                expected: None,
+                planned_conflict: None,
+            }),
+            NormalizePlan::Unchanged => None,
+            NormalizePlan::Conflict(r) => {
+                tracing::warn!(track_id = p.track_id, reason = %r, "normalize の宛先が衝突");
+                None
+            }
+        })
+        .collect();
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    match prepare_normalize_in(tx, Some("Inbox 取り込み"), &targets, None, now) {
+        Ok(p) => Ok(Some(p)),
+        Err(EditError::NoChanges) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Inbox 側を消す（コピー中に変わっていなければ）。空になったディレクトリも消す
@@ -1231,11 +1307,16 @@ pub async fn place_item(
     let placed_new = placed.placed_new.clone();
     let created_top = placed.created_top.clone();
     let companions = placed.companions.clone();
-    // 4. 登録
+    // 4. 登録（normalize の投入と件の placed も同じトランザクション）
+    let normalize = env.wav_to_flac && env.editor.as_ref().is_some_and(|e| e.can_normalize());
     let registered = {
         let (plan_tx, draft_tx, files_tx) = (plan.clone(), draft.clone(), Arc::clone(&files));
         env.db
-            .write(move |c| register_item(c, item_id, &plan_tx, &draft_tx, &placed, &files_tx))
+            .write(move |c| {
+                register_item(
+                    c, item_id, &plan_tx, &draft_tx, &placed, &files_tx, normalize,
+                )
+            })
             .await
     };
     let registered: Result<RegisteredItem, InboxError> = match registered {
@@ -1267,27 +1348,11 @@ pub async fn place_item(
         })
         .await;
     }
-    // 6. 後続: normalize（WAV / ALAC / AIFF）
-    let mut normalize_batch = None;
-    if env.wav_to_flac {
-        if let Some(editor) = &env.editor {
-            let ids: Vec<i64> = registered
-                .track_ids
-                .iter()
-                .zip(&draft.tracks)
-                .filter(|(_, t)| {
-                    files
-                        .get(&canonical_key(&t.rel_path))
-                        .is_some_and(|f| matches!(f.codec.as_str(), "wav" | "alac" | "aiff"))
-                })
-                .map(|(id, _)| *id)
-                .collect();
-            if !ids.is_empty() {
-                normalize_batch = enqueue_normalize(editor, &ids).await;
-            }
-        }
-    }
+    // 6. 通知（投入は登録のトランザクションで済んでいる）
     env.jobs.notify_enqueued(&registered.job_ids).await;
+    if let Some(ev) = registered.batch_event {
+        env.jobs.publish(Event::Batch(ev));
+    }
     env.jobs.publish(Event::Library(LibraryEvent::Ids {
         scan_run_id: 0,
         track_ids: registered.track_ids.clone(),
@@ -1304,48 +1369,6 @@ pub async fn place_item(
         rel_dir: plan.rel_dir,
         track_ids: registered.track_ids,
         job_ids: registered.job_ids,
-        normalize_batch,
+        normalize_batch: registered.normalize_batch,
     })
-}
-
-/// 可逆（WAV / ALAC / AIFF）を FLAC に正規化する編集バッチを作る（D-46 の予告）。失敗は警告だけ
-async fn enqueue_normalize(editor: &Editor, ids: &[i64]) -> Option<i64> {
-    use crate::edit::{NormalizePlan, NormalizeTarget};
-    let planned = match editor.plan_normalize(ids).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "normalize の計画に失敗");
-            return None;
-        }
-    };
-    let targets: Vec<NormalizeTarget> = planned
-        .into_iter()
-        .filter_map(|p| match p.planned {
-            NormalizePlan::Path(new_rel_path) => Some(NormalizeTarget {
-                track_id: p.track_id,
-                new_rel_path,
-                new_codec: "flac".to_owned(),
-                expected: None,
-                planned_conflict: None,
-            }),
-            NormalizePlan::Unchanged => None,
-            NormalizePlan::Conflict(r) => {
-                tracing::warn!(track_id = p.track_id, reason = %r, "normalize の宛先が衝突");
-                None
-            }
-        })
-        .collect();
-    if targets.is_empty() {
-        return None;
-    }
-    match editor
-        .prepare_normalize(Some("Inbox 取り込み"), targets)
-        .await
-    {
-        Ok(p) => Some(p.batch_id),
-        Err(e) => {
-            tracing::warn!(error = %e, "normalize を投入できない");
-            None
-        }
-    }
 }

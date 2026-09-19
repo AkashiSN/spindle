@@ -759,3 +759,48 @@ async fn crash_after_register_keeps_the_item_placed() {
     assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
     assert_eq!(lib.count("SELECT count(*) FROM tracks"), 1);
 }
+
+/// normalize の投入は登録と同じトランザクション: place_item（handler の後処理なし）が返った時点で
+/// 件の placed・トラック・rg / transcode・normalize バッチが揃って確定している（登録の commit と
+/// normalize の投入の間にプロセスが落ちる窓が無い）。次のジョブは placed の件を触らず二重投入しない
+#[tokio::test]
+async fn normalize_batch_is_recorded_atomically_with_registration() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("W/01.wav", 1, "One", "W", 1));
+    lib.scan(1000).await;
+    let w = lib.item("W").unwrap();
+    lib.approve(
+        w.id,
+        &draft_for(&[("W/01.wav", 1, "One")], None, "Wav Album"),
+    );
+    inbox::set_state(&lib.conn(), w.id, ItemState::Placing, None, 2).unwrap();
+    let env = lib.env(true);
+    let item = inbox::get(&lib.conn(), w.id).unwrap().unwrap();
+    let placed = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    let batch_id = placed.normalize_batch.expect("normalize バッチ");
+    let (state, ops, jobs): (String, i64, i64) = lib
+        .conn()
+        .query_row(
+            "SELECT (SELECT state FROM inbox_items WHERE id = ?1),
+                    (SELECT count(*) FROM edit_ops WHERE batch_id = ?2 AND kind = 'archive'),
+                    (SELECT count(*) FROM jobs WHERE type = 'normalize')",
+            [w.id, batch_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((state.as_str(), ops, jobs), ("placed", 1, 1));
+    assert!(
+        placed.job_ids.len() >= 2,
+        "rg + normalize: {:?}",
+        placed.job_ids
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    assert_eq!(lib.count("SELECT count(*) FROM edit_batches"), 1);
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'normalize'"),
+        1
+    );
+}

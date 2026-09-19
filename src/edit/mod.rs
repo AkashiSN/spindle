@@ -61,6 +61,7 @@ pub use normalize::{
     NormalizeEnv, NormalizeHook, NormalizePlan, NormalizeStep, NormalizeTarget, PlannedNormalize,
     NORMALIZE_SOURCES, SOURCE_HASH_KEY, UNDO_QUARANTINE_PREFIX,
 };
+pub(crate) use normalize::{plan_normalize_tx, prepare_normalize_in};
 pub use picture::{parse_picture_value, picture_value, PicturePrepared, PICTURE_KEY};
 pub use rename::{
     in_progress_keys, rename_dedup_key, temp_rel_path, PlannedRename, RenameHook, RenameOutcome,

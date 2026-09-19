@@ -139,7 +139,7 @@ fn flac_file_name(name: &str) -> String {
 
 // ---------------------------------------------------------------- plan / prepare
 
-pub(super) fn plan_normalize_tx(
+pub(crate) fn plan_normalize_tx(
     conn: &Connection,
     ids: &[i64],
 ) -> Result<Vec<PlannedNormalize>, EditError> {
@@ -229,12 +229,27 @@ pub(super) fn prepare_normalize_tx(
     now: i64,
 ) -> Result<Prepared, EditError> {
     let tx = conn.transaction()?;
+    let prepared = prepare_normalize_in(&tx, description, targets, reverts_batch_id, now)?;
+    tx.commit()?;
+    Ok(prepared)
+}
+
+/// `prepare_normalize_tx` の本体。呼び出し側のトランザクションの中で記録する（commit はしない）。
+/// Inbox の配置が、トラックの登録と同じトランザクションで normalize を投入するのに使う（D-68。
+/// 登録の commit 後に別トランザクションで投入すると、その間に落ちたとき投入が永久に欠ける）
+pub(crate) fn prepare_normalize_in(
+    tx: &Connection,
+    description: Option<&str>,
+    targets: &[NormalizeTarget],
+    reverts_batch_id: Option<i64>,
+    now: i64,
+) -> Result<Prepared, EditError> {
     let mut ids: Vec<i64> = targets.iter().map(|t| t.track_id).collect();
     ids.sort_unstable();
     if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
         return Err(EditError::DuplicateTrack(w[0]));
     }
-    let pending = history::pending_track_ids(&tx, &ids)?;
+    let pending = history::pending_track_ids(tx, &ids)?;
     if !pending.is_empty() {
         return Err(EditError::Pending { track_ids: pending });
     }
@@ -244,7 +259,7 @@ pub(super) fn prepare_normalize_tx(
     let mut to_vacate: Vec<i64> = Vec::new();
     let mut unchanged = 0usize;
     for t in targets {
-        let current = history::precondition_of_track(&tx, t.track_id)?
+        let current = history::precondition_of_track(tx, t.track_id)?
             .ok_or(EditError::TrackNotFound(t.track_id))?;
         let old_codec: String = tx.query_row(
             "SELECT codec FROM tracks WHERE id = ?1",
@@ -317,15 +332,15 @@ pub(super) fn prepare_normalize_tx(
     }
 
     let affected = planned.len() + conflicts.len();
-    let batch_id = history::insert_batch(&tx, description, affected as i64, reverts_batch_id, now)?;
+    let batch_id = history::insert_batch(tx, description, affected as i64, reverts_batch_id, now)?;
     let mut ordinal = 0i64;
     let mut job_ids = Vec::with_capacity(planned.len());
     // 宛先 key を missing 行が占有していれば明け渡させる（ファイルが残っていれば RENAME_NOREPLACE
     // が最終判定になり conflict になる）
-    scans::vacate_track_paths(&tx, &to_vacate)?;
+    scans::vacate_track_paths(tx, &to_vacate)?;
     for p in &planned {
         let op_id = history::insert_op(
-            &tx,
+            tx,
             batch_id,
             ordinal,
             p.track_id,
@@ -334,26 +349,26 @@ pub(super) fn prepare_normalize_tx(
         )?;
         ordinal += 1;
         history::insert_edit(
-            &tx,
+            tx,
             op_id,
             "rel_path",
             &serde_json::json!(p.old),
             &serde_json::json!(p.new.as_str()),
         )?;
         history::insert_edit(
-            &tx,
+            tx,
             op_id,
             "codec",
             &serde_json::json!(p.old_codec),
             &serde_json::json!(p.new_codec),
         )?;
-        let job_id = dbjobs::enqueue(&tx, &normalize_job(p.track_id, op_id, batch_id), now)?.id();
-        history::set_op_job(&tx, op_id, job_id)?;
+        let job_id = dbjobs::enqueue(tx, &normalize_job(p.track_id, op_id, batch_id), now)?.id();
+        history::set_op_job(tx, op_id, job_id)?;
         job_ids.push(job_id);
     }
     for c in &conflicts {
         let op_id = history::insert_op(
-            &tx,
+            tx,
             batch_id,
             ordinal,
             c.track_id,
@@ -362,21 +377,21 @@ pub(super) fn prepare_normalize_tx(
         )?;
         ordinal += 1;
         history::insert_edit(
-            &tx,
+            tx,
             op_id,
             "rel_path",
             &serde_json::json!(c.old),
             &serde_json::json!(c.new),
         )?;
         history::insert_edit(
-            &tx,
+            tx,
             op_id,
             "codec",
             &serde_json::json!(c.old_codec),
             &serde_json::json!(c.new_codec),
         )?;
         history::finish_op(
-            &tx,
+            tx,
             op_id,
             OpResult::SkippedConflict,
             Some(&c.error),
@@ -384,11 +399,10 @@ pub(super) fn prepare_normalize_tx(
             now,
         )?;
     }
-    let event = match history::aggregate_batch(&tx, batch_id, now)? {
-        Some(state) => Some(batch_event(&tx, batch_id, state)?),
+    let event = match history::aggregate_batch(tx, batch_id, now)? {
+        Some(state) => Some(batch_event(tx, batch_id, state)?),
         None => None,
     };
-    tx.commit()?;
     tracing::info!(
         batch_id,
         affected,
@@ -1489,6 +1503,11 @@ fn phase_unlink(root: &RootDir, dir: &Direction, tmp_rel: &RelPath, verified: Id
 // ---------------------------------------------------------------- Editor
 
 impl Editor {
+    /// 正規化の環境（Archive / エンコーダ）を持っているか
+    pub fn can_normalize(&self) -> bool {
+        self.normalize.is_some()
+    }
+
     fn normalize_env(&self) -> Result<&NormalizeEnv, EditError> {
         self.normalize.as_ref().ok_or_else(|| {
             EditError::Internal("正規化の環境（Archive / エンコーダ）が無い".to_owned())

@@ -868,7 +868,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       受け入れ: `tests/inbox_job.rs`（検出、変更の読み直しと承認の取り消し、消えた件、placed の期限切れ、
       補正付きの配置と同梱ファイル・DB 行・後続ジョブ・Inbox の消費、wav の normalize 投入の有無、
       衝突 → failed と後始末、排他が取れないときの再投入、配置中の変更、再実行の冪等性、placing のまま
-      落ちた件の回復、コピー前の差し替えの検出、登録前 / 登録後に落ちた後の完了、placed のディレクトリに残った音声）、
+      落ちた件の回復、コピー前の差し替えの検出、登録前 / 登録後に落ちた後の完了、placed のディレクトリに残った音声、normalize の投入と登録の原子性）、
       `tests/inbox_draft.rs`、`tests/inbox_db.rs`、`tests/inbox_api.rs`、`web/src/lib/inbox.test.ts`
 
 ---
