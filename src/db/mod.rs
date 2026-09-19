@@ -7,6 +7,7 @@
 
 pub mod archive;
 pub mod artwork;
+pub mod categories;
 pub mod derived;
 pub mod flaccheck;
 pub mod gc;

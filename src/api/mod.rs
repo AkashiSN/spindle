@@ -5,6 +5,7 @@ pub mod archive;
 pub mod artwork;
 pub mod auth;
 pub mod batch;
+pub mod categories;
 pub mod cd;
 pub mod config;
 pub mod error;
@@ -57,6 +58,10 @@ pub fn router(state: AppState) -> Router {
         .route("/cd/lookup", post(cd::lookup))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
+        .route(
+            "/categories",
+            get(categories::list).post(categories::create),
+        )
         .route("/albums/{id}", get(albums::get))
         .route("/artwork/{hash}", get(artwork::get))
         .route(
