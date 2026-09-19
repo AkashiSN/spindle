@@ -551,3 +551,65 @@ async fn pending_item_with_a_saved_draft_proposes_the_merge() {
     // 新しいファイルは既存の番号（1, 2）の続き
     assert_eq!(it["proposal"]["tracks"][2]["track_no"], 3);
 }
+
+#[tokio::test]
+async fn items_with_a_release_id_get_no_destination_and_no_number_check() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    seed_album(&app).await;
+    let id = app
+        .db
+        .write(|c| {
+            let id = inbox::insert_item(c, "cd", "cd", 1000)?;
+            inbox::replace_files(
+                c,
+                id,
+                &[FileRow {
+                    rel_path: "cd/01.flac".into(),
+                    inode: 1,
+                    size: 1,
+                    mtime_ns: 0,
+                    ctime_ns: 0,
+                    codec: "flac".into(),
+                    lossless: true,
+                    sample_rate: Some(44100),
+                    bit_depth: Some(16),
+                    channels: Some(2),
+                    duration_ms: Some(1000),
+                    tags: [
+                        ("TITLE", "One"),
+                        ("ALBUM", "Album"),
+                        ("ALBUMARTIST", "Artist"),
+                        ("TRACKNUMBER", "12"),
+                        ("MUSICBRAINZ_ALBUMID", "mbid-1"),
+                    ]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect(),
+                }],
+            )?;
+            Ok(id)
+        })
+        .await
+        .unwrap();
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    assert!(it["destination"].is_null(), "{it}");
+    // #12 は宛先の非 MB album と重なるが、別リリースなので通る
+    let (st, body) = app
+        .post(
+            &c,
+            &format!("/api/inbox/{id}/approve"),
+            json!({
+                "category": null, "albumartist": "Artist", "album": "Album", "date": null,
+                "tracks": [{ "rel_path": "cd/01.flac", "disc_no": 1, "track_no": 12, "title": "One", "artist": "" }]
+            }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+}

@@ -30,6 +30,7 @@ url="${@: -1}"
 key=$(printf '%s' "$url" | tr -c 'A-Za-z0-9' '_')
 if [[ " $* " == *" --dump-single-json "* ]]; then
   if [ -f "$FAKE/dump/$key.json" ]; then cat "$FAKE/dump/$key.json"; exit 0; fi
+  if [ -f "$FAKE/unsupported" ]; then echo "ERROR: Unsupported URL: $url" >&2; exit 1; fi
   echo "ERROR: [youtube] $url: Video unavailable" >&2; exit 1
 fi
 if [ -f "$FAKE/fail_download" ]; then echo "ERROR: unable to download: network down" >&2; exit 1; fi
@@ -225,6 +226,23 @@ impl Drop for Lib {
     }
 }
 
+/// テスト用: ファイルのタグを直接書き換える（`write_tag_changes` を tmp 無しで当てる）
+fn set_tags(path: &std::path::Path, ext: &str, tags: &[(&str, &[&str])]) {
+    let changes: Vec<spindle::domain::tags::TagChange> = tags
+        .iter()
+        .map(|(k, vs)| spindle::domain::tags::TagChange {
+            key: (*k).to_owned(),
+            values: Some(vs.iter().map(|v| (*v).to_owned()).collect()),
+        })
+        .collect();
+    let mut f = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    spindle::domain::tags::write_tag_changes(&mut f, Some(ext), &changes, None).unwrap();
+}
+
 macro_rules! lib {
     () => {
         match Lib::new() {
@@ -395,6 +413,83 @@ async fn playlist_is_expanded_into_one_job_per_entry() {
     );
 }
 
+/// Inbox に .opus を置いた直後に落ちた（サイドカー / inbox ジョブの投入前）状況からの再実行:
+/// 同名のファイルの SOURCE_URL が同じなら自分の成果物として採用し、サイドカーと投入を済ませる
+#[tokio::test]
+async fn rerun_after_placing_the_opus_adopts_it_and_finishes() {
+    let lib = lib!();
+    lib.video(U1, "v1", "KnownCh", "Song One", true);
+    lib.start();
+    let (id, st) = lib.run(U1).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    let dir = spindle::domain::relpath::RelPath::parse("youtube/Artist A/Songs of A").unwrap();
+    // 「置いた後に落ちた」を作る: サイドカーと inbox ジョブを消す（inbox_files はまだ無い）
+    std::fs::remove_file(lib.inbox_path("youtube/Artist A/Songs of A/spindle-inbox.json")).unwrap();
+    lib.conn().execute("DELETE FROM jobs", []).unwrap();
+    let (id, st) = lib.run(U1).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    let s = Sidecar::read(&lib.inbox, &dir).unwrap().unwrap();
+    assert_eq!(s.files["20260901 Song One [v1].opus"].verdict, "ok");
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'inbox' AND state = 'queued'"),
+        1
+    );
+    assert_eq!(
+        std::fs::read_dir(lib.inbox_path("youtube/Artist A/Songs of A"))
+            .unwrap()
+            .count(),
+        2,
+        "同じファイルを二重に置かない"
+    );
+
+    // 同名でも SOURCE_URL が違う（人が置いた等）なら Fatal
+    std::fs::remove_file(lib.inbox_path("youtube/Artist A/Songs of A/spindle-inbox.json")).unwrap();
+    lib.conn().execute("DELETE FROM jobs", []).unwrap();
+    set_tags(
+        &lib.inbox_path("youtube/Artist A/Songs of A/20260901 Song One [v1].opus"),
+        "opus",
+        &[("SOURCE_URL", &["https://other"])],
+    );
+    let (id, st) = lib.run(U1).await;
+    assert_eq!(st, JobState::Failed);
+    assert!(
+        lib.job(id).1.as_deref().unwrap_or("").contains("同名"),
+        "{:?}",
+        lib.job(id)
+    );
+}
+
+/// 走査が先に件を作っていた（inbox_files に SOURCE_URL がある）ときの再実行: 置き場所が自分の宛先と
+/// 同じなら、ダウンロードせずにサイドカーと投入だけ済ませる
+#[tokio::test]
+async fn rerun_after_the_scan_registered_the_file_completes_without_downloading() {
+    let lib = lib!();
+    lib.video(U1, "v1", "KnownCh", "Song One", true);
+    lib.start();
+    let (id, st) = lib.run(U1).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    std::fs::remove_file(lib.inbox_path("youtube/Artist A/Songs of A/spindle-inbox.json")).unwrap();
+    lib.conn().execute("DELETE FROM jobs", []).unwrap();
+    spindle::import::inbox::scan_inbox(&lib.db, &lib.inbox, 1000)
+        .await
+        .unwrap();
+    assert_eq!(lib.count("SELECT count(*) FROM inbox_files"), 1);
+    let calls_before = lib.calls().len();
+    let (id, st) = lib.run(U1).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    assert_eq!(
+        lib.calls().len(),
+        calls_before + 1,
+        "dump だけで download しない"
+    );
+    let dir = spindle::domain::relpath::RelPath::parse("youtube/Artist A/Songs of A").unwrap();
+    assert!(Sidecar::read(&lib.inbox, &dir).unwrap().is_some());
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'inbox' AND state = 'queued'"),
+        1
+    );
+}
+
 #[tokio::test]
 async fn already_imported_url_is_fatal() {
     let lib = lib!();
@@ -487,6 +582,10 @@ async fn plugin_fault_and_unknown_video_are_fatal() {
     // dump が失敗（存在しない動画等）は Failed（再試行）: yt-dlp の失敗は一時的か判別できない
     let (id, st) = lib.run("https://youtu.be/nope").await;
     assert_eq!(st, JobState::Queued, "{:?}", lib.job(id));
+    // ただし yt-dlp が「対応していない URL」と言ったものは再試行しても変わらない
+    std::fs::write(lib.fake.join("unsupported"), b"").unwrap();
+    let (id, st) = lib.run("https://example.com/page").await;
+    assert_eq!(st, JobState::Failed, "{:?}", lib.job(id));
 }
 
 // ---------------------------------------------------------------- 純粋な部分

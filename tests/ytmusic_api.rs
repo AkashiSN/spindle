@@ -145,6 +145,10 @@ async fn download_rejects_bad_bodies_and_needs_ytmusic_enabled() {
         json!({ "urls": [] }),
         json!({ "urls": ["  "] }),
         json!({ "urls": ["ftp://x/y"] }),
+        json!({ "urls": ["https://"] }),
+        json!({ "urls": ["https://youtu.be/a b"] }),
+        json!({ "urls": ["javascript:alert(1)"] }),
+        json!({ "urls": ["//youtu.be/a"] }),
         json!({ "urls": [format!("https://x/{}", "a".repeat(2100))] }),
         json!({}),
     ] {

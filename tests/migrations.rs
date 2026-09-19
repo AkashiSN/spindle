@@ -246,3 +246,98 @@ fn upgrade_to_0012_adds_track_artwork_with_set_null_on_delete() {
         .unwrap();
     assert_eq!((v, dirty), (None, 0));
 }
+
+// ---------------------------------------------------------------- 0015 jobs.type に ytdl（P3-3、D-70）
+
+/// 0015 は jobs の CHECK に ytdl を足すために表を作り直す。jobs を参照する子表（edit_ops SET NULL、
+/// derived_path_locks / job_mutexes / track_locks CASCADE、album_verifications SET NULL）の行が残り、
+/// FK と索引が戻ること
+#[test]
+fn upgrade_to_0015_adds_ytdl_and_keeps_rows_referencing_jobs() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let upto14: Vec<_> = list.iter().take(14).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto14).unwrap();
+    conn.execute_batch(
+        "INSERT INTO jobs (id, type, dedup_key, payload, state, created_at)
+           VALUES (1, 'scan', 'scan', '{}', 'done', 1), (2, 'rg', 'rg:1', '{}', 'queued', 2);
+         INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                             title, artist_display, album, albumartist, seen_at)
+           VALUES (5, 'a/b.flac', 'a/b.flac', 0, 0, 0, 'flac', 1, 't', 'a', 'al', 'aa', 0);
+         INSERT INTO albums (id, rel_dir, rel_dir_key) VALUES (3, 'a', 'a');
+         INSERT INTO edit_batches (id, created_at, state, affected) VALUES (1, 1, 'applied', 1);
+         INSERT INTO edit_ops (id, batch_id, ordinal, track_id, kind, result, job_id)
+           VALUES (10, 1, 0, 5, 'tags', 'applied', 1);
+         INSERT INTO derived_path_locks (rel_path_key, track_id, job_id, acquired_at) VALUES ('x', 5, 2, 1);
+         INSERT INTO job_mutexes (name, job_id, acquired_at) VALUES ('library', 2, 1);
+         INSERT INTO track_locks (track_id, job_id, acquired_at) VALUES (5, 2, 1);
+         INSERT INTO album_verifications (album_id, method, result, source, verified_at, disc_no, job_id)
+           VALUES (3, 'ctdb', 'verified', 'retro', 1, 1, 1);",
+    )
+    .unwrap();
+    // 0015 の前は ytdl が通らない
+    assert!(conn
+        .execute(
+            "INSERT INTO jobs (type, payload, created_at) VALUES ('ytdl', '{}', 1)",
+            []
+        )
+        .is_err());
+
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 15);
+
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT count(*) FROM jobs"), 2);
+    assert_eq!(count("SELECT count(*) FROM edit_ops WHERE job_id = 1"), 1);
+    assert_eq!(
+        count("SELECT count(*) FROM derived_path_locks WHERE job_id = 2"),
+        1
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM job_mutexes WHERE job_id = 2"),
+        1
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM track_locks WHERE job_id = 2"),
+        1
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM album_verifications WHERE job_id = 1"),
+        1
+    );
+    assert_eq!(count("PRAGMA foreign_keys"), 1);
+    assert_eq!(
+        count("SELECT count(*) FROM pragma_foreign_key_check"),
+        0,
+        "参照の整合"
+    );
+    // ytdl が通り、dedup の部分一意索引が生きている
+    conn.execute(
+        "INSERT INTO jobs (type, dedup_key, payload, created_at) VALUES ('ytdl', 'ytdl:u', '{}', 1)",
+        [],
+    )
+    .unwrap();
+    assert!(conn
+        .execute(
+            "INSERT INTO jobs (type, dedup_key, payload, created_at) VALUES ('ytdl', 'ytdl:u', '{}', 1)",
+            []
+        )
+        .is_err());
+    // FK も効いている（無い job を参照する子行、jobs を消すと CASCADE）
+    assert!(conn
+        .execute(
+            "INSERT INTO track_locks (track_id, job_id, acquired_at) VALUES (5, 99, 1)",
+            []
+        )
+        .is_err());
+    conn.execute("DELETE FROM jobs WHERE id = 2", []).unwrap();
+    assert_eq!(count("SELECT count(*) FROM track_locks"), 0);
+    conn.execute("DELETE FROM jobs WHERE id = 1", []).unwrap();
+    assert_eq!(
+        count("SELECT edit_ops.job_id IS NULL FROM edit_ops WHERE id = 10"),
+        1
+    );
+}

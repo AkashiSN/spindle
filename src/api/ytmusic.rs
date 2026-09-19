@@ -50,13 +50,11 @@ pub async fn download(
                 format!("URL が空か長すぎる（{MAX_URL_CHARS} 文字まで）"),
             ));
         }
-        if !(u.starts_with("https://") || u.starts_with("http://"))
-            || u.chars().any(char::is_control)
-        {
+        if !is_acceptable_url(u) {
             return Ok(error_response_with_message(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
-                format!("URL の形が不正: {u}"),
+                format!("URL の形が不正（http / https でホストのあるもの）: {u}"),
             ));
         }
     }
@@ -65,4 +63,18 @@ pub async fn download(
         job_ids.push(state.jobs.enqueue(new_ytdl_job(u)).await?.id());
     }
     Ok((StatusCode::ACCEPTED, Json(DownloadAccepted { job_ids })).into_response())
+}
+
+/// http / https でホストがあり、空白・制御文字を含まない URL か。ホストは限定しない（yt-dlp の
+/// 対応サイトは広く、対応していなければジョブが Fatal で伝える）
+fn is_acceptable_url(u: &str) -> bool {
+    if u.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    match url::Url::parse(u) {
+        Ok(p) => {
+            matches!(p.scheme(), "http" | "https") && p.host_str().is_some_and(|h| !h.is_empty())
+        }
+        Err(_) => false,
+    }
 }

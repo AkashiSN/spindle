@@ -379,7 +379,7 @@ pub fn propose(
             draft = merge_saved(&saved, &draft);
         }
     }
-    let destination = destination(conn, layout, &draft)?;
+    let destination = destination(conn, layout, &draft, files)?;
     let start = destination
         .as_ref()
         .and_then(|d| u32::try_from(d.max_track_no).ok())
@@ -790,6 +790,11 @@ fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -
                 .filter(|(ck, _)| ck == k)
                 .map(|(_, cv)| cv.as_str())
                 .collect();
+            // ARTIST は多値（プラグインの artists 等）があり得る。下書きは 1 値なので、先頭の値のまま
+            // （未編集）なら多値を保つ。編集していれば 1 値で置き換える（D-70）
+            if *k == "ARTIST" && now.len() > 1 && now.first() == Some(&v.as_str()) {
+                return false;
+            }
             now != [v.as_str()]
         })
         .map(|(k, v)| TagChange {
@@ -957,14 +962,21 @@ fn resolve_template(
     Ok((category, template))
 }
 
+/// 件のファイルの MUSICBRAINZ_ALBUMID の最頻値（配置のリリースキー `mb:` の元）
+fn incoming_release_id(files: &[FileRow]) -> Option<String> {
+    mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")))
+}
+
 /// 下書きの宛先ディレクトリ（降格前の素のパス）に active な album があり、それが MB リリースでも
-/// DiscID でもなければ返す（追記先）。トラックが無い下書きは None
+/// DiscID でもなければ返す（追記先）。件のファイルに MUSICBRAINZ_ALBUMID があれば別リリースなので
+/// 追記先は無い（配置は `mb:` のキーで降格か衝突になる）。トラックが無い下書きも None
 pub fn destination(
     conn: &rusqlite::Connection,
     layout: &LayoutConfig,
     draft: &InboxDraft,
+    files: &[FileRow],
 ) -> Result<Option<Destination>, InboxError> {
-    if draft.tracks.is_empty() {
+    if draft.tracks.is_empty() || incoming_release_id(files).is_some() {
         return Ok(None);
     }
     let (category, template) = resolve_template(conn, layout, draft)?;
@@ -1030,12 +1042,12 @@ fn plan_item(
     } = self_album(conn, sources)?;
     // リリースキー: MUSICBRAINZ_ALBUMID の最頻値があれば mb:、自分の成果物の album があればそれ、
     // 宛先に追記できる album があればそれ（D-70）、無ければ件ごとの新規
-    let release = match mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")))
+    let release = match incoming_release_id(files)
         .map(|m| format!("mb:{m}"))
         .or_else(|| self_album.map(|(_, k)| k))
     {
         Some(k) => k,
-        None => match destination(conn, layout, draft)? {
+        None => match destination(conn, layout, draft, files)? {
             Some(d) => d.release_key(),
             None => format!("inbox:{}", item.id),
         },

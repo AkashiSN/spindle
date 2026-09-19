@@ -136,15 +136,13 @@ pub async fn approve(
             if !matches!(item.state, ItemState::Pending | ItemState::Failed) {
                 return Ok(Approve::State);
             }
-            let names: Vec<String> = dbinbox::files(c, id)?
-                .into_iter()
-                .map(|f| f.rel_path)
-                .collect();
+            let files = dbinbox::files(c, id)?;
+            let names: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();
             if let Err(e) = draft.validate(&names) {
                 return Ok(Approve::Bad(e.to_string()));
             }
             // 追記先の active なトラックと番号が重ならないこと（配置で failed になる前に直させる。D-70）
-            let dest = match destination(c, &layout, &draft) {
+            let dest = match destination(c, &layout, &draft, &files) {
                 Ok(d) => d,
                 Err(e) => return Ok(Approve::Bad(e.to_string())),
             };

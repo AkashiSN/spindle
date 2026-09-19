@@ -807,6 +807,23 @@ async fn normalize_batch_is_recorded_atomically_with_registration() {
 
 // ---------------------------------------------------------------- 既存 album への追記（D-70）
 
+/// テスト用: ファイルのタグを直接書き換える（`write_tag_changes` を tmp 無しで当てる）
+fn set_tags(path: &std::path::Path, ext: &str, tags: &[(&str, &[&str])]) {
+    let changes: Vec<spindle::domain::tags::TagChange> = tags
+        .iter()
+        .map(|(k, vs)| spindle::domain::tags::TagChange {
+            key: (*k).to_owned(),
+            values: Some(vs.iter().map(|v| (*v).to_owned()).collect()),
+        })
+        .collect();
+    let mut f = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    spindle::domain::tags::write_tag_changes(&mut f, Some(ext), &changes, None).unwrap();
+}
+
 fn sidecar_entry() -> spindle::import::ytmusic::sidecar::FileEntry {
     spindle::import::ytmusic::sidecar::FileEntry {
         source: "youtube".into(),
@@ -958,4 +975,100 @@ async fn album_with_a_release_id_is_not_adopted() {
     assert!(lib
         .lib_path("_Unsorted/Artist/Album (2024)/02 Two.flac")
         .exists());
+}
+
+/// 入ってくる件に MUSICBRAINZ_ALBUMID があれば、宛先の非 MB の album には追記しない（別リリース）
+#[tokio::test]
+async fn incoming_release_id_is_not_appended_to_a_plain_album() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+
+    let p = lib.add("AlbumB/01.flac", 2, "Other", "Album", 1).unwrap();
+    set_tags(&p, "flac", &[("MUSICBRAINZ_ALBUMID", &["mbid-2"])]);
+    lib.scan(2000).await;
+    let b = lib.item("AlbumB").unwrap();
+    // 提案の宛先は無い（追記しない）
+    let files = inbox::files(&lib.conn(), b.id).unwrap();
+    let dest = spindle::import::inbox::destination(
+        &lib.conn(),
+        &lib.env(false).layout,
+        &draft_for(&[("AlbumB/01.flac", 1, "Other")], None, "Album"),
+        &files,
+    )
+    .unwrap();
+    assert!(dest.is_none());
+    // #1 が重なっても別リリースとして置ける（年で降格）
+    lib.approve(
+        b.id,
+        &draft_for(&[("AlbumB/01.flac", 1, "Other")], None, "Album"),
+    );
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), b.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert!(lib
+        .lib_path("_Unsorted/Artist/Album (2024)/01 Other.flac")
+        .exists());
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 2);
+}
+
+/// ARTIST が多値のファイルは、下書きのアーティストが先頭の値のまま（未編集）なら多値を保つ。
+/// 編集していれば 1 値で上書き（プラグインの artists の写像を Library まで運ぶ。SPEC §7.7）
+#[tokio::test]
+async fn unedited_multi_valued_artist_is_preserved_on_placement() {
+    let lib = Lib::new();
+    let p1 = require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    let p2 = lib.add("AlbumA/02.flac", 2, "Two", "A", 2).unwrap();
+    for p in [&p1, &p2] {
+        set_tags(p, "flac", &[("ARTIST", &["A", "B"])]);
+    }
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    let mut d = draft_for(
+        &[("AlbumA/01.flac", 1, "One"), ("AlbumA/02.flac", 2, "Two")],
+        None,
+        "Album",
+    );
+    d.tracks[0].artist = "A".into(); // 提案どおり（先頭）= 未編集
+    d.tracks[1].artist = "C".into(); // 編集
+    lib.approve(a.id, &d);
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let read = |rel: &str| {
+        spindle::domain::tags::read_audio_file(
+            std::fs::File::open(lib.lib_path(rel)).unwrap(),
+            Some("flac"),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        read("_Unsorted/Artist/Album/01 One.flac")
+            .tags
+            .values("ARTIST")
+            .collect::<Vec<_>>(),
+        ["A", "B"]
+    );
+    assert_eq!(
+        read("_Unsorted/Artist/Album/02 Two.flac")
+            .tags
+            .values("ARTIST")
+            .collect::<Vec<_>>(),
+        ["C"]
+    );
+    let disp: String = lib
+        .conn()
+        .query_row(
+            "SELECT artist_display FROM tracks WHERE rel_path = '_Unsorted/Artist/Album/01 One.flac'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(disp.contains('B'), "{disp}");
 }

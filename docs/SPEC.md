@@ -823,14 +823,18 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
   投入。操作タブの「YouTube」節（1 行 1 URL）から呼ぶ
 - **手順**（ジョブ 1 件 = URL 1 件。作業領域は `[paths].data/tmp/ytdl/<job_id>/`。全部引数配列、`--` の後に URL）
   1. `yt-dlp --dump-single-json --flat-playlist --no-download -- <url>`（120 秒）。`_type` が playlist なら
-     `entries` の URL ごとに `ytdl` を投入して終わり（展開だけ）。動画なら `id` / `webpage_url` / `uploader`
-     （channel）/ `channel`（channel_title）/ `title` / `upload_date` / `duration` を取る
-  2. 取り込み済みチェック: `SOURCE_URL = webpage_url` が Library（`track_tags`）か Inbox（`inbox_files.tags`）に
-     あれば `Fatal`（再試行なし。`last_error` にそのパス）
-  3. プラグインに問い合わせ（Request は上記。`channel` は `uploader`）。`ok` → 宛先
+     `entries` の `url` ごとに `ytdl` を投入して終わり（展開だけ）。動画なら `id` / `webpage_url` / `uploader`
+     （channel）/ `channel`（channel_title）/ `title` / `upload_date` / `duration` を取る。stderr が
+     `Unsupported URL` / `is not a valid URL` なら `Fatal`、他の失敗は `Failed`（再試行）
+  2. プラグインに問い合わせ（Request は上記。`channel` は `uploader`）。`ok` → 宛先
      `Inbox/youtube/<albumartist>/<album>/`（`sanitize_component`）。`ok: false` の `skip` → ダウンロードせず
      `done`（ログに message）。それ以外の reason（`unmatched` / `unknown_channel` / 未知）→ 宛先
-     `Inbox/youtube/_unmatched/<channel>/`（受け皿）。プラグインの故障（`ProviderError`）→ `Fatal`
+     `Inbox/youtube/_unmatched/<channel>/`（受け皿）。プラグインの故障（`ProviderError`）→ `Fatal`。
+     ここで Inbox のファイル名（8.）まで決まる
+  3. 取り込み済みチェック: `SOURCE_URL = webpage_url` が Library（`track_tags`）にあれば `Fatal`（再試行
+     なし。`last_error` にそのパス）。Inbox（`inbox_files.tags`）にあり、それが自分の宛先そのものなら
+     「置いた後に落ちて走査が先に拾った」再実行なので、ダウンロードせずに 8. の仕上げ（サイドカーと投入）
+     だけ済ませて `done`。Inbox の別の場所なら `Fatal`
   4. `yt-dlp -f "ba[ext=webm]" --no-playlist --write-thumbnail --convert-thumbnails jpg -o <tmp>/%(id)s.%(ext)s -- <url>`
      （`[ytmusic].download_timeout_secs`、既定 900）。webm の音声が無ければ `Fatal`。ネットワーク等の失敗は
      `Failed`（再試行）
@@ -840,8 +844,10 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
      動画タイトル + PICTURE + `SOURCE_URL` だけ（他は Inbox の警告で人が埋める）
   7. webm を `Archive/youtube/<id>.webm` へ（tmp + `RENAME_NOREPLACE`。既にあれば同じ id なので採用）
   8. `.opus` を宛先へ `<YYYYMMDD> <title> [<id>].opus`（title は `sanitize_component`。名前順 = 公開順 =
-     採番順。`RENAME_NOREPLACE`、既にあれば `Fatal`）。同じディレクトリの `spindle-inbox.json` を読んで
-     このファイルの項を足し tmp + rename で書く → `inbox` ジョブを投入（すぐ件が出る）
+     採番順。`RENAME_NOREPLACE`。既にあれば、その `SOURCE_URL` が同じときだけ自分の成果物（置いた後に
+     落ちた再実行）として採用し、違えば `Fatal`）。仕上げ: 同じディレクトリの `spindle-inbox.json` を読んで
+     このファイルの項を足し tmp + rename で書く → ディレクトリを fsync → `inbox` ジョブを投入（すぐ件が
+     出る）。仕上げの失敗は `Failed`（再試行。次の実行は 3. か 8. の採用でここへ戻る）
 - **サイドカー `spindle-inbox.json`**（タグに載らない情報を Inbox へ渡す。Inbox の DB には書かない）
   ```jsonc
   { "version": 1,
@@ -850,8 +856,12 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
                                  "verdict": "ok" | "unmatched" | "unknown_channel" | "<未知の reason>",
                                  "message": "…" | null } } }
   ```
-- **失敗の区分**: `Fatal`（再試行なし）は取り込み済み・webm の音声なし・プラグインの故障・宛先の同名ファイル。
-  それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O）は `Failed` で指数バックオフ。作業領域はどの終わり方でも消す
+- **失敗の区分**: `Fatal`（再試行なし）は取り込み済み・webm の音声なし・プラグインの故障・対応していない
+  URL・宛先の同名で別の内容。それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O、仕上げ）は `Failed` で指数
+  バックオフ。作業領域はどの終わり方でも消す。**再実行は冪等**: Archive は同じ id なら採用、Inbox は
+  `SOURCE_URL` で自分の成果物を見分けて続きから
+- `POST /api/ytmusic/download` の URL は http / https でホストがあり空白・制御文字を含まないものだけ受ける
+  （ホストは限定しない。対応していなければジョブが `Fatal` で伝える）
 - yt-dlp は YouTube の抽出に JS ランタイムを要求する版があるため、runtime イメージに deno を同梱する（§14）
 
 ### 7.8 Inbox 取り込み
@@ -909,10 +919,13 @@ Inbox/ に配置（ポーリング検出）
 - **後続**は `rg`（album）と `transcode`。WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら `normalize` の
   編集バッチを作って投入する（D-46 の予告）。thumbnail は埋め込み画像があればスキャンと同じ経路で出る
 - **既存の album への追記**（D-70）: リリースキーは MUSICBRAINZ_ALBUMID の最頻値があれば `mb:`、自分の成果物の
-  album があればそれ、**無ければ宛先ディレクトリに active な album があり、その album にも MB キーが無ければ
-  その album を採用**（`album:<id>`）、それも無ければ件ごとの新規。MB キー同士が違えば衝突（`failed`）。
-  採用する album は `GET /api/inbox` の `destination`（`{ album_id, title, track_count, max_track_no }` | null。
-  下書きの category / albumartist / album から引く）で見せる
+  album があればそれ、**無ければ宛先ディレクトリに active な album があり、その album にも MB キー / DiscID が
+  無ければその album を採用**（`album:<id>`）、それも無ければ件ごとの新規。MB キー同士が違えば従来どおり
+  降格か衝突。採用する album は `GET /api/inbox` の `destination`（`{ album_id, album, track_count,
+  max_track_no }` | null。下書きの category / albumartist / album と件のファイルから引く。件に
+  MUSICBRAINZ_ALBUMID があれば別リリースなので null）で見せる
+- **ARTIST の多値**: 下書きのアーティストは 1 値だが、ファイルの ARTIST が多値（プラグインの `artists` 等）で
+  下書きが先頭の値のまま（未編集）なら多値を保って配置する。編集していれば 1 値で置き換える
 - **採番**: 下書きの提案で TRACKNUMBER の無いファイルは、採用する album の active な `track_no` の最大 + 1 から
   ファイル名順に振る（無ければ 1 から）。承認の検証に「採用する album の active なトラックと `(disc_no, track_no)`
   が重ならない」を加え、配置で失敗する前に 400 で直させる。配置の登録トランザクションでも同じ検証をする

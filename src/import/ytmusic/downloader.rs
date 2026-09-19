@@ -2,18 +2,22 @@
 //!
 //! ```text
 //! dump      yt-dlp --dump-single-json --flat-playlist（playlist なら entries ごとに ytdl を投入して終わり）
-//! dedup     SOURCE_URL が Library / Inbox にあれば Fatal
 //! plugin    メタデータプラグイン（ok → youtube/<albumartist>/<album>、skip → 終わり、他 → youtube/_unmatched/<channel>）
+//! dedup     SOURCE_URL が Library にあれば Fatal。Inbox の自分の宛先にあれば自分の成果物（再実行）として
+//!           ダウンロードせずサイドカーと投入だけ済ませる。Inbox の別の場所なら Fatal
 //! download  yt-dlp -f "ba[ext=webm]" --write-thumbnail
 //! remux     ffmpeg -c:a copy → .opus（再エンコードなし）
 //! tags      lofty（TRACKNUMBER は書かない。採番は Inbox）+ PICTURE + SOURCE_URL
 //! archive   Archive/youtube/<id>.webm
-//! inbox     <YYYYMMDD> <title> [<id>].opus と spindle-inbox.json → inbox ジョブを投入
+//! inbox     <YYYYMMDD> <title> [<id>].opus（同名があれば SOURCE_URL が同じときだけ自分の成果物として採用）と
+//!           spindle-inbox.json → inbox ジョブを投入
 //! ```
 //!
-//! 失敗の区分: 再試行しても変わらないもの（取り込み済み・webm の音声なし・プラグインの故障・宛先の
-//! 同名ファイル）は [`DownloadError::Fatal`]、それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O）は
-//! [`DownloadError::Failed`] で指数バックオフ
+//! 再実行（Inbox に置いた後・サイドカーや投入の前に落ちた）は、置いたファイルの `SOURCE_URL` で自分の
+//! 成果物と見分けて続きから済ませる（冪等）。失敗の区分: 再試行しても変わらないもの（取り込み済み・
+//! webm の音声なし・プラグインの故障・対応していない URL・宛先の同名で別の内容）は
+//! [`DownloadError::Fatal`]、それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O）は [`DownloadError::Failed`] で
+//! 指数バックオフ
 
 use std::fs::File;
 use std::io::Write as _;
@@ -310,7 +314,7 @@ pub async fn download_one(
         }
     };
     // 1. dump
-    let out = ytdlp(env)
+    let out = match ytdlp(env)
         .args([
             "--dump-single-json",
             "--flat-playlist",
@@ -321,7 +325,19 @@ pub async fn download_one(
         .arg("--")
         .arg(url)
         .run(token)
-        .await?;
+        .await
+    {
+        Ok(out) => out,
+        // 対応していない URL は再試行しても変わらない。それ以外の失敗（存在しない・一時的な障害）は
+        // yt-dlp の出力から区別できないので再試行
+        Err(ProcessError::Failed { stderr, .. }) if is_unsupported_url(&stderr) => {
+            return Err(DownloadError::Fatal(format!(
+                "yt-dlp が対応していない URL: {}",
+                stderr.lines().last().unwrap_or("").trim()
+            )));
+        }
+        Err(e) => return Err(e.into()),
+    };
     let video = match parse_dump(&out.stdout)
         .map_err(|e| DownloadError::Fatal(format!("yt-dlp の出力を読めない: {e}")))?
     {
@@ -340,19 +356,8 @@ pub async fn download_one(
         }
         Dump::Video(v) => v,
     };
-    // 2. 取り込み済み
-    let canonical = video.webpage_url.clone();
-    if let Some(located) = env.db.read(move |c| find_source_url(c, &canonical)).await? {
-        let (place, rel) = match located {
-            SourceLocated::Library(p) => ("Library", p),
-            SourceLocated::Inbox(p) => ("Inbox", p),
-        };
-        return Err(DownloadError::Fatal(format!(
-            "取り込み済み（{place}）: {rel}"
-        )));
-    }
     check_cancel()?;
-    // 3. プラグイン
+    // 2. プラグイン（ダウンロードの前。skip ならここで終わり、宛先もここで決まる）
     let item = video.item();
     let (track, verdict, message) = match env.provider.resolve(&item, token).await {
         Ok(Outcome::Track(t)) => (Some(t), "ok".to_owned(), None),
@@ -369,11 +374,51 @@ pub async fn download_one(
         }
         Err(e) => return Err(DownloadError::Fatal(e.to_string())),
     };
+    let title = track
+        .as_ref()
+        .map(|t| t.title.clone())
+        .unwrap_or_else(|| video.title.clone());
+    let dir = inbox_dir(track.as_ref(), video.channel_key()).map_err(DownloadError::Fatal)?;
+    let name = video.inbox_file_name(&title);
+    let target = dir
+        .join(&name)
+        .map_err(|e| DownloadError::Fatal(e.to_string()))?;
+    let entry = FileEntry {
+        source: "youtube".into(),
+        url: Some(video.webpage_url.clone()),
+        channel: Some(video.channel_key().to_owned()),
+        verdict: verdict.clone(),
+        message,
+    };
+    let category = track.as_ref().and_then(|t| t.category.clone());
+    // 3. 取り込み済み。Inbox の自分の宛先にあるなら「置いた後に落ちて走査が先に拾った」再実行なので、
+    //    ダウンロードせずに続き（サイドカーと投入）だけ済ませる
+    let canonical = video.webpage_url.clone();
+    match env.db.read(move |c| find_source_url(c, &canonical)).await? {
+        Some(SourceLocated::Library(p)) => {
+            return Err(DownloadError::Fatal(format!(
+                "取り込み済み（Library）: {p}"
+            )));
+        }
+        Some(SourceLocated::Inbox(p)) if p == target.as_str() => {
+            tracing::info!(url, path = %target, "Inbox に置いた自分の成果物があるので続きだけ済ませる");
+            finish_staging(env, &dir, &name, category.as_deref(), entry).await?;
+            return Ok(Downloaded::Staged {
+                rel_path: target,
+                verdict,
+            });
+        }
+        Some(SourceLocated::Inbox(p)) => {
+            return Err(DownloadError::Fatal(format!("取り込み済み（Inbox）: {p}")));
+        }
+        None => {}
+    }
     if !video.has_webm_audio {
         return Err(DownloadError::Fatal(
             "webm の音声形式（ba[ext=webm]）が無い動画".into(),
         ));
     }
+    check_cancel()?;
     // 4. download（作業領域はどの終わり方でも消す）
     let work = WorkDir::create(&env.tmp_root, job_id)?;
     let template = work.path.join("%(id)s.%(ext)s");
@@ -415,10 +460,6 @@ pub async fn download_one(
         .run(token)
         .await?;
     // 6. タグ
-    let title = track
-        .as_ref()
-        .map(|t| t.title.clone())
-        .unwrap_or_else(|| video.title.clone());
     let changes = tag_changes(track.as_ref(), &video);
     let picture = match std::fs::read(&thumb) {
         Ok(bytes) if !bytes.is_empty() => Some(
@@ -444,7 +485,7 @@ pub async fn download_one(
     }
     check_cancel()?;
     // 7. category の語彙（プラグインの定義が正。D-69）
-    if let Some(cat) = track.as_ref().and_then(|t| t.category.clone()) {
+    if let Some(cat) = category.clone() {
         env.db
             .write(move |c| crate::db::categories::ensure(c, &cat).map(|_| ()))
             .await?;
@@ -459,43 +500,63 @@ pub async fn download_one(
         Ok(()) | Err(FsError::Exists) => {}
         Err(e) => return Err(e.into()),
     }
-    // 9. Inbox
-    let dir = inbox_dir(track.as_ref(), video.channel_key()).map_err(DownloadError::Fatal)?;
-    let name = video.inbox_file_name(&title);
-    let target = dir
-        .join(&name)
-        .map_err(|e| DownloadError::Fatal(e.to_string()))?;
+    // 9. Inbox。同名があれば SOURCE_URL が同じときだけ自分の成果物（置いた後に落ちた再実行）として採用
     env.inbox.create_dir_all(&dir)?;
     match put_file(&env.inbox, &dir, &target, &opus) {
         Ok(()) => {}
         Err(FsError::Exists) => {
-            return Err(DownloadError::Fatal(format!(
-                "Inbox に同名のファイルがある: {target}"
-            )))
+            if !is_own_product(&env.inbox, &target, &video.webpage_url) {
+                return Err(DownloadError::Fatal(format!(
+                    "Inbox に同名で別の内容のファイルがある: {target}"
+                )));
+            }
+            tracing::info!(path = %target, "Inbox に置いた自分の成果物があるので採用する");
         }
         Err(e) => return Err(e.into()),
     }
-    let entry = FileEntry {
-        source: "youtube".into(),
-        url: Some(video.webpage_url.clone()),
-        channel: Some(video.channel_key().to_owned()),
-        verdict: verdict.clone(),
-        message,
-    };
-    let category = track.as_ref().and_then(|t| t.category.as_deref());
-    if let Err(e) = Sidecar::upsert(&env.inbox, &dir, category, &name, entry) {
-        // ファイルは置けている。判定が付かないだけなので止めない
-        tracing::warn!(dir = %dir, error = %e, "spindle-inbox.json を更新できない");
-    }
-    env.inbox.fsync_dir(Some(&dir))?;
-    env.jobs
-        .enqueue(crate::jobs::handlers::inbox::new_inbox_job())
-        .await?;
+    finish_staging(env, &dir, &name, category.as_deref(), entry).await?;
     tracing::info!(url, path = %target, verdict, "Inbox に置いた");
     Ok(Downloaded::Staged {
         rel_path: target,
         verdict,
     })
+}
+
+/// 置いた後の仕上げ: サイドカーの項を足し、ディレクトリを fsync し、inbox ジョブを投入する。
+/// どれも失敗すれば再試行（ファイルは置けているので、次の実行は自分の成果物として採用して
+/// ここへ戻ってくる）
+async fn finish_staging(
+    env: &DownloaderEnv,
+    dir: &RelPath,
+    name: &str,
+    category: Option<&str>,
+    entry: FileEntry,
+) -> Result<(), DownloadError> {
+    Sidecar::upsert(&env.inbox, dir, category, name, entry).map_err(|e| {
+        DownloadError::Failed(anyhow::anyhow!("spindle-inbox.json を更新できない: {e}"))
+    })?;
+    env.inbox.fsync_dir(Some(dir))?;
+    env.jobs
+        .enqueue(crate::jobs::handlers::inbox::new_inbox_job())
+        .await?;
+    Ok(())
+}
+
+/// `target` の `SOURCE_URL` が `url` なら自分の成果物（同じ動画の同じ remux）
+fn is_own_product(inbox: &RootDir, target: &RelPath, url: &str) -> bool {
+    let Ok(file) = inbox.open_file(target) else {
+        return false;
+    };
+    let ext = target.file_name().rsplit_once('.').map(|(_, e)| e);
+    match crate::domain::tags::read_audio_file(file, ext) {
+        Ok(af) => af.tags.first(SOURCE_URL_KEY) == Some(url),
+        Err(_) => false,
+    }
+}
+
+/// yt-dlp の stderr が「対応していない URL」か（`Unsupported URL:` / `is not a valid URL`）
+fn is_unsupported_url(stderr: &str) -> bool {
+    stderr.contains("Unsupported URL") || stderr.contains("is not a valid URL")
 }
 
 fn ytdlp(env: &DownloaderEnv) -> ExternalCommand {
