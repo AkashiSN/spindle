@@ -973,7 +973,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `playlist_id`（静的・スマート）/ `flags` / `dsl` / `q` をそのまま再利用）。web は `useAlbums(filterParam)` で
       ツリー・プレイリスト・検索語の変更で取り直す。受け入れ: `tests/albums_api.rs`（album_ids / category /
       静的プレイリスト / スマートプレイリスト / q で絞れる、フィルタ無しは全件、不正なフィルタは 400）
-- [ ] **P4-7** Derived の系統化と Opus 256k（D-9 追記、D-51 追記、D-75、SPEC §7.6）。新しい連番のマイグレーションで
+- [x] **P4-7** Derived の系統化と Opus 256k（D-9 追記、D-51 追記、D-75、SPEC §7.6。2026-09-20）。新しい連番のマイグレーションで
       `delivery` ビューを DROP → `derived_files` を `(track_id, variant)` 主キー + `audio_profile` / `tag_profile` で
       作り直し（既存行は `variant = 'opus'`、`audio_profile = 'opus:128:v1'`、`tag_profile = 'opus:v1'`）→ ビューを
       `variant = 'opus'` で再作成。`[encode]` を `[encode.derived.opus] { enabled, bitrate }` に改め（`derived_codec` /

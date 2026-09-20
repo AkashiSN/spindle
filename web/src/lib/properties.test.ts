@@ -28,7 +28,7 @@ function row(over: Partial<TrackRow> = {}): TrackRow {
     rg_scanned_at: null,
     rg_written_at: null,
     rg: null,
-    derived: null,
+    derived: { opus: null, aac: null },
     flac_check: null,
   hires_check: null,
     pending_batch_id: null,
@@ -160,7 +160,7 @@ describe('generalRows', () => {
           rg_scanned_at: 1_700_000_000,
           rg_written_at: null,
           flac_check: { status: 'decode_error', checked_at: 1_700_000_000, stale: false, error: 'boom' },
-          derived: { codec: 'opus', stale_tags: true },
+          derived: { opus: { codec: 'opus', stale_tags: true }, aac: { codec: 'aac', stale_tags: false } },
           pending_batch_id: 5,
           duplicate_group: 'dead',
           hardlink: true,
@@ -172,6 +172,7 @@ describe('generalRows', () => {
     expect(valueOf(rows, 'rg')).toEqual({ kind: 'text', text: 'track -6.50 dB / peak 0.980000, album -7.00 dB / peak 1.000000（未書き込み）' })
     expect(valueOf(rows, 'flac_check')).toEqual({ kind: 'text', text: 'デコードエラー: boom' })
     expect(valueOf(rows, 'derived')).toEqual({ kind: 'text', text: 'opus（タグが古い）' })
+    expect(valueOf(rows, 'derived_aac')).toEqual({ kind: 'text', text: 'aac' })
     expect(valueOf(rows, 'state')).toEqual({ kind: 'text', text: '反映待ち #5, 重複, hardlink, 欠落' })
   })
 

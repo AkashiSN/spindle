@@ -2872,6 +2872,11 @@ track lock を取らず、running の間の投入は dedup で弾かれるため
   Encode、`tag_profile`（区切り / iTunNORM 規則）が違えば Retag。区切りやエンコーダ引数を変えたときに
   既存の Derived が追随する（音声版だけを見る今の判定では UpToDate のまま取り残される）
 - `enabled = false` は**凍結**（作らない・触らない・既存行は使い続ける）。GC は系統を区別しない
+- **実装（P4-7）**: 系統の設定は起動時に `derived_variants` 表へ写し（`db::derived::sync_variants`。
+  `export_profiles` の `fb2k_prefix` と同じ流儀。D-55）、投入判定（`enqueue_if_stale` / `enqueue_all_stale`）
+  は表から系統ごとの設定を引く（呼び出し側は設定を持ち回らない）。0018 より前に queued だった旧 payload
+  （`variant` 無し）は opus として扱う。`transcode` の `Resolved` に設定を持ち、表に無い系統のジョブは
+  何もせず Done。テストのフィクスチャは `common::enable_opus_variant` で表を作る
 - **配布ビューもプレイリストも `aac` には作らない。** `delivery` は `opus` 系統に固定。ミュージック.app
   へは `Derived/aac/` のファイルをそのまま取り込み、プレイリストは Apple 側で作る
 

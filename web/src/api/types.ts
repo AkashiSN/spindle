@@ -8,6 +8,8 @@ export type Verification =
   | 'not_attempted'
 
 export type Derived = { codec: string; stale_tags: boolean }
+/** 系統ごとの Derived（SPEC §7.6、D-75）。opus = 配布ビュー・D バッジ、aac = Apple 向け。無い系統は null */
+export type DerivedVariants = { opus: Derived | null; aac: Derived | null }
 /** FLAC 健全性チェックの結果（P1-5）。stale は検査後に audio_version が進んだ */
 export type FlacCheck = {
   status: 'ok' | 'md5_missing' | 'decode_error'
@@ -45,7 +47,7 @@ export type TrackRow = {
   rg_written_at: number | null
   /** 解析値（-18 LUFS 基準の dB）。未解析なら null */
   rg: RgValues | null
-  derived: Derived | null
+  derived: DerivedVariants
   flac_check: FlacCheck | null
   hires_check: HiresCheck | null
   pending_batch_id: number | null

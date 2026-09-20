@@ -19,7 +19,7 @@ const base: TrackRow = {
   rg_scanned_at: null,
   rg: null,
   rg_written_at: null,
-  derived: null,
+  derived: { opus: null, aac: null },
   flac_check: null,
   hires_check: null,
   album_id: null,
@@ -55,7 +55,7 @@ describe('badgesOf', () => {
   it('Derived の stale_tags は点付き、pending / conflict / 重複 / hardlink / missing が並ぶ', () => {
     const t: TrackRow = {
       ...base,
-      derived: { codec: 'opus', stale_tags: true },
+      derived: { opus: { codec: 'opus', stale_tags: true }, aac: null },
       pending_batch_id: 42,
       conflict_batch_id: 41,
       duplicate_group: 'ab',
@@ -73,6 +73,9 @@ describe('badgesOf', () => {
       'missing',
     ])
     expect(badgesOf(t).find((b) => b.key === 'derived')!.icon).toBe('D•')
+    // aac 系統だけでは D バッジは出ない（配布ビューは opus。SPEC §7.6）
+    const aacOnly = { ...t, derived: { opus: null, aac: { codec: 'aac', stale_tags: false } } }
+    expect(badgesOf(aacOnly).find((b) => b.key === 'derived')).toBeUndefined()
     expect(badgesOf(t).find((b) => b.key === 'pending')!.label).toContain('#42')
   })
 
@@ -144,8 +147,8 @@ describe('badgesOf', () => {
       { ...base, lossless: false, codec: 'opus' },
       { ...base, rg_scanned_at: 1, rg_written_at: 2, rg: { track_gain: 0, track_peak: 0, album_gain: null, album_peak: null } },
       { ...base, rg_scanned_at: 2, rg_written_at: 1, rg: { track_gain: 0, track_peak: 0, album_gain: null, album_peak: null } },
-      { ...base, derived: { codec: 'opus', stale_tags: false } },
-      { ...base, derived: { codec: 'opus', stale_tags: true } },
+      { ...base, derived: { opus: { codec: 'opus', stale_tags: false }, aac: null } },
+      { ...base, derived: { opus: { codec: 'opus', stale_tags: true }, aac: null } },
       { ...base, flac_check: { status: 'md5_missing', checked_at: 1, stale: true, error: null } },
       { ...base, flac_check: { status: 'decode_error', checked_at: 1, stale: false, error: 'x' } },
       { ...base, hires_check: { ...hires, status: 'upsampled' } },

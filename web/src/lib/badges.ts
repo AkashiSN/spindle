@@ -48,13 +48,15 @@ export function badgesOf(t: TrackRow): Badge[] {
       cls: `badge b-rg${unwritten ? ' b-faded' : ''}`,
     })
   }
-  if (t.derived) {
+  // D バッジは配布ビューの opus 系統だけ（aac 系統はプロパティで見せる。SPEC §7.6）
+  const opus = t.derived.opus
+  if (opus) {
     out.push({
       key: 'derived',
-      icon: t.derived.stale_tags ? 'D•' : 'D',
-      label: t.derived.stale_tags
-        ? `Derived あり（${t.derived.codec}、タグが古い）`
-        : `Derived あり（${t.derived.codec}）`,
+      icon: opus.stale_tags ? 'D•' : 'D',
+      label: opus.stale_tags
+        ? `Derived あり（${opus.codec}、タグが古い）`
+        : `Derived あり（${opus.codec}）`,
       cls: 'badge b-derived',
     })
   }

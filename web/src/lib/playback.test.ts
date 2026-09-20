@@ -33,7 +33,7 @@ function row(id: number, codec: string, lossless: boolean, missing = false): Tra
     rg_scanned_at: null,
     rg_written_at: null,
     rg: null,
-    derived: null,
+    derived: { opus: null, aac: null },
     flac_check: null,
   hires_check: null,
     album_id: null,

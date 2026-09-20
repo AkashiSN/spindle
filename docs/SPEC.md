@@ -747,8 +747,10 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
 ### 7.6 Derived 生成
 
 Derived は**系統（variant）**ごとに 1 本ずつ作る。系統は `opus`（Android の同期・Web 再生・配布ビュー）と
-`aac`（Mac のミュージック.app へ取り込む Apple 向け）の 2 つで固定（P4-7 / P4-8。D-9 追記、D-75。
-それまでは `opus` 系統だけがルート直下 `Derived/<...>.opus` にある）。
+`aac`（Mac のミュージック.app へ取り込む Apple 向け）の 2 つで固定（P4-7 で系統化、P4-8 で `aac` の実体。
+D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に `derived_variants` 表へ写す（投入判定は
+どこからでも同じ接続で設定を引ける。D-55 の `fb2k_prefix` と同じ流儀）。設定に無い系統は投入も生成も
+しない。
 
 | 項目 | 規則 |
 |---|---|
@@ -1299,9 +1301,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "track_no": 1, "disc_no": 1, "date": "2024", "category": "J-Pop",
                "duration_ms": 280000, "codec": "flac", "lossless": true,
                "verification": "verified_ctdb", "rg_scanned_at": 1, "rg_written_at": 1,
-               "derived": { "opus": { "stale_tags": false }, "aac": null },
-                                                                       // 系統ごと。無ければ null（§7.6。P4-7 まで
-                                                                       // は { "codec": "opus", "stale_tags": false } | null）
+               "derived": { "opus": { "codec": "opus", "stale_tags": false }, "aac": null },
+                                                                       // 系統ごと。無ければ null（§7.6）
                "flac_check": { "status": "ok", "checked_at": 1700000000, "stale": false, "error": null },
                                                                        // 未検査なら null（§7.9）
                "hires_check": { "status": "upsampled", "checked_at": 1700000000, "stale": false,
