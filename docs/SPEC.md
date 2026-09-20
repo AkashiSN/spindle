@@ -1140,6 +1140,17 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
   **全件削除**する
   （ロックはプロセス生存中しか意味を持たない）。単一インスタンス前提。同じ DB を
   複数プロセスで開くことは想定しない（compose で replicas を増やさない）
+- **終端遷移の書き込みの再試行**（D-76、P4-9）: ハンドラの結果を DB に書く終端トランザクション
+  （進捗の flush・ロック解放・`done` / `failed` / `cancelled` / 再キュー）が失敗したら、種別の許可と
+  CPU 予算を**持ったまま** 1, 2, 4, 8, 16, 32 秒の間隔で再試行する（6 回、約 1 分。ディスク満杯や
+  一時的なロックなら自力で復帰し、仕事の結果を失わない）。使い切ったら `failed` としての記録を 1 度
+  試み、それも駄目なら `running` のまま手放す（下の稼働中の回収が拾う）
+- **稼働中の回収**（起動時リカバリのループ版。D-76、P4-9）: ワーカーは周回ごとに、DB で `running`
+  だが**プロセス内で実行中でない**行（終端を書けなかった行）を `queued` へ戻し（`cancel_requested_at`
+  が立っていれば `cancelled`）、その行の `track_locks` / `derived_path_locks` / `job_mutexes` を消す。
+  `started_at` は NULL、`attempts` / `run_after` は触らない（起動時リカバリと同じ）。回収した旨を
+  `last_error` とログに残す。実行中の登録は claim と同じスケジューラの流れで spawn の前に行い、
+  「claim 済みだが未登録」の瞬間を作らない
 - `dedup_key` は **`queued` / `running` の間だけ**一意（partial unique index）。
   列 UNIQUE にすると `done` / `failed` 後に同じキー（`scan` の固定キー、同 version の
   手動再試行）を永久に投入できない。キーは `type` を含めて構成する
