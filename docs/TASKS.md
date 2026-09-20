@@ -954,7 +954,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - [ ] **P4-3** プロパティタブのフィールド削除 / 追加（D-72）。右クリック（または行末の ×）で `delete` op、
       「フィールドを追加」で新しいキーに `set` op。どちらも選択全体への一括編集（preview → apply）。
       受け入れ: `web/src/lib/properties.test.ts`、`web/src/components` の vitest
-- [ ] **P4-4** Inbox 承認画面の忠実表示（D-70 追記）。ARTIST の全値を `;` 区切りで見せ、`keep_artists` で
+- [x] **P4-4** Inbox 承認画面の忠実表示（D-70 追記。2026-09-20）。ARTIST の全値を `;` 区切りで見せ、`keep_artists` で
       「そのまま保つ / 1 値で書く」を明示。Inbox のファイルの埋め込み画像を返す `GET /api/inbox/:id/artwork/:hash`
       （`PICTURE` のハッシュで実体を照合、Library の artwork と同じ ETag / キャッシュ）と承認画面のサムネイル。
       受け入れ: `tests/inbox_api.rs`、`tests/inbox_job.rs`、`web/src/lib/inbox.test.ts`

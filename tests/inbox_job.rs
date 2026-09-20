@@ -326,6 +326,7 @@ fn draft_for(files: &[(&str, u32, &str)], category: Option<&str>, album: &str) -
                 track_no: *n,
                 title: title.to_string(),
                 artist: String::new(),
+                keep_artists: None,
             })
             .collect(),
         album_gain: false,
@@ -1153,25 +1154,44 @@ async fn incoming_release_id_is_not_appended_to_a_plain_album() {
     assert_eq!(lib.count("SELECT count(*) FROM albums"), 2);
 }
 
-/// ARTIST が多値のファイルは、下書きのアーティストが先頭の値のまま（未編集）なら多値を保つ。
-/// 編集していれば 1 値で上書き（プラグインの artists の写像を Library まで運ぶ。SPEC §7.7）
+/// ARTIST が多値のファイルは、下書きの `keep_artists` が true なら（現在の個数に関係なく）触れず、
+/// false なら `artist` の 1 値で上書きする。`keep_artists` の無い旧下書きは先頭の値のままなら保つ
+/// （プラグインの artists の写像を Library まで運ぶ。SPEC §7.7 / §7.8、D-70、P4-4）
 #[tokio::test]
-async fn unedited_multi_valued_artist_is_preserved_on_placement() {
+async fn keep_artists_decides_whether_multi_valued_artist_is_preserved_on_placement() {
     let lib = Lib::new();
     let p1 = require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
     let p2 = lib.add("AlbumA/02.flac", 2, "Two", "A", 2).unwrap();
-    for p in [&p1, &p2] {
+    let p3 = lib.add("AlbumA/03.flac", 3, "Three", "A", 3).unwrap();
+    let p4 = lib.add("AlbumA/04.flac", 4, "Four", "A", 4).unwrap();
+    for p in [&p1, &p2, &p3] {
         set_tags(p, "flac", &[("ARTIST", &["A", "B"])]);
     }
+    set_tags(&p4, "flac", &[("ARTIST", &["X"])]);
     lib.scan(1000).await;
     let a = lib.item("AlbumA").unwrap();
     let mut d = draft_for(
-        &[("AlbumA/01.flac", 1, "One"), ("AlbumA/02.flac", 2, "Two")],
+        &[
+            ("AlbumA/01.flac", 1, "One"),
+            ("AlbumA/02.flac", 2, "Two"),
+            ("AlbumA/03.flac", 3, "Three"),
+            ("AlbumA/04.flac", 4, "Four"),
+        ],
         None,
         "Album",
     );
-    d.tracks[0].artist = "A".into(); // 提案どおり（先頭）= 未編集
-    d.tracks[1].artist = "C".into(); // 編集
+    // 提案どおり（多値を保つ。artist は表示用）
+    d.tracks[0].artist = "A; B".into();
+    d.tracks[0].keep_artists = Some(true);
+    // チェックを外して 1 値に
+    d.tracks[1].artist = "C".into();
+    d.tracks[1].keep_artists = Some(false);
+    // 旧下書き（欄なし）: 先頭の値のまま = 保つ
+    d.tracks[2].artist = "A".into();
+    d.tracks[2].keep_artists = None;
+    // true はファイルが 1 値でも触れない（承認後に変わった経路の安全側）
+    d.tracks[3].artist = "Y".into();
+    d.tracks[3].keep_artists = Some(true);
     lib.approve(a.id, &d);
     lib.start(true);
     assert_eq!(lib.run_job().await, JobState::Done);
@@ -1182,20 +1202,17 @@ async fn unedited_multi_valued_artist_is_preserved_on_placement() {
         )
         .unwrap()
     };
-    assert_eq!(
-        read("_Unsorted/Artist/Album/01 One.flac")
+    let artists = |rel: &str| {
+        read(rel)
             .tags
             .values("ARTIST")
-            .collect::<Vec<_>>(),
-        ["A", "B"]
-    );
-    assert_eq!(
-        read("_Unsorted/Artist/Album/02 Two.flac")
-            .tags
-            .values("ARTIST")
-            .collect::<Vec<_>>(),
-        ["C"]
-    );
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(artists("_Unsorted/Artist/Album/01 One.flac"), ["A", "B"]);
+    assert_eq!(artists("_Unsorted/Artist/Album/02 Two.flac"), ["C"]);
+    assert_eq!(artists("_Unsorted/Artist/Album/03 Three.flac"), ["A", "B"]);
+    assert_eq!(artists("_Unsorted/Artist/Album/04 Four.flac"), ["X"]);
     let disp: String = lib
         .conn()
         .query_row(
@@ -1204,7 +1221,47 @@ async fn unedited_multi_valued_artist_is_preserved_on_placement() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(disp.contains('B'), "{disp}");
+    assert_eq!(disp, "A, B");
+}
+
+/// 走査は Library の pick_embedded と同じ規則（front cover 優先）で選んだ画像を `PICTURE` の先頭に
+/// 置く（承認画面の代表画像。P4-4）
+#[tokio::test]
+async fn scan_puts_the_front_cover_first_among_pictures() {
+    use lofty::picture::{MimeType, Picture, PictureType};
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    let other = jpeg(b"other");
+    let front = jpeg(b"front");
+    let pic = |bytes: &[u8], t: PictureType| {
+        Picture::unchecked(bytes.to_vec())
+            .pic_type(t)
+            .mime_type(MimeType::Jpeg)
+            .build()
+    };
+    common::retag(&p, |t| {
+        t.push_picture(pic(&other, PictureType::Other));
+        t.push_picture(pic(&front, PictureType::CoverFront));
+    });
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    let files = inbox::files(&lib.conn(), a.id).unwrap();
+    let hashes: Vec<(String, String)> = spindle::import::inbox::picture_hashes(&files[0].tags)
+        .into_iter()
+        .map(|(m, h)| (m.to_owned(), h.to_owned()))
+        .collect();
+    let hex = |b: &[u8]| {
+        spindle::media::artwork::ArtworkStore::hex(&spindle::media::artwork::ArtworkStore::hash_of(
+            b,
+        ))
+    };
+    assert_eq!(
+        hashes,
+        [
+            ("image/jpeg".to_owned(), hex(&front)),
+            ("image/jpeg".to_owned(), hex(&other))
+        ]
+    );
 }
 
 // ---------------------------------------------------------------- 配置直後のアートワーク解決（P3-4、D-68）

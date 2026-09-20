@@ -39,6 +39,7 @@ fn draft() -> InboxDraft {
                 track_no: 1,
                 title: "One".into(),
                 artist: String::new(),
+                keep_artists: None,
             },
             DraftTrack {
                 rel_path: "A/02.flac".into(),
@@ -46,6 +47,7 @@ fn draft() -> InboxDraft {
                 track_no: 2,
                 title: "Two".into(),
                 artist: "Guest".into(),
+                keep_artists: None,
             },
         ],
     }
@@ -226,6 +228,7 @@ fn number_missing_assigns_from_start_in_file_order_skipping_used_numbers() {
                 track_no: 0,
                 title: "b".into(),
                 artist: String::new(),
+                keep_artists: None,
             },
             DraftTrack {
                 rel_path: "x/20260901 a.opus".into(),
@@ -233,6 +236,7 @@ fn number_missing_assigns_from_start_in_file_order_skipping_used_numbers() {
                 track_no: 0,
                 title: "a".into(),
                 artist: String::new(),
+                keep_artists: None,
             },
             DraftTrack {
                 rel_path: "x/c.opus".into(),
@@ -240,6 +244,7 @@ fn number_missing_assigns_from_start_in_file_order_skipping_used_numbers() {
                 track_no: 14,
                 title: "c".into(),
                 artist: String::new(),
+                keep_artists: None,
             },
         ],
     };
@@ -274,6 +279,7 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
                 track_no: 7,
                 title: "Corrected".into(),
                 artist: String::new(),
+                keep_artists: None,
             },
             DraftTrack {
                 rel_path: "A/gone.flac".into(),
@@ -281,6 +287,7 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
                 track_no: 8,
                 title: "Gone".into(),
                 artist: String::new(),
+                keep_artists: None,
             },
         ],
     };
@@ -291,6 +298,7 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
         track_no: 0,
         title: "Three".into(),
         artist: String::new(),
+        keep_artists: None,
     });
     let merged = merge_saved(&saved, &proposed);
     // アルバム単位の補正は保存した下書き

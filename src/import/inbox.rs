@@ -32,9 +32,14 @@ pub struct DraftTrack {
     pub disc_no: u32,
     pub track_no: u32,
     pub title: String,
-    /// 空ならアルバムアーティスト
+    /// 空ならアルバムアーティスト。`keep_artists` が true なら表示用（ファイルの ARTIST の全値を
+    /// `"; "` で結合したもの）で、配置は見ない
     #[serde(default)]
     pub artist: String,
+    /// ファイルの ARTIST をそのまま保つ（配置で触れない。P4-4、D-70）。提案は多値なら true。None は
+    /// この欄が無かった旧下書きで、旧規則（多値で `artist` が先頭値のままなら保つ）で解釈する
+    #[serde(default)]
+    pub keep_artists: Option<bool>,
 }
 
 /// 承認の入力（アルバム単位の補正とトラック単位の補正）
@@ -215,6 +220,94 @@ fn tag<'a>(f: &'a FileRow, key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
+/// 承認画面が ARTIST の全値を見せるときの区切り（foobar2000 等の多値の慣習。Library の一覧が使う
+/// `", "` とは区別する。D-70）
+pub const ARTIST_JOIN: &str = "; ";
+
+/// `tags` の ARTIST の全値（trim 済み・空は除く。出現順）
+pub fn artist_values(tags: &[(String, String)]) -> Vec<&str> {
+    tags.iter()
+        .filter(|(k, _)| k == "ARTIST")
+        .map(|(_, v)| v.trim())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
+/// 提案の `artist`: ARTIST の全値を `"; "` で結合（1 値なら同じ、無ければ空）
+pub fn joined_artist(tags: &[(String, String)]) -> String {
+    artist_values(tags).join(ARTIST_JOIN)
+}
+
+/// 下書きのトラック `t` がファイルの ARTIST を**そのまま**保つ（配置で触れない）か。`keep_artists` が
+/// true なら現在の個数に関係なく true（承認後にファイルが 1 値に変わっていても安全側）。旧下書き
+/// （欄が無い）は、ファイルが多値で `artist` が先頭値のままなら保つ（D-70）
+pub fn keeps_artists(t: &DraftTrack, tags: &[(String, String)]) -> bool {
+    match t.keep_artists {
+        Some(keep) => keep,
+        None => {
+            let values = artist_values(tags);
+            values.len() > 1 && values.first() == Some(&t.artist.trim())
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 埋め込み画像（P4-4、D-70）
+
+/// `tags` の `PICTURE`（`"<mime>:<sha256 hex>"`）を `(mime, hash)` にほどく（出現順）
+pub fn picture_hashes(tags: &[(String, String)]) -> Vec<(&str, &str)> {
+    tags.iter()
+        .filter(|(k, _)| k == "PICTURE")
+        .filter_map(|(_, v)| v.split_once(':'))
+        .collect()
+}
+
+/// `hash`（sha256 hex、小文字）の埋め込み画像を件のファイルから探す（`GET /api/inbox/:id/artwork/:hash`）。
+/// `PICTURE` にその hash を持つファイルを走査順に開き（symlink / 境界外 / 消失は次の候補へ）、
+/// 内容の sha256 が一致する画像を `(mime, bytes)` で返す。MIME はタグの値ではなく内容の sniff で、
+/// sniff できない画像は一致しなかったものとして次へ。どれも一致しなければ None（呼び出し側は 404）。
+/// その他の I/O 失敗は Err
+pub fn embedded_picture(
+    inbox: &RootDir,
+    files: &[FileRow],
+    hash: &str,
+) -> Result<Option<(&'static str, Vec<u8>)>, InboxError> {
+    for f in files
+        .iter()
+        .filter(|f| picture_hashes(&f.tags).iter().any(|(_, h)| *h == hash))
+    {
+        let Ok(rel) = RelPath::parse(&f.rel_path) else {
+            continue;
+        };
+        let file = match inbox.open_file(&rel) {
+            Ok(f) => f,
+            Err(FsError::NotFound | FsError::Symlink | FsError::Escaped) => continue,
+            Err(FsError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let ext = rel
+            .file_name()
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase());
+        let Ok((_, pictures)) =
+            crate::domain::tags::read_audio_file_with_pictures(file, ext.as_deref())
+        else {
+            continue;
+        };
+        let found = pictures.into_iter().find_map(|pic| {
+            let digest = crate::media::artwork::ArtworkStore::hash_of(pic.data());
+            if crate::media::artwork::ArtworkStore::hex(&digest) != hash {
+                return None;
+            }
+            let info = crate::media::artwork::sniff(pic.data())?;
+            Some((info.mime, pic.data().to_vec()))
+        });
+        if found.is_some() {
+            return Ok(found);
+        }
+    }
+    Ok(None)
+}
+
 fn leading_int(s: &str) -> Option<u32> {
     let digits: String = s
         .trim()
@@ -226,7 +319,7 @@ fn leading_int(s: &str) -> Option<u32> {
 
 /// タグから下書きを作る。albumartist / album / date は最頻値（ALBUMARTIST が無ければ ARTIST）、
 /// category は GENRE の最頻値のうち `genre_map`（canonical key → category id）に当たるもの、
-/// トラックは TRACKNUMBER（無ければ 0 = 不足）/ DISCNUMBER（無ければ 1）/ TITLE / ARTIST
+/// トラックは TRACKNUMBER（無ければ 0 = 不足）/ DISCNUMBER（無ければ 1）/ TITLE / ARTIST（全値を `"; "` で結合）
 pub fn proposal(
     files: &[FileRow],
     categories: &[(i64, String)],
@@ -262,7 +355,8 @@ pub fn proposal(
             disc_no: tag(f, "DISCNUMBER").and_then(leading_int).unwrap_or(1),
             track_no: tag(f, "TRACKNUMBER").and_then(leading_int).unwrap_or(0),
             title: tag(f, "TITLE").unwrap_or("").trim().to_owned(),
-            artist: tag(f, "ARTIST").unwrap_or("").trim().to_owned(),
+            artist: joined_artist(&f.tags),
+            keep_artists: Some(artist_values(&f.tags).len() > 1),
         })
         .collect();
     InboxDraft {
@@ -526,8 +620,24 @@ fn stat_matches(row: &FileRow, st: &crate::fsroot::Stat) -> bool {
 fn read_row(root: &RootDir, seen: &Seen) -> Result<FileRow, FsError> {
     let ext = seen.rel.file_name().rsplit_once('.').map(|(_, e)| e);
     let file = root.open_file(&seen.rel)?;
-    let af = read_audio_file(file, ext)
+    let (af, pictures) = crate::domain::tags::read_audio_file_with_pictures(file, ext)
         .map_err(|e| FsError::Io(std::io::Error::other(e.to_string())))?;
+    let mut tags = af.tags.items().to_vec();
+    // 代表画像（Library の pick_embedded と同じ: front cover 優先、無ければ先頭）を PICTURE の
+    // 先頭に置く。画面は先頭を代表にする（P4-4、D-70）
+    if let Some(pick) = crate::media::artwork::pick_embedded(&pictures) {
+        let hash = crate::media::artwork::ArtworkStore::hex(
+            &crate::media::artwork::ArtworkStore::hash_of(pick.data()),
+        );
+        let first = tags.iter().position(|(k, _)| k == "PICTURE");
+        let at = tags
+            .iter()
+            .position(|(k, v)| k == "PICTURE" && v.split_once(':').map(|(_, h)| h) == Some(&hash));
+        if let (Some(first), Some(at)) = (first, at) {
+            let picked = tags.remove(at);
+            tags.insert(first, picked);
+        }
+    }
     Ok(FileRow {
         rel_path: seen.rel.as_str().to_owned(),
         inode: seen.st.inode as i64,
@@ -540,7 +650,7 @@ fn read_row(root: &RootDir, seen: &Seen) -> Result<FileRow, FsError> {
         bit_depth: af.bit_depth,
         channels: af.channels,
         duration_ms: af.duration_ms,
-        tags: af.tags.items().to_vec(),
+        tags,
     })
 }
 
@@ -801,9 +911,9 @@ fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -
                 .filter(|(ck, _)| ck == k)
                 .map(|(_, cv)| cv.as_str())
                 .collect();
-            // ARTIST は多値（プラグインの artists 等）があり得る。下書きは 1 値なので、先頭の値のまま
-            // （未編集）なら多値を保つ。編集していれば 1 値で置き換える（D-70）
-            if *k == "ARTIST" && now.len() > 1 && now.first() == Some(&v.as_str()) {
+            // ARTIST は多値（プラグインの artists 等）があり得る。提案は全値の結合なので、結合文字列の
+            // まま（未編集）なら多値を保つ。編集していれば 1 値で置き換える（D-70）
+            if *k == "ARTIST" && keeps_artists(t, current) {
                 return false;
             }
             now != [v.as_str()]
@@ -936,14 +1046,27 @@ fn split_name(rel_path: &str) -> (String, String) {
     }
 }
 
-/// 下書きのトラック `i` のテンプレート値
-fn track_fields(draft: &InboxDraft, category: Option<&str>, i: usize) -> TrackFields {
+/// 下書きのトラック `i` のテンプレート値。`files` は件のファイル（多値の ARTIST を保つときの
+/// `{artist}` を Library の `artist_display` と同じ `", "` 結合にするため）
+fn track_fields(
+    draft: &InboxDraft,
+    category: Option<&str>,
+    i: usize,
+    files: &[FileRow],
+) -> TrackFields {
     let t = &draft.tracks[i];
     let (stem, ext) = split_name(&t.rel_path);
+    let key = canonical_key(&t.rel_path);
+    let artist = match files.iter().find(|f| canonical_key(&f.rel_path) == key) {
+        Some(f) if keeps_artists(t, &f.tags) && !artist_values(&f.tags).is_empty() => {
+            artist_values(&f.tags).join(crate::import::scanner::ARTIST_SEPARATOR)
+        }
+        _ => draft.track_artist(i).to_owned(),
+    };
     TrackFields {
         category: category.map(str::to_owned),
         albumartist: Some(draft.albumartist.trim().to_owned()),
-        artist: Some(draft.track_artist(i).to_owned()),
+        artist: Some(artist),
         album: Some(draft.album.trim().to_owned()),
         title: Some(t.title.trim().to_owned()),
         disc_no: Some(i64::from(t.disc_no)),
@@ -993,7 +1116,7 @@ pub fn destination(
         return Ok(None);
     }
     let (category, template) = resolve_template(conn, layout, draft)?;
-    let fields = track_fields(draft, category.as_ref().map(|c| c.name.as_str()), 0);
+    let fields = track_fields(draft, category.as_ref().map(|c| c.name.as_str()), 0, files);
     let Ok(path) = template.render(&fields, pathgen::AlbumVariant::Plain) else {
         return Ok(None);
     };
@@ -1070,7 +1193,7 @@ fn plan_item(
         .map(|i| PlanItem {
             track_id: -(i as i64) - 1,
             template: template.clone(),
-            fields: track_fields(draft, category.as_ref().map(|c| c.name.as_str()), i),
+            fields: track_fields(draft, category.as_ref().map(|c| c.name.as_str()), i, files),
             release: release.clone(),
             current_rel_path: String::new(),
         })

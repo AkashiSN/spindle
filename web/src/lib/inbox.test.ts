@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  artistValues,
+  artworkUrl,
   codecSummary,
+  itemCover,
+  keepArtistsFor,
+  pictureOf,
   destinationLabel,
   draftForSubmit,
   draftFrom,
@@ -14,7 +19,7 @@ import {
   type InboxItem,
 } from './inbox'
 
-function file(rel_path: string, codec = 'flac'): InboxFile {
+function file(rel_path: string, codec = 'flac', tags: Array<[string, string]> = []): InboxFile {
   return {
     rel_path,
     inode: 1,
@@ -27,7 +32,7 @@ function file(rel_path: string, codec = 'flac'): InboxFile {
     bit_depth: 16,
     channels: 2,
     duration_ms: 1000,
-    tags: [],
+    tags,
     source: null,
   }
 }
@@ -38,8 +43,8 @@ const proposal: InboxDraft = {
   album: 'X',
   date: '2020',
   tracks: [
-    { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '' },
-    { rel_path: 'd/02.flac', disc_no: 1, track_no: 2, title: 'two', artist: '' },
+    { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '', keep_artists: false },
+    { rel_path: 'd/02.flac', disc_no: 1, track_no: 2, title: 'two', artist: '', keep_artists: false },
   ],
   album_gain: false,
 }
@@ -93,8 +98,8 @@ describe('draftFrom', () => {
     expect(d.album).toBe('Y')
     expect(d.date).toBeNull()
     expect(d.tracks).toEqual([
-      { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '' },
-      { rel_path: 'd/02.flac', disc_no: 2, track_no: 9, title: 'fixed', artist: 'C' },
+      { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '', keep_artists: false },
+      { rel_path: 'd/02.flac', disc_no: 2, track_no: 9, title: 'fixed', artist: 'C', keep_artists: false },
     ])
   })
 
@@ -182,7 +187,7 @@ describe('draftForSubmit', () => {
       albumartist: 'A',
       album: 'X',
       date: null,
-      tracks: [{ rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 't', artist: '' }],
+      tracks: [{ rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 't', artist: '', keep_artists: false }],
       album_gain: true,
     })
   })
@@ -229,3 +234,95 @@ describe('parseUrlLines（操作タブの YouTube）', () => {
     expect(parseUrlLines('\n  \n')).toEqual([])
   })
 })
+
+// ---------------------------------------------------------------- 忠実表示（P4-4、D-70）
+
+describe('ARTIST の多値', () => {
+  const multi = file('d/01.flac', 'flac', [
+    ['ARTIST', '花譜'],
+    ['ARTIST', ' 理芽 '],
+    ['ARTIST', ''],
+    ['TITLE', 'x'],
+  ])
+  const single = file('d/02.flac', 'flac', [['ARTIST', '花譜']])
+
+  it('artistValues は ARTIST の全値（trim、空は除く、出現順）', () => {
+    expect(artistValues(multi)).toEqual(['花譜', '理芽'])
+    expect(artistValues(single)).toEqual(['花譜'])
+    expect(artistValues(file('d/03.flac'))).toEqual([])
+  })
+
+  it('keepArtistsFor: 多値でなければ常に false、多値なら提案は true、保存値は boolean を尊重、旧下書きは先頭値のまま', () => {
+    expect(keepArtistsFor(single, null)).toBe(false)
+    expect(keepArtistsFor(single, { rel_path: 'd/02.flac', disc_no: 1, track_no: 1, title: '', artist: '花譜', keep_artists: true })).toBe(false)
+    expect(keepArtistsFor(undefined, null)).toBe(false)
+    expect(keepArtistsFor(multi, null)).toBe(true)
+    const t = { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: '', artist: '花譜' }
+    expect(keepArtistsFor(multi, { ...t, keep_artists: false })).toBe(false)
+    expect(keepArtistsFor(multi, { ...t, keep_artists: true, artist: 'zzz' })).toBe(true)
+    // 旧下書き（欄なし / null）: artist が先頭値のままなら保つ
+    expect(keepArtistsFor(multi, t)).toBe(true)
+    expect(keepArtistsFor(multi, { ...t, keep_artists: null })).toBe(true)
+    expect(keepArtistsFor(multi, { ...t, artist: '花譜; 理芽' })).toBe(false)
+  })
+
+  it('draftFrom は提案の keep_artists をファイルから決め、保存値が true でもファイルが多値でなければ false に戻す', () => {
+    const it0 = item({
+      tracks: [multi, single],
+      proposal: {
+        ...proposal,
+        tracks: [
+          { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '花譜; 理芽', keep_artists: true },
+          { rel_path: 'd/02.flac', disc_no: 1, track_no: 2, title: 'two', artist: '花譜', keep_artists: false },
+        ],
+      },
+    })
+    expect(draftFrom(it0).tracks.map((t) => t.keep_artists)).toEqual([true, false])
+    const saved: InboxDraft = {
+      ...proposal,
+      tracks: [
+        { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: 'C', keep_artists: false },
+        { rel_path: 'd/02.flac', disc_no: 1, track_no: 2, title: 'two', artist: 'x', keep_artists: true },
+      ],
+    }
+    const d = draftFrom(item({ ...it0, draft: saved }))
+    expect(d.tracks.map((t) => t.keep_artists)).toEqual([false, false])
+    expect(d.tracks[0].artist).toBe('C')
+  })
+
+  it('draftForSubmit は keep_artists を boolean にする（旧下書きの null は false）', () => {
+    const d: InboxDraft = {
+      ...proposal,
+      tracks: [
+        { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'a', artist: 'A; B', keep_artists: true },
+        { rel_path: 'd/02.flac', disc_no: 1, track_no: 2, title: 'b', artist: 'A', keep_artists: null },
+      ],
+    }
+    expect(draftForSubmit(d).tracks.map((t) => t.keep_artists)).toEqual([true, false])
+  })
+})
+
+describe('埋め込み画像', () => {
+  const h1 = 'a'.repeat(64)
+  const h2 = 'b'.repeat(64)
+  const withPic = (rel: string, ...hashes: string[]) =>
+    file(rel, 'flac', hashes.map((h) => ['PICTURE', `image/jpeg:${h}`] as [string, string]))
+
+  it('pictureOf は PICTURE の先頭の hash、無ければ null', () => {
+    expect(pictureOf(withPic('d/01.flac', h1, h2))).toBe(h1)
+    expect(pictureOf(file('d/01.flac'))).toBeNull()
+    expect(pictureOf(file('d/01.flac', 'flac', [['PICTURE', 'image/jpeg:']]))).toBeNull()
+  })
+
+  it('itemCover は各ファイルの代表の最頻（同数なら先に現れたもの）、無ければ null', () => {
+    expect(itemCover(item({ tracks: [withPic('a', h1), withPic('b', h2), withPic('c', h2)] }))).toBe(h2)
+    expect(itemCover(item({ tracks: [withPic('a', h1), withPic('b', h2)] }))).toBe(h1)
+    expect(itemCover(item({ tracks: [withPic('a', h1), file('b'), withPic('c', h1, h2)] }))).toBe(h1)
+    expect(itemCover(item({ tracks: [file('a')] }))).toBeNull()
+  })
+
+  it('artworkUrl', () => {
+    expect(artworkUrl(7, h1)).toBe(`/api/inbox/7/artwork/${h1}`)
+  })
+})
+

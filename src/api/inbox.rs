@@ -3,7 +3,7 @@
 //! （検証して approved にし、inbox ジョブを投入）、`/reject`、`/reopen`
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::db::inbox::{self as dbinbox, FileRow, Item, ItemState};
 use crate::db::now_epoch;
 use crate::db::scans;
-use crate::import::inbox::{destination, propose, Destination, InboxDraft};
+use crate::import::inbox::{destination, embedded_picture, propose, Destination, InboxDraft};
 use crate::import::ytmusic::sidecar::FileEntry;
 use crate::jobs::handlers::inbox::new_inbox_job;
 use crate::jobs::EnqueueResult;
@@ -244,4 +244,64 @@ pub async fn reopen(
         ItemState::Pending,
     )
     .await
+}
+
+/// `GET /api/inbox/:id/artwork/:hash`（SPEC §7.8、P4-4）。件のファイルのうち `PICTURE` の sha256 が
+/// `hash` のものを開き、一致する埋め込み画像を原寸で返す（MIME は sniff）。ハッシュアドレスなので
+/// `immutable` + ETag。304 は**実体の照合の後**（件に無い・ファイルが消えた・画像が変わっていれば
+/// If-None-Match が一致しても 404）。件の状態は見ない。セッション必須
+pub async fn artwork(
+    State(state): State<AppState>,
+    Path((id, hash)): Path<(i64, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let Some(inbox) = state.inbox.clone() else {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "inbox_unavailable",
+        ));
+    };
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(error_response(StatusCode::NOT_FOUND, "not_found"));
+    }
+    let hash = hash.to_ascii_lowercase();
+    let files = state
+        .db
+        .read(move |c| {
+            if dbinbox::get(c, id)?.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(dbinbox::files(c, id)?))
+        })
+        .await?;
+    let Some(files) = files else {
+        return Ok(error_response(StatusCode::NOT_FOUND, "not_found"));
+    };
+    let lookup = hash.clone();
+    let found = tokio::task::spawn_blocking(move || embedded_picture(&inbox, &files, &lookup))
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let Some((mime, bytes)) = found else {
+        return Ok(error_response(StatusCode::NOT_FOUND, "not_found"));
+    };
+    let etag = format!("\"{hash}-orig\"");
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag))
+    {
+        return Ok(StatusCode::NOT_MODIFIED.into_response());
+    }
+    let mut res = (StatusCode::OK, bytes).into_response();
+    let h = res.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    if let Ok(v) = HeaderValue::from_str(&etag) {
+        h.insert(header::ETAG, v);
+    }
+    Ok(res)
 }

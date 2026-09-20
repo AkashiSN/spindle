@@ -7,12 +7,17 @@ import type { InboxState } from '../hooks/useInbox'
 import { formatDuration } from '../lib/format'
 import { formatDateTime } from '../lib/history'
 import {
+  ARTIST_JOIN,
+  artistValues,
+  artworkUrl,
   codecSummary,
   destinationLabel,
   draftForSubmit,
   draftFrom,
   isEditable,
+  itemCover,
   itemTitle,
+  pictureOf,
   stateLabel,
   validateDraft,
   verdictLabel,
@@ -110,6 +115,9 @@ function ItemForm({
   const placedAlbumId = item.placed_album_id
   // ダウンローダが置いた件（サイドカーあり）だけ判定の列を出す
   const hasSource = item.tracks.some((f) => f.source != null)
+  // 埋め込み画像のあるファイルがあればサムネイル列を出す（P4-4）
+  const hasPicture = item.tracks.some((f) => pictureOf(f) != null)
+  const cover = itemCover(item)
 
   const update = (patch: Partial<InboxDraft>) => setDraft((d) => ({ ...d, ...patch }))
   const updateTrack = (i: number, patch: Partial<DraftTrack>) =>
@@ -143,6 +151,14 @@ function ItemForm({
   return (
     <div className="inbox-form">
       <h2>
+        {cover != null && (
+          <img
+            className="inbox-cover"
+            src={artworkUrl(item.id, cover)}
+            alt=""
+            title="件の埋め込み画像（多数派の目安。配置後のアルバムの代表画像とは限らない）"
+          />
+        )}
         {itemTitle(item)} <span className={`badge inbox-state-${item.state}`}>{stateLabel(item.state)}</span>
       </h2>
       {item.state === 'placed' && placedAlbumId != null && (
@@ -212,8 +228,9 @@ function ItemForm({
           <tr>
             <th>disc</th>
             <th>#</th>
+            {hasPicture && <th />}
             <th>タイトル</th>
-            <th>アーティスト（空ならアルバムアーティスト）</th>
+            <th>アーティスト（空ならアルバムアーティスト。多値のファイルは「そのまま保つ」を外すと 1 値になる）</th>
             <th>ファイル</th>
             <th>長さ</th>
             {hasSource && <th>判定</th>}
@@ -222,10 +239,16 @@ function ItemForm({
         <tbody>
           {draft.tracks.map((t, i) => {
             const f = byPath.get(t.rel_path)
+            const pic = f == null ? null : pictureOf(f)
             return (
               <tr key={t.rel_path} className={f?.source != null && f.source.verdict !== 'ok' ? 'inbox-unmatched' : ''}>
                 <td className="inbox-num">{num(t, i, 'disc_no', 'ディスク番号')}</td>
                 <td className="inbox-num">{num(t, i, 'track_no', 'トラック番号')}</td>
+                {hasPicture && (
+                  <td className="inbox-thumb-cell">
+                    {pic != null && <img className="inbox-thumb" src={artworkUrl(item.id, pic)} alt="" />}
+                  </td>
+                )}
                 <td>
                   <input
                     type="text"
@@ -236,13 +259,12 @@ function ItemForm({
                   />
                 </td>
                 <td>
-                  <input
-                    type="text"
-                    aria-label={`${t.rel_path} のアーティスト`}
-                    value={t.artist}
-                    placeholder={draft.albumartist}
-                    disabled={!editable}
-                    onChange={(e) => updateTrack(i, { artist: e.target.value })}
+                  <ArtistCell
+                    track={t}
+                    values={f == null ? [] : artistValues(f)}
+                    albumartist={draft.albumartist}
+                    editable={editable}
+                    onChange={(patch) => updateTrack(i, patch)}
                   />
                 </td>
                 <td className="muted small">
@@ -282,6 +304,63 @@ function ItemForm({
             下書きに戻す
           </button>
         )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * アーティスト欄（P4-4、D-70）。ファイルの ARTIST が多値なら元の値をチップで見せ、「そのまま保つ」
+ * （提案は on。on の間は "; " 結合の表示で編集不可）を外すと欄が編集できて 1 値で書く
+ */
+function ArtistCell({
+  track,
+  values,
+  albumartist,
+  editable,
+  onChange,
+}: {
+  track: DraftTrack
+  values: string[]
+  albumartist: string
+  editable: boolean
+  onChange: (patch: Partial<DraftTrack>) => void
+}) {
+  const multi = values.length > 1
+  const keep = multi && track.keep_artists === true
+  const input = (
+    <input
+      type="text"
+      aria-label={`${track.rel_path} のアーティスト`}
+      value={keep ? values.join(ARTIST_JOIN) : track.artist}
+      placeholder={albumartist}
+      disabled={!editable || keep}
+      title={keep ? 'ファイルの多値をそのまま保つ（配置で ARTIST に触れない）' : undefined}
+      onChange={(e) => onChange({ artist: e.target.value })}
+    />
+  )
+  if (!multi) return input
+  return (
+    <div className="inbox-artist">
+      {input}
+      <div className="inbox-chips small">
+        {values.map((v, i) => (
+          <span key={`${i}-${v}`} className="chip">
+            {v}
+          </span>
+        ))}
+        <label className="inbox-keep">
+          <input
+            type="checkbox"
+            checked={keep}
+            disabled={!editable}
+            onChange={(e) =>
+              onChange(e.target.checked ? { keep_artists: true, artist: values.join(ARTIST_JOIN) } : { keep_artists: false })
+            }
+          />{' '}
+          そのまま保つ
+        </label>
+        {!keep && <span className="muted">外すと 1 値『{track.artist.trim() === '' ? albumartist : track.artist.trim()}』で書く</span>}
       </div>
     </div>
   )

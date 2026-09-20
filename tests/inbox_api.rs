@@ -1,7 +1,10 @@
 //! Inbox の API（`GET /api/inbox`、`POST /api/inbox/scan`、`/:id/approve` / `reject` / `reopen`。
 //! SPEC §9、D-68、P2-10）。件は DB に直接作る（走査と配置は tests/inbox_job.rs）
 
+mod common;
+
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -138,6 +141,77 @@ impl App {
                 )?;
                 Ok(id)
             })
+            .await
+            .unwrap()
+    }
+
+    /// 件を作る（ファイルごとのタグを指定）
+    async fn item_with(&self, rel_dir: &str, files: Vec<(&str, Vec<(&str, &str)>)>) -> i64 {
+        let rel_dir = rel_dir.to_owned();
+        let files: Vec<(String, Vec<(String, String)>)> = files
+            .into_iter()
+            .map(|(rel, tags)| {
+                (
+                    rel.to_owned(),
+                    tags.into_iter()
+                        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                        .collect(),
+                )
+            })
+            .collect();
+        self.db
+            .write(move |c| {
+                let id = inbox::insert_item(
+                    c,
+                    &rel_dir,
+                    &spindle::domain::relpath::canonical_key(&rel_dir),
+                    1000,
+                )?;
+                let rows: Vec<FileRow> = files
+                    .into_iter()
+                    .map(|(rel, tags)| FileRow {
+                        rel_path: format!("{rel_dir}/{rel}"),
+                        inode: 1,
+                        size: 1,
+                        mtime_ns: 0,
+                        ctime_ns: 0,
+                        codec: "flac".into(),
+                        lossless: true,
+                        sample_rate: Some(44100),
+                        bit_depth: Some(16),
+                        channels: Some(2),
+                        duration_ms: Some(1000),
+                        tags,
+                    })
+                    .collect();
+                inbox::replace_files(c, id, &rows)?;
+                Ok(id)
+            })
+            .await
+            .unwrap()
+    }
+
+    fn inbox_path(&self, rel: &str) -> PathBuf {
+        self.dir.path().join("Inbox").join(rel)
+    }
+
+    /// 生の応答（ヘッダを見る用）
+    async fn raw(
+        &self,
+        c: Option<&str>,
+        uri: &str,
+        if_none_match: Option<&str>,
+    ) -> axum::response::Response {
+        let mut b = req(Method::GET, uri);
+        if let Some(c) = c {
+            b = b.header(header::COOKIE, c);
+        }
+        if let Some(e) = if_none_match {
+            b = b.header(header::IF_NONE_MATCH, e);
+        }
+        self.router
+            .clone()
+            .oneshot(b.body(Body::empty()).unwrap())
             .await
             .unwrap()
     }
@@ -617,4 +691,201 @@ async fn items_with_a_release_id_get_no_destination_and_no_number_check() {
         )
         .await;
     assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+}
+
+// ---------------------------------------------------------------- 忠実表示（P4-4、D-70）
+
+/// 提案の artist は ARTIST の全値を "; " で結合し、多値なら keep_artists = true
+#[tokio::test]
+async fn proposal_joins_multi_valued_artist_and_sets_keep_artists() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    app.item_with(
+        "AlbumM",
+        vec![
+            (
+                "01.flac",
+                vec![
+                    ("TITLE", "One"),
+                    ("ALBUM", "Album"),
+                    ("ALBUMARTIST", "Artist"),
+                    ("TRACKNUMBER", "1"),
+                    ("ARTIST", "花譜"),
+                    ("ARTIST", "理芽"),
+                ],
+            ),
+            (
+                "02.flac",
+                vec![
+                    ("TITLE", "Two"),
+                    ("ALBUM", "Album"),
+                    ("TRACKNUMBER", "2"),
+                    ("ARTIST", "花譜"),
+                ],
+            ),
+        ],
+    )
+    .await;
+    let (st, body) = app.get(&c, "/api/inbox").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let tracks = &body["items"][0]["proposal"]["tracks"];
+    assert_eq!(tracks[0]["artist"], "花譜; 理芽");
+    assert_eq!(tracks[0]["keep_artists"], true);
+    assert_eq!(tracks[1]["artist"], "花譜");
+    assert_eq!(tracks[1]["keep_artists"], false);
+    // keep_artists は承認の入力でも受ける（省略は旧下書き = null）
+    let (st, body) = app
+        .post(
+            &c,
+            "/api/inbox/1/approve",
+            json!({
+                "category": null, "albumartist": "Artist", "album": "Album", "date": null,
+                "tracks": [
+                    { "rel_path": "AlbumM/01.flac", "disc_no": 1, "track_no": 1, "title": "One", "artist": "花譜; 理芽", "keep_artists": true },
+                    { "rel_path": "AlbumM/02.flac", "disc_no": 1, "track_no": 2, "title": "Two", "artist": "花譜" }
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let saved = &body["items"][0]["draft"]["tracks"];
+    assert_eq!(saved[0]["keep_artists"], true);
+    assert!(saved[1]["keep_artists"].is_null());
+}
+
+/// 1x1 の JPEG（COM で内容を変える）
+fn jpeg(tag: &[u8]) -> Vec<u8> {
+    let mut v = vec![0xFF, 0xD8];
+    v.extend_from_slice(&[
+        0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+    ]);
+    let len = (tag.len() + 2) as u16;
+    v.extend_from_slice(&[0xFF, 0xFE]);
+    v.extend_from_slice(&len.to_be_bytes());
+    v.extend_from_slice(tag);
+    v.extend_from_slice(&[0xFF, 0xD9]);
+    v
+}
+
+fn set_picture(path: &std::path::Path, bytes: Vec<u8>) {
+    use lofty::picture::{MimeType, Picture, PictureType};
+    let pic = Picture::unchecked(bytes)
+        .pic_type(PictureType::CoverFront)
+        .mime_type(MimeType::Jpeg)
+        .build();
+    common::retag(path, |t| {
+        while !t.pictures().is_empty() {
+            t.remove_picture(0);
+        }
+        t.push_picture(pic);
+    });
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    spindle::media::artwork::ArtworkStore::hex(&spindle::media::artwork::ArtworkStore::hash_of(
+        bytes,
+    ))
+}
+
+/// `GET /api/inbox/:id/artwork/:hash`: 実体を照合して原寸を返す（MIME は sniff、immutable + ETag）。
+/// 304 は照合の後。件に無い hash・他の件・実体の消失・差し替えは 404、未ログインは 401
+#[tokio::test]
+async fn artwork_returns_the_embedded_picture_after_verifying_the_file() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    std::fs::create_dir_all(app.inbox_path("AlbumP")).unwrap();
+    let p1 = require_ffmpeg!(common::make_audio(
+        &app.inbox_path("AlbumP"),
+        "01.flac",
+        "flac",
+        1
+    ));
+    let p2 = common::make_audio(&app.inbox_path("AlbumP"), "02.flac", "flac", 2).unwrap();
+    let cover = jpeg(b"cover");
+    let hash = hex_of(&cover);
+    set_picture(&p1, cover.clone());
+    set_picture(&p2, cover.clone());
+    let picture = format!("image/png:{hash}"); // タグの MIME は信用しない（sniff で jpeg になる）
+    let id = app
+        .item_with(
+            "AlbumP",
+            vec![
+                (
+                    "01.flac",
+                    vec![("TITLE", "One"), ("PICTURE", picture.as_str())],
+                ),
+                (
+                    "02.flac",
+                    vec![("TITLE", "Two"), ("PICTURE", picture.as_str())],
+                ),
+            ],
+        )
+        .await;
+    let other = app
+        .item_with("Other", vec![("01.flac", vec![("TITLE", "X")])])
+        .await;
+    let uri = format!("/api/inbox/{id}/artwork/{hash}");
+    let etag = format!("\"{hash}-orig\"");
+
+    // 未ログイン
+    let res = app.raw(None, &uri, None).await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let res = app.raw(Some(&c), &uri, None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(res.headers()[header::ETAG], etag.as_str());
+    assert_eq!(
+        res.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), cover.as_slice());
+
+    // 304
+    let res = app.raw(Some(&c), &uri, Some(&etag)).await;
+    assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+
+    // 大文字の hash も同じ画像
+    let res = app
+        .raw(
+            Some(&c),
+            &format!("/api/inbox/{id}/artwork/{}", hash.to_uppercase()),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 件に無い hash、他の件、不正な hash
+    let res = app
+        .raw(
+            Some(&c),
+            &format!("/api/inbox/{id}/artwork/{}", hex_of(b"nope")),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app
+        .raw(
+            Some(&c),
+            &format!("/api/inbox/{other}/artwork/{hash}"),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app
+        .raw(Some(&c), &format!("/api/inbox/{id}/artwork/zz"), None)
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // 1 本目の画像が差し替わっても 2 本目の実体で返る。両方消えれば If-None-Match が一致しても 404
+    set_picture(&p1, jpeg(b"replaced"));
+    let res = app.raw(Some(&c), &uri, None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    std::fs::remove_file(&p2).unwrap();
+    let res = app.raw(Some(&c), &uri, Some(&etag)).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app.raw(Some(&c), &uri, None).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

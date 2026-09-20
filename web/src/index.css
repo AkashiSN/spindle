@@ -1776,6 +1776,50 @@ table.inbox-tracks td:nth-child(3),
 table.inbox-tracks td:nth-child(4) {
   width: 30%;
 }
+/* 承認画面の忠実表示（P4-4、D-70） */
+.inbox-cover {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  vertical-align: middle;
+  margin-right: 8px;
+  background: var(--border);
+}
+table.inbox-tracks td.inbox-thumb-cell {
+  width: 32px;
+  padding-right: 0;
+}
+.inbox-thumb {
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 3px;
+  display: block;
+  background: var(--border);
+}
+.inbox-artist input[type='text'] {
+  width: 100%;
+  box-sizing: border-box;
+}
+.inbox-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+.inbox-chips .chip {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 6px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+.inbox-keep {
+  white-space: nowrap;
+  cursor: pointer;
+}
 /* 操作タブの YouTube（D-70） */
 .operations textarea.youtube-urls {
   width: 100%;

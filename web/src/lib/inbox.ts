@@ -10,8 +10,13 @@ export type DraftTrack = {
   disc_no: number
   track_no: number
   title: string
-  /** 空ならアルバムアーティスト */
+  /** 空ならアルバムアーティスト。keep_artists が true なら表示用（ファイルの ARTIST の全値を "; " で結合） */
   artist: string
+  /**
+   * ファイルの ARTIST をそのまま保つ（配置で触れない。P4-4、D-70）。提案は多値なら true。
+   * null / 無しはこの欄が無かった旧下書き（サーバは「多値で artist が先頭値のままなら保つ」と解釈）
+   */
+  keep_artists?: boolean | null
 }
 
 export type InboxDraft = {
@@ -109,7 +114,69 @@ export function codecSummary(files: Array<Pick<InboxFile, 'codec'>>): string {
 }
 
 function cloneTrack(t: DraftTrack): DraftTrack {
-  return { rel_path: t.rel_path, disc_no: t.disc_no, track_no: t.track_no, title: t.title, artist: t.artist }
+  return {
+    rel_path: t.rel_path,
+    disc_no: t.disc_no,
+    track_no: t.track_no,
+    title: t.title,
+    artist: t.artist,
+    keep_artists: t.keep_artists === true,
+  }
+}
+
+/** 承認画面が ARTIST の全値を見せるときの区切り（サーバの ARTIST_JOIN と同じ。D-70） */
+export const ARTIST_JOIN = '; '
+
+/** ファイルの ARTIST の全値（trim 済み・空は除く。出現順） */
+export function artistValues(file: Pick<InboxFile, 'tags'>): string[] {
+  return file.tags
+    .filter(([k]) => k === 'ARTIST')
+    .map(([, v]) => v.trim())
+    .filter((v) => v !== '')
+}
+
+/**
+ * トラックの keep_artists の初期値。ファイルが多値でなければ常に false（保存値が true でも戻す）。
+ * 多値なら、保存値が無ければ true（提案）、保存値が boolean ならそれ、旧下書き（null）は
+ * 「artist が先頭値のまま」ならサーバが保つと解釈するのと同じ判定
+ */
+export function keepArtistsFor(file: Pick<InboxFile, 'tags'> | undefined, saved: DraftTrack | null): boolean {
+  const values = file == null ? [] : artistValues(file)
+  if (values.length <= 1) return false
+  if (saved == null) return true
+  if (typeof saved.keep_artists === 'boolean') return saved.keep_artists
+  return saved.artist.trim() === values[0]
+}
+
+/** ファイルの代表画像（PICTURE の先頭。走査が front cover 優先で並べる）の sha256。無ければ null */
+export function pictureOf(file: Pick<InboxFile, 'tags'>): string | null {
+  const v = file.tags.find(([k]) => k === 'PICTURE')?.[1]
+  if (v == null) return null
+  const i = v.indexOf(':')
+  const hash = i < 0 ? v : v.slice(i + 1)
+  return hash === '' ? null : hash
+}
+
+/** 件の見出しに出す画像（各ファイルの代表の最頻。同数なら先に現れたもの）。目安の要約で、配置後の代表とは限らない */
+export function itemCover(item: Pick<InboxItem, 'tracks'>): string | null {
+  const counts = new Map<string, number>()
+  for (const f of item.tracks) {
+    const h = pictureOf(f)
+    if (h != null) counts.set(h, (counts.get(h) ?? 0) + 1)
+  }
+  let best: string | null = null
+  let max = 0
+  for (const [h, n] of counts) {
+    if (n > max) {
+      best = h
+      max = n
+    }
+  }
+  return best
+}
+
+export function artworkUrl(itemId: number, hash: string): string {
+  return `/api/inbox/${itemId}/artwork/${hash}`
 }
 
 /** パス照合の鍵（サーバの canonical_key の近似: NFD + casefold）。表示には使わない */
@@ -125,9 +192,17 @@ function pathKey(s: string): string {
 export function draftFrom(item: InboxItem): InboxDraft {
   const p = item.proposal
   const saved = item.draft
+  const fileByKey = new Map(item.tracks.map((f) => [pathKey(f.rel_path), f]))
   if (saved == null) {
     // album gain の初期値は追記先の現在値（無ければ off。D-74）
-    return { ...p, tracks: p.tracks.map(cloneTrack), album_gain: item.destination?.album_gain ?? false }
+    return {
+      ...p,
+      tracks: p.tracks.map((t) => ({
+        ...cloneTrack(t),
+        keep_artists: keepArtistsFor(fileByKey.get(pathKey(t.rel_path)), null),
+      })),
+      album_gain: item.destination?.album_gain ?? false,
+    }
   }
   const byKey = new Map(saved.tracks.map((t) => [pathKey(t.rel_path), t]))
   return {
@@ -137,7 +212,10 @@ export function draftFrom(item: InboxItem): InboxDraft {
     date: saved.date,
     tracks: p.tracks.map((t) => {
       const s = byKey.get(pathKey(t.rel_path))
-      return s == null ? cloneTrack(t) : { ...cloneTrack(s), rel_path: t.rel_path }
+      const file = fileByKey.get(pathKey(t.rel_path))
+      return s == null
+        ? { ...cloneTrack(t), keep_artists: keepArtistsFor(file, null) }
+        : { ...cloneTrack(s), rel_path: t.rel_path, keep_artists: keepArtistsFor(file, s) }
     }),
     album_gain: saved.album_gain,
   }
@@ -212,6 +290,7 @@ export function draftForSubmit(d: InboxDraft): InboxDraft {
       track_no: t.track_no,
       title: t.title.trim(),
       artist: t.artist.trim(),
+      keep_artists: t.keep_artists === true,
     })),
     album_gain: d.album_gain,
   }
