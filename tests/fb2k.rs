@@ -132,6 +132,10 @@ fn spindle_only_fields_are_dropped_with_a_note() {
         "added",
         "has_derived",
         "missing",
+        "hirescheck",
+        "cutoff",
+        "cliff",
+        "effectivebits",
     ] {
         let q = conv(&format!("%{field}% IS x"));
         assert_eq!(q.query, "", "{field}");

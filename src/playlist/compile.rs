@@ -37,6 +37,8 @@ enum Kind {
     Text(&'static str),
     /// 整数の列
     Int(&'static str),
+    /// 実数の列（IS は等値、GREATER / LESS は数値比較）
+    Float(&'static str),
     /// 秒で比較する ms の列
     Seconds(&'static str),
     /// 真偽の式（真のとき成立する SQL）
@@ -72,6 +74,10 @@ fn resolve(field: &str) -> Kind {
         "channels" => Kind::Int("t.channels"),
         "bitrate" => Kind::Int("t.bitrate"),
         "duration" => Kind::Seconds("t.duration_ms"),
+        "hirescheck" | "hires_check" => Kind::Text("t.hires_check"),
+        "cutoff" => Kind::Int("t.hires_cutoff_hz"),
+        "cliff" => Kind::Float("t.hires_cliff_db"),
+        "effectivebits" | "effective_bits" => Kind::Int("t.hires_effective_bits"),
         "added" => Kind::Epoch("t.added_at"),
         other => Kind::Tag(other.to_ascii_uppercase()),
     }
@@ -308,6 +314,20 @@ fn compare(field: &str, cmp: Cmp, value: &str, f: &mut Fragment) -> Result<(), C
                 text_cmp(field, &format!("CAST({col} AS TEXT)"), cmp, value, f)
             }
         },
+        Kind::Float(col) => match cmp {
+            Cmp::Is | Cmp::Greater | Cmp::Less => {
+                let v = parse_float(field, value)?;
+                let op = match cmp {
+                    Cmp::Is => "=",
+                    Cmp::Greater => ">",
+                    _ => "<",
+                };
+                f.sql.push_str(&format!("{col} {op} ?"));
+                f.params.push(Value::from(v));
+                Ok(())
+            }
+            Cmp::Has | Cmp::Matches => Err(field_err(field, cmp_name(cmp))),
+        },
         Kind::Seconds(col) => match cmp {
             Cmp::Is | Cmp::Greater | Cmp::Less => {
                 let secs = parse_float(field, value)?;
@@ -407,7 +427,9 @@ fn compare(field: &str, cmp: Cmp, value: &str, f: &mut Fragment) -> Result<(), C
 fn presence(field: &str, present: bool, f: &mut Fragment) {
     let sql = match resolve(field) {
         Kind::Text(col) => format!("({col} IS NOT NULL AND {col} <> '')"),
-        Kind::Int(col) | Kind::Seconds(col) | Kind::Epoch(col) => format!("{col} IS NOT NULL"),
+        Kind::Int(col) | Kind::Float(col) | Kind::Seconds(col) | Kind::Epoch(col) => {
+            format!("{col} IS NOT NULL")
+        }
         // 真偽のフィールドは常に値を持つ
         Kind::Bool(_) => "1".to_owned(),
         Kind::Tag(key) => {
@@ -437,7 +459,9 @@ fn order_clause(order: Option<&Order>) -> Result<Fragment, CompileError> {
             // 文字列は大小文字を無視して並べる（IS と同じ NOCASE）
             let (expr, collate) = match resolve(field) {
                 Kind::Text(col) => (col.to_owned(), " COLLATE NOCASE"),
-                Kind::Int(col) | Kind::Seconds(col) | Kind::Epoch(col) => (col.to_owned(), ""),
+                Kind::Int(col) | Kind::Float(col) | Kind::Seconds(col) | Kind::Epoch(col) => {
+                    (col.to_owned(), "")
+                }
                 Kind::Bool(sql) => (format!("({sql})"), ""),
                 Kind::Tag(key) => {
                     // 式は 2 回（IS NULL と値）出るのでキーも 2 回バインドする

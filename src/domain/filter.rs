@@ -118,6 +118,10 @@ pub enum Flag {
     FlacUnchecked,
     /// `flac_check = 'decode_error'`
     FlacError,
+    /// 偽ハイレゾ検出の対象（可逆かつ >48 kHz または >16 bit）で結果が無いか古い（P3-5）
+    HiresUnchecked,
+    /// `hires_check IN ('upsampled','padded','both')`
+    HiresSuspect,
 }
 
 impl Flag {
@@ -133,6 +137,8 @@ impl Flag {
             Flag::Hardlink => "hardlink",
             Flag::FlacUnchecked => "flac_unchecked",
             Flag::FlacError => "flac_error",
+            Flag::HiresUnchecked => "hires_unchecked",
+            Flag::HiresSuspect => "hires_suspect",
         }
     }
 }

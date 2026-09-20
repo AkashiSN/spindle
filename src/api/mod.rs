@@ -13,6 +13,7 @@ pub mod events;
 pub mod flaccheck;
 pub mod gc;
 pub mod health;
+pub mod hirescheck;
 pub mod history;
 pub mod inbox;
 pub mod jobs;
@@ -55,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/rg", post(rg::start))
         .route("/rg/write", post(rg::write))
         .route("/flaccheck", post(flaccheck::start))
+        .route("/hirescheck", post(hirescheck::start))
         .route("/md5fill", post(md5fill::start))
         .route("/verify", post(verify::start))
         .route("/cd/lookup", post(cd::lookup))

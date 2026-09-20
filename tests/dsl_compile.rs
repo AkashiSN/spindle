@@ -158,6 +158,14 @@ fn fixture() -> Connection {
         [],
     )
     .unwrap();
+    // 偽ハイレゾ検出（P3-5）: 2 は upsampled、3 は ok（崖なし・実効 16 bit）、1 と 4 は未検査
+    c.execute_batch(
+        "UPDATE tracks SET hires_check = 'upsampled', hires_checked_at = 1, hires_check_version = 1,
+                           hires_cutoff_hz = 22050, hires_cliff_db = 48.5, hires_effective_bits = 24 WHERE id = 2;
+         UPDATE tracks SET hires_check = 'ok', hires_checked_at = 1, hires_check_version = 1,
+                           hires_cutoff_hz = 48000, hires_cliff_db = NULL, hires_effective_bits = 16 WHERE id = 3;",
+    )
+    .unwrap();
     c
 }
 
@@ -326,4 +334,22 @@ fn values_are_bound_not_interpolated() {
         Vec::<i64>::new()
     );
     assert_eq!(eval(&c, "%title% HAS \"' OR ''='\""), Vec::<i64>::new());
+}
+
+#[test]
+fn hires_check_fields_compare_status_and_measurements() {
+    let c = fixture();
+    assert_eq!(eval(&c, "%hirescheck% IS upsampled"), vec![2]);
+    assert_eq!(eval(&c, "%hirescheck% IS ok"), vec![3]);
+    assert_eq!(eval(&c, "MISSING %hirescheck%"), vec![1]);
+    assert_eq!(eval(&c, "%cutoff% LESS 25000"), vec![2]);
+    assert_eq!(eval(&c, "%cutoff% IS 48000"), vec![3]);
+    assert_eq!(eval(&c, "%cliff% GREATER 30"), vec![2]);
+    assert_eq!(
+        eval(&c, "%cliff% GREATER 30.5 AND %cliff% LESS 50"),
+        vec![2]
+    );
+    assert_eq!(eval(&c, "PRESENT %cliff%"), vec![2]);
+    assert_eq!(eval(&c, "%effectivebits% IS 16"), vec![3]);
+    assert_eq!(eval(&c, "%effectivebits% LESS 24"), vec![3]);
 }

@@ -43,6 +43,8 @@ pub struct TrackRow {
     pub derived: Option<Derived>,
     /// FLAC 健全性チェックの結果（P1-5）。未検査なら None
     pub flac_check: Option<FlacCheck>,
+    /// 偽ハイレゾ検出の結果（P3-5）。対象外・未検査なら None
+    pub hires_check: Option<HiresCheck>,
     pub pending_batch_id: Option<i64>,
     pub conflict_batch_id: Option<i64>,
     /// `audio_md5` の hex（小文字）。重複でなければ None
@@ -72,6 +74,20 @@ pub struct FlacCheck {
     /// 検査時の `audio_version` が現在値と違う（結果は古い）
     pub stale: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HiresCheck {
+    /// `ok` / `upsampled` / `padded` / `both` / `inconclusive` / `decode_error`
+    pub status: String,
+    pub checked_at: Option<i64>,
+    /// 検査時の `audio_version` が現在値と違う（結果は古い）
+    pub stale: bool,
+    pub error: Option<String>,
+    /// 計測値。計測しなかった側は None（SPEC §7.10）
+    pub cutoff_hz: Option<i64>,
+    pub cliff_db: Option<f64>,
+    pub effective_bits: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -120,9 +136,11 @@ const ROW_COLUMNS: &str = "t.id, t.title, t.artist_display, t.album, t.albumarti
   t.rg_track_gain, t.rg_track_peak, t.rg_album_gain, t.rg_album_peak,
   t.flac_check, t.flac_checked_at, t.flac_check_version <> t.audio_version, t.flac_check_error,
   t.album_id,
-  (SELECT lower(hex(aw.sha256)) FROM artwork aw WHERE aw.id = t.artwork_id)";
+  (SELECT lower(hex(aw.sha256)) FROM artwork aw WHERE aw.id = t.artwork_id),
+  t.hires_check, t.hires_checked_at, t.hires_check_version <> t.audio_version, t.hires_check_error,
+  t.hires_cutoff_hz, t.hires_cliff_db, t.hires_effective_bits";
 /// `ROW_COLUMNS` の列数。ソートキーの値はこの位置から始まる
-const ROW_COLUMN_COUNT: usize = 33;
+const ROW_COLUMN_COUNT: usize = 40;
 
 const ROW_JOINS: &str = "FROM tracks t
 LEFT JOIN derived_files d ON d.track_id = t.id
@@ -153,6 +171,18 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
         }),
         None => None,
     };
+    let hires_check = match r.get::<_, Option<String>>(33)? {
+        Some(status) => Some(HiresCheck {
+            status,
+            checked_at: r.get(34)?,
+            stale: r.get::<_, Option<bool>>(35)?.unwrap_or(true),
+            error: r.get(36)?,
+            cutoff_hz: r.get(37)?,
+            cliff_db: r.get(38)?,
+            effective_bits: r.get(39)?,
+        }),
+        None => None,
+    };
     Ok(TrackRow {
         id: r.get(0)?,
         title: r.get(1)?,
@@ -175,6 +205,7 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
             stale_tags: stale.unwrap_or(false),
         }),
         flac_check,
+        hires_check,
         pending_batch_id: r.get(17)?,
         conflict_batch_id: r.get(18)?,
         duplicate_group: r.get(19)?,
@@ -317,6 +348,11 @@ fn filter_where(f: &Filter) -> Where {
                 "t.codec = 'flac' AND (t.flac_check_version IS NULL OR t.flac_check_version <> t.audio_version)"
             }
             Flag::FlacError => "t.flac_check = 'decode_error'",
+            Flag::HiresUnchecked => {
+                "t.lossless = 1 AND t.missing_since IS NULL AND (t.sample_rate > 48000 OR t.bit_depth > 16)
+                 AND (t.hires_check_version IS NULL OR t.hires_check_version <> t.audio_version)"
+            }
+            Flag::HiresSuspect => "t.hires_check IN ('upsampled','padded','both')",
         };
         w.push(clause, []);
     }
