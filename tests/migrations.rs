@@ -441,7 +441,9 @@ fn upgrade_to_0017_adds_album_gain_and_clears_album_values() {
     migrations::apply_list(&mut conn, &list).unwrap();
     assert!(migrations::current_version(&conn).unwrap().unwrap() >= 17);
     let album_gain: i64 = conn
-        .query_row("SELECT album_gain FROM albums WHERE id = 1", [], |r| r.get(0))
+        .query_row("SELECT album_gain FROM albums WHERE id = 1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(album_gain, 0, "既存の album は off");
     assert!(
@@ -457,7 +459,11 @@ fn upgrade_to_0017_adds_album_gain_and_clears_album_values() {
         )
         .unwrap()
     };
-    assert_eq!(row(5), (None, None, Some(101), None), "album 値を持っていた行");
+    assert_eq!(
+        row(5),
+        (None, None, Some(101), None),
+        "album 値を持っていた行"
+    );
     assert_eq!(
         row(6),
         (None, None, Some(100), Some(100)),

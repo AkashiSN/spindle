@@ -20,9 +20,13 @@
 //!   別実体へ追随させた）何も書かずに失敗する。`rg_scanned_at` だけ更新し、`audio_version` /
 //!   `tag_version` は動かさない（`rg_written_at` は値が変わった行だけ NULL。D-48）
 //! - 無音（絶対ゲート以下）は gain 0 dB（`domain::replaygain`）
+//! - 書き込み時に `albums.album_gain` を読み直す（D-74）。album 単位の job でも off なら album の値は
+//!   書かず、track 単位の job は on の album に属する track の album 値を据え置く
 
 use std::fs::File;
 use std::sync::Arc;
+
+use rusqlite::OptionalExtension as _;
 
 use crate::db::replaygain::{self as dbrg, Member, Values};
 use crate::db::{now_epoch, DbError};
@@ -124,6 +128,60 @@ fn verify_unchanged(file: &File, member: &Member, when: &str) -> Result<(), JobE
 /// 同じ行を新実体へ追随させた場合、旧 FD から測った値をその行に書いてはいけない
 fn membership_changed(analyzed: &[Member], current: &[Member]) -> bool {
     analyzed != current
+}
+
+/// 属性を読み直して書く値を決める（D-74）。album 単位の job でも書き込み時に off なら album の値は
+/// 書かない（投入後に off にされた）。track 単位の job は album_gain=1 の album に属する track の
+/// album 値を据え置く（投入後に on にされた。次の album 解析で揃う）
+fn apply_album_attribute(
+    tx: &rusqlite::Connection,
+    scope: Scope,
+    results: Vec<(i64, Values)>,
+) -> crate::db::Result<Vec<(i64, Values)>> {
+    let with_album = |results: Vec<(i64, Values)>, album: (Option<f64>, Option<f64>)| {
+        results
+            .into_iter()
+            .map(|(id, v)| {
+                (
+                    id,
+                    Values {
+                        album_gain: album.0,
+                        album_peak: album.1,
+                        ..v
+                    },
+                )
+            })
+            .collect()
+    };
+    Ok(match scope {
+        Scope::Album(album_id) => {
+            if dbrg::album_gain_enabled(tx, album_id)? {
+                results
+            } else {
+                with_album(results, (None, None))
+            }
+        }
+        Scope::Track(track_id) => {
+            let album_id: Option<i64> = tx
+                .query_row(
+                    "SELECT album_id FROM tracks WHERE id = ?1",
+                    [track_id],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .optional()?
+                .flatten();
+            let keep = match album_id {
+                Some(a) => dbrg::album_gain_enabled(tx, a)?,
+                None => false,
+            };
+            if keep {
+                let current = dbrg::album_values_of(tx, track_id)?.unwrap_or((None, None));
+                with_album(results, current)
+            } else {
+                results
+            }
+        }
+    })
 }
 
 impl Handler for RgHandler {
@@ -269,6 +327,7 @@ impl Handler for RgHandler {
                         tx.rollback()?;
                         return Ok(None);
                     }
+                    let results = apply_album_attribute(&tx, scope, results)?;
                     let now = now_epoch();
                     let n = dbrg::store(&tx, &results, now)?;
                     if n != results.len() {

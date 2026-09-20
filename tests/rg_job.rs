@@ -128,6 +128,13 @@ impl Lib {
             .unwrap()
     }
 
+    /// album gain の属性を on にする（既定は off。D-74）
+    fn enable_album_gain(&self, album_id: i64) {
+        self.conn()
+            .execute("UPDATE albums SET album_gain = 1 WHERE id = ?1", [album_id])
+            .unwrap();
+    }
+
     fn rg(&self, rel: &str) -> Rg {
         self.conn()
             .query_row(
@@ -231,6 +238,7 @@ async fn album_job_writes_track_and_album_values() {
     lib.add_multichannel("A/03.flac", -20.0, "surround");
     lib.scan().await;
     let album = lib.album_id("A/01.flac");
+    lib.enable_album_gain(album);
     assert_eq!(lib.rg("A/03.flac").channels, Some(6));
 
     lib.start();
@@ -317,6 +325,7 @@ async fn missing_tracks_are_left_alone_and_excluded_from_album() {
             (now_epoch(), gone),
         )
         .unwrap();
+    lib.enable_album_gain(lib.album_id("C/01.flac"));
     lib.start();
     let id = lib
         .jobs
@@ -541,4 +550,55 @@ async fn row_stat_updated_during_analysis_is_not_written() {
         .unwrap();
     assert_eq!(lib.wait_job(id).await, JobState::Failed);
     assert_eq!(lib.rg("K/01.opus").scanned_at, None);
+}
+
+// ---------------------------------------------------------------- album gain の属性（D-74、P4-5）
+
+/// album_gain が off の album に album 単位の job が来ても（投入後に off にした）、album の値は書かない
+#[tokio::test]
+async fn album_job_writes_no_album_values_when_attribute_is_off() {
+    let _ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let lib = Lib::new();
+    lib.add("A/01.flac", -20.0, "loud");
+    lib.add("A/02.flac", -26.0, "quiet");
+    lib.scan().await;
+    let album = lib.album_id("A/01.flac");
+    // 既定は off のまま投入
+    lib.start();
+    let id = lib.jobs.enqueue(new_album_job(album)).await.unwrap().id();
+    assert_eq!(lib.wait_job(id).await, JobState::Done);
+    let loud = lib.rg("A/01.flac");
+    assert!(close(loud.track_gain.unwrap(), 2.0, 0.3), "{loud:?}");
+    assert_eq!(loud.album_gain, None);
+    assert_eq!(loud.album_peak, None);
+    assert_eq!(lib.rg("A/02.flac").album_gain, None);
+}
+
+/// track 単位の job は、album_gain=1 の album に属する track の album 値を消さない
+#[tokio::test]
+async fn track_job_keeps_album_values_of_an_album_gain_album() {
+    let _ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let lib = Lib::new();
+    lib.add("A/01.flac", -20.0, "loud");
+    lib.scan().await;
+    let album = lib.album_id("A/01.flac");
+    let track = lib.track_id("A/01.flac");
+    lib.enable_album_gain(album);
+    lib.conn()
+        .execute(
+            "UPDATE tracks SET rg_track_gain = 0, rg_track_peak = 0.5, rg_album_gain = -3.25,
+                    rg_album_peak = 0.75, rg_scanned_at = 1 WHERE id = ?1",
+            [track],
+        )
+        .unwrap();
+    lib.start();
+    let id = lib.jobs.enqueue(new_track_job(track)).await.unwrap().id();
+    assert_eq!(lib.wait_job(id).await, JobState::Done);
+    let rg = lib.rg("A/01.flac");
+    assert!(
+        close(rg.track_gain.unwrap(), 2.0, 0.3),
+        "track は解析し直す {rg:?}"
+    );
+    assert_eq!(rg.album_gain, Some(-3.25), "album の値は据え置き");
+    assert_eq!(rg.album_peak, Some(0.75));
 }
