@@ -216,3 +216,120 @@ async fn patch_album_requires_session() {
         .unwrap();
     assert_eq!(send(&app, r).await.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ---------------------------------------------------------------- ?filter=（P4-6、D-58 追記）
+
+fn urlenc(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+async fn album_ids(app: &TestApp, c: &str, filter: Option<&str>) -> (StatusCode, Vec<i64>) {
+    let uri = match filter {
+        Some(f) => format!("/api/albums?filter={}", urlenc(f)),
+        None => "/api/albums".to_owned(),
+    };
+    let r = req(Method::GET, &uri)
+        .header(header::COOKIE, c)
+        .body(Body::empty())
+        .unwrap();
+    let res = send(app, r).await;
+    let status = res.status();
+    let body = json(res).await;
+    let ids = body["items"]
+        .as_array()
+        .map(|a| a.iter().map(|i| i["id"].as_i64().unwrap()).collect())
+        .unwrap_or_default();
+    (status, ids)
+}
+
+/// アルバム一覧はトラック一覧と同じフィルタで絞れる（一致する active なトラックを持つ album だけ）
+#[tokio::test]
+async fn albums_can_be_filtered_like_tracks() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    let (a1, a2, a3, a4, pl_manual, pl_smart) = {
+        let conn = app.raw();
+        conn.execute("INSERT INTO categories (name) VALUES ('J-Pop')", [])
+            .unwrap();
+        let cat: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name = 'J-Pop'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let a1 = insert_album(&conn, "J-Pop/AA/One");
+        let a2 = insert_album(&conn, "J-Pop/AA/Two");
+        let a3 = insert_album(&conn, "Rock/BB/Three");
+        let a4 = insert_album(&conn, "Rock/BB/Gone");
+        conn.execute(
+            "UPDATE albums SET category_id = ?1 WHERE id IN (?2, ?3)",
+            params![cat, a1, a2],
+        )
+        .unwrap();
+        let t1 = insert_track(&conn, "J-Pop/AA/One/1.flac", "Sunrise", Some(a1));
+        let _t2 = insert_track(&conn, "J-Pop/AA/Two/1.flac", "Moon", Some(a2));
+        let t3 = insert_track(&conn, "Rock/BB/Three/1.flac", "Sunset", Some(a3));
+        // a4 は missing のトラックしか持たない
+        let t4 = insert_track(&conn, "Rock/BB/Gone/1.flac", "Sunk", Some(a4));
+        conn.execute("UPDATE tracks SET missing_since = 1 WHERE id = ?1", [t4])
+            .unwrap();
+        // 静的プレイリストは a1 の曲、スマートプレイリストは a3 の曲（どちらも playlist_items に実体化）
+        conn.execute(
+            "INSERT INTO playlists (id, name, name_key, kind, created_at, updated_at) VALUES (1, 'm', 'm', 'manual', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO playlists (id, name, name_key, kind, rule_source, rule_ast, created_at, updated_at)
+             VALUES (2, 's', 's', 'smart', '%title% HAS sun', '{}', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO playlist_items (playlist_id, position, track_id) VALUES (1, 0, ?1), (2, 0, ?2)",
+            params![t1, t3],
+        )
+        .unwrap();
+        (a1, a2, a3, a4, 1i64, 2i64)
+    };
+
+    // フィルタ無し・空・{} は全件（missing しか持たない album も含む）
+    for f in [None, Some(""), Some("{}")] {
+        let (st, ids) = album_ids(&app, &c, f).await;
+        assert_eq!(st, StatusCode::OK, "{f:?}");
+        assert_eq!(ids, [a1, a2, a3, a4], "{f:?}");
+    }
+    // album_ids
+    let (st, ids) = album_ids(&app, &c, Some(&format!(r#"{{"album_ids":[{a2},{a3}]}}"#))).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(ids, [a2, a3]);
+    // category
+    let (_, ids) = album_ids(&app, &c, Some(r#"{"category":"J-Pop"}"#)).await;
+    assert_eq!(ids, [a1, a2]);
+    // 静的 / スマートプレイリスト
+    let (_, ids) = album_ids(&app, &c, Some(&format!(r#"{{"playlist_id":{pl_manual}}}"#))).await;
+    assert_eq!(ids, [a1]);
+    let (_, ids) = album_ids(&app, &c, Some(&format!(r#"{{"playlist_id":{pl_smart}}}"#))).await;
+    assert_eq!(ids, [a3]);
+    // 検索語（FTS）と DSL
+    let (_, ids) = album_ids(&app, &c, Some(r#"{"q":"Sun"}"#)).await;
+    assert_eq!(ids, [a1, a3], "missing の Sunk を持つ a4 は出ない");
+    let (_, ids) = album_ids(&app, &c, Some(r#"{"dsl":"%title% IS Moon"}"#)).await;
+    assert_eq!(ids, [a2]);
+    // 組み合わせは AND
+    let (_, ids) = album_ids(&app, &c, Some(r#"{"category":"J-Pop","q":"Sun"}"#)).await;
+    assert_eq!(ids, [a1]);
+    // 不正なフィルタは 400
+    let (st, _) = album_ids(&app, &c, Some(r#"{"nope":1}"#)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = album_ids(&app, &c, Some("not json")).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}

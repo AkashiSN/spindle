@@ -2,7 +2,7 @@
 //! アルバムは数千件なので一覧はページングしない（ツリーの構築に全件を使う）
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query as QueryParams, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::tracks::{self, AlbumRow};
 use crate::db::{jobs as dbjobs, now_epoch, replaygain as dbrg};
+use crate::domain::filter::Filter;
 use crate::jobs::handlers::rg::new_album_job;
 
 use super::error::{error_response, error_response_with_message, ApiError};
@@ -20,9 +21,36 @@ pub struct AlbumList {
     pub items: Vec<AlbumRow>,
 }
 
-pub async fn list(State(state): State<AppState>) -> Result<Json<AlbumList>, ApiError> {
-    let items = state.db.read(tracks::list_albums).await?;
-    Ok(Json(AlbumList { items }))
+#[derive(Debug, Default, Deserialize)]
+pub struct ListParams {
+    /// `/api/tracks` と同じ JSON フィルタ（P4-6）。空なら全件
+    pub filter: Option<String>,
+}
+
+/// `GET /api/albums?filter=`。フィルタがあれば一致する active なトラックを持つ album だけ
+pub async fn list(
+    State(state): State<AppState>,
+    QueryParams(params): QueryParams<ListParams>,
+) -> Result<Response, ApiError> {
+    let filter = match params.filter.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => match Filter::parse(s) {
+            // `{}` は条件なし = フィルタ無しと同じ（active なトラックの有無で絞らない）
+            Ok(f) => (f != Filter::default()).then_some(f),
+            Err(e) => {
+                return Ok(error_response_with_message(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    e.to_string(),
+                ));
+            }
+        },
+        _ => None,
+    };
+    let items = state
+        .db
+        .read(move |c| tracks::list_albums_filtered(c, filter.as_ref()))
+        .await?;
+    Ok(Json(AlbumList { items }).into_response())
 }
 
 pub async fn get(State(state): State<AppState>, Path(id): Path<i64>) -> Result<Response, ApiError> {

@@ -755,9 +755,29 @@ fn read_album(r: &Row) -> rusqlite::Result<AlbumRow> {
 
 /// 全アルバム。albumartist, album, id 順
 pub fn list_albums(conn: &Connection) -> Result<Vec<AlbumRow>> {
-    let sql = format!("{ALBUM_SQL}\nORDER BY a.albumartist, a.album, a.id");
+    list_albums_filtered(conn, None)
+}
+
+/// `filter` があれば、一致する active なトラック（`missing_since IS NULL`）を 1 本以上持つ album だけ
+/// （P4-6、D-58 追記）。WHERE の生成はトラック一覧と同じ [`filter_where`]（列名はホワイトリスト、
+/// 値はバインド）。並びは [`list_albums`] と同じ
+pub fn list_albums_filtered(conn: &Connection, filter: Option<&Filter>) -> Result<Vec<AlbumRow>> {
+    let (clause, params) = match filter {
+        Some(f) => {
+            let w = filter_where(f);
+            (
+                format!(
+                    "WHERE a.id IN (SELECT t.album_id FROM tracks t WHERE t.missing_since IS NULL AND ({}))",
+                    w.sql()
+                ),
+                w.params,
+            )
+        }
+        None => (String::new(), Vec::new()),
+    };
+    let sql = format!("{ALBUM_SQL}\n{clause}\nORDER BY a.albumartist, a.album, a.id");
     let mut stmt = conn.prepare_cached(&sql)?;
-    let rows = stmt.query_map([], read_album)?;
+    let rows = stmt.query_map(params_from_iter(params), read_album)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 

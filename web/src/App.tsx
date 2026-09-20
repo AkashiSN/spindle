@@ -112,7 +112,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
 
   // 一覧は SSE を開いてから取る（開く前のイベントを失わない。D-36）
   const tracks = useTracks(filter, sort, sseOpen)
-  const albums = useAlbums(sseOpen)
+  const albums = useAlbums(sseOpen, filterParam, view === 'albums')
   const playlists = usePlaylists(sseOpen)
   const refreshPlaylists = playlists.refresh
   const jobs = useJobSummary(sseOpen)
@@ -538,7 +538,10 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           />
         ) : view === 'albums' ? (
           <AlbumGrid
-            albums={albums.albums}
+            albums={albums.filtered}
+            total={albums.albums.length}
+            filtered={filterParam !== ''}
+            pending={albums.filterPending}
             error={albums.error}
             onOpen={(a) => handleScope({ album_id: a.id })}
           />

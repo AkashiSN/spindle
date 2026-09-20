@@ -1,6 +1,7 @@
 // アートワークの URL とグリッドの並び（SPEC §9 GET /api/artwork/:hash?size=、§12.6、P1-3）
 
 import type { AlbumRow, TrackRow } from '../api/types'
+import { formatCount } from './format'
 
 /** サーバが持つサムネイルの一辺（media::artwork::THUMB_SIZES と一致させる） */
 export const THUMB_SIZES = [256, 768] as const
@@ -15,6 +16,16 @@ export function artworkUrl(hash: string, size?: ThumbSize): string {
 /** グリッドに出す album（missing は出さない）。API の順（albumartist, album, id）を保つ */
 export function gridAlbums(albums: AlbumRow[]): AlbumRow[] {
   return albums.filter((a) => a.missing_since == null)
+}
+
+/** `GET /api/albums` の URL。`filterParam`（filterToParam の出力）が空なら全件 */
+export function albumsUrl(filterParam: string): string {
+  return filterParam === '' ? '/api/albums' : `/api/albums?filter=${encodeURIComponent(filterParam)}`
+}
+
+/** アルバム画面の件数表示。絞り込み中は「全 M 件中 N 件」 */
+export function albumCountLabel(shown: number, total: number, filtered: boolean): string {
+  return filtered ? `全 ${formatCount(total)} 件中 ${formatCount(shown)} 件` : `${formatCount(shown)} 件`
 }
 
 /** グリッドの見出し行。album 名が無ければディレクトリ名 */

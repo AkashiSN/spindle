@@ -2048,6 +2048,12 @@ FLAC → FLAC に広げて補填する（2,000 行の壊れやすい経路を同
 クライアントで絞るのではなく `GET /api/albums?filter=` にトラック一覧と同じ JSON フィルタを受け、「一致する
 active なトラックを 1 本以上持つ album」を返す。アルバム画面は「いまのトラック一覧と同じ絞り込みのアルバム」に
 なる（検索語でも絞られる）。WHERE の生成はトラック一覧と共有し、列名はホワイトリスト・値はバインドのまま。
+実装で決めた点: `filter` が空・`{}` は全件（active なトラックの有無で絞らない。フィルタ無しと同じ）、指定が
+あれば `a.id IN (SELECT t.album_id FROM tracks t WHERE t.missing_since IS NULL AND (<filter_where>))`（`missing`
+フラグと組み合わせると空になるが、「表に出るトラックの album」の定義に従う）。web はツリー用の全件と画面用の
+絞り込みを別に持ち（`useAlbums(enabled, filterParam, wantFiltered)`）、絞り込みはアルバム画面を表示中で
+`filterParam` が空でないときだけ取る（ツリーのクリックごとに数千件を取り直さない）。応答は最新の要求だけを
+採用し、待ちの間は前のフィルタの結果を出さず全件を出す。
 
 ## D-59 MD5 の補填は md5 op の編集バッチにし、tagwrite ジョブで反映する
 

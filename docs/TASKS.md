@@ -967,7 +967,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/rg_api.rs`、`tests/cd_place.rs`、`tests/inbox_api.rs`、`tests/albums_api.rs`。実装: 切り替えは操作タブ
       （アルバム画面は無い）、`tests/rg_db.rs`（属性の読み書きと投入単位）、`tests/inbox_job.rs`（下書きの album_gain）、
       web は `lib/albumGain.ts` / `lib/inbox.ts`
-- [ ] **P4-6** アルバム一覧をトラック一覧と同じフィルタで絞る（D-58 追記）。`GET /api/albums?filter=`（トラック一覧と
+- [x] **P4-6** アルバム一覧をトラック一覧と同じフィルタで絞る（D-58 追記。2026-09-20）。`GET /api/albums?filter=`（トラック一覧と
       同じ JSON フィルタ。指定があれば一致する active なトラックを 1 本以上持つ album だけ。`WHERE a.id IN (SELECT
       t.album_id FROM tracks t … WHERE <db/tracks.rs の既存の WHERE>)` で、ツリーの `album_ids` / `category` /
       `playlist_id`（静的・スマート）/ `flags` / `dsl` / `q` をそのまま再利用）。web は `useAlbums(filterParam)` で

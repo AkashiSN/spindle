@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AlbumRow } from '../api/types'
-import { albumTitle, artworkUrl, displayArtworkHash, gridAlbums, parsePictureValue, uploadedSummary } from './artwork'
+import { albumTitle, artworkUrl, displayArtworkHash, gridAlbums, parsePictureValue, uploadedSummary, albumCountLabel, albumsUrl } from './artwork'
 
 const base: AlbumRow = {
   id: 1,
@@ -70,5 +70,20 @@ describe('displayArtworkHash', () => {
     expect(displayArtworkHash({ artwork_hash: null }, { artwork_hash: 'a' })).toBe('a')
     expect(displayArtworkHash(null, { artwork_hash: 'a' })).toBe('a')
     expect(displayArtworkHash({ artwork_hash: null }, null)).toBeNull()
+  })
+})
+
+describe('albums filter (P4-6)', () => {
+  it('albumsUrl は空なら全件、あれば filter を URL エンコードして付ける', () => {
+    expect(albumsUrl('')).toBe('/api/albums')
+    expect(albumsUrl('{"q":"花譜","album_ids":[1,2]}')).toBe(
+      '/api/albums?filter=%7B%22q%22%3A%22%E8%8A%B1%E8%AD%9C%22%2C%22album_ids%22%3A%5B1%2C2%5D%7D',
+    )
+  })
+
+  it('albumCountLabel は絞り込み中だけ「全 M 件中」', () => {
+    expect(albumCountLabel(721, 721, false)).toBe('721 件')
+    expect(albumCountLabel(12, 1234, true)).toBe('全 1,234 件中 12 件')
+    expect(albumCountLabel(0, 5, true)).toBe('全 5 件中 0 件')
   })
 })

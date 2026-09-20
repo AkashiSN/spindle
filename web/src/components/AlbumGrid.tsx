@@ -1,16 +1,26 @@
 // アルバムのサムネイルグリッド（SPEC §12.6、P1-3）。クリックで一覧を album_id に絞る。
-// 画像は /api/artwork/:hash?size=256（ハッシュアドレス。サムネイル未生成のうちは原画像が返る）
+// 画像は /api/artwork/:hash?size=256（ハッシュアドレス。サムネイル未生成のうちは原画像が返る）。
+// 表と同じ絞り込み（ツリー・プレイリスト・検索語）が効く（P4-6）
 
 import type { AlbumRow } from '../api/types'
-import { albumTitle, artworkUrl, gridAlbums } from '../lib/artwork'
+import { albumCountLabel, albumTitle, artworkUrl, gridAlbums } from '../lib/artwork'
 import { formatCount } from '../lib/format'
 
 export function AlbumGrid({
   albums,
+  total,
+  filtered,
+  pending,
   error,
   onOpen,
 }: {
   albums: AlbumRow[]
+  /** 全件の数（絞り込み中の「全 M 件中」） */
+  total: number
+  /** 表と同じ絞り込みが掛かっているか */
+  filtered: boolean
+  /** 絞り込みの応答待ち */
+  pending: boolean
   error: string | null
   onOpen: (album: AlbumRow) => void
 }) {
@@ -19,11 +29,14 @@ export function AlbumGrid({
     <section className="album-grid-view">
       <header className="album-grid-head">
         <h1>アルバム</h1>
-        <span className="muted">{formatCount(rows.length)} 件</span>
+        <span className="muted">{pending ? '…' : albumCountLabel(rows.length, total, filtered)}</span>
+        {filtered && <span className="muted small">（表と同じ絞り込み）</span>}
         {error ? <span className="error">{error}</span> : null}
       </header>
       {rows.length === 0 ? (
-        <p className="muted album-grid-empty">アルバムがありません。スキャンを実行してください</p>
+        <p className="muted album-grid-empty">
+          {filtered ? '絞り込みに一致するアルバムがありません' : 'アルバムがありません。スキャンを実行してください'}
+        </p>
       ) : (
         <ul className="album-grid">
           {rows.map((a) => (
