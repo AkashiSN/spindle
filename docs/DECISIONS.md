@@ -2879,6 +2879,27 @@ track lock を取らず、running の間の投入は dedup で弾かれるため
   何もせず Done。テストのフィクスチャは `common::enable_opus_variant` で表を作る
 - **配布ビューもプレイリストも `aac` には作らない。** `delivery` は `opus` 系統に固定。ミュージック.app
   へは `Derived/aac/` のファイルをそのまま取り込み、プレイリストは Apple 側で作る
+- **実装（P4-8）**: `derived_variants` に `lossy_sources` / `multi_value_separator` を 0019 で足す（`eligible`
+  が投入判定で前者を、ハンドラがタグ結合で後者を表から引く。`audio_profile` / `tag_profile` の文字列に
+  埋めて解析し直すより素直）。`aac` の対象は `!missing && channels ∈ {1,2} && (lossless || lossy_sources)
+  && rg_scanned_at IS NOT NULL`。エンコードは ffmpeg 1 パス（`-af volume=<gain>dB [-ar 48000] -c:a aac
+  -b:a <k>k -f mp4`。opus のような中間 WAV は要らない）。焼き込み量は `min(track_gain, −20·log10(peak))`
+  で、peak は true peak（1.0 超なら減衰側）。`iTunNORM` は 1〜2 値目 `000003E8` に加えて 3〜4 値目
+  （同じ 0 dB の基準 1/2500 表現）を `000009C4` で埋める（0 のままだと読む側の解釈が不定になりうる。
+  iTunes が読むのは 1〜2 値目）。MP4 のタグは Vorbis 名を lofty の `ItemKey` に写像して標準 atom へ、
+  写像できないキーは `----:com.apple.iTunes:<KEY>` のフリーフォームへ直接置く（lofty の generic Tag は
+  未知キーを捨てる）。画像は thumbnail と同じ変換の JPEG 版（`thumbs/<hex>/768.jpg`）。RG の解析世代
+  （`src_rg_scanned_at`）の差分は `aac` では Encode。album gain の on / off も世代を進めるので、その album
+  の aac は作り直される（track gain しか使わないが、値ベースの判定に列を足すより単純。まれな操作）。
+  `lossy_sources` を true → false にしても既存の非可逆の行とファイルは消さない（Skip = 凍結と同じ）。
+  ハンドラは `OpusEncoder` と `AacEncoder` の両方を持ち、系統でエンコーダ・タグ書き込み・画像の形式・
+  記録する bitrate を選ぶだけで、期待パスの予約・占有・配置・退避・drift の再キューは共通
+- **実機の順序（P4-8）**: 実機の 9,099 本のうち `rg_scanned_at` があるのは 270 本（残りはファイルに
+  foobar 時代の track gain タグがあるだけで DB に値が無い）。「RG 未解析は作らず待つ」ので、先に
+  `POST /api/rg` を全件流し（`write_tags = true` なら Library のタグ書き換え → `tag_version` が進んで
+  opus 系統のタグ上書きも走る）、完了後に `[encode.derived.aac]` を有効にしてデプロイする。ファイルの
+  既存 `REPLAYGAIN_*` を暫定値に使う案は、値を spindle で統一する方針（D-74）と食い違うので採らない。
+  RG 未解析でも焼き込み無しで作って解析後に作り直す案は、二度エンコードで CPU 時間が倍になるので採らない
 
 **理由**: Apple 純正の「ミュージック」は Opus を読めず、ReplayGain タグも読まない（独自の Sound Check =
 `iTunNORM` をトラック単位で、端末の設定が ON のときだけ適用）。端末設定に依らず音量を揃えるには焼き込み

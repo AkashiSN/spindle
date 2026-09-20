@@ -776,11 +776,11 @@ D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に
 
 | 項目 | 規則 |
 |---|---|
-| 対象 | 可逆（flac / alac / wav）に加え、`lossy_sources = true` なら**非可逆も**（opus / ogg / mp3 / aac → AAC。世代劣化は承知の上で、ミュージック.app が Opus を読めないため。**D-8 の例外**）。原本が AAC でも同じ経路で再エンコードする（stream copy では RG の焼き込みとリサンプルができない。D-75） |
-| 出力 | `ffmpeg -c:a aac -b:a <bitrate>k`（内蔵エンコーダ。既定 256 kbps）。48 kHz 超は 48 kHz へ落とす（`-ar 48000`）、44.1 / 48 は据え置き |
-| RG | **track gain を音声に焼き込む**（`volume=<gain>dB`。gain は `min(rg_track_gain, −20·log10(rg_track_peak))` でクリップを防ぐ。album gain は使わない）。**RG 未解析のトラックは作らず待つ**（rg の保存で投入される。二度エンコードの回避）。タグには `iTunNORM` を **0 dB 相当**（先頭 2 値 `000003E8`、残り 8 値 `00000000`）で書き、端末のサウンドチェック ON でも二重に掛からないようにする。`REPLAYGAIN_*` / `R128_*` は書かない |
-| タグ | Library のタグを写す。**多値フィールドは `multi_value_separator`（既定 `" & "`）で 1 値に結合**（ミュージック.app は複数値の 1 つしか見せない。ARTIST / ALBUMARTIST / GENRE / COMPOSER など多値になり得る全フィールド）。標準フィールドは lofty の MP4 マッピング（`©ART` 等）、それ以外は `----:com.apple.iTunes:<KEY>` のフリーフォーム |
-| 画像 | `opus` と同じ選び方で、長辺 768 の **JPEG**（ミュージック.app は `covr` の WebP を読まない）。`thumbs/<hex>/768.jpg` をキャッシュに足す |
+| 対象 | 可逆（flac / alac / wav）に加え、`lossy_sources = true` なら**非可逆も**（opus / ogg / mp3 / aac → AAC。世代劣化は承知の上で、ミュージック.app が Opus を読めないため。**D-8 の例外**）。原本が AAC でも同じ経路で再エンコードする（stream copy では RG の焼き込みとリサンプルができない。D-75）。`lossy_sources` を true → false にしても既存の非可逆の行とファイルは消さない（対象外 = Skip で凍結と同じ扱い。物理削除は GC のみ） |
+| 出力 | ffmpeg **1 パス**（中間 WAV なし。FD を stdin に繋ぐのは opus と同じ）: `-i /dev/stdin -map 0:a:0 -vn -map_metadata -1 -af volume=<gain>dB [-ar 48000] -c:a aac -b:a <bitrate>k -f mp4`（内蔵エンコーダ。既定 256 kbps）。48 kHz 超は 48 kHz へ落とす（`-ar 48000`）、44.1 / 48 は据え置き。`audio_profile` は `aac:<bitrate>:48k:bake1`、`tag_profile` は `aac:sep=<区切り>:itunnorm0:v1` |
+| RG | **track gain を音声に焼き込む**（`-af volume=<gain>dB`。gain は `min(rg_track_gain, −20·log10(rg_track_peak))` でクリップを防ぐ（peak は true peak なので 1.0 超なら減衰側に倒れる。peak が 0 以下 / NaN なら上限なし、gain が NaN なら 0）。album gain は使わない）。**RG 未解析のトラックは作らず待つ**（rg の保存で投入される。二度エンコードの回避）。RG の解析世代（`src_rg_scanned_at`）の差分は**再エンコード**（album gain の on / off も世代を進めるので、その album の aac は作り直される。track gain しか使わないが値ベースの判定に列を足すより単純で、まれな操作なので許容。D-75）。タグには `iTunNORM` を **0 dB 相当**で書き、端末のサウンドチェック ON でも二重に掛からないようにする。値は 10 個の 8 桁 16 進を空白区切り（先頭にも空白）で、1〜2 値目（基準 1/1000）は `000003E8`、3〜4 値目（同じ量の基準 1/2500 の表現）は `000009C4`、残り 6 値は `00000000`: `" 000003E8 000003E8 000009C4 000009C4 00000000 00000000 00000000 00000000 00000000 00000000"`。`REPLAYGAIN_*` / `R128_*` は書かない |
+| タグ | Library のタグを写す（`REPLAYGAIN_*` / `R128_*` / 既存の `ITUNNORM` は落とす）。**同じキーの複数値は出現順に `multi_value_separator`（既定 `" & "`）で 1 値に結合**（ミュージック.app は複数値の 1 つしか見せない。ARTIST / ALBUMARTIST / GENRE / COMPOSER など多値になり得る全フィールド）。Vorbis 名を lofty の `ItemKey` に写像して ilst の標準 atom（`©ART` `trkn` `disk` `©gen` 等）に書き、写像できないキーは `----:com.apple.iTunes:<KEY>` のフリーフォーム（`iTunNORM` もここ） |
+| 画像 | `opus` と同じ選び方で、長辺 768 の **JPEG**（ミュージック.app は `covr` の WebP を読まない）。`thumbs/<hex>/768.jpg` をキャッシュに足す（thumbnail ジョブと同じ変換に形式を足したもの。`-pix_fmt yuvj420p -q:v 2`） |
 
 ```toml
 [encode]
@@ -796,6 +796,9 @@ bitrate = 256                   # ffmpeg -c:a aac -b:a
 lossy_sources = true            # 非可逆原本も AAC へ（D-8 の例外。aac 原本も再エンコード）
 multi_value_separator = " & "   # 多値フィールドの結合
 ```
+
+`derived_variants` の `lossy_sources` / `multi_value_separator` は 0019 で足す（`eligible` が前者を、ハンドラが後者を
+表から引く。設定は config が正で、起動時に両系統を写す）。
 
 `derived_files` の主キーは `(track_id, variant)`（マイグレーションで `delivery` ビューを落とし、表を作り直し、
 既存行を `variant = 'opus'`・`audio_profile = 'opus:128:v1'`・`tag_profile = 'opus:v1'`・`rel_path` はルート直下の
@@ -1939,7 +1942,7 @@ src/
 │   ├── filter.rs        一覧のフィルタ（JSON）/ ソート / カーソルの検証
 │   ├── selection.rs     selection の 2 形、preview のスナップショット store（D-33）
 │   ├── pathgen.rs       テンプレート展開・正規化・衝突回避
-│   ├── tags.rs          lofty ラッパ、正規化、多値処理
+│   ├── tags.rs          lofty ラッパ、正規化、多値処理、Derived への書き出し（Opus の VorbisComments / MP4 の ilst + フリーフォーム）
 │   ├── replaygain.rs    ebur128、フォーマット別変換
 │   └── category.rs      統制語彙、GENRE 写像
 ├── edit/
@@ -1954,7 +1957,7 @@ src/
 │   ├── fingerprint.rs   STREAMINFO MD5 / デコード PCM MD5 / パケット列ハッシュ
 │   ├── decode.rs        symphonia / ffmpeg フォールバック
 │   ├── hires.rs         偽ハイレゾ検出の解析（PcmSink: FFT の累積とサンプル OR → 計測値（cutoff / cliff / 実効ビット）→ 判定。§7.10、D-71）
-│   ├── encode.rs        flac（ffmpeg デコード → flac -8）/ opus
+│   ├── encode.rs        flac（ffmpeg デコード → flac -8）/ opus（ffmpeg デコード → opusenc）/ aac（ffmpeg 1 パス。RG 焼き込み・48 kHz 上限）
 │   └── artwork.rs       同梱 / 埋め込み画像の選択、判別、ハッシュアドレスのキャッシュ（P1-3）
 ├── cd/
 │   ├── mod.rs           TrackLayout（サンプル単位のトラック列）、照会用 HTTP クライアント
