@@ -362,6 +362,22 @@ fn ytdl_job_type_is_serial_and_round_trips() {
     assert!(JobType::ALL.contains(&JobType::Ytdl));
 }
 
+#[test]
+fn hirescheck_job_type_runs_at_half_the_cores_and_is_versioned() {
+    assert_eq!(JobType::Hirescheck.as_str(), "hirescheck");
+    assert_eq!(
+        "hirescheck".parse::<JobType>().unwrap(),
+        JobType::Hirescheck
+    );
+    assert_eq!(JobType::Hirescheck.concurrency(8), 4);
+    assert_eq!(JobType::Hirescheck.concurrency(1), 1);
+    assert!(JobType::ALL.contains(&JobType::Hirescheck));
+    assert_eq!(
+        JobType::Hirescheck.version_field(),
+        Some(("audio_version", "audio_version"))
+    );
+}
+
 #[tokio::test]
 async fn queued_job_with_future_run_after_is_not_claimed() {
     let h = Harness::new();

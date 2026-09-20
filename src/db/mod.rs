@@ -11,6 +11,7 @@ pub mod categories;
 pub mod derived;
 pub mod flaccheck;
 pub mod gc;
+pub mod hires;
 pub mod history;
 pub mod inbox;
 pub mod jobs;

@@ -250,7 +250,7 @@ pub fn apply_list(conn: &mut Connection, list: &[Migration]) -> Result<Vec<u32>,
 }
 
 /// 参照されている表を作り直すため `foreign_keys=OFF` で適用する版（SQLite の 12 手順）
-const FOREIGN_KEYS_OFF: &[u32] = &[11, 15];
+const FOREIGN_KEYS_OFF: &[u32] = &[11, 15, 16];
 
 /// 1 版を 1 トランザクションで適用する。`check_fk` なら commit 前に `PRAGMA foreign_key_check` で
 /// 参照の整合を確かめる（違反があればロールバック）

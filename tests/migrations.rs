@@ -341,3 +341,73 @@ fn upgrade_to_0015_adds_ytdl_and_keeps_rows_referencing_jobs() {
         1
     );
 }
+
+// ---------------------------------------------------------------- 0016 tracks.hires_* と jobs.type に hirescheck（P3-5、D-71）
+
+/// 0016 は tracks に偽ハイレゾ検出の列を足し、jobs の CHECK に hirescheck を足すために表を作り直す
+/// （0015 と同じ手順）。子表の行と FK・索引が戻ること
+#[test]
+fn upgrade_to_0016_adds_hires_columns_and_hirescheck_type() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let upto15: Vec<_> = list.iter().take(15).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto15).unwrap();
+    conn.execute_batch(
+        "INSERT INTO jobs (id, type, dedup_key, payload, state, created_at)
+           VALUES (1, 'scan', 'scan', '{}', 'done', 1), (2, 'rg', 'rg:1', '{}', 'queued', 2);
+         INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                             title, artist_display, album, albumartist, seen_at)
+           VALUES (5, 'a/b.flac', 'a/b.flac', 0, 0, 0, 'flac', 1, 't', 'a', 'al', 'aa', 0);
+         INSERT INTO track_locks (track_id, job_id, acquired_at) VALUES (5, 2, 1);",
+    )
+    .unwrap();
+    assert!(conn
+        .execute(
+            "INSERT INTO jobs (type, payload, created_at) VALUES ('hirescheck', '{}', 1)",
+            []
+        )
+        .is_err());
+
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 16);
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT count(*) FROM jobs"), 2);
+    assert_eq!(
+        count("SELECT count(*) FROM track_locks WHERE job_id = 2"),
+        1
+    );
+    assert_eq!(count("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+    // 新しい列は NULL で始まり、CHECK が効く
+    assert_eq!(
+        count(
+            "SELECT count(*) FROM tracks WHERE hires_check IS NULL AND hires_cutoff_hz IS NULL
+               AND hires_cliff_db IS NULL AND hires_effective_bits IS NULL"
+        ),
+        1
+    );
+    conn.execute(
+        "UPDATE tracks SET hires_check = 'upsampled', hires_checked_at = 1, hires_check_version = 1,
+                           hires_cutoff_hz = 22050, hires_cliff_db = 48.5, hires_effective_bits = 16 WHERE id = 5",
+        [],
+    )
+    .unwrap();
+    assert!(conn
+        .execute("UPDATE tracks SET hires_check = 'bogus' WHERE id = 5", [])
+        .is_err());
+    conn.execute(
+        "INSERT INTO jobs (type, dedup_key, payload, created_at) VALUES ('hirescheck', 'hirescheck:5:1', '{}', 1)",
+        [],
+    )
+    .unwrap();
+    assert!(conn
+        .execute(
+            "INSERT INTO jobs (type, dedup_key, payload, created_at) VALUES ('hirescheck', 'hirescheck:5:1', '{}', 1)",
+            []
+        )
+        .is_err());
+    conn.execute("DELETE FROM jobs WHERE id = 2", []).unwrap();
+    assert_eq!(count("SELECT count(*) FROM track_locks"), 0);
+}

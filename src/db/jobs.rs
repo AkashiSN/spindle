@@ -31,10 +31,11 @@ pub enum JobType {
     Ytdl,
     Gc,
     Backup,
+    Hirescheck,
 }
 
 impl JobType {
-    pub const ALL: [JobType; 14] = [
+    pub const ALL: [JobType; 15] = [
         JobType::Scan,
         JobType::Rip,
         JobType::Verify,
@@ -49,6 +50,7 @@ impl JobType {
         JobType::Ytdl,
         JobType::Gc,
         JobType::Backup,
+        JobType::Hirescheck,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -67,6 +69,7 @@ impl JobType {
             JobType::Ytdl => "ytdl",
             JobType::Gc => "gc",
             JobType::Backup => "backup",
+            JobType::Hirescheck => "hirescheck",
         }
     }
 
@@ -88,6 +91,8 @@ impl JobType {
             JobType::Ytdl => 1,
             JobType::Gc => 1,
             JobType::Backup => 1,
+            // デコード + FFT。rg / transcode / flaccheck と同時に走る分を抑える（D-71）
+            JobType::Hirescheck => (cpus / 2).max(1),
         }
     }
 
@@ -96,7 +101,9 @@ impl JobType {
     pub fn version_field(self) -> Option<(&'static str, &'static str)> {
         match self {
             JobType::Tagwrite => Some(("tag_version", "tag_version")),
-            JobType::Transcode | JobType::Flaccheck => Some(("audio_version", "audio_version")),
+            JobType::Transcode | JobType::Flaccheck | JobType::Hirescheck => {
+                Some(("audio_version", "audio_version"))
+            }
             _ => None,
         }
     }
