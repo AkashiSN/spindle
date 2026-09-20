@@ -956,13 +956,15 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       ことを明示。Inbox のファイルの埋め込み画像を返す `GET /api/inbox/:id/artwork/:file`（`PICTURE` のハッシュで
       照合、Library の artwork と同じ ETag / キャッシュ）と承認画面のサムネイル。受け入れ: `tests/inbox_api.rs`、
       `web/src/lib/inbox.test.ts`
-- [ ] **P4-5** album gain を album ごとの属性に（D-74）。`db/migrations/0017_album_gain.sql`（`albums.album_gain`
+- [x] **P4-5** album gain を album ごとの属性に（D-74。2026-09-20）。`db/migrations/0017_album_gain.sql`（`albums.album_gain`
       既定 0、既存の `tracks.rg_album_*` を NULL）。rg の投入経路（`POST /api/rg`、スキャン後、承認後、CD 配置後）
       は属性で album / track 単位を選ぶ。`cd/place.rs` は true で作る。承認画面のチェックボックス（既定 off、追記先
       album の現在値が初期値）。アルバム画面の切り替え（`PATCH /api/albums/:id { album_gain }` → true なら album 単位
       の rg を投入、false なら `rg_album_*` を NULL にして未書込に）。書き出しは false なら album のキーを書かず、
       あれば消す。受け入れ: `tests/migrations.rs`、`tests/rg_job.rs`（track 単位の投入と album の集計なし）、
-      `tests/rg_api.rs`、`tests/cd_place.rs`、`tests/inbox_api.rs`、`tests/albums_api.rs`
+      `tests/rg_api.rs`、`tests/cd_place.rs`、`tests/inbox_api.rs`、`tests/albums_api.rs`。実装: 切り替えは操作タブ
+      （アルバム画面は無い）、`tests/rg_db.rs`（属性の読み書きと投入単位）、`tests/inbox_job.rs`（下書きの album_gain）、
+      web は `lib/albumGain.ts` / `lib/inbox.ts`
 - [ ] **P4-6** アルバム一覧をトラック一覧と同じフィルタで絞る（D-58 追記）。`GET /api/albums?filter=`（トラック一覧と
       同じ JSON フィルタ。指定があれば一致する active なトラックを 1 本以上持つ album だけ。`WHERE a.id IN (SELECT
       t.album_id FROM tracks t … WHERE <db/tracks.rs の既存の WHERE>)` で、ツリーの `album_ids` / `category` /
