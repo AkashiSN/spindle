@@ -6,7 +6,7 @@
 //! 追随）でも [`sync_written_at`] で判定し直す。`rg_scanned_at` より古ければ UI は「書き込み
 //! 未反映」として見せる
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension as _};
 
 use super::Result;
 use crate::domain::replaygain::file_matches;
@@ -114,25 +114,118 @@ pub fn store(conn: &Connection, results: &[(i64, Values)], now: i64) -> Result<u
     Ok(n)
 }
 
-/// `track_ids` の active な行を解析単位に分ける: album を持つものは album_id（重複なし、昇順）、
-/// 持たないものは track_id（昇順）
+// ---------------------------------------------------------------- album gain の属性（D-74、P4-5）
+
+/// album gain を計算・書き出しする album か（D-74）。無い album は false
+pub fn album_gain_enabled(conn: &Connection, album_id: i64) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT album_gain FROM albums WHERE id = ?1",
+            [album_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0)
+        == 1)
+}
+
+/// [`set_album_gain`] の結果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumGainChange {
+    /// 属性が変わった（同じ値なら false で `cleared` は空）
+    pub changed: bool,
+    /// off にして album の値を消した track（Derived の追随を投入する対象）
+    pub cleared: Vec<i64>,
+}
+
+/// album gain の属性を変える（D-74）。off にするときは構成トラックの `rg_album_*` を NULL にし、
+/// `rg_written_at` を NULL に戻し（ファイルには album のキーが残っている）、`rg_scanned_at` を進める
+/// （Derived の `src_rg_scanned_at` との差分でタグ上書きが走る）。on にするだけでは行を触らない
+/// （次の album 解析で揃う。呼び出し側が rg を投入する）。album が無ければ None
+pub fn set_album_gain(
+    conn: &Connection,
+    album_id: i64,
+    on: bool,
+    now: i64,
+) -> Result<Option<AlbumGainChange>> {
+    let current: Option<i64> = conn
+        .query_row(
+            "SELECT album_gain FROM albums WHERE id = ?1",
+            [album_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(current) = current else {
+        return Ok(None);
+    };
+    if (current == 1) == on {
+        return Ok(Some(AlbumGainChange {
+            changed: false,
+            cleared: Vec::new(),
+        }));
+    }
+    conn.execute(
+        "UPDATE albums SET album_gain = ?2 WHERE id = ?1",
+        params![album_id, i64::from(on)],
+    )?;
+    let mut cleared = Vec::new();
+    if !on {
+        let mut st = conn.prepare_cached(
+            "SELECT id FROM tracks
+              WHERE album_id = ?1 AND (rg_album_gain IS NOT NULL OR rg_album_peak IS NOT NULL)
+              ORDER BY id",
+        )?;
+        cleared = st
+            .query_map([album_id], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<i64>, _>>()?;
+        conn.execute(
+            "UPDATE tracks
+                SET rg_album_gain = NULL, rg_album_peak = NULL, rg_written_at = NULL,
+                    rg_scanned_at = MAX(?2, COALESCE(rg_scanned_at, 0) + 1)
+              WHERE album_id = ?1 AND (rg_album_gain IS NOT NULL OR rg_album_peak IS NOT NULL)",
+            params![album_id, now],
+        )?;
+    }
+    Ok(Some(AlbumGainChange {
+        changed: true,
+        cleared,
+    }))
+}
+
+/// 行の現在の `rg_album_gain` / `rg_album_peak`（track 単位の解析で album の値を保つのに使う）。
+/// 行が無ければ None
+pub fn album_values_of(
+    conn: &Connection,
+    track_id: i64,
+) -> Result<Option<(Option<f64>, Option<f64>)>> {
+    Ok(conn
+        .query_row(
+            "SELECT rg_album_gain, rg_album_peak FROM tracks WHERE id = ?1",
+            [track_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// `track_ids` の active な行を解析単位に分ける（D-74）: `album_gain = 1` の album に属するものは
+/// album_id（重複なし、昇順）、album を持たないものと `album_gain = 0` の album のものは track_id（昇順）
 pub fn scopes_of(conn: &Connection, track_ids: &[i64]) -> Result<(Vec<i64>, Vec<i64>)> {
     let json =
         serde_json::to_string(track_ids).map_err(|e| super::DbError::Internal(e.to_string()))?;
     let mut st = conn.prepare_cached(
-        "SELECT DISTINCT album_id FROM tracks
-          WHERE album_id IS NOT NULL AND missing_since IS NULL
-            AND id IN (SELECT value FROM json_each(?1))
-          ORDER BY album_id",
+        "SELECT DISTINCT t.album_id FROM tracks t JOIN albums a ON a.id = t.album_id
+          WHERE a.album_gain = 1 AND t.missing_since IS NULL
+            AND t.id IN (SELECT value FROM json_each(?1))
+          ORDER BY t.album_id",
     )?;
     let albums = st
         .query_map([&json], |r| r.get(0))?
         .collect::<std::result::Result<Vec<i64>, _>>()?;
     let mut st = conn.prepare_cached(
-        "SELECT id FROM tracks
-          WHERE album_id IS NULL AND missing_since IS NULL
-            AND id IN (SELECT value FROM json_each(?1))
-          ORDER BY id",
+        "SELECT t.id FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
+          WHERE (t.album_id IS NULL OR a.album_gain = 0) AND t.missing_since IS NULL
+            AND t.id IN (SELECT value FROM json_each(?1))
+          ORDER BY t.id",
     )?;
     let tracks = st
         .query_map([&json], |r| r.get(0))?
