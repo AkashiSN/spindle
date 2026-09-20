@@ -188,3 +188,29 @@ fn write_mp4_tags_maps_standard_atoms_and_freeform_and_covr() {
     let text = ffprobe_tags(&p);
     assert_eq!(text.matches("iTunNORM=").count(), 1, "{text}");
 }
+
+/// 同じ ilst atom に写像される別名キー（LABEL / ORGANIZATION → ItemKey::Label）は後勝ちで 1 値
+#[test]
+fn write_mp4_tags_keeps_only_the_last_of_aliased_keys() {
+    let _ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let dir = tempfile::tempdir().unwrap();
+    let p = common::make_audio(dir.path(), "t.m4a", "m4a", 1).unwrap();
+    let src = TransferTags {
+        items: vec![
+            ("TITLE".into(), "t".into()),
+            ("LABEL".into(), "first".into()),
+            ("ORGANIZATION".into(), "last".into()),
+            ("TRACKTOTAL".into(), "5".into()),
+            ("TOTALTRACKS".into(), "7".into()),
+        ],
+        pictures: vec![],
+    };
+    {
+        let mut f = File::options().read(true).write(true).open(&p).unwrap();
+        write_mp4_tags(&mut f, &aac_tags(&src, " & ", None)).unwrap();
+    }
+    let t = read_transfer_tags(File::open(&p).unwrap(), Some("m4a")).unwrap();
+    assert_eq!(values(&t, "LABEL"), vec!["last"]);
+    assert!(values(&t, "ORGANIZATION").is_empty());
+    assert_eq!(values(&t, "TRACKTOTAL"), vec!["7"]);
+}

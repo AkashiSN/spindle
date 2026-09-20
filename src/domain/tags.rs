@@ -661,8 +661,9 @@ pub fn write_mp4_tags(file: &mut File, tags: &TransferTags) -> Result<(), TagWri
             .filter(|k| k.map_key(TagType::Mp4Ilst).is_some());
         match mapped {
             Some(k) => {
-                // 同じ ItemKey に写像されるキーが 2 つある（TRACKTOTAL / TOTALTRACKS）と後勝ち
-                generic.push(TagItem::new(k, ItemValue::Text(value.clone())));
+                // 同じ ItemKey に写像される別名キーが 2 つある（LABEL / ORGANIZATION、TRACKTOTAL /
+                // TOTALTRACKS）と後勝ち。`push` だと両方残り、どちらを Apple が採るか決まらない
+                generic.insert(TagItem::new(k, ItemValue::Text(value.clone())));
             }
             None => {
                 let name = if key.eq_ignore_ascii_case(ITUNNORM_KEY) {
