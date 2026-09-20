@@ -1298,6 +1298,7 @@ button.primary {
   text-align: right;
   padding-right: 2px;
 }
+/* hover か Tab でのフォーカスまでは薄く消す（visibility だと Tab 順序から外れてキーボードで消せない） */
 .props-delete {
   border: 0;
   background: none;
@@ -1305,10 +1306,12 @@ button.primary {
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
-  visibility: hidden;
+  opacity: 0;
 }
-.props-table tr:hover .props-delete:not(:disabled) {
-  visibility: visible;
+.props-table tr:hover .props-delete:not(:disabled),
+.props-table tr:focus-within .props-delete:not(:disabled),
+.props-delete:focus-visible {
+  opacity: 1;
 }
 .props-delete:hover {
   color: var(--error);
