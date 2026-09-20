@@ -56,6 +56,19 @@ impl App {
         std::fs::create_dir(&der).unwrap();
         let db_path = dir.path().join("spindle.db");
         let db = Arc::new(Db::open(&db_path).unwrap());
+        {
+            // 起動時の sync_variants と同じ（opus 系統 128k、on）
+            let c = rusqlite::Connection::open(&db_path).unwrap();
+            derived::sync_variants(
+                &c,
+                &spindle::config::OpusVariantConfig {
+                    enabled: true,
+                    bitrate: 128,
+                },
+                0,
+            )
+            .unwrap();
+        }
         let config = Arc::new(Config::parse(toml).unwrap());
         let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
             .await
@@ -117,7 +130,7 @@ impl App {
 
     /// Derived の Opus を置いて derived_files を揃える（transcode ジョブは使わない）
     fn add_derived(&self, id: i64, rel_opus: &str, seed: u32) -> std::path::PathBuf {
-        let p = self.derived().join(rel_opus);
+        let p = self.derived().join("opus").join(rel_opus);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         let name = p.file_name().unwrap().to_str().unwrap().to_owned();
         let made = common::make_audio(p.parent().unwrap(), &name, "opus", seed).unwrap();
@@ -132,14 +145,18 @@ impl App {
         derived::upsert(
             &self.conn(),
             id,
-            rel_opus,
-            "opus",
+            spindle::domain::derived::Variant::Opus,
+            &format!("opus/{rel_opus}"),
             Some(128),
             av,
             derived::TagState {
                 src_tag_version: tv,
                 src_artwork_id: None,
                 src_rg_scanned_at: None,
+            },
+            &derived::Profiles {
+                audio_profile: "opus:128:v1".into(),
+                tag_profile: "opus:v1".into(),
             },
             0,
         )

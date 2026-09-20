@@ -820,9 +820,10 @@ async fn delivery_export_reports_stale_tags_count() {
     // a: Derived が現在値、b: タグ版だけ陳腐化（配るが追随待ち）、d: Derived 無し
     app.raw()
         .execute(
-            "INSERT INTO derived_files (track_id, rel_path, rel_path_key, codec, src_audio_version, src_tag_version, generated_at)
-             VALUES (?1, 'J-Pop/A/B/01 One.opus', 'j-pop/a/b/01 one.opus', 'opus', 1, 1, 0),
-                    (?2, 'J-Pop/A/B/02 Two.opus', 'j-pop/a/b/02 two.opus', 'opus', 1, 2, 0)",
+            "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, src_audio_version,
+                                        src_tag_version, generated_at, audio_profile, tag_profile)
+             VALUES (?1, 'opus', 'opus/J-Pop/A/B/01 One.opus', 'opus/j-pop/a/b/01 one.opus', 'opus', 1, 1, 0, 'opus:256:v1', 'opus:v1'),
+                    (?2, 'opus', 'opus/J-Pop/A/B/02 Two.opus', 'opus/j-pop/a/b/02 two.opus', 'opus', 1, 2, 0, 'opus:256:v1', 'opus:v1')",
             params![a, b],
         )
         .unwrap();

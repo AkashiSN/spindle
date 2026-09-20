@@ -4,6 +4,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -124,6 +125,7 @@ impl Lib {
         std::fs::create_dir(dir.path().join("tmp")).unwrap();
         let db_path = dir.path().join("spindle.db");
         let db = Arc::new(Db::open(&db_path).unwrap());
+        common::enable_opus_variant(&db_path, 128);
         let root = Arc::new(RootDir::open(&dir.path().join("Library")).unwrap());
         let jobs = Jobs::new(db.clone());
         let scanner = Scanner::new(db.clone(), root.clone(), 2);

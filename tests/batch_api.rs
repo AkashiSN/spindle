@@ -55,6 +55,7 @@ impl App {
     async fn open(dir: tempfile::TempDir) -> Self {
         let lib = dir.path().join("Library");
         let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
+        common::enable_opus_variant(&dir.path().join("spindle.db"), 128);
         let config = Arc::new(Config::parse(EXAMPLE).unwrap());
         let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
             .await
@@ -595,9 +596,9 @@ async fn applied_op_enqueues_derived_sync_for_each_track() {
     let b = app.track_id("A/02.flac");
     app.conn()
         .execute(
-            "INSERT INTO derived_files (track_id, rel_path, rel_path_key, codec, src_audio_version,
-                                        src_tag_version, generated_at)
-             VALUES (?1, 'A/01.opus', 'a/01.opus', 'opus', 1, 1, 1)",
+            "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, src_audio_version,
+                                        src_tag_version, generated_at, audio_profile, tag_profile)
+             VALUES (?1, 'opus', 'opus/A/01.opus', 'opus/a/01.opus', 'opus', 1, 1, 1, 'opus:128:v1', 'opus:v1')",
             [a],
         )
         .unwrap();

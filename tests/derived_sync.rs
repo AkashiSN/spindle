@@ -69,6 +69,19 @@ impl Lib {
         }
         let db_path = dir.path().join("spindle.db");
         let db = Arc::new(Db::open(&db_path).unwrap());
+        {
+            // 起動時の sync_variants と同じ（opus 系統 128k、on）
+            let c = Connection::open(&db_path).unwrap();
+            derived::sync_variants(
+                &c,
+                &spindle::config::OpusVariantConfig {
+                    enabled: true,
+                    bitrate: 128,
+                },
+                0,
+            )
+            .unwrap();
+        }
         let library = Arc::new(RootDir::open(&dir.path().join("Library")).unwrap());
         let derived = Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap());
         let store = Arc::new(ArtworkStore::new(dir.path().join("thumbs")));
@@ -185,14 +198,18 @@ impl Lib {
         derived::upsert(
             &self.conn(),
             id,
-            rel_opus,
-            "opus",
+            spindle::domain::derived::Variant::Opus,
+            &format!("opus/{rel_opus}"),
             None,
             av,
             derived::TagState {
                 src_tag_version: tv,
                 src_artwork_id: None,
                 src_rg_scanned_at: None,
+            },
+            &derived::Profiles {
+                audio_profile: "opus:128:v1".into(),
+                tag_profile: "opus:v1".into(),
             },
             0,
         )
@@ -406,10 +423,10 @@ async fn delivery_view_follows_versions_end_to_end() {
     lib.wait_transcodes().await;
     let a = lib.track_id("A/01.flac");
     let b = lib.track_id("A/02.opus");
-    assert_eq!(lib.delivery(a), ("Derived/A/01.opus".into(), 0));
+    assert_eq!(lib.delivery(a), ("Derived/opus/A/01.opus".into(), 0));
     assert_eq!(lib.delivery(b), ("Library/A/02.opus".into(), 0));
-    assert!(lib.derived_dir().join("A/01.opus").is_file());
-    assert!(!lib.derived_dir().join("A/02.opus").exists());
+    assert!(lib.derived_dir().join("opus/A/01.opus").is_file());
+    assert!(!lib.derived_dir().join("opus/A/02.opus").exists());
 
     // 外部でタグを変えて scan → stale_tags → transcode が追随
     common::retag(&p, |t| t.set_title("x".to_owned()));
@@ -421,12 +438,12 @@ async fn delivery_view_follows_versions_end_to_end() {
         )
         .await
         .unwrap();
-    assert_eq!(lib.delivery(a), ("Derived/A/01.opus".into(), 1));
+    assert_eq!(lib.delivery(a), ("Derived/opus/A/01.opus".into(), 1));
     assert_eq!(lib.scan_job().await, JobState::Done);
     lib.wait_transcodes().await;
-    assert_eq!(lib.delivery(a), ("Derived/A/01.opus".into(), 0));
+    assert_eq!(lib.delivery(a), ("Derived/opus/A/01.opus".into(), 0));
     let af = read_audio_file(
-        File::open(lib.derived_dir().join("A/01.opus")).unwrap(),
+        File::open(lib.derived_dir().join("opus/A/01.opus")).unwrap(),
         Some("opus"),
     )
     .unwrap();
@@ -447,5 +464,5 @@ async fn delivery_view_follows_versions_end_to_end() {
     assert_eq!(lib.delivery(a), ("Library/A/01.flac".into(), 0));
     assert_eq!(lib.scan_job().await, JobState::Done);
     lib.wait_transcodes().await;
-    assert_eq!(lib.delivery(a), ("Derived/A/01.opus".into(), 0));
+    assert_eq!(lib.delivery(a), ("Derived/opus/A/01.opus".into(), 0));
 }

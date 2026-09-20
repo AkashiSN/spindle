@@ -17,6 +17,7 @@ use rusqlite::Connection;
 use tokio_util::sync::CancellationToken;
 
 use spindle::db::{derived, Db};
+use spindle::domain::derived::Variant;
 use spindle::domain::tags::read_audio_file;
 use spindle::fsroot::RootDir;
 use spindle::import::scanner::{ScanKind, Scanner};
@@ -61,6 +62,19 @@ impl Lib {
         }
         let db_path = dir.path().join("spindle.db");
         let db = Arc::new(Db::open(&db_path).unwrap());
+        {
+            // 起動時の sync_variants と同じ（opus 系統 128k、on。エンコーダの設定と揃える）
+            let c = Connection::open(&db_path).unwrap();
+            derived::sync_variants(
+                &c,
+                &spindle::config::OpusVariantConfig {
+                    enabled: true,
+                    bitrate: 128,
+                },
+                0,
+            )
+            .unwrap();
+        }
         let library = Arc::new(RootDir::open(&dir.path().join("Library")).unwrap());
         let derived = Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap());
         let store = Arc::new(ArtworkStore::new(dir.path().join("thumbs")));
@@ -252,7 +266,7 @@ impl Lib {
     async fn enqueue(&self, id: i64, av: i64, tv: i64) -> i64 {
         match self
             .jobs
-            .enqueue(derived::new_job(id, av, tv))
+            .enqueue(derived::new_job(id, Variant::Opus, av, tv))
             .await
             .unwrap()
         {
@@ -265,7 +279,7 @@ impl Lib {
         let (av, tv) = self.versions(id);
         match self
             .jobs
-            .enqueue(derived::new_job(id, av, tv).max_attempts(1))
+            .enqueue(derived::new_job(id, Variant::Opus, av, tv).max_attempts(1))
             .await
             .unwrap()
         {
@@ -355,10 +369,10 @@ async fn first_run_encodes_with_tags_rg_and_cover() {
     lib.set_rg(id);
     assert_eq!(lib.run(id).await, JobState::Done);
     let (rel, av, tv, art) = lib.derived_row(id).unwrap();
-    assert_eq!(rel, "A/B/01.opus");
+    assert_eq!(rel, "opus/A/B/01.opus");
     assert_eq!((av, tv), (1, 1));
     let art = art.expect("album のアートワークを埋めた");
-    let opus = lib.derived().join("A/B/01.opus");
+    let opus = lib.derived().join("opus/A/B/01.opus");
     let af = read_audio_file(File::open(&opus).unwrap(), Some("opus")).unwrap();
     assert_eq!(af.codec.as_str(), "opus");
     assert_eq!(af.tags.first("TITLE"), Some("曲"));
@@ -374,13 +388,13 @@ async fn first_run_encodes_with_tags_rg_and_cover() {
     );
     assert_eq!(
         lib.delivery(id),
-        ("Derived/A/B/01.opus".into(), "opus".into(), 0)
+        ("Derived/opus/A/B/01.opus".into(), "opus".into(), 0)
     );
     // 768 のサムネイルをハンドラ自身が作った（thumbnail ジョブは登録していない）
     assert!(lib.thumb_exists(art, 768));
     // tmp が残っていない
     assert_eq!(lib.tmp_count(), 0);
-    assert!(!has_tmp(&lib.derived().join("A/B")));
+    assert!(!has_tmp(&lib.derived().join("opus/A/B")));
 }
 
 #[tokio::test]
@@ -394,7 +408,7 @@ async fn without_rg_and_cover_tags_only_transfer() {
     assert_eq!(lib.run(id).await, JobState::Done);
     assert_eq!(lib.derived_row(id).unwrap().3, None);
     let af = read_audio_file(
-        File::open(lib.derived().join("A/01.opus")).unwrap(),
+        File::open(lib.derived().join("opus/A/01.opus")).unwrap(),
         Some("opus"),
     )
     .unwrap();
@@ -414,20 +428,132 @@ async fn up_to_date_and_ineligible_are_noops() {
     lib.start();
     let a = lib.track_id("A/01.flac");
     assert_eq!(lib.run(a).await, JobState::Done);
-    let before = sha256(&lib.derived().join("A/01.opus"));
+    let before = sha256(&lib.derived().join("opus/A/01.opus"));
     // 二度目は何もしない（ファイルは同一）
     assert_eq!(lib.run(a).await, JobState::Done);
-    assert_eq!(sha256(&lib.derived().join("A/01.opus")), before);
+    assert_eq!(sha256(&lib.derived().join("opus/A/01.opus")), before);
     for rel in ["A/02.opus", "A/03.flac"] {
         let id = lib.track_id(rel);
         assert_eq!(lib.run(id).await, JobState::Done);
         assert!(lib.derived_row(id).is_none(), "{rel}");
     }
-    assert!(!lib.derived().join("A/02.opus").exists());
-    assert!(!lib.derived().join("A/03.opus").exists());
+    assert!(!lib.derived().join("opus/A/02.opus").exists());
+    assert!(!lib.derived().join("opus/A/03.opus").exists());
     // 非可逆の delivery は原本
     let b = lib.track_id("A/02.opus");
     assert_eq!(lib.delivery(b).0, "Library/A/02.opus");
+}
+
+// ---------------------------------------------------------------- 系統と設定の世代（P4-7、D-75）
+
+/// 0018 が移した旧ルート直下の行（audio_profile が 128k）は、設定が 256k なら作り直され opus/ 配下に
+/// 置かれて旧ファイルが消える。設定が 128k のままなら profile 一致でパスの差分だけなので Move
+#[tokio::test]
+async fn legacy_root_row_is_reencoded_or_moved_under_the_variant_dir() {
+    require_tools!();
+    let lib = Lib::new();
+    lib.add("A/01.flac", 1, "a");
+    lib.add("A/02.flac", 2, "b");
+    lib.scan().await;
+    lib.start();
+    let a = lib.track_id("A/01.flac");
+    let b = lib.track_id("A/02.flac");
+    assert_eq!(lib.run(a).await, JobState::Done);
+    assert_eq!(lib.run(b).await, JobState::Done);
+    let a_sha = sha256(&lib.derived().join("opus/A/01.opus"));
+    let b_sha = sha256(&lib.derived().join("opus/A/02.opus"));
+    // 0018 直後の状態を作る: ファイルをルート直下へ戻し、行もそこを指す（a は 128k の世代 = 設定と
+    // 同じ、b は 96k の世代 = 設定と違う）
+    std::fs::create_dir_all(lib.derived().join("A")).unwrap();
+    for (id, name, profile) in [
+        (a, "A/01.opus", "opus:128:v1"),
+        (b, "A/02.opus", "opus:96:v1"),
+    ] {
+        std::fs::rename(
+            lib.derived().join("opus").join(name),
+            lib.derived().join(name),
+        )
+        .unwrap();
+        lib.conn()
+            .execute(
+                "UPDATE derived_files SET rel_path = ?2, rel_path_key = ?3, audio_profile = ?4
+                  WHERE track_id = ?1",
+                rusqlite::params![id, name, name.to_lowercase(), profile],
+            )
+            .unwrap();
+    }
+    // a: profile 一致 → Move（再エンコードなし）
+    assert_eq!(lib.run(a).await, JobState::Done);
+    assert_eq!(lib.derived_row(a).unwrap().0, "opus/A/01.opus");
+    assert_eq!(sha256(&lib.derived().join("opus/A/01.opus")), a_sha);
+    assert!(!lib.derived().join("A/01.opus").exists());
+    // b: profile 差分 → Encode（作り直し。旧ファイルは消える）
+    assert_eq!(lib.run(b).await, JobState::Done);
+    assert_eq!(lib.derived_row(b).unwrap().0, "opus/A/02.opus");
+    assert!(lib.derived().join("opus/A/02.opus").is_file());
+    assert!(!lib.derived().join("A/02.opus").exists());
+    let profile: String = lib
+        .conn()
+        .query_row(
+            "SELECT audio_profile FROM derived_files WHERE track_id = ?1",
+            [b],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(profile, "opus:128:v1", "行の世代は設定に揃う");
+    let _ = b_sha;
+}
+
+/// 系統が凍結（enabled=false）なら何もしない: 行もファイルも据え置き、タグ版が進んでも触らない。
+/// 設定に無い系統（aac は P4-8）のジョブも何もしない
+#[tokio::test]
+async fn frozen_variant_and_unknown_variant_are_noops() {
+    require_tools!();
+    let lib = Lib::new();
+    let p = lib.add("A/01.flac", 1, "a");
+    lib.scan().await;
+    lib.start();
+    let a = lib.track_id("A/01.flac");
+    assert_eq!(lib.run(a).await, JobState::Done);
+    let before = sha256(&lib.derived().join("opus/A/01.opus"));
+    // 凍結
+    derived::sync_variants(
+        &lib.conn(),
+        &spindle::config::OpusVariantConfig {
+            enabled: false,
+            bitrate: 128,
+        },
+        1,
+    )
+    .unwrap();
+    common::retag(&p, |t| t.set_title("a2".to_owned()));
+    lib.scan().await;
+    let (av, tv) = lib.versions(a);
+    let job = lib.enqueue(a, av, tv).await;
+    assert_eq!(lib.wait_job(job).await, JobState::Done);
+    assert_eq!(sha256(&lib.derived().join("opus/A/01.opus")), before);
+    assert_eq!(lib.derived_row(a).unwrap().2, 1, "タグ版も据え置き");
+    // 設定に無い系統
+    let job = lib
+        .jobs
+        .enqueue(derived::new_job(a, Variant::Aac, av, tv))
+        .await
+        .unwrap()
+        .id();
+    assert_eq!(lib.wait_job(job).await, JobState::Done);
+    assert!(!lib.derived().join("aac").exists());
+    // 戻せば追随する
+    derived::sync_variants(
+        &lib.conn(),
+        &spindle::config::OpusVariantConfig {
+            enabled: true,
+            bitrate: 128,
+        },
+        2,
+    )
+    .unwrap();
+    assert_eq!(lib.run(a).await, JobState::Done);
+    assert_eq!(lib.derived_row(a).unwrap().2, 2);
 }
 
 #[tokio::test]
@@ -439,7 +565,7 @@ async fn tag_version_bump_retags_without_reencoding() {
     lib.start();
     let id = lib.track_id("A/01.flac");
     assert_eq!(lib.run(id).await, JobState::Done);
-    let opus = lib.derived().join("A/01.opus");
+    let opus = lib.derived().join("opus/A/01.opus");
     let audio_before = audio_md5(&opus);
     // 外部でタグを書き換えて再スキャン → tag_version++
     common::retag(&p, |t| t.set_title("b".to_owned()));
@@ -450,12 +576,12 @@ async fn tag_version_bump_retags_without_reencoding() {
     assert_eq!(lib.derived_row(id).unwrap().2, 2);
     assert_eq!(
         lib.delivery(id),
-        ("Derived/A/01.opus".into(), "opus".into(), 0)
+        ("Derived/opus/A/01.opus".into(), "opus".into(), 0)
     );
     let af = read_audio_file(File::open(&opus).unwrap(), Some("opus")).unwrap();
     assert_eq!(af.tags.first("TITLE"), Some("b"));
     assert_eq!(audio_md5(&opus), audio_before, "音声は再エンコードしない");
-    assert!(!has_tmp(&lib.derived().join("A")));
+    assert!(!has_tmp(&lib.derived().join("opus/A")));
 }
 
 #[tokio::test]
@@ -467,7 +593,7 @@ async fn audio_version_bump_reencodes_and_delivery_falls_back_meanwhile() {
     lib.start();
     let id = lib.track_id("A/01.flac");
     assert_eq!(lib.run(id).await, JobState::Done);
-    let before = audio_md5(&lib.derived().join("A/01.opus"));
+    let before = audio_md5(&lib.derived().join("opus/A/01.opus"));
     // 別の音声で差し替え → audio_version++
     std::fs::remove_file(&p).unwrap();
     lib.add("A/01.flac", 2, "a");
@@ -480,10 +606,10 @@ async fn audio_version_bump_reencodes_and_delivery_falls_back_meanwhile() {
     );
     assert_eq!(lib.run(id).await, JobState::Done);
     assert_eq!(lib.derived_row(id).unwrap().1, 2);
-    assert_ne!(audio_md5(&lib.derived().join("A/01.opus")), before);
+    assert_ne!(audio_md5(&lib.derived().join("opus/A/01.opus")), before);
     assert_eq!(
         lib.delivery(id),
-        ("Derived/A/01.opus".into(), "opus".into(), 0)
+        ("Derived/opus/A/01.opus".into(), "opus".into(), 0)
     );
 }
 
@@ -501,7 +627,7 @@ async fn stale_job_is_noop() {
     let job = lib.enqueue(id, 1, 1).await;
     assert_eq!(lib.wait_job(job).await, JobState::Done);
     assert!(lib.derived_row(id).is_none());
-    assert!(!lib.derived().join("A/01.opus").exists());
+    assert!(!lib.derived().join("opus/A/01.opus").exists());
 }
 
 #[tokio::test]
@@ -513,16 +639,16 @@ async fn external_move_renames_derived() {
     lib.start();
     let id = lib.track_id("A/01.flac");
     assert_eq!(lib.run(id).await, JobState::Done);
-    let before = sha256(&lib.derived().join("A/01.opus"));
+    let before = sha256(&lib.derived().join("opus/A/01.opus"));
     std::fs::create_dir_all(lib.lib().join("B")).unwrap();
     std::fs::rename(&p, lib.lib().join("B/01 new.flac")).unwrap();
     lib.scan().await;
     assert_eq!(lib.track_id("B/01 new.flac"), id);
     assert_eq!(lib.run(id).await, JobState::Done);
-    assert_eq!(lib.derived_row(id).unwrap().0, "B/01 new.opus");
-    assert!(!lib.derived().join("A/01.opus").exists());
-    assert_eq!(sha256(&lib.derived().join("B/01 new.opus")), before);
-    assert_eq!(lib.delivery(id).0, "Derived/B/01 new.opus");
+    assert_eq!(lib.derived_row(id).unwrap().0, "opus/B/01 new.opus");
+    assert!(!lib.derived().join("opus/A/01.opus").exists());
+    assert_eq!(sha256(&lib.derived().join("opus/B/01 new.opus")), before);
+    assert_eq!(lib.delivery(id).0, "Derived/opus/B/01 new.opus");
 }
 
 #[tokio::test]
@@ -534,12 +660,12 @@ async fn move_with_lost_derived_reencodes() {
     lib.start();
     let id = lib.track_id("A/01.flac");
     assert_eq!(lib.run(id).await, JobState::Done);
-    std::fs::remove_file(lib.derived().join("A/01.opus")).unwrap();
+    std::fs::remove_file(lib.derived().join("opus/A/01.opus")).unwrap();
     std::fs::rename(&p, lib.lib().join("A/02.flac")).unwrap();
     lib.scan().await;
     assert_eq!(lib.run(id).await, JobState::Done);
-    assert!(lib.derived().join("A/02.opus").is_file());
-    assert_eq!(lib.derived_row(id).unwrap().0, "A/02.opus");
+    assert!(lib.derived().join("opus/A/02.opus").is_file());
+    assert_eq!(lib.derived_row(id).unwrap().0, "opus/A/02.opus");
 }
 
 #[tokio::test]
@@ -551,11 +677,11 @@ async fn retag_with_lost_derived_reencodes() {
     lib.start();
     let id = lib.track_id("A/01.flac");
     assert_eq!(lib.run(id).await, JobState::Done);
-    std::fs::remove_file(lib.derived().join("A/01.opus")).unwrap();
+    std::fs::remove_file(lib.derived().join("opus/A/01.opus")).unwrap();
     common::retag(&p, |t| t.set_title("b".to_owned()));
     lib.scan().await;
     assert_eq!(lib.run(id).await, JobState::Done);
-    assert!(lib.derived().join("A/01.opus").is_file());
+    assert!(lib.derived().join("opus/A/01.opus").is_file());
     assert_eq!(lib.derived_row(id).unwrap().2, 2);
 }
 
@@ -569,7 +695,7 @@ async fn cover_replacement_retags_with_new_picture() {
     lib.start();
     let id = lib.track_id("A/B/01.flac");
     assert_eq!(lib.run(id).await, JobState::Done);
-    let opus = lib.derived().join("A/B/01.opus");
+    let opus = lib.derived().join("opus/A/B/01.opus");
     let first_art = lib.derived_row(id).unwrap().3.unwrap();
     let pic_before = picture_of(&opus).unwrap();
     let audio_before = audio_md5(&opus);
@@ -609,7 +735,7 @@ async fn library_changed_under_us_fails_without_writing() {
     assert_eq!(lib.wait_job(job).await, JobState::Failed);
     assert!(lib.last_error(job).unwrap().contains("再スキャン"));
     assert!(lib.derived_row(id).is_none());
-    assert!(!lib.derived().join("A/01.opus").exists());
+    assert!(!lib.derived().join("opus/A/01.opus").exists());
     assert_eq!(lib.tmp_count(), 0);
 }
 
@@ -625,7 +751,7 @@ async fn occupied_path_of_missing_track_is_taken_over() {
     let b = lib.track_id("A/02.flac");
     assert_eq!(lib.run(a).await, JobState::Done);
     assert_eq!(lib.run(b).await, JobState::Done);
-    let b_audio = audio_md5(&lib.derived().join("A/02.opus"));
+    let b_audio = audio_md5(&lib.derived().join("opus/A/02.opus"));
     // a を消して b を a のパスへ移す → b は inode で追随し、a は key を明け渡して missing。
     // b の Derived の期待パスは a の Derived が占有している
     std::fs::remove_file(&pa).unwrap();
@@ -640,14 +766,14 @@ async fn occupied_path_of_missing_track_is_taken_over() {
         .unwrap();
     assert!(a_missing.is_some());
     assert_eq!(lib.run(b).await, JobState::Done);
-    assert_eq!(lib.derived_row(b).unwrap().0, "A/01.opus");
+    assert_eq!(lib.derived_row(b).unwrap().0, "opus/A/01.opus");
     assert!(
         lib.derived_row(a).is_none(),
         "missing 行の Derived は明け渡す"
     );
-    assert!(!lib.derived().join("A/02.opus").exists());
-    assert_eq!(audio_md5(&lib.derived().join("A/01.opus")), b_audio);
-    assert_eq!(lib.delivery(b).0, "Derived/A/01.opus");
+    assert!(!lib.derived().join("opus/A/02.opus").exists());
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/01.opus")), b_audio);
+    assert_eq!(lib.delivery(b).0, "Derived/opus/A/01.opus");
 }
 
 #[tokio::test]
@@ -664,14 +790,18 @@ async fn occupied_path_of_live_stale_track_fails_until_it_moves() {
     derived::upsert(
         &lib.conn(),
         b,
-        "A/01.opus",
-        "opus",
+        Variant::Opus,
+        "opus/A/01.opus",
         None,
         1,
         derived::TagState {
             src_tag_version: 1,
             src_artwork_id: None,
             src_rg_scanned_at: None,
+        },
+        &derived::Profiles {
+            audio_profile: "opus:128:v1".into(),
+            tag_profile: "opus:v1".into(),
         },
         0,
     )
@@ -681,12 +811,12 @@ async fn occupied_path_of_live_stale_track_fails_until_it_moves() {
     // b 自身の期待パスは A/02.opus なので「追随待ち」。b の transcode は無いので失敗（次の scan で
     // 両方が投入される）
     assert!(lib.last_error(job).unwrap().contains("追随待ち"));
-    assert!(!lib.derived().join("A/01.opus").exists());
+    assert!(!lib.derived().join("opus/A/01.opus").exists());
     // b が追随（行の指す実体は無いので作り直し）すれば a は通る
     assert_eq!(lib.run(b).await, JobState::Done);
-    assert_eq!(lib.derived_row(b).unwrap().0, "A/02.opus");
+    assert_eq!(lib.derived_row(b).unwrap().0, "opus/A/02.opus");
     assert_eq!(lib.run(a).await, JobState::Done);
-    assert_eq!(lib.derived_row(a).unwrap().0, "A/01.opus");
+    assert_eq!(lib.derived_row(a).unwrap().0, "opus/A/01.opus");
 }
 
 #[tokio::test]
@@ -705,7 +835,7 @@ async fn cancel_leaves_nothing_behind() {
     match st {
         JobState::Cancelled => {
             assert!(lib.derived_row(id).is_none());
-            assert!(!lib.derived().join("A/01.opus").exists());
+            assert!(!lib.derived().join("opus/A/01.opus").exists());
         }
         JobState::Done => assert!(lib.derived_row(id).is_some()),
         other => panic!("{other:?}: {:?}", lib.last_error(job)),
@@ -722,7 +852,7 @@ async fn rg_scanned_after_derived_retags_with_r128() {
     lib.start();
     let id = lib.track_id("A/01.flac");
     assert_eq!(lib.run(id).await, JobState::Done);
-    let opus = lib.derived().join("A/01.opus");
+    let opus = lib.derived().join("opus/A/01.opus");
     assert!(picture_of(&opus).is_none());
     let audio_before = audio_md5(&opus);
     // 解析値が後から入る（版は動かない）→ タグだけ書き直す
@@ -783,8 +913,8 @@ async fn holder_reviving_after_claim_does_not_steal_the_placed_file() {
     let b = lib.track_id("A/02.flac");
     assert_eq!(lib.run(a).await, JobState::Done);
     assert_eq!(lib.run(b).await, JobState::Done);
-    let b_audio = audio_md5(&lib.derived().join("A/02.opus"));
-    let a_audio = audio_md5(&lib.derived().join("A/01.opus"));
+    let b_audio = audio_md5(&lib.derived().join("opus/A/02.opus"));
+    let a_audio = audio_md5(&lib.derived().join("opus/A/01.opus"));
     // a を消して b を a のパスへ → a は missing、b の期待パスは a の Derived が占有
     std::fs::remove_file(&pa).unwrap();
     std::fs::rename(&pb, &pa).unwrap();
@@ -807,14 +937,14 @@ async fn holder_reviving_after_claim_does_not_steal_the_placed_file() {
         .unwrap();
     assert!(a_missing.is_none(), "a は復活している");
     assert!(lib.derived_row(a).is_none());
-    assert_eq!(lib.derived_row(b).unwrap().0, "A/01.opus");
-    assert_eq!(audio_md5(&lib.derived().join("A/01.opus")), b_audio);
+    assert_eq!(lib.derived_row(b).unwrap().0, "opus/A/01.opus");
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/01.opus")), b_audio);
     // a の transcode は自分の期待パスに作り直すだけで、b のファイルを動かさない
     assert_eq!(lib.run(a).await, JobState::Done);
-    assert_eq!(lib.derived_row(a).unwrap().0, "A/03.opus");
-    assert_eq!(audio_md5(&lib.derived().join("A/03.opus")), a_audio);
-    assert_eq!(audio_md5(&lib.derived().join("A/01.opus")), b_audio);
-    assert_eq!(lib.derived_row(b).unwrap().0, "A/01.opus");
+    assert_eq!(lib.derived_row(a).unwrap().0, "opus/A/03.opus");
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/03.opus")), a_audio);
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/01.opus")), b_audio);
+    assert_eq!(lib.derived_row(b).unwrap().0, "opus/A/01.opus");
 }
 
 /// 原画像がキャッシュに無いときは画像なしで作り、`src_artwork_id` には None を記録する。
@@ -832,7 +962,7 @@ async fn missing_artwork_cache_is_recorded_as_no_picture_and_recovers() {
     std::fs::remove_dir_all(lib.dir.path().join("thumbs")).unwrap();
     std::fs::create_dir(lib.dir.path().join("thumbs")).unwrap();
     assert_eq!(lib.run(id).await, JobState::Done);
-    let opus = lib.derived().join("A/B/01.opus");
+    let opus = lib.derived().join("opus/A/B/01.opus");
     assert!(picture_of(&opus).is_none());
     assert_eq!(
         lib.derived_row(id).unwrap().3,
@@ -856,7 +986,7 @@ fn sweep_tmp_removes_leftovers_and_keeps_everything_else() {
     let dir = tempfile::tempdir().unwrap();
     let data_tmp = dir.path().join("tmp");
     let derived = dir.path().join("Derived");
-    std::fs::create_dir_all(derived.join("A/B")).unwrap();
+    std::fs::create_dir_all(derived.join("opus/A/B")).unwrap();
     std::fs::create_dir_all(&data_tmp).unwrap();
     for name in [
         "spindle-transcode-0123.wav",
@@ -866,10 +996,11 @@ fn sweep_tmp_removes_leftovers_and_keeps_everything_else() {
     ] {
         std::fs::write(data_tmp.join(name), b"x").unwrap();
     }
-    std::fs::write(derived.join("A/B/01.opus"), b"x").unwrap();
+    std::fs::write(derived.join("opus/A/B/01.opus"), b"x").unwrap();
+    std::fs::create_dir_all(derived.join("A/B")).unwrap();
     std::fs::write(derived.join("A/B/.spindle-tmp-abcd"), b"x").unwrap();
     std::fs::write(derived.join(".spindle-tmp-root"), b"x").unwrap();
-    std::fs::write(derived.join("A/keep.opus"), b"x").unwrap();
+    std::fs::write(derived.join("opus/A/keep.opus"), b"x").unwrap();
     let root = RootDir::open(&derived).unwrap();
     let report = sweep_tmp(&data_tmp, &root);
     assert_eq!(
@@ -881,8 +1012,8 @@ fn sweep_tmp_removes_leftovers_and_keeps_everything_else() {
     );
     assert!(data_tmp.join("other.txt").is_file());
     assert!(!data_tmp.join("spindle-transcode-0123.wav").exists());
-    assert!(derived.join("A/B/01.opus").is_file());
-    assert!(derived.join("A/keep.opus").is_file());
+    assert!(derived.join("opus/A/B/01.opus").is_file());
+    assert!(derived.join("opus/A/keep.opus").is_file());
     assert!(!derived.join("A/B/.spindle-tmp-abcd").exists());
     assert!(!derived.join(".spindle-tmp-root").exists());
     // 二度目は 0
@@ -934,9 +1065,9 @@ async fn same_expected_path_from_flac_and_wav_only_one_wins() {
         .query_row("SELECT COUNT(*) FROM derived_files", [], |r| r.get(0))
         .unwrap();
     assert_eq!(rows, 1);
-    assert_eq!(lib.derived_row(winner).unwrap().0, "A/x.opus");
+    assert_eq!(lib.derived_row(winner).unwrap().0, "opus/A/x.opus");
     let af = read_audio_file(
-        File::open(lib.derived().join("A/x.opus")).unwrap(),
+        File::open(lib.derived().join("opus/A/x.opus")).unwrap(),
         Some("opus"),
     )
     .unwrap();
@@ -982,8 +1113,8 @@ async fn running_retag_blocks_a_new_claimant_until_it_finishes() {
     let b = lib.track_id("A/02.flac");
     assert_eq!(lib.run(a).await, JobState::Done);
     assert_eq!(lib.run(b).await, JobState::Done);
-    let a_audio = audio_md5(&lib.derived().join("A/01.opus"));
-    let b_audio = audio_md5(&lib.derived().join("A/02.opus"));
+    let a_audio = audio_md5(&lib.derived().join("opus/A/01.opus"));
+    let b_audio = audio_md5(&lib.derived().join("opus/A/02.opus"));
     assert_ne!(a_audio, b_audio);
     // a に retag が要る状態にして、書く直前で止める
     common::retag(&pa, |t| t.set_title("a2".to_owned()));
@@ -1017,16 +1148,16 @@ async fn running_retag_blocks_a_new_claimant_until_it_finishes() {
         .query_row("SELECT state FROM jobs WHERE id = ?1", [jb], |r| r.get(0))
         .unwrap();
     assert_eq!(sb, "queued", "予約待ちで再キューされている");
-    assert_eq!(audio_md5(&lib.derived().join("A/01.opus")), a_audio);
-    assert_eq!(lib.derived_row(a).unwrap().0, "A/01.opus");
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/01.opus")), a_audio);
+    assert_eq!(lib.derived_row(a).unwrap().0, "opus/A/01.opus");
     // a の retag を進める → 終わったら b が claim して作り直す
     gate.notify_one();
     assert_eq!(lib.wait_job(ja).await, JobState::Done);
     assert_eq!(lib.wait_job(jb).await, JobState::Done);
     assert!(lib.derived_row(a).is_none());
-    assert_eq!(lib.derived_row(b).unwrap().0, "A/01.opus");
-    assert_eq!(audio_md5(&lib.derived().join("A/01.opus")), b_audio);
-    assert!(!lib.derived().join("A/02.opus").exists());
+    assert_eq!(lib.derived_row(b).unwrap().0, "opus/A/01.opus");
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/01.opus")), b_audio);
+    assert!(!lib.derived().join("opus/A/02.opus").exists());
 }
 
 /// retag が Library を読んでから Derived を書く間に album gain を off にされた（track lock を取らない
@@ -1069,7 +1200,7 @@ async fn album_gain_turned_off_during_retag_is_caught_up_by_requeue() {
     };
     lib.start_with_hook(hook);
     assert_eq!(lib.run(a).await, JobState::Done);
-    let opus = lib.derived().join("A/01.opus");
+    let opus = lib.derived().join("opus/A/01.opus");
     let af = read_audio_file(File::open(&opus).unwrap(), Some("opus")).unwrap();
     assert_eq!(af.tags.first("R128_ALBUM_GAIN"), Some("-2304"));
 
@@ -1134,10 +1265,10 @@ async fn library_swap_moves_both_derived_without_reencoding() {
     let b = lib.track_id("A/02.flac");
     assert_eq!(lib.run(a).await, JobState::Done);
     assert_eq!(lib.run(b).await, JobState::Done);
-    let a_audio = audio_md5(&lib.derived().join("A/01.opus"));
-    let b_audio = audio_md5(&lib.derived().join("A/02.opus"));
-    let a_sha = sha256(&lib.derived().join("A/01.opus"));
-    let b_sha = sha256(&lib.derived().join("A/02.opus"));
+    let a_audio = audio_md5(&lib.derived().join("opus/A/01.opus"));
+    let b_audio = audio_md5(&lib.derived().join("opus/A/02.opus"));
+    let a_sha = sha256(&lib.derived().join("opus/A/01.opus"));
+    let b_sha = sha256(&lib.derived().join("opus/A/02.opus"));
     // swap
     let tmp = lib.lib().join("A/swap.tmp");
     std::fs::rename(&p1, &tmp).unwrap();
@@ -1153,15 +1284,15 @@ async fn library_swap_moves_both_derived_without_reencoding() {
     let jb = lib.enqueue(b, bv, btv).await;
     assert_eq!(lib.wait_job(ja).await, JobState::Done);
     assert_eq!(lib.wait_job(jb).await, JobState::Done);
-    assert_eq!(lib.derived_row(a).unwrap().0, "A/02.opus");
-    assert_eq!(lib.derived_row(b).unwrap().0, "A/01.opus");
-    assert_eq!(audio_md5(&lib.derived().join("A/02.opus")), a_audio);
-    assert_eq!(audio_md5(&lib.derived().join("A/01.opus")), b_audio);
+    assert_eq!(lib.derived_row(a).unwrap().0, "opus/A/02.opus");
+    assert_eq!(lib.derived_row(b).unwrap().0, "opus/A/01.opus");
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/02.opus")), a_audio);
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/01.opus")), b_audio);
     // ファイルは rename されただけ（再エンコードしていない）
-    assert_eq!(sha256(&lib.derived().join("A/02.opus")), a_sha);
-    assert_eq!(sha256(&lib.derived().join("A/01.opus")), b_sha);
+    assert_eq!(sha256(&lib.derived().join("opus/A/02.opus")), a_sha);
+    assert_eq!(sha256(&lib.derived().join("opus/A/01.opus")), b_sha);
     // 退避名も予約も残らない
-    let leftovers: Vec<String> = std::fs::read_dir(lib.derived().join("A"))
+    let leftovers: Vec<String> = std::fs::read_dir(lib.derived().join("opus/A"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.contains(".moving-") || n.starts_with(".spindle-tmp-"))
@@ -1172,8 +1303,8 @@ async fn library_swap_moves_both_derived_without_reencoding() {
         .query_row("SELECT COUNT(*) FROM derived_path_locks", [], |r| r.get(0))
         .unwrap();
     assert_eq!(locks, 0);
-    assert_eq!(lib.delivery(a).0, "Derived/A/02.opus");
-    assert_eq!(lib.delivery(b).0, "Derived/A/01.opus");
+    assert_eq!(lib.delivery(a).0, "Derived/opus/A/02.opus");
+    assert_eq!(lib.delivery(b).0, "Derived/opus/A/01.opus");
 }
 
 /// 3 件の循環 rename（01 → 02 → 03 → 01）も収束する
@@ -1193,7 +1324,7 @@ async fn library_three_cycle_converges() {
     for &id in &ids {
         assert_eq!(lib.run(id).await, JobState::Done);
     }
-    let audio: Vec<String> = ["A/01.opus", "A/02.opus", "A/03.opus"]
+    let audio: Vec<String> = ["opus/A/01.opus", "opus/A/02.opus", "opus/A/03.opus"]
         .iter()
         .map(|r| audio_md5(&lib.derived().join(r)))
         .collect();
@@ -1215,13 +1346,13 @@ async fn library_three_cycle_converges() {
     for j in jobs {
         assert_eq!(lib.wait_job(j).await, JobState::Done);
     }
-    assert_eq!(lib.derived_row(ids[0]).unwrap().0, "A/02.opus");
-    assert_eq!(lib.derived_row(ids[1]).unwrap().0, "A/03.opus");
-    assert_eq!(lib.derived_row(ids[2]).unwrap().0, "A/01.opus");
-    assert_eq!(audio_md5(&lib.derived().join("A/02.opus")), audio[0]);
-    assert_eq!(audio_md5(&lib.derived().join("A/03.opus")), audio[1]);
-    assert_eq!(audio_md5(&lib.derived().join("A/01.opus")), audio[2]);
-    let leftovers = std::fs::read_dir(lib.derived().join("A"))
+    assert_eq!(lib.derived_row(ids[0]).unwrap().0, "opus/A/02.opus");
+    assert_eq!(lib.derived_row(ids[1]).unwrap().0, "opus/A/03.opus");
+    assert_eq!(lib.derived_row(ids[2]).unwrap().0, "opus/A/01.opus");
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/02.opus")), audio[0]);
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/03.opus")), audio[1]);
+    assert_eq!(audio_md5(&lib.derived().join("opus/A/01.opus")), audio[2]);
+    let leftovers = std::fs::read_dir(lib.derived().join("opus/A"))
         .unwrap()
         .filter(|e| {
             let n = e
@@ -1253,7 +1384,8 @@ async fn move_failure_releases_the_path_lock() {
             Box::pin(async move {
                 if point == "claimed" && armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
                     // 宛先ディレクトリ B の場所にファイルを置いて create_dir_all を失敗させる
-                    std::fs::write(derived_dir.join("B"), b"not a dir").unwrap();
+                    std::fs::create_dir_all(derived_dir.join("opus")).unwrap();
+                    std::fs::write(derived_dir.join("opus/B"), b"not a dir").unwrap();
                 }
             })
         })
@@ -1274,8 +1406,8 @@ async fn move_failure_releases_the_path_lock() {
         .unwrap();
     assert_eq!(locks, 0);
     // 元の Derived は無傷
-    assert!(lib.derived().join("A/01.opus").is_file());
-    assert_eq!(lib.derived_row(id).unwrap().0, "A/01.opus");
+    assert!(lib.derived().join("opus/A/01.opus").is_file());
+    assert_eq!(lib.derived_row(id).unwrap().0, "opus/A/01.opus");
 }
 
 /// swap と同時に両方の音声が差し替わった（両方 Plan::Encode で、互いの行が相手の期待パスを持つ）。
@@ -1309,8 +1441,8 @@ async fn swap_with_both_audio_replaced_converges() {
     assert_eq!(lib.track_id("A/02.flac"), a);
     assert_eq!(lib.versions(a).0, 2);
     assert_eq!(lib.versions(b).0, 2);
-    assert_eq!(lib.derived_row(a).unwrap().0, "A/01.opus");
-    assert_eq!(lib.derived_row(b).unwrap().0, "A/02.opus");
+    assert_eq!(lib.derived_row(a).unwrap().0, "opus/A/01.opus");
+    assert_eq!(lib.derived_row(b).unwrap().0, "opus/A/02.opus");
     let (av, atv) = lib.versions(a);
     let (bv, btv) = lib.versions(b);
     let ja = lib.enqueue(a, av, atv).await;
@@ -1319,21 +1451,21 @@ async fn swap_with_both_audio_replaced_converges() {
     assert_eq!(lib.wait_job(jb).await, JobState::Done);
     let ra = lib.derived_row(a).unwrap();
     let rb = lib.derived_row(b).unwrap();
-    assert_eq!((ra.0.as_str(), ra.1), ("A/02.opus", 2));
-    assert_eq!((rb.0.as_str(), rb.1), ("A/01.opus", 2));
+    assert_eq!((ra.0.as_str(), ra.1), ("opus/A/02.opus", 2));
+    assert_eq!((rb.0.as_str(), rb.1), ("opus/A/01.opus", 2));
     let one = read_audio_file(
-        File::open(lib.derived().join("A/01.opus")).unwrap(),
+        File::open(lib.derived().join("opus/A/01.opus")).unwrap(),
         Some("opus"),
     )
     .unwrap();
     assert_eq!(one.tags.first("TITLE"), Some("one-new"));
     let two = read_audio_file(
-        File::open(lib.derived().join("A/02.opus")).unwrap(),
+        File::open(lib.derived().join("opus/A/02.opus")).unwrap(),
         Some("opus"),
     )
     .unwrap();
     assert_eq!(two.tags.first("TITLE"), Some("two-new"));
-    let leftovers = std::fs::read_dir(lib.derived().join("A"))
+    let leftovers = std::fs::read_dir(lib.derived().join("opus/A"))
         .unwrap()
         .filter(|e| {
             let n = e
@@ -1378,7 +1510,7 @@ async fn cycle_with_missing_physical_derived_converges() {
     std::fs::rename(&p1, &p2).unwrap();
     std::fs::rename(&tmp, &p1).unwrap();
     lib.scan().await;
-    for rel in ["A/01.opus", "A/02.opus", "A/03.opus"] {
+    for rel in ["opus/A/01.opus", "opus/A/02.opus", "opus/A/03.opus"] {
         std::fs::remove_file(lib.derived().join(rel)).unwrap();
     }
     let mut jobs = Vec::new();
@@ -1389,13 +1521,13 @@ async fn cycle_with_missing_physical_derived_converges() {
     for j in jobs {
         assert_eq!(lib.wait_job(j).await, JobState::Done);
     }
-    assert_eq!(lib.derived_row(ids[0]).unwrap().0, "A/02.opus");
-    assert_eq!(lib.derived_row(ids[1]).unwrap().0, "A/03.opus");
-    assert_eq!(lib.derived_row(ids[2]).unwrap().0, "A/01.opus");
+    assert_eq!(lib.derived_row(ids[0]).unwrap().0, "opus/A/02.opus");
+    assert_eq!(lib.derived_row(ids[1]).unwrap().0, "opus/A/03.opus");
+    assert_eq!(lib.derived_row(ids[2]).unwrap().0, "opus/A/01.opus");
     for (rel, title) in [
-        ("A/02.opus", "one"),
-        ("A/03.opus", "two"),
-        ("A/01.opus", "three"),
+        ("opus/A/02.opus", "one"),
+        ("opus/A/03.opus", "two"),
+        ("opus/A/01.opus", "three"),
     ] {
         let af =
             read_audio_file(File::open(lib.derived().join(rel)).unwrap(), Some("opus")).unwrap();

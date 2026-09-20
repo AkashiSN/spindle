@@ -223,10 +223,11 @@ fn export_tracks_skip_missing_and_follow_source() {
     // 1 は Derived が現在値、2 は Derived の音声版が不一致（再エンコード待ち）、3 は Derived 無し、
     // 4 は Derived のタグ版だけ不一致（配るが stale_tags に数える）
     c.execute(
-        "INSERT INTO derived_files (track_id, rel_path, rel_path_key, codec, src_audio_version, src_tag_version, generated_at)
-         VALUES (1, 'A/1.opus', 'a/1.opus', 'opus', 1, 1, 0),
-                (2, 'A/2.opus', 'a/2.opus', 'opus', 2, 1, 0),
-                (4, 'A/4.opus', 'a/4.opus', 'opus', 1, 2, 0)",
+        "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, src_audio_version,
+                                    src_tag_version, generated_at, audio_profile, tag_profile)
+         VALUES (1, 'opus', 'opus/A/1.opus', 'opus/a/1.opus', 'opus', 1, 1, 0, 'opus:256:v1', 'opus:v1'),
+                (2, 'opus', 'opus/A/2.opus', 'opus/a/2.opus', 'opus', 2, 1, 0, 'opus:256:v1', 'opus:v1'),
+                (4, 'opus', 'opus/A/4.opus', 'opus/a/4.opus', 'opus', 1, 2, 0, 'opus:256:v1', 'opus:v1')",
         [],
     )
     .unwrap();
@@ -257,10 +258,10 @@ fn export_tracks_skip_missing_and_follow_source() {
     assert_eq!(
         paths,
         vec![
-            "Derived/A/1.opus",
+            "Derived/opus/A/1.opus",
             "Library/A/2.flac",
             "Library/A/3.flac",
-            "Derived/A/4.opus"
+            "Derived/opus/A/4.opus"
         ]
     );
     assert_eq!(set.skipped_missing, 1);

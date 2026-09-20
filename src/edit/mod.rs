@@ -539,11 +539,11 @@ impl Editor {
                             now,
                         )?);
                         // Derived の追随（D-51）。無い・版が古い・パスがずれていれば transcode を投入する
-                        if let Some(id) =
-                            crate::db::derived::enqueue_if_stale(&tx, op.track_id, now)?
-                        {
-                            followup_jobs.push(id);
-                        }
+                        followup_jobs.extend(crate::db::derived::enqueue_if_stale(
+                            &tx,
+                            op.track_id,
+                            now,
+                        )?);
                         OpOutcome::Applied
                     }
                     Staged::Conflict { reason, current } => {

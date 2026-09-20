@@ -1110,9 +1110,11 @@ fn commit_settled(
     let mut derived_jobs = Vec::new();
     for s in settled {
         if s.result == OpResult::Applied {
-            if let Some(id) = crate::db::derived::enqueue_if_stale(&tx, s.op.track_id, now)? {
-                derived_jobs.push(id);
-            }
+            derived_jobs.extend(crate::db::derived::enqueue_if_stale(
+                &tx,
+                s.op.track_id,
+                now,
+            )?);
         }
     }
     let event = match history::aggregate_batch(&tx, batch_id, now)? {

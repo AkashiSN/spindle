@@ -340,10 +340,8 @@ impl Handler for RgHandler {
                     // Derived の追随（D-51）。解析値は版に乗らないので、ここで retag を投入する
                     let mut derived_jobs = Vec::new();
                     for (track_id, _) in &results {
-                        if let Some(id) = crate::db::derived::enqueue_if_stale(&tx, *track_id, now)?
-                        {
-                            derived_jobs.push(id);
-                        }
+                        derived_jobs
+                            .extend(crate::db::derived::enqueue_if_stale(&tx, *track_id, now)?);
                     }
                     tx.commit()?;
                     Ok(Some((n, derived_jobs)))

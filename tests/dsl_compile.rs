@@ -153,8 +153,10 @@ fn fixture() -> Connection {
         },
     );
     c.execute(
-        "INSERT INTO derived_files (track_id, rel_path, rel_path_key, codec, src_audio_version, src_tag_version, generated_at)
-         VALUES (1, 'x/1.opus', 'x/1.opus', 'opus', 1, 1, 0)",
+        "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, src_audio_version,
+                                    src_tag_version, generated_at, audio_profile, tag_profile)
+         VALUES (1, 'opus', 'opus/x/1.opus', 'opus/x/1.opus', 'opus', 1, 1, 0, 'opus:256:v1', 'opus:v1'),
+                (2, 'aac', 'aac/x/2.m4a', 'aac/x/2.m4a', 'aac', 1, 1, 0, 'aac:256:v1', 'aac:v1')",
         [],
     )
     .unwrap();
@@ -246,7 +248,9 @@ fn extension_fields() {
     assert_eq!(eval(&c, "%lossless% IS true"), vec![1, 3]);
     assert_eq!(eval(&c, "%lossless% IS no"), vec![2]);
     assert_eq!(eval(&c, "%codec% IS opus"), vec![2]);
+    // has_derived は opus 系統の有無（2 は aac だけなので含めない。SPEC §7.6、D-75）
     assert_eq!(eval(&c, "%has_derived% IS true"), vec![1]);
+    assert_eq!(eval(&c, "%has_derived% IS false"), vec![2, 3]);
     assert_eq!(eval(&c, "%verification% IS not_attempted"), vec![1, 2, 3]);
     assert_eq!(eval(&c, "%source_type% IS unknown"), vec![1, 2, 3]);
 }

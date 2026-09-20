@@ -4,7 +4,8 @@
 use lofty::picture::{MimeType, Picture, PictureType};
 
 use spindle::domain::derived::{
-    eligible, expected_rel_path, opus_tags, plan, Current, Plan, Target,
+    eligible, expected_rel_path, opus_profiles, opus_tags, plan, Current, Plan, Target, Variant,
+    VariantSettings,
 };
 use spindle::domain::replaygain::Values;
 use spindle::domain::tags::TransferTags;
@@ -25,11 +26,24 @@ fn target() -> Target {
 
 fn current() -> Current {
     Current {
-        rel_path: "J-Pop/A/B/01 t.opus".into(),
+        rel_path: "opus/J-Pop/A/B/01 t.opus".into(),
         src_audio_version: 2,
         src_tag_version: 3,
         src_artwork_id: Some(7),
         src_rg_scanned_at: Some(100),
+        audio_profile: "opus:256:v1".into(),
+        tag_profile: "opus:v1".into(),
+    }
+}
+
+/// opus 系統の設定（256k、on）
+fn settings() -> VariantSettings {
+    let (audio_profile, tag_profile) = opus_profiles(256);
+    VariantSettings {
+        variant: Variant::Opus,
+        enabled: true,
+        audio_profile,
+        tag_profile,
     }
 }
 
@@ -41,40 +55,75 @@ fn picture(mime: MimeType, data: &[u8]) -> Picture {
 }
 
 #[test]
-fn expected_path_replaces_extension_with_opus() {
-    assert_eq!(expected_rel_path("A/B/01 t.flac"), "A/B/01 t.opus");
-    assert_eq!(expected_rel_path("A/B/01.t.wav"), "A/B/01.t.opus");
-    assert_eq!(expected_rel_path("A/B/noext"), "A/B/noext.opus");
-    assert_eq!(expected_rel_path("x.flac"), "x.opus");
+fn expected_path_is_under_the_variant_dir_with_its_extension() {
+    let o = Variant::Opus;
+    assert_eq!(expected_rel_path(o, "A/B/01 t.flac"), "opus/A/B/01 t.opus");
+    assert_eq!(expected_rel_path(o, "A/B/01.t.wav"), "opus/A/B/01.t.opus");
+    assert_eq!(expected_rel_path(o, "A/B/noext"), "opus/A/B/noext.opus");
+    assert_eq!(expected_rel_path(o, "x.flac"), "opus/x.opus");
     // ディレクトリ名のドットは拡張子ではない。先頭ドットだけの名前も拡張子扱いしない
-    assert_eq!(expected_rel_path("A.b/x"), "A.b/x.opus");
-    assert_eq!(expected_rel_path("A/.hidden"), "A/.hidden.opus");
+    assert_eq!(expected_rel_path(o, "A.b/x"), "opus/A.b/x.opus");
+    assert_eq!(expected_rel_path(o, "A/.hidden"), "opus/A/.hidden.opus");
+    assert_eq!(expected_rel_path(Variant::Aac, "A/x.flac"), "aac/A/x.m4a");
+}
+
+#[test]
+fn variant_names_and_profiles() {
+    assert_eq!(Variant::Opus.as_str(), "opus");
+    assert_eq!(Variant::Aac.as_str(), "aac");
+    assert_eq!(Variant::parse("opus"), Some(Variant::Opus));
+    assert_eq!(Variant::parse("aac"), Some(Variant::Aac));
+    assert_eq!(Variant::parse("ogg"), None);
+    assert_eq!(Variant::ALL, [Variant::Opus, Variant::Aac]);
+    assert_eq!(
+        opus_profiles(256),
+        ("opus:256:v1".to_owned(), "opus:v1".to_owned())
+    );
+    assert_eq!(opus_profiles(128).0, "opus:128:v1");
 }
 
 #[test]
 fn eligibility_requires_lossless_present_and_stereo_or_mono() {
-    assert!(eligible(&target()));
-    assert!(eligible(&Target {
-        channels: Some(1),
-        ..target()
-    }));
+    let o = Variant::Opus;
+    assert!(eligible(o, &target()));
+    assert!(eligible(
+        o,
+        &Target {
+            channels: Some(1),
+            ..target()
+        }
+    ));
     // チャンネル数不明はマルチチャンネルかもしれないので対象外
-    assert!(!eligible(&Target {
-        channels: None,
-        ..target()
-    }));
-    assert!(!eligible(&Target {
-        channels: Some(6),
-        ..target()
-    }));
-    assert!(!eligible(&Target {
-        lossless: false,
-        ..target()
-    }));
-    assert!(!eligible(&Target {
-        missing: true,
-        ..target()
-    }));
+    assert!(!eligible(
+        o,
+        &Target {
+            channels: None,
+            ..target()
+        }
+    ));
+    assert!(!eligible(
+        o,
+        &Target {
+            channels: Some(6),
+            ..target()
+        }
+    ));
+    assert!(!eligible(
+        o,
+        &Target {
+            lossless: false,
+            ..target()
+        }
+    ));
+    assert!(!eligible(
+        o,
+        &Target {
+            missing: true,
+            ..target()
+        }
+    ));
+    // aac 系統は P4-8 まで対象なし
+    assert!(!eligible(Variant::Aac, &target()));
 }
 
 #[test]
@@ -82,6 +131,7 @@ fn plan_covers_every_transition() {
     let t = target();
     assert_eq!(
         plan(
+            &settings(),
             &Target {
                 lossless: false,
                 ..target()
@@ -90,9 +140,10 @@ fn plan_covers_every_transition() {
         ),
         Plan::Skip
     );
-    assert_eq!(plan(&t, None), Plan::Encode);
+    assert_eq!(plan(&settings(), &t, None), Plan::Encode);
     assert_eq!(
         plan(
+            &settings(),
             &t,
             Some(&Current {
                 src_audio_version: 1,
@@ -101,9 +152,10 @@ fn plan_covers_every_transition() {
         ),
         Plan::Encode
     );
-    assert_eq!(plan(&t, Some(&current())), Plan::UpToDate);
+    assert_eq!(plan(&settings(), &t, Some(&current())), Plan::UpToDate);
     assert_eq!(
         plan(
+            &settings(),
             &t,
             Some(&Current {
                 src_tag_version: 2,
@@ -114,6 +166,7 @@ fn plan_covers_every_transition() {
     );
     assert_eq!(
         plan(
+            &settings(),
             &t,
             Some(&Current {
                 src_artwork_id: None,
@@ -124,6 +177,7 @@ fn plan_covers_every_transition() {
     );
     assert_eq!(
         plan(
+            &settings(),
             &Target {
                 artwork_id: None,
                 ..target()
@@ -135,6 +189,7 @@ fn plan_covers_every_transition() {
     // RG の解析世代（未解析 → 解析済み、再解析）もタグの上書き
     assert_eq!(
         plan(
+            &settings(),
             &t,
             Some(&Current {
                 src_rg_scanned_at: None,
@@ -145,6 +200,7 @@ fn plan_covers_every_transition() {
     );
     assert_eq!(
         plan(
+            &settings(),
             &t,
             Some(&Current {
                 src_rg_scanned_at: Some(99),
@@ -155,6 +211,7 @@ fn plan_covers_every_transition() {
     );
     assert_eq!(
         plan(
+            &settings(),
             &t,
             Some(&Current {
                 rel_path: "old/x.opus".into(),
@@ -165,6 +222,7 @@ fn plan_covers_every_transition() {
     );
     assert_eq!(
         plan(
+            &settings(),
             &t,
             Some(&Current {
                 rel_path: "old/x.opus".into(),
@@ -177,6 +235,7 @@ fn plan_covers_every_transition() {
     // 音声版が古ければパスも含めて作り直す（Encode が全部面倒を見る）
     assert_eq!(
         plan(
+            &settings(),
             &t,
             Some(&Current {
                 rel_path: "old/x.opus".into(),
@@ -186,6 +245,66 @@ fn plan_covers_every_transition() {
         ),
         Plan::Encode
     );
+}
+
+/// 設定の世代（D-75）: audio_profile の差分は再エンコード、tag_profile の差分はタグ上書き。
+/// enabled=false は凍結（行があっても何もしない）
+#[test]
+fn profiles_and_freeze_drive_the_plan() {
+    let t = target();
+    // 0018 が移した旧ルート直下の 128k の行。設定 256k → Encode（パスも opus/ 配下へ）
+    let legacy = Current {
+        rel_path: "J-Pop/A/B/01 t.opus".into(),
+        audio_profile: "opus:128:v1".into(),
+        ..current()
+    };
+    assert_eq!(plan(&settings(), &t, Some(&legacy)), Plan::Encode);
+    // 設定を 128 のままにすれば profile 一致でパスの差分だけ → Move
+    let (audio_profile, tag_profile) = opus_profiles(128);
+    let s128 = VariantSettings {
+        audio_profile,
+        tag_profile,
+        ..settings()
+    };
+    assert_eq!(plan(&s128, &t, Some(&legacy)), Plan::Move);
+    // tag_profile だけ違えば Retag
+    assert_eq!(
+        plan(
+            &settings(),
+            &t,
+            Some(&Current {
+                tag_profile: "opus:v0".into(),
+                ..current()
+            })
+        ),
+        Plan::Retag
+    );
+    // 凍結: 行があっても無くても、古くても Skip
+    let frozen = VariantSettings {
+        enabled: false,
+        ..settings()
+    };
+    assert_eq!(plan(&frozen, &t, None), Plan::Skip);
+    assert_eq!(plan(&frozen, &t, Some(&legacy)), Plan::Skip);
+    assert_eq!(
+        plan(
+            &frozen,
+            &t,
+            Some(&Current {
+                src_tag_version: 1,
+                ..current()
+            })
+        ),
+        Plan::Skip
+    );
+    // aac 系統は対象が無いので Skip（P4-8 まで）
+    let aac = VariantSettings {
+        variant: Variant::Aac,
+        audio_profile: "aac:256:v1".into(),
+        tag_profile: "aac:v1".into(),
+        ..settings()
+    };
+    assert_eq!(plan(&aac, &t, None), Plan::Skip);
 }
 
 #[test]

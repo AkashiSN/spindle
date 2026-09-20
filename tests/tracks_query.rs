@@ -599,8 +599,11 @@ fn badges_are_returned_per_row() {
     let b2 = insert_batch(&conn);
     insert_op(&conn, b2, x2, "skipped_conflict");
     conn.execute(
-        "INSERT INTO derived_files (track_id, rel_path, rel_path_key, codec, src_audio_version, src_tag_version, generated_at)
-         VALUES (?1, 'd/1.opus', 'd/1.opus', 'opus', 1, 1, 1), (?2, 'd/3.opus', 'd/3.opus', 'opus', 1, 1, 1)",
+        "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, src_audio_version,
+                                    src_tag_version, generated_at, audio_profile, tag_profile)
+         VALUES (?1, 'opus', 'opus/d/1.opus', 'opus/d/1.opus', 'opus', 1, 1, 1, 'opus:256:v1', 'opus:v1'),
+                (?2, 'opus', 'opus/d/3.opus', 'opus/d/3.opus', 'opus', 1, 1, 1, 'opus:256:v1', 'opus:v1'),
+                (?2, 'aac', 'aac/d/3.m4a', 'aac/d/3.m4a', 'aac', 1, 2, 1, 'aac:256:v1', 'aac:v1')",
         params![x1, x3],
     )
     .unwrap();
@@ -621,10 +624,13 @@ fn badges_are_returned_per_row() {
     );
     assert_eq!(
         r1.derived,
-        Some(tracks::Derived {
-            codec: "opus".into(),
-            stale_tags: false
-        })
+        tracks::DerivedVariants {
+            opus: Some(tracks::Derived {
+                codec: "opus".into(),
+                stale_tags: false
+            }),
+            aac: None,
+        }
     );
     assert!(!r1.hardlink);
     assert!(r1.lossless);
@@ -633,16 +639,24 @@ fn badges_are_returned_per_row() {
     assert_eq!(r2.conflict_batch_id, Some(b2));
     assert_eq!(r2.duplicate_group, r1.duplicate_group);
     assert!(r2.hardlink);
-    assert_eq!(r2.derived, None);
+    assert_eq!(r2.derived, tracks::DerivedVariants::default());
 
     assert_eq!(r3.duplicate_group, None);
+    // 系統ごとに集約する（2 系統あっても行は 1 つ。aac はタグ版が一致）
     assert_eq!(
         r3.derived,
-        Some(tracks::Derived {
-            codec: "opus".into(),
-            stale_tags: true
-        })
+        tracks::DerivedVariants {
+            opus: Some(tracks::Derived {
+                codec: "opus".into(),
+                stale_tags: true
+            }),
+            aac: Some(tracks::Derived {
+                codec: "aac".into(),
+                stale_tags: false
+            }),
+        }
     );
+    assert_eq!(page.items.len(), 3, "aac の行で重複しない");
 
     let one = tracks::get(&conn, x2).unwrap().unwrap();
     assert_eq!(&one, r2);

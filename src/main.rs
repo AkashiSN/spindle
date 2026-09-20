@@ -103,6 +103,19 @@ async fn main() -> anyhow::Result<()> {
         "ジョブをリカバリした"
     );
 
+    // Derived の系統設定は config を正とし、起動時に derived_variants へ写す（D-75）
+    {
+        let opus = config.encode.derived.opus.clone();
+        db.write(move |c| spindle::db::derived::sync_variants(c, &opus, spindle::db::now_epoch()))
+            .await
+            .context("derived_variants の更新に失敗")?;
+        info!(
+            enabled = config.encode.derived.opus.enabled,
+            bitrate = config.encode.derived.opus.bitrate,
+            "Derived の opus 系統の設定を揃えた"
+        );
+    }
+
     // foobar プロファイルの UNC prefix は config を正とする（D-55）
     let fb2k_prefix = config.export.fb2k_prefix.clone();
     if db

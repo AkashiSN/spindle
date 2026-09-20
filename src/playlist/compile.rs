@@ -66,7 +66,10 @@ fn resolve(field: &str) -> Kind {
         "codec" => Kind::Text("t.codec"),
         "lossless" => Kind::Bool("t.lossless = 1"),
         "has_derived" | "hasderived" => {
-            Kind::Bool("EXISTS (SELECT 1 FROM derived_files d WHERE d.track_id = t.id)")
+            // opus 系統（配布ビュー）の有無。aac だけのトラックは含めない（SPEC §7.6、D-75）
+            Kind::Bool(
+                "EXISTS (SELECT 1 FROM derived_files d WHERE d.track_id = t.id AND d.variant = 'opus')",
+            )
         }
         "missing" => Kind::Bool("t.missing_since IS NOT NULL"),
         "samplerate" => Kind::Int("t.sample_rate"),

@@ -1390,9 +1390,7 @@ fn register_item(
         }
     }
     for &id in track_ids.iter().chain(gain_change.cleared.iter()) {
-        if let Some(j) = crate::db::derived::enqueue_if_stale(&tx, id, now)? {
-            job_ids.push(j);
-        }
+        job_ids.extend(crate::db::derived::enqueue_if_stale(&tx, id, now)?);
     }
     // 後続の normalize（D-46 の予告。WAV / ALAC / AIFF を FLAC へ）も同じトランザクションで記録する。
     // 別トランザクションにすると、登録の commit からその間に落ちたとき投入が永久に欠ける

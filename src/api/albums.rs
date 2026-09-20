@@ -79,9 +79,8 @@ pub async fn patch(
                     job_id = Some(dbjobs::enqueue(c, &new_album_job(id), now)?.id());
                 } else {
                     for track_id in &change.cleared {
-                        if let Some(j) = crate::db::derived::enqueue_if_stale(c, *track_id, now)? {
-                            derived_jobs.push(j);
-                        }
+                        derived_jobs
+                            .extend(crate::db::derived::enqueue_if_stale(c, *track_id, now)?);
                     }
                 }
             }

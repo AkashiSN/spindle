@@ -40,7 +40,8 @@ pub struct TrackRow {
     pub rg_written_at: Option<i64>,
     /// 解析値（内部表現 -18 LUFS 基準の dB。再生時にクライアントが掛ける。P1-9）。未解析なら None
     pub rg: Option<RgValues>,
-    pub derived: Option<Derived>,
+    /// 系統ごとの Derived（SPEC §7.6、D-75）。無い系統は None
+    pub derived: DerivedVariants,
     /// FLAC 健全性チェックの結果（P1-5）。未検査なら None
     pub flac_check: Option<FlacCheck>,
     /// 偽ハイレゾ検出の結果（P3-5）。対象外・未検査なら None
@@ -96,6 +97,13 @@ pub struct Derived {
     pub stale_tags: bool,
 }
 
+/// 系統ごとの Derived（`opus` = 配布ビュー・`has_derived`、`aac` = Apple 向け）
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+pub struct DerivedVariants {
+    pub opus: Option<Derived>,
+    pub aac: Option<Derived>,
+}
+
 /// `GET /api/tracks/:id`（セッションあり）が行に加えて返す詳細（D-58）。プロパティタブの
 /// Metadata（`track_tags` 全部）と Location / General の元。一覧には付けない
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -138,18 +146,22 @@ const ROW_COLUMNS: &str = "t.id, t.title, t.artist_display, t.album, t.albumarti
   t.album_id,
   (SELECT lower(hex(aw.sha256)) FROM artwork aw WHERE aw.id = t.artwork_id),
   t.hires_check, t.hires_checked_at, t.hires_check_version <> t.audio_version, t.hires_check_error,
-  t.hires_cutoff_hz, t.hires_cliff_db, t.hires_effective_bits";
+  t.hires_cutoff_hz, t.hires_cliff_db, t.hires_effective_bits,
+  da.codec, da.src_tag_version <> t.tag_version";
 /// `ROW_COLUMNS` の列数。ソートキーの値はこの位置から始まる
-const ROW_COLUMN_COUNT: usize = 40;
+const ROW_COLUMN_COUNT: usize = 42;
 
 const ROW_JOINS: &str = "FROM tracks t
-LEFT JOIN derived_files d ON d.track_id = t.id
+LEFT JOIN derived_files d ON d.track_id = t.id AND d.variant = 'opus'
+LEFT JOIN derived_files da ON da.track_id = t.id AND da.variant = 'aac'
 LEFT JOIN edit_ops po ON po.track_id = t.id AND po.result = 'pending'
 LEFT JOIN edit_ops lo ON lo.id = (SELECT max(o.id) FROM edit_ops o WHERE o.track_id = t.id)";
 
 fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
     let derived_codec: Option<String> = r.get(15)?;
     let stale: Option<bool> = r.get(16)?;
+    let aac_codec: Option<String> = r.get(40)?;
+    let aac_stale: Option<bool> = r.get(41)?;
     let rg_scanned_at: Option<i64> = r.get(13)?;
     let track_gain: Option<f64> = r.get(23)?;
     let track_peak: Option<f64> = r.get(24)?;
@@ -200,10 +212,16 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
         rg_scanned_at,
         rg_written_at: r.get(14)?,
         rg,
-        derived: derived_codec.map(|codec| Derived {
-            codec,
-            stale_tags: stale.unwrap_or(false),
-        }),
+        derived: DerivedVariants {
+            opus: derived_codec.map(|codec| Derived {
+                codec,
+                stale_tags: stale.unwrap_or(false),
+            }),
+            aac: aac_codec.map(|codec| Derived {
+                codec,
+                stale_tags: aac_stale.unwrap_or(false),
+            }),
+        },
         flac_check,
         hires_check,
         pending_batch_id: r.get(17)?,

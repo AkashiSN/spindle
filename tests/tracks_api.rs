@@ -208,7 +208,11 @@ async fn list_returns_spec_shape_with_cursor_and_total() {
     }
     assert_eq!(row["title"], "t0");
     assert_eq!(row["category"], "J-Pop");
-    assert_eq!(row["derived"], serde_json::Value::Null);
+    assert_eq!(
+        row["derived"],
+        serde_json::json!({ "opus": null, "aac": null }),
+        "系統ごと（SPEC §7.6）"
+    );
     assert_eq!(row["rg"], serde_json::Value::Null, "未解析なら null");
     assert_eq!(row["pending_batch_id"], serde_json::Value::Null);
     assert_eq!(row["hardlink"], false);

@@ -151,3 +151,18 @@ pub fn set_basic_tags(
         tag.set_disk(disc);
     });
 }
+
+/// Derived の opus 系統を on（`bitrate` kbps）にする。起動時の `db::derived::sync_variants` と同じで、
+/// transcode の投入を見るテストのフィクスチャが `Db::open` の直後に呼ぶ（SPEC §7.6、D-75）
+pub fn enable_opus_variant(db_path: &Path, bitrate: u32) {
+    let c = rusqlite::Connection::open(db_path).unwrap();
+    spindle::db::derived::sync_variants(
+        &c,
+        &spindle::config::OpusVariantConfig {
+            enabled: true,
+            bitrate,
+        },
+        0,
+    )
+    .unwrap();
+}

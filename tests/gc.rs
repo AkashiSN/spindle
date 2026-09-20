@@ -122,9 +122,9 @@ impl Env {
     fn derived_row(&self, track_id: i64, rel: &str) {
         self.conn()
             .execute(
-                "INSERT INTO derived_files (track_id, rel_path, rel_path_key, codec, src_audio_version,
-                                            src_tag_version, generated_at)
-                 VALUES (?1, ?2, lower(?2), 'opus', 1, 1, 0)",
+                "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, src_audio_version,
+                                            src_tag_version, generated_at, audio_profile, tag_profile)
+                 VALUES (?1, 'opus', ?2, lower(?2), 'opus', 1, 1, 0, 'opus:256:v1', 'opus:v1')",
                 params![track_id, rel],
             )
             .unwrap();

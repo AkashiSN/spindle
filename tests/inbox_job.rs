@@ -44,6 +44,7 @@ impl Lib {
         }
         let db_path = dir.path().join("spindle.db");
         let db = Arc::new(Db::open(&db_path).unwrap());
+        common::enable_opus_variant(&db_path, 128);
         let library = Arc::new(RootDir::open(&dir.path().join("Library")).unwrap());
         let inbox = Arc::new(RootDir::open(&dir.path().join("Inbox")).unwrap());
         let archive = Arc::new(RootDir::open(&dir.path().join("Archive")).unwrap());

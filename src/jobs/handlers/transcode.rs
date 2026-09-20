@@ -1,6 +1,7 @@
-//! `transcode` ジョブ（SPEC §7.6 / §8、D-8 / D-9 / D-22 / D-25 / D-51、P1-10）。payload は
-//! `{"track_id", "audio_version", "tag_version"}`、dedup `transcode:<track_id>:<audio_version>`。
-//! 基盤が `audio_version` で stale 判定して track lock を取ってから始まる。
+//! `transcode` ジョブ（SPEC §7.6 / §8、D-8 / D-9 / D-22 / D-25 / D-51 / D-75、P1-10 / P4-7）。payload は
+//! `{"track_id", "variant", "audio_version", "tag_version"}`（variant 無しの旧 payload は opus）、dedup
+//! `transcode:<track_id>:<variant>:<audio_version>`。基盤が `audio_version` で stale 判定して track lock を
+//! 取ってから始まる。系統の設定（`derived_variants`）が無ければ何もしない（設定に無い系統）。
 //!
 //! 「そのトラックの Derived を現在値に揃える」ハンドラ。payload の版は使わず、毎回 DB の現在値
 //! から [`plan`] で必要な処理を決める（投入側が retag / move / encode を判定しない。D-51）:
@@ -32,10 +33,12 @@ use std::sync::Arc;
 use lofty::picture::{MimeType, Picture, PictureType};
 
 use crate::db::artwork as dbart;
-use crate::db::derived::{self as dbderived, TagState};
+use crate::db::derived::{self as dbderived, Profiles, TagState};
 use crate::db::replaygain::{self as dbrg, Member};
 use crate::db::{now_epoch, DbError};
-use crate::domain::derived::{expected_rel_path, opus_tags, plan, Current, Plan, Target};
+use crate::domain::derived::{
+    expected_rel_path, opus_tags, plan, Current, Plan, Target, Variant, VariantSettings,
+};
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::domain::replaygain::Values;
 use crate::domain::tags::{read_transfer_tags, write_opus_tags, TransferTags};
@@ -47,8 +50,6 @@ use crate::media::encode::OpusEncoder;
 
 /// Derived に埋める画像の一辺（`THUMB_SIZES` の大きい方）
 const COVER_SIZE: u32 = 768;
-/// Derived の codec 列
-const DERIVED_CODEC: &str = "opus";
 
 /// テストが競合を差し込むためのフック（`"reserved"` = 期待パスの排他予約を取った直後、
 /// `"claimed"` = 占有を DB で確定した直後、`"retag_before_write"` = retag が Library を読み終えて
@@ -100,12 +101,21 @@ impl TranscodeHandler {
 
 /// 解決したトラックの状態（1 回の読み取りで揃える）
 struct Resolved {
+    /// 系統の設定（`derived_variants`。凍結中なら plan が Skip）
+    settings: VariantSettings,
     target: Target,
     current: Option<Current>,
     /// Library の行の物理属性（開いた FD と照合する）
     member: Member,
     rg: Option<Values>,
     bit_depth: Option<u32>,
+}
+
+impl Resolved {
+    /// この系統の期待パス
+    fn expected(&self) -> String {
+        expected_rel_path(self.settings.variant, &self.target.library_rel_path)
+    }
 }
 
 /// `do_move` の結果
@@ -169,18 +179,24 @@ impl TranscodeHandler {
                 ctx.job.payload
             )));
         };
-        let Some(r) = self.resolve(&ctx, track_id).await? else {
-            tracing::info!(job_id, track_id, "トラックが無いので何もしない");
+        let Some(variant) = dbderived::variant_of_payload(&ctx.job.payload) else {
+            return Err(failed(format!(
+                "payload の variant が不正: {}",
+                ctx.job.payload
+            )));
+        };
+        let Some(r) = self.resolve(&ctx, track_id, variant).await? else {
+            tracing::info!(job_id, track_id, %variant, "トラックか系統の設定が無いので何もしない");
             return Ok(Outcome::Done);
         };
-        let what = plan(&r.target, r.current.as_ref());
-        tracing::debug!(job_id, track_id, ?what, "Derived の判定");
+        let what = plan(&r.settings, &r.target, r.current.as_ref());
+        tracing::debug!(job_id, track_id, %variant, ?what, "Derived の判定");
         if !what.needs_job() {
             return Ok(Outcome::Done);
         }
         // 期待パスの排他予約（物理的な書き込みの前。encode / move / retag の全経路で持つ）。
         // 別のジョブが持っていれば試行回数を数えずに再キュー
-        let key = canonical_key(&expected_rel_path(&r.target.library_rel_path));
+        let key = canonical_key(&r.expected());
         let locked = ctx
             .db()
             .write({
@@ -230,14 +246,22 @@ impl TranscodeHandler {
         }
     }
 
-    async fn resolve(&self, ctx: &JobContext, track_id: i64) -> Result<Option<Resolved>, JobError> {
+    async fn resolve(
+        &self,
+        ctx: &JobContext,
+        track_id: i64,
+        variant: Variant,
+    ) -> Result<Option<Resolved>, JobError> {
         let r = ctx
             .db()
             .read(move |c| {
+                let Some(settings) = dbderived::settings_of(c, variant)? else {
+                    return Ok(None);
+                };
                 let Some(target) = dbderived::load_target(c, track_id)? else {
                     return Ok(None);
                 };
-                let current = dbderived::get(c, track_id)?;
+                let current = dbderived::get(c, track_id, variant)?;
                 // missing なら member が空。plan が Skip にするので中身は使われない
                 let member = dbrg::track_member(c, track_id)?.pop().unwrap_or(Member {
                     id: track_id,
@@ -257,6 +281,7 @@ impl TranscodeHandler {
                     |r| r.get(0),
                 )?;
                 Ok(Some(Resolved {
+                    settings,
                     target,
                     current,
                     member,
@@ -352,7 +377,7 @@ impl TranscodeHandler {
         let Some(cur) = &r.current else {
             return Ok(());
         };
-        let expected = expected_rel_path(&r.target.library_rel_path);
+        let expected = r.expected();
         if canonical_key(&cur.rel_path) == canonical_key(&expected) {
             return Ok(());
         }
@@ -392,16 +417,18 @@ impl TranscodeHandler {
         match moved {
             None => {
                 // 実体が無い。行を消して key を明け渡す（次の試行は Encode）
+                let variant = r.settings.variant;
                 ctx.db()
-                    .write(move |c| dbderived::delete(c, track_id))
+                    .write(move |c| dbderived::delete(c, track_id, variant))
                     .await?;
                 tracing::info!(track_id, path = %from, "Derived の実体が無いので行を消して key を明け渡した");
             }
             Some(false) => {} // 退避済み
             Some(true) => {
                 let aside_str = aside.as_str().to_owned();
+                let variant = r.settings.variant;
                 ctx.db()
-                    .write(move |c| dbderived::set_path(c, track_id, &aside_str))
+                    .write(move |c| dbderived::set_path(c, track_id, variant, &aside_str))
                     .await?;
                 tracing::info!(track_id, from = %from, to = %aside, "Derived を一時名へ退避した");
             }
@@ -415,7 +442,7 @@ impl TranscodeHandler {
         let job_id = ctx.job.id;
         let track_id = r.target.track_id;
         ctx.check_cancel().await?;
-        let dst_rel = parse_rel(&expected_rel_path(&r.target.library_rel_path))?;
+        let dst_rel = parse_rel(&r.expected())?;
         // 期待パスの占有を先に確定する（エンコードしてから気付くと無駄になる。配置の直前にもう一度見る）
         if let Claim::Blocked { holder_busy, .. } = self.claim_path(ctx, r, &dst_rel).await? {
             return blocked(holder_busy);
@@ -482,6 +509,8 @@ impl TranscodeHandler {
         let dst = dst_rel.as_str().to_owned();
         let bitrate = i64::from(self.encoder.bitrate_kbps());
         let before = r.target.clone();
+        let variant = r.settings.variant;
+        let profiles = Profiles::of(&r.settings);
         let drifted = ctx
             .db()
             .write(move |c| {
@@ -494,11 +523,12 @@ impl TranscodeHandler {
                 dbderived::upsert(
                     &tx,
                     track_id,
+                    variant,
                     &dst,
-                    DERIVED_CODEC,
                     Some(bitrate),
                     av,
                     tag_state,
+                    &profiles,
                     now_epoch(),
                 )?;
                 let drifted = dbderived::target_drifted(&tx, &before)?;
@@ -545,11 +575,12 @@ impl TranscodeHandler {
     /// 旧パスから期待パスへ rename。元が無ければ [`Step::SourceMissing`]（呼び出し側が Encode に倒す）
     async fn do_move(&self, ctx: &JobContext, r: &Resolved) -> Result<Step, JobError> {
         let track_id = r.target.track_id;
+        let variant = r.settings.variant;
         let Some(cur) = &r.current else {
             return Ok(Step::SourceMissing);
         };
         let from = parse_rel(&cur.rel_path)?;
-        let to = parse_rel(&expected_rel_path(&r.target.library_rel_path))?;
+        let to = parse_rel(&r.expected())?;
         ctx.check_cancel().await?;
         match self.claim_path(ctx, r, &to).await? {
             Claim::Claimed => {}
@@ -605,7 +636,7 @@ impl TranscodeHandler {
                         "移動の直後に別のトラックが期待パスを持っている: {dst}"
                     )));
                 }
-                dbderived::set_path(&tx, track_id, &dst)?;
+                dbderived::set_path(&tx, track_id, variant, &dst)?;
                 tx.commit()?;
                 Ok(())
             })
@@ -618,7 +649,7 @@ impl TranscodeHandler {
 
     async fn retag(&self, ctx: &JobContext, r: &Resolved) -> HandlerResult {
         let track_id = r.target.track_id;
-        let dst = parse_rel(&expected_rel_path(&r.target.library_rel_path))?;
+        let dst = parse_rel(&r.expected())?;
         ctx.check_cancel().await?;
         let (_file, tags) = self.open_library(r).await?;
         let (cover, embedded_artwork) = self.cover_picture(ctx, r.target.artwork_id).await?;
@@ -666,11 +697,20 @@ impl TranscodeHandler {
             ..TagState::of(&r.target)
         };
         let before = r.target.clone();
+        let variant = r.settings.variant;
+        let tag_profile = r.settings.tag_profile.clone();
         let drifted = ctx
             .db()
             .write(move |c| {
                 let tx = c.transaction()?;
-                dbderived::set_tag_state(&tx, track_id, tag_state, now_epoch())?;
+                dbderived::set_tag_state(
+                    &tx,
+                    track_id,
+                    variant,
+                    tag_state,
+                    &tag_profile,
+                    now_epoch(),
+                )?;
                 let drifted = dbderived::target_drifted(&tx, &before)?;
                 tx.commit()?;
                 Ok(drifted)
@@ -744,14 +784,14 @@ fn take_over_path(tx: &rusqlite::Connection, track_id: i64, dst: &str) -> crate:
         return Ok(Claim::Claimed);
     }
     if h.missing {
-        dbderived::delete(tx, h.track_id)?;
+        dbderived::delete(tx, h.track_id, h.variant)?;
         tracing::warn!(track_id, holder = h.track_id, path = %dst, "missing 行の Derived を明け渡した");
         return Ok(Claim::Claimed);
     }
     if h.stale {
         return Ok(Claim::Blocked {
             holder: h.track_id,
-            holder_busy: dbderived::has_active_job(tx, h.track_id)?,
+            holder_busy: dbderived::has_active_job(tx, h.track_id, h.variant)?,
         });
     }
     // 相手の期待パスでもある: `x.flac` と `x.wav` のような衝突。片方しか持てない
