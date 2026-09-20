@@ -1137,7 +1137,8 @@ POST   /api/verify                                { selection }。selection の�
                                                   → 202 { albums, duplicates, job_ids }
                                                   → 409 no_changes
 
-GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ
+GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ。
+                                                  `?filter=`（/api/tracks と同じ JSON）で一致するトラックを持つ album だけ（P4-6）
                                                   /api/tracks の行と /api/tracks/:id には artwork_hash（トラック自身の
                                                   埋め込み画像。無ければ null。D-61）
 GET    /api/categories, POST /api/categories        統制語彙 { "items": [{ id, name }] }。POST は { name }（重複は 409）。

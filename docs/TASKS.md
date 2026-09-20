@@ -963,6 +963,12 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       の rg を投入、false なら `rg_album_*` を NULL にして未書込に）。書き出しは false なら album のキーを書かず、
       あれば消す。受け入れ: `tests/migrations.rs`、`tests/rg_job.rs`（track 単位の投入と album の集計なし）、
       `tests/rg_api.rs`、`tests/cd_place.rs`、`tests/inbox_api.rs`、`tests/albums_api.rs`
+- [ ] **P4-6** アルバム一覧をトラック一覧と同じフィルタで絞る（D-58 追記）。`GET /api/albums?filter=`（トラック一覧と
+      同じ JSON フィルタ。指定があれば一致する active なトラックを 1 本以上持つ album だけ。`WHERE a.id IN (SELECT
+      t.album_id FROM tracks t … WHERE <db/tracks.rs の既存の WHERE>)` で、ツリーの `album_ids` / `category` /
+      `playlist_id`（静的・スマート）/ `flags` / `dsl` / `q` をそのまま再利用）。web は `useAlbums(filterParam)` で
+      ツリー・プレイリスト・検索語の変更で取り直す。受け入れ: `tests/albums_api.rs`（album_ids / category /
+      静的プレイリスト / スマートプレイリスト / q で絞れる、フィルタ無しは全件、不正なフィルタは 400）
 
 ## 着手前に確認が必要な残課題
 
