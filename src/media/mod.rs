@@ -4,3 +4,4 @@ pub mod artwork;
 pub mod decode;
 pub mod encode;
 pub mod fingerprint;
+pub mod hires;
