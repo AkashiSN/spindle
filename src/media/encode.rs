@@ -1,4 +1,4 @@
-//! FLAC エンコード（ロスレス正規化。SPEC §7.4、D-10 / D-11 / D-45）。
+//! FLAC エンコード（ロスレス正規化。SPEC §7.4、D-10 / D-11 / D-45）と Derived の Opus / AAC（§7.6）。
 //!
 //! ```text
 //! 元ファイル（WAV / ALAC / AIFF。root から開いた FD）
@@ -311,5 +311,106 @@ impl OpusEncoder {
             .await?;
         drop(wav);
         Ok(EncodedOpus { guard: opus })
+    }
+}
+
+// ---------------------------------------------------------------- Derived の AAC
+
+/// 48 kHz 超はここへ落とす（ミュージック.app / AAC-LC の実用上限。SPEC §7.6）
+const AAC_MAX_SAMPLE_RATE: u32 = 48_000;
+
+/// Derived の AAC エンコード（SPEC §7.6「aac 系統」、D-75）。Apple 向け。
+///
+/// ```text
+/// Library のファイル（root から開いた FD。可逆でも非可逆でも） → ffmpeg 1 パスで tmp の M4A へ
+///   （volume フィルタで track gain を焼き込み、48 kHz 超は 48 kHz へ、内蔵 aac -b:a <bitrate>k。
+///    メタデータは移さない。タグは呼び出し側が lofty で書く。`domain::tags::write_mp4_tags`）
+/// ```
+#[derive(Debug, Clone)]
+pub struct AacEncoder {
+    ffmpeg: PathBuf,
+    bitrate_kbps: u32,
+    tmp_dir: PathBuf,
+}
+
+/// エンコードした M4A（tmp）。`guard` を drop すると消える
+#[derive(Debug)]
+pub struct EncodedAac {
+    pub guard: TempGuard,
+}
+
+impl AacEncoder {
+    pub fn new(ffmpeg: impl Into<PathBuf>, bitrate_kbps: u32, tmp_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            ffmpeg: ffmpeg.into(),
+            bitrate_kbps: bitrate_kbps.max(1),
+            tmp_dir: tmp_dir.into(),
+        }
+    }
+
+    pub fn tmp_dir(&self) -> &Path {
+        &self.tmp_dir
+    }
+
+    pub fn bitrate_kbps(&self) -> u32 {
+        self.bitrate_kbps
+    }
+
+    fn tmp_path(&self, ext: &str) -> Result<PathBuf, EncodeError> {
+        let mut buf = [0u8; 8];
+        getrandom::fill(&mut buf).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(self.tmp_dir.join(format!("{OPUS_TMP_PREFIX}{hex}.{ext}")))
+    }
+
+    /// `source`（読み取りで開いた Library のファイル）を AAC にする。`gain_db` を音声に焼き込む
+    /// （`domain::derived::bake_gain_db`）。`sample_rate` が 48 kHz 超なら 48 kHz へ落とす（不明なら
+    /// 据え置き）。`token` が倒れたら子プロセスごと止めて [`ProcessError::Cancelled`]
+    pub async fn encode(
+        &self,
+        source: File,
+        gain_db: f64,
+        sample_rate: Option<u32>,
+        token: &CancellationToken,
+    ) -> Result<EncodedAac, EncodeError> {
+        std::fs::create_dir_all(&self.tmp_dir).map_err(|source| EncodeError::TmpDir {
+            path: self.tmp_dir.clone(),
+            source,
+        })?;
+        let m4a = TempGuard::new(self.tmp_path("m4a")?);
+        let volume = format!("volume={gain_db:.2}dB");
+        let bitrate = format!("{}k", self.bitrate_kbps);
+        let mut cmd = ExternalCommand::new(&self.ffmpeg)
+            .path_style(PathStyle::DotSlash)
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                "/dev/stdin",
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-map_metadata",
+                "-1",
+                "-fflags",
+                "+bitexact",
+                "-flags",
+                "+bitexact",
+                "-af",
+                volume.as_str(),
+            ]);
+        if sample_rate.is_some_and(|r| r > AAC_MAX_SAMPLE_RATE) {
+            cmd = cmd.args(["-ar", "48000"]);
+        }
+        cmd.args(["-c:a", "aac", "-b:a", bitrate.as_str(), "-f", "mp4"])
+            .path_arg(m4a.path())
+            .stdin_file(source)
+            .timeout(STEP_TIMEOUT)
+            .run(token)
+            .await?;
+        Ok(EncodedAac { guard: m4a })
     }
 }
