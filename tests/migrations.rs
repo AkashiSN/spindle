@@ -580,3 +580,44 @@ fn upgrade_to_0018_rebuilds_derived_files_per_variant() {
         0
     );
 }
+
+/// 0019: `derived_variants` に aac 系統の `lossy_sources` / `multi_value_separator`（D-75、P4-8）。
+/// 既存行（opus）は既定値で埋まり、CHECK が効く
+#[test]
+fn upgrade_to_0019_adds_variant_options_with_defaults() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let upto18: Vec<_> = list.iter().take(18).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto18).unwrap();
+    conn.execute_batch(
+        "INSERT INTO derived_variants (variant, enabled, audio_profile, tag_profile, codec, bitrate, updated_at)
+           VALUES ('opus', 1, 'opus:256:v1', 'opus:v1', 'opus', 256, 1);",
+    )
+    .unwrap();
+
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 19);
+    let row: (i64, String) = conn
+        .query_row(
+            "SELECT lossy_sources, multi_value_separator FROM derived_variants WHERE variant = 'opus'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(row, (0, " & ".into()), "既存行は既定値");
+    conn.execute(
+        "INSERT INTO derived_variants (variant, enabled, audio_profile, tag_profile, codec, bitrate,
+                                       updated_at, lossy_sources, multi_value_separator)
+           VALUES ('aac', 1, 'aac:256:48k:bake1', 'aac:sep= & :itunnorm0:v1', 'aac', 256, 1, 1, ' / ')",
+        [],
+    )
+    .unwrap();
+    let bad = conn.execute(
+        "UPDATE derived_variants SET lossy_sources = 2 WHERE variant = 'aac'",
+        [],
+    );
+    assert!(bad.is_err(), "lossy_sources は 0 / 1 のみ");
+}
