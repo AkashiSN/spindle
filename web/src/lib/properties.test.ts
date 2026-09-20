@@ -115,6 +115,16 @@ describe('locationRows', () => {
     expect(valueOf(rows, 'name')).toEqual({ kind: 'text', text: 'x.flac' })
     expect(valueOf(rows, 'size')).toEqual({ kind: 'text', text: '1,000 B' })
     expect((valueOf(rows, 'mtime') as { text: string }).text).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
+    expect(valueOf(rows, 'derived')).toEqual({ kind: 'empty' })
+    expect(valueOf(rows, 'derived_aac')).toEqual({ kind: 'empty' })
+  })
+  it('Derived は系統ごとに 1 行（Location 側。SPEC §7.6 / §12.2）', () => {
+    const rows = locationRows(
+      [row({ derived: { opus: { codec: 'opus', stale_tags: true }, aac: { codec: 'aac', stale_tags: false } } })],
+      new Map(),
+    )
+    expect(valueOf(rows, 'derived')).toEqual({ kind: 'text', text: 'opus（タグが古い）' })
+    expect(valueOf(rows, 'derived_aac')).toEqual({ kind: 'text', text: 'aac' })
   })
   it('複数: 共通のフォルダは出し、サイズは合計（詳細が届いた分だけ）', () => {
     const rows = locationRows(
@@ -171,8 +181,6 @@ describe('generalRows', () => {
     )
     expect(valueOf(rows, 'rg')).toEqual({ kind: 'text', text: 'track -6.50 dB / peak 0.980000, album -7.00 dB / peak 1.000000（未書き込み）' })
     expect(valueOf(rows, 'flac_check')).toEqual({ kind: 'text', text: 'デコードエラー: boom' })
-    expect(valueOf(rows, 'derived')).toEqual({ kind: 'text', text: 'opus（タグが古い）' })
-    expect(valueOf(rows, 'derived_aac')).toEqual({ kind: 'text', text: 'aac' })
     expect(valueOf(rows, 'state')).toEqual({ kind: 'text', text: '反映待ち #5, 重複, hardlink, 欠落' })
   })
 

@@ -156,6 +156,9 @@ export function locationRows(rows: readonly TrackRow[], details: ReadonlyMap<num
       label: 'Added',
       value: commonValue(withDetail(rows, details, (d) => formatEpoch(d.added_at))),
     },
+    // Derived は系統ごとに 1 行（SPEC §7.6 / §12.2。所在なので Location 側）
+    { key: 'derived', label: 'Derived (opus)', value: commonValue(rows.map((r) => derivedLabel(r.derived.opus))) },
+    { key: 'derived_aac', label: 'Derived (aac)', value: commonValue(rows.map((r) => derivedLabel(r.derived.aac))) },
   ]
 }
 
@@ -245,8 +248,6 @@ export function generalRows(rows: readonly TrackRow[], details: ReadonlyMap<numb
     { key: 'rg', label: 'ReplayGain', value: commonValue(rows.map(rgLabel)) },
     { key: 'flac_check', label: 'FLAC check', value: commonValue(rows.map(flacCheckLabel)) },
     { key: 'hires_check', label: 'Hi-Res check', value: commonValue(rows.map(hiresCheckLabel)) },
-    { key: 'derived', label: 'Derived (opus)', value: commonValue(rows.map((r) => derivedLabel(r.derived.opus))) },
-    { key: 'derived_aac', label: 'Derived (aac)', value: commonValue(rows.map((r) => derivedLabel(r.derived.aac))) },
     { key: 'state', label: 'State', value: commonValue(rows.map(stateLabel)) },
   ]
 }
