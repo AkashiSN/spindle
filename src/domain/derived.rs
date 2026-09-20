@@ -265,3 +265,37 @@ pub fn opus_tags(
         pictures: cover.into_iter().collect(),
     }
 }
+
+/// MP4 のフリーフォーム atom 名（大小文字はこの通り。内部キーの大文字化に関わらず固定する）
+pub const ITUNNORM_KEY: &str = "iTunNORM";
+/// Sound Check の 0 dB。1〜2 値目（基準 1/1000）と 3〜4 値目（同じ量の基準 1/2500 表現）に 0 dB、残りは 0
+pub const ITUNNORM_ZERO_DB: &str =
+    " 000003E8 000003E8 000009C4 000009C4 00000000 00000000 00000000 00000000 00000000 00000000";
+
+/// aac に書くタグ集合（SPEC §7.6「aac 系統」、D-75）。RG 系（`REPLAYGAIN_*` / `R128_*`）と既存の
+/// `ITUNNORM` を落とし、同じキーの複数値を出現順に `separator` で 1 値に結合し（ミュージック.app は
+/// 複数値の 1 つしか見せない）、`iTunNORM` を 0 dB で足す（gain は音声に焼き込み済み。端末の
+/// サウンドチェック ON でも二重に掛からない）。画像は呼び出し側が選んだ JPEG 1 枚
+pub fn aac_tags(src: &TransferTags, separator: &str, cover: Option<Picture>) -> TransferTags {
+    let mut items: Vec<(String, String)> = Vec::new();
+    for (k, v) in &src.items {
+        if k.starts_with("REPLAYGAIN_")
+            || k.starts_with("R128_")
+            || k.eq_ignore_ascii_case(ITUNNORM_KEY)
+        {
+            continue;
+        }
+        match items.iter_mut().find(|(key, _)| key == k) {
+            Some((_, joined)) => {
+                joined.push_str(separator);
+                joined.push_str(v);
+            }
+            None => items.push((k.clone(), v.clone())),
+        }
+    }
+    items.push((ITUNNORM_KEY.to_owned(), ITUNNORM_ZERO_DB.to_owned()));
+    TransferTags {
+        items,
+        pictures: cover.into_iter().collect(),
+    }
+}

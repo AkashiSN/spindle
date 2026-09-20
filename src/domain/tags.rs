@@ -641,3 +641,54 @@ pub fn write_opus_tags(file: &mut File, tags: &TransferTags) -> Result<(), TagWr
     f.save_to(file, WriteOptions::default())?;
     Ok(())
 }
+
+/// 生成した MP4（`file` は読み書きで開いた tmp）に [`TransferTags`] を書く（aac 系統の Derived。
+/// SPEC §7.6、D-75）。既存の ilst は置き換える。Vorbis 名を lofty の `ItemKey` に写像して ilst の
+/// 標準 atom（`©ART` `trkn` `disk` `©gen` …）に、写像できないキーは `----:com.apple.iTunes:<KEY>` の
+/// フリーフォームに直接置く（lofty の generic `Tag` → `Ilst` は未知キーを捨てるので迂回する）。
+/// `iTunNORM` は内部キーの大小文字に関わらず atom 名を固定する。画像は `covr`（JPEG / PNG）
+pub fn write_mp4_tags(file: &mut File, tags: &TransferTags) -> Result<(), TagWriteError> {
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst};
+
+    use crate::domain::derived::ITUNNORM_KEY;
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut f = lofty::mp4::Mp4File::read_from(&mut *file, ParseOptions::new())?;
+    let mut generic = Tag::new(TagType::Mp4Ilst);
+    let mut freeform: Vec<(String, String)> = Vec::new();
+    for (key, value) in &tags.items {
+        let mapped = ItemKey::from_key(TagType::VorbisComments, key)
+            .filter(|k| k.map_key(TagType::Mp4Ilst).is_some());
+        match mapped {
+            Some(k) => {
+                // 同じ ItemKey に写像されるキーが 2 つある（TRACKTOTAL / TOTALTRACKS）と後勝ち
+                generic.push(TagItem::new(k, ItemValue::Text(value.clone())));
+            }
+            None => {
+                let name = if key.eq_ignore_ascii_case(ITUNNORM_KEY) {
+                    ITUNNORM_KEY.to_owned()
+                } else {
+                    key.clone()
+                };
+                freeform.push((name, value.clone()));
+            }
+        }
+    }
+    let mut ilst: Ilst = generic.into();
+    for (name, value) in freeform {
+        ilst.insert(Atom::new(
+            AtomIdent::Freeform {
+                mean: "com.apple.iTunes".into(),
+                name: name.into(),
+            },
+            AtomData::UTF8(value),
+        ));
+    }
+    for pic in &tags.pictures {
+        ilst.insert_picture(pic.clone());
+    }
+    f.set_ilst(ilst);
+    file.seek(SeekFrom::Start(0))?;
+    f.save_to(file, WriteOptions::default())?;
+    Ok(())
+}
