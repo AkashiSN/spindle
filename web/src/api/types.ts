@@ -148,7 +148,7 @@ export type TypeCounts = {
 }
 
 export type JobList = {
-  /** 上限付き（実行中が先頭、待ちは取り出し順、終端は新しい順） */
+  /** 状態ごとに上限付き（実行中・待ちはキューの順、完了と失敗・取り消しは新しい順。`limits`） */
   items: Job[]
   summary: JobSummary
   concurrency: Record<string, number>
@@ -156,6 +156,14 @@ export type JobList = {
   cpu_budget: number
   /** 種別ごとの queued / running / failed。`items` は上限付きなのでこちらで数える */
   by_type: Record<string, TypeCounts>
+  /** `items` の状態ごとの上限（実行中・待ち / 完了 / 失敗・取り消し）。達していれば切れている */
+  limits: ListLimits
+}
+
+export type ListLimits = {
+  active: number
+  done: number
+  failed: number
 }
 
 // SSE /api/events

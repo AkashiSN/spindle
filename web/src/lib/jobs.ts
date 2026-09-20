@@ -1,6 +1,6 @@
 // ジョブ画面（SPEC §12.5）の純粋ロジック: 種別ごとの集計、絞り込み、進捗と操作可否の判定
 
-import type { Job, JobState, JobSummary, TypeCounts } from '../api/types'
+import type { Job, JobState, JobSummary, ListLimits, TypeCounts } from '../api/types'
 
 const TYPE_LABEL: Record<string, string> = {
   scan: 'スキャン',
@@ -114,4 +114,22 @@ export function cpuBudgetLabel(rows: readonly TypeSummary[], budget: number | nu
   if (budget == null) return null
   const running = rows.filter((r) => CPU_BOUND_TYPES.has(r.type)).reduce((n, r) => n + r.running, 0)
   return `CPU 系（rg / transcode / flaccheck / hirescheck）の実行中の合計 ${running} / 予算 ${budget}（= コア数）`
+}
+
+/**
+ * 表示中のタブが上限で切れているか（切れていれば「表示は最新 N 件まで」）。すべてのタブは 3 つのどれかが
+ * 切れていれば合計。`limits` が無い（旧サーバ）なら判定しない
+ */
+export function shownLimit(state: StateFilter, limits: ListLimits | null, shown: readonly Job[]): number | null {
+  if (!limits) return null
+  const n = (s: StateFilter) => shown.filter((j) => filterJobs([j], s, null).length > 0).length
+  const hit = (s: 'active' | 'done' | 'failed') => n(s) >= limits[s]
+  switch (state) {
+    case 'active':
+    case 'done':
+    case 'failed':
+      return hit(state) ? limits[state] : null
+    case 'all':
+      return hit('active') || hit('done') || hit('failed') ? limits.active + limits.done + limits.failed : null
+  }
 }

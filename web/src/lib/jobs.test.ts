@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { Job } from '../api/types'
-import { canCancel, canRetry, cpuBudgetLabel, filterJobs, jobProgress, jobTypeLabel, summarizeByType, tabCounts } from './jobs'
+import {
+  canCancel,
+  canRetry,
+  cpuBudgetLabel,
+  filterJobs,
+  jobProgress,
+  jobTypeLabel,
+  shownLimit,
+  summarizeByType,
+  tabCounts,
+} from './jobs'
 
 function job(over: Partial<Job>): Job {
   return {
@@ -78,6 +88,16 @@ describe('filterJobs', () => {
     expect(filterJobs(items, 'done', null).map((j) => j.id)).toEqual([4])
     expect(filterJobs(items, 'failed', null).map((j) => j.id)).toEqual([3, 5])
     expect(filterJobs(items, 'all', null).map((j) => j.id)).toEqual([1, 2, 3, 4, 5])
+  })
+  it('上限に達したタブだけ「表示は最新 N 件まで」', () => {
+    const limits = { active: 2, done: 1, failed: 5 }
+    const shown = filterJobs(items, 'all', null)
+    expect(shownLimit('active', limits, filterJobs(items, 'active', null))).toBe(2)
+    expect(shownLimit('done', limits, filterJobs(items, 'done', null))).toBe(1)
+    expect(shownLimit('failed', limits, filterJobs(items, 'failed', null))).toBeNull()
+    expect(shownLimit('all', limits, shown)).toBe(8)
+    expect(shownLimit('all', { active: 9, done: 9, failed: 9 }, shown)).toBeNull()
+    expect(shownLimit('active', null, shown)).toBeNull()
   })
   it('タブの件数は summary の全件集計から（一覧は上限付き）', () => {
     const summary = { running: 12, queued: 8835, done: 15300, failed: 2, cancelled: 3, pending_ops: 0 }

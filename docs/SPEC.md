@@ -1388,12 +1388,15 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "subject" } ],   // subject = 対象の表示用文字列（track_id → Library のパス、album_id → ディレクトリ、
                                 //   batch_id → 説明、transcode は " [<variant>]" 付き、scan は kind、ytdl は url、
                                 //   thumbnail は "artwork #id"。行が消えていれば "track #id"、対象の無い種別は null）
-                 // 上限 1,000 件。実行中 → 待ち（取り出し順 = priority 降順・作成順・id 昇順）→ 終端（新しい順）
+                 // 状態ごとに上限付き（`limits`）: 実行中・待ち 1,000（実行中 → 待ち。取り出し順 = priority 降順・
+                 // 作成順・id 昇順）→ 完了 300（新しい順）→ 失敗・取り消し 300（新しい順）。1 本の並びで切ると
+                 // 待ちが数千件のとき完了・失敗が届かない
   "summary": { "running": 3, "queued": 12, "done": 15300, "failed": 0, "cancelled": 0, "pending_ops": 1204 },
   "by_type": { "transcode": { "queued": 6470, "running": 11, "done": 1089, "failed": 0, "cancelled": 0 }, … },
                  // 種別ごとの全件集計（0 件の種別は無し）
   "concurrency": { "scan": 1, "rg": 12, "transcode": 11, … },   // 種別ごとの並列度（§8）
-  "cpu_budget": 12 }                                              // CPU 系の共通予算（= コア数。D-73）
+  "cpu_budget": 12,                                               // CPU 系の共通予算（= コア数。D-73）
+  "limits": { "active": 1000, "done": 300, "failed": 300 } }     // items の状態ごとの上限
 // POST /api/jobs/:id/cancel  → 202（queued は即 cancelled、running は cancel_requested_at を立てる）
 //                            → 404 | 409 { "error": "not_cancellable" }   // 既に終端
 // POST /api/jobs/:id/retry   → 202（failed / cancelled を attempts=0 で queued に戻す）
@@ -1671,8 +1674,8 @@ rel_path（既定非表示）
 画面で数えない）、一覧の各行に**対象**（`subject`。どのファイル / アルバム / バッチかが id だけでは分からない）、
 実行中の進捗（`done / total`）、失敗の `last_error` と [再試行] / [キャンセル]。一覧のタブは
 **実行中・待ち / 完了 / 失敗・取り消し / すべて**で、各タブに `summary` の件数を添える（待ち → 実行中 → 完了と
-数が移っていくのが分かる）。一覧は実行中が先頭で、待ちはキューから取られる順、終端は新しい順。上限（1,000 件）に
-達していれば「表示は最新 1,000 件まで」と添える。種別表の下に CPU 系の実行中の合計と共通予算（`cpu_budget`。D-73）。編集バッチ由来のジョブは `edit_batch_id` で履歴画面へリンク。
+数が移っていくのが分かる）。一覧は状態ごとに切り出す（実行中・待ちはキューの順で 1,000 件、完了と失敗・取り消しは新しい順で
+各 300 件。`limits`）。表示中のタブが上限に達していれば「表示は最新 N 件まで」と添える。種別表の下に CPU 系の実行中の合計と共通予算（`cpu_budget`。D-73）。編集バッチ由来のジョブは `edit_batch_id` で履歴画面へリンク。
 SSE `/api/events` で更新し、リロードしても DB の値で復元する。
 
 ### 12.6 その他の画面（骨格のみ）

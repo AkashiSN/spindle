@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::jobs::{CancelOutcome, Job, JobType, RetryOutcome, Summary, TypeCounts};
+use crate::jobs::ListLimits;
+use crate::jobs::{CancelOutcome, Job, JobType, RetryOutcome, Summary, TypeCounts, LIST_LIMITS};
 
 use super::error::{error_response, ApiError};
 use super::AppState;
@@ -23,6 +24,8 @@ pub struct JobList {
     pub cpu_budget: usize,
     /// 種別ごとの queued / running / failed（全件の集計。`items` は上限付きなので web で数えない）
     pub by_type: BTreeMap<String, TypeCounts>,
+    /// `items` の状態ごとの上限（達していれば画面が「表示は最新 N 件まで」と添える）
+    pub limits: ListLimits,
 }
 
 pub async fn list(State(state): State<AppState>) -> Result<Json<JobList>, ApiError> {
@@ -38,6 +41,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<JobList>, ApiErr
         concurrency,
         cpu_budget: state.jobs.cpu_budget(),
         by_type,
+        limits: LIST_LIMITS,
     }))
 }
 

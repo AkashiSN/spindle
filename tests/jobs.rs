@@ -1497,6 +1497,67 @@ async fn jobs_list_returns_items_and_summary() {
     assert_eq!(body["by_type"]["gc"]["failed"], 0);
 }
 
+/// 一覧は状態ごとの切り出し（実行中・待ち ≤ 1,000、完了 ≤ 300、失敗・取り消し ≤ 300）。待ちが上限を超えて
+/// いても完了・失敗が届く（1 本の並びで切ると待ちだけで埋まり、完了タブが空になる）
+#[tokio::test]
+async fn jobs_list_returns_recent_terminal_jobs_even_when_the_queue_is_long() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    app.jobs
+        .db()
+        .write(|c| {
+            let tx = c.transaction()?;
+            {
+                let mut st = tx.prepare(
+                    "INSERT INTO jobs (type, payload, state, created_at, finished_at, max_attempts)
+                     VALUES ('gc', '{}', ?1, ?2, ?3, 1)",
+                )?;
+                for i in 0..1_100i64 {
+                    st.execute(rusqlite::params!["queued", 100 + i, Option::<i64>::None])?;
+                }
+                for i in 0..310i64 {
+                    st.execute(rusqlite::params!["done", 50, Some(200 + i)])?;
+                }
+                for i in 0..5i64 {
+                    st.execute(rusqlite::params!["failed", 50, Some(900 + i)])?;
+                }
+                st.execute(rusqlite::params!["cancelled", 50, Some(950)])?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let res = send(
+        &app,
+        req(Method::GET, "/api/jobs")
+            .header(header::COOKIE, &c)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let body = json(res).await;
+    let items = body["items"].as_array().unwrap();
+    let count = |st: &str| items.iter().filter(|i| i["state"] == st).count();
+    assert_eq!(count("queued"), 1_000, "待ちは上限まで");
+    assert_eq!(count("done"), 300, "完了は新しい順に上限まで");
+    assert_eq!(count("failed"), 5);
+    assert_eq!(count("cancelled"), 1);
+    // 完了は finished_at の新しい順（一番古い 10 本が落ちる）
+    let oldest_done = items
+        .iter()
+        .filter(|i| i["state"] == "done")
+        .map(|i| i["finished_at"].as_i64().unwrap())
+        .min()
+        .unwrap();
+    assert_eq!(oldest_done, 210);
+    assert_eq!(body["limits"]["active"], 1_000);
+    assert_eq!(body["limits"]["done"], 300);
+    assert_eq!(body["limits"]["failed"], 300);
+    assert_eq!(body["summary"]["queued"], 1_100);
+    assert_eq!(body["summary"]["done"], 310);
+}
+
 /// 一覧の `subject`（ジョブの対象。payload の track_id / album_id / batch_id を解決した表示用の文字列）
 #[tokio::test]
 async fn jobs_list_resolves_the_subject_of_each_job() {

@@ -26,11 +26,11 @@ use std::sync::Arc;
 use serde::Serialize;
 
 pub use crate::db::jobs::{
-    backoff_secs, CancelOutcome, EnqueueResult, Job, JobState, JobType, NewJob, RecoveryReport,
-    RetryOutcome, Summary, TypeCounts,
+    backoff_secs, CancelOutcome, EnqueueResult, Job, JobState, JobType, ListLimits, NewJob,
+    RecoveryReport, RetryOutcome, Summary, TypeCounts,
 };
 pub use context::{JobContext, TempGuard};
-pub use queue::{Jobs, EVENT_CAPACITY, LIST_LIMIT};
+pub use queue::{Jobs, EVENT_CAPACITY, LIST_LIMITS};
 
 /// ハンドラが返す future
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

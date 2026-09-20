@@ -15,24 +15,22 @@ import {
   jobProgress,
   jobTypeLabel,
   STATE_LABEL,
+  shownLimit,
   summarizeByType,
   tabCounts,
   type StateFilter,
 } from '../lib/jobs'
 
-/** `GET /api/jobs` の一覧の上限（src/jobs/queue.rs の LIST_LIMIT）。これに達していれば切れている */
-const LIST_LIMIT = 1000
-
 export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: (batchId: number) => void }) {
   const [state, setState] = useState<StateFilter>('active')
   const [type, setType] = useState<string | null>(null)
-  const { items, summary, concurrency, byType: counts, cpuBudget, error, notice } = jobs
+  const { items, summary, concurrency, byType: counts, limits, cpuBudget, error, notice } = jobs
 
   const byType = summarizeByType(counts, concurrency)
   const shown = items ? filterJobs(items, state, type) : []
   const tabs = summary ? tabCounts(summary) : null
-  // 一覧はサーバの上限で切れる（実行中 → 待ち → 終端の順なので、切れるのは待ちの末尾と古い終端）
-  const truncated = items != null && items.length >= LIST_LIMIT
+  // 一覧は状態ごとにサーバの上限で切れる（待ちの末尾、古い完了 / 失敗）
+  const limit = items && type == null ? shownLimit(state, limits, shown) : null
 
   return (
     <section className="jobs">
@@ -117,7 +115,7 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
         )}
         <span className="spacer" />
         <span className="muted small">
-          {items ? `${formatCount(shown.length)} 件${truncated ? `（表示は最新 ${formatCount(LIST_LIMIT)} 件まで）` : ''}` : ''}
+          {items ? `${formatCount(shown.length)} 件${limit != null ? `（表示は最新 ${formatCount(limit)} 件まで）` : ''}` : ''}
         </span>
       </div>
       {items == null ? (
@@ -158,7 +156,7 @@ function JobRow({ j, jobs, onOpenBatch }: { j: Job; jobs: JobsState; onOpenBatch
   return (
     <tr className={`state-${j.state}`}>
       <td className="num">#{j.id}</td>
-      <td>
+      <td className="nowrap">
         {jobTypeLabel(j.type)}
         {j.edit_batch_id != null && (
           <>

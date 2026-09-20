@@ -451,27 +451,71 @@ pub fn active_jobs_of_batch(conn: &Connection, batch_id: i64) -> Result<Vec<Job>
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// 一覧。実行中を先頭に、待ちはキューから取られる順（priority 降順 → 作成順 → id 昇順。
-/// [`claim`] と同じ）、終端は新しい順。上限で切れるのは待ちの末尾と古い終端行（同じ秒に数千件を
-/// 一括投入したとき id 降順だと、先頭から取られた実行中が上限の外に落ちる）
-pub fn list(conn: &Connection, limit: usize) -> Result<Vec<Job>> {
+/// `GET /api/jobs` の一覧の上限（状態ごと。ジョブ画面のタブに対応）。待ちが数千件あっても完了・失敗が
+/// 届くよう、1 本の並びで切らずに状態ごとに切り出す
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ListLimits {
+    /// 実行中 + 待ち（実行中が先頭、待ちはキューから取られる順）
+    pub active: usize,
+    /// 完了（新しい順）
+    pub done: usize,
+    /// 失敗 + 取り消し（新しい順）
+    pub failed: usize,
+}
+
+impl Default for ListLimits {
+    fn default() -> Self {
+        Self {
+            active: 1000,
+            done: 300,
+            failed: 300,
+        }
+    }
+}
+
+/// 状態の集合と並び（定数。値は含まない）
+enum Slice {
+    Active,
+    Done,
+    Failed,
+}
+
+impl Slice {
+    fn sql(self) -> (&'static str, &'static str) {
+        match self {
+            // キューから取られる順（[`claim`] と同じ priority 降順 → 作成順 → id 昇順）。同じ秒に数千件を
+            // 一括投入したとき id 降順だと、先頭から取られた実行中が上限の外に落ちる
+            Slice::Active => (
+                "j.state IN ('queued', 'running')",
+                "(j.state = 'running') DESC, j.priority DESC, j.created_at ASC, j.id ASC",
+            ),
+            Slice::Done => (
+                "j.state = 'done'",
+                "COALESCE(j.finished_at, j.created_at) DESC, j.id DESC",
+            ),
+            Slice::Failed => (
+                "j.state IN ('failed', 'cancelled')",
+                "COALESCE(j.finished_at, j.created_at) DESC, j.id DESC",
+            ),
+        }
+    }
+}
+
+fn list_slice(conn: &Connection, slice: Slice, limit: usize) -> Result<Vec<Job>> {
     // 対象の解決（track / album / batch）。payload の id を JOIN するだけで、行が無ければ NULL
     let columns: Vec<String> = JOB_COLUMNS
         .split(',')
         .map(|c| format!("j.{}", c.trim()))
         .collect();
+    let (filter, order) = slice.sql();
     let mut stmt = conn.prepare(&format!(
         "SELECT {}, t.rel_path, a.rel_dir, b.description
          FROM jobs j
          LEFT JOIN tracks t ON t.id = json_extract(j.payload, '$.track_id')
          LEFT JOIN albums a ON a.id = json_extract(j.payload, '$.album_id')
          LEFT JOIN edit_batches b ON b.id = json_extract(j.payload, '$.batch_id')
-         ORDER BY (j.state = 'running') DESC,
-                  (j.state = 'queued') DESC,
-                  CASE WHEN j.state IN ('queued','running') THEN j.priority END DESC,
-                  CASE WHEN j.state IN ('queued','running') THEN j.created_at END ASC,
-                  CASE WHEN j.state IN ('queued','running') THEN j.id END ASC,
-                  COALESCE(j.finished_at, j.created_at) DESC, j.id DESC
+         WHERE {filter}
+         ORDER BY {order}
          LIMIT ?1",
         columns.join(", ")
     ))?;
@@ -492,14 +536,22 @@ pub fn list(conn: &Connection, limit: usize) -> Result<Vec<Job>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// 一覧。実行中・待ち（上限まで）→ 完了（新しい順に上限まで）→ 失敗・取り消し（同）の順に並べる
+pub fn list(conn: &Connection, limits: ListLimits) -> Result<Vec<Job>> {
+    let mut items = list_slice(conn, Slice::Active, limits.active)?;
+    items.extend(list_slice(conn, Slice::Done, limits.done)?);
+    items.extend(list_slice(conn, Slice::Failed, limits.failed)?);
+    Ok(items)
+}
+
 /// 一覧・summary・種別ごとの件数を同じ読み取りスナップショットで取る（WAL では別 SELECT が別
 /// スナップになり得るため、明示トランザクションで囲う）
 pub fn list_with_summary(
     conn: &Connection,
-    limit: usize,
+    limits: ListLimits,
 ) -> Result<(Vec<Job>, Summary, BTreeMap<String, TypeCounts>)> {
     let tx = conn.unchecked_transaction()?;
-    let items = list(&tx, limit)?;
+    let items = list(&tx, limits)?;
     let summary = summary(&tx)?;
     let by_type = counts_by_type(&tx)?;
     tx.finish()?;

@@ -11,14 +11,18 @@ use crate::db::jobs as dbjobs;
 use crate::db::{now_epoch, Db, Result};
 
 use super::{
-    CancelOutcome, EnqueueResult, Event, Job, JobEvent, NewJob, Registry, RetryOutcome, Summary,
-    TypeCounts,
+    CancelOutcome, EnqueueResult, Event, Job, JobEvent, ListLimits, NewJob, Registry, RetryOutcome,
+    Summary, TypeCounts,
 };
 
 /// broadcast チャネルの容量。遅い購読者は Lagged を受け取り、SSE 側で読み飛ばす
 pub const EVENT_CAPACITY: usize = 1024;
-/// `GET /api/jobs` が返す最大件数。未完了が先に並ぶので、溢れるのは古い終端行だけ
-pub const LIST_LIMIT: usize = 1000;
+/// `GET /api/jobs` が返す最大件数（状態ごと。実行中・待ち 1,000 / 完了 300 / 失敗・取り消し 300）
+pub const LIST_LIMITS: ListLimits = ListLimits {
+    active: 1000,
+    done: 300,
+    failed: 300,
+};
 
 pub struct Jobs {
     db: Arc<Db>,
@@ -92,7 +96,7 @@ impl Jobs {
 
     pub async fn list(&self) -> Result<(Vec<Job>, Summary, BTreeMap<String, TypeCounts>)> {
         self.db
-            .read(|c| dbjobs::list_with_summary(c, LIST_LIMIT))
+            .read(|c| dbjobs::list_with_summary(c, LIST_LIMITS))
             .await
     }
 

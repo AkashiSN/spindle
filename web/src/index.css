@@ -1507,7 +1507,8 @@ table.jobs-types td.failed {
   white-space: nowrap;
 }
 .jobs-table td.subject-cell {
-  max-width: 32em;
+  max-width: 26em;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
