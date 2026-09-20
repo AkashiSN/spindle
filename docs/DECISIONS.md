@@ -2812,8 +2812,13 @@ hirescheck = コア数 / 2 で、スキャン完了時に 4 種がまとめて�
 消した行は `rg_written_at` を NULL に戻し `rg_scanned_at` を 1 進める（Derived の `R128_ALBUM_GAIN` が
 タグ上書きで追随する）。rg ハンドラは**書き込み時に属性を読み直し**、album 単位の job でも off なら
 album の値を書かず、track 単位の job は on の album に属する track の album 値を据え置く（投入と切り替えの
-競合で値が嘘にならない）。
-- `POST /api/rg { selection }`、スキャン後・承認後・配置後の自動投入は album の属性を見て投入単位を
+競合で値が嘘にならない）。**スキャンは rg を自動投入しない**（D-47 のまま。新規・音声差し替えの
+トラックは `POST /api/rg`（`no_rg` フィルタ）か取り込み経路で解析する）。`store` は `rg_scanned_at` を
+前の値より小さくしない（off で `now + 1` へ進めた直後に同じ秒の解析が保存しても巻き戻らない）。
+transcode は Derived に記録する同じトランザクションで元の世代（音声版 / tag_version / 画像 / RG 世代 /
+所在）を読み直し、読んでから書く間に動いていれば同じジョブを再キューして揃え直す（属性の切り替えは
+track lock を取らず、running の間の投入は dedup で弾かれるため）。
+- `POST /api/rg { selection }`、承認後・配置後の自動投入は album の属性を見て投入単位を
   決める。設定ファイルに `[replaygain].album_gain` は置かない（album ごとに決まる）
 - **RG の一致判定（`rg_written_at`）は完全一致のまま。** 既存ライブラリの RG タグ（foobar2000 / ytmusic
   が書いた track gain。9,099 本すべて track のみ、album は 0 本）は spindle の解析値と丸め・実装差で

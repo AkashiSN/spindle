@@ -97,3 +97,43 @@ fn album_values_of_returns_current_row_values() {
     assert_eq!(dbrg::album_values_of(&c, 21).unwrap(), Some((None, None)));
     assert_eq!(dbrg::album_values_of(&c, 999).unwrap(), None);
 }
+
+/// off の直後に、その前から走っていた解析が同じ値で保存しても `rg_scanned_at` は巻き戻らない
+/// （Derived の `src_rg_scanned_at` との差分が消えると追随が抜ける。D-74）
+#[test]
+fn store_never_moves_rg_scanned_at_backwards() {
+    use spindle::db::replaygain::Values;
+    let c = conn();
+    // 11: (-1.0, 0.9, -2.0, 0.95, scanned 100, written 100)。off で 101 に進む
+    let ch = dbrg::set_album_gain(&c, 1, false, 100).unwrap().unwrap();
+    assert_eq!(ch.cleared, vec![11]);
+    let scanned = |id: i64| -> (Option<i64>, Option<i64>) {
+        c.query_row(
+            "SELECT rg_scanned_at, rg_written_at FROM tracks WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(scanned(11), (Some(101), None));
+    // 同じ秒（now = 100）に、属性を読み直して album 値 NULL・track 値は同じで保存
+    let same = Values {
+        track_gain: -1.0,
+        track_peak: 0.9,
+        album_gain: None,
+        album_peak: None,
+    };
+    assert_eq!(dbrg::store(&c, &[(11, same)], 100).unwrap(), 1);
+    assert_eq!(scanned(11), (Some(101), None), "同じ値でも 101 のまま");
+    // 値が変わる保存も前より小さくならない
+    let changed = Values {
+        track_gain: -1.5,
+        ..same
+    };
+    assert_eq!(dbrg::store(&c, &[(11, changed)], 100).unwrap(), 1);
+    assert_eq!(scanned(11), (Some(102), None));
+    // 確認済み（written >= scanned）の行に同じ値を小さい now で保存しても written は下がらない
+    assert_eq!(scanned(21), (Some(100), Some(100)));
+    assert_eq!(dbrg::store(&c, &[(21, same)], 50).unwrap(), 1);
+    assert_eq!(scanned(21), (Some(100), Some(100)));
+}

@@ -481,7 +481,9 @@ impl TranscodeHandler {
         let av = r.target.audio_version;
         let dst = dst_rel.as_str().to_owned();
         let bitrate = i64::from(self.encoder.bitrate_kbps());
-        ctx.db()
+        let before = r.target.clone();
+        let drifted = ctx
+            .db()
             .write(move |c| {
                 let tx = c.transaction()?;
                 if !matches!(take_over_path(&tx, track_id, &dst)?, Claim::Claimed) {
@@ -499,8 +501,9 @@ impl TranscodeHandler {
                     tag_state,
                     now_epoch(),
                 )?;
+                let drifted = dbderived::target_drifted(&tx, &before)?;
                 tx.commit()?;
-                Ok(())
+                Ok(drifted)
             })
             .await?;
 
@@ -524,6 +527,16 @@ impl TranscodeHandler {
             }
         }
         tracing::info!(job_id, track_id, path = %dst_rel, "Derived を生成した");
+        if drifted {
+            // 読んでから記録するまでに世代が動いた（album gain の切り替え等）。記録は書いた内容で
+            // 正しいので、揃え直しは同じジョブの再実行に任せる
+            tracing::info!(
+                job_id,
+                track_id,
+                "生成中に元の世代が動いたので揃え直す（再キュー）"
+            );
+            return Ok(Outcome::Requeue);
+        }
         Ok(Outcome::Done)
     }
 
@@ -652,10 +665,25 @@ impl TranscodeHandler {
             src_artwork_id: embedded_artwork,
             ..TagState::of(&r.target)
         };
-        ctx.db()
-            .write(move |c| dbderived::set_tag_state(c, track_id, tag_state, now_epoch()))
+        let before = r.target.clone();
+        let drifted = ctx
+            .db()
+            .write(move |c| {
+                let tx = c.transaction()?;
+                dbderived::set_tag_state(&tx, track_id, tag_state, now_epoch())?;
+                let drifted = dbderived::target_drifted(&tx, &before)?;
+                tx.commit()?;
+                Ok(drifted)
+            })
             .await?;
         tracing::info!(track_id, path = %dst, "Derived のタグを更新した");
+        if drifted {
+            tracing::info!(
+                track_id,
+                "タグ更新中に元の世代が動いたので揃え直す（再キュー）"
+            );
+            return Ok(Outcome::Requeue);
+        }
         Ok(Outcome::Done)
     }
 

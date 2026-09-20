@@ -84,7 +84,11 @@ pub use crate::domain::replaygain::Values;
 /// `rg_written_at` は「ファイルのタグが解析値と一致していると確認した時刻」なので、値が
 /// 1 つでも変われば NULL にする（ファイルは旧値のまま）。時刻が秒単位のため、同じ秒に確認と
 /// 再解析が起きると `rg_written_at < rg_scanned_at` では検出できない。値が全て同じで確認が
-/// 有効（`rg_written_at >= rg_scanned_at`）なら確認は成り立ったままなので `now` へ進める
+/// 有効（`rg_written_at >= rg_scanned_at`）なら確認は成り立ったままなので `now` へ進める。
+///
+/// どちらの分岐でも `rg_scanned_at` は**前の値より小さくしない**（同じ秒に [`set_album_gain`] が
+/// `now + 1` へ進めた直後に、その前から走っていた解析が同じ値で保存すると巻き戻り、Derived の
+/// `src_rg_scanned_at` との差分が消えて追随が抜ける。D-74）
 pub fn store(conn: &Connection, results: &[(i64, Values)], now: i64) -> Result<usize> {
     let mut st = conn.prepare_cached(
         "UPDATE tracks
@@ -92,11 +96,11 @@ pub fn store(conn: &Connection, results: &[(i64, Values)], now: i64) -> Result<u
                   WHEN rg_track_gain IS ?2 AND rg_track_peak IS ?3
                    AND rg_album_gain IS ?4 AND rg_album_peak IS ?5
                    AND rg_written_at IS NOT NULL AND rg_written_at >= rg_scanned_at
-                  THEN ?6 ELSE NULL END,
+                  THEN MAX(?6, rg_written_at) ELSE NULL END,
                 rg_scanned_at = CASE
                   WHEN rg_track_gain IS ?2 AND rg_track_peak IS ?3
                    AND rg_album_gain IS ?4 AND rg_album_peak IS ?5
-                  THEN ?6 ELSE MAX(?6, COALESCE(rg_scanned_at, 0) + 1) END,
+                  THEN MAX(?6, COALESCE(rg_scanned_at, 0)) ELSE MAX(?6, COALESCE(rg_scanned_at, 0) + 1) END,
                 rg_track_gain = ?2, rg_track_peak = ?3, rg_album_gain = ?4, rg_album_peak = ?5
           WHERE id = ?1 AND missing_since IS NULL",
     )?;

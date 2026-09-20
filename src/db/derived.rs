@@ -37,6 +37,22 @@ pub fn load_target(conn: &Connection, track_id: i64) -> Result<Option<Target>> {
         .optional()?)
 }
 
+/// ジョブが読んだ `before` から、タグ側の世代（`tag_version` / 埋める画像 / RG の解析世代）・音声版・
+/// 所在が動いたか。transcode が Library を読んでから Derived に記録するまでの間に、track lock を
+/// 取らない経路（album gain の切り替え。D-74）が世代を進めていれば、書いた内容は古いので同じ
+/// ジョブを再キューして揃え直す（投入は running の間 dedup で弾かれるため、自分で拾う）
+pub fn target_drifted(conn: &Connection, before: &Target) -> Result<bool> {
+    let Some(now) = load_target(conn, before.track_id)? else {
+        return Ok(true);
+    };
+    Ok(now.audio_version != before.audio_version
+        || now.tag_version != before.tag_version
+        || now.artwork_id != before.artwork_id
+        || now.rg_scanned_at != before.rg_scanned_at
+        || now.library_rel_path != before.library_rel_path
+        || now.missing != before.missing)
+}
+
 pub fn get(conn: &Connection, track_id: i64) -> Result<Option<Current>> {
     Ok(conn
         .query_row(

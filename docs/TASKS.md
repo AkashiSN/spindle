@@ -957,7 +957,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       照合、Library の artwork と同じ ETag / キャッシュ）と承認画面のサムネイル。受け入れ: `tests/inbox_api.rs`、
       `web/src/lib/inbox.test.ts`
 - [x] **P4-5** album gain を album ごとの属性に（D-74。2026-09-20）。`db/migrations/0017_album_gain.sql`（`albums.album_gain`
-      既定 0、既存の `tracks.rg_album_*` を NULL）。rg の投入経路（`POST /api/rg`、スキャン後、承認後、CD 配置後）
+      既定 0、既存の `tracks.rg_album_*` を NULL）。rg の投入経路（`POST /api/rg`、承認後、CD 配置後。スキャンは投入しない）
       は属性で album / track 単位を選ぶ。`cd/place.rs` は true で作る。承認画面のチェックボックス（既定 off、追記先
       album の現在値が初期値）。アルバム画面の切り替え（`PATCH /api/albums/:id { album_gain }` → true なら album 単位
       の rg を投入、false なら `rg_album_*` を NULL にして未書込に）。書き出しは false なら album のキーを書かず、

@@ -1029,6 +1029,97 @@ async fn running_retag_blocks_a_new_claimant_until_it_finishes() {
     assert!(!lib.derived().join("A/02.opus").exists());
 }
 
+/// retag が Library を読んでから Derived を書く間に album gain を off にされた（track lock を取らない
+/// 経路。D-74）とき、書いた内容は古い世代なので同じジョブが再キューされ、揃え直した Derived には
+/// R128_ALBUM_GAIN が残らず、行の世代も現在値に揃う
+#[tokio::test]
+async fn album_gain_turned_off_during_retag_is_caught_up_by_requeue() {
+    use spindle::db::replaygain as dbrg;
+    require_tools!();
+    let lib = Lib::new();
+    lib.add("A/01.flac", 1, "a");
+    lib.scan().await;
+    let a = lib.track_id("A/01.flac");
+    let album: i64 = lib
+        .conn()
+        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [a], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    lib.conn()
+        .execute("UPDATE albums SET album_gain = 1 WHERE id = ?1", [album])
+        .unwrap();
+    lib.set_rg(a);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook: TestHook = {
+        let gate = gate.clone();
+        let armed = armed.clone();
+        Arc::new(move |point: &'static str| {
+            let gate = gate.clone();
+            let armed = armed.clone();
+            Box::pin(async move {
+                if point == "retag_before_write"
+                    && armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    gate.notified().await;
+                }
+            })
+        })
+    };
+    lib.start_with_hook(hook);
+    assert_eq!(lib.run(a).await, JobState::Done);
+    let opus = lib.derived().join("A/01.opus");
+    let af = read_audio_file(File::open(&opus).unwrap(), Some("opus")).unwrap();
+    assert_eq!(af.tags.first("R128_ALBUM_GAIN"), Some("-2304"));
+
+    // RG の世代だけ進めて retag を要る状態にし、書く直前で止める
+    lib.conn()
+        .execute("UPDATE tracks SET rg_scanned_at = 2 WHERE id = ?1", [a])
+        .unwrap();
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (av, tv) = lib.versions(a);
+    let job = lib.enqueue(a, av, tv).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline && armed.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !armed.load(std::sync::atomic::Ordering::SeqCst),
+        "retag が書く直前で止まった"
+    );
+    // その間に album gain を off（album 値が消え、rg_scanned_at が進む）。running の間の投入は dedup
+    let ch = dbrg::set_album_gain(&lib.conn(), album, false, 1000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ch.cleared, vec![a]);
+    gate.notify_one();
+    assert_eq!(lib.wait_job(job).await, JobState::Done);
+
+    let scanned: i64 = lib
+        .conn()
+        .query_row("SELECT rg_scanned_at FROM tracks WHERE id = ?1", [a], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(scanned, 1000);
+    let src: Option<i64> = lib
+        .conn()
+        .query_row(
+            "SELECT src_rg_scanned_at FROM derived_files WHERE track_id = ?1",
+            [a],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(src, Some(1000), "再キューで現在の世代に揃う");
+    let af = read_audio_file(File::open(&opus).unwrap(), Some("opus")).unwrap();
+    assert!(
+        af.tags.first("R128_ALBUM_GAIN").is_none(),
+        "古い album gain が Derived に残らない"
+    );
+    assert_eq!(af.tags.first("R128_TRACK_GAIN"), Some("-2816"));
+}
+
 /// Library の 2 件 swap。双方の期待パスを相手が持っているが、一方が自分の Derived を一時名へ退避して
 /// 相手に譲り、次の試行で自分も移る（rename バッチの 2 段階と同じ）。再エンコードは走らない
 #[tokio::test]
