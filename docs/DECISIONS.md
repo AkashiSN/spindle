@@ -2817,7 +2817,8 @@ album の値を書かず、track 単位の job は on の album に属する tra
 前の値より小さくしない（off で `now + 1` へ進めた直後に同じ秒の解析が保存しても巻き戻らない）。
 transcode は Derived に記録する同じトランザクションで元の世代（音声版 / tag_version / 画像 / RG 世代 /
 所在）を読み直し、読んでから書く間に動いていれば同じジョブを再キューして揃え直す（属性の切り替えは
-track lock を取らず、running の間の投入は dedup で弾かれるため）。
+track lock を取らず、running の間の投入は dedup で弾かれるため。音声版が動いた場合は再キューした
+ジョブが版のゲートで終わり、scanner が投入した新しい版のジョブが揃える）。
 - `POST /api/rg { selection }`、承認後・配置後の自動投入は album の属性を見て投入単位を
   決める。設定ファイルに `[replaygain].album_gain` は置かない（album ごとに決まる）
 - **RG の一致判定（`rg_written_at`）は完全一致のまま。** 既存ライブラリの RG タグ（foobar2000 / ytmusic
