@@ -204,6 +204,23 @@ pub enum TagReadError {
     Io(#[from] std::io::Error),
 }
 
+impl TagReadError {
+    /// 失敗の原因に I/O エラーがあればその種類。lofty は読み取り中の I/O 失敗も
+    /// [`lofty::error::FileParseError`] に包むので、source の連鎖を辿って探す。
+    /// 呼び出し側が「形式として読めない（内容が変わった）」と「読めない（権限・デバイス）」を
+    /// 分けるために使う
+    pub fn io_kind(&self) -> Option<std::io::ErrorKind> {
+        let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(e) = cur {
+            if let Some(io) = e.downcast_ref::<std::io::Error>() {
+                return Some(io.kind());
+            }
+            cur = e.source();
+        }
+        None
+    }
+}
+
 /// ファイルのタグと音声属性を読む。キーは Vorbis Comment 名（大文字）に揃え、任意キーと
 /// 多値を保つ。FLAC / Opus / Vorbis は VorbisComments を直接読む（lofty の generic `Tag` は
 /// 未知のキーを落とす）。他の形式は lofty の `ItemKey` を Vorbis 名へ写像する

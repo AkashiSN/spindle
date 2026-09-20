@@ -194,3 +194,19 @@ fn mp3_with_two_tag_blocks_prefers_primary_and_fills_missing_keys_from_secondary
     // primary に無いキーは副ブロックから補う
     assert_eq!(get("ARTIST"), ["only-in-v1"]);
 }
+
+/// `TagReadError::io_kind` は lofty の Parse に包まれた I/O エラーも source を辿って見つける
+/// （Inbox の埋め込み画像が「内容が変わった」と「読めない」を分けるのに使う。P4-4）
+#[test]
+fn io_kind_finds_io_errors_wrapped_by_lofty() {
+    use spindle::domain::tags::TagReadError;
+    use std::io::{Error, ErrorKind};
+    let wrapped = TagReadError::Parse(lofty::error::FileParseError::from(Error::new(
+        ErrorKind::PermissionDenied,
+        "denied",
+    )));
+    assert_eq!(wrapped.io_kind(), Some(ErrorKind::PermissionDenied));
+    let direct = TagReadError::Io(Error::new(ErrorKind::UnexpectedEof, "eof"));
+    assert_eq!(direct.io_kind(), Some(ErrorKind::UnexpectedEof));
+    assert_eq!(TagReadError::Unrecognized.io_kind(), None);
+}

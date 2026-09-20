@@ -293,16 +293,16 @@ pub fn embedded_picture(
             .file_name()
             .rsplit_once('.')
             .map(|(_, e)| e.to_ascii_lowercase());
-        // 形式として読めない（書き換わった等）は次の候補へ。I/O の失敗は 500 に伝える
+        // 形式として読めない（書き換わった・途中で切れている等）は次の候補へ。読み取りの I/O 失敗
+        // （権限・デバイス。lofty の Parse に包まれたものも含む）は 500 に伝える
         let pictures =
             match crate::domain::tags::read_audio_file_with_pictures(file, ext.as_deref()) {
                 Ok((_, pictures)) => pictures,
-                Err(crate::domain::tags::TagReadError::Io(e))
-                    if e.kind() != std::io::ErrorKind::NotFound =>
-                {
-                    return Err(e.into());
-                }
-                Err(_) => continue,
+                Err(e) => match e.io_kind() {
+                    Some(std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof)
+                    | None => continue,
+                    Some(_) => return Err(std::io::Error::other(e).into()),
+                },
             };
         let found = pictures.into_iter().find_map(|pic| {
             let digest = crate::media::artwork::ArtworkStore::hash_of(pic.data());
