@@ -912,26 +912,29 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       出ない」を、配置の直後にその album だけ解決して thumbnail を投入する形で埋めた
       （`scanner::resolve_album_artwork_now`、`PlaceItemEnv.artwork`。D-68 追記）。受け入れ:
       `tests/inbox_job.rs`（埋め込み画像から解決して thumbnail 投入、画像なしは「なし」で解決）
-- [ ] **P3-5** 偽ハイレゾ検出（`rustfft`、任意機能。SPEC §7.10、D-71。表示と絞り込みだけで、判定を消費する
+- [x] **P3-5** 偽ハイレゾ検出（`rustfft`、任意機能。SPEC §7.10、D-71。表示と絞り込みだけで、判定を消費する
       自動処理は無い）
-      - [ ] `media/hires.rs`: `HiresSink`（PcmSink。Hann 8192 / ホップ 8192 の FFT をチャンネルごとに累積、
-            無音フレーム除外、サンプルの OR）→ `Measurement { cutoff_hz, cliff_db, effective_bits }`（探索は
-            1/3 オクターブ平滑化、崖は平滑化前。境界は SPEC §7.10）→ `[hires]` のしきい値で `Status`。
-            合成信号の単体テスト（96 kHz で 22.05 kHz と 24 kHz の brickwall → upsampled で cutoff が
-            エッジ ± 数百 Hz、緩やかなロールオフ → inconclusive、全帯域 → ok（cutoff = Nyquist）、
-            L だけ全帯域の 2ch → ok で cliff は同じ ch、下位 8 bit ゼロ → padded、両方 → both、全無音 → inconclusive で
-            計測値 NULL、帯域外が完全ゼロでも有限、Nyquist 直下のカットオフで cliff NULL）
-      - [ ] `db/migrations/0016_hires_check.sql`: `tracks.hires_check*` + `hires_cutoff_hz` / `hires_cliff_db` / `hires_effective_bits`、
-            `jobs.type` に `hirescheck`（0015 と同じ表の作り直し）。`db/hires.rs`（Status / Target / record /
-            enqueue_all_unchecked / dedup_key）
-      - [ ] `jobs/handlers/hirescheck.rs`（並列 = max(1, コア数 / 2)、`version_field` に追加して stale ゲートと
-            track_locks を効かせる、fstat 照合 → decode → 版付き record）。`[hires]` 設定。スキャン commit での自動投入。`POST /api/hirescheck`
-      - [ ] `tracks` の行に `hires_check`、`Flag::HiresUnchecked` / `HiresSuspect`、DSL の `hirescheck` /
-            `cutoff` / `cliff` / `effectivebits`
-      - [ ] UI: バッジ、プロパティ（判定 + 計測値）、フィルタ、操作タブの再投入
-      - [ ] 受け入れ: `tests/hires_check.rs`（合成 FLAC でジョブを通す。差し替え済みは記録なしで Done、版が進んだ
-            no-op、対象条件。ffmpeg 経由（WavPack）の 24 bit で下位 8 bit ゼロ / 非ゼロ・最大正負が同じ
-            スケールで戻ること）、`tests/hirescheck_api.rs`、`tests/config.rs`、`web/src/lib/*.test.ts`
+      - [x] `media/hires.rs`: `HiresSink`（PcmSink。Hann 8192 / ホップ 8192 の FFT をチャンネルごとに累積、
+            無音フレーム除外、サンプルの OR）→ `Measurement { cutoff_hz, cliff_db, effective_bits }`（候補は
+            1/3 オクターブ平滑化、エッジは平滑化前の段差最大、崖は平滑化前。境界は SPEC §7.10）→ `[hires]` の
+            しきい値で `Verdict`。受け入れ: `tests/hires_analysis.rs`（逆 FFT の合成信号で: 96 kHz の 22.05 kHz と
+            24 kHz の brickwall → upsampled でエッジ ± 数百 Hz、帯域外が完全ゼロでも有限、緩やかなロールオフ →
+            inconclusive、全帯域 → ok（cutoff = Nyquist）、下位 8 bit ゼロ → padded / both、44.1k はスペクトル
+            なし、全無音・32 bit → inconclusive で計測値 NULL、2ch は cutoff 最大の ch と対の cliff、判定の優先順位）
+      - [x] `db/migrations/0016_hires_check.sql`: `tracks.hires_check*` + `hires_cutoff_hz` / `hires_cliff_db` /
+            `hires_effective_bits`、`jobs.type` に `hirescheck`（0015 と同じ表の作り直し）。`db/hires.rs`（Status /
+            Target / record / enqueue_all_unchecked / enqueue_selection）。受け入れ: `tests/migrations.rs`、
+            `tests/hires_db.rs`、`tests/jobs.rs`
+      - [x] `jobs/handlers/hirescheck.rs`（並列 = max(1, コア数 / 2)、`version_field` で stale ゲートと track_locks、
+            fstat 照合 → decode → デコード後の再照合 → 版付き record。デコード失敗は `decode_error`）。`[hires]` 設定
+            （`tests/config.rs`）。スキャン commit での自動投入。受け入れ: `tests/hires_job.rs`（合成 24/96 FLAC で
+            ok / padded、44.1k の 24 bit はスペクトルなし、対象外・差し替え済み・版が進んだ件は記録なし、壊れた
+            ファイルは decode_error、スキャンの自動投入と再投入なし、ffmpeg 経路（WavPack）の整数スケール）
+      - [x] `tracks` の行に `hires_check`、`Flag::HiresUnchecked` / `HiresSuspect`、DSL の `hirescheck` / `cutoff` /
+            `cliff`（`Kind::Float`）/ `effectivebits`、fb2k は変換不能。`POST /api/hirescheck`。受け入れ:
+            `tests/dsl_compile.rs`、`tests/fb2k.rs`、`tests/hirescheck_api.rs`
+      - [x] UI: H バッジ（疑い / inconclusive / エラー、stale は •）、プロパティ「Hi-Res check」（判定 + 計測値）、
+            フィルタ、操作タブ「偽ハイレゾを検出」、ジョブ名。`web/src/lib/{badges,properties,operations}.test.ts`
 
 ---
 
