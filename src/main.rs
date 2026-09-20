@@ -20,6 +20,7 @@ use spindle::import::ytmusic::MetadataProvider;
 use spindle::jobs::handlers::backup::{self, BackupHandler};
 use spindle::jobs::handlers::flaccheck::FlaccheckHandler;
 use spindle::jobs::handlers::gc::{self as gc_job, GcHandler};
+use spindle::jobs::handlers::hirescheck::HirescheckHandler;
 use spindle::jobs::handlers::inbox::{self as inbox_job, InboxHandler};
 use spindle::jobs::handlers::normalize::NormalizeHandler;
 use spindle::jobs::handlers::rename::RenameHandler;
@@ -184,7 +185,8 @@ async fn main() -> anyhow::Result<()> {
         JobType::Scan,
         Arc::new(
             ScanHandler::new(scanner, state.config.scan.deep_interval_days)
-                .with_flac_verify(state.config.normalize.flac_verify_on_import),
+                .with_flac_verify(state.config.normalize.flac_verify_on_import)
+                .with_hires_check(state.config.hires.check_on_import),
         ),
     );
     // FLAC 健全性チェック（P1-5、D-57）。読むだけ
@@ -193,6 +195,18 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(FlaccheckHandler::new(
             Arc::clone(&library_root),
             &state.config.bin.flac,
+        )),
+    );
+    // 偽ハイレゾ検出（P3-5、D-71）。読むだけ。デコーダは rg と同じもの
+    registry.register(
+        JobType::Hirescheck,
+        Arc::new(HirescheckHandler::new(
+            Arc::clone(&library_root),
+            Decoder::new(&state.config.bin.ffmpeg),
+            spindle::media::hires::Thresholds {
+                cutoff_hz: state.config.hires.cutoff_hz,
+                cliff_db: state.config.hires.cliff_db,
+            },
         )),
     );
     // 遡及照合（P2-9、D-13 / D-63）。読むだけ。ログは data/verify/

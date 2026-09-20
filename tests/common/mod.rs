@@ -33,9 +33,12 @@ pub fn pack_pcm(samples: &[i32], bits: u32) -> Vec<u8> {
 }
 
 pub fn write_wav(path: &Path, samples: &[i32], bits: u32) {
+    write_wav_ex(path, samples, bits, 44_100, 2);
+}
+
+/// レートとチャンネル数を指定して書く（ハイレゾの合成用）
+pub fn write_wav_ex(path: &Path, samples: &[i32], bits: u32, rate: u32, channels: u16) {
     let data = pack_pcm(samples, bits);
-    let channels = 2u16;
-    let rate = 44_100u32;
     let block_align = channels * (bits / 8) as u16;
     let mut f = File::create(path).unwrap();
     f.write_all(b"RIFF").unwrap();
