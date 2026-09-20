@@ -14,6 +14,7 @@ import {
   initialSelection,
   outcomeAfterTocEdit,
   validateDraft,
+  type CopyScope,
   type DiscDraft,
   type DiscMetadata,
   type DiscTrackDraft,
@@ -28,6 +29,8 @@ export type CdState = {
   result: LookupResponse | null
   /** 選んだ候補（result.candidates の添字）。手入力なら null */
   selected: number | null
+  /** 候補から写す範囲（D-72、P4-2）。既定は識別用の最小限 */
+  copyScope: CopyScope
   /** 編集中のフォーム（候補を選ぶか手入力を始めると現れる） */
   draft: DiscDraft | null
   paste: string
@@ -45,6 +48,7 @@ export type CdAction =
   | { type: 'lookup_error'; error: string }
   | { type: 'reset' }
   | { type: 'select'; index: number }
+  | { type: 'set_copy_scope'; scope: CopyScope }
   | { type: 'start_manual' }
   | { type: 'update_draft'; patch: Partial<DiscDraft> }
   | { type: 'update_track'; index: number; patch: Partial<DiscTrackDraft> }
@@ -61,6 +65,7 @@ export const initialCdState: CdState = {
   error: null,
   result: null,
   selected: null,
+  copyScope: 'minimal',
   draft: null,
   paste: '',
   pasteArtistFirst: false,
@@ -100,7 +105,7 @@ export function cdReducer(s: CdState, a: CdAction): CdState {
       const sel = initialSelection(r)
       const base: CdState = { ...belowResult(s), busy: false, error: null, result: r }
       // exact が 1 件ならそれをフォームに、候補が無ければ空のフォームへ（照会ゼロ件でも完走できる。D-21）
-      if (sel != null) return withDraft(base, sel, draftFromCandidate(r.candidates[sel]!, r.tracks))
+      if (sel != null) return withDraft(base, sel, draftFromCandidate(r.candidates[sel]!, r.tracks, s.copyScope))
       if (r.candidates.length === 0) return withDraft(base, null, emptyDraft(r.tracks))
       return base
     }
@@ -113,7 +118,17 @@ export function cdReducer(s: CdState, a: CdAction): CdState {
       if (s.result == null || s.confirmed != null) return s
       const c = s.result.candidates[a.index]
       if (c == null) return s
-      return withDraft(s, a.index, draftFromCandidate(c, s.result.tracks))
+      return withDraft(s, a.index, draftFromCandidate(c, s.result.tracks, s.copyScope))
+    }
+    case 'set_copy_scope': {
+      // 範囲を変えると、候補を選択中（未確定）ならその候補を写し直す（編集中の内容は捨てる。画面で断っている）。
+      // 手入力中・確定後は範囲だけ変わる
+      if (a.scope === s.copyScope) return s
+      const next = { ...s, copyScope: a.scope }
+      if (s.result == null || s.selected == null || s.confirmed != null) return next
+      const c = s.result.candidates[s.selected]
+      if (c == null) return next
+      return withDraft(next, s.selected, draftFromCandidate(c, s.result.tracks, a.scope))
     }
     case 'start_manual':
       if (s.result == null || s.confirmed != null) return s

@@ -5,7 +5,16 @@
 import { Fragment, useState } from 'react'
 import { useCategories } from '../hooks/useCategories'
 import type { CdLookupState } from '../hooks/useCdLookup'
-import { albumTags, candidateLengthMs, candidateSummary, lookupHeadline, trackTags, type DiscMetadata } from '../lib/cd'
+import {
+  albumTags,
+  candidateLengthMs,
+  candidateSummary,
+  COPY_SCOPE_LABELS,
+  lookupHeadline,
+  trackTags,
+  type CopyScope,
+  type DiscMetadata,
+} from '../lib/cd'
 import { formatDuration } from '../lib/format'
 
 export function CdView({ cd }: { cd: CdLookupState }) {
@@ -87,6 +96,27 @@ export function CdView({ cd }: { cd: CdLookupState }) {
                 </li>
               ))}
             </ul>
+          )}
+          {result.candidates.length > 0 && (
+            <fieldset className="cd-copy-scope">
+              <legend className="small">候補から写す範囲</legend>
+              {(Object.keys(COPY_SCOPE_LABELS) as CopyScope[]).map((scope) => (
+                <label key={scope} className="small">
+                  <input
+                    type="radio"
+                    name="cd-copy-scope"
+                    checked={cd.copyScope === scope}
+                    disabled={confirmed != null}
+                    onChange={() => cd.setCopyScope(scope)}
+                  />{' '}
+                  {COPY_SCOPE_LABELS[scope]}
+                </label>
+              ))}
+              <span className="muted small">
+                最小限はアルバム名・アルバムアーティスト・日付・ディスク番号 / 枚数・MusicBrainz の id。トラック名は貼り付けか手入力で埋める。
+                切り替えると選択中の候補を写し直す（編集中の内容は消える）
+              </span>
+            </fieldset>
           )}
           {confirmed == null && (
             <div className="op-row">

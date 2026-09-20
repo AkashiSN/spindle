@@ -210,7 +210,20 @@ export function emptyDraft(toc: TocTrackInfo[]): DiscDraft {
  * 候補をフォームに写す。行は TOC の音声トラック（候補のトラックは位置順に当て、足りなければ空行、
  * 余れば捨てる）。レーベルは先頭の 1 つ
  */
-export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[]): DiscDraft {
+/**
+ * 候補から写す範囲（D-72、P4-2）。`minimal` は盤を見分けるのに要る最小限（アルバム / アルバムアーティスト /
+ * 日付 / ディスク番号・枚数 / MusicBrainz のリリース id）。レーベル・カタログ番号・JAN と各トラックの
+ * タイトル・アーティスト・MB id・ISRC は `full` のときだけ写る（値は公式表記を手で入れる運用）
+ */
+export type CopyScope = 'minimal' | 'full'
+
+export const COPY_SCOPE_LABELS: Record<CopyScope, string> = {
+  minimal: '識別用の最小限（既定）',
+  full: '全部写す',
+}
+
+export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[], scope: CopyScope): DiscDraft {
+  const full = scope === 'full'
   const [label, catalog] = c.labels[0] ?? ['', null]
   return {
     source: 'musicbrainz',
@@ -219,15 +232,16 @@ export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[]): Di
     album: c.title,
     album_artist: c.artist,
     date: c.date ?? '',
-    label,
-    catalog_number: catalog ?? '',
-    barcode: c.barcode ?? '',
+    label: full ? label : '',
+    catalog_number: full ? (catalog ?? '') : '',
+    barcode: full ? (c.barcode ?? '') : '',
     disc_no: c.medium_position,
     disc_count: c.medium_count,
     category: null,
+    // minimal はトラック行を番号と長さだけの空行にする（貼り付けか手入力で埋める）
     tracks: blankRows(toc).map((row, i) => {
       const t = c.tracks[i]
-      if (t == null) return row
+      if (!full || t == null) return row
       return {
         ...row,
         title: t.title,

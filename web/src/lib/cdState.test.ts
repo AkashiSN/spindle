@@ -94,6 +94,52 @@ describe('cdReducer: 選択と手入力', () => {
   })
 })
 
+describe('cdReducer: 候補から写す範囲（D-72、P4-2）', () => {
+  const two = response([cand(true, 'X'), cand(false, 'Y')])
+  it('既定は minimal: exact の自動選択も select も最小限だけ写す', () => {
+    const s = looked(two)
+    expect(s.copyScope).toBe('minimal')
+    expect(s.selected).toBe(0)
+    expect(s.draft).toMatchObject({ album: 'X', label: '', catalog_number: '', barcode: '' })
+    expect(s.draft!.tracks.every((t) => t.title === '' && t.artist === '' && t.mb == null)).toBe(true)
+    const t = cdReducer(s, { type: 'select', index: 1 })
+    expect(t.draft).toMatchObject({ album: 'Y', label: '' })
+    expect(t.draft!.tracks.every((t) => t.title === '')).toBe(true)
+  })
+  it('set_copy_scope: full で選択中の候補を写し直し、minimal に戻すと空行になる（編集中の内容は捨てる）', () => {
+    let s = run([{ type: 'update_draft', patch: { album: 'edited' } }], looked(two))
+    s = cdReducer(s, { type: 'set_copy_scope', scope: 'full' })
+    expect(s.copyScope).toBe('full')
+    expect(s.selected).toBe(0)
+    expect(s.draft!.album).toBe('X')
+    expect(s.draft!.tracks[0]).toMatchObject({ title: 'a', artist: 'A', mb: { recording_id: 'x', track_id: 'y', isrcs: [] } })
+    s = cdReducer(s, { type: 'set_copy_scope', scope: 'minimal' })
+    expect(s.draft!.tracks[0]).toMatchObject({ title: '', artist: '', mb: null })
+  })
+  it('同じ範囲なら何もしない。手入力中は範囲だけ変わる。確定後も範囲だけ変わりフォームは残る', () => {
+    const s = looked(two)
+    expect(cdReducer(s, { type: 'set_copy_scope', scope: 'minimal' })).toBe(s)
+    const manual = cdReducer(s, { type: 'start_manual' })
+    const m2 = cdReducer(manual, { type: 'set_copy_scope', scope: 'full' })
+    expect(m2.copyScope).toBe('full')
+    expect(m2.draft).toBe(manual.draft)
+    const confirmed = run(
+      [
+        { type: 'set_copy_scope', scope: 'full' },
+        { type: 'update_draft', patch: { album: 'ok', album_artist: 'aa' } },
+        { type: 'fill_titles' },
+        { type: 'confirm' },
+      ],
+      s,
+    )
+    expect(confirmed.confirmed).not.toBeNull()
+    const c2 = cdReducer(confirmed, { type: 'set_copy_scope', scope: 'minimal' })
+    expect(c2.copyScope).toBe('minimal')
+    expect(c2.draft).toBe(confirmed.draft)
+    expect(c2.confirmed).toBe(confirmed.confirmed)
+  })
+})
+
 describe('cdReducer: フォームの編集と貼り付け', () => {
   const base = looked(response([]))
   it('update_draft / update_track / fill_titles はエラー表示を消す', () => {

@@ -4,12 +4,13 @@
 
 import { useCallback, useReducer } from 'react'
 import { ApiError, apiPost } from '../api/client'
-import { normalizeTocInput, type DiscDraft, type DiscTrackDraft, type LookupResponse, type ReleaseCandidate } from '../lib/cd'
+import { normalizeTocInput, type CopyScope, type DiscDraft, type DiscTrackDraft, type LookupResponse, type ReleaseCandidate } from '../lib/cd'
 import { cdReducer, initialCdState, type CdState } from '../lib/cdState'
 
 export type CdLookupState = CdState & {
   setToc: (v: string) => void
   select: (i: number) => void
+  setCopyScope: (scope: CopyScope) => void
   chosen: ReleaseCandidate | null
   lookup: () => Promise<void>
   reset: () => void
@@ -61,6 +62,7 @@ export function useCdLookup(): CdLookupState {
     lookup,
     setToc: useCallback((toc: string) => dispatch({ type: 'set_toc', toc }), []),
     select: useCallback((index: number) => dispatch({ type: 'select', index }), []),
+    setCopyScope: useCallback((scope: CopyScope) => dispatch({ type: 'set_copy_scope', scope }), []),
     reset: useCallback(() => dispatch({ type: 'reset' }), []),
     startManual: useCallback(() => dispatch({ type: 'start_manual' }), []),
     updateDraft: useCallback((patch: Partial<DiscDraft>) => dispatch({ type: 'update_draft', patch }), []),

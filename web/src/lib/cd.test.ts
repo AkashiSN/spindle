@@ -128,7 +128,7 @@ const toc = [
 
 describe('draftFromCandidate / emptyDraft', () => {
   it('行は TOC の音声トラック数。候補のトラックは位置で写し、足りない行は空', () => {
-    const d = draftFromCandidate(base, toc)
+    const d = draftFromCandidate(base, toc, 'full')
     expect(d.source).toBe('musicbrainz')
     expect(d.release_id).toBe('r')
     expect(d.album).toBe('T')
@@ -147,8 +147,29 @@ describe('draftFromCandidate / emptyDraft', () => {
     expect(d.tracks[0]!.mb).toEqual({ recording_id: 'x', track_id: 'y', isrcs: [] })
     expect(d.tracks[2]!.mb).toBeNull()
   })
+  it('minimal は識別用の最小限だけ写す（レーベル・カタログ番号・JAN は空、トラック行は番号と長さだけ。D-72、P4-2）', () => {
+    const d = draftFromCandidate(base, toc, 'minimal')
+    expect(d).toMatchObject({
+      source: 'musicbrainz',
+      release_id: 'r',
+      release_group_id: base.release_group_id,
+      album: 'T',
+      album_artist: 'A',
+      date: '1991-09-24',
+      label: '',
+      catalog_number: '',
+      barcode: '',
+      disc_no: 1,
+      disc_count: 1,
+    })
+    expect(d.tracks.map((t) => [t.number, t.title, t.artist, t.length_ms, t.mb])).toEqual([
+      [1, '', '', 1000, null],
+      [2, '', '', 2500, null],
+      [3, '', '', 4000, null],
+    ])
+  })
   it('候補が TOC より多いトラックを持っていても TOC の行数に切る（警告は validate で出す）', () => {
-    const d = draftFromCandidate(base, [toc[0]!])
+    const d = draftFromCandidate(base, [toc[0]!], 'full')
     expect(d.tracks).toHaveLength(1)
   })
   it('空のフォーム: 手入力、アルバム欄は空、行は TOC から', () => {
@@ -251,7 +272,7 @@ describe('validateDraft / fillEmptyTitles / finalizeDraft', () => {
     expect(m.release_id).toBeNull()
   })
   it('候補からの確定は MusicBrainz の ID を持ち越す', () => {
-    const m = finalizeDraft(draftFromCandidate({ ...base, tracks: base.tracks.slice(0, 1) }, [toc[0]!]))
+    const m = finalizeDraft(draftFromCandidate({ ...base, tracks: base.tracks.slice(0, 1) }, [toc[0]!], 'full'))
     expect(m.source).toBe('musicbrainz')
     expect(m.release_id).toBe('r')
     expect(m.tracks[0]!.mb).toEqual({ recording_id: 'x', track_id: 'y', isrcs: [] })
@@ -261,7 +282,7 @@ describe('validateDraft / fillEmptyTitles / finalizeDraft', () => {
 describe('albumTags / trackTags', () => {
   it('MusicBrainz の id の写像: recording → MUSICBRAINZ_TRACKID、track → MUSICBRAINZ_RELEASETRACKID', () => {
     const m = finalizeDraft(
-      draftFromCandidate({ ...base, tracks: [{ ...base.tracks[0]!, isrcs: ['USGF19942501', 'JPX'] }] }, [toc[0]!]),
+      draftFromCandidate({ ...base, tracks: [{ ...base.tracks[0]!, isrcs: ['USGF19942501', 'JPX'] }] }, [toc[0]!], 'full'),
     )
     // ISRC は多値のまま（Vorbis コメントは同じキーを反復する。`;` で繋がない）
     expect(trackTags(m.tracks[0]!)).toEqual([
@@ -307,7 +328,7 @@ describe('albumTags / trackTags', () => {
 describe('category（配置先。D-67）', () => {
   it('空のフォームと候補の写しは category を持たない', () => {
     expect(emptyDraft(toc).category).toBeNull()
-    expect(draftFromCandidate(base, toc).category).toBeNull()
+    expect(draftFromCandidate(base, toc, 'full').category).toBeNull()
   })
   it('確定で category をそのまま持ち越し、タグには写さない', () => {
     const d: DiscDraft = {

@@ -1776,6 +1776,25 @@ table.inbox-tracks td:nth-child(3),
 table.inbox-tracks td:nth-child(4) {
   width: 30%;
 }
+/* CD 確定フォームの「候補から写す範囲」（P4-2、D-72） */
+.cd-copy-scope {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px 6px;
+  margin: 8px 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+.cd-copy-scope legend {
+  padding: 0 4px;
+  color: var(--muted);
+}
+.cd-copy-scope label {
+  white-space: nowrap;
+  cursor: pointer;
+}
 /* 承認画面の忠実表示（P4-4、D-70） */
 .inbox-cover {
   width: 48px;
