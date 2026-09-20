@@ -10,6 +10,7 @@ import { formatDateTime } from '../lib/history'
 import {
   canCancel,
   canRetry,
+  cpuBudgetLabel,
   filterJobs,
   jobProgress,
   jobTypeLabel,
@@ -21,7 +22,7 @@ import {
 export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: (batchId: number) => void }) {
   const [state, setState] = useState<StateFilter>('active')
   const [type, setType] = useState<string | null>(null)
-  const { items, summary, concurrency, error, notice } = jobs
+  const { items, summary, concurrency, cpuBudget, error, notice } = jobs
 
   const byType = summarizeByType(items ?? [], concurrency)
   const shown = items ? filterJobs(items, state, type) : []
@@ -73,6 +74,9 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
           ))}
         </tbody>
       </table>
+      {cpuBudgetLabel(byType, cpuBudget) != null && (
+        <p className="muted small jobs-cpu-budget">{cpuBudgetLabel(byType, cpuBudget)}</p>
+      )}
 
       <div className="table-toolbar">
         <div className="tabs" role="tablist">

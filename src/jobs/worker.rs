@@ -1,5 +1,9 @@
 //! スケジューラ本体。種別ごとの Semaphore で並列度を絞り、`claim_next` で取ったジョブを
-//! 個別タスクで実行する。終端遷移はすべてここで行う（ハンドラは結果を返すだけ）
+//! 個別タスクで実行する。終端遷移はすべてここで行う（ハンドラは結果を返すだけ）。
+//!
+//! CPU 系の種別（`JobType::cpu_bound`）は種別の許可に加えて共通の予算（= コア数。D-73）も取る。
+//! 取得順は「種別 → 共通」で、共通が取れなければ claim せずに次の周回で試す（ジョブは queued の
+//! まま。1 本のループで待つと他の種別を止めるので、許可を持ったまま待たずに手放して回る）
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,8 +39,10 @@ pub(super) async fn run(jobs: Arc<Jobs>, registry: Registry, shutdown: Cancellat
         .map(|ty| (ty, Arc::new(Semaphore::new(ty.concurrency(cpus)))))
         .collect();
     slots.sort_by_key(|(ty, _)| ty.as_str());
+    let budget = Arc::new(Semaphore::new(jobs.cpu_budget()));
     info!(
         types = ?slots.iter().map(|(t, s)| format!("{t}:{}", s.available_permits())).collect::<Vec<_>>(),
+        cpu_budget = budget.available_permits(),
         "ジョブワーカーを開始"
     );
 
@@ -59,7 +65,7 @@ pub(super) async fn run(jobs: Arc<Jobs>, registry: Registry, shutdown: Cancellat
             Err(e) => warn!(error = %e, "cancel 要求済み queued の掃除に失敗"),
         }
         for (ty, sem) in &slots {
-            claim_all(&jobs, &registry, *ty, sem, &mut tasks, &shutdown).await;
+            claim_all(&jobs, &registry, *ty, sem, &budget, &mut tasks, &shutdown).await;
         }
 
         tokio::select! {
@@ -85,6 +91,7 @@ async fn claim_all(
     registry: &Arc<Registry>,
     ty: JobType,
     sem: &Arc<Semaphore>,
+    budget: &Arc<Semaphore>,
     tasks: &mut JoinSet<()>,
     shutdown: &CancellationToken,
 ) {
@@ -98,6 +105,16 @@ async fn claim_all(
         }
         let Ok(permit) = Arc::clone(sem).try_acquire_owned() else {
             return;
+        };
+        // CPU 系は共通の予算も要る（D-73）。取れなければ種別の許可も手放して次の周回に回す
+        // （実行中のタスクが終わると wake が来る）
+        let budget_permit = if ty.cpu_bound() {
+            match Arc::clone(budget).try_acquire_owned() {
+                Ok(p) => Some(p),
+                Err(_) => return,
+            }
+        } else {
+            None
         };
         let claimed = jobs
             .db()
@@ -117,7 +134,13 @@ async fn claim_all(
                     }
                     return;
                 }
-                tasks.spawn(execute(Arc::clone(jobs), Arc::clone(&handler), job, permit));
+                tasks.spawn(execute(
+                    Arc::clone(jobs),
+                    Arc::clone(&handler),
+                    job,
+                    permit,
+                    budget_permit,
+                ));
             }
             Ok(None) => return,
             Err(e) => {
@@ -128,12 +151,13 @@ async fn claim_all(
     }
 }
 
-/// 1 件を実行して終端まで進める。permit はこの関数の終わりで返る
+/// 1 件を実行して終端まで進める。permit（種別と、CPU 系なら共通予算）はこの関数の終わりで返る
 async fn execute(
     jobs: Arc<Jobs>,
     handler: Arc<dyn Handler>,
     job: Job,
     _permit: OwnedSemaphorePermit,
+    _budget_permit: Option<OwnedSemaphorePermit>,
 ) {
     let id = job.id;
     let ty = job.job_type;

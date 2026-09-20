@@ -34,13 +34,18 @@ impl Jobs {
         let cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
+        Self::with_cpus(db, cpus)
+    }
+
+    /// コア数を固定して作る（並列度のテスト用。0 は 1 に丸める）
+    pub fn with_cpus(db: Arc<Db>, cpus: usize) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         Arc::new(Self {
             db,
             events,
             wake: Notify::new(),
             running: Mutex::new(HashMap::new()),
-            cpus,
+            cpus: cpus.max(1),
         })
     }
 
@@ -50,6 +55,11 @@ impl Jobs {
 
     /// 論理コア数（種別ごとの並列度の元。`JobType::concurrency`）
     pub fn cpus(&self) -> usize {
+        self.cpus
+    }
+
+    /// CPU 系（`JobType::cpu_bound`）が共有する並列予算（= コア数。D-73）
+    pub fn cpu_budget(&self) -> usize {
         self.cpus
     }
 

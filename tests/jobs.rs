@@ -46,6 +46,19 @@ impl Harness {
         }
     }
 
+    /// コア数を固定して作る（並列度のテスト用）
+    fn with_cpus(cpus: usize) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
+        let jobs = Jobs::with_cpus(db.clone(), cpus);
+        Self {
+            db,
+            jobs,
+            shutdown: CancellationToken::new(),
+            dir,
+        }
+    }
+
     /// 同じ DB ファイルを開き直す（プロセス再起動の模擬）
     fn reopen(mut self) -> Self {
         self.shutdown.cancel();
@@ -1131,6 +1144,104 @@ async fn worker_shutdown_leaves_no_job_running_that_never_started() {
     assert_eq!(running + queued, 20);
 }
 
+// ---------------------------------------------------------------- CPU 系の共通予算（P4-1、D-73）
+
+/// rg / transcode / flaccheck / hirescheck は種別ごとの上限に加えて共通の予算（= コア数）を取る。
+/// コア数 2 で rg（上限 2）と flaccheck（上限 2）を同時に投入しても、実行中の合計は 2 を超えない
+#[tokio::test]
+async fn cpu_bound_types_share_a_budget_of_cpus() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let h = Harness::with_cpus(2);
+    assert_eq!(h.jobs.cpus(), 2);
+    assert!(JobType::Rg.cpu_bound() && JobType::Flaccheck.cpu_bound());
+    assert!(JobType::Transcode.cpu_bound() && JobType::Hirescheck.cpu_bound());
+    assert!(!JobType::Thumbnail.cpu_bound() && !JobType::Scan.cpu_bound());
+    let running = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let mut reg = Registry::new();
+    for ty in [JobType::Rg, JobType::Flaccheck] {
+        let running = running.clone();
+        let peak = peak.clone();
+        reg.register_fn(ty, move |_ctx| {
+            let running = running.clone();
+            let peak = peak.clone();
+            async move {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                running.fetch_sub(1, Ordering::SeqCst);
+                Ok(Outcome::Done)
+            }
+        });
+    }
+    // flaccheck は版付き（track_id + audio_version）なのでトラックを置く
+    {
+        let conn = h.raw();
+        for i in 0..3 {
+            insert_track(&conn, 100 + i, 1, 1);
+        }
+    }
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let rg = NewJob::new(JobType::Rg, serde_json::json!({})).dedup_key(format!("rg:{i}"));
+        let fc = NewJob::new(
+            JobType::Flaccheck,
+            serde_json::json!({ "track_id": 100 + i, "audio_version": 1 }),
+        )
+        .dedup_key(format!("flaccheck:{i}"));
+        for job in [rg, fc] {
+            let EnqueueResult::Inserted(id) = h.jobs.enqueue(job).await.unwrap() else {
+                panic!()
+            };
+            ids.push(id);
+        }
+    }
+    h.start(reg);
+    for id in &ids {
+        wait_state(&h, *id, JobState::Done).await;
+    }
+    assert_eq!(peak.load(Ordering::SeqCst), 2, "予算 = コア数を超えない");
+}
+
+/// 予算に入らない種別は今までどおり種別の上限だけ（thumbnail = 4 は CPU 予算 2 に縛られない）
+#[tokio::test]
+async fn non_cpu_types_are_not_limited_by_the_budget() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let h = Harness::with_cpus(2);
+    let running = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let mut reg = Registry::new();
+    {
+        let running = running.clone();
+        let peak = peak.clone();
+        reg.register_fn(JobType::Thumbnail, move |_ctx| {
+            let running = running.clone();
+            let peak = peak.clone();
+            async move {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                running.fetch_sub(1, Ordering::SeqCst);
+                Ok(Outcome::Done)
+            }
+        });
+    }
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        let job = NewJob::new(JobType::Thumbnail, serde_json::json!({}))
+            .dedup_key(format!("thumbnail:{i}"));
+        let EnqueueResult::Inserted(id) = h.jobs.enqueue(job).await.unwrap() else {
+            panic!()
+        };
+        ids.push(id);
+    }
+    h.start(reg);
+    for id in &ids {
+        wait_state(&h, *id, JobState::Done).await;
+    }
+    assert_eq!(peak.load(Ordering::SeqCst), 4);
+}
+
 // ---------------------------------------------------------------- HTTP API
 
 struct TestApp {
@@ -1259,6 +1370,10 @@ async fn jobs_list_returns_items_and_summary() {
     assert!(item.get("started_at").is_some());
     // 種別ごとの並列度（SPEC §12.5 のジョブ画面が出す）。scan は常に 1、rg はコア数
     let conc = body["concurrency"].as_object().unwrap();
+    assert_eq!(
+        body["cpu_budget"], conc["rg"],
+        "CPU 系の共通予算 = コア数（D-73）"
+    );
     assert_eq!(conc["scan"], 1);
     assert_eq!(conc["gc"], 1);
     assert!(conc["rg"].as_u64().unwrap() >= 1);

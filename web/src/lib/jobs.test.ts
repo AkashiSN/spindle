@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Job } from '../api/types'
-import { canCancel, canRetry, filterJobs, jobProgress, jobTypeLabel, summarizeByType } from './jobs'
+import { canCancel, canRetry, cpuBudgetLabel, filterJobs, jobProgress, jobTypeLabel, summarizeByType } from './jobs'
 
 function job(over: Partial<Job>): Job {
   return {
@@ -88,5 +88,23 @@ describe('jobTypeLabel', () => {
   it('既知の種別は日本語、未知はそのまま', () => {
     expect(jobTypeLabel('transcode')).toBe('Derived 生成')
     expect(jobTypeLabel('mystery')).toBe('mystery')
+  })
+})
+
+describe('cpuBudgetLabel（D-73）', () => {
+  it('CPU 系の実行中の合計と予算を出し、予算が無ければ null', () => {
+    const rows = summarizeByType(
+      [
+        job({ id: 1, type: 'transcode', state: 'running' }),
+        job({ id: 2, type: 'rg', state: 'running' }),
+        job({ id: 3, type: 'thumbnail', state: 'running' }),
+        job({ id: 4, type: 'flaccheck', state: 'queued' }),
+      ],
+      { transcode: 11, rg: 12, thumbnail: 4, flaccheck: 12 },
+    )
+    expect(cpuBudgetLabel(rows, 12)).toBe(
+      'CPU 系（rg / transcode / flaccheck / hirescheck）の実行中の合計 2 / 予算 12（= コア数）',
+    )
+    expect(cpuBudgetLabel(rows, null)).toBeNull()
   })
 })

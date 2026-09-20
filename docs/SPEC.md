@@ -1126,6 +1126,10 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
 | `gc` | 1 | 固定（scan と同じ排他 `library` を取れなければ Requeue。D-56） |
 | `backup` | 1 | 固定 |
 
+- **CPU 系の共通予算**（`rg` / `transcode` / `flaccheck` / `hirescheck`。D-73、P4-1）: 種別の並列度に加えて
+  共有の予算（= CPU コア数）を取ってから走る。種別単独なら今までどおり、複数種別が同時に走るときだけ
+  実行中の合計がコア数に収まる。取得順は種別 → 共通で、共通が取れなければ claim せず次の周回で試す
+  （ジョブは queued のまま。順序は変えない）。`GET /api/jobs` の `cpu_budget`
 - 起動時リカバリ: `running` を `queued` へ戻し、`track_locks` / `derived_path_locks` / `job_mutexes` を
   **全件削除**する
   （ロックはプロセス生存中しか意味を持たない）。単一インスタンス前提。同じ DB を
@@ -1377,7 +1381,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 { "items": [ { "id", "type", "state", "progress", "done", "total", "attempts", "last_error",
                "run_after", "edit_batch_id", "created_at", "started_at" } ],
   "summary": { "running": 3, "queued": 12, "pending_ops": 1204, "failed": 0 },
-  "concurrency": { "scan": 1, "rg": 12, "transcode": 11, … } }   // 種別ごとの並列度（§8）
+  "concurrency": { "scan": 1, "rg": 12, "transcode": 11, … },   // 種別ごとの並列度（§8）
+  "cpu_budget": 12 }                                              // CPU 系の共通予算（= コア数。D-73）
 // POST /api/jobs/:id/cancel  → 202（queued は即 cancelled、running は cancel_requested_at を立てる）
 //                            → 404 | 409 { "error": "not_cancellable" }   // 既に終端
 // POST /api/jobs/:id/retry   → 202（failed / cancelled を attempts=0 で queued に戻す）
@@ -1652,7 +1657,7 @@ rel_path（既定非表示）
 ### 12.5 ジョブ
 
 種別ごとの並列度と待ち行列、実行中の進捗（`done / total`）、失敗の `last_error` と
-[再試行] / [キャンセル]。編集バッチ由来のジョブは `edit_batch_id` で履歴画面へリンク。
+[再試行] / [キャンセル]。種別表の下に CPU 系の実行中の合計と共通予算（`cpu_budget`。D-73）。編集バッチ由来のジョブは `edit_batch_id` で履歴画面へリンク。
 SSE `/api/events` で更新し、リロードしても DB の値で復元する。
 
 ### 12.6 その他の画面（骨格のみ）

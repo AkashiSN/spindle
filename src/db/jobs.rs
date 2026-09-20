@@ -73,6 +73,15 @@ impl JobType {
         }
     }
 
+    /// デコード・エンコード・解析で CPU を使い切る種別（D-73）。種別ごとの上限に加えて、
+    /// 共通の並列予算（`Jobs::cpu_budget` = コア数）を取ってから走る
+    pub fn cpu_bound(self) -> bool {
+        matches!(
+            self,
+            JobType::Rg | JobType::Transcode | JobType::Flaccheck | JobType::Hirescheck
+        )
+    }
+
     /// 種別ごとの並列度（SPEC §8）。`cpus` は論理コア数
     pub fn concurrency(self, cpus: usize) -> usize {
         let cpus = cpus.max(1);

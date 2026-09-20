@@ -88,3 +88,13 @@ export function canCancel(j: Job): boolean {
 export function canRetry(j: Job): boolean {
   return j.state === 'failed' || j.state === 'cancelled'
 }
+
+/** CPU 系（rg / transcode / flaccheck / hirescheck）の種別か（共通予算の対象。D-73） */
+export const CPU_BOUND_TYPES: ReadonlySet<string> = new Set(['rg', 'transcode', 'flaccheck', 'hirescheck'])
+
+/** 種別表の脚注: CPU 系の実行中の合計と予算 */
+export function cpuBudgetLabel(rows: readonly TypeSummary[], budget: number | null): string | null {
+  if (budget == null) return null
+  const running = rows.filter((r) => CPU_BOUND_TYPES.has(r.type)).reduce((n, r) => n + r.running, 0)
+  return `CPU 系（rg / transcode / flaccheck / hirescheck）の実行中の合計 ${running} / 予算 ${budget}（= コア数）`
+}

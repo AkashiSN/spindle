@@ -9,6 +9,8 @@ export type JobsState = {
   items: Job[] | null
   /** 種別ごとの並列度 */
   concurrency: Record<string, number>
+  /** CPU 系が共有する並列予算（= コア数。D-73）。まだ取れていなければ null */
+  cpuBudget: number | null
   error: string | null
   notice: string | null
   refresh: () => void
@@ -21,6 +23,7 @@ export function useJobSummary(enabled: boolean): JobsState {
   const [summary, setSummary] = useState<JobSummary | null>(null)
   const [items, setItems] = useState<Job[] | null>(null)
   const [concurrency, setConcurrency] = useState<Record<string, number>>({})
+  const [cpuBudget, setCpuBudget] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const timer = useRef<number | null>(null)
@@ -30,6 +33,7 @@ export function useJobSummary(enabled: boolean): JobsState {
         setSummary(l.summary)
         setItems(l.items)
         setConcurrency(l.concurrency ?? {})
+        setCpuBudget(l.cpu_budget ?? null)
         setError(null)
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
@@ -77,6 +81,7 @@ export function useJobSummary(enabled: boolean): JobsState {
     summary,
     items,
     concurrency,
+    cpuBudget,
     error,
     notice,
     refresh,

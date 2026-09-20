@@ -19,6 +19,8 @@ pub struct JobList {
     pub summary: Summary,
     /// 種別ごとの並列度（SPEC §8。ジョブ画面 §12.5 が待ち行列と並べて出す）
     pub concurrency: BTreeMap<&'static str, usize>,
+    /// CPU 系（rg / transcode / flaccheck / hirescheck）が共有する並列予算（= コア数。D-73）
+    pub cpu_budget: usize,
 }
 
 pub async fn list(State(state): State<AppState>) -> Result<Json<JobList>, ApiError> {
@@ -32,6 +34,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<JobList>, ApiErr
         items,
         summary,
         concurrency,
+        cpu_budget: state.jobs.cpu_budget(),
     }))
 }
 
