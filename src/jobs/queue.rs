@@ -1,7 +1,7 @@
 //! プロセス内のジョブハンドル。投入・キャンセル・再試行・一覧・イベント購読を提供し、
 //! ワーカー（`worker.rs`）を起動する。API ハンドラと将来のハンドラ群はこれ経由で触る
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, Notify};
@@ -12,6 +12,7 @@ use crate::db::{now_epoch, Db, Result};
 
 use super::{
     CancelOutcome, EnqueueResult, Event, Job, JobEvent, NewJob, Registry, RetryOutcome, Summary,
+    TypeCounts,
 };
 
 /// broadcast チャネルの容量。遅い購読者は Lagged を受け取り、SSE 側で読み飛ばす
@@ -89,7 +90,7 @@ impl Jobs {
         self.db.read(move |c| dbjobs::get(c, id)).await
     }
 
-    pub async fn list(&self) -> Result<(Vec<Job>, Summary)> {
+    pub async fn list(&self) -> Result<(Vec<Job>, Summary, BTreeMap<String, TypeCounts>)> {
         self.db
             .read(|c| dbjobs::list_with_summary(c, LIST_LIMIT))
             .await

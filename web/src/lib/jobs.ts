@@ -1,6 +1,6 @@
 // ジョブ画面（SPEC §12.5）の純粋ロジック: 種別ごとの集計、絞り込み、進捗と操作可否の判定
 
-import type { Job, JobState } from '../api/types'
+import type { Job, JobState, TypeCounts } from '../api/types'
 
 const TYPE_LABEL: Record<string, string> = {
   scan: 'スキャン',
@@ -40,21 +40,28 @@ export type TypeSummary = {
   failed: number
 }
 
-/** 種別ごとの待ち行列。並列度を持つ種別は 0 件でも出し、種別名順。未知の種別は後ろ */
-export function summarizeByType(items: readonly Job[], concurrency: Readonly<Record<string, number>>): TypeSummary[] {
+/**
+ * 種別ごとの待ち行列。件数はサーバの全件集計（`by_type`。一覧は上限付きなので数えない）に並列度を
+ * 添える。並列度を持つ種別は 0 件でも出し、種別名順。未知の種別は後ろ
+ */
+export function summarizeByType(
+  byType: Readonly<Record<string, TypeCounts>>,
+  concurrency: Readonly<Record<string, number>>,
+): TypeSummary[] {
   const map = new Map<string, TypeSummary>()
   for (const type of Object.keys(concurrency).sort()) {
     map.set(type, { type, concurrency: concurrency[type] ?? null, queued: 0, running: 0, failed: 0 })
   }
-  for (const j of items) {
-    let row = map.get(j.type)
-    if (!row) {
-      row = { type: j.type, concurrency: null, queued: 0, running: 0, failed: 0 }
-      map.set(j.type, row)
+  for (const type of Object.keys(byType).sort()) {
+    const c = byType[type]
+    const row = map.get(type)
+    if (row) {
+      row.queued = c.queued
+      row.running = c.running
+      row.failed = c.failed
+    } else {
+      map.set(type, { type, concurrency: null, queued: c.queued, running: c.running, failed: c.failed })
     }
-    if (j.state === 'queued') row.queued++
-    else if (j.state === 'running') row.running++
-    else if (j.state === 'failed') row.failed++
   }
   return [...map.values()]
 }

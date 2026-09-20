@@ -5,6 +5,7 @@
 //! UPDATE で行い、`changes()` で遷移が成立したかを返す（同じジョブを二重に終端へ
 //! 進めない）。
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -402,13 +403,17 @@ pub fn active_jobs_of_batch(conn: &Connection, batch_id: i64) -> Result<Vec<Job>
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// 一覧。未完了を先に、その中では priority 降順・作成順。終端は新しい順
+/// 一覧。実行中を先頭に、待ちはキューから取られる順（priority 降順 → 作成順 → id 昇順。
+/// [`claim`] と同じ）、終端は新しい順。上限で切れるのは待ちの末尾と古い終端行（同じ秒に数千件を
+/// 一括投入したとき id 降順だと、先頭から取られた実行中が上限の外に落ちる）
 pub fn list(conn: &Connection, limit: usize) -> Result<Vec<Job>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {JOB_COLUMNS} FROM jobs
-         ORDER BY (state IN ('queued','running')) DESC,
+         ORDER BY (state = 'running') DESC,
+                  (state = 'queued') DESC,
                   CASE WHEN state IN ('queued','running') THEN priority END DESC,
                   CASE WHEN state IN ('queued','running') THEN created_at END ASC,
+                  CASE WHEN state IN ('queued','running') THEN id END ASC,
                   COALESCE(finished_at, created_at) DESC, id DESC
          LIMIT ?1"
     ))?;
@@ -416,14 +421,50 @@ pub fn list(conn: &Connection, limit: usize) -> Result<Vec<Job>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// 一覧と summary を同じ読み取りスナップショットで取る（WAL では別 SELECT が別スナップに
-/// なり得るため、明示トランザクションで囲う）
-pub fn list_with_summary(conn: &Connection, limit: usize) -> Result<(Vec<Job>, Summary)> {
+/// 一覧・summary・種別ごとの件数を同じ読み取りスナップショットで取る（WAL では別 SELECT が別
+/// スナップになり得るため、明示トランザクションで囲う）
+pub fn list_with_summary(
+    conn: &Connection,
+    limit: usize,
+) -> Result<(Vec<Job>, Summary, BTreeMap<String, TypeCounts>)> {
     let tx = conn.unchecked_transaction()?;
     let items = list(&tx, limit)?;
     let summary = summary(&tx)?;
+    let by_type = counts_by_type(&tx)?;
     tx.finish()?;
-    Ok((items, summary))
+    Ok((items, summary, by_type))
+}
+
+/// 種別ごとの件数（`GET /api/jobs` の `by_type`。一覧は上限付きなので web で数えると欠ける）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct TypeCounts {
+    pub queued: i64,
+    pub running: i64,
+    pub failed: i64,
+}
+
+/// 種別ごとの queued / running / failed を全件から集計する。件数 0 の種別は入らない
+pub fn counts_by_type(conn: &Connection) -> Result<BTreeMap<String, TypeCounts>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT type,
+                count(*) FILTER (WHERE state = 'queued'),
+                count(*) FILTER (WHERE state = 'running'),
+                count(*) FILTER (WHERE state = 'failed')
+           FROM jobs
+          WHERE state IN ('queued', 'running', 'failed')
+          GROUP BY type",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            TypeCounts {
+                queued: r.get(1)?,
+                running: r.get(2)?,
+                failed: r.get(3)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()?)
 }
 
 /// `GET /api/jobs` の `summary`（SPEC §9）

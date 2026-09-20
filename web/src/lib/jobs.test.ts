@@ -23,23 +23,21 @@ function job(over: Partial<Job>): Job {
 }
 
 describe('summarizeByType', () => {
-  it('種別ごとに queued / running / failed を数え、並列度を添える。並列度がある種別は 0 件でも出す', () => {
+  it('サーバの種別ごとの件数に並列度を添える。並列度がある種別は 0 件でも出す（一覧は上限付きなので数えない）', () => {
     const rows = summarizeByType(
-      [
-        job({ id: 1, type: 'transcode', state: 'queued' }),
-        job({ id: 2, type: 'transcode', state: 'running' }),
-        job({ id: 3, type: 'transcode', state: 'done' }),
-        job({ id: 4, type: 'rg', state: 'failed' }),
-        job({ id: 5, type: 'mystery', state: 'queued' }),
-      ],
+      {
+        transcode: { queued: 6470, running: 11, failed: 0 },
+        rg: { queued: 0, running: 0, failed: 1 },
+        mystery: { queued: 1, running: 0, failed: 0 },
+      },
       { transcode: 11, rg: 12, scan: 1 },
     )
     expect(rows.map((r) => r.type)).toEqual(['rg', 'scan', 'transcode', 'mystery'])
     expect(rows.find((r) => r.type === 'transcode')).toEqual({
       type: 'transcode',
       concurrency: 11,
-      queued: 1,
-      running: 1,
+      queued: 6470,
+      running: 11,
       failed: 0,
     })
     expect(rows.find((r) => r.type === 'scan')).toEqual({ type: 'scan', concurrency: 1, queued: 0, running: 0, failed: 0 })
@@ -94,12 +92,12 @@ describe('jobTypeLabel', () => {
 describe('cpuBudgetLabel（D-73）', () => {
   it('CPU 系の実行中の合計と予算を出し、予算が無ければ null', () => {
     const rows = summarizeByType(
-      [
-        job({ id: 1, type: 'transcode', state: 'running' }),
-        job({ id: 2, type: 'rg', state: 'running' }),
-        job({ id: 3, type: 'thumbnail', state: 'running' }),
-        job({ id: 4, type: 'flaccheck', state: 'queued' }),
-      ],
+      {
+        transcode: { queued: 0, running: 1, failed: 0 },
+        rg: { queued: 0, running: 1, failed: 0 },
+        thumbnail: { queued: 0, running: 1, failed: 0 },
+        flaccheck: { queued: 1, running: 0, failed: 0 },
+      },
       { transcode: 11, rg: 12, thumbnail: 4, flaccheck: 12 },
     )
     expect(cpuBudgetLabel(rows, 12)).toBe(

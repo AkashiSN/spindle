@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch, ApiError } from '../api/client'
-import type { Job, JobList, JobSummary } from '../api/types'
+import type { Job, JobList, JobSummary, TypeCounts } from '../api/types'
 
 export type JobsState = {
   /** ヘッダの要約。まだ取れていなければ null */
@@ -9,6 +9,8 @@ export type JobsState = {
   items: Job[] | null
   /** 種別ごとの並列度 */
   concurrency: Record<string, number>
+  /** 種別ごとの件数（サーバの全件集計） */
+  byType: Record<string, TypeCounts>
   /** CPU 系が共有する並列予算（= コア数。D-73）。まだ取れていなければ null */
   cpuBudget: number | null
   error: string | null
@@ -23,6 +25,7 @@ export function useJobSummary(enabled: boolean): JobsState {
   const [summary, setSummary] = useState<JobSummary | null>(null)
   const [items, setItems] = useState<Job[] | null>(null)
   const [concurrency, setConcurrency] = useState<Record<string, number>>({})
+  const [byType, setByType] = useState<Record<string, TypeCounts>>({})
   const [cpuBudget, setCpuBudget] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -33,6 +36,7 @@ export function useJobSummary(enabled: boolean): JobsState {
         setSummary(l.summary)
         setItems(l.items)
         setConcurrency(l.concurrency ?? {})
+        setByType(l.by_type ?? {})
         setCpuBudget(l.cpu_budget ?? null)
         setError(null)
       })
@@ -81,6 +85,7 @@ export function useJobSummary(enabled: boolean): JobsState {
     summary,
     items,
     concurrency,
+    byType,
     cpuBudget,
     error,
     notice,

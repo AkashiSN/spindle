@@ -1453,6 +1453,64 @@ async fn jobs_list_returns_items_and_summary() {
     assert!(item.get("progress").is_some());
     assert!(item.get("done").is_some());
     assert!(item.get("total").is_some());
+    // 種別ごとの件数はサーバが全件を集計する（items は上限付きなので web で数えると欠ける）
+    let by_type = body["by_type"].as_object().unwrap();
+    assert_eq!(by_type["scan"]["queued"], 1);
+    assert_eq!(by_type["scan"]["running"], 0);
+    assert_eq!(by_type["scan"]["failed"], 0);
+    assert_eq!(by_type["gc"]["failed"], 1);
+    assert_eq!(by_type["gc"]["queued"], 0);
+    assert!(by_type.get("rg").is_none(), "件数 0 の種別は返さない");
+}
+
+/// 一覧は実行中が先頭、待ちはキューから取られる順（priority → created_at → id 昇順）。同じ秒に
+/// 数千件を一括投入すると id 降順では実行中（古い id）が上限の外に落ちる
+#[tokio::test]
+async fn jobs_list_puts_running_first_and_queued_in_dequeue_order() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        let j =
+            NewJob::new(JobType::Gc, serde_json::json!({ "i": i })).dedup_key(format!("gc:{i}"));
+        let EnqueueResult::Inserted(id) = app.jobs.enqueue(j).await.unwrap() else {
+            panic!()
+        };
+        ids.push(id);
+    }
+    let (first, third) = (ids[0], ids[2]);
+    app.jobs
+        .db()
+        .write(move |c| {
+            // 全部同じ秒に作られ、先頭が実行中、3 つ目は高優先
+            c.execute("UPDATE jobs SET created_at = 100", [])?;
+            c.execute(
+                "UPDATE jobs SET state = 'running', started_at = 101 WHERE id = ?1",
+                [first],
+            )?;
+            c.execute("UPDATE jobs SET priority = 5 WHERE id = ?1", [third])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let res = send(
+        &app,
+        req(Method::GET, "/api/jobs")
+            .header(header::COOKIE, &c)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let body = json(res).await;
+    let order: Vec<i64> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(order, vec![ids[0], ids[2], ids[1], ids[3]]);
+    assert_eq!(body["by_type"]["gc"]["running"], 1);
+    assert_eq!(body["by_type"]["gc"]["queued"], 3);
 }
 
 #[tokio::test]

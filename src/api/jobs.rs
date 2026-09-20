@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::jobs::{CancelOutcome, Job, JobType, RetryOutcome, Summary};
+use crate::jobs::{CancelOutcome, Job, JobType, RetryOutcome, Summary, TypeCounts};
 
 use super::error::{error_response, ApiError};
 use super::AppState;
@@ -21,10 +21,12 @@ pub struct JobList {
     pub concurrency: BTreeMap<&'static str, usize>,
     /// CPU 系（rg / transcode / flaccheck / hirescheck）が共有する並列予算（= コア数。D-73）
     pub cpu_budget: usize,
+    /// 種別ごとの queued / running / failed（全件の集計。`items` は上限付きなので web で数えない）
+    pub by_type: BTreeMap<String, TypeCounts>,
 }
 
 pub async fn list(State(state): State<AppState>) -> Result<Json<JobList>, ApiError> {
-    let (items, summary) = state.jobs.list().await?;
+    let (items, summary, by_type) = state.jobs.list().await?;
     let cpus = state.jobs.cpus();
     let concurrency = JobType::ALL
         .iter()
@@ -35,6 +37,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<JobList>, ApiErr
         summary,
         concurrency,
         cpu_budget: state.jobs.cpu_budget(),
+        by_type,
     }))
 }
 

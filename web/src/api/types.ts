@@ -133,12 +133,22 @@ export type JobSummary = {
   failed: number
 }
 
+/** 種別ごとの件数（全件の集計） */
+export type TypeCounts = {
+  queued: number
+  running: number
+  failed: number
+}
+
 export type JobList = {
+  /** 上限付き（実行中が先頭、待ちは取り出し順、終端は新しい順） */
   items: Job[]
   summary: JobSummary
   concurrency: Record<string, number>
   /** CPU 系（rg / transcode / flaccheck / hirescheck）が共有する並列予算（= コア数。D-73） */
   cpu_budget: number
+  /** 種別ごとの queued / running / failed。`items` は上限付きなのでこちらで数える */
+  by_type: Record<string, TypeCounts>
 }
 
 // SSE /api/events

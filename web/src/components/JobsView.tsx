@@ -22,9 +22,9 @@ import {
 export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: (batchId: number) => void }) {
   const [state, setState] = useState<StateFilter>('active')
   const [type, setType] = useState<string | null>(null)
-  const { items, summary, concurrency, cpuBudget, error, notice } = jobs
+  const { items, summary, concurrency, byType: counts, cpuBudget, error, notice } = jobs
 
-  const byType = summarizeByType(items ?? [], concurrency)
+  const byType = summarizeByType(counts, concurrency)
   const shown = items ? filterJobs(items, state, type) : []
 
   return (
