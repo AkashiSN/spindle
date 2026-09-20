@@ -37,6 +37,31 @@ pub fn cover_rank(name: &str) -> Option<u8> {
     Some((n * COVER_EXTS.len() + e) as u8)
 }
 
+/// サムネイルの形式。一覧・Opus は WebP、aac の `covr` は JPEG（ミュージック.app は WebP を読まない。
+/// D-75）。`missing_thumbs` と thumbnail ジョブは WebP だけを見る（JPEG は aac の transcode が要るときに
+/// 作る。GC は `thumbs/<hex>/` をディレクトリごと消すので JPEG も一緒に回収される）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbFormat {
+    WebP,
+    Jpeg,
+}
+
+impl ThumbFormat {
+    pub fn ext(self) -> &'static str {
+        match self {
+            ThumbFormat::WebP => "webp",
+            ThumbFormat::Jpeg => "jpg",
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            ThumbFormat::WebP => "image/webp",
+            ThumbFormat::Jpeg => "image/jpeg",
+        }
+    }
+}
+
 /// 画像ヘッダから読んだ種別と寸法
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageInfo {
@@ -173,8 +198,15 @@ impl ArtworkStore {
             .join(format!("orig.{}", ext_of_mime(mime)))
     }
 
+    /// 一覧・Opus 用の WebP サムネイル
     pub fn thumb_path(&self, hash: &[u8], size: u32) -> PathBuf {
-        self.entry_dir(hash).join(format!("{size}.webp"))
+        self.thumb_path_of(hash, size, ThumbFormat::WebP)
+    }
+
+    /// 形式付きのサムネイル（`<size>.webp` / `<size>.jpg`）
+    pub fn thumb_path_of(&self, hash: &[u8], size: u32, format: ThumbFormat) -> PathBuf {
+        self.entry_dir(hash)
+            .join(format!("{size}.{}", format.ext()))
     }
 
     pub fn has_original(&self, hash: &[u8], mime: &str) -> bool {

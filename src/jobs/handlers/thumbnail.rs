@@ -15,12 +15,14 @@ use crate::jobs::process::{ExternalCommand, PathStyle};
 use crate::jobs::{
     BoxFuture, Handler, HandlerResult, JobContext, JobError, JobType, NewJob, Outcome,
 };
-use crate::media::artwork::{ArtworkStore, THUMB_SIZES};
+use crate::media::artwork::{ArtworkStore, ThumbFormat, THUMB_SIZES};
 
 /// 1 枚の変換の上限
 const STEP_TIMEOUT: Duration = Duration::from_secs(60);
 /// WebP の品質（0..100）
 const WEBP_QUALITY: &str = "82";
+/// JPEG の品質（mjpeg の -q:v。2 ≈ 90%）
+const JPEG_QUALITY: &str = "2";
 
 pub fn dedup_key(artwork_id: i64) -> String {
     format!("thumbnail:{artwork_id}")
@@ -48,12 +50,13 @@ impl ThumbnailHandler {
     }
 }
 
-/// `src` から一辺 `size` の WebP を `dst` に作る（tmp + rename。失敗したら tmp を消す）
+/// `src` から一辺 `size` の WebP / JPEG を `dst` に作る（tmp + rename。失敗したら tmp を消す）
 pub async fn make_thumb(
     ffmpeg: &Path,
     src: &Path,
     dst: &Path,
     size: u32,
+    format: ThumbFormat,
     job_id: i64,
     token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), JobError> {
@@ -61,26 +64,30 @@ pub async fn make_thumb(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let tmp = dst.with_extension(format!("webp.tmp-{job_id}-{nonce}"));
-    // 長辺を size に。小さい画像は拡大しない（min）。偶数丸めは不要（WebP に制約なし）
+    let tmp = dst.with_extension(format!("{}.tmp-{job_id}-{nonce}", format.ext()));
+    // 長辺を size に。小さい画像は拡大しない（min）。偶数丸めは不要（WebP に制約なし、mjpeg も奇数で書ける）
     let scale =
         format!("scale='min({size},iw)':'min({size},ih)':force_original_aspect_ratio=decrease");
+    let codec: &[&str] = match format {
+        ThumbFormat::WebP => &["-c:v", "libwebp", "-quality", WEBP_QUALITY, "-f", "webp"],
+        // mjpeg はフルレンジの yuvj420p。-f image2 で 1 枚の JPEG
+        ThumbFormat::Jpeg => &[
+            "-c:v",
+            "mjpeg",
+            "-pix_fmt",
+            "yuvj420p",
+            "-q:v",
+            JPEG_QUALITY,
+            "-f",
+            "image2",
+        ],
+    };
     let result = ExternalCommand::new(ffmpeg)
         .path_style(PathStyle::DotSlash)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i"])
         .path_arg(src)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            &scale,
-            "-c:v",
-            "libwebp",
-            "-quality",
-            WEBP_QUALITY,
-            "-f",
-            "webp",
-        ])
+        .args(["-frames:v", "1", "-vf", &scale])
+        .args(codec)
         .path_arg(&tmp)
         .timeout(STEP_TIMEOUT)
         .run(token)
@@ -137,7 +144,16 @@ impl Handler for ThumbnailHandler {
             for (i, size) in missing.iter().enumerate() {
                 ctx.check_cancel().await?;
                 let dst = store.thumb_path(&art.sha256, *size);
-                make_thumb(&ffmpeg, &src, &dst, *size, job_id, &token).await?;
+                make_thumb(
+                    &ffmpeg,
+                    &src,
+                    &dst,
+                    *size,
+                    ThumbFormat::WebP,
+                    job_id,
+                    &token,
+                )
+                .await?;
                 ctx.progress(total - missing.len() as i64 + i as i64 + 1, total)
                     .await?;
             }

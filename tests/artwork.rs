@@ -1,9 +1,11 @@
 //! アートワーク（SPEC §5 / §7.1、docs/TASKS.md P1-3、D-49）: 同梱カバー画像の名前、画像の判別、
 //! 埋め込み画像の選択、ハッシュアドレスのキャッシュ
 
+mod common;
+
 use spindle::media::artwork::{
-    cover_rank, ext_of_mime, pick_embedded, sniff, ArtworkStore, ImageInfo, MAX_COVER_BYTES,
-    THUMB_SIZES,
+    cover_rank, ext_of_mime, pick_embedded, sniff, ArtworkStore, ImageInfo, ThumbFormat,
+    MAX_COVER_BYTES, THUMB_SIZES,
 };
 
 /// 1x1 の JPEG（最小のヘッダ + SOF0）
@@ -210,4 +212,73 @@ fn putting_an_existing_original_again_refreshes_the_entry_dir_mtime() {
     );
     // 無い hash の touch は何もしない
     store.touch(&[7u8; 32]).unwrap();
+}
+
+#[test]
+fn thumb_path_of_selects_the_extension_by_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ArtworkStore::new(dir.path());
+    let hash = ArtworkStore::hash_of(b"x");
+    assert_eq!(
+        store.thumb_path_of(&hash, 768, ThumbFormat::WebP),
+        store.thumb_path(&hash, 768)
+    );
+    let jpg = store.thumb_path_of(&hash, 768, ThumbFormat::Jpeg);
+    assert_eq!(jpg.file_name().unwrap(), "768.jpg");
+    assert_eq!(jpg.parent(), store.thumb_path(&hash, 768).parent());
+    assert_eq!(ThumbFormat::Jpeg.mime(), "image/jpeg");
+    assert_eq!(ThumbFormat::WebP.mime(), "image/webp");
+    assert_eq!(ThumbFormat::Jpeg.ext(), "jpg");
+    assert_eq!(ThumbFormat::WebP.ext(), "webp");
+}
+
+/// aac の `covr` 用 JPEG（thumbnail ジョブと同じ変換に形式を足したもの。D-75）
+#[tokio::test]
+async fn make_thumb_writes_jpeg_with_the_long_side_capped() {
+    let ffmpeg = require_ffmpeg!(common::ffmpeg());
+    use spindle::jobs::handlers::thumbnail::make_thumb;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("orig.png");
+    let st = std::process::Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=1600x900",
+            "-frames:v",
+            "1",
+        ])
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    for (format, mime, name) in [
+        (ThumbFormat::Jpeg, "image/jpeg", "768.jpg"),
+        (ThumbFormat::WebP, "image/webp", "768.webp"),
+    ] {
+        let dst = dir.path().join(name);
+        make_thumb(
+            &ffmpeg,
+            &src,
+            &dst,
+            768,
+            format,
+            1,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let info = sniff(&std::fs::read(&dst).unwrap()).unwrap();
+        assert_eq!(info.mime, mime);
+        assert_eq!((info.width, info.height), (768, 432));
+    }
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        3,
+        "tmp が残らない"
+    );
 }

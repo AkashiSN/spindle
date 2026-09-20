@@ -45,7 +45,7 @@ use crate::domain::tags::{read_transfer_tags, write_opus_tags, TransferTags};
 use crate::fsroot::{self, FsError, RootDir};
 use crate::jobs::handlers::thumbnail::make_thumb;
 use crate::jobs::{BoxFuture, Handler, HandlerResult, JobContext, JobError, Outcome};
-use crate::media::artwork::ArtworkStore;
+use crate::media::artwork::{ArtworkStore, ThumbFormat};
 use crate::media::encode::OpusEncoder;
 
 /// Derived に埋める画像の一辺（`THUMB_SIZES` の大きい方）
@@ -760,6 +760,7 @@ impl TranscodeHandler {
                 &orig,
                 &thumb,
                 COVER_SIZE,
+                ThumbFormat::WebP,
                 ctx.job.id,
                 &ctx.cancel_token(),
             )
