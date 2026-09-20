@@ -93,7 +93,8 @@ impl Lib {
                 Decoder::new(ffmpeg),
                 Thresholds {
                     cutoff_hz: 25_000,
-                    cliff_db: 30.0,
+                    cliff_db: 10.0,
+                    hard_cutoff_hz: 22_500,
                 },
             )),
         );

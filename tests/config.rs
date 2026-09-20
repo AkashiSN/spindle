@@ -532,15 +532,20 @@ fn hires_section_is_optional_with_documented_defaults() {
     let cfg = Config::parse(&without_section("hires")).unwrap();
     assert!(cfg.hires.check_on_import);
     assert_eq!(cfg.hires.cutoff_hz, 25_000);
-    assert_eq!(cfg.hires.cliff_db, 30.0);
+    assert_eq!(cfg.hires.cliff_db, 10.0);
+    assert_eq!(cfg.hires.hard_cutoff_hz, 22_500);
     let cfg = Config::parse(&with_override(
         "hires",
-        "check_on_import = false\ncutoff_hz = 23000\ncliff_db = 40.5",
+        "check_on_import = false\ncutoff_hz = 23000\ncliff_db = 40.5\nhard_cutoff_hz = 21000",
     ))
     .unwrap();
     assert!(!cfg.hires.check_on_import);
     assert_eq!(cfg.hires.cutoff_hz, 23_000);
     assert_eq!(cfg.hires.cliff_db, 40.5);
+    assert_eq!(cfg.hires.hard_cutoff_hz, 21_000);
+    // hard_cutoff_hz は cutoff_hz 以下
+    let err = Config::parse(&with_override("hires", "hard_cutoff_hz = 26000")).unwrap_err();
+    assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
     // 未知キーと不正値は弾く
     assert!(Config::parse(&with_override("hires", "cutoff = 1")).is_err());
     let err = Config::parse(&with_override("hires", "cutoff_hz = 0")).unwrap_err();

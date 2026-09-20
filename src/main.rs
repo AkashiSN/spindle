@@ -206,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
             spindle::media::hires::Thresholds {
                 cutoff_hz: state.config.hires.cutoff_hz,
                 cliff_db: state.config.hires.cliff_db,
+                hard_cutoff_hz: state.config.hires.hard_cutoff_hz,
             },
         )),
     );

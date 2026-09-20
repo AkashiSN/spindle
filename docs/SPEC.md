@@ -1024,16 +1024,21 @@ hirescheck ジョブ（読むだけ。track_id + audio_version、並列 = max(1,
       inconclusive : 計測できたものが無い（cutoff_hz と effective_bits がともに NULL。全無音、
                      32 bit かつ ≤ 48 kHz）
       both         : upsampled かつ padded
-      upsampled    : cutoff_hz ≤ [hires].cutoff_hz かつ cliff_db ≥ [hires].cliff_db
+      upsampled    : cutoff_hz ≤ [hires].cutoff_hz かつ（cliff_db ≥ [hires].cliff_db または
+                     cutoff_hz ≤ [hires].hard_cutoff_hz）。後者は 44.1 kHz の Nyquist + 余裕で、
+                     >48 kHz のファイルでそこから上が空なら崖の有無を問わない（D-71 追記）
       padded       : effective_bits ≤ 16
       inconclusive : cutoff_hz ≤ [hires].cutoff_hz だが崖が無い（cliff_db が NULL か閾値未満。
                      自然なロールオフ。本物の可能性あり）
       ok           : いずれでもない
 ```
 
-カットオフだけで判定しない理由: アナログテープ起こしや静かなアコースティックは本物でも
-22 kHz 前後から自然に減衰する。SRC のローパスは 1 kHz 以内で 30 dB 以上落ちる「崖」を作るので、
-それを条件に加えて誤検出を避ける。崖の無いものは `inconclusive` として人が見る。
+カットオフだけで判定しない理由: 本物でも録音や マスタリングの都合で自然に減衰する帯域がある。
+SRC のローパスは 1 kHz 以内に段差（実測 12〜21 dB。エッジ直下の音楽の残りと上げた後の床の差で
+決まり、30 dB には届かない）を作るので、それを条件に加えて誤検出を避ける。ただし 44.1 kHz の
+Nyquist（22.05 kHz）の下で床に沈むものは、段差が無くても本物の >48 kHz 録音ではあり得ない
+（実機の 106 本の本物はすべて 25.4 kHz 以上まで伸びていた）ので `hard_cutoff_hz` で拾う。
+22.5〜25 kHz の帯（48 kHz マスター）で崖の無いものは `inconclusive` として人が見る。
 
 結果は `tracks.hires_check` に検査時の `audio_version` 付きで記録し（`hires_checked_at` /
 `hires_check_version` / `hires_check_error`）、**計測値 `hires_cutoff_hz` / `hires_cliff_db` /
@@ -1709,7 +1714,8 @@ download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D
 check_on_import = true         # スキャン完了時に未検査の対象（可逆かつ >48 kHz または >16 bit）を自動投入
 cutoff_hz = 25000              # カットオフがこれ以下なら「上げただけ」の疑い（44.1k の 22.05 kHz と 48k の 24 kHz を
                                # 窓の漏れ込みの余裕込みで拾う。本物の 96k は 30 kHz 以上まで伸びるのが普通）
-cliff_db = 30.0                # カットオフ前後 1 kHz の落差がこれ以上なら SRC の崖とみなす
+cliff_db = 10.0                # カットオフ前後 1 kHz の落差がこれ以上なら SRC の崖とみなす（実 SRC は 12〜21 dB）
+hard_cutoff_hz = 22500         # カットオフがこれ以下なら崖に関わらず「上げただけ」（44.1k の Nyquist + 余裕）
 
 [bin]                          # 外部バイナリ。パスで上書き可
 ffmpeg = "ffmpeg"
@@ -1972,7 +1978,8 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 - [x] Discogs / VGMdb 連携（2026-09-20。作らない。D-72）
 - [x] `.fpl` 書き出し（2026-09-20。作らない。D-72）
 - [x] `HAS` 等の演算子の foobar 実機との挙動突き合わせ（2026-09-19。部分一致で一致。D-55）
-- [x] 偽ハイレゾ検出のしきい値設計（2026-09-20。カットオフ ≤ 25 kHz かつ崖 ≥ 30 dB / 実効 ≤ 16 bit。計測値も保存。§7.10、D-71）
+- [x] 偽ハイレゾ検出のしきい値設計（2026-09-20。カットオフ ≤ 25 kHz かつ（崖 ≥ 10 dB または ≤ 22.5 kHz）/ 実効 ≤ 16 bit。
+      実機 124 本で較正。計測値も保存。§7.10、D-71）
 - [x] 移行後の NFSv4 ACL 再適用（2026-09-20。UI で手動。MIGRATION.md §2 のチェックリスト）
 - [x] CPU 系ジョブ（rg / transcode / flaccheck / hirescheck）に共通の並列予算（2026-09-20。共通 Semaphore =
       コア数を P4 で実装。D-73）

@@ -47,6 +47,8 @@ const MAX_EXACT_BITS: u32 = 24;
 pub struct Thresholds {
     pub cutoff_hz: u32,
     pub cliff_db: f64,
+    /// これ以下のカットオフは崖に関わらず upsampled（D-71 追記）
+    pub hard_cutoff_hz: u32,
 }
 
 /// 計測値。計測しなかった側は `None`
@@ -68,13 +70,16 @@ pub enum Verdict {
 }
 
 /// SPEC §7.10 の優先順位: 計測できたものが無い → inconclusive、both → upsampled → padded →
-/// 崖なしの低いカットオフ → inconclusive、それ以外 → ok
+/// 崖なしの低いカットオフ → inconclusive、それ以外 → ok。
+/// upsampled はカットオフが `cutoff_hz` 以下で、崖が `cliff_db` 以上か、カットオフが
+/// `hard_cutoff_hz` 以下（44.1 kHz の Nyquist の下。崖の有無を問わない）
 pub fn judge(m: &Measurement, t: &Thresholds) -> Verdict {
     if m.cutoff_hz.is_none() && m.effective_bits.is_none() {
         return Verdict::Inconclusive;
     }
     let low = m.cutoff_hz.is_some_and(|c| c <= t.cutoff_hz);
-    let upsampled = low && m.cliff_db.is_some_and(|c| c >= t.cliff_db);
+    let hard = m.cutoff_hz.is_some_and(|c| c <= t.hard_cutoff_hz);
+    let upsampled = low && (hard || m.cliff_db.is_some_and(|c| c >= t.cliff_db));
     let padded = m.effective_bits.is_some_and(|b| b <= 16);
     match (upsampled, padded) {
         (true, true) => Verdict::Both,

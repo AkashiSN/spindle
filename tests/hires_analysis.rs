@@ -15,7 +15,8 @@ const RATE: u32 = 96_000;
 const LEN: usize = 1 << 18;
 const THRESHOLDS: Thresholds = Thresholds {
     cutoff_hz: 25_000,
-    cliff_db: 30.0,
+    cliff_db: 10.0,
+    hard_cutoff_hz: 22_500,
 };
 
 struct Xorshift(u64);
@@ -94,7 +95,10 @@ fn brickwall_at_22050_on_96k_is_upsampled_with_edge_near_the_cutoff() {
     let m = analyze(&[x], RATE, Some(24));
     let cutoff = m.cutoff_hz.unwrap();
     assert!((21_600..=22_500).contains(&cutoff), "{m:?}");
-    assert!(m.cliff_db.unwrap() >= 30.0, "{m:?}");
+    assert!(
+        m.cliff_db.unwrap() >= 30.0,
+        "合成の brickwall は崖が大きい: {m:?}"
+    );
     assert_eq!(m.effective_bits, Some(24), "{m:?}");
     assert_eq!(judge(&m, &THRESHOLDS), Verdict::Upsampled);
 }
@@ -123,23 +127,46 @@ fn completely_zero_out_of_band_gives_finite_values_and_the_same_verdict() {
 
 #[test]
 fn gentle_rolloff_into_a_noise_floor_is_inconclusive() {
-    // 18 kHz から 500 Hz ごとに 6 dB 落ち、-80 dB の白色雑音に沈む（アナログ起こし風）
+    // 18 kHz から 500 Hz ごとに 3 dB 落ち、-60 dB の白色雑音に沈む（本物の膝に近い形）。
+    // カットオフは hard_cutoff_hz（22.5 kHz）より上、cutoff_hz（25 kHz）以下で、崖は 10 dB 未満
     let x = synth(
         |f| {
             let env = if f <= 18_000.0 {
                 1.0
             } else {
-                10f64.powf(-(f - 18_000.0) / 500.0 * 6.0 / 20.0)
+                10f64.powf(-(f - 18_000.0) / 500.0 * 3.0 / 20.0)
             };
-            env + 1e-4
+            env + 1e-3
         },
         4,
     );
     let m = analyze(&[x], RATE, Some(24));
     let cutoff = m.cutoff_hz.unwrap();
-    assert!(cutoff <= 25_000 && cutoff > 19_000, "{m:?}");
-    assert!(m.cliff_db.unwrap() < 30.0, "{m:?}");
+    assert!(cutoff <= 25_000 && cutoff > 22_500, "{m:?}");
+    assert!(m.cliff_db.unwrap() < 10.0, "{m:?}");
     assert_eq!(judge(&m, &THRESHOLDS), Verdict::Inconclusive);
+}
+
+#[test]
+fn a_cutoff_below_the_44k_nyquist_is_upsampled_even_without_a_cliff() {
+    // 「Miss you」型: 15 kHz から緩やかに落ちて 22 kHz 手前で床に沈む。段差は無いが、96 kHz の
+    // 録音で 22.5 kHz 以上が空なのは成立しない（実機の観察。D-71 追記）
+    let x = synth(
+        |f| {
+            let env = if f <= 15_000.0 {
+                1.0
+            } else {
+                10f64.powf(-(f - 15_000.0) / 500.0 * 3.0 / 20.0)
+            };
+            env + 1e-3
+        },
+        15,
+    );
+    let m = analyze(&[x], RATE, Some(24));
+    let cutoff = m.cutoff_hz.unwrap();
+    assert!(cutoff <= 22_500 && cutoff > 19_000, "{m:?}");
+    assert!(m.cliff_db.unwrap() < 10.0, "{m:?}");
+    assert_eq!(judge(&m, &THRESHOLDS), Verdict::Upsampled);
 }
 
 #[test]
@@ -233,18 +260,32 @@ fn judge_follows_the_documented_precedence() {
         Verdict::Upsampled
     );
     assert_eq!(
-        judge(&m(Some(22_050), Some(10.0), Some(16)), &t),
+        judge(&m(Some(23_000), Some(4.0), Some(16)), &t),
         Verdict::Padded,
         "崖なし + padded は padded"
     );
     assert_eq!(judge(&m(None, None, Some(16)), &t), Verdict::Padded);
     assert_eq!(
-        judge(&m(Some(22_050), Some(10.0), Some(24)), &t),
+        judge(&m(Some(23_000), Some(4.0), Some(24)), &t),
         Verdict::Inconclusive
     );
     assert_eq!(
-        judge(&m(Some(22_050), None, Some(24)), &t),
+        judge(&m(Some(23_000), None, Some(24)), &t),
         Verdict::Inconclusive
+    );
+    assert_eq!(
+        judge(&m(Some(23_000), Some(10.0), Some(24)), &t),
+        Verdict::Upsampled,
+        "崖はしきい値ちょうどを含む"
+    );
+    assert_eq!(
+        judge(&m(Some(22_500), None, Some(24)), &t),
+        Verdict::Upsampled,
+        "hard_cutoff 以下は崖なしでも"
+    );
+    assert_eq!(
+        judge(&m(Some(22_050), Some(4.0), Some(16)), &t),
+        Verdict::Both
     );
     assert_eq!(
         judge(&m(Some(25_000), Some(50.0), Some(24)), &t),

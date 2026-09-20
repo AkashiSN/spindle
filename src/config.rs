@@ -223,6 +223,10 @@ pub struct HiresConfig {
     /// カットオフ前後 1 kHz の落差（dB）がこれ以上なら SRC の崖とみなす
     #[serde(default = "default_hires_cliff")]
     pub cliff_db: f64,
+    /// カットオフがこれ以下なら崖に関わらず「上げただけ」（44.1 kHz の Nyquist + 余裕。>48 kHz の
+    /// ファイルで 22.5 kHz 以上が空なのは録音として成立しない。D-71 追記）
+    #[serde(default = "default_hires_hard_cutoff")]
+    pub hard_cutoff_hz: u32,
 }
 
 fn default_true() -> bool {
@@ -234,7 +238,11 @@ fn default_hires_cutoff() -> u32 {
 }
 
 fn default_hires_cliff() -> f64 {
-    30.0
+    10.0
+}
+
+fn default_hires_hard_cutoff() -> u32 {
+    22_500
 }
 
 impl Default for HiresConfig {
@@ -243,6 +251,7 @@ impl Default for HiresConfig {
             check_on_import: true,
             cutoff_hz: default_hires_cutoff(),
             cliff_db: default_hires_cliff(),
+            hard_cutoff_hz: default_hires_hard_cutoff(),
         }
     }
 }
@@ -528,6 +537,9 @@ impl Config {
         }
         if !self.hires.cliff_db.is_finite() || self.hires.cliff_db < 0.0 {
             return invalid("hires.cliff_db は 0 以上の有限値".into());
+        }
+        if self.hires.hard_cutoff_hz > self.hires.cutoff_hz {
+            return invalid("hires.hard_cutoff_hz は hires.cutoff_hz 以下".into());
         }
 
         Ok(())
