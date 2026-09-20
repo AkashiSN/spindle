@@ -15,6 +15,16 @@ export type FlacCheck = {
   stale: boolean
   error: string | null
 }
+export type HiresCheck = {
+  status: 'ok' | 'upsampled' | 'padded' | 'both' | 'inconclusive' | 'decode_error'
+  checked_at: number | null
+  stale: boolean
+  error: string | null
+  /** 計測値。計測しなかった側は null（SPEC §7.10） */
+  cutoff_hz: number | null
+  cliff_db: number | null
+  effective_bits: number | null
+}
 export type RgValues = { track_gain: number; track_peak: number; album_gain: number | null; album_peak: number | null }
 
 export type TrackRow = {
@@ -37,6 +47,7 @@ export type TrackRow = {
   rg: RgValues | null
   derived: Derived | null
   flac_check: FlacCheck | null
+  hires_check: HiresCheck | null
   pending_batch_id: number | null
   conflict_batch_id: number | null
   duplicate_group: string | null

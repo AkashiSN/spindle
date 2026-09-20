@@ -111,6 +111,14 @@ export function OperationsPanel({
           >
             {label('md5fill', 'MD5 を補填')}
           </button>
+          <button
+            type="button"
+            disabled={busy || !hasSelection}
+            title="可逆かつ 48 kHz 超または 16 bit 超のトラックを解析し、アップサンプリング・ビット深度の水増しを判定する（読むだけ）"
+            onClick={() => void ops.startHirescheck()}
+          >
+            {label('hirescheck', '偽ハイレゾを検出')}
+          </button>
           <span className="muted small">解析はアルバム単位のジョブ。書き込みと補填は巻き戻せるバッチ</span>
         </div>
         <div className="op-row">

@@ -13,6 +13,7 @@ const TYPE_LABEL: Record<string, string> = {
   normalize: '正規化',
   thumbnail: 'サムネイル',
   flaccheck: 'FLAC 検査',
+  hirescheck: '偽ハイレゾ検出',
   inbox: 'Inbox 取り込み',
   gc: 'GC',
   backup: 'バックアップ',

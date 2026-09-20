@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   embedMessage,
   flaccheckStartedMessage,
+  hirescheckStartedMessage,
   verifyStartedMessage,
   md5FillMessage,
   operationErrorMessage,
@@ -43,6 +44,14 @@ describe('開始・書き込みの結果メッセージ', () => {
   it('FLAC 検査はトラック・対象外・重複', () => {
     expect(flaccheckStartedMessage({ tracks: 5, skipped: 2, duplicates: 0, job_ids: [] })).toBe(
       'FLAC 検査を投入した: 5 件（FLAC でない・欠落で対象外 2）',
+    )
+  })
+  it('偽ハイレゾ検出は件数と対象外・重複', () => {
+    expect(hirescheckStartedMessage({ tracks: 2, skipped: 1, duplicates: 0, job_ids: [] })).toBe(
+      '偽ハイレゾ検出を投入した: 2 件（対象外（非可逆・44.1/48 kHz かつ 16 bit・欠落） 1）',
+    )
+    expect(hirescheckStartedMessage({ tracks: 0, skipped: 0, duplicates: 3, job_ids: [] })).toBe(
+      '偽ハイレゾ検出を投入した: 0 件（既に投入済み 3）',
     )
   })
   it('遡及照合はアルバム数と重複', () => {

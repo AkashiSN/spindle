@@ -3,7 +3,7 @@
 // から Metadata / Location / General の 3 表を組む。複数選択は共通値、異なれば multiple
 
 import type { TrackDetail, TrackRow } from '../api/types'
-import { VERIFICATION } from './badges'
+import { HIRES_LABEL, VERIFICATION, hiresMeasurements } from './badges'
 import { formatDuration } from './format'
 
 /** 詳細を取りに行く選択行の上限（それ以上は読み込み済みの行だけで判定） */
@@ -189,6 +189,15 @@ function flacCheckLabel(r: TrackRow): string {
   }
 }
 
+function hiresCheckLabel(r: TrackRow): string {
+  const h = r.hires_check
+  if (!h) return ''
+  const stale = h.stale ? '（結果が古い）' : ''
+  if (h.status === 'decode_error') return `デコードエラー${stale}${h.error ? `: ${h.error}` : ''}`
+  const m = hiresMeasurements(h)
+  return `${HIRES_LABEL[h.status]}${m ? `（${m}）` : ''}${stale}`
+}
+
 function derivedLabel(r: TrackRow): string {
   if (!r.derived) return ''
   return `${r.derived.codec}${r.derived.stale_tags ? '（タグが古い）' : ''}`
@@ -235,6 +244,7 @@ export function generalRows(rows: readonly TrackRow[], details: ReadonlyMap<numb
     },
     { key: 'rg', label: 'ReplayGain', value: commonValue(rows.map(rgLabel)) },
     { key: 'flac_check', label: 'FLAC check', value: commonValue(rows.map(flacCheckLabel)) },
+    { key: 'hires_check', label: 'Hi-Res check', value: commonValue(rows.map(hiresCheckLabel)) },
     { key: 'derived', label: 'Derived', value: commonValue(rows.map(derivedLabel)) },
     { key: 'state', label: 'State', value: commonValue(rows.map(stateLabel)) },
   ]

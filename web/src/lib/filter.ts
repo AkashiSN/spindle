@@ -12,6 +12,8 @@ export const FLAGS = [
   'hardlink',
   'flac_unchecked',
   'flac_error',
+  'hires_unchecked',
+  'hires_suspect',
 ] as const
 export type Flag = (typeof FLAGS)[number]
 
@@ -26,6 +28,8 @@ export const FLAG_LABELS: Record<Flag, string> = {
   hardlink: 'hardlink',
   flac_unchecked: 'FLAC 未検査',
   flac_error: 'FLAC エラー',
+  hires_unchecked: 'Hi-Res 未検査',
+  hires_suspect: '偽ハイレゾ疑い',
 }
 
 export type Filter = {

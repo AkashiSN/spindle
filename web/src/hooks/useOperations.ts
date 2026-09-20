@@ -15,6 +15,7 @@ import type { UploadedArtwork } from '../lib/artwork'
 import {
   embedMessage,
   flaccheckStartedMessage,
+  hirescheckStartedMessage,
   verifyStartedMessage,
   md5FillMessage,
   operationErrorMessage,
@@ -22,6 +23,7 @@ import {
   rgWrittenMessage,
   type EmbedResponse,
   type FlaccheckStartResponse,
+  type HirescheckStartResponse,
   type VerifyStartResponse,
   type Md5FillResponse,
   type PathApplyResponse,
@@ -61,6 +63,8 @@ export type Operations = {
   startRg: () => Promise<void>
   writeRg: (skipPending?: boolean) => Promise<void>
   startFlaccheck: () => Promise<void>
+  /** 偽ハイレゾ検出（可逆かつ 48 kHz 超または 16 bit 超のトラックを解析。読むだけ） */
+  startHirescheck: () => Promise<void>
   startVerify: () => Promise<void>
   /** MD5 の補填（md5_missing の FLAC に編集バッチ。409 pending は 2 択） */
   startMd5Fill: (skipPending?: boolean) => Promise<void>
@@ -243,6 +247,26 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     }
   }, [sel, begin, fail])
 
+  const startHirescheck = useCallback(async () => {
+    if (!sel) {
+      setError('行を選択してください')
+      return
+    }
+    begin('hirescheck')
+    try {
+      const r = await parseErrorBody<HirescheckStartResponse>('/api/hirescheck', {
+        method: 'POST',
+        body: JSON.stringify({ selection: sel }),
+      })
+      if (r.ok) setNotice(hirescheckStartedMessage(r.body))
+      else setError(operationErrorMessage(r.status, r.body))
+    } catch (e) {
+      fail(e)
+    } finally {
+      setBusy(null)
+    }
+  }, [sel, begin, fail])
+
   const startVerify = useCallback(async () => {
     if (!sel) {
       setError('行を選択してください')
@@ -398,6 +422,7 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     startRg,
     writeRg,
     startFlaccheck,
+    startHirescheck,
     startVerify,
     startMd5Fill,
     startYoutube,

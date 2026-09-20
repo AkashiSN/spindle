@@ -1,6 +1,24 @@
 // バッジ列の内容（SPEC §12.2）。表示は components/Badges.tsx
 
-import type { TrackRow, Verification } from '../api/types'
+import type { HiresCheck, TrackRow, Verification } from '../api/types'
+
+export const HIRES_LABEL: Record<HiresCheck['status'], string> = {
+  ok: 'OK',
+  upsampled: 'アップサンプリングの疑い',
+  padded: 'ビット深度の水増し',
+  both: 'アップサンプリングとビット深度の水増しの疑い',
+  inconclusive: '判定できず',
+  decode_error: 'デコードエラー',
+}
+
+/** 「カットオフ 22.1 kHz / 崖 48 dB / 実効 24 bit」。無い値は省く */
+export function hiresMeasurements(h: HiresCheck): string {
+  const parts: string[] = []
+  if (h.cutoff_hz != null) parts.push(`カットオフ ${(h.cutoff_hz / 1000).toFixed(1)} kHz`)
+  if (h.cliff_db != null) parts.push(`崖 ${Math.round(h.cliff_db)} dB`)
+  if (h.effective_bits != null) parts.push(`実効 ${h.effective_bits} bit`)
+  return parts.join(' / ')
+}
 
 export const VERIFICATION: Record<Verification, { icon: string; label: string; cls: string }> = {
   verified_ar: { icon: '✔', label: '検証済み（AccurateRip）', cls: 'v-ar' },
@@ -55,6 +73,33 @@ export function badgesOf(t: TrackRow): Badge[] {
         icon: t.flac_check.stale ? 'F•' : 'F',
         label: `FLAC の STREAMINFO に MD5 が無い${stale}`,
         cls: 'badge b-flac-md5',
+      })
+    }
+  }
+  if (t.hires_check && t.hires_check.status !== 'ok') {
+    const h = t.hires_check
+    const stale = h.stale ? '（結果が古い。再検査待ち）' : ''
+    const icon = h.stale ? 'H•' : 'H'
+    if (h.status === 'decode_error') {
+      out.push({
+        key: 'hires',
+        icon,
+        label: `偽ハイレゾ検出: デコードエラー${stale}: ${h.error ?? ''}`.trimEnd(),
+        cls: 'badge b-hires-error',
+      })
+    } else if (h.status === 'inconclusive') {
+      out.push({
+        key: 'hires',
+        icon,
+        label: `偽ハイレゾ検出: 判定できず（${hiresMeasurements(h)}）${stale}`,
+        cls: 'badge b-hires-inconclusive',
+      })
+    } else {
+      out.push({
+        key: 'hires',
+        icon,
+        label: `${HIRES_LABEL[h.status]}（${hiresMeasurements(h)}）${stale}`,
+        cls: 'badge b-hires-suspect',
       })
     }
   }

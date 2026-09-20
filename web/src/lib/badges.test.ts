@@ -21,6 +21,7 @@ const base: TrackRow = {
   rg_written_at: null,
   derived: null,
   flac_check: null,
+  hires_check: null,
   album_id: null,
   artwork_hash: null,
   pending_batch_id: null,
@@ -95,5 +96,39 @@ describe('badgesOf', () => {
     expect(m.cls).toContain('b-flac-md5')
     expect(m.label).toContain('MD5')
     expect(m.label).toContain('古い')
+  })
+
+  it('偽ハイレゾ検出は疑いと inconclusive だけバッジを出し、stale は • を付ける', () => {
+    const ok = {
+      status: 'ok' as const,
+      checked_at: 1,
+      stale: false,
+      error: null,
+      cutoff_hz: 48000,
+      cliff_db: null,
+      effective_bits: 24,
+    }
+    expect(keys({ ...base, hires_check: ok })).toEqual(['verification', 'lossless'])
+    const up = badgesOf({ ...base, hires_check: { ...ok, status: 'upsampled', cutoff_hz: 22050, cliff_db: 48.3 } })
+    const b = up.find((x) => x.key === 'hires')!
+    expect(b.icon).toBe('H')
+    expect(b.cls).toContain('b-hires-suspect')
+    expect(b.label).toContain('22.1 kHz')
+    expect(b.label).toContain('48 dB')
+    const both = badgesOf({
+      ...base,
+      hires_check: { ...ok, status: 'both', stale: true, cutoff_hz: 22050, cliff_db: 48.3, effective_bits: 16 },
+    })
+    const bb = both.find((x) => x.key === 'hires')!
+    expect(bb.icon).toBe('H•')
+    expect(bb.label).toContain('16 bit')
+    expect(bb.label).toContain('結果が古い')
+    const inc = badgesOf({ ...base, hires_check: { ...ok, status: 'inconclusive', cutoff_hz: 23000, cliff_db: 12 } })
+    expect(inc.find((x) => x.key === 'hires')!.cls).toContain('b-hires-inconclusive')
+    const err = badgesOf({
+      ...base,
+      hires_check: { ...ok, status: 'decode_error', error: 'boom', cutoff_hz: null, effective_bits: null },
+    })
+    expect(err.find((x) => x.key === 'hires')!.label).toContain('boom')
   })
 })

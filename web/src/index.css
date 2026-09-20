@@ -686,6 +686,18 @@ table.kv tr.differs td {
 .badge.b-flac-md5 {
   color: var(--muted);
 }
+.badge.b-hires-suspect {
+  background: #fef3c7;
+  color: #92400e;
+  font-weight: 600;
+}
+.badge.b-hires-inconclusive {
+  color: var(--muted);
+}
+.badge.b-hires-error {
+  color: var(--error);
+  font-weight: 600;
+}
 .badge.b-hardlink {
   background: #ede9fe;
   color: #5b21b6;

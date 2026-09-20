@@ -35,6 +35,7 @@ function row(id: number, codec: string, lossless: boolean, missing = false): Tra
     rg: null,
     derived: null,
     flac_check: null,
+  hires_check: null,
     album_id: null,
     artwork_hash: null,
     pending_batch_id: null,

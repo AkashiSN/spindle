@@ -30,6 +30,7 @@ function row(over: Partial<TrackRow> = {}): TrackRow {
     rg: null,
     derived: null,
     flac_check: null,
+  hires_check: null,
     pending_batch_id: null,
     conflict_batch_id: null,
     duplicate_group: null,
@@ -143,6 +144,7 @@ describe('generalRows', () => {
     expect(valueOf(rows, 'verification')).toEqual({ kind: 'text', text: '未検証' })
     expect(valueOf(rows, 'rg')).toEqual({ kind: 'empty' })
     expect(valueOf(rows, 'flac_check')).toEqual({ kind: 'empty' })
+    expect(valueOf(rows, 'hires_check')).toEqual({ kind: 'empty' })
     expect(valueOf(rows, 'state')).toEqual({ kind: 'empty' })
 
     const two = generalRows([row({ id: 1 }), row({ id: 2, duration_ms: 30_000, codec: 'opus', lossless: false })], new Map())
@@ -171,5 +173,45 @@ describe('generalRows', () => {
     expect(valueOf(rows, 'flac_check')).toEqual({ kind: 'text', text: 'デコードエラー: boom' })
     expect(valueOf(rows, 'derived')).toEqual({ kind: 'text', text: 'opus（タグが古い）' })
     expect(valueOf(rows, 'state')).toEqual({ kind: 'text', text: '反映待ち #5, 重複, hardlink, 欠落' })
+  })
+
+  it('hires_check は判定と計測値を 1 行にする', () => {
+    const up = generalRows(
+      [
+        row({
+          hires_check: {
+            status: 'upsampled',
+            checked_at: 1,
+            stale: false,
+            error: null,
+            cutoff_hz: 22050,
+            cliff_db: 48.3,
+            effective_bits: 24,
+          },
+        }),
+      ],
+      new Map(),
+    )
+    expect(valueOf(up, 'hires_check')).toEqual({
+      kind: 'text',
+      text: 'アップサンプリングの疑い（カットオフ 22.1 kHz / 崖 48 dB / 実効 24 bit）',
+    })
+    const padded = generalRows(
+      [
+        row({
+          hires_check: {
+            status: 'padded',
+            checked_at: 1,
+            stale: true,
+            error: null,
+            cutoff_hz: null,
+            cliff_db: null,
+            effective_bits: 16,
+          },
+        }),
+      ],
+      new Map(),
+    )
+    expect(valueOf(padded, 'hires_check')).toEqual({ kind: 'text', text: 'ビット深度の水増し（実効 16 bit）（結果が古い）' })
   })
 })
