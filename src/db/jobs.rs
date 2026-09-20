@@ -440,18 +440,21 @@ pub fn list_with_summary(
 pub struct TypeCounts {
     pub queued: i64,
     pub running: i64,
+    pub done: i64,
     pub failed: i64,
+    pub cancelled: i64,
 }
 
-/// 種別ごとの queued / running / failed を全件から集計する。件数 0 の種別は入らない
+/// 種別ごとの状態別件数を全件から集計する。件数 0 の種別は入らない
 pub fn counts_by_type(conn: &Connection) -> Result<BTreeMap<String, TypeCounts>> {
     let mut stmt = conn.prepare_cached(
         "SELECT type,
                 count(*) FILTER (WHERE state = 'queued'),
                 count(*) FILTER (WHERE state = 'running'),
-                count(*) FILTER (WHERE state = 'failed')
+                count(*) FILTER (WHERE state = 'done'),
+                count(*) FILTER (WHERE state = 'failed'),
+                count(*) FILTER (WHERE state = 'cancelled')
            FROM jobs
-          WHERE state IN ('queued', 'running', 'failed')
           GROUP BY type",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -460,7 +463,9 @@ pub fn counts_by_type(conn: &Connection) -> Result<BTreeMap<String, TypeCounts>>
             TypeCounts {
                 queued: r.get(1)?,
                 running: r.get(2)?,
-                failed: r.get(3)?,
+                done: r.get(3)?,
+                failed: r.get(4)?,
+                cancelled: r.get(5)?,
             },
         ))
     })?;
@@ -474,17 +479,22 @@ pub struct Summary {
     pub queued: i64,
     pub pending_ops: i64,
     pub failed: i64,
+    /// 終端（ジョブ画面の「完了」タブ。GC までの全件）
+    pub done: i64,
+    pub cancelled: i64,
 }
 
 pub fn summary(conn: &Connection) -> Result<Summary> {
-    let (running, queued, failed) = conn.query_row(
+    let (running, queued, failed, done, cancelled) = conn.query_row(
         "SELECT
             count(*) FILTER (WHERE state = 'running'),
             count(*) FILTER (WHERE state = 'queued'),
-            count(*) FILTER (WHERE state = 'failed')
+            count(*) FILTER (WHERE state = 'failed'),
+            count(*) FILTER (WHERE state = 'done'),
+            count(*) FILTER (WHERE state = 'cancelled')
          FROM jobs",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     let pending_ops = conn.query_row(
         "SELECT count(*) FROM edit_ops WHERE result = 'pending'",
@@ -496,6 +506,8 @@ pub fn summary(conn: &Connection) -> Result<Summary> {
         queued,
         pending_ops,
         failed,
+        done,
+        cancelled,
     })
 }
 

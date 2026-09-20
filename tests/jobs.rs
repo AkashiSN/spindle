@@ -1428,6 +1428,8 @@ async fn jobs_list_returns_items_and_summary() {
     assert_eq!(body["summary"]["queued"], 1);
     assert_eq!(body["summary"]["running"], 0);
     assert_eq!(body["summary"]["failed"], 1);
+    assert_eq!(body["summary"]["done"], 0);
+    assert_eq!(body["summary"]["cancelled"], 0);
     assert_eq!(body["summary"]["pending_ops"], 0);
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
@@ -1458,9 +1460,41 @@ async fn jobs_list_returns_items_and_summary() {
     assert_eq!(by_type["scan"]["queued"], 1);
     assert_eq!(by_type["scan"]["running"], 0);
     assert_eq!(by_type["scan"]["failed"], 0);
+    assert_eq!(by_type["scan"]["done"], 0);
     assert_eq!(by_type["gc"]["failed"], 1);
     assert_eq!(by_type["gc"]["queued"], 0);
     assert!(by_type.get("rg").is_none(), "件数 0 の種別は返さない");
+    // 終端（done / cancelled）も数える（ジョブ画面の「完了」タブと種別表の完了列）
+    app.jobs
+        .db()
+        .write(move |c| {
+            c.execute(
+                "UPDATE jobs SET state = 'done', finished_at = 2 WHERE id = ?1",
+                [id],
+            )?;
+            c.execute(
+                "UPDATE jobs SET state = 'cancelled', finished_at = 3 WHERE id = ?1",
+                [failed_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let res = send(
+        &app,
+        req(Method::GET, "/api/jobs")
+            .header(header::COOKIE, &c)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let body = json(res).await;
+    assert_eq!(body["summary"]["done"], 1);
+    assert_eq!(body["summary"]["cancelled"], 1);
+    assert_eq!(body["summary"]["queued"], 0);
+    assert_eq!(body["by_type"]["scan"]["done"], 1);
+    assert_eq!(body["by_type"]["gc"]["cancelled"], 1);
+    assert_eq!(body["by_type"]["gc"]["failed"], 0);
 }
 
 /// 一覧は実行中が先頭、待ちはキューから取られる順（priority → created_at → id 昇順）。同じ秒に

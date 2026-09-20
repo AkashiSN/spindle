@@ -1386,8 +1386,9 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 { "items": [ { "id", "type", "state", "progress", "done", "total", "attempts", "last_error",
                "run_after", "edit_batch_id", "created_at", "started_at" } ],
                  // 上限 1,000 件。実行中 → 待ち（取り出し順 = priority 降順・作成順・id 昇順）→ 終端（新しい順）
-  "summary": { "running": 3, "queued": 12, "pending_ops": 1204, "failed": 0 },
-  "by_type": { "transcode": { "queued": 6470, "running": 11, "failed": 0 }, … },  // 種別ごとの全件集計（0 件の種別は無し）
+  "summary": { "running": 3, "queued": 12, "done": 15300, "failed": 0, "cancelled": 0, "pending_ops": 1204 },
+  "by_type": { "transcode": { "queued": 6470, "running": 11, "done": 1089, "failed": 0, "cancelled": 0 }, … },
+                 // 種別ごとの全件集計（0 件の種別は無し）
   "concurrency": { "scan": 1, "rg": 12, "transcode": 11, … },   // 種別ごとの並列度（§8）
   "cpu_budget": 12 }                                              // CPU 系の共通予算（= コア数。D-73）
 // POST /api/jobs/:id/cancel  → 202（queued は即 cancelled、running は cancel_requested_at を立てる）
@@ -1663,9 +1664,11 @@ rel_path（既定非表示）
 
 ### 12.5 ジョブ
 
-種別ごとの並列度と待ち行列（件数は `by_type` の全件集計。一覧は上限付きなので画面で数えない）、実行中の
-進捗（`done / total`）、失敗の `last_error` と [再試行] / [キャンセル]。一覧は実行中が先頭で、待ちはキューから
-取られる順。種別表の下に CPU 系の実行中の合計と共通予算（`cpu_budget`。D-73）。編集バッチ由来のジョブは `edit_batch_id` で履歴画面へリンク。
+種別ごとの並列度と待ち行列（待ち / 実行中 / 完了 / 失敗。件数は `by_type` の全件集計。一覧は上限付きなので
+画面で数えない）、実行中の進捗（`done / total`）、失敗の `last_error` と [再試行] / [キャンセル]。一覧のタブは
+**実行中・待ち / 完了 / 失敗・取り消し / すべて**で、各タブに `summary` の件数を添える（待ち → 実行中 → 完了と
+数が移っていくのが分かる）。一覧は実行中が先頭で、待ちはキューから取られる順、終端は新しい順。上限（1,000 件）に
+達していれば「表示は最新 1,000 件まで」と添える。種別表の下に CPU 系の実行中の合計と共通予算（`cpu_budget`。D-73）。編集バッチ由来のジョブは `edit_batch_id` で履歴画面へリンク。
 SSE `/api/events` で更新し、リロードしても DB の値で復元する。
 
 ### 12.6 その他の画面（骨格のみ）

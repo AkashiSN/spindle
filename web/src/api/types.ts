@@ -131,13 +131,18 @@ export type JobSummary = {
   queued: number
   pending_ops: number
   failed: number
+  /** 終端（GC までの全件） */
+  done: number
+  cancelled: number
 }
 
 /** 種別ごとの件数（全件の集計） */
 export type TypeCounts = {
   queued: number
   running: number
+  done: number
   failed: number
+  cancelled: number
 }
 
 export type JobList = {

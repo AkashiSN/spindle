@@ -16,8 +16,12 @@ import {
   jobTypeLabel,
   STATE_LABEL,
   summarizeByType,
+  tabCounts,
   type StateFilter,
 } from '../lib/jobs'
+
+/** `GET /api/jobs` の一覧の上限（src/jobs/queue.rs の LIST_LIMIT）。これに達していれば切れている */
+const LIST_LIMIT = 1000
 
 export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: (batchId: number) => void }) {
   const [state, setState] = useState<StateFilter>('active')
@@ -26,6 +30,9 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
 
   const byType = summarizeByType(counts, concurrency)
   const shown = items ? filterJobs(items, state, type) : []
+  const tabs = summary ? tabCounts(summary) : null
+  // 一覧はサーバの上限で切れる（実行中 → 待ち → 終端の順なので、切れるのは待ちの末尾と古い終端）
+  const truncated = items != null && items.length >= LIST_LIMIT
 
   return (
     <section className="jobs">
@@ -33,8 +40,8 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
         <h1>ジョブ</h1>
         {summary && (
           <span className="small muted">
-            実行中 {formatCount(summary.running)} · 待ち {formatCount(summary.queued)} · 失敗 {formatCount(summary.failed)} ·
-            反映待ち op {formatCount(summary.pending_ops)}
+            実行中 {formatCount(summary.running)} · 待ち {formatCount(summary.queued)} · 完了 {formatCount(summary.done)} ·
+            失敗 {formatCount(summary.failed)} · 反映待ち op {formatCount(summary.pending_ops)}
           </span>
         )}
         <span className="spacer" />
@@ -50,8 +57,9 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
           <tr>
             <th>種別</th>
             <th className="num">並列度</th>
-            <th className="num">実行中</th>
             <th className="num">待ち</th>
+            <th className="num">実行中</th>
+            <th className="num">完了</th>
             <th className="num">失敗</th>
           </tr>
         </thead>
@@ -67,9 +75,10 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
                 {jobTypeLabel(t.type)} <span className="muted small">{t.type}</span>
               </td>
               <td className="num">{t.concurrency ?? '–'}</td>
-              <td className="num">{t.running || ''}</td>
-              <td className="num">{t.queued || ''}</td>
-              <td className={`num${t.failed > 0 ? ' failed' : ''}`}>{t.failed || ''}</td>
+              <td className="num">{t.queued ? formatCount(t.queued) : ''}</td>
+              <td className="num">{t.running ? formatCount(t.running) : ''}</td>
+              <td className="num">{t.done ? formatCount(t.done) : ''}</td>
+              <td className={`num${t.failed > 0 ? ' failed' : ''}`}>{t.failed ? formatCount(t.failed) : ''}</td>
             </tr>
           ))}
         </tbody>
@@ -83,6 +92,7 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
           {(
             [
               ['active', '実行中・待ち'],
+              ['done', '完了'],
               ['failed', '失敗・取り消し'],
               ['all', 'すべて'],
             ] as const
@@ -96,6 +106,7 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
               onClick={() => setState(k)}
             >
               {label}
+              {tabs && <span className="count">{formatCount(tabs[k])}</span>}
             </button>
           ))}
         </div>
@@ -105,7 +116,9 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
           </button>
         )}
         <span className="spacer" />
-        <span className="muted small">{items ? `${formatCount(shown.length)} 件` : ''}</span>
+        <span className="muted small">
+          {items ? `${formatCount(shown.length)} 件${truncated ? `（表示は最新 ${formatCount(LIST_LIMIT)} 件まで）` : ''}` : ''}
+        </span>
       </div>
       {items == null ? (
         <p className="muted">読み込み中…</p>

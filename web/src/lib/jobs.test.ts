@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Job } from '../api/types'
-import { canCancel, canRetry, cpuBudgetLabel, filterJobs, jobProgress, jobTypeLabel, summarizeByType } from './jobs'
+import { canCancel, canRetry, cpuBudgetLabel, filterJobs, jobProgress, jobTypeLabel, summarizeByType, tabCounts } from './jobs'
 
 function job(over: Partial<Job>): Job {
   return {
@@ -26,9 +26,9 @@ describe('summarizeByType', () => {
   it('サーバの種別ごとの件数に並列度を添える。並列度がある種別は 0 件でも出す（一覧は上限付きなので数えない）', () => {
     const rows = summarizeByType(
       {
-        transcode: { queued: 6470, running: 11, failed: 0 },
-        rg: { queued: 0, running: 0, failed: 1 },
-        mystery: { queued: 1, running: 0, failed: 0 },
+        transcode: { queued: 6470, running: 11, done: 1089, failed: 0, cancelled: 0 },
+        rg: { queued: 0, running: 0, done: 0, failed: 1, cancelled: 2 },
+        mystery: { queued: 1, running: 0, done: 0, failed: 0, cancelled: 0 },
       },
       { transcode: 11, rg: 12, scan: 1 },
     )
@@ -38,10 +38,29 @@ describe('summarizeByType', () => {
       concurrency: 11,
       queued: 6470,
       running: 11,
+      done: 1089,
       failed: 0,
+      cancelled: 0,
     })
-    expect(rows.find((r) => r.type === 'scan')).toEqual({ type: 'scan', concurrency: 1, queued: 0, running: 0, failed: 0 })
-    expect(rows.find((r) => r.type === 'mystery')).toEqual({ type: 'mystery', concurrency: null, queued: 1, running: 0, failed: 0 })
+    expect(rows.find((r) => r.type === 'rg')?.cancelled).toBe(2)
+    expect(rows.find((r) => r.type === 'scan')).toEqual({
+      type: 'scan',
+      concurrency: 1,
+      queued: 0,
+      running: 0,
+      done: 0,
+      failed: 0,
+      cancelled: 0,
+    })
+    expect(rows.find((r) => r.type === 'mystery')).toEqual({
+      type: 'mystery',
+      concurrency: null,
+      queued: 1,
+      running: 0,
+      done: 0,
+      failed: 0,
+      cancelled: 0,
+    })
   })
 })
 
@@ -53,10 +72,15 @@ describe('filterJobs', () => {
     job({ id: 4, type: 'scan', state: 'done' }),
     job({ id: 5, type: 'scan', state: 'cancelled' }),
   ]
-  it('state: active は queued + running、failed は failed + cancelled、all は全部', () => {
+  it('state: active は queued + running、done は done、failed は failed + cancelled、all は全部', () => {
     expect(filterJobs(items, 'active', null).map((j) => j.id)).toEqual([1, 2])
+    expect(filterJobs(items, 'done', null).map((j) => j.id)).toEqual([4])
     expect(filterJobs(items, 'failed', null).map((j) => j.id)).toEqual([3, 5])
     expect(filterJobs(items, 'all', null).map((j) => j.id)).toEqual([1, 2, 3, 4, 5])
+  })
+  it('タブの件数は summary の全件集計から（一覧は上限付き）', () => {
+    const summary = { running: 12, queued: 8835, done: 15300, failed: 2, cancelled: 3, pending_ops: 0 }
+    expect(tabCounts(summary)).toEqual({ active: 8847, done: 15300, failed: 5, all: 24152 })
   })
   it('type で絞る', () => {
     expect(filterJobs(items, 'all', 'rg').map((j) => j.id)).toEqual([2, 3])
@@ -91,12 +115,13 @@ describe('jobTypeLabel', () => {
 
 describe('cpuBudgetLabel（D-73）', () => {
   it('CPU 系の実行中の合計と予算を出し、予算が無ければ null', () => {
+    const z = { done: 0, failed: 0, cancelled: 0 }
     const rows = summarizeByType(
       {
-        transcode: { queued: 0, running: 1, failed: 0 },
-        rg: { queued: 0, running: 1, failed: 0 },
-        thumbnail: { queued: 0, running: 1, failed: 0 },
-        flaccheck: { queued: 1, running: 0, failed: 0 },
+        transcode: { queued: 0, running: 1, ...z },
+        rg: { queued: 0, running: 1, ...z },
+        thumbnail: { queued: 0, running: 1, ...z },
+        flaccheck: { queued: 1, running: 0, ...z },
       },
       { transcode: 11, rg: 12, thumbnail: 4, flaccheck: 12 },
     )

@@ -1,6 +1,6 @@
 // ジョブ画面（SPEC §12.5）の純粋ロジック: 種別ごとの集計、絞り込み、進捗と操作可否の判定
 
-import type { Job, JobState, TypeCounts } from '../api/types'
+import type { Job, JobState, JobSummary, TypeCounts } from '../api/types'
 
 const TYPE_LABEL: Record<string, string> = {
   scan: 'スキャン',
@@ -37,7 +37,9 @@ export type TypeSummary = {
   concurrency: number | null
   queued: number
   running: number
+  done: number
   failed: number
+  cancelled: number
 }
 
 /**
@@ -49,24 +51,23 @@ export function summarizeByType(
   concurrency: Readonly<Record<string, number>>,
 ): TypeSummary[] {
   const map = new Map<string, TypeSummary>()
+  const zero = { queued: 0, running: 0, done: 0, failed: 0, cancelled: 0 }
   for (const type of Object.keys(concurrency).sort()) {
-    map.set(type, { type, concurrency: concurrency[type] ?? null, queued: 0, running: 0, failed: 0 })
+    map.set(type, { type, concurrency: concurrency[type] ?? null, ...zero })
   }
   for (const type of Object.keys(byType).sort()) {
     const c = byType[type]
     const row = map.get(type)
     if (row) {
-      row.queued = c.queued
-      row.running = c.running
-      row.failed = c.failed
+      Object.assign(row, { queued: c.queued, running: c.running, done: c.done, failed: c.failed, cancelled: c.cancelled })
     } else {
-      map.set(type, { type, concurrency: null, queued: c.queued, running: c.running, failed: c.failed })
+      map.set(type, { type, concurrency: null, ...zero, ...c })
     }
   }
   return [...map.values()]
 }
 
-export type StateFilter = 'active' | 'failed' | 'all'
+export type StateFilter = 'active' | 'done' | 'failed' | 'all'
 
 export function filterJobs(items: readonly Job[], state: StateFilter, type: string | null): Job[] {
   return items.filter((j) => {
@@ -74,12 +75,21 @@ export function filterJobs(items: readonly Job[], state: StateFilter, type: stri
     switch (state) {
       case 'active':
         return j.state === 'queued' || j.state === 'running'
+      case 'done':
+        return j.state === 'done'
       case 'failed':
         return j.state === 'failed' || j.state === 'cancelled'
       case 'all':
         return true
     }
   })
+}
+
+/** タブに出す件数（サーバの全件集計。一覧は上限付きなので items から数えない） */
+export function tabCounts(summary: JobSummary): Record<StateFilter, number> {
+  const active = summary.running + summary.queued
+  const failed = summary.failed + summary.cancelled
+  return { active, done: summary.done, failed, all: active + summary.done + failed }
 }
 
 export function jobProgress(j: Job): string {

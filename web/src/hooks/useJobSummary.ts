@@ -33,7 +33,8 @@ export function useJobSummary(enabled: boolean): JobsState {
   const fetchNow = useCallback(() => {
     apiFetch<JobList>('/api/jobs')
       .then((l) => {
-        setSummary(l.summary)
+        // 旧サーバ（done / cancelled 無し）でも NaN にしない
+        setSummary({ ...l.summary, done: l.summary.done ?? 0, cancelled: l.summary.cancelled ?? 0 })
         setItems(l.items)
         setConcurrency(l.concurrency ?? {})
         setByType(l.by_type ?? {})
