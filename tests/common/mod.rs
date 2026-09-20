@@ -155,14 +155,23 @@ pub fn set_basic_tags(
 /// Derived の opus 系統を on（`bitrate` kbps）にする。起動時の `db::derived::sync_variants` と同じで、
 /// transcode の投入を見るテストのフィクスチャが `Db::open` の直後に呼ぶ（SPEC §7.6、D-75）
 pub fn enable_opus_variant(db_path: &Path, bitrate: u32) {
+    enable_variants(db_path, bitrate, None);
+}
+
+/// Derived の系統を on にする。起動時の `db::derived::sync_variants` と同じ。`aac` は None なら
+/// 節省略の既定（off）
+pub fn enable_variants(
+    db_path: &Path,
+    opus_bitrate: u32,
+    aac: Option<spindle::config::AacVariantConfig>,
+) {
     let c = rusqlite::Connection::open(db_path).unwrap();
-    spindle::db::derived::sync_variants(
-        &c,
-        &spindle::config::OpusVariantConfig {
+    let cfg = spindle::config::DerivedConfig {
+        opus: spindle::config::OpusVariantConfig {
             enabled: true,
-            bitrate,
+            bitrate: opus_bitrate,
         },
-        0,
-    )
-    .unwrap();
+        aac: aac.unwrap_or_default(),
+    };
+    spindle::db::derived::sync_variants(&c, &cfg, 0).unwrap();
 }

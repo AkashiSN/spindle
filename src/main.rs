@@ -105,14 +105,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Derived の系統設定は config を正とし、起動時に derived_variants へ写す（D-75）
     {
-        let opus = config.encode.derived.opus.clone();
-        db.write(move |c| spindle::db::derived::sync_variants(c, &opus, spindle::db::now_epoch()))
-            .await
-            .context("derived_variants の更新に失敗")?;
+        let derived_cfg = config.encode.derived.clone();
+        db.write(move |c| {
+            spindle::db::derived::sync_variants(c, &derived_cfg, spindle::db::now_epoch())
+        })
+        .await
+        .context("derived_variants の更新に失敗")?;
         info!(
-            enabled = config.encode.derived.opus.enabled,
-            bitrate = config.encode.derived.opus.bitrate,
-            "Derived の opus 系統の設定を揃えた"
+            opus_enabled = config.encode.derived.opus.enabled,
+            opus_bitrate = config.encode.derived.opus.bitrate,
+            aac_enabled = config.encode.derived.aac.enabled,
+            aac_bitrate = config.encode.derived.aac.bitrate,
+            "Derived の系統設定を揃えた"
         );
     }
 

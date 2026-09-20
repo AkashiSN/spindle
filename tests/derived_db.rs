@@ -3,7 +3,7 @@
 
 use rusqlite::{params, Connection};
 
-use spindle::config::OpusVariantConfig;
+use spindle::config::{AacVariantConfig, DerivedConfig, OpusVariantConfig};
 use spindle::db::derived::{Profiles, TagState};
 use spindle::db::{derived, open_memory_connection, replaygain as dbrg};
 use spindle::domain::derived::{Variant, VariantSettings};
@@ -19,7 +19,50 @@ fn conn() -> Connection {
 }
 
 fn sync(c: &Connection, enabled: bool, bitrate: u32) {
-    derived::sync_variants(c, &OpusVariantConfig { enabled, bitrate }, 0).unwrap();
+    sync_with_aac(c, enabled, bitrate, None);
+}
+
+/// 両系統を写す（`aac` が None なら節省略の既定 = off）
+fn sync_with_aac(c: &Connection, enabled: bool, bitrate: u32, aac: Option<AacVariantConfig>) {
+    let cfg = DerivedConfig {
+        opus: OpusVariantConfig { enabled, bitrate },
+        aac: aac.unwrap_or_default(),
+    };
+    derived::sync_variants(c, &cfg, 0).unwrap();
+}
+
+#[test]
+fn sync_variants_writes_the_aac_row_from_config() {
+    let c = open_memory_connection().unwrap();
+    // 節省略の既定（off）でも行はできる（表に無い系統 = 未設定、とは区別する）
+    sync_with_aac(&c, true, 256, None);
+    let aac = derived::settings_of(&c, Variant::Aac).unwrap().unwrap();
+    assert!(!aac.enabled);
+    assert_eq!(aac.audio_profile, "aac:256:48k:bake1");
+    assert_eq!(aac.tag_profile, "aac:sep= & :itunnorm0:v1");
+    assert!(aac.lossy_sources);
+    assert_eq!(aac.multi_value_separator, " & ");
+    let opus = derived::settings_of(&c, Variant::Opus).unwrap().unwrap();
+    assert!(!opus.lossy_sources);
+    // on にして区切りを変えると世代が変わる
+    sync_with_aac(
+        &c,
+        true,
+        256,
+        Some(AacVariantConfig {
+            enabled: true,
+            bitrate: 192,
+            lossy_sources: false,
+            multi_value_separator: " / ".into(),
+        }),
+    );
+    let aac = derived::settings_of(&c, Variant::Aac).unwrap().unwrap();
+    assert!(aac.enabled);
+    assert_eq!(aac.audio_profile, "aac:192:48k:bake1");
+    assert_eq!(aac.tag_profile, "aac:sep= / :itunnorm0:v1");
+    assert!(!aac.lossy_sources);
+    assert_eq!(aac.multi_value_separator, " / ");
+    assert_eq!(derived::variant_settings(&c).unwrap().len(), 2);
 }
 
 /// 現在の opus 系統の設定と同じ世代
@@ -200,14 +243,26 @@ fn enqueue_follows_profiles_and_freeze() {
     let all = derived::variant_settings(&c).unwrap();
     assert_eq!(
         all,
-        vec![VariantSettings {
-            variant: O,
-            enabled: true,
-            audio_profile: "opus:256:v1".into(),
-            tag_profile: "opus:v1".into(),
-        }]
+        vec![
+            VariantSettings {
+                variant: Variant::Aac,
+                enabled: false,
+                audio_profile: "aac:256:48k:bake1".into(),
+                tag_profile: "aac:sep= & :itunnorm0:v1".into(),
+                lossy_sources: true,
+                multi_value_separator: " & ".into(),
+            },
+            VariantSettings {
+                variant: O,
+                enabled: true,
+                audio_profile: "opus:256:v1".into(),
+                tag_profile: "opus:v1".into(),
+                lossy_sources: false,
+                multi_value_separator: " & ".into(),
+            },
+        ],
+        "variant 名順。aac は節省略の既定（off）で行がある"
     );
-    assert!(derived::settings_of(&c, Variant::Aac).unwrap().is_none());
 }
 
 #[test]

@@ -4,8 +4,8 @@
 use lofty::picture::{MimeType, Picture, PictureType};
 
 use spindle::domain::derived::{
-    eligible, expected_rel_path, opus_profiles, opus_tags, plan, Current, Plan, Target, Variant,
-    VariantSettings,
+    aac_profiles, eligible, expected_rel_path, opus_profiles, opus_tags, plan, Current, Plan,
+    Target, Variant, VariantSettings,
 };
 use spindle::domain::replaygain::Values;
 use spindle::domain::tags::TransferTags;
@@ -44,6 +44,8 @@ fn settings() -> VariantSettings {
         enabled: true,
         audio_profile,
         tag_profile,
+        lossy_sources: false,
+        multi_value_separator: " & ".into(),
     }
 }
 
@@ -80,6 +82,13 @@ fn variant_names_and_profiles() {
         ("opus:256:v1".to_owned(), "opus:v1".to_owned())
     );
     assert_eq!(opus_profiles(128).0, "opus:128:v1");
+    assert_eq!(
+        aac_profiles(256, " & "),
+        (
+            "aac:256:48k:bake1".to_owned(),
+            "aac:sep= & :itunnorm0:v1".to_owned()
+        )
+    );
 }
 
 #[test]

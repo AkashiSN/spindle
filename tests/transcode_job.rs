@@ -62,19 +62,8 @@ impl Lib {
         }
         let db_path = dir.path().join("spindle.db");
         let db = Arc::new(Db::open(&db_path).unwrap());
-        {
-            // 起動時の sync_variants と同じ（opus 系統 128k、on。エンコーダの設定と揃える）
-            let c = Connection::open(&db_path).unwrap();
-            derived::sync_variants(
-                &c,
-                &spindle::config::OpusVariantConfig {
-                    enabled: true,
-                    bitrate: 128,
-                },
-                0,
-            )
-            .unwrap();
-        }
+        // 起動時の sync_variants と同じ（opus 系統 128k、on。エンコーダの設定と揃える）
+        common::enable_opus_variant(&db_path, 128);
         let library = Arc::new(RootDir::open(&dir.path().join("Library")).unwrap());
         let derived = Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap());
         let store = Arc::new(ArtworkStore::new(dir.path().join("thumbs")));
@@ -195,6 +184,19 @@ impl Lib {
 
     fn conn(&self) -> Connection {
         Connection::open(&self.db_path).unwrap()
+    }
+
+    /// opus 系統の設定を写し直す（aac は節省略の既定 = off のまま）
+    fn sync_opus(&self, enabled: bool, bitrate: u32, now: i64) {
+        derived::sync_variants(
+            &self.conn(),
+            &spindle::config::DerivedConfig {
+                opus: spindle::config::OpusVariantConfig { enabled, bitrate },
+                aac: Default::default(),
+            },
+            now,
+        )
+        .unwrap();
     }
 
     fn track_id(&self, rel: &str) -> i64 {
@@ -517,15 +519,7 @@ async fn frozen_variant_and_unknown_variant_are_noops() {
     assert_eq!(lib.run(a).await, JobState::Done);
     let before = sha256(&lib.derived().join("opus/A/01.opus"));
     // 凍結
-    derived::sync_variants(
-        &lib.conn(),
-        &spindle::config::OpusVariantConfig {
-            enabled: false,
-            bitrate: 128,
-        },
-        1,
-    )
-    .unwrap();
+    lib.sync_opus(false, 128, 1);
     common::retag(&p, |t| t.set_title("a2".to_owned()));
     lib.scan().await;
     let (av, tv) = lib.versions(a);
@@ -533,7 +527,7 @@ async fn frozen_variant_and_unknown_variant_are_noops() {
     assert_eq!(lib.wait_job(job).await, JobState::Done);
     assert_eq!(sha256(&lib.derived().join("opus/A/01.opus")), before);
     assert_eq!(lib.derived_row(a).unwrap().2, 1, "タグ版も据え置き");
-    // 設定に無い系統
+    // 凍結中の系統（aac は節省略の既定 = off）
     let job = lib
         .jobs
         .enqueue(derived::new_job(a, Variant::Aac, av, tv))
@@ -543,15 +537,7 @@ async fn frozen_variant_and_unknown_variant_are_noops() {
     assert_eq!(lib.wait_job(job).await, JobState::Done);
     assert!(!lib.derived().join("aac").exists());
     // 戻せば追随する
-    derived::sync_variants(
-        &lib.conn(),
-        &spindle::config::OpusVariantConfig {
-            enabled: true,
-            bitrate: 128,
-        },
-        2,
-    )
-    .unwrap();
+    lib.sync_opus(true, 128, 2);
     assert_eq!(lib.run(a).await, JobState::Done);
     assert_eq!(lib.derived_row(a).unwrap().2, 2);
 }

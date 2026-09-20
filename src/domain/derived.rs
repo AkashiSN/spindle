@@ -81,11 +81,24 @@ pub struct VariantSettings {
     pub audio_profile: String,
     /// タグに効く設定の世代。行の値と違えばタグ上書き
     pub tag_profile: String,
+    /// `aac`: 非可逆原本（opus / ogg / mp3 / aac）も対象にする（D-8 の例外）。`opus` は常に false
+    pub lossy_sources: bool,
+    /// `aac`: 同じキーの複数値を 1 値に結合する区切り。`opus` では使わない
+    pub multi_value_separator: String,
 }
 
 /// opus 系統の設定の世代。`opusenc --vbr --music --bitrate <bitrate>`（引数を変えるときは版を上げる）
 pub fn opus_profiles(bitrate: u32) -> (String, String) {
     (format!("opus:{bitrate}:v1"), "opus:v1".to_owned())
+}
+
+/// aac 系統の設定の世代。`ffmpeg -af volume [-ar 48000] -c:a aac -b:a <bitrate>k`（引数・焼き込み方式を
+/// 変えるときは `bake1` の版を上げる）と、区切り / iTunNORM 規則
+pub fn aac_profiles(bitrate: u32, separator: &str) -> (String, String) {
+    (
+        format!("aac:{bitrate}:48k:bake1"),
+        format!("aac:sep={separator}:itunnorm0:v1"),
+    )
 }
 
 /// Library の `rel_path` に対応する Derived の `rel_path`（`<variant>/` 以下に、末尾要素の拡張子を

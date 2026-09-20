@@ -69,19 +69,8 @@ impl Lib {
         }
         let db_path = dir.path().join("spindle.db");
         let db = Arc::new(Db::open(&db_path).unwrap());
-        {
-            // 起動時の sync_variants と同じ（opus 系統 128k、on）
-            let c = Connection::open(&db_path).unwrap();
-            derived::sync_variants(
-                &c,
-                &spindle::config::OpusVariantConfig {
-                    enabled: true,
-                    bitrate: 128,
-                },
-                0,
-            )
-            .unwrap();
-        }
+        // 起動時の sync_variants と同じ（opus 系統 128k、on。エンコーダの設定と揃える）
+        common::enable_opus_variant(&db_path, 128);
         let library = Arc::new(RootDir::open(&dir.path().join("Library")).unwrap());
         let derived = Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap());
         let store = Arc::new(ArtworkStore::new(dir.path().join("thumbs")));

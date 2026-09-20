@@ -56,19 +56,8 @@ impl App {
         std::fs::create_dir(&der).unwrap();
         let db_path = dir.path().join("spindle.db");
         let db = Arc::new(Db::open(&db_path).unwrap());
-        {
-            // 起動時の sync_variants と同じ（opus 系統 128k、on）
-            let c = rusqlite::Connection::open(&db_path).unwrap();
-            derived::sync_variants(
-                &c,
-                &spindle::config::OpusVariantConfig {
-                    enabled: true,
-                    bitrate: 128,
-                },
-                0,
-            )
-            .unwrap();
-        }
+        // 起動時の sync_variants と同じ（opus 系統 128k、on。エンコーダの設定と揃える）
+        common::enable_opus_variant(&db_path, 128);
         let config = Arc::new(Config::parse(toml).unwrap());
         let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
             .await

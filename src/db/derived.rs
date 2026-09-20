@@ -11,36 +11,56 @@
 
 use rusqlite::{params, Connection, OptionalExtension as _};
 
-use crate::config::OpusVariantConfig;
+use crate::config::DerivedConfig;
 use crate::db::jobs::{self as dbjobs, EnqueueResult, JobType, NewJob};
 use crate::db::Result;
 use crate::domain::derived::{
-    expected_rel_path, opus_profiles, plan, Current, Target, Variant, VariantSettings,
+    aac_profiles, expected_rel_path, opus_profiles, plan, Current, Target, Variant, VariantSettings,
 };
 use crate::domain::relpath::canonical_key;
 
 // ---------------------------------------------------------------- 系統の設定（derived_variants）
 
-/// 起動時に `config.toml` の系統設定を `derived_variants` 表へ写す（`aac` 系統は P4-8）
-pub fn sync_variants(conn: &Connection, opus: &OpusVariantConfig, now: i64) -> Result<()> {
-    let (audio_profile, tag_profile) = opus_profiles(opus.bitrate);
-    conn.execute(
-        "INSERT INTO derived_variants (variant, enabled, audio_profile, tag_profile, codec, bitrate, updated_at)
-         VALUES ('opus', ?1, ?2, ?3, 'opus', ?4, ?5)
+/// 起動時に `config.toml` の系統設定を `derived_variants` 表へ写す（opus / aac の 2 行。節を省略した
+/// 系統も既定値で行を作る。表に無い = 未設定、とは区別する）
+pub fn sync_variants(conn: &Connection, cfg: &DerivedConfig, now: i64) -> Result<()> {
+    let mut st = conn.prepare_cached(
+        "INSERT INTO derived_variants (variant, enabled, audio_profile, tag_profile, codec, bitrate,
+                                       updated_at, lossy_sources, multi_value_separator)
+         VALUES (?1, ?2, ?3, ?4, ?1, ?5, ?6, ?7, ?8)
          ON CONFLICT(variant) DO UPDATE SET
            enabled = excluded.enabled, audio_profile = excluded.audio_profile,
            tag_profile = excluded.tag_profile, codec = excluded.codec, bitrate = excluded.bitrate,
-           updated_at = excluded.updated_at",
-        params![
-            i64::from(opus.enabled),
-            audio_profile,
-            tag_profile,
-            i64::from(opus.bitrate),
-            now
-        ],
+           updated_at = excluded.updated_at, lossy_sources = excluded.lossy_sources,
+           multi_value_separator = excluded.multi_value_separator",
     )?;
+    let (audio, tag) = opus_profiles(cfg.opus.bitrate);
+    st.execute(params![
+        Variant::Opus.as_str(),
+        i64::from(cfg.opus.enabled),
+        audio,
+        tag,
+        i64::from(cfg.opus.bitrate),
+        now,
+        0i64,
+        " & ",
+    ])?;
+    let (audio, tag) = aac_profiles(cfg.aac.bitrate, &cfg.aac.multi_value_separator);
+    st.execute(params![
+        Variant::Aac.as_str(),
+        i64::from(cfg.aac.enabled),
+        audio,
+        tag,
+        i64::from(cfg.aac.bitrate),
+        now,
+        i64::from(cfg.aac.lossy_sources),
+        cfg.aac.multi_value_separator,
+    ])?;
     Ok(())
 }
+
+const SETTINGS_COLUMNS: &str =
+    "variant, enabled, audio_profile, tag_profile, lossy_sources, multi_value_separator";
 
 fn settings_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<VariantSettings>> {
     let name: String = r.get(0)?;
@@ -52,14 +72,16 @@ fn settings_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<VariantSetting
         enabled: r.get::<_, i64>(1)? == 1,
         audio_profile: r.get(2)?,
         tag_profile: r.get(3)?,
+        lossy_sources: r.get::<_, i64>(4)? == 1,
+        multi_value_separator: r.get(5)?,
     }))
 }
 
 /// 表にある系統の設定（凍結中も含む。variant 名順）
 pub fn variant_settings(conn: &Connection) -> Result<Vec<VariantSettings>> {
-    let mut st = conn.prepare_cached(
-        "SELECT variant, enabled, audio_profile, tag_profile FROM derived_variants ORDER BY variant",
-    )?;
+    let mut st = conn.prepare_cached(&format!(
+        "SELECT {SETTINGS_COLUMNS} FROM derived_variants ORDER BY variant"
+    ))?;
     let rows = st
         .query_map([], settings_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -70,7 +92,7 @@ pub fn variant_settings(conn: &Connection) -> Result<Vec<VariantSettings>> {
 pub fn settings_of(conn: &Connection, variant: Variant) -> Result<Option<VariantSettings>> {
     Ok(conn
         .query_row(
-            "SELECT variant, enabled, audio_profile, tag_profile FROM derived_variants WHERE variant = ?1",
+            &format!("SELECT {SETTINGS_COLUMNS} FROM derived_variants WHERE variant = ?1"),
             [variant.as_str()],
             settings_row,
         )
