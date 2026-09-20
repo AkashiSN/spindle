@@ -152,19 +152,44 @@ pub struct RipConfig {
     pub prefer_ctdb: bool,
 }
 
-/// Derived のコーデック。D-9 により Opus のみ
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DerivedCodec {
-    Opus,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EncodeConfig {
-    pub derived_codec: DerivedCodec,
-    pub derived_bitrate: u32,
     pub flac_compression: u8,
+    /// Derived の系統ごとの設定（SPEC §7.6、D-75）。省略時は opus が on / 256k
+    #[serde(default)]
+    pub derived: DerivedConfig,
+}
+
+/// `[encode.derived.<variant>]`。`aac` 系統は P4-8 で足す
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DerivedConfig {
+    #[serde(default)]
+    pub opus: OpusVariantConfig,
+}
+
+/// `[encode.derived.opus]`（`opusenc --vbr --music --bitrate <bitrate>`。D-9 追記）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpusVariantConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_opus_bitrate")]
+    pub bitrate: u32,
+}
+
+impl Default for OpusVariantConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bitrate: default_opus_bitrate(),
+        }
+    }
+}
+
+fn default_opus_bitrate() -> u32 {
+    256
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -450,8 +475,8 @@ impl Config {
         }
 
         // [encode]
-        if self.encode.derived_bitrate == 0 {
-            return invalid("encode.derived_bitrate は 1 以上".into());
+        if self.encode.derived.opus.bitrate == 0 {
+            return invalid("encode.derived.opus.bitrate は 1 以上".into());
         }
         if self.encode.flac_compression > 8 {
             return invalid(format!(

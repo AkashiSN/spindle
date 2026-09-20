@@ -1727,9 +1727,11 @@ retry_on_mismatch = 2
 prefer_ctdb = true
 
 [encode]
-derived_codec = "opus"         # P4-7 で [encode.derived.opus] / [encode.derived.aac] に置き換わる（§7.6）
-derived_bitrate = 128
 flac_compression = 8
+
+[encode.derived.opus]          # Derived の opus 系統（§7.6、D-75）。Android の同期・Web 再生・配布ビュー
+enabled = true
+bitrate = 256                  # opusenc --vbr --music --bitrate（D-9 追記）
 
 [replaygain]
 reference_lufs = -18.0         # 内部表現。書き出し時に変換

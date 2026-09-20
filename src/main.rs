@@ -291,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
             OpusEncoder::new(
                 &state.config.bin.ffmpeg,
                 &state.config.bin.opusenc,
-                state.config.encode.derived_bitrate,
+                state.config.encode.derived.opus.bitrate,
                 state.config.paths.data.join(TMP_DIR_NAME),
             ),
             Arc::clone(&artwork),

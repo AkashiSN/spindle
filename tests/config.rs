@@ -35,7 +35,8 @@ fn example_config_parses_and_validates() {
     let cfg = Config::parse(EXAMPLE).expect("deploy/config.example.toml は妥当であること");
     assert_eq!(cfg.paths.library.as_os_str(), "/library");
     assert_eq!(cfg.paths.data.as_os_str(), "/data");
-    assert_eq!(cfg.encode.derived_bitrate, 128);
+    assert!(cfg.encode.derived.opus.enabled);
+    assert_eq!(cfg.encode.derived.opus.bitrate, 256, "D-9 追記");
     assert_eq!(cfg.encode.flac_compression, 8);
     assert_eq!(cfg.replaygain.reference_lufs, -18.0);
     assert_eq!(cfg.rip.drive_offset, DriveOffset::Auto);
@@ -198,19 +199,35 @@ fn flac_compression_out_of_range_is_rejected() {
 }
 
 #[test]
-fn derived_bitrate_zero_is_rejected() {
-    let err = Config::parse(&with_override("encode", "derived_bitrate = 0")).unwrap_err();
+fn derived_opus_bitrate_zero_is_rejected() {
+    let toml = replace_section(
+        "encode",
+        "flac_compression = 8\n[derived.opus]\nenabled = true\nbitrate = 0",
+    );
+    let err = Config::parse(&toml).unwrap_err();
     assert!(
-        matches!(err, ConfigError::Invalid(ref m) if m.contains("derived_bitrate")),
+        matches!(err, ConfigError::Invalid(ref m) if m.contains("encode.derived.opus.bitrate")),
         "{err}"
     );
 }
 
 #[test]
-fn derived_codec_other_than_opus_is_rejected() {
-    // D-9: Derived は Opus のみ
-    let err = Config::parse(&with_override("encode", r#"derived_codec = "mp3""#)).unwrap_err();
+fn derived_section_defaults_to_opus_enabled_256() {
+    // [encode.derived] を省いても opus 系統は on / 256k（SPEC §7.6、D-75）
+    let cfg = Config::parse(&replace_section("encode", "flac_compression = 8")).unwrap();
+    assert!(cfg.encode.derived.opus.enabled);
+    assert_eq!(cfg.encode.derived.opus.bitrate, 256);
+    // 旧キー（derived_codec / derived_bitrate）は受け付けない
+    let err = Config::parse(&with_override("encode", "derived_bitrate = 128")).unwrap_err();
     assert!(matches!(err, ConfigError::Parse(_)), "{err}");
+    // 系統だけ off にできる
+    let cfg = Config::parse(&replace_section(
+        "encode",
+        "flac_compression = 8\n[derived.opus]\nenabled = false\nbitrate = 128",
+    ))
+    .unwrap();
+    assert!(!cfg.encode.derived.opus.enabled);
+    assert_eq!(cfg.encode.derived.opus.bitrate, 128);
 }
 
 #[test]
