@@ -113,7 +113,7 @@ export function CdView({ cd }: { cd: CdLookupState }) {
                 </label>
               ))}
               <span className="muted small">
-                最小限はアルバム名・アルバムアーティスト・日付・ディスク番号 / 枚数・MusicBrainz の id。トラック名は貼り付けか手入力で埋める。
+                最小限はアルバム名・アルバムアーティスト・日付・ディスク番号 / 枚数・MusicBrainz のリリース id。トラック名は貼り付けか手入力で埋める。
                 切り替えると選択中の候補を写し直す（編集中の内容は消える）
               </span>
             </fieldset>

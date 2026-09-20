@@ -148,11 +148,13 @@ describe('draftFromCandidate / emptyDraft', () => {
     expect(d.tracks[2]!.mb).toBeNull()
   })
   it('minimal は識別用の最小限だけ写す（レーベル・カタログ番号・JAN は空、トラック行は番号と長さだけ。D-72、P4-2）', () => {
-    const d = draftFromCandidate(base, toc, 'minimal')
+    const withGroup = { ...base, release_group_id: 'rg' }
+    expect(draftFromCandidate(withGroup, toc, 'full').release_group_id).toBe('rg')
+    const d = draftFromCandidate(withGroup, toc, 'minimal')
     expect(d).toMatchObject({
       source: 'musicbrainz',
       release_id: 'r',
-      release_group_id: base.release_group_id,
+      release_group_id: null,
       album: 'T',
       album_artist: 'A',
       date: '1991-09-24',

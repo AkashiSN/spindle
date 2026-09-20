@@ -212,7 +212,7 @@ export function emptyDraft(toc: TocTrackInfo[]): DiscDraft {
  */
 /**
  * 候補から写す範囲（D-72、P4-2）。`minimal` は盤を見分けるのに要る最小限（アルバム / アルバムアーティスト /
- * 日付 / ディスク番号・枚数 / MusicBrainz のリリース id）。レーベル・カタログ番号・JAN と各トラックの
+ * 日付 / ディスク番号・枚数 / MUSICBRAINZ_ALBUMID。DISCID と TRACKTOTAL は吸い出し時に TOC から付く）。レーベル・カタログ番号・JAN と各トラックの
  * タイトル・アーティスト・MB id・ISRC は `full` のときだけ写る（値は公式表記を手で入れる運用）
  */
 export type CopyScope = 'minimal' | 'full'
@@ -228,7 +228,8 @@ export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[], sco
   return {
     source: 'musicbrainz',
     release_id: c.release_id,
-    release_group_id: c.release_group_id,
+    // Release Group は盤の版を特定する鍵ではないので最小限には含めない（D-72 の id は ALBUMID / DISCID）
+    release_group_id: full ? c.release_group_id : null,
     album: c.title,
     album_artist: c.artist,
     date: c.date ?? '',
