@@ -19,7 +19,7 @@ use spindle::config::Config;
 use spindle::db::{now_epoch, Db};
 use spindle::jobs::{
     self, backoff_secs, CancelOutcome, EnqueueResult, Event, JobError, JobState, JobType, Jobs,
-    NewJob, Outcome, Registry, RetryOutcome,
+    NewJob, Outcome, Registry, RetryOutcome, ORPHAN_REQUEUED_ERROR,
 };
 
 const EXAMPLE: &str = include_str!("../deploy/config.example.toml");
@@ -533,6 +533,201 @@ async fn recovery_cancels_running_job_that_had_cancel_requested() {
     assert!(finished.is_some());
 }
 
+// ---------------------------------------------------------------- 終端書き込みの再試行と稼働中の回収（D-76）
+
+/// `id` の (attempts, last_error, started_at)
+fn attempts_error_started(conn: &Connection, id: i64) -> (i64, Option<String>, Option<i64>) {
+    conn.query_row(
+        "SELECT attempts, last_error, started_at FROM jobs WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .unwrap()
+}
+
+fn lock_rows(conn: &Connection) -> (i64, i64, i64) {
+    let n = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+    (
+        n("SELECT count(*) FROM track_locks"),
+        n("SELECT count(*) FROM derived_path_locks"),
+        n("SELECT count(*) FROM job_mutexes"),
+    )
+}
+
+/// 終端の書き込みが失敗しても（ディスク満杯の模擬に writer を読み取り専用にする）、書けるように
+/// なれば再試行で完走し、失敗には数えない
+#[tokio::test]
+async fn terminal_write_is_retried_until_the_db_is_writable() {
+    let h = Harness::new();
+    let EnqueueResult::Inserted(id) = h.jobs.enqueue(scan_job()).await.unwrap() else {
+        panic!()
+    };
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut reg = Registry::new();
+    {
+        let runs = runs.clone();
+        reg.register_fn(JobType::Scan, move |ctx| {
+            let runs = runs.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                // 仕事は済んだが、終端を書く直前に DB が書けなくなった
+                let db = Arc::clone(ctx.db());
+                db.write(|c| Ok(c.pragma_update(None, "query_only", true)?))
+                    .await?;
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    db.write(|c| Ok(c.pragma_update(None, "query_only", false)?))
+                        .await
+                        .unwrap();
+                });
+                Ok(Outcome::Done)
+            }
+        });
+    }
+    h.start(reg);
+    wait_state(&h, id, JobState::Done).await;
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "再実行ではなく再試行で完走する"
+    );
+    let (attempts, last_error, _) = attempts_error_started(&h.raw(), id);
+    assert_eq!(attempts, 0);
+    assert_eq!(last_error, None);
+}
+
+/// 終端を書けないまま running に残った行（実行中表に無い）は、ワーカーが稼働中に queued へ戻して
+/// ロックを消し、その後普通に実行される
+#[tokio::test]
+async fn orphaned_running_job_is_requeued_while_the_worker_runs() {
+    let h = Harness::new();
+    let EnqueueResult::Inserted(id) = h.jobs.enqueue(scan_job()).await.unwrap() else {
+        panic!()
+    };
+    {
+        let conn = h.raw();
+        insert_track(&conn, 1, 1, 1);
+        conn.execute(
+            "UPDATE jobs SET state = 'running', started_at = 1 WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_locks (track_id, job_id, acquired_at) VALUES (1, ?1, 1)",
+            [id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO derived_path_locks (rel_path_key, track_id, job_id, acquired_at)
+             VALUES ('opus/a.opus', NULL, ?1, 1)",
+            [id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO job_mutexes (name, job_id, acquired_at) VALUES ('library', ?1, 1)",
+            [id],
+        )
+        .unwrap();
+    }
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut reg = Registry::new();
+    {
+        let runs = runs.clone();
+        reg.register_fn(JobType::Scan, move |_ctx| {
+            let runs = runs.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(Outcome::Done)
+            }
+        });
+    }
+    let mut rx = h.jobs.subscribe();
+    h.start(reg);
+    wait_state(&h, id, JobState::Done).await;
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    // 回収（queued）→ 実行（running）→ 完了（done）の順に SSE が流れる
+    let mut states = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let Event::Job(j) = ev {
+            if j.id == id {
+                states.push(j.state);
+            }
+        }
+    }
+    assert_eq!(
+        states,
+        [JobState::Queued, JobState::Running, JobState::Done],
+        "{states:?}"
+    );
+    let conn = h.raw();
+    let (attempts, last_error, _) = attempts_error_started(&conn, id);
+    assert_eq!(attempts, 0, "回収は失敗に数えない");
+    assert_eq!(last_error.as_deref(), Some(ORPHAN_REQUEUED_ERROR));
+    assert_eq!(lock_rows(&conn), (0, 0, 0));
+}
+
+/// cancel 要求が立ったまま取り残された running は cancelled（起動時リカバリと同じ）
+#[tokio::test]
+async fn orphaned_running_job_with_cancel_requested_is_cancelled() {
+    let h = Harness::new();
+    let EnqueueResult::Inserted(id) = h.jobs.enqueue(scan_job()).await.unwrap() else {
+        panic!()
+    };
+    h.raw()
+        .execute(
+            "UPDATE jobs SET state = 'running', started_at = 1, cancel_requested_at = 2 WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut reg = Registry::new();
+    {
+        let runs = runs.clone();
+        reg.register_fn(JobType::Scan, move |_ctx| {
+            let runs = runs.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(Outcome::Done)
+            }
+        });
+    }
+    h.start(reg);
+    wait_state(&h, id, JobState::Cancelled).await;
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    let (_, _, started) = attempts_error_started(&h.raw(), id);
+    assert_eq!(started, None);
+}
+
+/// 本物の running（実行中表にある）は、ワーカーが何周回っても戻さない
+#[tokio::test]
+async fn running_job_that_is_tracked_is_not_swept() {
+    let h = Harness::new();
+    let EnqueueResult::Inserted(id) = h.jobs.enqueue(scan_job()).await.unwrap() else {
+        panic!()
+    };
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut reg = Registry::new();
+    {
+        let runs = runs.clone();
+        reg.register_fn(JobType::Scan, move |_ctx| {
+            let runs = runs.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                // ワーカーの周回（最長 1 秒）を何度も跨ぐ
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                Ok(Outcome::Done)
+            }
+        });
+    }
+    h.start(reg);
+    wait_state(&h, id, JobState::Done).await;
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "戻されて再実行されていない");
+    let (attempts, last_error, _) = attempts_error_started(&h.raw(), id);
+    assert_eq!(attempts, 0);
+    assert_eq!(last_error, None);
+}
+
 #[tokio::test]
 async fn queued_job_with_cancel_requested_is_cancelled_without_running() {
     let h = Harness::new();
@@ -866,25 +1061,9 @@ async fn stale_check_happens_after_track_lock() {
     let h = Harness::new();
     let conn = h.raw();
     insert_track(&conn, 1, 5, 1);
-    // 別ジョブ（99）がトラック 1 を握っている
-    conn.execute(
-        "INSERT INTO jobs (id, type, payload, state, created_at) VALUES (99, 'rg', '{}', 'running', 0)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO track_locks (track_id, job_id, acquired_at) VALUES (1, 99, 0)",
-        [],
-    )
-    .unwrap();
-    let job = NewJob::new(
-        JobType::Tagwrite,
-        serde_json::json!({"track_id": 1, "tag_version": 5}),
-    )
-    .dedup_key("tagwrite:1:5");
-    let EnqueueResult::Inserted(id) = h.jobs.enqueue(job).await.unwrap() else {
-        panic!()
-    };
+    // 別の本物の running ジョブ（rg）がトラック 1 を握り続ける（行を直接 running にすると
+    // 稼働中の回収で queued に戻される。D-76）
+    let release = CancellationToken::new();
     let runs = Arc::new(AtomicUsize::new(0));
     let mut reg = Registry::new();
     {
@@ -896,8 +1075,40 @@ async fn stale_check_happens_after_track_lock() {
                 Ok(Outcome::Done)
             }
         });
+        let release = release.clone();
+        reg.register_fn(JobType::Rg, move |ctx| {
+            let release = release.clone();
+            async move {
+                if !ctx.lock_tracks(&[1]).await? {
+                    return Ok(Outcome::Requeue);
+                }
+                release.cancelled().await;
+                Ok(Outcome::Done)
+            }
+        });
     }
+    let EnqueueResult::Inserted(holder) = h
+        .jobs
+        .enqueue(NewJob::new(JobType::Rg, serde_json::json!({})))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
     h.start(reg);
+    wait_state(&h, holder, JobState::Running).await;
+    let locks: i64 = conn
+        .query_row("SELECT count(*) FROM track_locks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(locks, 1, "rg がトラック 1 を握っている");
+    let job = NewJob::new(
+        JobType::Tagwrite,
+        serde_json::json!({"track_id": 1, "tag_version": 5}),
+    )
+    .dedup_key("tagwrite:1:5");
+    let EnqueueResult::Inserted(id) = h.jobs.enqueue(job).await.unwrap() else {
+        panic!()
+    };
     // ロックが取れないので走らずに queued へ戻る（run_after が立つ）
     let mut requeued = false;
     // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
@@ -919,11 +1130,11 @@ async fn stale_check_happens_after_track_lock() {
     assert!(requeued, "ロック待ちで再キューされること");
     assert_eq!(runs.load(Ordering::SeqCst), 0);
 
-    // ロック保持中に版が進んでからロックが外れる
+    // ロック保持中に版が進んでからロックが外れる（rg の終端で解放される）
     conn.execute("UPDATE tracks SET tag_version = 6 WHERE id = 1", [])
         .unwrap();
-    conn.execute("DELETE FROM track_locks WHERE job_id = 99", [])
-        .unwrap();
+    release.cancel();
+    wait_state(&h, holder, JobState::Done).await;
     wait_state(&h, id, JobState::Done).await;
     assert_eq!(runs.load(Ordering::SeqCst), 0, "stale なので実行されない");
     let locks: i64 = conn

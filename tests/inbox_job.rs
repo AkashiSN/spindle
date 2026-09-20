@@ -513,28 +513,53 @@ async fn busy_library_requeues_and_keeps_item_approved() {
         a.id,
         &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
     );
-    // 別の running ジョブが library を持っている
-    {
-        let c = lib.conn();
-        c.execute(
-            "INSERT INTO jobs (type, state, payload, priority, attempts, max_attempts, created_at)
-             VALUES ('scan', 'running', '{}', 0, 0, 1, 0)",
-            [],
-        )
-        .unwrap();
-        let other = c.last_insert_rowid();
-        c.execute(
-            "INSERT INTO job_mutexes (name, job_id, acquired_at) VALUES ('library', ?1, 0)",
-            [other],
-        )
-        .unwrap();
-    }
+    // 別の本物の running ジョブ（scan）が library を持ち続ける（行を直接 running にすると
+    // 稼働中の回収で queued に戻される。D-76）
+    let release = CancellationToken::new();
     let env = lib.env(true);
     let handler = InboxHandler::new(env);
     // ハンドラを直接は呼べないので、ワーカーで 1 回だけ回して Requeue を観測する
     let mut reg = Registry::new();
     reg.register(JobType::Inbox, Arc::new(handler));
+    {
+        let release = release.clone();
+        reg.register_fn(JobType::Scan, move |ctx| {
+            let release = release.clone();
+            async move {
+                if !ctx.lock_mutex(spindle::jobs::LIBRARY_MUTEX).await? {
+                    return Ok(spindle::jobs::Outcome::Requeue);
+                }
+                release.cancelled().await;
+                Ok(spindle::jobs::Outcome::Done)
+            }
+        });
+    }
+    let other = match lib
+        .jobs
+        .enqueue(spindle::jobs::NewJob::new(
+            JobType::Scan,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap()
+    {
+        EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+    };
     lib.jobs.start(reg, lib.shutdown.clone());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let st: String = lib
+            .conn()
+            .query_row("SELECT state FROM jobs WHERE id = ?1", [other], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        if st == "running" || std::time::Instant::now() >= deadline {
+            assert_eq!(st, "running");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let job = match lib.jobs.enqueue(new_inbox_job()).await.unwrap() {
         EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
     };
@@ -550,6 +575,7 @@ async fn busy_library_requeues_and_keeps_item_approved() {
         ItemState::Approved
     );
     assert!(!lib.lib_path("_Unsorted").exists());
+    release.cancel();
 }
 
 #[tokio::test]

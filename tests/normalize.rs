@@ -1902,7 +1902,9 @@ async fn revert_gets_its_own_job_even_while_previous_job_is_still_running() {
     let old_job = prepared.job_ids[0];
     lib.wait_job_terminal(old_job).await;
     // 前のジョブがまだ running（ハンドラは返ったが終端のトランザクションが済んでいない）状態を
-    // 作る。dedup key がトラック単位だと、この間の revert が前のジョブに相乗りして永遠に動かない
+    // 作る。dedup key がトラック単位だと、この間の revert が前のジョブに相乗りして永遠に動かない。
+    // ワーカーが動いていると実行中表に無い running は回収されてしまう（D-76）ので、止めてから作る
+    let lib = lib.reopen();
     lib.conn()
         .execute("UPDATE jobs SET state = 'running' WHERE id = ?1", [old_job])
         .unwrap();
@@ -1921,6 +1923,7 @@ async fn revert_gets_its_own_job_even_while_previous_job_is_still_running() {
     lib.conn()
         .execute("UPDATE jobs SET state = 'done' WHERE id = ?1", [old_job])
         .unwrap();
+    lib.start();
     assert_eq!(
         lib.wait_batch_terminal(reverse.batch_id).await,
         BatchState::Applied

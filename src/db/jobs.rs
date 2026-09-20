@@ -5,7 +5,7 @@
 //! UPDATE で行い、`changes()` で遷移が成立したかを返す（同じジョブを二重に終端へ
 //! 進めない）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
@@ -677,6 +677,69 @@ pub fn sweep_cancel_requested(conn: &Connection, now: i64) -> Result<Vec<i64>> {
     )?;
     let ids = stmt.query_map([now], |r| r.get(0))?;
     Ok(ids.collect::<rusqlite::Result<Vec<i64>>>()?)
+}
+
+/// 稼働中の回収（D-76）で `queued` へ戻した行の `last_error`
+pub const ORPHAN_REQUEUED_ERROR: &str =
+    "終端を記録できないまま running に残っていたので再キューした（稼働中の回収）";
+
+/// 稼働中の回収の結果（[`sweep_orphaned_running`]）
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OrphanSweep {
+    /// `queued` へ戻した id
+    pub requeued: Vec<i64>,
+    /// cancel 要求が立っていたので `cancelled` に送った id
+    pub cancelled: Vec<i64>,
+    pub locks_cleared: usize,
+}
+
+impl OrphanSweep {
+    pub fn is_empty(&self) -> bool {
+        self.requeued.is_empty() && self.cancelled.is_empty()
+    }
+}
+
+/// 稼働中の回収（起動時リカバリのループ版。SPEC §8、D-76）。DB で `running` だが `tracked`
+/// （プロセス内の実行中表）に無い行は、終端を書けずに残った行なので `queued` へ戻す（cancel 要求が
+/// 立っていれば `cancelled`）。その行の `track_locks` / `derived_path_locks` / `job_mutexes` も消す。
+/// `attempts` / `run_after` は触らない（基盤の障害であってジョブの失敗ではない）
+pub fn sweep_orphaned_running(
+    conn: &Connection,
+    tracked: &HashSet<i64>,
+    now: i64,
+) -> Result<OrphanSweep> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, cancel_requested_at IS NOT NULL FROM jobs WHERE state = 'running'",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)))?;
+    let orphans: Vec<(i64, bool)> = rows
+        .filter_map(|r| match r {
+            Ok((id, _)) if tracked.contains(&id) => None,
+            other => Some(other),
+        })
+        .collect::<rusqlite::Result<_>>()?;
+    let mut sweep = OrphanSweep::default();
+    for (id, cancel_requested) in orphans {
+        sweep.locks_cleared += release_track_locks(conn, id)?
+            + conn.execute("DELETE FROM derived_path_locks WHERE job_id = ?1", [id])?
+            + release_mutexes(conn, id)?;
+        if cancel_requested {
+            conn.execute(
+                "UPDATE jobs SET state = 'cancelled', finished_at = ?2, started_at = NULL
+                 WHERE id = ?1 AND state = 'running'",
+                params![id, now],
+            )?;
+            sweep.cancelled.push(id);
+        } else {
+            conn.execute(
+                "UPDATE jobs SET state = 'queued', started_at = NULL, last_error = ?2
+                 WHERE id = ?1 AND state = 'running'",
+                params![id, ORPHAN_REQUEUED_ERROR],
+            )?;
+            sweep.requeued.push(id);
+        }
+    }
+    Ok(sweep)
 }
 
 /// 種別 `ty` の実行可能なジョブを 1 件 `running` にして返す。

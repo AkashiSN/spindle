@@ -27,7 +27,7 @@ use serde::Serialize;
 
 pub use crate::db::jobs::{
     backoff_secs, CancelOutcome, EnqueueResult, Job, JobState, JobType, ListLimits, NewJob,
-    RecoveryReport, RetryOutcome, Summary, TypeCounts,
+    OrphanSweep, RecoveryReport, RetryOutcome, Summary, TypeCounts, ORPHAN_REQUEUED_ERROR,
 };
 pub use context::{JobContext, TempGuard};
 pub use queue::{Jobs, EVENT_CAPACITY, LIST_LIMITS};

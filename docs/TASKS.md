@@ -1005,7 +1005,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/transcode_job.rs`（可逆 → AAC の読み戻し・焼き込み・peak 上限・96k → 48k・opus / aac 原本の再エンコード・
       RG 世代の作り直し・`lossy_sources` off の据え置き・タグ上書き・区切り変更の Retag・両系統の共存）
 
-- [ ] **P4-9** 終端を書けなかった `running` の稼働中回収（SPEC §8、D-76。設計済み）。ジョブの
+- [x] **P4-9** 終端を書けなかった `running` の稼働中回収（SPEC §8、D-76）。ジョブの
       終端状態（done / failed / requeue）を DB に書けなかったとき（2026-09-20 の実機でディスク満杯により 88 本）、
       `src/jobs/worker.rs::execute` のフォールバック（failed の記録）も同じ理由で失敗し、行が `running` のまま
       次回起動のリカバリまで残る（ロックも残る）。候補: (a) 終端書き込みをバックオフ付きで再試行（数十秒〜数分。

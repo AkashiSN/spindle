@@ -26,6 +26,33 @@ const TICK: Duration = Duration::from_secs(1);
 /// `Outcome::Requeue` 後に再度対象になるまでの秒数（同じジョブが空回りしないように）
 const REQUEUE_DELAY_SECS: i64 = 1;
 
+/// 終端遷移の書き込みに失敗したときの再試行間隔（秒。合計約 1 分。D-76）。この間は種別の許可と
+/// CPU 予算を持ったまま待つ
+const FINISH_RETRY_DELAYS: [u64; 6] = [1, 2, 4, 8, 16, 32];
+
+/// ハンドラの結果を DB に書ける形にしたもの。`JobError` は `anyhow::Error` を含んで Clone
+/// できないので、再試行のためにメッセージへ落とす
+#[derive(Debug, Clone)]
+enum Terminal {
+    Done,
+    Requeue,
+    Cancelled,
+    Fatal(String),
+    Failed(String),
+}
+
+impl From<super::HandlerResult> for Terminal {
+    fn from(r: super::HandlerResult) -> Self {
+        match r {
+            Ok(Outcome::Done) => Terminal::Done,
+            Ok(Outcome::Requeue) => Terminal::Requeue,
+            Err(JobError::Cancelled) => Terminal::Cancelled,
+            Err(JobError::Fatal(e)) => Terminal::Fatal(format!("{e:#}")),
+            Err(JobError::Failed(e)) => Terminal::Failed(format!("{e:#}")),
+        }
+    }
+}
+
 /// 版付きジョブの実行前ゲートの結果
 enum Gate {
     Proceed,
@@ -57,18 +84,39 @@ pub(super) async fn run(jobs: Arc<Jobs>, registry: Registry, shutdown: Cancellat
         if shutdown.is_cancelled() {
             break;
         }
-        // バックオフ中などに cancel された queued を、claim する前に cancelled へ送る
+        // バックオフ中などに cancel された queued を、claim する前に cancelled へ送る。同じ
+        // トランザクションで、終端を書けずに running に残った行（実行中表に無い）も回収する（D-76）
+        let tracked = jobs.running_ids();
         match jobs
             .db()
-            .write(|c| dbjobs::sweep_cancel_requested(c, now_epoch()))
+            .write(move |c| {
+                let tx = c.transaction()?;
+                let now = now_epoch();
+                let cancelled = dbjobs::sweep_cancel_requested(&tx, now)?;
+                let orphans = dbjobs::sweep_orphaned_running(&tx, &tracked, now)?;
+                tx.commit()?;
+                Ok((cancelled, orphans))
+            })
             .await
         {
-            Ok(ids) => {
-                for id in ids {
+            Ok((cancelled, orphans)) => {
+                if !orphans.is_empty() {
+                    warn!(
+                        requeued = ?orphans.requeued,
+                        cancelled = ?orphans.cancelled,
+                        locks_cleared = orphans.locks_cleared,
+                        "終端を記録できないまま running に残っていたジョブを回収した"
+                    );
+                }
+                for id in cancelled
+                    .into_iter()
+                    .chain(orphans.requeued)
+                    .chain(orphans.cancelled)
+                {
                     jobs.emit_job(id).await;
                 }
             }
-            Err(e) => warn!(error = %e, "cancel 要求済み queued の掃除に失敗"),
+            Err(e) => warn!(error = %e, "cancel 要求済み queued の掃除と running の回収に失敗"),
         }
         for (ty, sem) in &other_slots {
             while claim_one(&jobs, &registry, *ty, sem, &budget, &mut tasks, &shutdown).await
@@ -168,10 +216,15 @@ async fn claim_one(
                 }
                 return Claimed::No;
             }
+            // 実行中表への登録は spawn の前、claim と同じ流れで行う（回収が「claim 済みだが
+            // 未登録」の瞬間に本物を戻さないため。D-76）
+            let token = CancellationToken::new();
+            jobs.track_running(job.id, token.clone());
             tasks.spawn(execute(
                 Arc::clone(jobs),
                 Arc::clone(&handler),
                 job,
+                token,
                 permit,
                 budget_permit,
             ));
@@ -185,23 +238,29 @@ async fn claim_one(
     }
 }
 
-/// 1 件を実行して終端まで進める。permit（種別と、CPU 系なら共通予算）はこの関数の終わりで返る
+/// 1 件を実行して終端まで進める。`token` は claim 時に実行中表へ登録済み。permit（種別と、
+/// CPU 系なら共通予算）はこの関数の終わりで返る
 async fn execute(
     jobs: Arc<Jobs>,
     handler: Arc<dyn Handler>,
     job: Job,
+    token: CancellationToken,
     _permit: OwnedSemaphorePermit,
     _budget_permit: Option<OwnedSemaphorePermit>,
 ) {
     let id = job.id;
     let ty = job.job_type;
-    let token = CancellationToken::new();
-    jobs.track_running(id, token.clone());
+    // 登録の解除は drop で行う（この関数自体が panic しても実行中表に残らず、回収の対象になる）
+    let _untrack = Untrack {
+        jobs: Arc::clone(&jobs),
+        id,
+    };
     jobs.emit_job(id).await;
 
     let finished = run_one(&jobs, handler, job, token).await;
     if let Err(e) = finished {
-        // ここに来るのは DB 障害。running のまま固着させず、失敗として記録を試みる
+        // ここに来るのは DB 障害（終端の書き込みは再試行済み）。running のまま固着させず、
+        // 失敗として記録を試みる
         warn!(job_id = id, %ty, error = %e, "ジョブの終端処理に失敗。failed として記録する");
         let message = format!("終端処理に失敗: {e:#}");
         let r = jobs
@@ -216,13 +275,26 @@ async fn execute(
             })
             .await;
         if let Err(e) = r {
-            warn!(job_id = id, %ty, error = %e, "failed への記録もできない。次回起動のリカバリで queued に戻る");
+            warn!(job_id = id, %ty, error = %e, "failed への記録もできない。running のまま手放し、稼働中の回収で queued に戻す");
         }
     }
 
-    jobs.untrack_running(id);
+    // 登録を外した後は回収の対象になる（終端を書けていればもう running ではないので無関係）
+    drop(_untrack);
     jobs.emit_job(id).await;
     jobs.wake().notify_one();
+}
+
+/// drop で実行中表から外す（[`execute`] の終端。D-76）
+struct Untrack {
+    jobs: Arc<Jobs>,
+    id: i64,
+}
+
+impl Drop for Untrack {
+    fn drop(&mut self) {
+        self.jobs.untrack_running(self.id);
+    }
 }
 
 async fn run_one(
@@ -308,63 +380,90 @@ async fn run_one(
     };
 
     let unflushed = ctx.take_unflushed_progress();
-    let now = now_epoch();
-    db.write(move |c| {
-        let tx = c.transaction()?;
-        if let Some((done, total)) = unflushed {
-            dbjobs::update_progress(&tx, id, done, total)?;
-        }
-        dbjobs::release_track_locks(&tx, id)?;
-                dbjobs::release_mutexes(&tx, id)?;
-        match outcome {
-            // 完了直前に cancel が来ていても完了が勝つ（仕事は済んでいる。D-36）
-            Ok(Outcome::Done) => {
-                dbjobs::mark_done(&tx, id, now)?;
-                debug!(job_id = id, %ty, "完了");
-            }
-            Ok(Outcome::Requeue) => match dbjobs::requeue(&tx, id, now, REQUEUE_DELAY_SECS)? {
-                dbjobs::RequeueOutcome::Requeued { run_after } => {
-                    debug!(job_id = id, %ty, run_after, "前提が取れないので再キュー")
+    let terminal = Terminal::from(outcome);
+    // 終端の書き込みは DB 障害（ディスク満杯等）で失敗し得る。ハンドラの仕事は済んでいるので、
+    // 許可を持ったまま間隔を空けて書き直す（D-76）
+    let mut delays = FINISH_RETRY_DELAYS.iter();
+    loop {
+        let terminal = terminal.clone();
+        let r = db
+            .write(move |c| finish(c, id, ty, unflushed, terminal, now_epoch()))
+            .await;
+        match r {
+            Ok(()) => return Ok(()),
+            Err(e) => match delays.next() {
+                Some(secs) => {
+                    warn!(job_id = id, %ty, error = %e, retry_in = secs, "終端の書き込みに失敗。再試行する");
+                    tokio::time::sleep(Duration::from_secs(*secs)).await;
                 }
-                dbjobs::RequeueOutcome::Cancelled => {
-                    info!(job_id = id, %ty, "再キュー前に cancel 要求があったので cancelled")
-                }
-                dbjobs::RequeueOutcome::NotRunning => {
-                    warn!(job_id = id, %ty, "再キューしようとしたが running ではなかった")
-                }
+                None => return Err(e),
             },
-            Err(JobError::Cancelled) => {
-                dbjobs::mark_cancelled(&tx, id, now)?;
-                info!(job_id = id, %ty, "キャンセルされた");
+        }
+    }
+}
+
+/// 終端遷移を 1 トランザクションで書く（未 flush の進捗・ロック解放・状態遷移）。失敗したら
+/// 呼び出し側が丸ごとやり直す
+fn finish(
+    c: &mut rusqlite::Connection,
+    id: i64,
+    ty: JobType,
+    unflushed: Option<(i64, i64)>,
+    terminal: Terminal,
+    now: i64,
+) -> crate::db::Result<()> {
+    let tx = c.transaction()?;
+    if let Some((done, total)) = unflushed {
+        dbjobs::update_progress(&tx, id, done, total)?;
+    }
+    dbjobs::release_track_locks(&tx, id)?;
+    dbjobs::release_mutexes(&tx, id)?;
+    match terminal {
+        // 完了直前に cancel が来ていても完了が勝つ（仕事は済んでいる。D-36）
+        Terminal::Done => {
+            dbjobs::mark_done(&tx, id, now)?;
+            debug!(job_id = id, %ty, "完了");
+        }
+        Terminal::Requeue => match dbjobs::requeue(&tx, id, now, REQUEUE_DELAY_SECS)? {
+            dbjobs::RequeueOutcome::Requeued { run_after } => {
+                debug!(job_id = id, %ty, run_after, "前提が取れないので再キュー")
             }
-            Err(JobError::Fatal(e)) => {
-                let message = format!("{e:#}");
-                if dbjobs::mark_failed_fatally(&tx, id, &message, now)? {
-                    warn!(job_id = id, %ty, error = %message, "失敗。再試行しても変わらないので failed");
-                } else {
-                    warn!(job_id = id, %ty, error = %message, "失敗したが running ではなかった");
-                }
+            dbjobs::RequeueOutcome::Cancelled => {
+                info!(job_id = id, %ty, "再キュー前に cancel 要求があったので cancelled")
             }
-            Err(JobError::Failed(e)) => {
-                let message = format!("{e:#}");
-                match dbjobs::mark_failed(&tx, id, &message, now)? {
-                    dbjobs::FailureOutcome::Retrying { run_after, attempts } => {
-                        warn!(job_id = id, %ty, attempts, run_after, error = %message, "失敗。再試行を予約")
-                    }
-                    dbjobs::FailureOutcome::Failed { attempts } => {
-                        warn!(job_id = id, %ty, attempts, error = %message, "失敗。上限に達した")
-                    }
-                    dbjobs::FailureOutcome::Cancelled => {
-                        info!(job_id = id, %ty, error = %message, "失敗したが cancel 要求があったので cancelled")
-                    }
-                    dbjobs::FailureOutcome::NotRunning => {
-                        warn!(job_id = id, %ty, error = %message, "失敗したが running ではなかった")
-                    }
-                }
+            dbjobs::RequeueOutcome::NotRunning => {
+                warn!(job_id = id, %ty, "再キューしようとしたが running ではなかった")
+            }
+        },
+        Terminal::Cancelled => {
+            dbjobs::mark_cancelled(&tx, id, now)?;
+            info!(job_id = id, %ty, "キャンセルされた");
+        }
+        Terminal::Fatal(message) => {
+            if dbjobs::mark_failed_fatally(&tx, id, &message, now)? {
+                warn!(job_id = id, %ty, error = %message, "失敗。再試行しても変わらないので failed");
+            } else {
+                warn!(job_id = id, %ty, error = %message, "失敗したが running ではなかった");
             }
         }
-        tx.commit()?;
-        Ok(())
-    })
-    .await
+        Terminal::Failed(message) => match dbjobs::mark_failed(&tx, id, &message, now)? {
+            dbjobs::FailureOutcome::Retrying {
+                run_after,
+                attempts,
+            } => {
+                warn!(job_id = id, %ty, attempts, run_after, error = %message, "失敗。再試行を予約")
+            }
+            dbjobs::FailureOutcome::Failed { attempts } => {
+                warn!(job_id = id, %ty, attempts, error = %message, "失敗。上限に達した")
+            }
+            dbjobs::FailureOutcome::Cancelled => {
+                info!(job_id = id, %ty, error = %message, "失敗したが cancel 要求があったので cancelled")
+            }
+            dbjobs::FailureOutcome::NotRunning => {
+                warn!(job_id = id, %ty, error = %message, "失敗したが running ではなかった")
+            }
+        },
+    }
+    tx.commit()?;
+    Ok(())
 }

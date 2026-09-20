@@ -15,13 +15,17 @@ use spindle::db::{now_epoch, Db};
 use spindle::fsroot::RootDir;
 use spindle::gc::{execute_all, execute_rows, plan, GcRoots, ORPHAN_GRACE_SECS};
 use spindle::jobs::handlers::gc::{new_gc_job, GcHandler};
-use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};
+use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, NewJob, Registry};
 use spindle::media::artwork::ArtworkStore;
 
 const DAY: i64 = 86_400;
 const RETENTION: i64 = 30 * DAY;
 /// テスト用の GC ジョブ行（ロックの持ち主として要る）
 const GC_JOB: i64 = 101;
+
+type HoldFut = std::pin::Pin<
+    Box<dyn std::future::Future<Output = spindle::jobs::HandlerResult> + Send + 'static>,
+>;
 
 struct Env {
     dir: tempfile::TempDir,
@@ -68,6 +72,32 @@ impl Env {
 
     fn conn(&self) -> Connection {
         Connection::open(&self.db_path).unwrap()
+    }
+
+    /// `GC_JOB`（直接実行用に入れてある `running` 行）を終端にする。ワーカーを起動するテストで
+    /// 先に呼ぶ（実行中表に無い `running` は稼働中の回収で queued に戻され、走ってしまう。D-76）
+    fn retire_fake_gc_job(&self) {
+        self.conn()
+            .execute(
+                "UPDATE jobs SET state = 'done', finished_at = 1 WHERE id = ?1",
+                [GC_JOB],
+            )
+            .unwrap();
+    }
+
+    /// `LIBRARY_MUTEX` を取って `release` が倒れるまで持ち続けるハンドラ（本物の running が
+    /// mutex を持つ状況の模擬）。取れなければ `Requeue`
+    fn mutex_holder(release: CancellationToken) -> impl Fn(spindle::jobs::JobContext) -> HoldFut {
+        move |ctx| {
+            let release = release.clone();
+            Box::pin(async move {
+                if !ctx.lock_mutex(spindle::jobs::LIBRARY_MUTEX).await? {
+                    return Ok(spindle::jobs::Outcome::Requeue);
+                }
+                release.cancelled().await;
+                Ok(spindle::jobs::Outcome::Done)
+            })
+        }
     }
 
     fn path(&self, rel: &str) -> PathBuf {
@@ -143,19 +173,6 @@ impl Env {
 
     fn count(&self, sql: &str) -> i64 {
         self.conn().query_row(sql, [], |r| r.get(0)).unwrap()
-    }
-
-    fn start(&self) {
-        let mut reg = Registry::new();
-        reg.register(
-            JobType::Gc,
-            Arc::new(GcHandler::new(
-                self.db.clone(),
-                self.roots.clone(),
-                RETENTION,
-            )),
-        );
-        self.jobs.start(reg, self.shutdown.clone());
     }
 
     fn job_state(&self, id: i64) -> JobState {
@@ -444,34 +461,40 @@ async fn artwork_rows_without_album_reference_and_dirs_without_rows_are_removed(
 
 #[tokio::test]
 async fn gc_job_waits_while_a_scan_holds_the_library_mutex() {
-    use spindle::jobs::LIBRARY_MUTEX;
     let env = Env::new();
+    env.retire_fake_gc_job();
     env.track(1, "A/gone.flac", None, Some(31 * DAY));
-    // running な scan が library mutex を持っている（ハンドラは登録しない）
-    let c = env.conn();
-    c.execute(
-        "INSERT INTO jobs (id, type, payload, state, created_at) VALUES (50, 'scan', '{}', 'running', 0)",
-        [],
-    )
-    .unwrap();
-    c.execute(
-        "INSERT INTO job_mutexes (name, job_id, acquired_at) VALUES (?1, 50, 0)",
-        [LIBRARY_MUTEX],
-    )
-    .unwrap();
-    env.start();
+    // 本物の running な scan が library mutex を持ち続ける
+    let release = CancellationToken::new();
+    let mut reg = Registry::new();
+    reg.register_fn(JobType::Scan, Env::mutex_holder(release.clone()));
+    reg.register(
+        JobType::Gc,
+        Arc::new(GcHandler::new(env.db.clone(), env.roots.clone(), RETENTION)),
+    );
+    let scan_id = match env
+        .jobs
+        .enqueue(NewJob::new(JobType::Scan, serde_json::json!({})))
+        .await
+        .unwrap()
+    {
+        EnqueueResult::Inserted(id) | EnqueueResult::Duplicate(id) => id,
+    };
+    env.jobs.start(reg, env.shutdown.clone());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while env.job_state(scan_id) != JobState::Running && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(env.job_state(scan_id), JobState::Running);
     let gc_id = match env.jobs.enqueue(new_gc_job()).await.unwrap() {
         EnqueueResult::Inserted(id) | EnqueueResult::Duplicate(id) => id,
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(env.job_state(gc_id), JobState::Queued);
     assert_eq!(env.count("SELECT count(*) FROM tracks"), 1);
-    // scan が終端になれば（持ち主が running でなくなれば）mutex を奪って走る
-    c.execute(
-        "UPDATE jobs SET state = 'done', finished_at = 1 WHERE id = 50",
-        [],
-    )
-    .unwrap();
+    // scan が終端になれば（mutex が解放されれば）走る
+    release.cancel();
+    assert_eq!(env.wait_job(scan_id).await, JobState::Done);
     assert_eq!(env.wait_job(gc_id).await, JobState::Done);
     assert_eq!(env.count("SELECT count(*) FROM tracks"), 0);
     assert_eq!(
@@ -490,8 +513,8 @@ async fn gc_job_waits_while_a_scan_holds_the_library_mutex() {
 async fn scan_and_gc_enqueued_together_both_finish() {
     use spindle::import::scanner::Scanner;
     use spindle::jobs::handlers::scan::{new_scan_job, ScanHandler};
-    // Env の GC_JOB（running 行）は mutex を持たないので邪魔しない
     let env = Env::new();
+    env.retire_fake_gc_job();
     env.track(1, "A/gone.flac", None, Some(31 * DAY));
     let scanner = Arc::new(Scanner::new(env.db.clone(), env.roots.library.clone(), 2));
     let mut reg = Registry::new();
@@ -816,17 +839,22 @@ async fn scan_waits_while_gc_holds_the_library_mutex() {
     use spindle::import::scanner::Scanner;
     use spindle::jobs::handlers::scan::{new_scan_job, ScanHandler};
     let env = Env::new();
-    // Env が入れた GC_JOB（running）が library mutex を持っている
-    env.conn()
-        .execute(
-            "INSERT INTO job_mutexes (name, job_id, acquired_at) VALUES (?1, ?2, 0)",
-            params![spindle::jobs::LIBRARY_MUTEX, GC_JOB],
-        )
-        .unwrap();
+    env.retire_fake_gc_job();
+    // 本物の running な gc が library mutex を持ち続ける
+    let release = CancellationToken::new();
     let scanner = Arc::new(Scanner::new(env.db.clone(), env.roots.library.clone(), 2));
     let mut reg = Registry::new();
     reg.register(JobType::Scan, Arc::new(ScanHandler::new(scanner, 30)));
+    reg.register_fn(JobType::Gc, Env::mutex_holder(release.clone()));
+    let gc_id = match env.jobs.enqueue(new_gc_job()).await.unwrap() {
+        EnqueueResult::Inserted(id) | EnqueueResult::Duplicate(id) => id,
+    };
     env.jobs.start(reg, env.shutdown.clone());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while env.job_state(gc_id) != JobState::Running && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(env.job_state(gc_id), JobState::Running);
     let scan_id = match env
         .jobs
         .enqueue(new_scan_job(spindle::db::scans::ScanKind::Incremental))
@@ -837,12 +865,8 @@ async fn scan_waits_while_gc_holds_the_library_mutex() {
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(env.job_state(scan_id), JobState::Queued);
-    env.conn()
-        .execute(
-            "UPDATE jobs SET state = 'done', finished_at = 1 WHERE id = ?1",
-            [GC_JOB],
-        )
-        .unwrap();
+    release.cancel();
+    assert_eq!(env.wait_job(gc_id).await, JobState::Done);
     assert_eq!(env.wait_job(scan_id).await, JobState::Done);
 }
 

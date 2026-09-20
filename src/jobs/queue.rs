@@ -1,7 +1,7 @@
 //! プロセス内のジョブハンドル。投入・キャンセル・再試行・一覧・イベント購読を提供し、
 //! ワーカー（`worker.rs`）を起動する。API ハンドラと将来のハンドラ群はこれ経由で触る
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, Notify};
@@ -179,6 +179,16 @@ impl Jobs {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, token);
+    }
+
+    /// 実行中として登録されている id（稼働中の回収が DB の `running` と突き合わせる。D-76）
+    pub(super) fn running_ids(&self) -> HashSet<i64> {
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .copied()
+            .collect()
     }
 
     pub(super) fn untrack_running(&self, id: i64) {
