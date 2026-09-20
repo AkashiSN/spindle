@@ -18,6 +18,7 @@ const base: AlbumRow = {
   track_count: 12,
   duration_ms: 2_800_000,
   missing_since: null,
+  album_gain: false,
 }
 
 describe('artwork', () => {

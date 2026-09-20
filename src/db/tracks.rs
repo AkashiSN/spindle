@@ -700,13 +700,16 @@ pub struct AlbumRow {
     pub track_count: i64,
     pub duration_ms: i64,
     pub missing_since: Option<i64>,
+    /// album gain を計算・書き出しする album か（D-74）
+    pub album_gain: bool,
 }
 
 const ALBUM_SQL: &str = "SELECT a.id, a.rel_dir, c.name, a.albumartist, a.album, a.date, a.original_date, a.edition,
   a.mb_release_id, a.disc_count, a.artwork_id,
   (SELECT count(*) FROM tracks t WHERE t.album_id = a.id AND t.missing_since IS NULL),
   (SELECT coalesce(sum(t.duration_ms), 0) FROM tracks t WHERE t.album_id = a.id AND t.missing_since IS NULL),
-  a.missing_since, CASE WHEN w.sha256 IS NULL THEN NULL ELSE lower(hex(w.sha256)) END
+  a.missing_since, CASE WHEN w.sha256 IS NULL THEN NULL ELSE lower(hex(w.sha256)) END,
+  a.album_gain
 FROM albums a
 LEFT JOIN categories c ON c.id = a.category_id
 LEFT JOIN artwork w ON w.id = a.artwork_id";
@@ -728,6 +731,7 @@ fn read_album(r: &Row) -> rusqlite::Result<AlbumRow> {
         duration_ms: r.get(12)?,
         missing_since: r.get(13)?,
         artwork_hash: r.get(14)?,
+        album_gain: r.get::<_, i64>(15)? == 1,
     })
 }
 

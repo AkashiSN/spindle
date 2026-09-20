@@ -18,6 +18,7 @@ function album(over: Partial<AlbumRow> & { id: number }): AlbumRow {
     track_count: 1,
     duration_ms: 0,
     missing_since: null,
+  album_gain: false,
     ...over,
   }
 }

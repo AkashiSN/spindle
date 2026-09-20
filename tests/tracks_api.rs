@@ -485,6 +485,7 @@ async fn albums_list_and_get() {
     assert_eq!(items[0]["track_count"], 1, "missing は数えない");
     assert_eq!(items[0]["duration_ms"], 1000);
     assert_eq!(items[0]["rel_dir"], "J-Pop/AA/Al");
+    assert_eq!(items[0]["album_gain"], false, "既定 off（D-74）");
 
     let (status, one) = get(&app, &c, &format!("/api/albums/{alb}")).await;
     assert_eq!(status, StatusCode::OK);

@@ -411,3 +411,56 @@ fn upgrade_to_0016_adds_hires_columns_and_hirescheck_type() {
     conn.execute("DELETE FROM jobs WHERE id = 2", []).unwrap();
     assert_eq!(count("SELECT count(*) FROM track_locks"), 0);
 }
+
+// ---------------------------------------------------------------- 0017 albums.album_gain（P4-5、D-74）
+
+/// 0017 は albums に album_gain（既定 0）を足し、既存の rg_album_* を NULL に揃える。値を持っていた行は
+/// rg_written_at が NULL に戻り rg_scanned_at が 1 進む（Derived の追随）。持っていなかった行は触らない
+#[test]
+fn upgrade_to_0017_adds_album_gain_and_clears_album_values() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let upto16: Vec<_> = list.iter().take(16).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto16).unwrap();
+    conn.execute_batch(
+        "INSERT INTO albums (id, rel_dir, rel_dir_key) VALUES (1, 'A/B', 'a/b');
+         INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                             title, artist_display, album, albumartist, seen_at, album_id,
+                             rg_track_gain, rg_track_peak, rg_album_gain, rg_album_peak,
+                             rg_scanned_at, rg_written_at)
+           VALUES (5, 'A/B/1.flac', 'a/b/1.flac', 0, 0, 0, 'flac', 1, 't', 'a', 'al', 'aa', 0, 1,
+                   -1.5, 0.9, -2.0, 0.95, 100, 100),
+                  (6, 'A/B/2.flac', 'a/b/2.flac', 0, 0, 0, 'flac', 1, 't', 'a', 'al', 'aa', 0, 1,
+                   -1.0, 0.8, NULL, NULL, 100, 100);",
+    )
+    .unwrap();
+
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 17);
+    let album_gain: i64 = conn
+        .query_row("SELECT album_gain FROM albums WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(album_gain, 0, "既存の album は off");
+    assert!(
+        conn.execute("UPDATE albums SET album_gain = 2 WHERE id = 1", [])
+            .is_err(),
+        "CHECK (0, 1)"
+    );
+    let row = |id: i64| -> (Option<f64>, Option<f64>, Option<i64>, Option<i64>) {
+        conn.query_row(
+            "SELECT rg_album_gain, rg_album_peak, rg_scanned_at, rg_written_at FROM tracks WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(row(5), (None, None, Some(101), None), "album 値を持っていた行");
+    assert_eq!(
+        row(6),
+        (None, None, Some(100), Some(100)),
+        "持っていなかった行は据え置き"
+    );
+}

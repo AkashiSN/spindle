@@ -101,6 +101,8 @@ export type AlbumRow = {
   track_count: number
   duration_ms: number
   missing_since: number | null
+  /** album gain を計算・書き出しする album か（D-74） */
+  album_gain: boolean
 }
 
 export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
