@@ -2900,8 +2900,9 @@ track lock を取らず、running の間の投入は dedup で弾かれるため
   記録する bitrate を選ぶだけで、期待パスの予約・占有・配置・退避・drift の再キューは共通
 - **実機の順序（P4-8）**: 実機の 9,099 本のうち `rg_scanned_at` があるのは 270 本（残りはファイルに
   foobar 時代の track gain タグがあるだけで DB に値が無い）。「RG 未解析は作らず待つ」ので、先に
-  `POST /api/rg` を全件流し（`write_tags = true` なら Library のタグ書き換え → `tag_version` が進んで
-  opus 系統のタグ上書きも走る）、完了後に `[encode.derived.aac]` を有効にしてデプロイする。ファイルの
+  `POST /api/rg` を全件流し（解析値は DB にしか書かない。Library のタグへの書き込みは別の
+  `POST /api/rg/write` で、それは aac の前提ではない）、完了後に `[encode.derived.aac]` を有効にして
+  デプロイする。ファイルの
   既存 `REPLAYGAIN_*` を暫定値に使う案は、値を spindle で統一する方針（D-74）と食い違うので採らない。
   RG 未解析でも焼き込み無しで作って解析後に作り直す案は、二度エンコードで CPU 時間が倍になるので採らない
 
