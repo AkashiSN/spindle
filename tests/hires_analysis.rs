@@ -7,7 +7,9 @@ use std::f64::consts::TAU;
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 use spindle::media::decode::{PcmInfo, PcmSink};
-use spindle::media::hires::{judge, HiresSink, Measurement, Thresholds, Verdict};
+use spindle::media::hires::{
+    analyze_spectrum, judge, HiresSink, Measurement, Thresholds, Verdict, FRAME,
+};
 
 const RATE: u32 = 96_000;
 const LEN: usize = 1 << 18;
@@ -255,4 +257,69 @@ fn judge_follows_the_documented_precedence() {
     );
     assert_eq!(judge(&m(Some(48_000), None, Some(24)), &t), Verdict::Ok);
     assert_eq!(judge(&m(Some(48_000), None, None), &t), Verdict::Ok);
+}
+
+/// `chunk` 個ずつ（チャンネル数の倍数でない切れ目で）流し、有音フレーム数と計測値を返す
+fn analyze_chunked(channels: &[Vec<f32>], rate: u32, chunk: usize) -> (Vec<u64>, Measurement) {
+    let n = channels[0].len();
+    let mut all = Vec::with_capacity(n * channels.len());
+    for t in 0..n {
+        for ch in channels {
+            all.push(ch[t]);
+        }
+    }
+    let mut sink = HiresSink::new(Some(24));
+    sink.start(&PcmInfo {
+        channels: channels.len() as u32,
+        sample_rate: rate,
+    })
+    .unwrap();
+    for c in all.chunks(chunk) {
+        sink.push(c).unwrap();
+    }
+    let frames = sink.voiced_frames().to_vec();
+    (frames, sink.finish())
+}
+
+#[test]
+fn channel_phase_survives_push_boundaries_that_are_not_channel_aligned() {
+    // ffmpeg 経路の push は任意のサンプル数で切れる（decode.rs は 4 byte 境界しか揃えない）。
+    // 3ch を 1001 値ずつ（1001 mod 3 = 2）流しても、チャンネルの割り当てがずれないこと。
+    // ずれると無音の ch に有音のサンプルが混ざり、有音フレームが 0 でなくなる
+    let full = synth(|_| 1.0, 20);
+    let zeros = vec![0.0f32; LEN];
+    let frames_per_ch = (LEN / FRAME) as u64;
+    let (frames, m) = analyze_chunked(&[full.clone(), zeros.clone(), zeros.clone()], RATE, 1001);
+    assert_eq!(frames, vec![frames_per_ch, 0, 0], "{m:?}");
+    assert_eq!(m.cutoff_hz, Some(48_000));
+    let (frames, _) = analyze_chunked(&[zeros.clone(), zeros.clone(), full.clone()], RATE, 1001);
+    assert_eq!(frames, vec![0, 0, frames_per_ch]);
+    // 揃った切れ目でも同じ
+    let (frames, _) = analyze_chunked(&[zeros.clone(), full, zeros], RATE, 3 * 4096);
+    assert_eq!(frames, vec![0, frames_per_ch, 0]);
+}
+
+#[test]
+fn analyze_spectrum_saturates_the_cliff_when_the_band_above_is_exactly_zero() {
+    // 平均パワーを直接与える境界: 1000 ビンまで 1.0、上は完全ゼロ
+    let n = FRAME / 2 + 1;
+    let bin_hz = RATE as f64 / FRAME as f64;
+    let mut p = vec![0.0; n];
+    for v in &mut p[..=1000] {
+        *v = 1.0;
+    }
+    let (cutoff, cliff) = analyze_spectrum(&p, RATE);
+    let edge = (1001.0 * bin_hz).round() as u32;
+    assert!(
+        (edge - 30..=edge + 30).contains(&cutoff),
+        "{cutoff} vs {edge}"
+    );
+    assert_eq!(cliff, Some(200.0), "分母 0 は +200 dB に飽和");
+    // 上端まで信号があれば Nyquist で崖なし
+    let (cutoff, cliff) = analyze_spectrum(&vec![1.0; n], RATE);
+    assert_eq!((cutoff, cliff), (48_000, None));
+    // 全ゼロ（有音フレームがあっても平均が 0）でも落ちず有限
+    let (cutoff, cliff) = analyze_spectrum(&vec![0.0; n], RATE);
+    assert_eq!(cutoff, 48_000, "床と同じなので候補が無い");
+    assert_eq!(cliff, None);
 }

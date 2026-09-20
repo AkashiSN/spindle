@@ -16,7 +16,9 @@ use tokio_util::sync::CancellationToken;
 use spindle::db::Db;
 use spindle::fsroot::RootDir;
 use spindle::import::scanner::{ScanKind, Scanner};
-use spindle::jobs::handlers::hirescheck::{new_hirescheck_job, HirescheckHandler};
+use spindle::jobs::handlers::hirescheck::{
+    is_content_error, new_hirescheck_job, truncate_head, HirescheckHandler,
+};
 use spindle::jobs::handlers::scan::ScanHandler;
 use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};
 use spindle::media::decode::Decoder;
@@ -79,12 +81,16 @@ impl Lib {
     }
 
     fn start(&self, check_on_import: bool) {
+        self.start_with(check_on_import, "ffmpeg");
+    }
+
+    fn start_with(&self, check_on_import: bool, ffmpeg: &str) {
         let mut reg = Registry::new();
         reg.register(
             JobType::Hirescheck,
             Arc::new(HirescheckHandler::new(
                 self.root.clone(),
-                Decoder::new("ffmpeg"),
+                Decoder::new(ffmpeg),
                 Thresholds {
                     cutoff_hz: 25_000,
                     cliff_db: 30.0,
@@ -485,4 +491,84 @@ async fn scan_enqueues_unchecked_targets_when_enabled() {
     };
     assert_eq!(lib.wait_job(scan).await, JobState::Done);
     assert_eq!(lib.jobs_of_type("hirescheck"), 1);
+}
+
+#[tokio::test]
+async fn environment_failures_are_job_failures_not_check_results() {
+    // ffmpeg が無い（パス誤設定）と WavPack はデコードできないが、それはファイルの内容では
+    // ないので decode_error にしない。ジョブの失敗（再試行）にして、直せば同じ版で回復する
+    let _ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let lib = Lib::new();
+    let src = lib.lib().join("probe.wav");
+    common::write_wav_ex(&src, &noise24(1, 30), 24, RATE, 2);
+    let probe = lib.lib().join("probe.wv");
+    if common::encode(&src, &probe, &["-c:a", "wavpack"]).is_none() {
+        eprintln!("ffmpeg に wavpack が無いので skip");
+        return;
+    }
+    std::fs::remove_file(&src).unwrap();
+    std::fs::remove_file(&probe).unwrap();
+    lib.add("W/x.wv", &noise24(1, 31), 24, RATE);
+    lib.scan().await;
+    lib.start_with(false, "/nonexistent/ffmpeg");
+    let (id, ver) = lib.track("W/x.wv");
+    let job = match lib.jobs.enqueue(new_hirescheck_job(id, ver)).await.unwrap() {
+        EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+    };
+    // 1 回目の試行が終わる（attempts ≥ 1 で running でない）まで待つ
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let (state, attempts): (String, i64) = lib
+            .conn()
+            .query_row(
+                "SELECT state, attempts FROM jobs WHERE id = ?1",
+                [job],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        if attempts >= 1 && state != "running" {
+            assert!(state == "queued" || state == "failed", "{state}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "試行が始まらない");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let r = lib.result("W/x.wv");
+    assert_eq!(r.status, None, "環境の失敗は検査結果にしない: {r:?}");
+}
+
+#[test]
+fn content_errors_are_classified_and_messages_keep_their_head() {
+    use spindle::jobs::process::ProcessError;
+    use spindle::media::decode::DecodeError;
+
+    assert!(is_content_error(&DecodeError::NoAudioTrack));
+    assert!(is_content_error(&DecodeError::Unsupported("x".into())));
+    assert!(is_content_error(&DecodeError::Process(
+        ProcessError::Failed {
+            program: "ffmpeg".into(),
+            status: std::process::ExitStatus::default(),
+            stderr: "bad".into(),
+        }
+    )));
+    assert!(!is_content_error(&DecodeError::Process(
+        ProcessError::Timeout {
+            program: "ffmpeg".into(),
+            after: Duration::from_secs(1),
+        }
+    )));
+    assert!(!is_content_error(&DecodeError::Io(std::io::Error::other(
+        "io"
+    ))));
+    assert!(!is_content_error(&DecodeError::Sink(anyhow::anyhow!(
+        "sink"
+    ))));
+    assert!(!is_content_error(&DecodeError::Cancelled));
+
+    let long = "先頭".to_owned() + &"あ".repeat(600) + "末尾";
+    let t = truncate_head(&long, 500);
+    assert_eq!(t.chars().count(), 500);
+    assert!(t.starts_with("先頭"));
+    assert!(!t.ends_with("末尾"));
+    assert_eq!(truncate_head("  short  ", 500), "short");
 }

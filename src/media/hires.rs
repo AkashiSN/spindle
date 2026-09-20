@@ -93,6 +93,8 @@ pub struct HiresSink {
     or_bits: i32,
     channels: usize,
     sample_rate: u32,
+    /// 次に来るサンプルのチャンネル（push の境界はフレーム境界でもチャンネル境界でもない）
+    next_channel: usize,
     /// スペクトルを取るときだけ Some
     fft: Option<Arc<dyn Fft<f32>>>,
     window: Vec<f32>,
@@ -116,6 +118,7 @@ impl HiresSink {
             or_bits: 0,
             channels: 0,
             sample_rate: 0,
+            next_channel: 0,
             fft: None,
             window: Vec::new(),
             norm: 0.0,
@@ -150,6 +153,12 @@ impl HiresSink {
             *acc += f64::from(self.buf[k].norm_sqr()) * norm;
         }
         self.frames[ch] += 1;
+    }
+
+    /// チャンネルごとの有音フレーム数（スペクトルを取らないときは空）。チャンネルの割り当てが
+    /// push の境界でずれていないことをテストで確かめるために公開する
+    pub fn voiced_frames(&self) -> &[u64] {
+        &self.frames
     }
 
     /// 累積を計測値にする
@@ -222,9 +231,15 @@ impl PcmSink for HiresSink {
             }
         }
         if self.fft.is_some() {
-            for (i, v) in interleaved.iter().enumerate() {
-                self.pending[i % self.channels].push(*v);
+            let mut ch = self.next_channel;
+            for v in interleaved {
+                self.pending[ch].push(*v);
+                ch += 1;
+                if ch == self.channels {
+                    ch = 0;
+                }
             }
+            self.next_channel = ch;
             for ch in 0..self.channels {
                 while self.pending[ch].len() >= FRAME {
                     self.analyze_frame(ch);
@@ -244,11 +259,12 @@ fn mean(xs: &[f64]) -> f64 {
     xs.iter().sum::<f64>() / xs.len() as f64
 }
 
-/// 平均線形パワー（未平滑、`FRAME/2 + 1` ビン）から（カットオフ Hz、崖 dB）を出す。
+/// 平均線形パワー（未平滑、`FRAME/2 + 1` ビン）から（カットオフ Hz、崖 dB）を出す。境界の
+/// テストのために公開する（通常は [`HiresSink::finish`] が呼ぶ）。
 /// 1. 1/3 オクターブ平滑化 S で候補 f_s（床 + 10 dB を上回る最高ビン）。無ければ Nyquist
 /// 2. `[f_s / 2^(1/3), f_s]` で 200 Hz 幅の dB 平均の段差が最大のビンをエッジにする
 /// 3. 崖 = エッジ前後 1 kHz の平均線形パワーの比（帯域は [0, Nyquist] で切り、空なら None）
-fn analyze_spectrum(p: &[f64], sample_rate: u32) -> (u32, Option<f64>) {
+pub fn analyze_spectrum(p: &[f64], sample_rate: u32) -> (u32, Option<f64>) {
     let n = p.len();
     let bin_hz = f64::from(sample_rate) / FRAME as f64;
     let nyquist = f64::from(sample_rate) / 2.0;
@@ -305,7 +321,13 @@ fn analyze_spectrum(p: &[f64], sample_rate: u32) -> (u32, Option<f64>) {
     let cliff = if pre.is_empty() || post.is_empty() {
         None
     } else {
-        Some((db(mean(pre)) - db(mean(post))).clamp(-CLIFF_MAX_DB, CLIFF_MAX_DB))
+        let (a, b) = (mean(pre), mean(post));
+        // 分母（カットオフより上）が完全ゼロなら飽和（SPEC §7.10）
+        Some(if b <= 0.0 {
+            CLIFF_MAX_DB
+        } else {
+            (db(a) - db(b)).clamp(-CLIFF_MAX_DB, CLIFF_MAX_DB)
+        })
     };
     (cutoff_hz, cliff)
 }

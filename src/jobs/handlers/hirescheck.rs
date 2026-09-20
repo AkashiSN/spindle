@@ -13,6 +13,7 @@ use crate::db::hires::{self as dbh, Status, Target};
 use crate::db::now_epoch;
 use crate::domain::relpath::RelPath;
 use crate::fsroot::{self, RootDir};
+use crate::jobs::process::ProcessError;
 use crate::jobs::{BoxFuture, Handler, HandlerResult, JobContext, JobError, NewJob, Outcome};
 use crate::media::decode::{DecodeError, Decoder};
 use crate::media::hires::{judge, HiresSink, Measurement, Thresholds, Verdict};
@@ -121,21 +122,22 @@ impl HirescheckHandler {
         let ext = rel.as_str().rsplit_once('.').map(|(_, e)| e);
         let bit_depth = target.bit_depth.and_then(|b| u32::try_from(b).ok());
         let sink = HiresSink::new(bit_depth);
-        let (status, error, measurement) = match self
+        let outcome = self
             .decoder
             .decode(file, ext, sink, &ctx.cancel_token())
-            .await
-        {
+            .await;
+        // 成功でも失敗でも、デコード中に実体が変わっていれば何も書かない（次のスキャン待ち）
+        if !decoded_unchanged(&probe, &target) {
+            tracing::info!(
+                job_id,
+                track_id,
+                rel_path = target.rel_path,
+                "デコード中にファイルが変わったので結果を捨てる。再スキャン後に再投入される"
+            );
+            return Ok(Outcome::Done);
+        }
+        let (status, error, measurement) = match outcome {
             Ok((info, sink)) => {
-                if !decoded_unchanged(&probe, &target) {
-                    tracing::info!(
-                        job_id,
-                        track_id,
-                        rel_path = target.rel_path,
-                        "デコード中にファイルが変わったので結果を捨てる。再スキャン後に再投入される"
-                    );
-                    return Ok(Outcome::Done);
-                }
                 let m = sink.finish();
                 tracing::debug!(
                     job_id,
@@ -150,11 +152,19 @@ impl HirescheckHandler {
                 (status_of(judge(&m, &self.thresholds)), None, m)
             }
             Err(DecodeError::Cancelled) => return Err(JobError::Cancelled),
-            // デコードできないのは検査結果（ジョブの失敗ではない。再試行しても同じ）
-            Err(e) => {
-                let message = truncate_tail(&format!("{e:#}"), ERROR_MAX);
+            // ファイルの内容に由来する失敗だけが検査結果（再試行しても同じ）。環境の失敗
+            // （ffmpeg が無い・タイムアウト・I/O・受け手）はジョブの失敗にして再試行に回す。
+            // 検査結果にしてしまうと同じ版は再投入されず、設定を直しても回復しない
+            Err(e) if is_content_error(&e) => {
+                let message = truncate_head(&format!("{e:#}"), ERROR_MAX);
                 tracing::warn!(job_id, track_id, rel_path = target.rel_path, error = %message, "デコードに失敗");
                 (Status::DecodeError, Some(message), Measurement::default())
+            }
+            Err(e) => {
+                return Err(JobError::Failed(anyhow::anyhow!(
+                    "{}: {e:#}",
+                    target.rel_path
+                )))
             }
         };
         let written = ctx
@@ -206,14 +216,26 @@ fn status_of(v: Verdict) -> Status {
     }
 }
 
-/// 末尾 `max` 文字（文字境界で切る）
-fn truncate_tail(s: &str, max: usize) -> String {
+/// ファイルの内容に由来するデコード失敗か（音声が無い・判別できない・壊れている・対応外・
+/// ffmpeg が非ゼロで終わった）。起動できない・タイムアウト・I/O・受け手の失敗は環境の問題
+pub fn is_content_error(e: &DecodeError) -> bool {
+    match e {
+        DecodeError::NoAudioTrack
+        | DecodeError::Probe(_)
+        | DecodeError::Decode(_)
+        | DecodeError::Unsupported(_) => true,
+        DecodeError::Process(p) => matches!(p, ProcessError::Failed { .. }),
+        DecodeError::Sink(_) | DecodeError::Cancelled | DecodeError::Io(_) => false,
+    }
+}
+
+/// 先頭 `max` 文字（文字境界で切る）。anyhow の外側の文脈を落とさない
+pub fn truncate_head(s: &str, max: usize) -> String {
     let s = s.trim();
-    let n = s.chars().count();
-    if n <= max {
+    if s.chars().count() <= max {
         s.to_owned()
     } else {
-        s.chars().skip(n - max).collect()
+        s.chars().take(max).collect()
     }
 }
 
