@@ -10,6 +10,7 @@ import { FLAGS, FLAG_LABELS, filterToParam, type Filter, type Flag } from '../li
 import { formatCount } from '../lib/format'
 import { buildTree, parsePattern, PRESETS, TREE_FIELDS, type TreeNode, type TreePreset } from '../lib/tree'
 import { PlaylistSection } from './PlaylistSection'
+import { SearchBox } from './SearchBox'
 
 /** サイドバーが決める部分。検索語 q は上部ナビが別に持つ */
 export type Scope = Omit<Filter, 'q'>
@@ -22,6 +23,8 @@ export function Sidebar({
   albums,
   scope,
   onScope,
+  query,
+  onQuery,
   playlists,
   onPlaylistDeleted,
   onDropTracks,
@@ -33,6 +36,9 @@ export function Sidebar({
   albums: AlbumRow[]
   scope: Scope
   onScope: (s: Scope) => void
+  /** 検索語（表の filter.q）。ツリーの下の検索ボックス */
+  query: string
+  onQuery: (q: string) => void
   playlists: Playlists
   onPlaylistDeleted: (playlistId: number) => void
   onDropTracks: (playlistId: number, trackIds: number[]) => void
@@ -128,6 +134,11 @@ export function Sidebar({
 
   return (
     <nav className="sidebar">
+      {/* 検索はスクロールしない先頭に固定（ツリー・プレイリスト・フィルタは下でスクロール） */}
+      <div className="sidebar-search">
+        <SearchBox query={query} onQuery={onQuery} />
+      </div>
+      <div className="sidebar-body">
       <section className="tree-section">
         <h2>
           <button
@@ -240,6 +251,7 @@ export function Sidebar({
           ))}
         </ul>
       </section>
+      </div>
     </nav>
   )
 }

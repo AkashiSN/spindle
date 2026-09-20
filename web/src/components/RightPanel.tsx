@@ -111,21 +111,22 @@ export function RightPanel({
             操作
           </button>
         </div>
+        <span
+          className="panel-count"
+          title={
+            selection.kind === 'filter'
+              ? `フィルタ形の選択（選択時のフィルタ: ${selection.filter || '{}'}${selection.excludeIds.size > 0 ? `、除外 ${selection.excludeIds.size} 件` : ''}）`
+              : undefined
+          }
+        >
+          選択 {formatCount(summary.count)} 件
+          {summary.pending != null && summary.pending > 0 && (
+            <span className="muted">（うち反映待ち {formatCount(summary.pending)} 件）</span>
+          )}
+        </span>
         <button type="button" className="ghost" title="パネルを閉じる" onClick={() => setCollapsed(true)}>
           ▴
         </button>
-      </div>
-      <div className="panel-summary">
-        選択 {formatCount(summary.count)} 件
-        {summary.pending != null && summary.pending > 0 && (
-          <span className="muted">（うち反映待ち {formatCount(summary.pending)} 件）</span>
-        )}
-        {selection.kind === 'filter' && (
-          <div className="muted small">
-            フィルタ形の選択（選択時のフィルタ: <code>{selection.filter || '{}'}</code>
-            {selection.excludeIds.size > 0 ? `、除外 ${selection.excludeIds.size} 件` : ''}）
-          </div>
-        )}
       </div>
       {tab === 'edit' ? (
         <div className="panel-body">

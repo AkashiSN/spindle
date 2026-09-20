@@ -17,11 +17,10 @@ import { Login } from './components/Login'
 import { CdView } from './components/CdView'
 import { InboxView } from './components/InboxView'
 import { SettingsView } from './components/SettingsView'
-import { PlayerBar } from './components/PlayerBar'
 import { RightPanel, type SelectionSummary } from './components/RightPanel'
 import { SmartRuleEditor, type RuleDraft } from './components/SmartRuleEditor'
 import { Sidebar, type Scope } from './components/Sidebar'
-import { TopNav } from './components/TopNav'
+import { TopBar } from './components/TopBar'
 import { TrackTable } from './components/TrackTable'
 import { useAlbums } from './hooks/useAlbums'
 import { useBatchEdit } from './hooks/useBatchEdit'
@@ -432,21 +431,21 @@ function Shell({ onLogout }: { onLogout: () => void }) {
 
   return (
     <div className="shell">
-      <TopNav
+      <TopBar
         view={view}
         onView={setView}
-        query={query}
-        onQuery={setQuery}
         summary={jobs.summary}
         connected={connected}
         onLogout={logout}
+        player={player}
       />
-      <PlayerBar player={player} />
       <div className="left-col">
       <Sidebar
         albums={albums.albums}
         scope={scope}
         onScope={handleScope}
+        query={query}
+        onQuery={setQuery}
         playlists={playlists}
         onPlaylistDeleted={(id) => {
           // 表示中のプレイリストを消したら「すべて」へ（行キャッシュと position ソートを残さない）
