@@ -14,6 +14,7 @@ import {
   stateLabel,
   validateDraft,
   verdictLabel,
+  type DraftTrack,
   type InboxDraft,
   type InboxFile,
   type InboxItem,
@@ -245,25 +246,37 @@ describe('ARTIST の多値', () => {
     ['TITLE', 'x'],
   ])
   const single = file('d/02.flac', 'flac', [['ARTIST', '花譜']])
+  const track = (over: Partial<DraftTrack> = {}) => ({
+    rel_path: 'd/01.flac',
+    disc_no: 1,
+    track_no: 1,
+    title: '',
+    artist: '花譜',
+    ...over,
+  })
 
-  it('artistValues は ARTIST の全値（trim、空は除く、出現順）', () => {
-    expect(artistValues(multi)).toEqual(['花譜', '理芽'])
+  it('artistValues は ARTIST の全値をそのまま（空白・空値も 1 値として数える。サーバと同じ）', () => {
+    expect(artistValues(multi)).toEqual(['花譜', ' 理芽 ', ''])
     expect(artistValues(single)).toEqual(['花譜'])
     expect(artistValues(file('d/03.flac'))).toEqual([])
+    // ["A", ""] も多値（1 値扱いにして配置で潰さない）
+    expect(keepArtistsFor(file('d/04.flac', 'flac', [['ARTIST', 'A'], ['ARTIST', '']]), null, 'AA')).toBe(true)
   })
 
   it('keepArtistsFor: 多値でなければ常に false、多値なら提案は true、保存値は boolean を尊重、旧下書きは先頭値のまま', () => {
-    expect(keepArtistsFor(single, null)).toBe(false)
-    expect(keepArtistsFor(single, { rel_path: 'd/02.flac', disc_no: 1, track_no: 1, title: '', artist: '花譜', keep_artists: true })).toBe(false)
-    expect(keepArtistsFor(undefined, null)).toBe(false)
-    expect(keepArtistsFor(multi, null)).toBe(true)
-    const t = { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: '', artist: '花譜' }
-    expect(keepArtistsFor(multi, { ...t, keep_artists: false })).toBe(false)
-    expect(keepArtistsFor(multi, { ...t, keep_artists: true, artist: 'zzz' })).toBe(true)
-    // 旧下書き（欄なし / null）: artist が先頭値のままなら保つ
-    expect(keepArtistsFor(multi, t)).toBe(true)
-    expect(keepArtistsFor(multi, { ...t, keep_artists: null })).toBe(true)
-    expect(keepArtistsFor(multi, { ...t, artist: '花譜; 理芽' })).toBe(false)
+    expect(keepArtistsFor(single, null, 'AA')).toBe(false)
+    expect(keepArtistsFor(single, track({ rel_path: 'd/02.flac', keep_artists: true }), 'AA')).toBe(false)
+    expect(keepArtistsFor(undefined, null, 'AA')).toBe(false)
+    expect(keepArtistsFor(multi, null, 'AA')).toBe(true)
+    expect(keepArtistsFor(multi, track({ keep_artists: false }), 'AA')).toBe(false)
+    expect(keepArtistsFor(multi, track({ keep_artists: true, artist: 'zzz' }), 'AA')).toBe(true)
+    // 旧下書き（欄なし / null）: 実効アーティスト（空ならアルバムアーティスト）が先頭値のままなら保つ
+    expect(keepArtistsFor(multi, track(), 'AA')).toBe(true)
+    expect(keepArtistsFor(multi, track({ keep_artists: null }), 'AA')).toBe(true)
+    expect(keepArtistsFor(multi, track({ artist: ' 花譜 ' }), 'AA')).toBe(true)
+    expect(keepArtistsFor(multi, track({ artist: '' }), '花譜')).toBe(true)
+    expect(keepArtistsFor(multi, track({ artist: '' }), 'AA')).toBe(false)
+    expect(keepArtistsFor(multi, track({ artist: '花譜; 理芽' }), 'AA')).toBe(false)
   })
 
   it('draftFrom は提案の keep_artists をファイルから決め、保存値が true でもファイルが多値でなければ false に戻す', () => {
@@ -272,7 +285,7 @@ describe('ARTIST の多値', () => {
       proposal: {
         ...proposal,
         tracks: [
-          { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '花譜; 理芽', keep_artists: true },
+          { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '花譜;  理芽 ; ', keep_artists: true },
           { rel_path: 'd/02.flac', disc_no: 1, track_no: 2, title: 'two', artist: '花譜', keep_artists: false },
         ],
       },
@@ -288,6 +301,28 @@ describe('ARTIST の多値', () => {
     const d = draftFrom(item({ ...it0, draft: saved }))
     expect(d.tracks.map((t) => t.keep_artists)).toEqual([false, false])
     expect(d.tracks[0].artist).toBe('C')
+  })
+
+  it('保存時に「そのまま保つ」だった artist は現在のファイルの値から作り直す（古い表示文字列を書き戻さない）', () => {
+    const savedKeep: InboxDraft = {
+      ...proposal,
+      tracks: [{ rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: 'A; B', keep_artists: true }],
+    }
+    const prop = { ...proposal, tracks: [{ rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '' }] }
+    // 多値 → 1 値: keep は false に戻り、artist は現在の値（"A; B" を C に上書きしない）
+    const toSingle = draftFrom(item({ tracks: [file('d/01.flac', 'flac', [['ARTIST', 'C']])], proposal: prop, draft: savedKeep }))
+    expect(toSingle.tracks[0]).toMatchObject({ keep_artists: false, artist: 'C' })
+    // 多値 → 別の多値: keep のまま、表示は現在の結合値（外しても "A; B" は復活しない）
+    const toOther = draftFrom(
+      item({ tracks: [file('d/01.flac', 'flac', [['ARTIST', 'C'], ['ARTIST', 'D']])], proposal: prop, draft: savedKeep }),
+    )
+    expect(toOther.tracks[0]).toMatchObject({ keep_artists: true, artist: 'C; D' })
+    // 保存が false（編集済み）なら保存した値のまま
+    const savedEdit: InboxDraft = { ...savedKeep, tracks: [{ ...savedKeep.tracks[0], artist: 'Z', keep_artists: false }] }
+    const edited = draftFrom(
+      item({ tracks: [file('d/01.flac', 'flac', [['ARTIST', 'C'], ['ARTIST', 'D']])], proposal: prop, draft: savedEdit }),
+    )
+    expect(edited.tracks[0]).toMatchObject({ keep_artists: false, artist: 'Z' })
   })
 
   it('draftForSubmit は keep_artists を boolean にする（旧下書きの null は false）', () => {
@@ -325,4 +360,3 @@ describe('埋め込み画像', () => {
     expect(artworkUrl(7, h1)).toBe(`/api/inbox/7/artwork/${h1}`)
   })
 })
-

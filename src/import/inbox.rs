@@ -224,12 +224,12 @@ fn tag<'a>(f: &'a FileRow, key: &str) -> Option<&'a str> {
 /// `", "` とは区別する。D-70）
 pub const ARTIST_JOIN: &str = "; ";
 
-/// `tags` の ARTIST の全値（trim 済み・空は除く。出現順）
+/// `tags` の ARTIST の全値（TagSet の値そのまま。出現順。多値の判定・表示・パス用の結合はすべて
+/// これを使い、Library の `artist_display` と同じ値の並びにする）
 pub fn artist_values(tags: &[(String, String)]) -> Vec<&str> {
     tags.iter()
         .filter(|(k, _)| k == "ARTIST")
-        .map(|(_, v)| v.trim())
-        .filter(|v| !v.is_empty())
+        .map(|(_, v)| v.as_str())
         .collect()
 }
 
@@ -238,15 +238,20 @@ pub fn joined_artist(tags: &[(String, String)]) -> String {
     artist_values(tags).join(ARTIST_JOIN)
 }
 
-/// 下書きのトラック `t` がファイルの ARTIST を**そのまま**保つ（配置で触れない）か。`keep_artists` が
-/// true なら現在の個数に関係なく true（承認後にファイルが 1 値に変わっていても安全側）。旧下書き
-/// （欄が無い）は、ファイルが多値で `artist` が先頭値のままなら保つ（D-70）
-pub fn keeps_artists(t: &DraftTrack, tags: &[(String, String)]) -> bool {
-    match t.keep_artists {
+/// 下書きのトラックがファイルの ARTIST を**そのまま**保つ（配置で触れない）か。`keep_artists` が
+/// Some なら現在の個数に関係なくその値（true は承認後にファイルが 1 値に変わっていても安全側）。
+/// 旧下書き（欄が無い）は旧規則をそのまま再現する: ファイルの ARTIST が複数で、先頭が下書きの実効
+/// アーティスト `effective`（`InboxDraft::track_artist`。空ならアルバムアーティスト）と一致するとき（D-70）
+pub fn keeps_artists(
+    keep_artists: Option<bool>,
+    effective: &str,
+    tags: &[(String, String)],
+) -> bool {
+    match keep_artists {
         Some(keep) => keep,
         None => {
             let values = artist_values(tags);
-            values.len() > 1 && values.first() == Some(&t.artist.trim())
+            values.len() > 1 && values.first() == Some(&effective)
         }
     }
 }
@@ -288,11 +293,17 @@ pub fn embedded_picture(
             .file_name()
             .rsplit_once('.')
             .map(|(_, e)| e.to_ascii_lowercase());
-        let Ok((_, pictures)) =
-            crate::domain::tags::read_audio_file_with_pictures(file, ext.as_deref())
-        else {
-            continue;
-        };
+        // 形式として読めない（書き換わった等）は次の候補へ。I/O の失敗は 500 に伝える
+        let pictures =
+            match crate::domain::tags::read_audio_file_with_pictures(file, ext.as_deref()) {
+                Ok((_, pictures)) => pictures,
+                Err(crate::domain::tags::TagReadError::Io(e))
+                    if e.kind() != std::io::ErrorKind::NotFound =>
+                {
+                    return Err(e.into());
+                }
+                Err(_) => continue,
+            };
         let found = pictures.into_iter().find_map(|pic| {
             let digest = crate::media::artwork::ArtworkStore::hash_of(pic.data());
             if crate::media::artwork::ArtworkStore::hex(&digest) != hash {
@@ -913,7 +924,7 @@ fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -
                 .collect();
             // ARTIST は多値（プラグインの artists 等）があり得る。提案は全値の結合なので、結合文字列の
             // まま（未編集）なら多値を保つ。編集していれば 1 値で置き換える（D-70）
-            if *k == "ARTIST" && keeps_artists(t, current) {
+            if *k == "ARTIST" && keeps_artists(t.keep_artists, draft.track_artist(index), current) {
                 return false;
             }
             now != [v.as_str()]
@@ -1058,7 +1069,10 @@ fn track_fields(
     let (stem, ext) = split_name(&t.rel_path);
     let key = canonical_key(&t.rel_path);
     let artist = match files.iter().find(|f| canonical_key(&f.rel_path) == key) {
-        Some(f) if keeps_artists(t, &f.tags) && !artist_values(&f.tags).is_empty() => {
+        Some(f)
+            if keeps_artists(t.keep_artists, draft.track_artist(i), &f.tags)
+                && !artist_values(&f.tags).is_empty() =>
+        {
             artist_values(&f.tags).join(crate::import::scanner::ARTIST_SEPARATOR)
         }
         _ => draft.track_artist(i).to_owned(),

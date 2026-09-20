@@ -354,9 +354,8 @@ function ArtistCell({
             type="checkbox"
             checked={keep}
             disabled={!editable}
-            onChange={(e) =>
-              onChange(e.target.checked ? { keep_artists: true, artist: values.join(ARTIST_JOIN) } : { keep_artists: false })
-            }
+            // on / off とも欄は現在のファイルの結合値から始める（外した直後の欄 = 見えていた文字列）
+            onChange={(e) => onChange({ keep_artists: e.target.checked, artist: values.join(ARTIST_JOIN) })}
           />{' '}
           そのまま保つ
         </label>

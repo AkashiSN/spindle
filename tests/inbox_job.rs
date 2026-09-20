@@ -1164,10 +1164,15 @@ async fn keep_artists_decides_whether_multi_valued_artist_is_preserved_on_placem
     let p2 = lib.add("AlbumA/02.flac", 2, "Two", "A", 2).unwrap();
     let p3 = lib.add("AlbumA/03.flac", 3, "Three", "A", 3).unwrap();
     let p4 = lib.add("AlbumA/04.flac", 4, "Four", "A", 4).unwrap();
+    let p5 = lib.add("AlbumA/05.flac", 5, "Five", "A", 5).unwrap();
+    let p6 = lib.add("AlbumA/06.flac", 6, "Six", "A", 6).unwrap();
     for p in [&p1, &p2, &p3] {
         set_tags(p, "flac", &[("ARTIST", &["A", "B"])]);
     }
     set_tags(&p4, "flac", &[("ARTIST", &["X"])]);
+    // 空白だけの値も 1 値として数える（["A", " "] は多値）。旧規則の実効アーティストはアルバムアーティストに倒れる
+    set_tags(&p5, "flac", &[("ARTIST", &["A", " "])]);
+    set_tags(&p6, "flac", &[("ARTIST", &["Artist", " B "])]);
     lib.scan(1000).await;
     let a = lib.item("AlbumA").unwrap();
     let mut d = draft_for(
@@ -1176,10 +1181,27 @@ async fn keep_artists_decides_whether_multi_valued_artist_is_preserved_on_placem
             ("AlbumA/02.flac", 2, "Two"),
             ("AlbumA/03.flac", 3, "Three"),
             ("AlbumA/04.flac", 4, "Four"),
+            ("AlbumA/05.flac", 5, "Five"),
+            ("AlbumA/06.flac", 6, "Six"),
         ],
         None,
         "Album",
     );
+    // 提案は値をそのまま結合し、空値があっても多値
+    let proposal =
+        spindle::import::inbox::proposal(&inbox::files(&lib.conn(), a.id).unwrap(), &[], &[]);
+    let by_path = |rel: &str| {
+        proposal
+            .tracks
+            .iter()
+            .find(|t| t.rel_path == rel)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_path("AlbumA/05.flac").artist, "A;  ");
+    assert_eq!(by_path("AlbumA/05.flac").keep_artists, Some(true));
+    assert_eq!(by_path("AlbumA/06.flac").artist, "Artist;  B ");
+    assert_eq!(by_path("AlbumA/04.flac").keep_artists, Some(false));
     // 提案どおり（多値を保つ。artist は表示用）
     d.tracks[0].artist = "A; B".into();
     d.tracks[0].keep_artists = Some(true);
@@ -1192,6 +1214,12 @@ async fn keep_artists_decides_whether_multi_valued_artist_is_preserved_on_placem
     // true はファイルが 1 値でも触れない（承認後に変わった経路の安全側）
     d.tracks[3].artist = "Y".into();
     d.tracks[3].keep_artists = Some(true);
+    // 旧下書き: ["A", " "] の先頭 "A" のまま = 保つ（空白の値を落とすと 1 値扱いになって潰れる）
+    d.tracks[4].artist = "A".into();
+    d.tracks[4].keep_artists = None;
+    // 旧下書き: artist 空 → 実効はアルバムアーティスト "Artist" = 先頭値 → 保つ
+    d.tracks[5].artist = String::new();
+    d.tracks[5].keep_artists = None;
     lib.approve(a.id, &d);
     lib.start(true);
     assert_eq!(lib.run_job().await, JobState::Done);
@@ -1213,6 +1241,11 @@ async fn keep_artists_decides_whether_multi_valued_artist_is_preserved_on_placem
     assert_eq!(artists("_Unsorted/Artist/Album/02 Two.flac"), ["C"]);
     assert_eq!(artists("_Unsorted/Artist/Album/03 Three.flac"), ["A", "B"]);
     assert_eq!(artists("_Unsorted/Artist/Album/04 Four.flac"), ["X"]);
+    assert_eq!(artists("_Unsorted/Artist/Album/05 Five.flac"), ["A", " "]);
+    assert_eq!(
+        artists("_Unsorted/Artist/Album/06 Six.flac"),
+        ["Artist", " B "]
+    );
     let disp: String = lib
         .conn()
         .query_row(

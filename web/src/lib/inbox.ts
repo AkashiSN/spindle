@@ -127,25 +127,27 @@ function cloneTrack(t: DraftTrack): DraftTrack {
 /** 承認画面が ARTIST の全値を見せるときの区切り（サーバの ARTIST_JOIN と同じ。D-70） */
 export const ARTIST_JOIN = '; '
 
-/** ファイルの ARTIST の全値（trim 済み・空は除く。出現順） */
+/** ファイルの ARTIST の全値（値そのまま。出現順。サーバの artist_values と同じ） */
 export function artistValues(file: Pick<InboxFile, 'tags'>): string[] {
-  return file.tags
-    .filter(([k]) => k === 'ARTIST')
-    .map(([, v]) => v.trim())
-    .filter((v) => v !== '')
+  return file.tags.filter(([k]) => k === 'ARTIST').map(([, v]) => v)
 }
 
 /**
  * トラックの keep_artists の初期値。ファイルが多値でなければ常に false（保存値が true でも戻す）。
- * 多値なら、保存値が無ければ true（提案）、保存値が boolean ならそれ、旧下書き（null）は
- * 「artist が先頭値のまま」ならサーバが保つと解釈するのと同じ判定
+ * 多値なら、保存値が無ければ true（提案）、保存値が boolean ならそれ、旧下書き（null）はサーバの
+ * 旧規則と同じ「先頭値が下書きの実効アーティスト（空ならアルバムアーティスト）のまま」
  */
-export function keepArtistsFor(file: Pick<InboxFile, 'tags'> | undefined, saved: DraftTrack | null): boolean {
+export function keepArtistsFor(
+  file: Pick<InboxFile, 'tags'> | undefined,
+  saved: DraftTrack | null,
+  albumartist: string,
+): boolean {
   const values = file == null ? [] : artistValues(file)
   if (values.length <= 1) return false
   if (saved == null) return true
   if (typeof saved.keep_artists === 'boolean') return saved.keep_artists
-  return saved.artist.trim() === values[0]
+  const effective = saved.artist.trim() === '' ? albumartist.trim() : saved.artist.trim()
+  return effective === values[0]
 }
 
 /** ファイルの代表画像（PICTURE の先頭。走査が front cover 優先で並べる）の sha256。無ければ null */
@@ -199,7 +201,7 @@ export function draftFrom(item: InboxItem): InboxDraft {
       ...p,
       tracks: p.tracks.map((t) => ({
         ...cloneTrack(t),
-        keep_artists: keepArtistsFor(fileByKey.get(pathKey(t.rel_path)), null),
+        keep_artists: keepArtistsFor(fileByKey.get(pathKey(t.rel_path)), null, p.albumartist),
       })),
       album_gain: item.destination?.album_gain ?? false,
     }
@@ -213,9 +215,12 @@ export function draftFrom(item: InboxItem): InboxDraft {
     tracks: p.tracks.map((t) => {
       const s = byKey.get(pathKey(t.rel_path))
       const file = fileByKey.get(pathKey(t.rel_path))
-      return s == null
-        ? { ...cloneTrack(t), keep_artists: keepArtistsFor(file, null) }
-        : { ...cloneTrack(s), rel_path: t.rel_path, keep_artists: keepArtistsFor(file, s) }
+      if (s == null) return { ...cloneTrack(t), keep_artists: keepArtistsFor(file, null, saved.albumartist) }
+      const keep = keepArtistsFor(file, s, saved.albumartist)
+      // 保存時に「そのまま保つ」だった artist は表示文字列なので、現在のファイルの値から作り直す
+      // （承認後にファイルが変わっていても古い文字列を書き戻さない）
+      const artist = s.keep_artists === true && file != null ? artistValues(file).join(ARTIST_JOIN) : s.artist
+      return { ...cloneTrack(s), rel_path: t.rel_path, artist, keep_artists: keep }
     }),
     album_gain: saved.album_gain,
   }

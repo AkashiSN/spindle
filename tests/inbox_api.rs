@@ -883,9 +883,21 @@ async fn artwork_returns_the_embedded_picture_after_verifying_the_file() {
     set_picture(&p1, jpeg(b"replaced"));
     let res = app.raw(Some(&c), &uri, None).await;
     assert_eq!(res.status(), StatusCode::OK);
+    // 読めない（権限）は消失ではなく I/O の失敗 → 500（root では作れないので飛ばす）
+    if !is_root() {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p2, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let res = app.raw(Some(&c), &uri, None).await;
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        std::fs::set_permissions(&p2, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
     std::fs::remove_file(&p2).unwrap();
     let res = app.raw(Some(&c), &uri, Some(&etag)).await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let res = app.raw(Some(&c), &uri, None).await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+fn is_root() -> bool {
+    rustix::process::geteuid().is_root()
 }
