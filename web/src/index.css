@@ -196,7 +196,9 @@ code {
   width: 100%;
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
 }
-.album-art {
+/* 左下のアートワーク。アルバム一覧の .album-art（下）と名前が同じなので .left-col にスコープする
+   （漏れると一覧の img に height が付いて縦長になる） */
+.left-col > .album-art {
   height: var(--art-h);
   flex: none;
   display: flex;
@@ -205,7 +207,7 @@ code {
   overflow: hidden;
   background: var(--bg-alt);
 }
-.album-art img {
+.left-col > .album-art img {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
@@ -963,17 +965,19 @@ button.primary {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-.album-art {
+/* 枠は正方形。サムネイルはアスペクト比を保って 256px に収めてあるので、横長は幅いっぱいで
+   上下に余白、縦長は高さいっぱいで左右に余白（切り取らない） */
+.album-grid .album-art {
   display: block;
   width: 100%;
   aspect-ratio: 1 / 1;
-  object-fit: cover;
+  object-fit: contain;
   border-radius: 4px;
   background: var(--bg-alt);
   border: 1px solid var(--border);
   box-sizing: border-box;
 }
-.album-art-none {
+.album-grid .album-art-none {
   display: flex;
   align-items: center;
   justify-content: center;
