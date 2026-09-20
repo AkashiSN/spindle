@@ -470,3 +470,113 @@ fn upgrade_to_0017_adds_album_gain_and_clears_album_values() {
         "持っていなかった行は据え置き"
     );
 }
+
+// ---------------------------------------------------------------- 0018 derived_files を系統ごとに（P4-7、D-75）
+
+/// 0018 は delivery を落として derived_files を (track_id, variant) 主キーで作り直し、既存行を opus
+/// 系統（audio_profile は当時のビットレート）として移し、delivery を opus 固定で作り直す
+#[test]
+fn upgrade_to_0018_rebuilds_derived_files_per_variant() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let upto17: Vec<_> = list.iter().take(17).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto17).unwrap();
+    conn.execute_batch(
+        "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                             title, artist_display, album, albumartist, seen_at, audio_version, tag_version)
+           VALUES (5, 'A/B/1.flac', 'a/b/1.flac', 0, 0, 0, 'flac', 1, 't', 'a', 'al', 'aa', 0, 1, 2),
+                  (6, 'A/B/2.flac', 'a/b/2.flac', 0, 0, 0, 'flac', 1, 't', 'a', 'al', 'aa', 0, 1, 1);
+         INSERT INTO derived_files (track_id, rel_path, rel_path_key, codec, bitrate, src_audio_version,
+                                    src_tag_version, generated_at, src_rg_scanned_at)
+           VALUES (5, 'A/B/1.opus', 'a/b/1.opus', 'opus', 128, 1, 1, 10, 7);",
+    )
+    .unwrap();
+
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 18);
+    let row: (String, String, i64, String, String, Option<i64>) = conn
+        .query_row(
+            "SELECT variant, rel_path, bitrate, audio_profile, tag_profile, src_rg_scanned_at
+               FROM derived_files WHERE track_id = 5",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "opus".into(),
+            "A/B/1.opus".into(),
+            128,
+            "opus:128:v1".into(),
+            "opus:v1".into(),
+            Some(7)
+        ),
+        "既存行は opus 系統、パスはルート直下のまま"
+    );
+    // delivery は opus 系統を指し、タグ版が違うので stale_tags
+    let d: (String, String, i64) = conn
+        .query_row(
+            "SELECT path, codec, stale_tags FROM delivery WHERE track_id = 5",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(d, ("Derived/A/B/1.opus".into(), "opus".into(), 1));
+    let d6: (String, String) = conn
+        .query_row(
+            "SELECT path, codec FROM delivery WHERE track_id = 6",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(d6, ("Library/A/B/2.flac".into(), "flac".into()));
+    // 同じトラックに aac 系統の 2 行目を持てる。aac は delivery に影響しない
+    conn.execute(
+        "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, bitrate,
+                                    src_audio_version, src_tag_version, generated_at, audio_profile, tag_profile)
+           VALUES (5, 'aac', 'aac/A/B/1.m4a', 'aac/a/b/1.m4a', 'aac', 256, 1, 2, 11, 'aac:256:v1', 'aac:v1')",
+        [],
+    )
+    .unwrap();
+    let d: (String, i64) = conn
+        .query_row(
+            "SELECT path, stale_tags FROM delivery WHERE track_id = 5",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(d, ("Derived/A/B/1.opus".into(), 1));
+    assert!(conn
+        .execute(
+            "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, src_audio_version,
+                                        src_tag_version, generated_at, audio_profile, tag_profile)
+               VALUES (6, 'ogg', 'x', 'x', 'ogg', 1, 1, 1, 'a', 'b')",
+            []
+        )
+        .is_err(), "variant の CHECK");
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT count(*) FROM derived_variants"),
+        0,
+        "設定は起動時に写す"
+    );
+    // トラックを消すと系統ごとの行も消える（CASCADE）
+    conn.execute("DELETE FROM tracks WHERE id = 5", []).unwrap();
+    assert_eq!(
+        count("SELECT count(*) FROM derived_files WHERE track_id = 5"),
+        0
+    );
+}
