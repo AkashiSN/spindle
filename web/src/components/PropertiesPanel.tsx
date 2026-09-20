@@ -104,49 +104,56 @@ export function PropertiesPanel({
         </p>
       )}
       {editError && <p className="error small">{editError}</p>}
-      <table className="kv props-table">
-        <tbody>
-          <Section title="Metadata" />
-          {metadata.map((row) =>
-            editing?.key === row.key ? (
-              <tr key={row.key} className="editing">
-                <th>{row.label}</th>
-                <td>
-                  <input
-                    autoFocus
-                    value={editing.text}
-                    disabled={busy}
-                    placeholder={row.value.kind === 'multiple' ? '<複数の値>' : ''}
-                    onChange={(e) => setEditing({ key: row.key, text: e.target.value })}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        void commit()
-                      } else if (e.key === 'Escape') {
-                        setEditing(null)
-                        setEditError(null)
-                      }
-                    }}
-                    onBlur={() => {
-                      if (!busy) setEditing(null)
-                    }}
-                  />
-                </td>
-              </tr>
-            ) : (
-              <ValueRow key={row.key} row={row} onDoubleClick={() => startEdit(row)} title="ダブルクリックで編集" />
-            ),
-          )}
-          <Section title="Location" />
-          {location.map((row) => (
-            <ValueRow key={row.key} row={row} />
-          ))}
-          <Section title="General" />
-          {general.map((row) => (
-            <ValueRow key={row.key} row={row} />
-          ))}
-        </tbody>
-      </table>
+      {/* foobar2000 の Properties と同じ 2 列: 左に Metadata、右に Location と General。狭ければ 1 列 */}
+      <div className="props-cols">
+        <table className="kv props-table">
+          <tbody>
+            <Section title="Metadata" />
+            {metadata.map((row) =>
+              editing?.key === row.key ? (
+                <tr key={row.key} className="editing">
+                  <th>{row.label}</th>
+                  <td>
+                    <input
+                      autoFocus
+                      value={editing.text}
+                      disabled={busy}
+                      placeholder={row.value.kind === 'multiple' ? '<複数の値>' : ''}
+                      onChange={(e) => setEditing({ key: row.key, text: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          void commit()
+                        } else if (e.key === 'Escape') {
+                          setEditing(null)
+                          setEditError(null)
+                        }
+                      }}
+                      onBlur={() => {
+                        if (!busy) setEditing(null)
+                      }}
+                    />
+                  </td>
+                </tr>
+              ) : (
+                <ValueRow key={row.key} row={row} onDoubleClick={() => startEdit(row)} title="ダブルクリックで編集" />
+              ),
+            )}
+          </tbody>
+        </table>
+        <table className="kv props-table">
+          <tbody>
+            <Section title="Location" />
+            {location.map((row) => (
+              <ValueRow key={row.key} row={row} />
+            ))}
+            <Section title="General" />
+            {general.map((row) => (
+              <ValueRow key={row.key} row={row} />
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

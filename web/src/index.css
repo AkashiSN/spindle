@@ -1181,7 +1181,25 @@ button.primary {
   resize: vertical;
 }
 
-/* プロパティタブ（D-58） */
+/* プロパティタブ（D-58）。foobar2000 の Properties と同じく 2 列（左 Metadata、右 Location + General）。
+   右パネルが狭ければ 1 列に戻す（コンテナ幅で判定） */
+.props-area {
+  container-type: inline-size;
+}
+.props-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 24px;
+  align-items: start;
+}
+.props-cols .props-table {
+  min-width: 0;
+}
+@container (max-width: 900px) {
+  .props-cols {
+    grid-template-columns: 1fr;
+  }
+}
 .props-table tr.section th {
   color: var(--fg);
   font-weight: 600;
