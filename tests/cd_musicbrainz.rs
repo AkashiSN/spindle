@@ -345,7 +345,8 @@ async fn client_retries_once_on_503_then_gives_up() {
     );
 }
 
-/// 1 req/s: 連続した照会は間隔を空ける
+/// 1 req/s: 連続した照会は間隔を空ける。見るのは**サーバ側の受信間隔**（規約が数えるのはそれ）。
+/// クライアントは応答が返ってから間隔を数えるので、1 本目の接続確立が遅い CI でも縮まない
 #[tokio::test]
 async fn client_spaces_requests_by_the_minimum_interval() {
     let (base, seen) = serve().await;

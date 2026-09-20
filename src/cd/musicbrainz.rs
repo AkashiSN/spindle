@@ -261,7 +261,9 @@ pub fn parse_lookup(
 pub struct MusicBrainzClient {
     base: String,
     http: reqwest::Client,
-    /// 直前の要求の時刻。ロックを持ったまま待つので、並行する照会も直列に間隔が空く
+    /// 直前の要求が**返った**時刻。ロックを持ったまま待って送るので、並行する照会も直列に
+    /// 間隔が空く。送信前ではなく応答後に打つのは、規約が数えるのがサーバ側の受信間隔だから
+    /// （送信前だと、1 本目の接続確立ぶんだけサーバから見た間隔が縮む）
     last_request: Arc<tokio::sync::Mutex<Option<Instant>>>,
     min_interval: Duration,
 }
@@ -293,7 +295,7 @@ impl MusicBrainzClient {
     ) -> Result<(reqwest::StatusCode, String), LookupError> {
         let url = format!("{}{}", self.base, path);
         for attempt in 0..2 {
-            {
+            let resp = {
                 let mut last = self.last_request.lock().await;
                 if let Some(t) = *last {
                     let wait = self.min_interval.saturating_sub(t.elapsed());
@@ -301,9 +303,11 @@ impl MusicBrainzClient {
                         tokio::time::sleep(wait).await;
                     }
                 }
+                let sent = self.http.get(&url).query(query).send().await;
+                // 失敗（接続不能等）でも要求は出しているので、次の間隔はここから数える
                 *last = Some(Instant::now());
-            }
-            let resp = self.http.get(&url).query(query).send().await?;
+                sent?
+            };
             let status = resp.status();
             if status == reqwest::StatusCode::SERVICE_UNAVAILABLE && attempt == 0 {
                 tracing::warn!(url, "MusicBrainz が 503。間隔を空けて再試行");
