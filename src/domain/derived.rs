@@ -7,6 +7,8 @@
 //! - 系統（[`Variant`]）は `opus`（Android の同期・Web 再生・配布ビュー）と `aac`（Apple 向け。P4-8）
 //! - `opus` の対象は Library 内の可逆で active（missing でない）な 1ch / 2ch のトラック。非可逆は
 //!   原本をそのまま配る（D-8）。マルチチャンネルとチャンネル数不明は作らない（D-22 / D-51）
+//! - `aac` は可逆に加え `lossy_sources` なら非可逆も対象（D-8 の例外）。track gain を音声に焼き込む
+//!   ので RG 解析済み（時刻 + gain + peak）だけを作り、RG の解析世代の差分は再エンコード
 //! - Derived のパスは `<variant>/` 以下に Library と完全ミラーで、拡張子だけ系統のもの
 //! - 系統の設定（[`VariantSettings`]）が off なら凍結（何もしない）。音声版か `audio_profile` が
 //!   違えば再エンコード、パスが違えば rename、タグ版・埋めた画像・RG の解析世代・`tag_profile` が
@@ -134,6 +136,9 @@ pub struct Target {
     pub artwork_id: Option<i64>,
     /// `tracks.rg_scanned_at`（未解析なら None）
     pub rg_scanned_at: Option<i64>,
+    /// RG 解析済み: `rg_scanned_at` / `rg_track_gain` / `rg_track_peak` の 3 つが揃っている（時刻だけ
+    /// 残った行で 0 dB の焼き込みを確定させない。`aac` の対象条件）
+    pub rg_ready: bool,
 }
 
 /// `derived_files` の現在の行
@@ -175,35 +180,59 @@ impl Plan {
 }
 
 /// その系統の Derived を作る対象か。チャンネル数が不明（None）なのは属性を読めなかったファイルで、
-/// マルチチャンネルかもしれないので対象にしない（deep scan で埋まってから）。`aac` 系統の対象は
-/// P4-8 で決める（それまでは無し）
-pub fn eligible(variant: Variant, t: &Target) -> bool {
-    match variant {
-        Variant::Opus => t.lossless && !t.missing && matches!(t.channels, Some(1 | 2)),
-        Variant::Aac => false,
+/// マルチチャンネルかもしれないので対象にしない（deep scan で埋まってから）。
+/// - `opus`: Library 内の可逆で active な 1ch / 2ch（非可逆は原本を配る。D-8）
+/// - `aac`: 可逆に加え `lossy_sources` なら非可逆も。RG を音声に焼き込むので**解析済みだけ**（未解析は
+///   待つ。rg の保存で投入される）
+pub fn eligible(s: &VariantSettings, t: &Target) -> bool {
+    if t.missing || !matches!(t.channels, Some(1 | 2)) {
+        return false;
+    }
+    match s.variant {
+        Variant::Opus => t.lossless,
+        Variant::Aac => (t.lossless || s.lossy_sources) && t.rg_ready,
     }
 }
 
 pub fn plan(s: &VariantSettings, t: &Target, current: Option<&Current>) -> Plan {
-    if !s.enabled || !eligible(s.variant, t) {
+    if !s.enabled || !eligible(s, t) {
         return Plan::Skip;
     }
     let Some(c) = current else {
         return Plan::Encode;
     };
-    if c.src_audio_version != t.audio_version || c.audio_profile != s.audio_profile {
+    // aac は RG を音声に焼き込むので、解析世代の差分は再エンコード（opus はタグ上書きで済む）
+    let rg_changed = c.src_rg_scanned_at != t.rg_scanned_at;
+    if c.src_audio_version != t.audio_version
+        || c.audio_profile != s.audio_profile
+        || (s.variant == Variant::Aac && rg_changed)
+    {
         return Plan::Encode;
     }
     let moved = c.rel_path != expected_rel_path(s.variant, &t.library_rel_path);
     let retag = c.src_tag_version != t.tag_version
         || c.src_artwork_id != t.artwork_id
-        || c.src_rg_scanned_at != t.rg_scanned_at
+        || rg_changed
         || c.tag_profile != s.tag_profile;
     match (moved, retag) {
         (true, true) => Plan::MoveAndRetag,
         (true, false) => Plan::Move,
         (false, true) => Plan::Retag,
         (false, false) => Plan::UpToDate,
+    }
+}
+
+/// aac に焼き込む量（dB）。track gain を true peak で頭打ちにしてエンコーダ入力を 0 dBTP 以下に抑える
+/// （`min(track_gain, −20·log10(peak))`。peak > 1.0 なら減衰側）。再符号化後のオーバーシュートは
+/// 保証しない。gain が有限でなければ 0、peak は有限かつ > 0 のときだけ上限を掛ける（SPEC §7.6）
+pub fn bake_gain_db(v: &Values) -> f64 {
+    if !v.track_gain.is_finite() {
+        return 0.0;
+    }
+    if v.track_peak.is_finite() && v.track_peak > 0.0 {
+        v.track_gain.min(-20.0 * v.track_peak.log10())
+    } else {
+        v.track_gain
     }
 }
 

@@ -456,3 +456,65 @@ fn target_artwork_prefers_the_tracks_own_picture_over_the_album() {
     let ids = derived::enqueue_all_stale(&c, 100).unwrap();
     assert_eq!(job_track_ids(&c, &ids), vec![1]);
 }
+
+#[test]
+fn enqueue_all_stale_waits_for_rg_on_aac_and_includes_lossy_sources() {
+    let c = open_memory_connection().unwrap();
+    sync_with_aac(
+        &c,
+        true,
+        256,
+        Some(AacVariantConfig {
+            enabled: true,
+            bitrate: 256,
+            lossy_sources: true,
+            multi_value_separator: " & ".into(),
+        }),
+    );
+    insert_track(&c, 1, "A/1.flac", "flac", Some(2));
+    insert_track(&c, 2, "A/2.opus", "opus", Some(2));
+    insert_track(&c, 3, "A/3.flac", "flac", Some(2));
+    // 1: 解析済み、2: 解析済み（非可逆）、3: 時刻だけ残った行（値が無い）
+    c.execute(
+        "UPDATE tracks SET rg_track_gain = -3.0, rg_track_peak = 0.9, rg_scanned_at = 5 WHERE id IN (1, 2)",
+        [],
+    )
+    .unwrap();
+    c.execute("UPDATE tracks SET rg_scanned_at = 5 WHERE id = 3", [])
+        .unwrap();
+    let ids = derived::enqueue_all_stale(&c, 10).unwrap();
+    let mut keys: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            c.query_row("SELECT dedup_key FROM jobs WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        })
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "transcode:1:aac:1".to_owned(),
+            "transcode:1:opus:1".to_owned(),
+            "transcode:2:aac:1".to_owned(),
+            "transcode:3:opus:1".to_owned(),
+        ],
+        "aac は解析済みの 1・2（非可逆含む）、3 は値が無いので待つ。opus は可逆の 1・3"
+    );
+    // 3 の値が揃えば enqueue_if_stale が拾う
+    c.execute(
+        "UPDATE tracks SET rg_track_gain = -1.0, rg_track_peak = 0.5 WHERE id = 3",
+        [],
+    )
+    .unwrap();
+    let ids = derived::enqueue_if_stale(&c, 3, 11).unwrap();
+    assert_eq!(ids.len(), 1);
+    let key: String = c
+        .query_row("SELECT dedup_key FROM jobs WHERE id = ?1", [ids[0]], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(key, "transcode:3:aac:1");
+}

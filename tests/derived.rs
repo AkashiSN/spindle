@@ -4,8 +4,8 @@
 use lofty::picture::{MimeType, Picture, PictureType};
 
 use spindle::domain::derived::{
-    aac_profiles, eligible, expected_rel_path, opus_profiles, opus_tags, plan, Current, Plan,
-    Target, Variant, VariantSettings,
+    aac_profiles, bake_gain_db, eligible, expected_rel_path, opus_profiles, opus_tags, plan,
+    Current, Plan, Target, Variant, VariantSettings,
 };
 use spindle::domain::replaygain::Values;
 use spindle::domain::tags::TransferTags;
@@ -21,6 +21,7 @@ fn target() -> Target {
         tag_version: 3,
         artwork_id: Some(7),
         rg_scanned_at: Some(100),
+        rg_ready: true,
     }
 }
 
@@ -93,10 +94,10 @@ fn variant_names_and_profiles() {
 
 #[test]
 fn eligibility_requires_lossless_present_and_stereo_or_mono() {
-    let o = Variant::Opus;
-    assert!(eligible(o, &target()));
+    let o = settings();
+    assert!(eligible(&o, &target()));
     assert!(eligible(
-        o,
+        &o,
         &Target {
             channels: Some(1),
             ..target()
@@ -104,35 +105,191 @@ fn eligibility_requires_lossless_present_and_stereo_or_mono() {
     ));
     // チャンネル数不明はマルチチャンネルかもしれないので対象外
     assert!(!eligible(
-        o,
+        &o,
         &Target {
             channels: None,
             ..target()
         }
     ));
     assert!(!eligible(
-        o,
+        &o,
         &Target {
             channels: Some(6),
             ..target()
         }
     ));
     assert!(!eligible(
-        o,
+        &o,
         &Target {
             lossless: false,
             ..target()
         }
     ));
     assert!(!eligible(
-        o,
+        &o,
         &Target {
             missing: true,
             ..target()
         }
     ));
-    // aac 系統は P4-8 まで対象なし
-    assert!(!eligible(Variant::Aac, &target()));
+    // opus は RG を見ない（タグ上書きで追随できる）
+    assert!(eligible(
+        &o,
+        &Target {
+            rg_ready: false,
+            rg_scanned_at: None,
+            ..target()
+        }
+    ));
+}
+
+/// aac 系統の設定（256k、on）
+fn aac_settings(lossy_sources: bool) -> VariantSettings {
+    let (audio_profile, tag_profile) = aac_profiles(256, " & ");
+    VariantSettings {
+        variant: Variant::Aac,
+        enabled: true,
+        audio_profile,
+        tag_profile,
+        lossy_sources,
+        multi_value_separator: " & ".into(),
+    }
+}
+
+fn aac_current() -> Current {
+    Current {
+        rel_path: "aac/J-Pop/A/B/01 t.m4a".into(),
+        src_audio_version: 2,
+        src_tag_version: 3,
+        src_artwork_id: Some(7),
+        src_rg_scanned_at: Some(100),
+        audio_profile: "aac:256:48k:bake1".into(),
+        tag_profile: "aac:sep= & :itunnorm0:v1".into(),
+    }
+}
+
+#[test]
+fn aac_eligibility_covers_lossy_sources_and_requires_rg() {
+    let s = aac_settings(true);
+    assert!(eligible(&s, &target()));
+    // 非可逆は lossy_sources のときだけ
+    let lossy = Target {
+        lossless: false,
+        ..target()
+    };
+    assert!(eligible(&s, &lossy));
+    assert!(!eligible(&aac_settings(false), &lossy));
+    // RG 未解析（時刻が無い / 値が無い）は待つ
+    assert!(!eligible(
+        &s,
+        &Target {
+            rg_scanned_at: None,
+            rg_ready: false,
+            ..target()
+        }
+    ));
+    assert!(!eligible(
+        &s,
+        &Target {
+            rg_ready: false,
+            ..target()
+        }
+    ));
+    // opus と同じ除外
+    assert!(!eligible(
+        &s,
+        &Target {
+            missing: true,
+            ..target()
+        }
+    ));
+    assert!(!eligible(
+        &s,
+        &Target {
+            channels: Some(6),
+            ..target()
+        }
+    ));
+    assert!(!eligible(
+        &s,
+        &Target {
+            channels: None,
+            ..target()
+        }
+    ));
+}
+
+#[test]
+fn aac_plan_reencodes_on_rg_generation_and_retags_on_tag_profile() {
+    let s = aac_settings(true);
+    assert_eq!(plan(&s, &target(), Some(&aac_current())), Plan::UpToDate);
+    // RG の解析世代が変わった → 音声に入っているので Encode（opus は Retag）
+    let t = Target {
+        rg_scanned_at: Some(101),
+        ..target()
+    };
+    assert_eq!(plan(&s, &t, Some(&aac_current())), Plan::Encode);
+    assert_eq!(plan(&settings(), &t, Some(&current())), Plan::Retag);
+    // tag_profile（区切り）の差分は Retag
+    let c = Current {
+        tag_profile: "aac:sep= / :itunnorm0:v1".into(),
+        ..aac_current()
+    };
+    assert_eq!(plan(&s, &target(), Some(&c)), Plan::Retag);
+    // audio_profile（bitrate）の差分は Encode
+    let c = Current {
+        audio_profile: "aac:192:48k:bake1".into(),
+        ..aac_current()
+    };
+    assert_eq!(plan(&s, &target(), Some(&c)), Plan::Encode);
+    // 行が無ければ Encode、RG 未解析なら行があっても Skip（待つ）
+    assert_eq!(plan(&s, &target(), None), Plan::Encode);
+    let t = Target {
+        rg_ready: false,
+        ..target()
+    };
+    assert_eq!(plan(&s, &t, Some(&aac_current())), Plan::Skip);
+    // lossy_sources を off にした後の非可逆の行は Skip（消さない）
+    let t = Target {
+        lossless: false,
+        ..target()
+    };
+    assert_eq!(
+        plan(&aac_settings(false), &t, Some(&aac_current())),
+        Plan::Skip
+    );
+    // 凍結
+    let frozen = VariantSettings {
+        enabled: false,
+        ..aac_settings(true)
+    };
+    assert_eq!(plan(&frozen, &target(), None), Plan::Skip);
+}
+
+#[test]
+fn bake_gain_is_capped_by_true_peak_and_tolerates_non_finite_values() {
+    let v = |g: f64, p: f64| Values {
+        track_gain: g,
+        track_peak: p,
+        album_gain: None,
+        album_peak: None,
+    };
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    // peak 0.5 → 上限 +6.02 dB。gain が下ならそのまま
+    assert!(close(bake_gain_db(&v(-6.0, 0.5)), -6.0));
+    assert!(close(bake_gain_db(&v(3.0, 0.5)), 3.0));
+    // 上限に掛かる
+    assert!(close(bake_gain_db(&v(9.0, 0.5)), -20.0 * 0.5f64.log10()));
+    // true peak > 1.0 は減衰側に倒れる
+    assert!(close(bake_gain_db(&v(2.0, 2.0)), -20.0 * 2.0f64.log10()));
+    assert!(bake_gain_db(&v(2.0, 2.0)) < 0.0);
+    // peak が 0 以下 / 非有限なら上限なし
+    assert!(close(bake_gain_db(&v(9.0, 0.0)), 9.0));
+    assert!(close(bake_gain_db(&v(9.0, f64::NAN)), 9.0));
+    assert!(close(bake_gain_db(&v(9.0, f64::INFINITY)), 9.0));
+    // gain が非有限なら 0
+    assert!(close(bake_gain_db(&v(f64::NAN, 0.5)), 0.0));
+    assert!(close(bake_gain_db(&v(f64::NEG_INFINITY, 0.5)), 0.0));
 }
 
 #[test]
@@ -306,12 +463,10 @@ fn profiles_and_freeze_drive_the_plan() {
         ),
         Plan::Skip
     );
-    // aac 系統は対象が無いので Skip（P4-8 まで）
+    // aac 系統も凍結は Skip（対象の判定は aac_plan_* で見る）
     let aac = VariantSettings {
-        variant: Variant::Aac,
-        audio_profile: "aac:256:v1".into(),
-        tag_profile: "aac:v1".into(),
-        ..settings()
+        enabled: false,
+        ..aac_settings(true)
     };
     assert_eq!(plan(&aac, &t, None), Plan::Skip);
 }

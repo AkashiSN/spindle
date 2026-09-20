@@ -105,7 +105,9 @@ pub fn load_target(conn: &Connection, track_id: i64) -> Result<Option<Target>> {
         .query_row(
             "SELECT t.id, t.lossless, t.missing_since IS NOT NULL, t.channels, t.rel_path,
                     t.audio_version, t.tag_version, coalesce(t.artwork_id, a.artwork_id),
-                    t.rg_scanned_at
+                    t.rg_scanned_at,
+                    t.rg_scanned_at IS NOT NULL AND t.rg_track_gain IS NOT NULL
+                      AND t.rg_track_peak IS NOT NULL
              FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
              WHERE t.id = ?1",
             [track_id],
@@ -120,6 +122,7 @@ pub fn load_target(conn: &Connection, track_id: i64) -> Result<Option<Target>> {
                     tag_version: r.get(6)?,
                     artwork_id: r.get(7)?,
                     rg_scanned_at: r.get(8)?,
+                    rg_ready: r.get::<_, i64>(9)? == 1,
                 })
             },
         )
@@ -429,8 +432,8 @@ pub fn enqueue_if_stale(conn: &Connection, track_id: i64, now: i64) -> Result<Ve
 }
 
 /// 対象になりうる全トラック（active・1ch / 2ch）を系統ごとに見て食い違う分を一括投入する（scan 完了時）。
-/// 期待パスの比較は SQL では書きにくいので行を取ってから Rust で判定する。非可逆は `eligible` が
-/// 系統ごとに判定する（opus は対象外、aac は P4-8）
+/// 期待パスの比較は SQL では書きにくいので行を取ってから Rust で判定する。非可逆と RG の有無は
+/// `eligible` が系統ごとに判定する（opus は可逆のみ、aac は解析済みなら非可逆も）
 pub fn enqueue_all_stale(conn: &Connection, now: i64) -> Result<Vec<i64>> {
     let mut ids = Vec::new();
     for s in variant_settings(conn)? {
@@ -440,6 +443,8 @@ pub fn enqueue_all_stale(conn: &Connection, now: i64) -> Result<Vec<i64>> {
         let mut stmt = conn.prepare(
             "SELECT t.id, t.lossless, t.channels, t.rel_path, t.audio_version, t.tag_version,
                     coalesce(t.artwork_id, a.artwork_id), t.rg_scanned_at,
+                    t.rg_scanned_at IS NOT NULL AND t.rg_track_gain IS NOT NULL
+                      AND t.rg_track_peak IS NOT NULL,
                     d.rel_path, d.src_audio_version, d.src_tag_version, d.src_artwork_id,
                     d.src_rg_scanned_at, d.audio_profile, d.tag_profile
              FROM tracks t
@@ -459,17 +464,18 @@ pub fn enqueue_all_stale(conn: &Connection, now: i64) -> Result<Vec<i64>> {
                 tag_version: r.get(5)?,
                 artwork_id: r.get(6)?,
                 rg_scanned_at: r.get(7)?,
+                rg_ready: r.get::<_, i64>(8)? == 1,
             };
-            let rel: Option<String> = r.get(8)?;
+            let rel: Option<String> = r.get(9)?;
             let current = match rel {
                 Some(rel_path) => Some(Current {
                     rel_path,
-                    src_audio_version: r.get(9)?,
-                    src_tag_version: r.get(10)?,
-                    src_artwork_id: r.get(11)?,
-                    src_rg_scanned_at: r.get(12)?,
-                    audio_profile: r.get(13)?,
-                    tag_profile: r.get(14)?,
+                    src_audio_version: r.get(10)?,
+                    src_tag_version: r.get(11)?,
+                    src_artwork_id: r.get(12)?,
+                    src_rg_scanned_at: r.get(13)?,
+                    audio_profile: r.get(14)?,
+                    tag_profile: r.get(15)?,
                 }),
                 None => None,
             };
