@@ -2882,13 +2882,17 @@ track lock を取らず、running の間の投入は dedup で弾かれるため
 - **実装（P4-8）**: `derived_variants` に `lossy_sources` / `multi_value_separator` を 0019 で足す（`eligible`
   が投入判定で前者を、ハンドラがタグ結合で後者を表から引く。`audio_profile` / `tag_profile` の文字列に
   埋めて解析し直すより素直）。`aac` の対象は `!missing && channels ∈ {1,2} && (lossless || lossy_sources)
-  && rg_scanned_at IS NOT NULL`。エンコードは ffmpeg 1 パス（`-af volume=<gain>dB [-ar 48000] -c:a aac
+  && RG 解析済み`（`rg_scanned_at` / `rg_track_gain` / `rg_track_peak` の 3 つが揃っている。時刻だけの行で 0 dB
+  の焼き込みを確定させない）。節を省略したときの `enabled` は aac だけ false（既存 config のまま新版を
+  起動しても始まらない）。エンコードは ffmpeg 1 パス（`-af volume=<gain>dB [-ar 48000] -c:a aac
   -b:a <k>k -f mp4`。opus のような中間 WAV は要らない）。焼き込み量は `min(track_gain, −20·log10(peak))`
-  で、peak は true peak（1.0 超なら減衰側）。`iTunNORM` は 1〜2 値目 `000003E8` に加えて 3〜4 値目
+  で、peak は true peak（1.0 超なら減衰側）。これはエンコーダ入力の上限で、AAC 再符号化後のオーバー
+  シュートは保証しない（安全余裕は入れない。受け入れテストは ebur128 の測定に ±0.5 dB の許容）。
+  gain が有限でなければ 0、peak は有限かつ > 0 のときだけ上限を掛ける。`iTunNORM` は 1〜2 値目 `000003E8` に加えて 3〜4 値目
   （同じ 0 dB の基準 1/2500 表現）を `000009C4` で埋める（0 のままだと読む側の解釈が不定になりうる。
   iTunes が読むのは 1〜2 値目）。MP4 のタグは Vorbis 名を lofty の `ItemKey` に写像して標準 atom へ、
   写像できないキーは `----:com.apple.iTunes:<KEY>` のフリーフォームへ直接置く（lofty の generic Tag は
-  未知キーを捨てる）。画像は thumbnail と同じ変換の JPEG 版（`thumbs/<hex>/768.jpg`）。RG の解析世代
+  未知キーを捨てる）。`iTunNORM` だけは内部キーの大文字化に関わらず atom 名を固定する。画像は thumbnail と同じ変換の JPEG 版（`thumbs/<hex>/768.jpg`）。RG の解析世代
   （`src_rg_scanned_at`）の差分は `aac` では Encode。album gain の on / off も世代を進めるので、その album
   の aac は作り直される（track gain しか使わないが、値ベースの判定に列を足すより単純。まれな操作）。
   `lossy_sources` を true → false にしても既存の非可逆の行とファイルは消さない（Skip = 凍結と同じ）。
