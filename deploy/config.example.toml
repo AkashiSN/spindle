@@ -73,6 +73,11 @@ metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メ�
 metadata_timeout_secs = 30
 download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
 
+[hires]                        # 偽ハイレゾ検出（D-71）
+check_on_import = true         # スキャン完了時に未検査の対象（可逆かつ >48 kHz または >16 bit）を自動投入
+cutoff_hz = 25000              # カットオフがこれ以下なら「上げただけ」の疑い（44.1k の 22.05 kHz と 48k の 24 kHz を余裕込みで拾う）
+cliff_db = 30.0                # カットオフ前後 1 kHz の落差がこれ以上なら SRC の崖とみなす
+
 [bin]
 ffmpeg = "ffmpeg"
 flac = "flac"

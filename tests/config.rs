@@ -43,6 +43,7 @@ fn example_config_parses_and_validates() {
     assert!(cfg.auth.trusted_cidrs.is_empty());
     assert_eq!(cfg.bin.cdparanoia, "cd-paranoia");
     assert_eq!(cfg.inbox.poll_interval_secs, 60);
+    assert_eq!(cfg.hires.cutoff_hz, 25_000);
 }
 
 #[test]
@@ -523,4 +524,27 @@ fn probe_executables_reports_missing_binaries_and_plugin() {
         .probe_executables()
         .iter()
         .all(|m| !m.contains("metadata_command")));
+}
+
+#[test]
+fn hires_section_is_optional_with_documented_defaults() {
+    // SPEC §7.10 / §13、D-71。省略時は既定値、値は上書きできる
+    let cfg = Config::parse(&without_section("hires")).unwrap();
+    assert!(cfg.hires.check_on_import);
+    assert_eq!(cfg.hires.cutoff_hz, 25_000);
+    assert_eq!(cfg.hires.cliff_db, 30.0);
+    let cfg = Config::parse(&with_override(
+        "hires",
+        "check_on_import = false\ncutoff_hz = 23000\ncliff_db = 40.5",
+    ))
+    .unwrap();
+    assert!(!cfg.hires.check_on_import);
+    assert_eq!(cfg.hires.cutoff_hz, 23_000);
+    assert_eq!(cfg.hires.cliff_db, 40.5);
+    // 未知キーと不正値は弾く
+    assert!(Config::parse(&with_override("hires", "cutoff = 1")).is_err());
+    let err = Config::parse(&with_override("hires", "cutoff_hz = 0")).unwrap_err();
+    assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
+    let err = Config::parse(&with_override("hires", "cliff_db = -1.0")).unwrap_err();
+    assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
 }

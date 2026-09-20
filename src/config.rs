@@ -55,6 +55,9 @@ pub struct Config {
     /// Inbox の検出（P2-10、D-68）。省略時は 60 秒
     #[serde(default)]
     pub inbox: InboxConfig,
+    /// 偽ハイレゾ検出（P3-5、D-71）。省略時は既定値
+    #[serde(default)]
+    pub hires: HiresConfig,
     pub ytmusic: YtmusicConfig,
     pub bin: BinConfig,
 }
@@ -203,6 +206,43 @@ impl Default for InboxConfig {
     fn default() -> Self {
         Self {
             poll_interval_secs: default_inbox_poll(),
+        }
+    }
+}
+
+/// 偽ハイレゾ検出のしきい値と自動投入（SPEC §7.10、D-71）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HiresConfig {
+    /// スキャン完了時に未検査の対象（可逆かつ >48 kHz または >16 bit）を自動投入する
+    #[serde(default = "default_true")]
+    pub check_on_import: bool,
+    /// カットオフ周波数（Hz）がこれ以下なら「上げただけ」の疑い
+    #[serde(default = "default_hires_cutoff")]
+    pub cutoff_hz: u32,
+    /// カットオフ前後 1 kHz の落差（dB）がこれ以上なら SRC の崖とみなす
+    #[serde(default = "default_hires_cliff")]
+    pub cliff_db: f64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_hires_cutoff() -> u32 {
+    25_000
+}
+
+fn default_hires_cliff() -> f64 {
+    30.0
+}
+
+impl Default for HiresConfig {
+    fn default() -> Self {
+        Self {
+            check_on_import: true,
+            cutoff_hz: default_hires_cutoff(),
+            cliff_db: default_hires_cliff(),
         }
     }
 }
@@ -480,6 +520,14 @@ impl Config {
             if self.ytmusic.download_timeout_secs == 0 {
                 return invalid("ytmusic.download_timeout_secs は 1 以上".into());
             }
+        }
+
+        // [hires]
+        if self.hires.cutoff_hz == 0 {
+            return invalid("hires.cutoff_hz は 1 以上".into());
+        }
+        if !self.hires.cliff_db.is_finite() || self.hires.cliff_db < 0.0 {
+            return invalid("hires.cliff_db は 0 以上の有限値".into());
         }
 
         Ok(())
