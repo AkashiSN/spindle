@@ -161,12 +161,14 @@ pub struct EncodeConfig {
     pub derived: DerivedConfig,
 }
 
-/// `[encode.derived.<variant>]`。`aac` 系統は P4-8 で足す
+/// `[encode.derived.<variant>]`
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DerivedConfig {
     #[serde(default)]
     pub opus: OpusVariantConfig,
+    #[serde(default)]
+    pub aac: AacVariantConfig,
 }
 
 /// `[encode.derived.opus]`（`opusenc --vbr --music --bitrate <bitrate>`。D-9 追記）
@@ -190,6 +192,42 @@ impl Default for OpusVariantConfig {
 
 fn default_opus_bitrate() -> u32 {
     256
+}
+
+/// `[encode.derived.aac]`（ffmpeg 内蔵 `aac -b:a <bitrate>k`。Apple 向け。D-75）。節を省略したときは
+/// **off**（既存の config のまま新版を起動しても aac は始まらない。RG 全件解析 → 有効化の順序を崩さない）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AacVariantConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_aac_bitrate")]
+    pub bitrate: u32,
+    /// 非可逆原本（opus / ogg / mp3 / aac）も AAC へ（D-8 の例外）
+    #[serde(default = "default_true")]
+    pub lossy_sources: bool,
+    /// 多値フィールドを 1 値に結合する区切り
+    #[serde(default = "default_multi_value_separator")]
+    pub multi_value_separator: String,
+}
+
+impl Default for AacVariantConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bitrate: default_aac_bitrate(),
+            lossy_sources: true,
+            multi_value_separator: default_multi_value_separator(),
+        }
+    }
+}
+
+fn default_aac_bitrate() -> u32 {
+    256
+}
+
+fn default_multi_value_separator() -> String {
+    " & ".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -477,6 +515,12 @@ impl Config {
         // [encode]
         if self.encode.derived.opus.bitrate == 0 {
             return invalid("encode.derived.opus.bitrate は 1 以上".into());
+        }
+        if self.encode.derived.aac.bitrate == 0 {
+            return invalid("encode.derived.aac.bitrate は 1 以上".into());
+        }
+        if self.encode.derived.aac.multi_value_separator.is_empty() {
+            return invalid("encode.derived.aac.multi_value_separator は空にできない".into());
         }
         if self.encode.flac_compression > 8 {
             return invalid(format!(

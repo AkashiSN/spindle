@@ -212,6 +212,43 @@ fn derived_opus_bitrate_zero_is_rejected() {
 }
 
 #[test]
+fn derived_aac_defaults_to_disabled_256_lossy_and_ampersand() {
+    // [encode.derived.aac] を省略 → 既存 config のまま新版を起動しても aac は始まらない（SPEC §7.6）
+    let cfg = Config::parse(&replace_section("encode", "flac_compression = 8")).unwrap();
+    let aac = &cfg.encode.derived.aac;
+    assert!(!aac.enabled);
+    assert_eq!(aac.bitrate, 256);
+    assert!(aac.lossy_sources);
+    assert_eq!(aac.multi_value_separator, " & ");
+    // example は明示的に on
+    let cfg = Config::parse(EXAMPLE).unwrap();
+    assert!(cfg.encode.derived.aac.enabled);
+    assert_eq!(cfg.encode.derived.aac.bitrate, 256);
+}
+
+#[test]
+fn derived_aac_bitrate_zero_and_empty_separator_are_rejected() {
+    let toml = replace_section(
+        "encode",
+        "flac_compression = 8\n[derived.aac]\nenabled = true\nbitrate = 0",
+    );
+    let err = Config::parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::Invalid(ref m) if m.contains("encode.derived.aac.bitrate")),
+        "{err}"
+    );
+    let toml = replace_section(
+        "encode",
+        "flac_compression = 8\n[derived.aac]\nmulti_value_separator = \"\"",
+    );
+    let err = Config::parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::Invalid(ref m) if m.contains("multi_value_separator")),
+        "{err}"
+    );
+}
+
+#[test]
 fn derived_section_defaults_to_opus_enabled_256() {
     // [encode.derived] を省いても opus 系統は on / 256k（SPEC §7.6、D-75）
     let cfg = Config::parse(&replace_section("encode", "flac_compression = 8")).unwrap();

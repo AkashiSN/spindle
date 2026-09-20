@@ -1740,6 +1740,12 @@ flac_compression = 8
 enabled = true
 bitrate = 256                  # opusenc --vbr --music --bitrate（D-9 追記）
 
+[encode.derived.aac]           # Derived の aac 系統（§7.6、D-75）。Mac のミュージック.app へ取り込む Apple 向け
+enabled = true                 # 節を省略すると false（RG 全件解析 → 有効化の順序のため）
+bitrate = 256                  # ffmpeg -c:a aac -b:a
+lossy_sources = true           # 非可逆原本も AAC へ（D-8 の例外。aac 原本も再エンコード）
+multi_value_separator = " & "  # 多値フィールドの結合
+
 [replaygain]
 reference_lufs = -18.0         # 内部表現。書き出し時に変換
 write_tags = true
