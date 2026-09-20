@@ -954,10 +954,10 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - [ ] **P4-3** プロパティタブのフィールド削除 / 追加（D-72）。右クリック（または行末の ×）で `delete` op、
       「フィールドを追加」で新しいキーに `set` op。どちらも選択全体への一括編集（preview → apply）。
       受け入れ: `web/src/lib/properties.test.ts`、`web/src/components` の vitest
-- [ ] **P4-4** Inbox 承認画面の忠実表示（D-70 追記）。ARTIST の全値を `;` 区切りで見せ、編集すると 1 値になる
-      ことを明示。Inbox のファイルの埋め込み画像を返す `GET /api/inbox/:id/artwork/:file`（`PICTURE` のハッシュで
-      照合、Library の artwork と同じ ETag / キャッシュ）と承認画面のサムネイル。受け入れ: `tests/inbox_api.rs`、
-      `web/src/lib/inbox.test.ts`
+- [ ] **P4-4** Inbox 承認画面の忠実表示（D-70 追記）。ARTIST の全値を `;` 区切りで見せ、`keep_artists` で
+      「そのまま保つ / 1 値で書く」を明示。Inbox のファイルの埋め込み画像を返す `GET /api/inbox/:id/artwork/:hash`
+      （`PICTURE` のハッシュで実体を照合、Library の artwork と同じ ETag / キャッシュ）と承認画面のサムネイル。
+      受け入れ: `tests/inbox_api.rs`、`tests/inbox_job.rs`、`web/src/lib/inbox.test.ts`
 - [x] **P4-5** album gain を album ごとの属性に（D-74。2026-09-20）。`db/migrations/0017_album_gain.sql`（`albums.album_gain`
       既定 0、既存の `tracks.rg_album_*` を NULL）。rg の投入経路（`POST /api/rg`、承認後、CD 配置後。スキャンは投入しない）
       は属性で album / track 単位を選ぶ。`cd/place.rs` は true で作る。承認画面のチェックボックス（既定 off、追記先

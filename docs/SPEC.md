@@ -988,17 +988,24 @@ Inbox/ に配置（ポーリング検出）
   MUSICBRAINZ_ALBUMID があれば別リリースなので null）で見せる
 - **album gain**（D-74）: 下書きの `album_gain`（既定 false。承認画面のチェックボックス。追記先があればその
   現在値が初期値）を配置時に album の属性へ書く（追記先の属性も上書きし、off にすれば album の値を消す）
-- **ARTIST の多値**（P4-4、D-70）: 提案の `artist` はファイルの ARTIST の**全値を `"; "` で結合**した文字列
-  （1 値なら同じ）。配置は、ファイルの ARTIST が多値（プラグインの `artists` 等）で下書きの `artist`（trim）が
-  その結合文字列と一致（未編集）なら多値を保つ。それ以外は下書きの値 1 値で置き換える（`;` で分割はしない。
-  承認画面は「そのままなら多値を保ち、編集すると 1 値になる」と示す）。多値を保つときのパス生成の
-  `{artist}` は Library の `artist_display` と同じ `", "` 結合
-- **埋め込み画像**（P4-4、D-70）: `GET /api/inbox/:id/artwork/:hash` が、件のファイルのうち `PICTURE` の
-  sha256 が `:hash` のものを開いて一致する画像を原寸・元の MIME で返す（ハッシュアドレスなので
-  `Cache-Control: public, max-age=31536000, immutable`、ETag `"<hash>-orig"`、`If-None-Match` で 304）。
-  件に無い hash・ファイルが消えた・画像が変わっていれば 404。サムネイルは作らない（画面で縮小）。
-  同梱の `cover.jpg` 等は配置時に埋め込みより優先されるが（§7.1 の規則）、承認画面が見せるのは
-  埋め込み画像だけ
+- **ARTIST の多値**（P4-4、D-70）: 提案のトラックは `artist`（ファイルの ARTIST の全値を `"; "` で結合した
+  表示文字列。1 値なら同じ）と **`keep_artists`**（ファイルの ARTIST が多値なら true）を持つ。配置は
+  `keep_artists` が true でファイルの ARTIST が多値なら ARTIST に触れない（`artist` は表示用で、値は
+  見ない）。false なら `artist`（空ならアルバムアーティスト）の 1 値で置き換える（`;` で分割はしない）。
+  `keep_artists` を持たない旧下書きは旧規則（`artist` が先頭値のままなら保つ）で解釈する。多値を保つ
+  ときのパス生成の `{artist}` は Library の `artist_display` と同じ `", "` 結合
+- **埋め込み画像**（P4-4、D-70）: 走査は各ファイルの `PICTURE`（`"<mime>:<sha256>"`）を、Library の
+  `pick_embedded` と同じ規則（front cover 優先、無ければ先頭）で選んだ画像が**先頭**になる順で記録する。
+  各ファイルの代表画像はその先頭、件の代表画像は各ファイルの代表の最頻（同数なら先に現れたもの）。
+  `GET /api/inbox/:id/artwork/:hash` は、件があれば `PICTURE` にその sha256 を持つファイルを走査順に
+  開き（openat2。symlink / 境界外 / 消失は次の候補へ）、埋め込み画像の内容の sha256 が一致するものを
+  探す。見つからなければ 404（件に無い hash、ファイルが消えた、画像が書き換わった）。見つかれば
+  `If-None-Match` が ETag `"<hash>-orig"` に一致すれば 304、でなければ原寸を返す（MIME はタグの値ではなく
+  内容の sniff。sniff できなければ 404。`Cache-Control: public, max-age=31536000, immutable`）。
+  **304 の判定は実体の照合の後**（DB に `PICTURE` が残っていても実体が無ければ 404）。件の状態は見ない
+  （rejected / failed でも実体があれば返す。placed は実体が消えているので普通 404）。セッション必須
+  （allowlist 無し）。その他の I/O 失敗は 500。サムネイルは作らない（画面で縮小）。同梱の `cover.jpg`
+  等は配置時に埋め込みより優先されるが（§7.1 の規則）、承認画面が見せるのは埋め込み画像だけ
 - **採番**: 下書きの提案で TRACKNUMBER の無いファイルは、採用する album の active な `track_no` の最大 + 1 から
   ファイル名順に振る（無ければ 1 から）。承認の検証に「採用する album の active なトラックと `(disc_no, track_no)`
   が重ならない」を加え、配置で失敗する前に 400 で直させる。配置の登録トランザクションでも同じ検証をする
@@ -1284,11 +1291,12 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   sample_rate, bit_depth, channels, duration_ms, tags, source }] }] }
                                                   （§7.8、D-68。destination と source は D-70: source は spindle-inbox.json の
                                                   項 { source, url, channel, verdict, message } | null）
-GET    /api/inbox/:id/artwork/:hash               件のファイルの埋め込み画像（PICTURE の sha256 で照合。原寸・元の MIME、immutable +
-                                                  ETag、304。件に無ければ 404。§7.8、P4-4）
+GET    /api/inbox/:id/artwork/:hash               件のファイルの埋め込み画像（PICTURE の sha256 で実体を照合してから ETag / 304。
+                                                  原寸、MIME は sniff、immutable。件に無い / 実体消失 / 不一致は 404。状態非依存。
+                                                  セッション必須。§7.8、P4-4）
 POST   /api/inbox/scan                            inbox ジョブを投入（202 + job_id。queued / running があれば 409 duplicate）
 POST   /api/inbox/:id/approve                     { category, albumartist, album, date, album_gain?, tracks: [{ rel_path, disc_no,
-                                                  track_no, title, artist }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved +
+                                                  track_no, title, artist, keep_artists? }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved +
                                                   ジョブ投入。album_gain は既定 false（D-74）
 POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
 POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
@@ -1730,10 +1738,10 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   `destination` があれば「宛先: 既存の『…』（N 曲）に追加」と出す。`source` のあるトラック行は判定バッジ
   （ok / 未判定）を出し、行を開くと `message`（参照実装ならルールの足し方）と URL が読める（D-70）。
   「album gain を計算する」のチェックボックス（既定 off。`destination` があればその現在値が初期値。D-74）。
-  **忠実表示**（P4-4、D-70）: アーティスト欄は提案で ARTIST の全値（`"; "` 区切り）を見せ、見出しに「そのままなら
-  多値を保ち、編集すると 1 値になる」。多値のファイルで欄が結合文字列と違う行には「編集済み: 1 値『…』として
-  書く」の注記。見出しの横に件の代表画像（トラック間で最頻の `PICTURE`）、トラック表に小さなサムネイル列
-  （`GET /api/inbox/:id/artwork/:hash`。無ければ空）
+  **忠実表示**（P4-4、D-70）: ARTIST が多値のファイルの行は元の値をチップで見せ、「ファイルの多値をそのまま
+  保つ」のチェック（提案は on。on の間は欄が `"; "` 結合の表示で編集不可、外すと欄が編集できて 1 値で書く
+  旨を示す）。見出しの横に件の代表画像（各ファイルの代表 = `PICTURE` の先頭、の最頻）、トラック表に
+  小さなサムネイル列（`GET /api/inbox/:id/artwork/:hash`。無ければ空）
 - **操作タブの「album gain」**（P4-5、D-74）: 「ReplayGain / FLAC」節に、選択行が属する album ごとの
   チェックボックス（`PATCH /api/albums/:id`。20 album を超えたら絞るよう促す）。アルバム画面は無く
   アルバム一覧は表を絞るだけなので、切り替えはここに置く
