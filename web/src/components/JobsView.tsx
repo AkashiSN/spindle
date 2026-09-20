@@ -130,6 +130,7 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
             <tr>
               <th className="num">#</th>
               <th>種別</th>
+              <th>対象</th>
               <th>状態</th>
               <th className="num">進捗</th>
               <th>作成</th>
@@ -172,6 +173,9 @@ function JobRow({ j, jobs, onOpenBatch }: { j: Job; jobs: JobsState; onOpenBatch
             </button>
           </>
         )}
+      </td>
+      <td className="subject-cell" title={j.subject ?? undefined}>
+        {j.subject != null && <span>{j.subject}</span>}
       </td>
       <td className="nowrap">
         {STATE_LABEL[j.state]}

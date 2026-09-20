@@ -206,6 +206,9 @@ pub struct Job {
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+    /// 対象の表示用文字列（`GET /api/jobs` の一覧だけが埋める。payload の track_id / album_id /
+    /// batch_id を解決したもの。[`subject_of`]）
+    pub subject: Option<String>,
 }
 
 const JOB_COLUMNS: &str = "id, type, dedup_key, payload, state, edit_batch_id, priority, run_after,
@@ -247,7 +250,52 @@ fn job_from_row(row: &Row<'_>) -> rusqlite::Result<Job> {
         created_at: row.get(15)?,
         started_at: row.get(16)?,
         finished_at: row.get(17)?,
+        subject: None,
     })
+}
+
+/// ジョブの対象（ジョブ画面の「対象」列）。payload の id を解決した値を優先し、行が消えていれば id で
+/// 示す。種別に対象が無ければ None
+pub fn subject_of(
+    job_type: JobType,
+    payload: &serde_json::Value,
+    track_rel_path: Option<&str>,
+    album_rel_dir: Option<&str>,
+    batch_description: Option<&str>,
+) -> Option<String> {
+    let id_of = |key: &str| payload.get(key).and_then(|v| v.as_i64());
+    let text_of = |key: &str| payload.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    let track = || {
+        track_rel_path
+            .map(str::to_owned)
+            .or_else(|| id_of("track_id").map(|id| format!("track #{id}")))
+    };
+    let album = || {
+        album_rel_dir
+            .map(|d| format!("{d}/"))
+            .or_else(|| id_of("album_id").map(|id| format!("album #{id}")))
+    };
+    let batch = || {
+        batch_description
+            .map(str::to_owned)
+            .or_else(|| id_of("batch_id").map(|id| format!("batch #{id}")))
+    };
+    match job_type {
+        JobType::Transcode => {
+            let variant = text_of("variant").unwrap_or_else(|| "opus".to_owned());
+            track().map(|t| format!("{t} [{variant}]"))
+        }
+        JobType::Rg => track().or_else(album),
+        JobType::Flaccheck | JobType::Hirescheck | JobType::Tagwrite | JobType::Normalize => {
+            track()
+        }
+        JobType::Verify => album(),
+        JobType::Rename => batch(),
+        JobType::Scan => text_of("kind"),
+        JobType::Ytdl => text_of("url"),
+        JobType::Thumbnail => id_of("artwork_id").map(|id| format!("artwork #{id}")),
+        JobType::Rip | JobType::Inbox | JobType::Gc | JobType::Backup => None,
+    }
 }
 
 /// 投入するジョブ。`NewJob::new(..).dedup_key(..)` のように組み立てる
@@ -407,17 +455,40 @@ pub fn active_jobs_of_batch(conn: &Connection, batch_id: i64) -> Result<Vec<Job>
 /// [`claim`] と同じ）、終端は新しい順。上限で切れるのは待ちの末尾と古い終端行（同じ秒に数千件を
 /// 一括投入したとき id 降順だと、先頭から取られた実行中が上限の外に落ちる）
 pub fn list(conn: &Connection, limit: usize) -> Result<Vec<Job>> {
+    // 対象の解決（track / album / batch）。payload の id を JOIN するだけで、行が無ければ NULL
+    let columns: Vec<String> = JOB_COLUMNS
+        .split(',')
+        .map(|c| format!("j.{}", c.trim()))
+        .collect();
     let mut stmt = conn.prepare(&format!(
-        "SELECT {JOB_COLUMNS} FROM jobs
-         ORDER BY (state = 'running') DESC,
-                  (state = 'queued') DESC,
-                  CASE WHEN state IN ('queued','running') THEN priority END DESC,
-                  CASE WHEN state IN ('queued','running') THEN created_at END ASC,
-                  CASE WHEN state IN ('queued','running') THEN id END ASC,
-                  COALESCE(finished_at, created_at) DESC, id DESC
-         LIMIT ?1"
+        "SELECT {}, t.rel_path, a.rel_dir, b.description
+         FROM jobs j
+         LEFT JOIN tracks t ON t.id = json_extract(j.payload, '$.track_id')
+         LEFT JOIN albums a ON a.id = json_extract(j.payload, '$.album_id')
+         LEFT JOIN edit_batches b ON b.id = json_extract(j.payload, '$.batch_id')
+         ORDER BY (j.state = 'running') DESC,
+                  (j.state = 'queued') DESC,
+                  CASE WHEN j.state IN ('queued','running') THEN j.priority END DESC,
+                  CASE WHEN j.state IN ('queued','running') THEN j.created_at END ASC,
+                  CASE WHEN j.state IN ('queued','running') THEN j.id END ASC,
+                  COALESCE(j.finished_at, j.created_at) DESC, j.id DESC
+         LIMIT ?1",
+        columns.join(", ")
     ))?;
-    let rows = stmt.query_map([limit as i64], job_from_row)?;
+    let rows = stmt.query_map([limit as i64], |row| {
+        let mut job = job_from_row(row)?;
+        let track: Option<String> = row.get(18)?;
+        let album: Option<String> = row.get(19)?;
+        let batch: Option<String> = row.get(20)?;
+        job.subject = subject_of(
+            job.job_type,
+            &job.payload,
+            track.as_deref(),
+            album.as_deref(),
+            batch.as_deref(),
+        );
+        Ok(job)
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 

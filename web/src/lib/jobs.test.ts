@@ -18,6 +18,7 @@ function job(over: Partial<Job>): Job {
     created_at: 1,
     started_at: null,
     finished_at: null,
+    subject: null,
     ...over,
   }
 }

@@ -1506,6 +1506,18 @@ table.jobs-types td.failed {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.jobs-table td.subject-cell {
+  max-width: 32em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 長いパスは末尾（ファイル名）を残して先頭を省く */
+  text-align: left;
+}
+.jobs-table td.subject-cell > span {
+  unicode-bidi: plaintext;
+}
+
 button.link {
   background: none;
   border: none;

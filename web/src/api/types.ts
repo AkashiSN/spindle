@@ -124,6 +124,8 @@ export type Job = {
   created_at: number
   started_at: number | null
   finished_at: number | null
+  /** 対象（トラックのパス / アルバムのディレクトリ / バッチの説明など。種別に対象が無ければ null） */
+  subject: string | null
 }
 
 export type JobSummary = {

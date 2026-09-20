@@ -1497,6 +1497,84 @@ async fn jobs_list_returns_items_and_summary() {
     assert_eq!(body["by_type"]["gc"]["failed"], 0);
 }
 
+/// 一覧の `subject`（ジョブの対象。payload の track_id / album_id / batch_id を解決した表示用の文字列）
+#[tokio::test]
+async fn jobs_list_resolves_the_subject_of_each_job() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    app.jobs
+        .db()
+        .write(|c| {
+            c.execute_batch(
+                "INSERT INTO albums (id, rel_dir, rel_dir_key, albumartist, album)
+                   VALUES (7, 'Anime/AA/Album', 'anime/aa/album', 'AA', 'Album');
+                 INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                                     title, artist_display, album, albumartist, seen_at, album_id)
+                   VALUES (5, 'Anime/AA/Album/1-01 曲.flac', 'anime/aa/album/1-01 曲.flac', 0, 0, 0, 'flac', 1,
+                           '曲', 'a', 'Album', 'AA', 0, 7);
+                 INSERT INTO edit_batches (id, description, created_at)
+                   VALUES (3, 'テンプレート変更', 0);",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let jobs = [
+        NewJob::new(
+            JobType::Transcode,
+            serde_json::json!({ "track_id": 5, "variant": "aac", "audio_version": 1, "tag_version": 1 }),
+        ),
+        NewJob::new(JobType::Rg, serde_json::json!({ "album_id": 7 })),
+        NewJob::new(JobType::Rg, serde_json::json!({ "track_id": 5 })),
+        NewJob::new(JobType::Rename, serde_json::json!({ "batch_id": 3 })),
+        NewJob::new(JobType::Scan, serde_json::json!({ "kind": "deep" })),
+        NewJob::new(
+            JobType::Ytdl,
+            serde_json::json!({ "url": "https://music.youtube.com/watch?v=x" }),
+        ),
+        NewJob::new(JobType::Thumbnail, serde_json::json!({ "artwork_id": 9 })),
+        NewJob::new(
+            JobType::Flaccheck,
+            serde_json::json!({ "track_id": 404, "audio_version": 1 }),
+        ),
+        NewJob::new(JobType::Gc, serde_json::json!({})),
+    ];
+    let mut ids = Vec::new();
+    for j in jobs {
+        let EnqueueResult::Inserted(id) = app.jobs.enqueue(j).await.unwrap() else {
+            panic!()
+        };
+        ids.push(id);
+    }
+    let res = send(
+        &app,
+        req(Method::GET, "/api/jobs")
+            .header(header::COOKIE, &c)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let body = json(res).await;
+    let subject = |id: i64| -> serde_json::Value {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .unwrap()["subject"]
+            .clone()
+    };
+    assert_eq!(subject(ids[0]), "Anime/AA/Album/1-01 曲.flac [aac]");
+    assert_eq!(subject(ids[1]), "Anime/AA/Album/");
+    assert_eq!(subject(ids[2]), "Anime/AA/Album/1-01 曲.flac");
+    assert_eq!(subject(ids[3]), "テンプレート変更");
+    assert_eq!(subject(ids[4]), "deep");
+    assert_eq!(subject(ids[5]), "https://music.youtube.com/watch?v=x");
+    assert_eq!(subject(ids[6]), "artwork #9");
+    assert_eq!(subject(ids[7]), "track #404", "行が無いトラックは id で");
+    assert_eq!(subject(ids[8]), serde_json::Value::Null);
+}
+
 /// 一覧は実行中が先頭、待ちはキューから取られる順（priority → created_at → id 昇順）。同じ秒に
 /// 数千件を一括投入すると id 降順では実行中（古い id）が上限の外に落ちる
 #[tokio::test]
