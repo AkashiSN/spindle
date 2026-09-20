@@ -68,6 +68,8 @@ pub async fn start(
             ))
         }
     };
+    // 投入単位は album の属性で分かれる（`albums.album_gain` が on なら album 単位、それ以外は
+    // track 単位。D-74）
     let (albums, track_ids) = state
         .db
         .read(move |c| {

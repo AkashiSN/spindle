@@ -1167,7 +1167,8 @@ POST   /api/rename/preview                        テンプレート適用結果
 POST   /api/rename/apply                          token の集合をリネームバッチとして記録
 POST   /api/normalize/preview                     ロスレス → FLAC 正規化の宛先（selection_token を発行）
 POST   /api/normalize/apply                       token の集合を正規化バッチとして記録（§7.4）
-POST   /api/rg                                    { selection }。album ごとに rg ジョブを投入（D-47）
+POST   /api/rg                                    { selection }。rg ジョブを投入（D-47）。`albums.album_gain` が on の
+                                                  album は album 単位（rg:album:<id>）、それ以外は track 単位（rg:track:<id>。D-74）
 POST   /api/rg/write                              { selection, description?, skip_pending? }。解析値を
                                                   タグとして書く編集バッチを記録（§6、D-48）。
                                                   preview 段階は無い（値は DB から決まる）
@@ -1188,7 +1189,11 @@ POST   /api/verify                                { selection }。selection の�
 GET    /api/albums / :id                         全件（ページングなし）。track_count / duration_ms は active のみ。
                                                   `?filter=`（/api/tracks と同じ JSON）で一致するトラックを持つ album だけ（P4-6）
                                                   /api/tracks の行と /api/tracks/:id には artwork_hash（トラック自身の
-                                                  埋め込み画像。無ければ null。D-61）
+                                                  埋め込み画像。無ければ null。D-61）。行に album_gain（D-74）
+PATCH  /api/albums/:id                            { album_gain }。album gain の属性（D-74）。true → album 単位の rg を投入、
+                                                  false → rg_album_* を NULL にして未書込に戻し、Derived の追随を投入。
+                                                  同じ値なら何もしない。200 { album, job_id | null, derived_jobs }。
+                                                  404 not_found / 400 bad_request
 GET    /api/categories, POST /api/categories        統制語彙 { "items": [{ id, name }] }。POST は { name }（重複は 409）。
                                                   CD 取り込みの確定フォームの category に使う（D-67）
 GET    /api/search?q=                             FTS5 trigram（3 文字未満は LIKE）。/api/tracks と同じ

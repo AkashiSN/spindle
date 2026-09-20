@@ -66,7 +66,7 @@ pub fn router(state: AppState) -> Router {
             "/categories",
             get(categories::list).post(categories::create),
         )
-        .route("/albums/{id}", get(albums::get))
+        .route("/albums/{id}", get(albums::get).patch(albums::patch))
         .route("/artwork/{hash}", get(artwork::get))
         .route(
             "/artwork/upload",

@@ -112,6 +112,14 @@ impl App {
             .unwrap()
     }
 
+    /// album gain の属性を on にする（既定は off。D-74）
+    fn enable_album_gain(&self, rel: &str) {
+        let album = album_of(self, rel);
+        self.conn()
+            .execute("UPDATE albums SET album_gain = 1 WHERE id = ?1", [album])
+            .unwrap();
+    }
+
     fn jobs(&self) -> Vec<(String, String)> {
         let c = self.conn();
         let mut st = c
@@ -205,6 +213,8 @@ async fn enqueues_one_job_per_album_in_selection() {
     app.add("B/01.flac", "b1");
     app.add("C/01.flac", "c1");
     app.scan().await;
+    app.enable_album_gain("A/01.flac");
+    app.enable_album_gain("B/01.flac");
     let c = app.cookie().await;
     let ids = vec![
         app.track_id("A/01.flac"),
@@ -255,6 +265,8 @@ async fn filter_selection_with_no_rg_flag_covers_unscanned_albums() {
     app.add("A/01.flac", "a1");
     app.add("B/01.flac", "b1");
     app.scan().await;
+    app.enable_album_gain("A/01.flac");
+    app.enable_album_gain("B/01.flac");
     // A は解析済みにしておく
     app.conn()
         .execute(
@@ -297,6 +309,27 @@ async fn tracks_without_album_get_track_jobs() {
     assert_eq!(body["tracks"], 1, "{body}");
     let keys: Vec<String> = app.jobs().into_iter().map(|(k, _)| k).collect();
     assert_eq!(keys, vec![format!("rg:track:{id}")]);
+}
+
+/// 既定（album_gain = 0）の album は track 単位で投入される（D-74）
+#[tokio::test]
+async fn default_albums_get_track_jobs() {
+    let _ffmpeg = require_ffmpeg!(common::ffmpeg());
+    let app = App::new().await;
+    app.add("A/01.flac", "a1");
+    app.add("A/02.flac", "a2");
+    app.scan().await;
+    let c = app.cookie().await;
+    let ids = vec![app.track_id("A/01.flac"), app.track_id("A/02.flac")];
+    let (st, body) = app
+        .post(&c, serde_json::json!({ "selection": { "ids": ids } }))
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["albums"], 0, "{body}");
+    assert_eq!(body["tracks"], 2, "{body}");
+    let keys: Vec<String> = app.jobs().into_iter().map(|(k, _)| k).collect();
+    assert_eq!(keys.len(), 2);
+    assert!(keys.iter().all(|k| k.starts_with("rg:track:")), "{keys:?}");
 }
 
 #[tokio::test]
