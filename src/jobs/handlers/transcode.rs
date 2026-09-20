@@ -8,8 +8,10 @@
 //!
 //! - `Skip` / `UpToDate`: 何もしない
 //! - `Encode`: Library の FD を開き、**fstat が DB の行と一致する**ことを確かめてから（パスは
-//!   識別子ではない）ffmpeg → opusenc で tmp に作り、タグ・画像を書き、Derived の宛先ディレクトリの
-//!   tmp へコピーして `replace_file`。旧パスに自分の Derived があれば消す。DB は配置後に upsert
+//!   識別子ではない）エンコーダで tmp に作り（opus: ffmpeg → opusenc、aac: ffmpeg 1 パスで track gain を
+//!   焼き込み。P4-8）、タグ・画像を書き（opus: VorbisComments + WebP、aac: ilst + JPEG）、Derived の
+//!   宛先ディレクトリの tmp へコピーして `replace_file`。旧パスに自分の Derived があれば消す。DB は
+//!   配置後に upsert
 //! - `Move`: `rename_noreplace`。宛先に何かあれば消してから（Derived は再生成物）。元が無ければ
 //!   `Encode` に倒す
 //! - `Retag`: Derived を同じディレクトリの tmp にコピーし、タグ・画像を書いて `replace_file`。
@@ -37,16 +39,17 @@ use crate::db::derived::{self as dbderived, Profiles, TagState};
 use crate::db::replaygain::{self as dbrg, Member};
 use crate::db::{now_epoch, DbError};
 use crate::domain::derived::{
-    expected_rel_path, opus_tags, plan, Current, Plan, Target, Variant, VariantSettings,
+    aac_tags, bake_gain_db, expected_rel_path, opus_tags, plan, Current, Plan, Target, Variant,
+    VariantSettings,
 };
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::domain::replaygain::Values;
-use crate::domain::tags::{read_transfer_tags, write_opus_tags, TransferTags};
+use crate::domain::tags::{read_transfer_tags, write_mp4_tags, write_opus_tags, TransferTags};
 use crate::fsroot::{self, FsError, RootDir};
 use crate::jobs::handlers::thumbnail::make_thumb;
 use crate::jobs::{BoxFuture, Handler, HandlerResult, JobContext, JobError, Outcome};
 use crate::media::artwork::{ArtworkStore, ThumbFormat};
-use crate::media::encode::OpusEncoder;
+use crate::media::encode::{AacEncoder, OpusEncoder};
 
 /// Derived に埋める画像の一辺（`THUMB_SIZES` の大きい方）
 const COVER_SIZE: u32 = 768;
@@ -59,7 +62,8 @@ pub type TestHook = Arc<dyn Fn(&'static str) -> BoxFuture<'static, ()> + Send + 
 pub struct TranscodeHandler {
     library: Arc<RootDir>,
     derived: Arc<RootDir>,
-    encoder: OpusEncoder,
+    opus: OpusEncoder,
+    aac: AacEncoder,
     artwork: Arc<ArtworkStore>,
     ffmpeg: PathBuf,
     reference_lufs: f64,
@@ -70,7 +74,8 @@ impl TranscodeHandler {
     pub fn new(
         library: Arc<RootDir>,
         derived: Arc<RootDir>,
-        encoder: OpusEncoder,
+        opus: OpusEncoder,
+        aac: AacEncoder,
         artwork: Arc<ArtworkStore>,
         ffmpeg: impl AsRef<Path>,
         reference_lufs: f64,
@@ -78,7 +83,8 @@ impl TranscodeHandler {
         Self {
             library,
             derived,
-            encoder,
+            opus,
+            aac,
             artwork,
             ffmpeg: ffmpeg.as_ref().to_path_buf(),
             reference_lufs,
@@ -97,6 +103,36 @@ impl TranscodeHandler {
             h(point).await;
         }
     }
+
+    /// 系統ごとの出力タグ集合（opus: Library のタグ + R128_*、aac: 多値を結合 + iTunNORM 0 dB）
+    fn output_tags(
+        &self,
+        r: &Resolved,
+        src: &TransferTags,
+        cover: Option<Picture>,
+    ) -> TransferTags {
+        match r.variant() {
+            Variant::Opus => opus_tags(src, r.rg.as_ref(), self.reference_lufs, cover),
+            Variant::Aac => aac_tags(src, &r.settings.multi_value_separator, cover),
+        }
+    }
+
+    /// 行に記録する bitrate（設定の kbps）
+    fn bitrate_of(&self, variant: Variant) -> i64 {
+        i64::from(match variant {
+            Variant::Opus => self.opus.bitrate_kbps(),
+            Variant::Aac => self.aac.bitrate_kbps(),
+        })
+    }
+}
+
+/// 系統ごとのタグ書き込み（tmp の実体に）
+fn write_derived_tags(variant: Variant, f: &mut File, tags: &TransferTags) -> Result<(), JobError> {
+    match variant {
+        Variant::Opus => write_opus_tags(f, tags),
+        Variant::Aac => write_mp4_tags(f, tags),
+    }
+    .map_err(|e| failed(format!("タグを書けない: {e}")))
 }
 
 /// 解決したトラックの状態（1 回の読み取りで揃える）
@@ -109,12 +145,26 @@ struct Resolved {
     member: Member,
     rg: Option<Values>,
     bit_depth: Option<u32>,
+    /// 原本のサンプルレート（aac の 48 kHz 上限に使う）
+    sample_rate: Option<u32>,
 }
 
 impl Resolved {
+    fn variant(&self) -> Variant {
+        self.settings.variant
+    }
+
     /// この系統の期待パス
     fn expected(&self) -> String {
         expected_rel_path(self.settings.variant, &self.target.library_rel_path)
+    }
+
+    /// 埋める画像の形式（opus は WebP、aac は JPEG。ミュージック.app は WebP を読まない）
+    fn cover_format(&self) -> ThumbFormat {
+        match self.variant() {
+            Variant::Opus => ThumbFormat::WebP,
+            Variant::Aac => ThumbFormat::Jpeg,
+        }
     }
 }
 
@@ -160,7 +210,8 @@ impl Handler for TranscodeHandler {
         let this = TranscodeHandler {
             library: Arc::clone(&self.library),
             derived: Arc::clone(&self.derived),
-            encoder: self.encoder.clone(),
+            opus: self.opus.clone(),
+            aac: self.aac.clone(),
             artwork: Arc::clone(&self.artwork),
             ffmpeg: self.ffmpeg.clone(),
             reference_lufs: self.reference_lufs,
@@ -275,10 +326,10 @@ impl TranscodeHandler {
                 let rg = dbrg::write_rows(c, &[track_id])?
                     .pop()
                     .and_then(|w| w.values);
-                let bit_depth: Option<i64> = c.query_row(
-                    "SELECT bit_depth FROM tracks WHERE id = ?1",
+                let (bit_depth, sample_rate): (Option<i64>, Option<i64>) = c.query_row(
+                    "SELECT bit_depth, sample_rate FROM tracks WHERE id = ?1",
                     [track_id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
                 Ok(Some(Resolved {
                     settings,
@@ -287,6 +338,7 @@ impl TranscodeHandler {
                     member,
                     rg,
                     bit_depth: bit_depth.and_then(|b| u32::try_from(b).ok()),
+                    sample_rate: sample_rate.and_then(|b| u32::try_from(b).ok()),
                 }))
             })
             .await?;
@@ -452,23 +504,41 @@ impl TranscodeHandler {
         let (file, tags) = self.open_library(r).await?;
         let source = file.try_clone()?;
 
-        // 2. エンコード
+        // 2. エンコード（系統ごと）
         let token = ctx.cancel_token();
-        let encoded = match self.encoder.encode(source, r.bit_depth, &token).await {
-            Ok(e) => e,
-            Err(e) if e.is_cancelled() => return Err(JobError::Cancelled),
-            Err(e) => return Err(failed(format!("エンコードに失敗: {e}"))),
+        let variant = r.variant();
+        let encoded = match variant {
+            Variant::Opus => match self.opus.encode(source, r.bit_depth, &token).await {
+                Ok(e) => e.guard,
+                Err(e) if e.is_cancelled() => return Err(JobError::Cancelled),
+                Err(e) => return Err(failed(format!("エンコードに失敗: {e}"))),
+            },
+            Variant::Aac => {
+                // eligible が RG 解析済みを要求するので通常は Some。無ければ失敗（次の rg 保存で投入される）
+                let Some(v) = r.rg.as_ref() else {
+                    return Err(failed(
+                        "RG の解析値が無いので aac を作れない（解析後に投入される）",
+                    ));
+                };
+                let gain = bake_gain_db(v);
+                match self.aac.encode(source, gain, r.sample_rate, &token).await {
+                    Ok(e) => e.guard,
+                    Err(e) if e.is_cancelled() => return Err(JobError::Cancelled),
+                    Err(e) => return Err(failed(format!("エンコードに失敗: {e}"))),
+                }
+            }
         };
 
         // 3. タグと画像
-        let (cover, embedded_artwork) = self.cover_picture(ctx, r.target.artwork_id).await?;
-        let out = opus_tags(&tags, r.rg.as_ref(), self.reference_lufs, cover);
+        let (cover, embedded_artwork) = self
+            .cover_picture(ctx, r.target.artwork_id, r.cover_format())
+            .await?;
+        let out = self.output_tags(r, &tags, cover);
         {
-            let path = encoded.guard.path().to_path_buf();
+            let path = encoded.path().to_path_buf();
             tokio::task::spawn_blocking(move || -> Result<(), JobError> {
                 let mut f = File::options().read(true).write(true).open(&path)?;
-                write_opus_tags(&mut f, &out)
-                    .map_err(|e| failed(format!("タグを書けない: {e}")))?;
+                write_derived_tags(variant, &mut f, &out)?;
                 f.sync_all()?;
                 Ok(())
             })
@@ -491,7 +561,7 @@ impl TranscodeHandler {
         }
         {
             let derived = Arc::clone(&self.derived);
-            let src = encoded.guard.path().to_path_buf();
+            let src = encoded.path().to_path_buf();
             let dst_rel = dst_rel.clone();
             tokio::task::spawn_blocking(move || place(&derived, &src, &dst_rel))
                 .await
@@ -507,9 +577,8 @@ impl TranscodeHandler {
         };
         let av = r.target.audio_version;
         let dst = dst_rel.as_str().to_owned();
-        let bitrate = i64::from(self.encoder.bitrate_kbps());
+        let bitrate = self.bitrate_of(variant);
         let before = r.target.clone();
-        let variant = r.settings.variant;
         let profiles = Profiles::of(&r.settings);
         let drifted = ctx
             .db()
@@ -652,8 +721,11 @@ impl TranscodeHandler {
         let dst = parse_rel(&r.expected())?;
         ctx.check_cancel().await?;
         let (_file, tags) = self.open_library(r).await?;
-        let (cover, embedded_artwork) = self.cover_picture(ctx, r.target.artwork_id).await?;
-        let out = opus_tags(&tags, r.rg.as_ref(), self.reference_lufs, cover);
+        let (cover, embedded_artwork) = self
+            .cover_picture(ctx, r.target.artwork_id, r.cover_format())
+            .await?;
+        let out = self.output_tags(r, &tags, cover);
+        let variant = r.variant();
         ctx.check_cancel().await?;
         self.hook("retag_before_write").await;
         let exists = {
@@ -671,8 +743,7 @@ impl TranscodeHandler {
                 let result = (|| -> Result<(), JobError> {
                     std::io::copy(&mut src, &mut tmp)?;
                     tmp.seek(SeekFrom::Start(0))?;
-                    write_opus_tags(&mut tmp, &out)
-                        .map_err(|e| failed(format!("タグを書けない: {e}")))?;
+                    write_derived_tags(variant, &mut tmp, &out)?;
                     tmp.sync_all()?;
                     derived
                         .replace_file(&tmp_rel, &dst)
@@ -697,7 +768,6 @@ impl TranscodeHandler {
             ..TagState::of(&r.target)
         };
         let before = r.target.clone();
-        let variant = r.settings.variant;
         let tag_profile = r.settings.tag_profile.clone();
         let drifted = ctx
             .db()
@@ -729,7 +799,7 @@ impl TranscodeHandler {
 
     // ---- 画像
 
-    /// album のアートワークの 768 WebP を `Picture` にする。キャッシュに無ければ原画像から作る
+    /// album のアートワークの 768 WebP / JPEG（系統の `format`）を `Picture` にする。キャッシュに無ければ原画像から作る
     /// （thumbnail ジョブと同じ変換。tmp + rename なので thumbnail ジョブと同時に走っても壊れない）。
     /// 原画像も無ければ画像なし。返す id は**実際に埋めた**画像のもの（画像なしなら None）で、
     /// `src_artwork_id` にはこれを記録する。album の `artwork_id` をそのまま記録すると、次のスキャンが
@@ -738,6 +808,7 @@ impl TranscodeHandler {
         &self,
         ctx: &JobContext,
         artwork_id: Option<i64>,
+        format: ThumbFormat,
     ) -> Result<(Option<Picture>, Option<i64>), JobError> {
         let Some(id) = artwork_id else {
             return Ok((None, None));
@@ -745,7 +816,7 @@ impl TranscodeHandler {
         let Some(art) = ctx.db().read(move |c| dbart::get(c, id)).await? else {
             return Ok((None, None));
         };
-        let thumb = self.artwork.thumb_path(&art.sha256, COVER_SIZE);
+        let thumb = self.artwork.thumb_path_of(&art.sha256, COVER_SIZE, format);
         if !thumb.is_file() {
             let orig = self.artwork.original_path(&art.sha256, &art.mime);
             if !orig.is_file() {
@@ -760,16 +831,20 @@ impl TranscodeHandler {
                 &orig,
                 &thumb,
                 COVER_SIZE,
-                ThumbFormat::WebP,
+                format,
                 ctx.job.id,
                 &ctx.cancel_token(),
             )
             .await?;
         }
         let bytes = tokio::fs::read(&thumb).await?;
+        let mime = match format {
+            ThumbFormat::WebP => MimeType::Unknown("image/webp".into()),
+            ThumbFormat::Jpeg => MimeType::Jpeg,
+        };
         let picture = Picture::unchecked(bytes)
             .pic_type(PictureType::CoverFront)
-            .mime_type(MimeType::Unknown("image/webp".into()))
+            .mime_type(mime)
             .build();
         Ok((Some(picture), Some(id)))
     }

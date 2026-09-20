@@ -34,7 +34,7 @@ use spindle::jobs::handlers::ytdl::YtdlHandler;
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
 use spindle::media::artwork::ArtworkStore;
 use spindle::media::decode::Decoder;
-use spindle::media::encode::{FlacEncoder, OpusEncoder};
+use spindle::media::encode::{AacEncoder, FlacEncoder, OpusEncoder};
 use spindle::playlist::autoexport::AutoExport;
 use spindle::{config::Config, logging};
 
@@ -309,6 +309,11 @@ async fn main() -> anyhow::Result<()> {
                 &state.config.bin.ffmpeg,
                 &state.config.bin.opusenc,
                 state.config.encode.derived.opus.bitrate,
+                state.config.paths.data.join(TMP_DIR_NAME),
+            ),
+            AacEncoder::new(
+                &state.config.bin.ffmpeg,
+                state.config.encode.derived.aac.bitrate,
                 state.config.paths.data.join(TMP_DIR_NAME),
             ),
             Arc::clone(&artwork),

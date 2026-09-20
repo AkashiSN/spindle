@@ -31,7 +31,7 @@ use spindle::jobs::handlers::transcode::TranscodeHandler;
 use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};
 use spindle::media::artwork::ArtworkStore;
 use spindle::media::decode::Decoder;
-use spindle::media::encode::OpusEncoder;
+use spindle::media::encode::{AacEncoder, OpusEncoder};
 
 const REFERENCE: f64 = -18.0;
 
@@ -123,6 +123,7 @@ impl Lib {
                     self.library.clone(),
                     self.derived.clone(),
                     OpusEncoder::new("ffmpeg", "opusenc", 128, self.dir.path().join("tmp")),
+                    AacEncoder::new("ffmpeg", 128, self.dir.path().join("tmp")),
                     self.store.clone(),
                     "ffmpeg",
                     REFERENCE,

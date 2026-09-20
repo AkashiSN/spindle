@@ -16,15 +16,17 @@ use lofty::tag::Accessor as _;
 use rusqlite::Connection;
 use tokio_util::sync::CancellationToken;
 
+use spindle::config::AacVariantConfig;
 use spindle::db::{derived, Db};
-use spindle::domain::derived::Variant;
+use spindle::domain::derived::{Variant, ITUNNORM_ZERO_DB};
+use spindle::domain::replaygain::LoudnessMeter;
 use spindle::domain::tags::read_audio_file;
 use spindle::fsroot::RootDir;
 use spindle::import::scanner::{ScanKind, Scanner};
 use spindle::jobs::handlers::transcode::{sweep_tmp, SweepReport, TestHook, TranscodeHandler};
 use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};
 use spindle::media::artwork::ArtworkStore;
-use spindle::media::encode::OpusEncoder;
+use spindle::media::encode::{AacEncoder, OpusEncoder};
 
 const REFERENCE: f64 = -18.0;
 
@@ -62,8 +64,8 @@ impl Lib {
         }
         let db_path = dir.path().join("spindle.db");
         let db = Arc::new(Db::open(&db_path).unwrap());
-        // 起動時の sync_variants と同じ（opus 系統 128k、on。エンコーダの設定と揃える）
-        common::enable_opus_variant(&db_path, 128);
+        // 起動時の sync_variants と同じ（opus / aac とも 128k、on。エンコーダの設定と揃える）
+        common::enable_variants(&db_path, 128, Some(aac_config()));
         let library = Arc::new(RootDir::open(&dir.path().join("Library")).unwrap());
         let derived = Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap());
         let store = Arc::new(ArtworkStore::new(dir.path().join("thumbs")));
@@ -75,6 +77,7 @@ impl Lib {
             library.clone(),
             derived.clone(),
             encoder,
+            AacEncoder::new("ffmpeg", 128, dir.path().join("tmp")),
             store.clone(),
             "ffmpeg",
             REFERENCE,
@@ -104,6 +107,7 @@ impl Lib {
             self.library.clone(),
             self.derived_root.clone(),
             OpusEncoder::new("ffmpeg", "opusenc", 128, self.dir.path().join("tmp")),
+            AacEncoder::new("ffmpeg", 128, self.dir.path().join("tmp")),
             self.store.clone(),
             "ffmpeg",
             REFERENCE,
@@ -186,17 +190,75 @@ impl Lib {
         Connection::open(&self.db_path).unwrap()
     }
 
-    /// opus 系統の設定を写し直す（aac は節省略の既定 = off のまま）
+    /// opus 系統の設定を写し直す（aac は on のまま）
     fn sync_opus(&self, enabled: bool, bitrate: u32, now: i64) {
         derived::sync_variants(
             &self.conn(),
             &spindle::config::DerivedConfig {
                 opus: spindle::config::OpusVariantConfig { enabled, bitrate },
-                aac: Default::default(),
+                aac: aac_config(),
             },
             now,
         )
         .unwrap();
+    }
+
+    /// aac 系統の設定を写し直す（opus は 128k / on のまま）
+    fn sync_aac(&self, aac: AacVariantConfig, now: i64) {
+        derived::sync_variants(
+            &self.conn(),
+            &spindle::config::DerivedConfig {
+                opus: spindle::config::OpusVariantConfig {
+                    enabled: true,
+                    bitrate: 128,
+                },
+                aac,
+            },
+            now,
+        )
+        .unwrap();
+    }
+
+    fn derived_row_of(&self, id: i64, v: Variant) -> Option<(String, i64, i64, Option<i64>)> {
+        self.conn()
+            .query_row(
+                "SELECT rel_path, src_audio_version, src_tag_version, src_artwork_id
+                 FROM derived_files WHERE track_id = ?1 AND variant = ?2",
+                rusqlite::params![id, v.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .ok()
+    }
+
+    fn thumb_exists_of(&self, artwork_id: i64, size: u32, ext: &str) -> bool {
+        let hash: Vec<u8> = self
+            .conn()
+            .query_row(
+                "SELECT sha256 FROM artwork WHERE id = ?1",
+                [artwork_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        self.dir
+            .path()
+            .join("thumbs")
+            .join(ArtworkStore::hex(&hash))
+            .join(format!("{size}.{ext}"))
+            .is_file()
+    }
+
+    /// 現在の版で `v` 系統を投入して終端まで待つ
+    async fn run_variant(&self, id: i64, v: Variant) -> JobState {
+        let (av, tv) = self.versions(id);
+        let job = match self
+            .jobs
+            .enqueue(derived::new_job(id, v, av, tv))
+            .await
+            .unwrap()
+        {
+            EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+        };
+        self.wait_job(job).await
     }
 
     fn track_id(&self, rel: &str) -> i64 {
@@ -357,6 +419,65 @@ fn has_tmp(dir: &Path) -> bool {
             .to_string_lossy()
             .starts_with(".spindle-tmp-")
     })
+}
+
+/// aac 系統のテスト設定（128k、on、非可逆も対象）
+fn aac_config() -> AacVariantConfig {
+    AacVariantConfig {
+        enabled: true,
+        bitrate: 128,
+        lossy_sources: true,
+        multi_value_separator: " & ".into(),
+    }
+}
+
+/// デコードしたサンプルを ebur128 に流す（aac の焼き込みを測る）
+struct Meter(Option<LoudnessMeter>);
+
+impl spindle::media::decode::PcmSink for Meter {
+    fn start(&mut self, info: &spindle::media::decode::PcmInfo) -> anyhow::Result<()> {
+        self.0 = Some(LoudnessMeter::new(info.channels, info.sample_rate)?);
+        Ok(())
+    }
+    fn push(&mut self, interleaved: &[f32]) -> anyhow::Result<()> {
+        if let Some(m) = &mut self.0 {
+            m.push(interleaved)?;
+        }
+        Ok(())
+    }
+}
+
+/// `p` の積分ラウドネス（LUFS）とサンプルレート
+async fn loudness_of(p: &Path) -> (f64, u32) {
+    let ext = p.extension().and_then(|e| e.to_str());
+    let (info, sink) = spindle::media::decode::Decoder::new("ffmpeg")
+        .decode(
+            File::open(p).unwrap(),
+            ext,
+            Meter(None),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    (sink.0.unwrap().loudness().lufs, info.sample_rate)
+}
+
+fn ffprobe_tags(p: &Path) -> String {
+    let out = Command::new("ffprobe")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-show_entries",
+            "format_tags",
+            "-of",
+            "flat",
+        ])
+        .arg(p)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 #[tokio::test]
@@ -527,7 +648,7 @@ async fn frozen_variant_and_unknown_variant_are_noops() {
     assert_eq!(lib.wait_job(job).await, JobState::Done);
     assert_eq!(sha256(&lib.derived().join("opus/A/01.opus")), before);
     assert_eq!(lib.derived_row(a).unwrap().2, 1, "タグ版も据え置き");
-    // 凍結中の系統（aac は節省略の既定 = off）
+    // 別系統（aac）は RG 未解析なので待つ = 何も作らない
     let job = lib
         .jobs
         .enqueue(derived::new_job(a, Variant::Aac, av, tv))
@@ -1524,4 +1645,240 @@ async fn cycle_with_missing_physical_derived_converges() {
         .query_row("SELECT COUNT(*) FROM derived_path_locks", [], |r| r.get(0))
         .unwrap();
     assert_eq!(locks, 0);
+}
+
+// ---------------------------------------------------------------- aac 系統（P4-8）
+
+#[tokio::test]
+async fn aac_first_run_bakes_track_gain_writes_itunnorm_joined_tags_and_jpeg_cover() {
+    require_tools!();
+    let lib = Lib::new();
+    let p = lib.add("A/B/01.flac", 1, "曲");
+    // 多値 ARTIST（既定の "Artist" に 2 値足す）
+    common::retag(&p, |t| {
+        use lofty::tag::{ItemKey, ItemValue, TagItem};
+        t.push(TagItem::new(
+            ItemKey::TrackArtist,
+            ItemValue::Text("X".into()),
+        ));
+        t.push(TagItem::new(
+            ItemKey::TrackArtist,
+            ItemValue::Text("Y".into()),
+        ));
+    });
+    lib.add_cover("A/B", "red");
+    lib.scan().await;
+    lib.start();
+    let id = lib.track_id("A/B/01.flac");
+    // RG 未解析のうちは待つ（Skip = Done で行もファイルも無い）
+    assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
+    assert!(lib.derived_row_of(id, Variant::Aac).is_none());
+    assert!(!lib.derived().join("aac/A/B/01.m4a").exists());
+    let (before, _) = loudness_of(&p).await;
+    lib.set_rg(id); // track gain -6.0、peak 0.5（上限 +6.02 なので -6.0 がそのまま）
+    assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
+    let (rel, av, tv, art) = lib.derived_row_of(id, Variant::Aac).unwrap();
+    assert_eq!(rel, "aac/A/B/01.m4a");
+    assert_eq!((av, tv), (1, 1));
+    let art = art.expect("album のアートワークを埋めた");
+    let m4a = lib.derived().join("aac/A/B/01.m4a");
+    let (after, rate) = loudness_of(&m4a).await;
+    assert!((after - (before - 6.0)).abs() <= 0.5, "{before} → {after}");
+    assert_eq!(rate, 44_100);
+    let af = read_audio_file(File::open(&m4a).unwrap(), Some("m4a")).unwrap();
+    assert_eq!(af.codec.as_str(), "aac");
+    assert_eq!(af.tags.first("TITLE"), Some("曲"));
+    assert_eq!(af.tags.first("ARTIST"), Some("Artist & X & Y"));
+    assert!(af.tags.first("REPLAYGAIN_TRACK_GAIN").is_none());
+    assert!(af.tags.first("R128_TRACK_GAIN").is_none());
+    assert_eq!(
+        af.tags
+            .first("PICTURE")
+            .map(|s| s.starts_with("image/jpeg:")),
+        Some(true)
+    );
+    // iTunNORM は ffprobe で外部観測
+    assert!(ffprobe_tags(&m4a).contains(ITUNNORM_ZERO_DB));
+    // 768.jpg を作った。行の profile と bitrate
+    assert!(lib.thumb_exists_of(art, 768, "jpg"));
+    let (ap, tp, br): (String, String, i64) = lib
+        .conn()
+        .query_row(
+            "SELECT audio_profile, tag_profile, bitrate FROM derived_files
+             WHERE track_id = ?1 AND variant = 'aac'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (ap.as_str(), tp.as_str(), br),
+        ("aac:128:48k:bake1", "aac:sep= & :itunnorm0:v1", 128)
+    );
+    // opus の行は別に無い（投入していない）。delivery は原本のまま（aac は配布ビューに出ない）
+    assert!(lib.derived_row_of(id, Variant::Opus).is_none());
+    assert_eq!(lib.delivery(id).0, "Library/A/B/01.flac");
+    assert_eq!(lib.tmp_count(), 0);
+    assert!(!has_tmp(&lib.derived().join("aac/A/B")));
+}
+
+#[tokio::test]
+async fn aac_peak_caps_the_gain_and_high_rate_is_downsampled() {
+    require_tools!();
+    let lib = Lib::new();
+    // 96 kHz の WAV は scan で対象になる（正規化は別ジョブ）
+    let p = lib.lib().join("H/01.wav");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    common::write_wav_ex(&p, &common::pcm_samples(1), 16, 96_000, 2);
+    common::set_basic_tags(&p, "h", "Artist", "Album", "AlbumArtist", 1, 1);
+    lib.scan().await;
+    lib.start();
+    let id = lib.track_id("H/01.wav");
+    let (before, _) = loudness_of(&p).await;
+    // gain +9 だが peak 0.9 → 上限 +0.915 dB
+    lib.conn()
+        .execute(
+            "UPDATE tracks SET rg_track_gain = 9.0, rg_track_peak = 0.9, rg_scanned_at = 1 WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
+    let (after, rate) = loudness_of(&lib.derived().join("aac/H/01.m4a")).await;
+    assert_eq!(rate, 48_000);
+    let cap = -20.0 * 0.9f64.log10();
+    assert!(
+        (after - (before + cap)).abs() <= 0.5,
+        "{before} + {cap} → {after}"
+    );
+}
+
+#[tokio::test]
+async fn aac_covers_lossy_sources_and_reencodes_when_rg_changes() {
+    require_tools!();
+    let lib = Lib::new();
+    lib.add("L/01.opus", 2, "o");
+    lib.add("L/02.m4a", 3, "a");
+    lib.scan().await;
+    lib.start();
+    for rel in ["L/01.opus", "L/02.m4a"] {
+        let id = lib.track_id(rel);
+        lib.set_rg(id);
+        assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
+        let (r, ..) = lib.derived_row_of(id, Variant::Aac).unwrap();
+        assert_eq!(r, format!("aac/{}.m4a", rel.rsplit_once('.').unwrap().0));
+        // opus 系統は非可逆を作らない
+        assert_eq!(lib.run_variant(id, Variant::Opus).await, JobState::Done);
+        assert!(lib.derived_row_of(id, Variant::Opus).is_none());
+    }
+    // aac 原本も同じ経路（再エンコードされている = 元と別の実体）
+    let id = lib.track_id("L/02.m4a");
+    let m4a = lib.derived().join("aac/L/02.m4a");
+    assert_ne!(sha256(&lib.lib().join("L/02.m4a")), sha256(&m4a));
+    // RG の世代が進むと再エンコード（opus なら Retag だが aac は音声に入っている）
+    let first = audio_md5(&m4a);
+    lib.conn()
+        .execute(
+            "UPDATE tracks SET rg_track_gain = -1.0, rg_scanned_at = 2 WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
+    assert_ne!(audio_md5(&m4a), first, "音声が作り直されている");
+    let src_rg: i64 = lib
+        .conn()
+        .query_row(
+            "SELECT src_rg_scanned_at FROM derived_files WHERE track_id = ?1 AND variant = 'aac'",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(src_rg, 2);
+    // lossy_sources を off にすると非可逆の行は Skip（消さない）
+    lib.sync_aac(
+        AacVariantConfig {
+            lossy_sources: false,
+            ..aac_config()
+        },
+        3,
+    );
+    lib.conn()
+        .execute(
+            "UPDATE tracks SET rg_track_gain = -2.0, rg_scanned_at = 4 WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
+    assert!(lib.derived_row_of(id, Variant::Aac).is_some());
+    assert!(m4a.is_file());
+}
+
+#[tokio::test]
+async fn aac_tag_bump_retags_the_m4a_in_place() {
+    require_tools!();
+    let lib = Lib::new();
+    let p = lib.add("T/01.flac", 1, "before");
+    lib.scan().await;
+    lib.start();
+    let id = lib.track_id("T/01.flac");
+    lib.set_rg(id);
+    assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
+    let m4a = lib.derived().join("aac/T/01.m4a");
+    let first_audio = audio_md5(&m4a);
+    common::set_basic_tags(&p, "after", "Artist", "Album", "AlbumArtist", 1, 1);
+    lib.scan().await;
+    assert_eq!(lib.versions(id), (1, 2));
+    assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
+    let af = read_audio_file(File::open(&m4a).unwrap(), Some("m4a")).unwrap();
+    assert_eq!(af.tags.first("TITLE"), Some("after"));
+    assert_eq!(audio_md5(&m4a), first_audio, "タグだけ書き換えた");
+    assert_eq!(lib.derived_row_of(id, Variant::Aac).unwrap().2, 2);
+    assert!(ffprobe_tags(&m4a).contains(ITUNNORM_ZERO_DB));
+    // 区切りを変えると tag_profile の差分で Retag
+    lib.sync_aac(
+        AacVariantConfig {
+            multi_value_separator: " / ".into(),
+            ..aac_config()
+        },
+        5,
+    );
+    assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
+    let tp: String = lib
+        .conn()
+        .query_row(
+            "SELECT tag_profile FROM derived_files WHERE track_id = ?1 AND variant = 'aac'",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tp, "aac:sep= / :itunnorm0:v1");
+    assert_eq!(audio_md5(&m4a), first_audio);
+}
+
+#[tokio::test]
+async fn aac_and_opus_rows_coexist_and_scan_enqueues_both() {
+    require_tools!();
+    let lib = Lib::new();
+    lib.add("B/01.flac", 1, "b");
+    lib.scan().await;
+    let id = lib.track_id("B/01.flac");
+    lib.set_rg(id);
+    lib.start();
+    // scan 完了時の一括投入と同じ
+    let ids = derived::enqueue_all_stale(&lib.conn(), 1).unwrap();
+    assert_eq!(ids.len(), 2);
+    for j in ids {
+        assert_eq!(lib.wait_job(j).await, JobState::Done);
+    }
+    assert_eq!(
+        lib.derived_row_of(id, Variant::Opus).unwrap().0,
+        "opus/B/01.opus"
+    );
+    assert_eq!(
+        lib.derived_row_of(id, Variant::Aac).unwrap().0,
+        "aac/B/01.m4a"
+    );
+    assert_eq!(lib.delivery(id).0, "Derived/opus/B/01.opus");
+    // 揃っていれば何も投入しない
+    assert!(derived::enqueue_all_stale(&lib.conn(), 2)
+        .unwrap()
+        .is_empty());
 }
