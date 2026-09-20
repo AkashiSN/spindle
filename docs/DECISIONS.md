@@ -104,7 +104,7 @@ ZFS では rename とタグ書き換えで inode が不変。FLAC の STREAMINFO
 **追記（2026-09-20。P4-8）**: Apple 向けの `aac` 系統（D-75）だけは非可逆原本（opus / ogg / mp3）も
 AAC へ変換する。ミュージック.app が Opus を読めず、配布ビューで原本へ倒しても Apple 側で再生できない
 ため、世代劣化を承知で全曲を揃える。`opus` 系統と配布ビュー（Android / Web）はこの決定のまま。
-原本が AAC なら再エンコードせず複製する。
+原本が AAC でも同じ経路で再エンコードする（焼き込みのため）。
 
 ---
 
@@ -1639,6 +1639,12 @@ cover.jpg 優先の D-49 と食い違い、原寸のまま太る）。missing �
 0.14 秒。エンコード中のロードアベレージは 13 前後で、他のコンテナと同居する NAS では並列度を設定で
 落とせるようにする余地がある（SPEC §8 の cpus-1 固定のまま）。
 
+**追記（2026-09-20。P4-7 / P4-8）**: D-75 が次を上書きする。`transcode` の単位と dedup は
+`(track_id, variant)`、`derived_files` は系統ごとに 1 行、`aac` 系統は非可逆も対象（D-8 追記）で
+RG の解析世代の差分は Retag でなく Encode、`delivery` は `opus` 系統に固定、`has_derived` は `opus` の
+行の有無。判定の入力に `audio_profile` / `tag_profile`（設定の世代）が加わる。それ以外（判定を
+ハンドラが現在値から下す、退避経路、投入経路）はこの決定のまま。
+
 **閉じた未決**（2026-09-18、リハーサル環境 9,098 トラックの実データで需要を確認。出てきたら再開）:
 - マルチチャンネルのダウンミックス（SPEC §7.6）: 全トラックが 2ch。DSD / SACD も非対応方針で、
   マルチチャンネルが入る経路が無い。作るなら `tracks` に列を足し、対象判定と `-ac 2`、RG 集計の扱いを決める
@@ -2827,13 +2833,18 @@ hirescheck = コア数 / 2 で、スキャン完了時に 4 種がまとめて�
   設定は `[encode.derived.<variant>]`（`enabled` / `bitrate`。`aac` は `lossy_sources` と
   `multi_value_separator` も）
 - **エンコーダは ffmpeg 内蔵 `aac`**（`-b:a 256k`。ABR に近く真の VBR ではない）。追加依存を持たない
-- **非可逆原本も AAC へ**（`lossy_sources = true`。D-8 の例外）。原本が AAC なら複製
+- **非可逆原本も AAC へ**（`lossy_sources = true`。D-8 の例外）。原本が AAC でも再エンコード（2 本。
+  stream copy では焼き込みとリサンプルが効かない）
 - **ReplayGain は track gain を音声に焼き込み**（クリップ防止に peak で上限）、タグには `iTunNORM` を
   0 dB 相当で書く。`REPLAYGAIN_*` / `R128_*` は書かない。**RG 未解析なら作らず待つ**（rg の保存で投入）。
   RG の解析世代が変わったら再エンコード（`opus` はタグ上書きで済むが、`aac` は音声に入っている）
 - **多値フィールドは `" & "` で 1 値に結合**（設定で変更可）。ミュージック.app は複数値の 1 つしか
   見せないため
 - 画像は 768 の JPEG（`covr` の WebP は読まれない）
+- **設定の世代を行に持つ**: `audio_profile`（codec / bitrate / サンプルレート規則 / 焼き込み方式）が違えば
+  Encode、`tag_profile`（区切り / iTunNORM 規則）が違えば Retag。区切りやエンコーダ引数を変えたときに
+  既存の Derived が追随する（音声版だけを見る今の判定では UpToDate のまま取り残される）
+- `enabled = false` は**凍結**（作らない・触らない・既存行は使い続ける）。GC は系統を区別しない
 - **配布ビューもプレイリストも `aac` には作らない。** `delivery` は `opus` 系統に固定。ミュージック.app
   へは `Derived/aac/` のファイルをそのまま取り込み、プレイリストは Apple 側で作る
 
@@ -2846,7 +2857,9 @@ hirescheck = コア数 / 2 で、スキャン完了時に 4 種がまとめて�
 **却下**: `fdkaac`（Debian non-free。真の VBR で品質にも定評があるが、依存が 1 つ増える。256k なら
 内蔵 `aac` で実用上透過）。`iTunNORM` のみ（端末で ON にする必要があり、換算式と Apple 側の扱いが
 不確か）。焼き込みのみ（サウンドチェック ON の端末で Apple が独自に計算した値が重なる）。非可逆原本を
-除外する（Apple 側で YouTube 由来の 1,513 本が欠ける）。系統ごとに別の root（`paths.derived_aac`。
+除外する（Apple 側で YouTube 由来の 1,513 本が欠ける）。AAC 原本の stream copy（焼き込みと矛盾。
+複製して実ゲインの iTunNORM を書く案は、その 2 本だけ端末設定に依存する）。`enabled = false` で
+ファイルを消す・GC から除外する（消すのは再エンコードの往復、除外は孤児の意味が変わる）。系統ごとに別の root（`paths.derived_aac`。
 データセットを分ける需要が無く、GC と孤児回収が二重になる）。プロファイル `apple` の m3u8
 （SMB の絶対パス / 相対パス。取り込みがファイルだけなので不要）。
 

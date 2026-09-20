@@ -753,8 +753,9 @@ Derived は**系統（variant）**ごとに 1 本ずつ作る。系統は `opus`
 | 項目 | 規則 |
 |---|---|
 | パス | `Derived/<variant>/` 以下に Library と完全ミラー（拡張子だけ `.opus` / `.m4a`）。`paths.derived` は 1 つ |
-| 設定 | `[encode.derived.<variant>]` に `enabled` と `bitrate`（下記）。`enabled = false` の系統は行もファイルも触らない（GC の孤児回収も掛けない） |
-| 判定 | `audio_version` 差分・**行の `codec` / `bitrate` が設定と食い違う** → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）の差分のみ → タグ上書き（**`aac` は RG を音声に焼き込むので RG 世代の差分も再エンコード**）/ パスの差分のみ → rename |
+| 設定 | `[encode.derived.<variant>]` に `enabled` と `bitrate`（下記）。`enabled = false` の系統は**凍結**: 新しく作らず、既存の行とファイルは Move / Retag / Encode のどれも行わず、配布ビュー・バッジ・`has_derived` は既存行をそのまま使う。GC は系統を区別せず `Derived/` 全体で「行に無いファイル = 孤児」を回収する（凍結でも行は残るので消えない） |
+| 出力仕様の世代 | 系統ごとに 2 つの文字列を設定から作り、行に保存する。**`audio_profile`**（音声に効く設定: codec / bitrate / サンプルレート規則 / RG 焼き込み方式の版。例 `opus:256:v1`、`aac:256:48k:rgbake1`）と **`tag_profile`**（タグに効く設定: `multi_value_separator` / iTunNORM 規則の版。例 `aac:sep= & :itunnorm0:v1`）。エンコーダの引数や規則を変えるときは版を上げる |
+| 判定 | `audio_version` 差分・**行の `audio_profile` が設定と食い違う** → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）・**`tag_profile`** の差分のみ → タグ上書き（**`aac` は RG を音声に焼き込むので RG 世代の差分は再エンコード**）/ パスの差分のみ → rename。優先順はこの順（再エンコードは残りを兼ねる） |
 | 投入 | scan ジョブの完了時に食い違う全トラック × 系統、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（`(track_id, variant)` 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める。P4-1 の共通並列予算の対象 |
 | 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児（行に無いファイル。`Derived/` 全体）は GC ジョブ |
 | マルチch | どの系統も既定で対象外（チャンネル数不明も対象外）。トラック単位の `-ac 2` ダウンミックスは需要が出たら（D-51。実データは全件 2ch） |
@@ -773,7 +774,7 @@ Derived は**系統（variant）**ごとに 1 本ずつ作る。系統は `opus`
 
 | 項目 | 規則 |
 |---|---|
-| 対象 | 可逆（flac / alac / wav）に加え、`lossy_sources = true` なら**非可逆も**（opus / ogg / mp3 → AAC。世代劣化は承知の上で、ミュージック.app が Opus を読めないため。**D-8 の例外**）。原本が AAC（m4a）なら再エンコードせず `-c:a copy` で複製し、タグだけ書き直す |
+| 対象 | 可逆（flac / alac / wav）に加え、`lossy_sources = true` なら**非可逆も**（opus / ogg / mp3 / aac → AAC。世代劣化は承知の上で、ミュージック.app が Opus を読めないため。**D-8 の例外**）。原本が AAC でも同じ経路で再エンコードする（stream copy では RG の焼き込みとリサンプルができない。D-75） |
 | 出力 | `ffmpeg -c:a aac -b:a <bitrate>k`（内蔵エンコーダ。既定 256 kbps）。48 kHz 超は 48 kHz へ落とす（`-ar 48000`）、44.1 / 48 は据え置き |
 | RG | **track gain を音声に焼き込む**（`volume=<gain>dB`。gain は `min(rg_track_gain, −20·log10(rg_track_peak))` でクリップを防ぐ。album gain は使わない）。**RG 未解析のトラックは作らず待つ**（rg の保存で投入される。二度エンコードの回避）。タグには `iTunNORM` を **0 dB 相当**（先頭 2 値 `000003E8`、残り 8 値 `00000000`）で書き、端末のサウンドチェック ON でも二重に掛からないようにする。`REPLAYGAIN_*` / `R128_*` は書かない |
 | タグ | Library のタグを写す。**多値フィールドは `multi_value_separator`（既定 `" & "`）で 1 値に結合**（ミュージック.app は複数値の 1 つしか見せない。ARTIST / ALBUMARTIST / GENRE / COMPOSER など多値になり得る全フィールド）。標準フィールドは lofty の MP4 マッピング（`©ART` 等）、それ以外は `----:com.apple.iTunes:<KEY>` のフリーフォーム |
@@ -794,9 +795,15 @@ lossy_sources = true            # 非可逆原本も AAC へ（D-8 の例外。a
 multi_value_separator = " & "   # 多値フィールドの結合
 ```
 
-`derived_files` の主キーは `(track_id, variant)`（マイグレーションで作り直す。既存行は `variant = 'opus'`、
-`rel_path` はルート直下のまま移し、次の transcode がビットレート差分で作り直すときに `opus/` 配下へ置く。
-旧ファイルは transcode の退避経路で消える）。
+`derived_files` の主キーは `(track_id, variant)`（マイグレーションで `delivery` ビューを落とし、表を作り直し、
+既存行を `variant = 'opus'`・`audio_profile = 'opus:128:v1'`・`tag_profile = 'opus:v1'`・`rel_path` はルート直下の
+ままで移し、ビューを `variant = 'opus'` で作り直す）。既定の 256k では次の transcode が `audio_profile` の差分で
+再エンコードして `opus/` 配下へ置き、旧ファイルは transcode の退避経路で消える。`bitrate = 128` のまま
+（`audio_profile` が一致）ならパスの差分だけなので Move で `opus/` 配下へ移る。
+
+`has_derived`（DSL / フラグ / バッジ）は **`opus` 系統の行**の有無（= 配布ビューが Derived を指すか）。
+`aac` しか無いトラック（非可逆原本）は `has_derived` にならない。`GET /api/tracks` の `derived` は系統ごとに
+集約して返す（2 系統あっても行は 1 つ）。
 
 容量逼迫時のみ、トラック単位で `force_transcode` を手動指定可能（**元が 256kbps 以上の場合のみ**）
 という `opus` 系統の例外は、需要が出るまで実装しない（D-51。実データの非可逆は Opus が大半で削減にならない）。
