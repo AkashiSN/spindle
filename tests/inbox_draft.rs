@@ -31,6 +31,7 @@ fn draft() -> InboxDraft {
         albumartist: "Artist".into(),
         album: "Album".into(),
         date: Some("2024".into()),
+        album_gain: false,
         tracks: vec![
             DraftTrack {
                 rel_path: "A/01.flac".into(),
@@ -217,6 +218,7 @@ fn number_missing_assigns_from_start_in_file_order_skipping_used_numbers() {
         albumartist: "A".into(),
         album: "B".into(),
         date: None,
+        album_gain: false,
         tracks: vec![
             DraftTrack {
                 rel_path: "x/20260902 b.opus".into(),
@@ -264,6 +266,7 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
         albumartist: "Fixed".into(),
         album: "Fixed Album".into(),
         date: Some("2020".into()),
+        album_gain: true,
         tracks: vec![
             DraftTrack {
                 rel_path: "A/01.flac".into(),
@@ -295,6 +298,7 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
     assert_eq!(merged.albumartist, "Fixed");
     assert_eq!(merged.album, "Fixed Album");
     assert_eq!(merged.date.as_deref(), Some("2020"));
+    assert!(merged.album_gain, "album gain も保存した下書き（D-74）");
     // 既知のファイルは補正を保ち、消えたファイルは落ち、新しいファイルは提案のまま
     let names: Vec<&str> = merged.tracks.iter().map(|t| t.rel_path.as_str()).collect();
     assert_eq!(names, vec!["A/01.flac", "A/02.flac", "A/03.flac"]);

@@ -761,6 +761,8 @@ fn register(
             ))));
         }
     }
+    // CD 取り込みの album は album gain on（アルバムとして通して聴く単位。D-74）。合流でも on にする
+    let _ = crate::db::replaygain::set_album_gain(&tx, album_id, true, now)?;
     let mut job_ids = vec![dbjobs::enqueue(&tx, &new_album_job(album_id), now)?.id()];
     for &id in &track_ids {
         if let Some(j) = crate::db::derived::enqueue_if_stale(&tx, id, now)? {

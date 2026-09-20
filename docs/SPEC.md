@@ -499,7 +499,7 @@ Phase 4  commit:     1 トランザクションで
    ↓
 [ログ出力]      rip.log / disc.cue / disc.toc をアルバムディレクトリへ
    ↓
-[後続ジョブ投入] rg → transcode(Derived) → thumbnail
+[後続ジョブ投入] rg（album 単位。配置した album は album gain on。D-74）→ transcode(Derived) → thumbnail
 ```
 
 配置（`src/cd/place.rs`、D-67）: rip ジョブの最終段。PCM を `TrackLayout` で切り、raw のまま
@@ -968,7 +968,7 @@ Inbox/ に配置（ポーリング検出）
   トランザクションの中で確定する（commit の直後に落ちても `placing` が残らず、投入も欠けない）。`placed` の件のディレクトリに走査で音声が見えたら（消せなかった原本、
   配置の後に置かれたファイル）`pending` に戻して件として出し直す。
   Inbox は Library と別データセットなので move は実コピー（§5）
-- **後続**は `rg`（album）と `transcode`。WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら `normalize` の
+- **後続**は `rg`（album の属性が on なら album 単位、off なら登録した track ごと。D-74）と `transcode`。WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら `normalize` の
   編集バッチを作って投入する（D-46 の予告）。**アートワークは配置の直後にその album だけ解決する**
   （`scanner::resolve_album_artwork_now`。同梱カバー画像 → 構成トラックの埋め込み画像というスキャンの
   Phase 5 と同じ規則・同じ DB 反映で、thumbnail もここで投入。**`library` の排他を持ったまま**行う（解放して
@@ -979,8 +979,10 @@ Inbox/ に配置（ポーリング検出）
   album があればそれ、**無ければ宛先ディレクトリに active な album があり、その album にも MB キー / DiscID が
   無ければその album を採用**（`album:<id>`）、それも無ければ件ごとの新規。MB キー同士が違えば従来どおり
   降格か衝突。採用する album は `GET /api/inbox` の `destination`（`{ album_id, album, track_count,
-  max_track_no }` | null。下書きの category / albumartist / album と件のファイルから引く。件に
+  max_track_no, album_gain }` | null。下書きの category / albumartist / album と件のファイルから引く。件に
   MUSICBRAINZ_ALBUMID があれば別リリースなので null）で見せる
+- **album gain**（D-74）: 下書きの `album_gain`（既定 false。承認画面のチェックボックス。追記先があればその
+  現在値が初期値）を配置時に album の属性へ書く（追記先の属性も上書きし、off にすれば album の値を消す）
 - **ARTIST の多値**: 下書きのアーティストは 1 値だが、ファイルの ARTIST が多値（プラグインの `artists` 等）で
   下書きが先頭の値のまま（未編集）なら多値を保って配置する。編集していれば 1 値で置き換える
 - **採番**: 下書きの提案で TRACKNUMBER の無いファイルは、採用する album の active な `track_no` の最大 + 1 から
@@ -1253,8 +1255,9 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   （§7.8、D-68。destination と source は D-70: source は spindle-inbox.json の
                                                   項 { source, url, channel, verdict, message } | null）
 POST   /api/inbox/scan                            inbox ジョブを投入（202 + job_id。queued / running があれば 409 duplicate）
-POST   /api/inbox/:id/approve                     { category, albumartist, album, date, tracks: [{ rel_path, disc_no, track_no,
-                                                  title, artist }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved + ジョブ投入
+POST   /api/inbox/:id/approve                     { category, albumartist, album, date, album_gain?, tracks: [{ rel_path, disc_no,
+                                                  track_no, title, artist }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved +
+                                                  ジョブ投入。album_gain は既定 false（D-74）
 POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
 POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
                                                   → 202 { job_ids }。`[ytmusic].enabled` でなければ 404（§7.7、D-70）

@@ -49,6 +49,9 @@ pub struct InboxDraft {
     #[serde(default)]
     pub date: Option<String>,
     pub tracks: Vec<DraftTrack>,
+    /// album gain を計算する album にする（D-74）。既定 off。追記先の album ならその属性を上書きする
+    #[serde(default)]
+    pub album_gain: bool,
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -268,6 +271,7 @@ pub fn proposal(
         album,
         date,
         tracks,
+        album_gain: false,
     }
 }
 
@@ -320,6 +324,7 @@ pub fn merge_saved(saved: &InboxDraft, proposed: &InboxDraft) -> InboxDraft {
         album: saved.album.clone(),
         date: saved.date.clone(),
         tracks,
+        album_gain: saved.album_gain,
     }
 }
 
@@ -701,6 +706,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::LayoutConfig;
 use crate::db::now_epoch;
+use crate::db::replaygain as dbrg;
 use crate::db::scans::{self, AlbumMeta, Fingerprint, PictureState};
 use crate::domain::pathgen::{self, PlanItem, Planned, Template, TrackFields};
 use crate::domain::tags::{write_tag_changes, TagChange};
@@ -709,7 +715,7 @@ use crate::import::placement::{
     find_or_create_album, place_one, register_track, remove_placed, PlacedFile, PlacementError,
 };
 use crate::import::scanner::{read_fingerprint, track_content};
-use crate::jobs::handlers::rg::new_album_job;
+use crate::jobs::handlers::rg::{new_album_job, new_track_job};
 use crate::jobs::{Event, Jobs, LibraryEvent};
 
 /// 配置に要する環境
@@ -904,6 +910,8 @@ pub struct Destination {
     pub track_count: i64,
     /// active な `track_no` の最大（採番の起点）
     pub max_track_no: i64,
+    /// 追記先の album gain の属性（承認画面のチェックボックスの初期値。D-74）
+    pub album_gain: bool,
     /// active なトラックの `(disc_no, track_no)`（承認の検証に使う。応答には出さない）
     #[serde(skip)]
     pub numbers: HashSet<(u32, u32)>,
@@ -992,17 +1000,17 @@ pub fn destination(
     let Some(rel_dir) = path.parent() else {
         return Ok(None);
     };
-    let found: Option<(i64, Option<String>)> = conn
+    let found: Option<(i64, Option<String>, i64)> = conn
         .query_row(
-            "SELECT id, album FROM albums
+            "SELECT id, album, album_gain FROM albums
               WHERE rel_dir_key = ?1 AND missing_since IS NULL
                 AND (mb_release_id IS NULL OR mb_release_id = '')
                 AND (discid IS NULL OR discid = '')",
             [rel_dir.key()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((album_id, album)) = found else {
+    let Some((album_id, album, album_gain)) = found else {
         return Ok(None);
     };
     let mut st = conn.prepare_cached(
@@ -1027,6 +1035,7 @@ pub fn destination(
         album,
         track_count,
         max_track_no,
+        album_gain: album_gain == 1,
         numbers,
     }))
 }
@@ -1363,8 +1372,24 @@ fn register_item(
         scans::set_source_type(&tx, id, "download")?;
         track_ids.push(id);
     }
-    let mut job_ids = vec![crate::db::jobs::enqueue(&tx, &new_album_job(album_id), now)?.id()];
-    for &id in &track_ids {
+    // album gain の属性（D-74）。新規は下書きの値、追記先は下書きの値で上書き（承認画面の初期値は
+    // 追記先の現在値）。off にしたときの album 値の片付けは set_album_gain、Derived の追随はここ。
+    // rg は on なら album 単位、off なら登録した track ごと
+    let gain_change = dbrg::set_album_gain(&tx, album_id, draft.album_gain, now)?.unwrap_or(
+        dbrg::AlbumGainChange {
+            changed: false,
+            cleared: Vec::new(),
+        },
+    );
+    let mut job_ids = Vec::new();
+    if draft.album_gain {
+        job_ids.push(crate::db::jobs::enqueue(&tx, &new_album_job(album_id), now)?.id());
+    } else {
+        for &id in &track_ids {
+            job_ids.push(crate::db::jobs::enqueue(&tx, &new_track_job(id), now)?.id());
+        }
+    }
+    for &id in track_ids.iter().chain(gain_change.cleared.iter()) {
         if let Some(j) = crate::db::derived::enqueue_if_stale(&tx, id, now)? {
             job_ids.push(j);
         }

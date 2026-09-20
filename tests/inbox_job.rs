@@ -327,6 +327,7 @@ fn draft_for(files: &[(&str, u32, &str)], category: Option<&str>, album: &str) -
                 artist: String::new(),
             })
             .collect(),
+        album_gain: false,
     }
 }
 
@@ -391,10 +392,20 @@ async fn approved_item_is_placed_registered_and_consumed() {
     let it = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
     assert_eq!(it.state, ItemState::Placed);
     assert_eq!(it.placed_album_id, Some(album_id));
-    // 後続: rg 1 + transcode 2
+    // 後続: rg はトラックごと（album gain は既定 off。D-74）+ transcode 2
     assert_eq!(
         lib.count("SELECT count(*) FROM jobs WHERE type = 'rg' AND state = 'queued'"),
-        1
+        2
+    );
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'rg' AND dedup_key LIKE 'rg:track:%'"),
+        2
+    );
+    assert_eq!(
+        lib.count(&format!(
+            "SELECT album_gain FROM albums WHERE id = {album_id}"
+        )),
+        0
     );
     assert_eq!(
         lib.count("SELECT count(*) FROM jobs WHERE type = 'transcode' AND state = 'queued'"),
@@ -918,6 +929,89 @@ async fn second_item_appends_to_the_existing_album_and_removes_the_sidecar() {
         .lib_path(&format!("Rock/Artist/Album/{SIDECAR_NAME}"))
         .exists());
     assert!(!lib.inbox_path("youtube/Artist/Album").exists());
+}
+
+/// 下書きの album_gain=true で配置した album は属性が on になり rg は album 単位。追記の下書きは
+/// 追記先の属性を上書きし、off にすると album の値が消える（D-74）
+#[tokio::test]
+async fn album_gain_in_draft_sets_the_attribute_and_picks_the_rg_scope() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.conn()
+        .execute("INSERT INTO categories (name) VALUES ('Rock')", [])
+        .unwrap();
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    let mut draft = draft_for(&[("AlbumA/01.flac", 1, "One")], Some("Rock"), "Album");
+    draft.album_gain = true;
+    lib.approve(a.id, &draft);
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let album_id: i64 = lib
+        .conn()
+        .query_row(
+            "SELECT id FROM albums WHERE rel_dir = 'Rock/Artist/Album'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        lib.count(&format!(
+            "SELECT album_gain FROM albums WHERE id = {album_id}"
+        )),
+        1
+    );
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'rg' AND dedup_key LIKE 'rg:album:%'"),
+        1
+    );
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'rg' AND dedup_key LIKE 'rg:track:%'"),
+        0
+    );
+    // album の値を持たせておき、2 件目を off で追記 → 属性 off、値が消え、rg は track 単位
+    lib.conn()
+        .execute(
+            "UPDATE tracks SET rg_track_gain = 0, rg_track_peak = 0.5, rg_album_gain = -1.0,
+                    rg_album_peak = 0.9, rg_scanned_at = 10, rg_written_at = 10
+              WHERE album_id = ?1",
+            [album_id],
+        )
+        .unwrap();
+    lib.conn()
+        .execute("DELETE FROM jobs WHERE type IN ('rg', 'transcode')", [])
+        .unwrap();
+    lib.add("AlbumB/02.flac", 2, "Two", "Album", 1);
+    lib.scan(2000).await;
+    let b = lib.item("AlbumB").unwrap();
+    lib.approve(
+        b.id,
+        &draft_for(&[("AlbumB/02.flac", 2, "Two")], Some("Rock"), "Album"),
+    );
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), b.id).unwrap().unwrap();
+    assert_eq!(it.placed_album_id, Some(album_id), "{:?}", it.error);
+    assert_eq!(
+        lib.count(&format!(
+            "SELECT album_gain FROM albums WHERE id = {album_id}"
+        )),
+        0
+    );
+    assert_eq!(
+        lib.count(&format!(
+            "SELECT count(*) FROM tracks WHERE album_id = {album_id} AND rg_album_gain IS NOT NULL"
+        )),
+        0
+    );
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'rg' AND dedup_key LIKE 'rg:track:%'"),
+        1,
+        "追記した 1 曲だけ track 単位"
+    );
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'rg' AND dedup_key LIKE 'rg:album:%'"),
+        0
+    );
 }
 
 /// 承認と配置の間に番号が埋まっていたら、登録で弾いて failed（置いたファイルは片付ける）

@@ -438,7 +438,12 @@ async fn list_reports_destination_source_and_numbers_after_the_existing_album() 
     assert_eq!(it["destination"]["album"], "Album");
     assert_eq!(it["destination"]["track_count"], 2);
     assert_eq!(it["destination"]["max_track_no"], 12);
+    assert_eq!(
+        it["destination"]["album_gain"], false,
+        "追記先の属性（D-74）"
+    );
     assert!(it["destination"].get("numbers").is_none());
+    assert_eq!(it["proposal"]["album_gain"], false);
     // 採番は 13 から
     assert_eq!(it["proposal"]["tracks"][0]["track_no"], 13);
     // 判定はトラック行に付く

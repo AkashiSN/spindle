@@ -460,6 +460,22 @@ async fn places_flac_with_tags_companions_rows_and_jobs() {
     assert_eq!(jobs.iter().filter(|t| *t == "rg").count(), 1);
     assert_eq!(jobs.iter().filter(|t| *t == "transcode").count(), 3);
     assert_eq!(placed.job_ids.len(), 4);
+    // CD 取り込みの album は album gain on で、rg は album 単位（D-74）
+    let album_gain: i64 = c
+        .query_row(
+            "SELECT album_gain FROM albums WHERE id = ?1",
+            [placed.album_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(album_gain, 1);
+    assert_eq!(
+        count(
+            &lib,
+            "SELECT count(*) FROM jobs WHERE type = 'rg' AND dedup_key LIKE 'rg:album:%'"
+        ),
+        1
+    );
     // 排他は解放されている
     assert_eq!(count(&lib, "SELECT count(*) FROM job_mutexes"), 0);
     drop(c);
