@@ -192,6 +192,18 @@ function ItemForm({
             <input type="text" value={draft.category ?? '_Unsorted'} disabled />
           </label>
         )}
+        <label className="cd-field inbox-album-gain">
+          <span>album gain</span>
+          <span className="small">
+            <input
+              type="checkbox"
+              checked={draft.album_gain}
+              disabled={!editable}
+              onChange={(e) => update({ album_gain: e.target.checked })}
+            />{' '}
+            album gain を計算する（アルバム通し再生用。既定 off。CD 取り込みは on。追記先があればその現在値）
+          </span>
+        </label>
       </div>
 
       <h2>トラック（ファイル名・コーデック・長さはファイルから）</h2>

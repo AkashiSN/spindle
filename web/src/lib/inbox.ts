@@ -22,6 +22,8 @@ export type InboxDraft = {
   /** YYYY[-MM[-DD]] */
   date: string | null
   tracks: DraftTrack[]
+  /** album gain を計算する album にする（D-74）。既定 false。追記先があればその現在値を上書きする */
+  album_gain: boolean
 }
 
 export type InboxFile = {
@@ -59,6 +61,8 @@ export type InboxDestination = {
   album: string | null
   track_count: number
   max_track_no: number
+  /** 追記先の album gain の属性（チェックボックスの初期値。D-74） */
+  album_gain: boolean
 }
 
 /** GET /api/inbox の 1 件 */
@@ -122,7 +126,8 @@ export function draftFrom(item: InboxItem): InboxDraft {
   const p = item.proposal
   const saved = item.draft
   if (saved == null) {
-    return { ...p, tracks: p.tracks.map(cloneTrack) }
+    // album gain の初期値は追記先の現在値（無ければ off。D-74）
+    return { ...p, tracks: p.tracks.map(cloneTrack), album_gain: item.destination?.album_gain ?? false }
   }
   const byKey = new Map(saved.tracks.map((t) => [pathKey(t.rel_path), t]))
   return {
@@ -134,6 +139,7 @@ export function draftFrom(item: InboxItem): InboxDraft {
       const s = byKey.get(pathKey(t.rel_path))
       return s == null ? cloneTrack(t) : { ...cloneTrack(s), rel_path: t.rel_path }
     }),
+    album_gain: saved.album_gain,
   }
 }
 
@@ -207,6 +213,7 @@ export function draftForSubmit(d: InboxDraft): InboxDraft {
       title: t.title.trim(),
       artist: t.artist.trim(),
     })),
+    album_gain: d.album_gain,
   }
 }
 

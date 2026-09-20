@@ -36,6 +36,7 @@ import { useCdLookup } from './hooks/useCdLookup'
 import { useInbox } from './hooks/useInbox'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
+import { albumsOfRows } from './lib/albumGain'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
 import { scopeAfterPlaylistDelete, sortForScope } from './lib/playlists'
 import type { View } from './lib/views'
@@ -307,6 +308,21 @@ function Shell({ onLogout }: { onLogout: () => void }) {
 
   const edit = useBatchEdit(selection, sortToParam(sort))
   const operations = useOperations(selection, sortToParam(sort))
+  // 操作タブの album gain 切り替え（選択行が属する album。D-74）
+  const [albumGainError, setAlbumGainError] = useState<string | null>(null)
+  const albumGainAlbums = useMemo(() => albumsOfRows(selectedRows, albums.albums), [selectedRows, albums.albums])
+  const { busy: albumsBusy, setAlbumGain } = albums
+  const albumGain = useMemo(
+    () => ({
+      albums: albumGainAlbums,
+      busy: albumsBusy,
+      error: albumGainError,
+      onToggle: (id: number, on: boolean) => {
+        void setAlbumGain(id, on).then((err) => setAlbumGainError(err))
+      },
+    }),
+    [albumGainAlbums, albumsBusy, setAlbumGain, albumGainError],
+  )
   const handleInlineEdit = useCallback(
     (id: number, columnId: string, value: string) => edit.applyInline(id, columnId, value),
     [edit],
@@ -473,6 +489,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         ops={operations}
         playlists={playlists.items}
         onAddToPlaylist={(id) => void addToPlaylist(id, selection)}
+        albumGain={albumGain}
       />
       )}
       <main className="center">

@@ -1683,7 +1683,11 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   「却下」はファイルを残したまま一覧から外し、「下書きに戻す」で pending に戻る。placed の件は 24 時間
   残り、「アルバムを開く」で表を `album_id` に絞る。inbox ジョブの完了で一覧を取り直す。
   `destination` があれば「宛先: 既存の『…』（N 曲）に追加」と出す。`source` のあるトラック行は判定バッジ
-  （ok / 未判定）を出し、行を開くと `message`（参照実装ならルールの足し方）と URL が読める（D-70）
+  （ok / 未判定）を出し、行を開くと `message`（参照実装ならルールの足し方）と URL が読める（D-70）。
+  「album gain を計算する」のチェックボックス（既定 off。`destination` があればその現在値が初期値。D-74）
+- **操作タブの「album gain」**（P4-5、D-74）: 「ReplayGain / FLAC」節に、選択行が属する album ごとの
+  チェックボックス（`PATCH /api/albums/:id`。20 album を超えたら絞るよう促す）。アルバム画面は無く
+  アルバム一覧は表を絞るだけなので、切り替えはここに置く
 - **操作タブの「YouTube」**（P3-3、D-70）: 1 行 1 URL のテキストエリアと「ダウンロード」
   （`POST /api/ytmusic/download`）。投入した job_id を出し、進捗と失敗は Jobs タブ、結果は Inbox タブ
 - **設定**: `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、

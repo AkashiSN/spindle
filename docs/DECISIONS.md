@@ -2805,6 +2805,14 @@ hirescheck = コア数 / 2 で、スキャン完了時に 4 種がまとめて�
 - アルバム画面（SPEC §12.6）で後から切り替えられる。false → true で album 単位の rg を投入、
   true → false で `rg_album_*` を NULL にして「RG 未書込」に戻す（次の書き込みで album のキーが消える）
 - 既存 album はすべて false、既存の `rg_album_*` は 0017 で NULL に揃える（ファイルには書かない）
+
+**追記（2026-09-20。P4-5 の実装）**: 切り替えの置き場は**操作タブ**の「ReplayGain / FLAC」節
+（選択行が属する album ごとのチェックボックス、`PATCH /api/albums/:id`）。アルバム画面は無く、アルバム
+一覧は表を絞るだけなので。CD の配置は**合流（複数枚組の 2 枚目）でも on** にする。0017 で album の値を
+消した行は `rg_written_at` を NULL に戻し `rg_scanned_at` を 1 進める（Derived の `R128_ALBUM_GAIN` が
+タグ上書きで追随する）。rg ハンドラは**書き込み時に属性を読み直し**、album 単位の job でも off なら
+album の値を書かず、track 単位の job は on の album に属する track の album 値を据え置く（投入と切り替えの
+競合で値が嘘にならない）。
 - `POST /api/rg { selection }`、スキャン後・承認後・配置後の自動投入は album の属性を見て投入単位を
   決める。設定ファイルに `[replaygain].album_gain` は置かない（album ごとに決まる）
 - **RG の一致判定（`rg_written_at`）は完全一致のまま。** 既存ライブラリの RG タグ（foobar2000 / ytmusic

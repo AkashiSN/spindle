@@ -12,7 +12,7 @@ import { formatCount } from '../lib/format'
 import type { Selection } from '../lib/selection'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
 import { BatchEditPanel } from './BatchEditPanel'
-import { OperationsPanel } from './OperationsPanel'
+import { OperationsPanel, type AlbumGainControl } from './OperationsPanel'
 import { PropertiesPanel } from './PropertiesPanel'
 
 export type SelectionSummary = {
@@ -36,6 +36,7 @@ export function RightPanel({
   ops,
   playlists,
   onAddToPlaylist,
+  albumGain,
 }: {
   selection: Selection
   summary: SelectionSummary
@@ -48,6 +49,8 @@ export function RightPanel({
   /** 「プレイリストへ追加」の候補（手動のみ）と追加の実行（P1-6） */
   playlists: Playlist[]
   onAddToPlaylist: (playlistId: number) => void
+  /** 選択行が属する album の album gain 切り替え（D-74） */
+  albumGain: AlbumGainControl
 }) {
   const [collapsed, setCollapsed] = useLocalStorageState<boolean>(
     'props.collapsed',
@@ -139,6 +142,7 @@ export function RightPanel({
             hasSelection={selection.kind !== 'none'}
             playlists={playlists}
             onAddToPlaylist={onAddToPlaylist}
+            albumGain={albumGain}
           />
         </div>
       ) : (

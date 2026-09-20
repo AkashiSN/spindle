@@ -4,26 +4,37 @@
 // プレイリストへ追加もここ。状態は hooks/useOperations
 
 import { useState } from 'react'
-import type { Playlist } from '../api/types'
+import type { AlbumRow, Playlist } from '../api/types'
 import type { Operations, PathKind } from '../hooks/useOperations'
-import { artworkUrl, uploadedSummary } from '../lib/artwork'
+import { ALBUM_GAIN_LIMIT } from '../lib/albumGain'
+import { albumTitle, artworkUrl, uploadedSummary } from '../lib/artwork'
 import { formatCount } from '../lib/format'
 import { parseUrlLines } from '../lib/inbox'
 import { pathPreviewSummary } from '../lib/operations'
 
 const PATH_LABEL: Record<PathKind, string> = { rename: 'リネーム', normalize: '正規化（→ FLAC）' }
 
+/** 選択行が属する album の album gain 切り替え（D-74） */
+export type AlbumGainControl = {
+  albums: AlbumRow[]
+  busy: boolean
+  error: string | null
+  onToggle: (id: number, on: boolean) => void
+}
+
 export function OperationsPanel({
   ops,
   hasSelection,
   playlists,
   onAddToPlaylist,
+  albumGain,
 }: {
   ops: Operations
   hasSelection: boolean
   /** 「プレイリストへ追加」の候補（手動のみ）と追加の実行（P1-6） */
   playlists: Playlist[]
   onAddToPlaylist: (playlistId: number) => void
+  albumGain: AlbumGainControl
 }) {
   const [description, setDescription] = useState('')
   const [embedDescription, setEmbedDescription] = useState('')
@@ -119,8 +130,33 @@ export function OperationsPanel({
           >
             {label('hirescheck', '偽ハイレゾを検出')}
           </button>
-          <span className="muted small">解析はアルバム単位のジョブ。書き込みと補填は巻き戻せるバッチ</span>
+          <span className="muted small">
+            解析は album gain が on の album は album 単位、それ以外は曲ごとのジョブ。書き込みと補填は巻き戻せるバッチ
+          </span>
         </div>
+        {albumGain.albums.length > 0 && (
+          <div className="op-row album-gain">
+            <span className="muted small">
+              album gain（アルバム通し再生用。on にすると album 単位で解析し直す。off にすると album の値を消す）:
+            </span>
+            {albumGain.albums.length > ALBUM_GAIN_LIMIT ? (
+              <span className="muted small">選択が {ALBUM_GAIN_LIMIT} album を超えています。絞ってください</span>
+            ) : (
+              albumGain.albums.map((a) => (
+                <label key={a.id} className="small">
+                  <input
+                    type="checkbox"
+                    checked={a.album_gain}
+                    disabled={albumGain.busy}
+                    onChange={(e) => albumGain.onToggle(a.id, e.target.checked)}
+                  />{' '}
+                  {albumTitle(a)}
+                </label>
+              ))
+            )}
+            {albumGain.error && <span className="error small">{albumGain.error}</span>}
+          </div>
+        )}
         <div className="op-row">
           <button
             type="button"

@@ -1370,6 +1370,23 @@ button.primary {
   flex: 0 1 auto;
   min-width: 0;
 }
+/* album gain の切り替え（D-74）: チェックボックスは伸ばさず、album 名の直前に置く */
+.operations .op-row.album-gain label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 0;
+}
+.operations .op-row.album-gain input[type='checkbox'] {
+  flex: 0 0 auto;
+  min-width: 0;
+  width: auto;
+}
+/* Inbox 承認画面の album gain（cd-field は縦積みなので、チェックボックスと文言だけ横に並べる） */
+.inbox-album-gain input[type='checkbox'] {
+  width: auto;
+  vertical-align: middle;
+}
 .operations .artwork-upload {
   margin-top: 8px;
   display: flex;

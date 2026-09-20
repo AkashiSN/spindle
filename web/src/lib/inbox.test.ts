@@ -41,6 +41,7 @@ const proposal: InboxDraft = {
     { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '' },
     { rel_path: 'd/02.flac', disc_no: 1, track_no: 2, title: 'two', artist: '' },
   ],
+  album_gain: false,
 }
 
 function item(over: Partial<InboxItem> = {}): InboxItem {
@@ -83,8 +84,10 @@ describe('draftFrom', () => {
         { rel_path: 'd/02.flac', disc_no: 2, track_no: 9, title: 'fixed', artist: 'C' },
         { rel_path: 'd/gone.flac', disc_no: 1, track_no: 3, title: 'gone', artist: '' },
       ],
+      album_gain: true,
     }
     const d = draftFrom(item({ draft: saved }))
+    expect(d.album_gain).toBe(true)
     expect(d.category).toBe('Rock')
     expect(d.albumartist).toBe('B')
     expect(d.album).toBe('Y')
@@ -93,6 +96,13 @@ describe('draftFrom', () => {
       { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '' },
       { rel_path: 'd/02.flac', disc_no: 2, track_no: 9, title: 'fixed', artist: 'C' },
     ])
+  })
+
+  it('album_gain は保存済みが無ければ追記先の現在値、追記先も無ければ false（D-74）', () => {
+    expect(draftFrom(item()).album_gain).toBe(false)
+    const dest = { album_id: 1, album: 'x', track_count: 2, max_track_no: 2, album_gain: true }
+    expect(draftFrom(item({ destination: dest })).album_gain).toBe(true)
+    expect(draftFrom(item({ destination: dest, draft: { ...proposal, album_gain: false } })).album_gain).toBe(false)
   })
 })
 
@@ -165,6 +175,7 @@ describe('draftForSubmit', () => {
       album: 'X ',
       date: '',
       tracks: [{ rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: ' t ', artist: ' ' }],
+      album_gain: true,
     }
     expect(draftForSubmit(d)).toEqual({
       category: null,
@@ -172,6 +183,7 @@ describe('draftForSubmit', () => {
       album: 'X',
       date: null,
       tracks: [{ rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 't', artist: '' }],
+      album_gain: true,
     })
   })
 })
@@ -193,9 +205,9 @@ describe('表示', () => {
 describe('destinationLabel / verdictLabel（D-70）', () => {
   it('追記先があれば「既存の『…』（N 曲）に追加」', () => {
     expect(
-      destinationLabel({ album_id: 7, album: 'Songs of A', track_count: 12, max_track_no: 12 }),
+      destinationLabel({ album_id: 7, album: 'Songs of A', track_count: 12, max_track_no: 12, album_gain: false }),
     ).toBe('宛先: 既存の『Songs of A』（12 曲）に追加。番号は 13 から')
-    expect(destinationLabel({ album_id: 7, album: null, track_count: 0, max_track_no: 0 })).toBe(
+    expect(destinationLabel({ album_id: 7, album: null, track_count: 0, max_track_no: 0, album_gain: false })).toBe(
       '宛先: 既存のアルバム（0 曲）に追加。番号は 1 から',
     )
     expect(destinationLabel(null)).toBeNull()
