@@ -969,6 +969,26 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `playlist_id`（静的・スマート）/ `flags` / `dsl` / `q` をそのまま再利用）。web は `useAlbums(filterParam)` で
       ツリー・プレイリスト・検索語の変更で取り直す。受け入れ: `tests/albums_api.rs`（album_ids / category /
       静的プレイリスト / スマートプレイリスト / q で絞れる、フィルタ無しは全件、不正なフィルタは 400）
+- [ ] **P4-7** Derived の系統化と Opus 256k（D-9 追記、D-75、SPEC §7.6）。新しい連番のマイグレーションで
+      `derived_files` を `(track_id, variant)` 主キーに作り直し（既存行は `variant = 'opus'`）、`delivery` ビューを
+      `variant = 'opus'` に固定。`[encode]` を `[encode.derived.opus] { enabled, bitrate }` に改め（`derived_codec` /
+      `derived_bitrate` は廃止。deploy/config.example.toml と SPEC §13 を揃える）、`domain/derived.rs` の `plan()` に
+      variant と「行の codec / bitrate が設定と違えば Encode」を足す。パスは `Derived/opus/…`。`transcode` の
+      dedup キーとロックに variant、scan 完了時の投入は enabled な系統ごと。`GET /api/tracks` の `derived` を
+      系統ごとの形に（web の `TrackRow.derived`、`has_derived` バッジは opus のまま、プロパティ Location 列に
+      系統ごとの行）。受け入れ: `tests/migrations.rs`（作り直しと既存行の variant）、`tests/derived_plan.rs`
+      （bitrate 差分で Encode、enabled=false で Skip、旧ルート直下の行は Encode で `opus/` へ）、
+      `tests/transcode_job.rs`（旧パスの退避と削除）、`tests/config.rs`、`tests/tracks_api.rs`、
+      `web/src/lib/properties.test.ts`
+- [ ] **P4-8** Apple 向け `aac` 系統（D-75、D-8 追記、SPEC §7.6）。`[encode.derived.aac] { enabled, bitrate,
+      lossy_sources, multi_value_separator }`。`media/encode.rs` に `AacEncoder`（ffmpeg 内蔵 `aac -b:a <k>`、
+      48 kHz 超は `-ar 48000`、`volume=<gain>dB` の焼き込み、aac 原本は `-c:a copy`）。`domain/derived.rs` に
+      系統ごとの eligibility（`aac` は `lossy_sources` で非可逆も、RG 未解析は待つ）と `aac` の RG 世代差分 →
+      Encode。`domain/derived.rs::aac_tags`（多値を区切りで結合、RG 系キーを落として `iTunNORM` 0 dB、
+      フリーフォームは `----:com.apple.iTunes:<KEY>`）。画像は 768 JPEG（`thumbs/<hex>/768.jpg`）。
+      Dockerfile の変更なし。受け入れ: `tests/derived_plan.rs`（非可逆の対象化、RG 未解析で待つ、RG 世代で
+      Encode）、`tests/aac_tags.rs`（結合、iTunNORM の文字列、RG キー無し）、`tests/transcode_job.rs`
+      （AAC の生成 → lofty で読み戻し、ゲインの適用を ebur128 で確認、aac 原本の複製、96 kHz → 48 kHz）
 
 ## 着手前に確認が必要な残課題
 

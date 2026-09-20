@@ -34,7 +34,7 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 | 用語 | 定義 |
 |---|---|
 | Library | 唯一の正となるメディアツリー。1トラック=1ファイル |
-| Derived | Library から生成される配布用 Opus。破棄・再生成可能 |
+| Derived | Library から生成される配布用の非可逆（`opus` 系統と Apple 向け `aac` 系統。§7.6）。破棄・再生成可能 |
 | Archive | アプリが再生成できない生データ（YouTube webm 等）。追記のみ |
 | 配布ビュー (delivery) | 可逆なら Derived、非可逆なら Library を指す解決規則 |
 | Category | パス最上位階層。統制語彙。GENRE タグとは別概念 |
@@ -117,7 +117,8 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 │       ├── disc.toc                   CD リップ時のみ（同 disc<N>.toc）
 │       └── rip.log                    自前リップ時のみ（同 rip<N>.log。先頭行 `spindle rip log v1`）
 ├── Derived/                           [dataset] snapshot: なし
-│   └── <Category>/<AlbumArtist>/<Album>/1-01 Title.opus
+│   ├── opus/<Category>/<AlbumArtist>/<Album>/1-01 Title.opus   Android・Web 再生・配布ビュー
+│   └── aac/<Category>/<AlbumArtist>/<Album>/1-01 Title.m4a     Apple 向け（P4-8。D-75）
 ├── Archive/  → /mnt/hdd/media/Archive [dataset, hdd] snapshot: 週次
 │   ├── youtube/<id>.webm              YouTube の原本（id 名。DB に行は作らない。D-70）
 │   └── （FLAC 正規化で退避した WAV / ALAC / AIFF もここ。GC まで保持）
@@ -745,21 +746,60 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
 
 ### 7.6 Derived 生成
 
+Derived は**系統（variant）**ごとに 1 本ずつ作る。系統は `opus`（Android の同期・Web 再生・配布ビュー）と
+`aac`（Mac のミュージック.app へ取り込む Apple 向け）の 2 つで固定（P4-7 / P4-8。D-9 追記、D-75。
+それまでは `opus` 系統だけがルート直下 `Derived/<...>.opus` にある）。
+
 | 項目 | 規則 |
 |---|---|
-| 対象 | Library 内の可逆のみ（flac / alac / wav）。opus / aac / mp3 は対象外 |
-| 出力 | Opus 128kbps VBR（`--vbr`, signal=music）。可逆200GBで約25GB |
-| パス | Library と完全ミラー（拡張子のみ `.opus`） |
+| パス | `Derived/<variant>/` 以下に Library と完全ミラー（拡張子だけ `.opus` / `.m4a`）。`paths.derived` は 1 つ |
+| 設定 | `[encode.derived.<variant>]` に `enabled` と `bitrate`（下記）。`enabled = false` の系統は行もファイルも触らない（GC の孤児回収も掛けない） |
+| 判定 | `audio_version` 差分・**行の `codec` / `bitrate` が設定と食い違う** → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）の差分のみ → タグ上書き（**`aac` は RG を音声に焼き込むので RG 世代の差分も再エンコード**）/ パスの差分のみ → rename |
+| 投入 | scan ジョブの完了時に食い違う全トラック × 系統、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（`(track_id, variant)` 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める。P4-1 の共通並列予算の対象 |
+| 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児（行に無いファイル。`Derived/` 全体）は GC ジョブ |
+| マルチch | どの系統も既定で対象外（チャンネル数不明も対象外）。トラック単位の `-ac 2` ダウンミックスは需要が出たら（D-51。実データは全件 2ch） |
+| 配布ビュー | `delivery` は **`opus` 系統に固定**（Android の m3u8、`?transcode=opus`、`has_derived`）。`aac` は配布ビューを持たず、プレイリストも出さない（ミュージック.app へはファイルを取り込むだけ。D-75） |
+
+**`opus` 系統**
+
+| 項目 | 規則 |
+|---|---|
+| 対象 | Library 内の可逆のみ（flac / alac / wav）。opus / aac / mp3 は原本をそのまま配布（D-8） |
+| 出力 | `opusenc --vbr --music --bitrate <bitrate>`。既定 **256 kbps**（D-9 追記。可逆 237 GB で約 58 GB） |
 | RG | 再解析しない。Library 側の解析値を `R128_*` へ変換して埋める（`REPLAYGAIN_*` は書かない） |
 | 画像 | トラック自身の埋め込み画像（`tracks.artwork_id`。D-61）、無ければ album のアートワーク（§7.1）の長辺 768 の WebP を 1 枚だけ埋める（D-51） |
-| 判定 | `audio_version` 差分 → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）の差分のみ → タグ上書き / パスの差分のみ → rename |
-| 投入 | scan ジョブの完了時に食い違う全トラック、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（track 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める |
-| 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児は GC ジョブ |
-| マルチch | 既定で対象外（チャンネル数不明も対象外）。トラック単位の `-ac 2` ダウンミックスは需要が出たら（D-51。実データは全件 2ch） |
 
-非可逆音源は Derived を作らず原本をそのまま配布する（多重劣化の回避）。
+**`aac` 系統**（Apple 向け。D-75）
+
+| 項目 | 規則 |
+|---|---|
+| 対象 | 可逆（flac / alac / wav）に加え、`lossy_sources = true` なら**非可逆も**（opus / ogg / mp3 → AAC。世代劣化は承知の上で、ミュージック.app が Opus を読めないため。**D-8 の例外**）。原本が AAC（m4a）なら再エンコードせず `-c:a copy` で複製し、タグだけ書き直す |
+| 出力 | `ffmpeg -c:a aac -b:a <bitrate>k`（内蔵エンコーダ。既定 256 kbps）。48 kHz 超は 48 kHz へ落とす（`-ar 48000`）、44.1 / 48 は据え置き |
+| RG | **track gain を音声に焼き込む**（`volume=<gain>dB`。gain は `min(rg_track_gain, −20·log10(rg_track_peak))` でクリップを防ぐ。album gain は使わない）。**RG 未解析のトラックは作らず待つ**（rg の保存で投入される。二度エンコードの回避）。タグには `iTunNORM` を **0 dB 相当**（先頭 2 値 `000003E8`、残り 8 値 `00000000`）で書き、端末のサウンドチェック ON でも二重に掛からないようにする。`REPLAYGAIN_*` / `R128_*` は書かない |
+| タグ | Library のタグを写す。**多値フィールドは `multi_value_separator`（既定 `" & "`）で 1 値に結合**（ミュージック.app は複数値の 1 つしか見せない。ARTIST / ALBUMARTIST / GENRE / COMPOSER など多値になり得る全フィールド）。標準フィールドは lofty の MP4 マッピング（`©ART` 等）、それ以外は `----:com.apple.iTunes:<KEY>` のフリーフォーム |
+| 画像 | `opus` と同じ選び方で、長辺 768 の **JPEG**（ミュージック.app は `covr` の WebP を読まない）。`thumbs/<hex>/768.jpg` をキャッシュに足す |
+
+```toml
+[encode]
+flac_compression = 8
+
+[encode.derived.opus]
+enabled = true
+bitrate = 256                   # opusenc --vbr --music --bitrate
+
+[encode.derived.aac]
+enabled = true
+bitrate = 256                   # ffmpeg -c:a aac -b:a
+lossy_sources = true            # 非可逆原本も AAC へ（D-8 の例外。aac 原本は複製）
+multi_value_separator = " & "   # 多値フィールドの結合
+```
+
+`derived_files` の主キーは `(track_id, variant)`（マイグレーションで作り直す。既存行は `variant = 'opus'`、
+`rel_path` はルート直下のまま移し、次の transcode がビットレート差分で作り直すときに `opus/` 配下へ置く。
+旧ファイルは transcode の退避経路で消える）。
+
 容量逼迫時のみ、トラック単位で `force_transcode` を手動指定可能（**元が 256kbps 以上の場合のみ**）
-という例外は、需要が出るまで実装しない（D-51。実データの非可逆は Opus が大半で削減にならない）。
+という `opus` 系統の例外は、需要が出るまで実装しない（D-51。実データの非可逆は Opus が大半で削減にならない）。
 
 ### 7.7 ytmusic 統合
 
@@ -1064,7 +1104,7 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
 | `rip` | **1**（物理ドライブ1台） | discid |
 | `verify` | 2 | album_id |
 | `rg` | CPU コア数 | album_id |
-| `transcode` | CPU コア数 - 1 | track_id + audio_version |
+| `transcode` | CPU コア数 - 1 | track_id + variant + audio_version（variant は P4-7 から。§7.6） |
 | `tagwrite` | 4 | track_id + tag_version（`edit_batch_id` でバッチに紐づく） |
 | `rename` | 1 | batch_id（バッチ 1 つに 1 ジョブ。2 phase の順序を守るため直列。D-43） |
 | `normalize` | 2 | track_id + op_id（同じトラックの直列化は track_locks） |
@@ -1238,7 +1278,9 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "track_no": 1, "disc_no": 1, "date": "2024", "category": "J-Pop",
                "duration_ms": 280000, "codec": "flac", "lossless": true,
                "verification": "verified_ctdb", "rg_scanned_at": 1, "rg_written_at": 1,
-               "derived": { "codec": "opus", "stale_tags": false },   // または null
+               "derived": { "opus": { "stale_tags": false }, "aac": null },
+                                                                       // 系統ごと。無ければ null（§7.6。P4-7 まで
+                                                                       // は { "codec": "opus", "stale_tags": false } | null）
                "flac_check": { "status": "ok", "checked_at": 1700000000, "stale": false, "error": null },
                                                                        // 未検査なら null（§7.9）
                "hires_check": { "status": "upsampled", "checked_at": 1700000000, "stale": false,
@@ -1538,7 +1580,7 @@ rel_path（既定非表示）
 | 検証 | `verification` の 5 値をアイコン色で区別。`unverifiable` は「未検証」と別の見え方 | tracks |
 | 可逆 / 非可逆 | `lossless` | tracks |
 | RG | `rg_scanned_at` の有無。書き込み未反映（`rg_written_at < rg_scanned_at`）は半透明 | tracks |
-| Derived | `derived_files` あり。`stale_tags` は点付き | delivery |
+| Derived | `derived_files` の `opus` 系統あり（= 配布ビュー）。`stale_tags` は点付き。`aac` 系統はバッジにせずプロパティの Location 列に行を出す（§7.6） | delivery |
 | 反映待ち ⏳ | `edit_ops.result = 'pending'` がある | edit_ops |
 | conflict ⚠ | このトラックの**最新の op**（`edit_ops` を `id DESC` で 1 件）が `skipped_conflict` | edit_ops |
 | 重複 | `duplicate_groups` に属する | view |
@@ -1659,7 +1701,7 @@ retry_on_mismatch = 2
 prefer_ctdb = true
 
 [encode]
-derived_codec = "opus"
+derived_codec = "opus"         # P4-7 で [encode.derived.opus] / [encode.derived.aac] に置き換わる（§7.6）
 derived_bitrate = 128
 flac_compression = 8
 
@@ -1953,8 +1995,8 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 | ライブラリ構造 | 役割別 3 層（Library / Derived / Archive） | フォーマット別だと CD の FLAC が保管物かつ再生対象で破綻する |
 | Category 軸 | ジャンル別・統制語彙 | GENRE タグとは別フィールド |
 | アルバム名 | `{album}` のみ、衝突時のみ年を付与 | |
-| Derived | 可逆のみ変換 + 配布ビュー解決 | 非可逆の多重劣化を回避 |
-| ビットレート | Opus 128k VBR | 再生成可能なので低リスクな決定 |
+| Derived | 可逆のみ変換 + 配布ビュー解決。Apple 向け `aac` 系統だけ非可逆も変換（D-75） | 非可逆の多重劣化を回避。ミュージック.app は Opus を読めない |
+| ビットレート | Opus 256k VBR（当初 128k。D-9 追記）、AAC 256k | 再生成可能なので低リスクな決定 |
 | WAV | FLAC へ正規化（MD5 照合付き）。元 WAV は Archive へ退避し GC 待ち | タグ・RG の互換性が低いため。即時削除は禁止事項と矛盾 |
 | ジョブ dedup | `queued`/`running` の間だけ一意 | 列 UNIQUE だと完了後に同キーを再投入できない |
 | 一括編集 | DB 先行更新 + `edit_ops.pending`（トラック単位）、pending 中の再編集は 409、スキャナは pending の論理値を巻き戻さない | ファイル反映待ちの窓で「ファイルが正」と衝突する |

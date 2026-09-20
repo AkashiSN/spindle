@@ -101,6 +101,11 @@ ZFS では rename とタグ書き換えで inode が不変。FLAC の STREAMINFO
 **例外**: 容量逼迫時のみトラック単位で `force_transcode` を許可。
 ただし元が 256kbps 以上の場合のみ。
 
+**追記（2026-09-20。P4-8）**: Apple 向けの `aac` 系統（D-75）だけは非可逆原本（opus / ogg / mp3）も
+AAC へ変換する。ミュージック.app が Opus を読めず、配布ビューで原本へ倒しても Apple 側で再生できない
+ため、世代劣化を承知で全曲を揃える。`opus` 系統と配布ビュー（Android / Web）はこの決定のまま。
+原本が AAC なら再エンコードせず複製する。
+
 ---
 
 ## D-9 Opus 128kbps VBR
@@ -111,6 +116,11 @@ ZFS では rename とタグ書き換えで inode が不変。FLAC の STREAMINFO
 有線イヤホンで差が出る境界。160k 以上は体感差がほぼなく容量だけ増える。
 
 **補足**: Derived は再生成可能なので、この決定は低リスクであり後から変えられる。
+
+**追記（2026-09-20。P4-7）**: `opus` 系統の既定を **256 kbps** に上げる（`--vbr --music` は当初から）。
+可逆 237 GB（7,570 本）で 29 GB → 約 58 GB。あわせて系統ごとの設定 `[encode.derived.<variant>]` に
+改め、**行の `codec` / `bitrate` が設定と食い違えば再エンコード**の判定を足す（これが無いと設定を
+変えても音声版が同じ既存の Derived は作り直されない）。既存の 128k はこの判定で全件作り直す。
 
 ---
 
@@ -2804,4 +2814,39 @@ hirescheck = コア数 / 2 で、スキャン完了時に 4 種がまとめて�
 **却下**: 全体設定で album gain を off（CD の album gain まで消える）。育つコレクションだけ off
 （判定基準が曖昧で、なぜ計算されないかが見えない）。RG の一致判定に許容差（既存の値を尊重して
 書き換えを避ける案。spindle の値で統一したいので採らない）。
+
+---
+
+## D-75 Apple 向けに `aac` 系統の Derived を足す。RG は焼き込み + iTunNORM 0 dB、多値は結合、プレイリストは出さない
+
+**決定**（2026-09-20。P4-7 で Derived を系統化、P4-8 で `aac` 系統を実装。仕様 SPEC §7.6）:
+
+- Derived を**系統（variant）ごとに 1 本**にする。`opus`（Android の同期・Web 再生・配布ビュー。今まで
+  どおり）と `aac`（Mac のミュージック.app へ取り込む Apple 向け）の 2 つで固定。パスは
+  `Derived/<variant>/` 以下に Library のミラー、`derived_files` の主キーは `(track_id, variant)`、
+  設定は `[encode.derived.<variant>]`（`enabled` / `bitrate`。`aac` は `lossy_sources` と
+  `multi_value_separator` も）
+- **エンコーダは ffmpeg 内蔵 `aac`**（`-b:a 256k`。ABR に近く真の VBR ではない）。追加依存を持たない
+- **非可逆原本も AAC へ**（`lossy_sources = true`。D-8 の例外）。原本が AAC なら複製
+- **ReplayGain は track gain を音声に焼き込み**（クリップ防止に peak で上限）、タグには `iTunNORM` を
+  0 dB 相当で書く。`REPLAYGAIN_*` / `R128_*` は書かない。**RG 未解析なら作らず待つ**（rg の保存で投入）。
+  RG の解析世代が変わったら再エンコード（`opus` はタグ上書きで済むが、`aac` は音声に入っている）
+- **多値フィールドは `" & "` で 1 値に結合**（設定で変更可）。ミュージック.app は複数値の 1 つしか
+  見せないため
+- 画像は 768 の JPEG（`covr` の WebP は読まれない）
+- **配布ビューもプレイリストも `aac` には作らない。** `delivery` は `opus` 系統に固定。ミュージック.app
+  へは `Derived/aac/` のファイルをそのまま取り込み、プレイリストは Apple 側で作る
+
+**理由**: Apple 純正の「ミュージック」は Opus を読めず、ReplayGain タグも読まない（独自の Sound Check =
+`iTunNORM` をトラック単位で、端末の設定が ON のときだけ適用）。端末設定に依らず音量を揃えるには焼き込み
+が確実で、焼き込み済みの上でサウンドチェックが ON でも二重にならないよう `iTunNORM` を 0 dB で置く。
+アルバムをまたぐシャッフルが主な運用なので album gain は使わない（D-74）。Apple 側の取り込みは
+ファイルだけで足りるので、プロファイル `apple` の m3u8 は YAGNI。
+
+**却下**: `fdkaac`（Debian non-free。真の VBR で品質にも定評があるが、依存が 1 つ増える。256k なら
+内蔵 `aac` で実用上透過）。`iTunNORM` のみ（端末で ON にする必要があり、換算式と Apple 側の扱いが
+不確か）。焼き込みのみ（サウンドチェック ON の端末で Apple が独自に計算した値が重なる）。非可逆原本を
+除外する（Apple 側で YouTube 由来の 1,513 本が欠ける）。系統ごとに別の root（`paths.derived_aac`。
+データセットを分ける需要が無く、GC と孤児回収が二重になる）。プロファイル `apple` の m3u8
+（SMB の絶対パス / 相対パス。取り込みがファイルだけなので不要）。
 
