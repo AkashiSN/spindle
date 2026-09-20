@@ -5,6 +5,7 @@
 import type { Derived, TrackDetail, TrackRow } from '../api/types'
 import { HIRES_LABEL, VERIFICATION, hiresMeasurements } from './badges'
 import { formatDuration } from './format'
+import { keyProblem, normKey } from './tagops'
 
 /** 詳細を取りに行く選択行の上限（それ以上は読み込み済みの行だけで判定） */
 export const DETAIL_LIMIT = 50
@@ -74,6 +75,23 @@ export function splitValues(s: string): string[] {
     .split(';')
     .map((v) => v.trim())
     .filter((v) => v !== '')
+}
+
+/**
+ * 「フィールドを追加」のキーの検証（P4-3、D-72）。tagops と同じ規則に加えて、表に既にあるキーは
+ * その行のダブルクリックで編集するよう案内する。問題が無ければ null
+ */
+export function newFieldKeyProblem(key: string, existing: readonly string[]): string | null {
+  const kp = keyProblem(key)
+  if (kp) return kp
+  const k = normKey(key)
+  if (existing.includes(k)) return `${k} は既にあります。その行をダブルクリックで編集してください`
+  return null
+}
+
+/** 行の「フィールドを削除」が押せるか（値が無い行は消すものが無い。複数の値なら選択の一部にはある） */
+export function canDeleteRow(row: Pick<PropRow, 'value'>): boolean {
+  return row.value.kind !== 'empty'
 }
 
 export function metadataRows(details: readonly TrackDetail[]): PropRow[] {

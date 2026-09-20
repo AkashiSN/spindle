@@ -44,6 +44,8 @@ export type BatchEdit = {
    * （D-58）。空の values は削除。失敗の理由を返す（成功なら null）
    */
   applyToSelection: (key: string, values: string[]) => Promise<string | null>
+  /** プロパティタブの「フィールドを削除」（選択全体への 1 op の delete。P4-3）。失敗の理由を返す */
+  deleteFromSelection: (key: string) => Promise<string | null>
   lastBatchId: number | null
 }
 
@@ -197,6 +199,20 @@ export function useBatchEdit(selection: Selection, sortParam: string): BatchEdit
     [selection, quickApply],
   )
 
+  const deleteFromSelection = useCallback(
+    async (key: string): Promise<string | null> => {
+      const sel = toSelectionBody(selection)
+      if (!sel) return '行を選択してください'
+      const op: TagOp = { id: 'props', op: 'delete', key }
+      const problem = validateOps([op])
+      if (problem) return problem.replace(/^1: /, '')
+      const req = opsToRequest([op])[0]
+      if (!req || req.op !== 'delete') return '操作を組み立てられません'
+      return quickApply(sel, [req])
+    },
+    [selection, quickApply],
+  )
+
   return {
     ops,
     setOps,
@@ -209,6 +225,7 @@ export function useBatchEdit(selection: Selection, sortParam: string): BatchEdit
     dismissPending,
     applyInline,
     applyToSelection,
+    deleteFromSelection,
     lastBatchId,
   }
 }

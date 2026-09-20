@@ -1292,6 +1292,65 @@ button.primary {
     grid-template-columns: 1fr;
   }
 }
+/* プロパティタブのフィールド削除 / 追加（P4-3、D-72） */
+.props-table td.props-action {
+  width: 1.6em;
+  text-align: right;
+  padding-right: 2px;
+}
+.props-delete {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  visibility: hidden;
+}
+.props-table tr:hover .props-delete:not(:disabled) {
+  visibility: visible;
+}
+.props-delete:hover {
+  color: var(--error);
+}
+.props-add-row td {
+  padding-top: 4px;
+}
+.props-add input,
+.props-table tr.editing input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+}
+.props-menu {
+  position: fixed;
+  z-index: 50;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.15);
+  min-width: 12em;
+}
+.props-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  padding: 4px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.props-menu button:hover:not(:disabled) {
+  background: var(--selected-bg, var(--border));
+}
+.props-menu button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
 .props-table tr.section th {
   color: var(--fg);
   font-weight: 600;

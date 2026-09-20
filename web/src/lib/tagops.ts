@@ -70,7 +70,7 @@ export type OpRequest =
   | { op: 'number'; key: string; start: number; pad: number }
   | { op: 'delete'; key: string }
 
-function normKey(key: string): string {
+export function normKey(key: string): string {
   return key.trim().toUpperCase()
 }
 
@@ -93,14 +93,21 @@ export function opsToRequest(ops: readonly TagOp[]): OpRequest[] {
 
 const KEY_RE = /^[ -<>-}]+$/
 
+/** キー 1 つの検証（`validateOps` と同じ規則。プロパティタブの「フィールドを追加」が使う）。問題があればその文言 */
+export function keyProblem(key: string): string | null {
+  const k = normKey(key)
+  if (!k || !KEY_RE.test(k)) return 'キーが空か、使えない文字（= や制御文字）を含んでいます'
+  if (k === 'PICTURE') return '画像はタグ編集の対象外です'
+  return null
+}
+
 /** 送る前の検証。最初の問題を返す（サーバでも検証するが、往復せずに直せるものはここで） */
 export function validateOps(ops: readonly TagOp[]): string | null {
   if (ops.length === 0) return '操作を 1 つ以上追加してください'
   for (const [i, o] of ops.entries()) {
     const n = i + 1
-    const key = normKey(o.key)
-    if (!key || !KEY_RE.test(key)) return `${n}: キーが空か、使えない文字（= や制御文字）を含んでいます`
-    if (key === 'PICTURE') return `${n}: 画像はタグ編集の対象外です`
+    const kp = keyProblem(o.key)
+    if (kp) return `${n}: ${kp}`
     if (o.op === 'replace' && o.pattern === '') return `${n}: パターンが空です`
     if (o.op === 'number' && (!Number.isInteger(o.start) || o.start < 0)) return `${n}: 開始は 0 以上の整数です`
     if (o.op === 'number' && (!Number.isInteger(o.pad) || o.pad < 0 || o.pad > 6)) return `${n}: 桁は 0 〜 6 の整数です`

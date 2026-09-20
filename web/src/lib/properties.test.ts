@@ -7,8 +7,7 @@ import {
   locationRows,
   metadataRows,
   splitValues,
-  STANDARD_KEYS,
-} from './properties'
+  STANDARD_KEYS, canDeleteRow, newFieldKeyProblem } from './properties'
 
 function row(over: Partial<TrackRow> = {}): TrackRow {
   return {
@@ -222,5 +221,24 @@ describe('generalRows', () => {
       new Map(),
     )
     expect(valueOf(padded, 'hires_check')).toEqual({ kind: 'text', text: 'ビット深度の水増し（実効 16 bit）（結果が古い）' })
+  })
+})
+
+describe('フィールドの追加 / 削除（P4-3、D-72）', () => {
+  it('newFieldKeyProblem: 空・使えない文字・PICTURE・既存キーを弾き、大文字化して比べる', () => {
+    const existing = ['ARTIST', 'TITLE', 'MYTAG']
+    expect(newFieldKeyProblem('', existing)).toMatch(/空/)
+    expect(newFieldKeyProblem('  ', existing)).toMatch(/空/)
+    expect(newFieldKeyProblem('A=B', existing)).toMatch(/使えない文字/)
+    expect(newFieldKeyProblem('picture', existing)).toMatch(/画像/)
+    expect(newFieldKeyProblem('artist', existing)).toMatch(/ARTIST は既にあります/)
+    expect(newFieldKeyProblem(' mytag ', existing)).toMatch(/MYTAG は既にあります/)
+    expect(newFieldKeyProblem('CATALOGNUMBER', existing)).toBeNull()
+    expect(newFieldKeyProblem('release type', existing)).toBeNull()
+  })
+  it('canDeleteRow: 値のある行と複数の値の行は消せ、空の行は消せない', () => {
+    expect(canDeleteRow({ value: { kind: 'text', text: 'x' } })).toBe(true)
+    expect(canDeleteRow({ value: { kind: 'multiple' } })).toBe(true)
+    expect(canDeleteRow({ value: { kind: 'empty' } })).toBe(false)
   })
 })

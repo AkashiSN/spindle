@@ -154,6 +154,7 @@ export function RightPanel({
             loading={details.loading}
             error={details.error}
             onEdit={edit.applyToSelection}
+            onDelete={edit.deleteFromSelection}
           />
         </div>
       )}
