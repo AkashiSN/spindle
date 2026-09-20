@@ -791,7 +791,7 @@ bitrate = 256                   # opusenc --vbr --music --bitrate
 [encode.derived.aac]
 enabled = true
 bitrate = 256                   # ffmpeg -c:a aac -b:a
-lossy_sources = true            # 非可逆原本も AAC へ（D-8 の例外。aac 原本は複製）
+lossy_sources = true            # 非可逆原本も AAC へ（D-8 の例外。aac 原本も再エンコード）
 multi_value_separator = " & "   # 多値フィールドの結合
 ```
 
@@ -801,7 +801,8 @@ multi_value_separator = " & "   # 多値フィールドの結合
 再エンコードして `opus/` 配下へ置き、旧ファイルは transcode の退避経路で消える。`bitrate = 128` のまま
 （`audio_profile` が一致）ならパスの差分だけなので Move で `opus/` 配下へ移る。
 
-`has_derived`（DSL / フラグ / バッジ）は **`opus` 系統の行**の有無（= 配布ビューが Derived を指すか）。
+`has_derived`（DSL / フラグ / バッジ）は **`opus` 系統の行**の有無（= `opus` 系統を生成済みか。音声版が古い間は
+配布ビューが原本へ倒れるが、`has_derived` は行の有無のまま）。
 `aac` しか無いトラック（非可逆原本）は `has_derived` にならない。`GET /api/tracks` の `derived` は系統ごとに
 集約して返す（2 系統あっても行は 1 つ）。
 

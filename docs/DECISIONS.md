@@ -119,8 +119,9 @@ AAC へ変換する。ミュージック.app が Opus を読めず、配布ビ�
 
 **追記（2026-09-20。P4-7）**: `opus` 系統の既定を **256 kbps** に上げる（`--vbr --music` は当初から）。
 可逆 237 GB（7,570 本）で 29 GB → 約 58 GB。あわせて系統ごとの設定 `[encode.derived.<variant>]` に
-改め、**行の `codec` / `bitrate` が設定と食い違えば再エンコード**の判定を足す（これが無いと設定を
-変えても音声版が同じ既存の Derived は作り直されない）。既存の 128k はこの判定で全件作り直す。
+改め、**行の `audio_profile`（codec / bitrate / サンプルレート規則 / 焼き込み方式の版を並べた文字列）が
+設定と食い違えば再エンコード**の判定を足す（これが無いと設定を変えても音声版が同じ既存の Derived は
+作り直されない。D-75）。既存の 128k（`opus:128:v1`）はこの判定で全件作り直す。
 
 ---
 
@@ -1639,8 +1640,9 @@ cover.jpg 優先の D-49 と食い違い、原寸のまま太る）。missing �
 0.14 秒。エンコード中のロードアベレージは 13 前後で、他のコンテナと同居する NAS では並列度を設定で
 落とせるようにする余地がある（SPEC §8 の cpus-1 固定のまま）。
 
-**追記（2026-09-20。P4-7 / P4-8）**: D-75 が次を上書きする。`transcode` の単位と dedup は
-`(track_id, variant)`、`derived_files` は系統ごとに 1 行、`aac` 系統は非可逆も対象（D-8 追記）で
+**追記（2026-09-20。P4-7 / P4-8）**: D-75 が次を上書きする。`transcode` の処理単位は
+`(track_id, variant)` で dedup キーは `transcode:<track_id>:<variant>:<audio_version>`（SPEC §8）、
+`derived_files` は系統ごとに 1 行、`aac` 系統は非可逆も対象（D-8 追記）で
 RG の解析世代の差分は Retag でなく Encode、`delivery` は `opus` 系統に固定、`has_derived` は `opus` の
 行の有無。判定の入力に `audio_profile` / `tag_profile`（設定の世代）が加わる。それ以外（判定を
 ハンドラが現在値から下す、退避経路、投入経路）はこの決定のまま。
