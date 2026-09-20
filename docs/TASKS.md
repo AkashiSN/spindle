@@ -988,17 +988,22 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `opus/` へ、profile 一致でパスだけ違えば Move）、`tests/transcode_job.rs`（Encode 後の旧パスの退避と削除、
       Move で `opus/` 配下へ）、`tests/dsl_compile.rs`（`has_derived` が opus 限定）、`tests/config.rs`、
       `tests/tracks_api.rs`（2 系統あっても行は 1 つで `derived` に両方）、`web/src/lib/properties.test.ts`
-- [ ] **P4-8** Apple 向け `aac` 系統（D-75、D-8 追記、SPEC §7.6）。`[encode.derived.aac] { enabled, bitrate,
-      lossy_sources, multi_value_separator }`。`media/encode.rs` に `AacEncoder`（ffmpeg 内蔵 `aac -b:a <k>`、
-      48 kHz 超は `-ar 48000`、`volume=<gain>dB` の焼き込み。aac 原本も同じ経路）。`domain/derived.rs` に
-      系統ごとの eligibility（`aac` は `lossy_sources` で非可逆も、RG 未解析は待つ）と `aac` の RG 世代差分 →
-      Encode、`audio_profile` に焼き込み方式の版。`domain/derived.rs::aac_tags`（多値を区切りで結合、RG 系キーを
-      落として `iTunNORM` 0 dB、フリーフォームは `----:com.apple.iTunes:<KEY>`）。画像は 768 JPEG
-      （`thumbs/<hex>/768.jpg`）。Dockerfile の変更なし。受け入れ: `tests/derived_plan.rs`（非可逆の対象化、
-      RG 未解析で待つ、RG 世代で Encode、`tag_profile`（区切り変更）で Retag）、`tests/aac_tags.rs`（結合、
-      iTunNORM の文字列、RG キー無し）、`tests/transcode_job.rs`（可逆 → AAC を lofty で読み戻し、ゲインの適用を
-      ebur128 で確認（gain 0 / 負 / peak で上限）、96 kHz → 48 kHz、44.1 kHz は据え置き、aac 原本の再エンコード、
-      `ffprobe` で `iTunNORM` のフリーフォーム atom を外部観測）
+- [x] **P4-8** Apple 向け `aac` 系統（D-75、D-8 追記、SPEC §7.6。2026-09-20）。`[encode.derived.aac] { enabled（節省略時
+      false）, bitrate, lossy_sources, multi_value_separator }`、0019 で `derived_variants` に `lossy_sources` /
+      `multi_value_separator`（`sync_variants(&DerivedConfig)` が両系統を写す）。`media/encode.rs` に `AacEncoder`
+      （ffmpeg 1 パス: `-af volume=<gain>dB [-ar 48000] -c:a aac -b:a <k>k -f mp4`。aac 原本も同じ経路）。
+      `domain/derived.rs`: `Target.rg_ready`（時刻 + gain + peak）、`eligible(&VariantSettings, &Target)`（`aac` は
+      `lossy_sources` で非可逆も、RG 未解析は待つ）、`aac` の RG 世代差分 → Encode、`bake_gain_db`（true peak で
+      頭打ち、非有限は 0 / 上限なし）、`aac_tags`（多値を区切りで結合、RG 系と既存 ITUNNORM を落として `iTunNORM`
+      0 dB）。`domain/tags.rs::write_mp4_tags`（ilst 標準 atom + `----:com.apple.iTunes:<KEY>` フリーフォーム +
+      `covr`）。画像は `ThumbFormat::Jpeg` の 768（`thumbs/<hex>/768.jpg`）。transcode ハンドラは両エンコーダを持ち
+      系統で分岐（予約・占有・配置・退避・drift は共通）。Dockerfile の変更なし。受け入れ: `tests/migrations.rs`
+      （0019）、`tests/config.rs`、`tests/derived_db.rs`（sync と RG 待ちの投入）、`tests/derived.rs`（非可逆の対象化、
+      RG 未解析で Skip、RG 世代で Encode、`tag_profile` で Retag、`bake_gain_db` の境界）、`tests/aac_tags.rs`
+      （結合、iTunNORM、RG キー無し、`ffprobe` でフリーフォーム atom を外部観測）、`tests/aac_encode.rs`（ebur128 で
+      gain 0 / 負 / 正、96k → 48k、44.1k / 48k 据え置き、非可逆 3 形式、cancel）、`tests/artwork.rs`（JPEG 768）、
+      `tests/transcode_job.rs`（可逆 → AAC の読み戻し・焼き込み・peak 上限・96k → 48k・opus / aac 原本の再エンコード・
+      RG 世代の作り直し・`lossy_sources` off の据え置き・タグ上書き・区切り変更の Retag・両系統の共存）
 
 ## 着手前に確認が必要な残課題
 
