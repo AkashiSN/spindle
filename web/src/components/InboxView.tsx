@@ -230,7 +230,9 @@ function ItemForm({
             <th>#</th>
             {hasPicture && <th />}
             <th>タイトル</th>
-            <th>アーティスト（空ならアルバムアーティスト。多値のファイルは「そのまま保つ」を外すと 1 値になる）</th>
+            <th title="多値のファイルは元の値をチップで示す。「そのまま保つ」を外すと 1 値で書く">
+              アーティスト（空ならアルバムアーティスト）
+            </th>
             <th>ファイル</th>
             <th>長さ</th>
             {hasSource && <th>判定</th>}
@@ -359,7 +361,7 @@ function ArtistCell({
           />{' '}
           そのまま保つ
         </label>
-        {!keep && <span className="muted">外すと 1 値『{track.artist.trim() === '' ? albumartist : track.artist.trim()}』で書く</span>}
+        {!keep && <span className="muted">1 値『{track.artist.trim() === '' ? albumartist : track.artist.trim()}』で書く</span>}
       </div>
     </div>
   )
