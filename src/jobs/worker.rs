@@ -3,7 +3,9 @@
 //!
 //! CPU 系の種別（`JobType::cpu_bound`）は種別の許可に加えて共通の予算（= コア数。D-73）も取る。
 //! 取得順は「種別 → 共通」で、共通が取れなければ claim せずに次の周回で試す（ジョブは queued の
-//! まま。1 本のループで待つと他の種別を止めるので、許可を持ったまま待たずに手放して回る）
+//! まま。1 本のループで待つと他の種別を止めるので、許可を持ったまま待たずに手放して回る）。
+//! 予算を分け合う種別は 1 件ずつ**ラウンドロビン**で claim し、開始位置を周回ごとに回す（種別名順に
+//! 空きが尽きるまで取ると、先頭の種別のキューが尽きるまで残りが始まらない）
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +48,10 @@ pub(super) async fn run(jobs: Arc<Jobs>, registry: Registry, shutdown: Cancellat
         "ジョブワーカーを開始"
     );
 
+    let (cpu_slots, other_slots): (Vec<_>, Vec<_>) =
+        slots.iter().cloned().partition(|(ty, _)| ty.cpu_bound());
+    // CPU 系のラウンドロビンの開始位置（周回ごとに 1 つ進める）
+    let mut rotation = 0usize;
     let mut tasks: JoinSet<()> = JoinSet::new();
     loop {
         if shutdown.is_cancelled() {
@@ -64,8 +70,29 @@ pub(super) async fn run(jobs: Arc<Jobs>, registry: Registry, shutdown: Cancellat
             }
             Err(e) => warn!(error = %e, "cancel 要求済み queued の掃除に失敗"),
         }
-        for (ty, sem) in &slots {
-            claim_all(&jobs, &registry, *ty, sem, &budget, &mut tasks, &shutdown).await;
+        for (ty, sem) in &other_slots {
+            while claim_one(&jobs, &registry, *ty, sem, &budget, &mut tasks, &shutdown).await
+                == Claimed::Yes
+            {}
+        }
+        // CPU 系: 種別を 1 件ずつ順に回し、1 周で何も取れなくなるまで（予算切れ・空）繰り返す
+        if !cpu_slots.is_empty() {
+            let start = rotation % cpu_slots.len();
+            rotation = rotation.wrapping_add(1);
+            loop {
+                let mut progressed = false;
+                for i in 0..cpu_slots.len() {
+                    let (ty, sem) = &cpu_slots[(start + i) % cpu_slots.len()];
+                    if claim_one(&jobs, &registry, *ty, sem, &budget, &mut tasks, &shutdown).await
+                        == Claimed::Yes
+                    {
+                        progressed = true;
+                    }
+                }
+                if !progressed {
+                    break;
+                }
+            }
         }
 
         tokio::select! {
@@ -85,8 +112,16 @@ pub(super) async fn run(jobs: Arc<Jobs>, registry: Registry, shutdown: Cancellat
     info!(inflight, "ジョブワーカーを停止");
 }
 
-/// 種別 `ty` の空きスロットが尽きるか queued が無くなるまで claim して起動する
-async fn claim_all(
+/// [`claim_one`] の結果。`No` は空き無し・予算無し・queued 無し・停止・claim 失敗のいずれか
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claimed {
+    Yes,
+    No,
+}
+
+/// 種別 `ty` の queued を 1 件 claim して起動する。空きスロットが無い・予算が無い・queued が無ければ
+/// 何もしない
+async fn claim_one(
     jobs: &Arc<Jobs>,
     registry: &Arc<Registry>,
     ty: JobType,
@@ -94,59 +129,58 @@ async fn claim_all(
     budget: &Arc<Semaphore>,
     tasks: &mut JoinSet<()>,
     shutdown: &CancellationToken,
-) {
+) -> Claimed {
     // slots は registry から作るので必ずあるが、無ければ claim して放置するより何もしない
     let Some(handler) = registry.get(ty) else {
-        return;
+        return Claimed::No;
     };
-    loop {
-        if shutdown.is_cancelled() {
-            return;
+    if shutdown.is_cancelled() {
+        return Claimed::No;
+    }
+    let Ok(permit) = Arc::clone(sem).try_acquire_owned() else {
+        return Claimed::No;
+    };
+    // CPU 系は共通の予算も要る（D-73）。取れなければ種別の許可も手放して次の周回に回す
+    // （実行中のタスクが終わると wake が来る）
+    let budget_permit = if ty.cpu_bound() {
+        match Arc::clone(budget).try_acquire_owned() {
+            Ok(p) => Some(p),
+            Err(_) => return Claimed::No,
         }
-        let Ok(permit) = Arc::clone(sem).try_acquire_owned() else {
-            return;
-        };
-        // CPU 系は共通の予算も要る（D-73）。取れなければ種別の許可も手放して次の周回に回す
-        // （実行中のタスクが終わると wake が来る）
-        let budget_permit = if ty.cpu_bound() {
-            match Arc::clone(budget).try_acquire_owned() {
-                Ok(p) => Some(p),
-                Err(_) => return,
-            }
-        } else {
-            None
-        };
-        let claimed = jobs
-            .db()
-            .write(move |c| dbjobs::claim_next(c, ty, now_epoch()))
-            .await;
-        match claimed {
-            Ok(Some(job)) => {
-                // claim の DB 往復中に停止が来たら起動せず queued へ戻す（停止後に副作用を始めない）
-                if shutdown.is_cancelled() {
-                    let id = job.id;
-                    let r = jobs
-                        .db()
-                        .write(move |c| dbjobs::requeue(c, id, now_epoch(), 0))
-                        .await;
-                    if let Err(e) = r {
-                        warn!(job_id = id, %ty, error = %e, "停止時の再キューに失敗");
-                    }
-                    return;
+    } else {
+        None
+    };
+    let claimed = jobs
+        .db()
+        .write(move |c| dbjobs::claim_next(c, ty, now_epoch()))
+        .await;
+    match claimed {
+        Ok(Some(job)) => {
+            // claim の DB 往復中に停止が来たら起動せず queued へ戻す（停止後に副作用を始めない）
+            if shutdown.is_cancelled() {
+                let id = job.id;
+                let r = jobs
+                    .db()
+                    .write(move |c| dbjobs::requeue(c, id, now_epoch(), 0))
+                    .await;
+                if let Err(e) = r {
+                    warn!(job_id = id, %ty, error = %e, "停止時の再キューに失敗");
                 }
-                tasks.spawn(execute(
-                    Arc::clone(jobs),
-                    Arc::clone(&handler),
-                    job,
-                    permit,
-                    budget_permit,
-                ));
+                return Claimed::No;
             }
-            Ok(None) => return,
-            Err(e) => {
-                warn!(%ty, error = %e, "ジョブの claim に失敗");
-                return;
-            }
+            tasks.spawn(execute(
+                Arc::clone(jobs),
+                Arc::clone(&handler),
+                job,
+                permit,
+                budget_permit,
+            ));
+            Claimed::Yes
+        }
+        Ok(None) => Claimed::No,
+        Err(e) => {
+            warn!(%ty, error = %e, "ジョブの claim に失敗");
+            Claimed::No
         }
     }
 }

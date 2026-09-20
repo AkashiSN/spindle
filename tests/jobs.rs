@@ -1203,6 +1203,77 @@ async fn cpu_bound_types_share_a_budget_of_cpus() {
     assert_eq!(peak.load(Ordering::SeqCst), 2, "予算 = コア数を超えない");
 }
 
+/// 予算は種別間で公平に配る。4 種を 3 本ずつ（先頭の種別名 flaccheck から順に）投入しても、先頭の
+/// キューが尽きる前に残りの種別が始まる（ラウンドロビン。D-73 追記）。合計はコア数を超えない
+#[tokio::test]
+async fn cpu_budget_is_shared_round_robin_across_types() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let h = Harness::with_cpus(2);
+    let running = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let started: Arc<Mutex<Vec<JobType>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut reg = Registry::new();
+    let types = [
+        JobType::Flaccheck,
+        JobType::Hirescheck,
+        JobType::Rg,
+        JobType::Transcode,
+    ];
+    for ty in types {
+        let running = running.clone();
+        let peak = peak.clone();
+        let started = started.clone();
+        reg.register_fn(ty, move |_ctx| {
+            let running = running.clone();
+            let peak = peak.clone();
+            let started = started.clone();
+            async move {
+                started.lock().unwrap().push(ty);
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                running.fetch_sub(1, Ordering::SeqCst);
+                Ok(Outcome::Done)
+            }
+        });
+    }
+    {
+        let conn = h.raw();
+        for i in 0..12 {
+            insert_track(&conn, 200 + i, 1, 1);
+        }
+    }
+    // 種別名順に固めて投入する（flaccheck ×3 → hirescheck ×3 → rg ×3 → transcode ×3）
+    let mut ids = Vec::new();
+    let mut n = 0;
+    for ty in types {
+        for _ in 0..3 {
+            let payload = if ty.version_field().is_some() {
+                serde_json::json!({ "track_id": 200 + n, "audio_version": 1 })
+            } else {
+                serde_json::json!({})
+            };
+            let job = NewJob::new(ty, payload).dedup_key(format!("{ty}:{n}"));
+            let EnqueueResult::Inserted(id) = h.jobs.enqueue(job).await.unwrap() else {
+                panic!()
+            };
+            ids.push(id);
+            n += 1;
+        }
+    }
+    h.start(reg);
+    for id in &ids {
+        wait_state(&h, *id, JobState::Done).await;
+    }
+    assert_eq!(peak.load(Ordering::SeqCst), 2);
+    let order = started.lock().unwrap().clone();
+    assert_eq!(order.len(), 12);
+    // 先頭 6 本の開始で 4 種すべてが出ている（固定順なら flaccheck ×3 → hirescheck ×3 が先に並ぶ）
+    let first: std::collections::HashSet<JobType> = order.iter().take(6).copied().collect();
+    assert_eq!(first.len(), 4, "開始順 {order:?}");
+}
+
 /// 予算に入らない種別は今までどおり種別の上限だけ（thumbnail = 4 は CPU 予算 2 に縛られない）
 #[tokio::test]
 async fn non_cpu_types_are_not_limited_by_the_budget() {

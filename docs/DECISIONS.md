@@ -2796,8 +2796,11 @@ hirescheck = コア数 / 2 で、スキャン完了時に 4 種がまとめて�
 1 本のループなので、そこで待つと他の種別の claim まで止まる。ジョブは queued のままで順序も変わらない
 ので、決定の意図（running にしない・順序を変えない）は同じ。`cpu_budget` は `concurrency` の中ではなく
 `GET /api/jobs` の兄弟フィールド（`concurrency` は種別名をキーにした表で、画面がそのまま行にするため）。
-`JobType::cpu_bound` が対象種別を決める。受け入れは `tests/jobs.rs`（コア数 2 で rg + flaccheck を 3 本ずつ、
-実行中の最大が 2。thumbnail は予算に縛られず 4）。
+`JobType::cpu_bound` が対象種別を決める。**予算を分け合う種別は 1 件ずつラウンドロビンで claim し、
+開始位置を周回ごとに回す**（種別名順に空きが尽きるまで取ると、先頭の flaccheck のキューが尽きるまで
+rg / transcode / hirescheck が始まらない。codex のレビュー指摘）。受け入れは `tests/jobs.rs`（コア数 2 で
+rg + flaccheck を 3 本ずつで実行中の最大が 2、4 種を種別名順に固めて 3 本ずつ投入しても先頭 6 本の開始に
+4 種が揃う、thumbnail は予算に縛られず 4）。
 
 ## D-74 album gain は album ごとの属性。既定 off、CD 取り込みは on、Inbox の承認画面で選ぶ
 

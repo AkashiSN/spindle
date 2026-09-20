@@ -1129,7 +1129,8 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
 - **CPU 系の共通予算**（`rg` / `transcode` / `flaccheck` / `hirescheck`。D-73、P4-1）: 種別の並列度に加えて
   共有の予算（= CPU コア数）を取ってから走る。種別単独なら今までどおり、複数種別が同時に走るときだけ
   実行中の合計がコア数に収まる。取得順は種別 → 共通で、共通が取れなければ claim せず次の周回で試す
-  （ジョブは queued のまま。順序は変えない）。`GET /api/jobs` の `cpu_budget`
+  （ジョブは queued のまま。種別内の順序は変えない）。予算を分け合う種別は 1 件ずつラウンドロビンで
+  claim する（開始位置は周回ごとに回す。1 種別が予算を独占しない）。`GET /api/jobs` の `cpu_budget`
 - 起動時リカバリ: `running` を `queued` へ戻し、`track_locks` / `derived_path_locks` / `job_mutexes` を
   **全件削除**する
   （ロックはプロセス生存中しか意味を持たない）。単一インスタンス前提。同じ DB を

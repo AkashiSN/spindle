@@ -945,7 +945,8 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - [x] **P4-1** CPU 系ジョブの共通並列予算（D-73。2026-09-20）。`worker.rs` に共有 Semaphore（= コア数）、`rg` /
       `transcode` / `flaccheck` / `hirescheck` が種別の上限に加えて取る。`GET /api/jobs` に `cpu_budget`
       （`concurrency` の兄弟。D-73 追記）。受け入れ: `tests/jobs.rs`（コア数 2 で rg + flaccheck の同時投入で
-      実行中の合計が 2 を超えない、thumbnail は縛られない）、`web/src/lib/jobs.test.ts`（脚注）
+      実行中の合計が 2 を超えない、4 種を固めて投入しても先頭 6 本に 4 種が揃う（ラウンドロビン）、thumbnail は
+      縛られない）、`web/src/lib/jobs.test.ts`（脚注）
 - [ ] **P4-2** CD 確定フォームの「候補から写す範囲」（D-72）。既定は識別用の最小限（ALBUM / ALBUMARTIST /
       DATE / DISCNUMBER / DISCTOTAL / TRACKTOTAL / MB id）、「全部写す」で LABEL / CATALOGNUMBER / BARCODE /
       トラックのタイトル・アーティスト・ISRC も。`web/src/lib/cdState.ts` の reducer に 1 アクション。受け入れ:
