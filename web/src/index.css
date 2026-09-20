@@ -521,6 +521,45 @@ table.kv tr.differs td {
   gap: 6px;
   align-items: center;
 }
+.badge-legend {
+  position: absolute;
+  right: 8px;
+  top: 100%;
+  z-index: 10;
+  width: 420px;
+  max-height: 70vh;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.12);
+  padding: 8px 12px;
+  text-align: left;
+  font-weight: 400;
+}
+.badge-legend h4 {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.badge-legend section:first-child h4 {
+  margin-top: 0;
+}
+.badge-legend ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.badge-legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+.badge-legend li > .badge {
+  flex: none;
+  min-width: 28px;
+}
 .table-scroll {
   flex: 1;
   min-height: 0;

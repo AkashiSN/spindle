@@ -27,6 +27,7 @@ import { dropTarget, parseDragIds, serializeDragIds, TRACK_DRAG_TYPE, type DropH
 import type { ClickModifiers, Selection, VisibleOrder } from '../lib/selection'
 import { isSelected } from '../lib/selection'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
+import { BadgeLegend } from './BadgeLegend'
 import { Badges } from './Badges'
 
 const features = tableFeatures({
@@ -233,6 +234,7 @@ export function TrackTable(props: TrackTableProps) {
     isSizing,
   )
   const [chooserOpen, setChooserOpen] = useState(false)
+  const [legendOpen, setLegendOpen] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const count = total ?? rows.length
@@ -382,7 +384,26 @@ export function TrackTable(props: TrackTableProps) {
           <span className="muted small">並べ替えは position 昇順のときだけ</span>
         )}
         <span className="spacer" />
-        <button type="button" className="ghost" onClick={() => setChooserOpen((o) => !o)}>
+        <button
+          type="button"
+          className="ghost"
+          title="バッジの意味"
+          onClick={() => {
+            setLegendOpen((o) => !o)
+            setChooserOpen(false)
+          }}
+        >
+          凡例
+        </button>
+        {legendOpen && <BadgeLegend />}
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => {
+            setChooserOpen((o) => !o)
+            setLegendOpen(false)
+          }}
+        >
           列
         </button>
         {chooserOpen && (

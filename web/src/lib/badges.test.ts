@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TrackRow } from '../api/types'
-import { badgesOf } from './badges'
+import { BADGE_LEGEND, badgesOf } from './badges'
 
 const base: TrackRow = {
   id: 1,
@@ -130,5 +130,41 @@ describe('badgesOf', () => {
       hires_check: { ...ok, status: 'decode_error', error: 'boom', cutoff_hz: null, effective_bits: null },
     })
     expect(err.find((x) => x.key === 'hires')!.label).toContain('boom')
+  })
+
+  it('凡例は badgesOf が出しうるバッジ（key / icon / cls）をすべて含む', () => {
+    const legend = new Set(BADGE_LEGEND.flatMap((g) => g.items.map((it) => `${it.key}|${it.icon.replace('•', '')}|${it.cls}`)))
+    const hires = { checked_at: 1, stale: false, error: null, cutoff_hz: 22050, cliff_db: 48.3, effective_bits: 16 }
+    const rows: TrackRow[] = [
+      base,
+      { ...base, verification: 'verified_ar' },
+      { ...base, verification: 'verified_ctdb' },
+      { ...base, verification: 'mismatch' },
+      { ...base, verification: 'unverifiable' },
+      { ...base, lossless: false, codec: 'opus' },
+      { ...base, rg_scanned_at: 1, rg_written_at: 2, rg: { track_gain: 0, track_peak: 0, album_gain: null, album_peak: null } },
+      { ...base, rg_scanned_at: 2, rg_written_at: 1, rg: { track_gain: 0, track_peak: 0, album_gain: null, album_peak: null } },
+      { ...base, derived: { codec: 'opus', stale_tags: false } },
+      { ...base, derived: { codec: 'opus', stale_tags: true } },
+      { ...base, flac_check: { status: 'md5_missing', checked_at: 1, stale: true, error: null } },
+      { ...base, flac_check: { status: 'decode_error', checked_at: 1, stale: false, error: 'x' } },
+      { ...base, hires_check: { ...hires, status: 'upsampled' } },
+      { ...base, hires_check: { ...hires, status: 'padded' } },
+      { ...base, hires_check: { ...hires, status: 'both', stale: true } },
+      { ...base, hires_check: { ...hires, status: 'inconclusive' } },
+      { ...base, hires_check: { ...hires, status: 'decode_error', error: 'x' } },
+      { ...base, pending_batch_id: 1 },
+      { ...base, conflict_batch_id: 1 },
+      { ...base, duplicate_group: 'ab' },
+      { ...base, hardlink: true },
+      { ...base, missing_since: 1 },
+    ]
+    for (const r of rows) {
+      for (const b of badgesOf(r)) {
+        // stale の • は同じ意味なので凡例では 1 行にまとめる
+        const k = `${b.key}|${b.icon.replace('•', '')}|${b.cls}`
+        expect(legend.has(k), `凡例に無い: ${k}`).toBe(true)
+      }
+    }
   })
 })
