@@ -542,7 +542,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             total={albums.albums.length}
             filtered={filterParam !== ''}
             pending={albums.filterPending}
-            error={albums.error}
+            error={albums.filterError ?? albums.error}
             onOpen={(a) => handleScope({ album_id: a.id })}
           />
         ) : view === 'inbox' ? (

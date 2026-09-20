@@ -10,9 +10,15 @@ import { albumsUrl } from '../lib/artwork'
  */
 export function useAlbums(enabled: boolean, filterParam = '', wantFiltered = false) {
   const [albums, setAlbums] = useState<AlbumRow[]>([])
-  const [filteredState, setFilteredState] = useState<{ param: string; items: AlbumRow[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // 絞り込みは要求の完了（成功 / 失敗）ごとに「どの filterParam に対する結果か」を持つ。
+  // 現在の filterParam と一致する完了が無ければ応答待ち（失敗も完了なので待ちが残らない）
+  const [filteredState, setFilteredState] = useState<{
+    param: string
+    items: AlbumRow[] | null
+    error: string | null
+  } | null>(null)
   // 取り直しの最新だけを採用する（古い応答で新しい絞り込みを上書きしない）
   const filteredSeq = useRef(0)
   const refreshAll = useCallback(() => {
@@ -28,12 +34,12 @@ export function useAlbums(enabled: boolean, filterParam = '', wantFiltered = fal
     const seq = ++filteredSeq.current
     apiFetch<{ items: AlbumRow[] }>(albumsUrl(filterParam))
       .then((r) => {
-        if (seq !== filteredSeq.current) return
-        setFilteredState({ param: filterParam, items: r.items })
-        setError(null)
+        if (seq === filteredSeq.current) setFilteredState({ param: filterParam, items: r.items, error: null })
       })
       .catch((e: unknown) => {
-        if (seq === filteredSeq.current) setError(e instanceof Error ? e.message : String(e))
+        if (seq === filteredSeq.current) {
+          setFilteredState({ param: filterParam, items: null, error: e instanceof Error ? e.message : String(e) })
+        }
       })
   }, [filterParam, wantFiltered])
   const refresh = useCallback(() => {
@@ -46,9 +52,12 @@ export function useAlbums(enabled: boolean, filterParam = '', wantFiltered = fal
   useEffect(() => {
     if (enabled) refreshFiltered()
   }, [enabled, refreshFiltered])
-  // 絞り込み無しなら全件、絞り込み中で応答待ちなら前回の（別のフィルタの）結果を出さず全件
-  const filtered = filterParam === '' ? albums : filteredState?.param === filterParam ? filteredState.items : albums
-  const filterPending = filterParam !== '' && wantFiltered && filteredState?.param !== filterParam
+  // 絞り込み無しなら全件。応答待ち・失敗・別のフィルタの結果しか無いときも全件（古い絞り込みを出さない）。
+  // 同じフィルタの取り直し（library / job イベント）の間は前回の結果を出し、届いたら差し替える
+  const current = filteredState?.param === filterParam ? filteredState : null
+  const filterPending = filterParam !== '' && wantFiltered && current == null
+  const filterError = current?.error ?? null
+  const filtered = filterParam === '' || current?.items == null ? albums : current.items
   /** album gain の属性を切り替える（PATCH /api/albums/:id。D-74）。失敗ならメッセージ */
   const setAlbumGain = useCallback(
     async (id: number, on: boolean): Promise<string | null> => {
@@ -65,5 +74,5 @@ export function useAlbums(enabled: boolean, filterParam = '', wantFiltered = fal
     },
     [],
   )
-  return { albums, filtered, filterPending, error, refresh, busy, setAlbumGain }
+  return { albums, filtered, filterPending, filterError, error, refresh, busy, setAlbumGain }
 }
