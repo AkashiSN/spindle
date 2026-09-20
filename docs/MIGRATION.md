@@ -107,6 +107,16 @@ sudo chown -R 1000:1000 /mnt/ssd/media /mnt/hdd/media /mnt/ssd/apps/spindle
 **ACL は rsync で引き継げない。** TrueNAS の SMB データセットは NFSv4 ACL を使うが、
 `rsync -A` が扱うのは POSIX ACL であり互換がない。コピー後に TrueNAS の ACL エディタで
 新データセットにプリセットを適用し直す（SMB ユーザとコンテナの `1000:1000` の両方が書ける形）。
+1 回しか使わないのでスクリプト化はしない（D-72 と同日に決定）。手順:
+
+1. Datasets → `ssd/media` → Permissions → Edit（`hdd/media` も同じ）
+2. Owner / Group を `1000` / `1000`、Preset は **Restricted** を基点に、`owner@` と `group@` に
+   FULL_CONTROL、SMB で書くユーザ（またはそのグループ）にも FULL_CONTROL の ACE を足す
+3. **Apply permissions recursively** と **Apply permissions to child datasets** にチェックして保存
+4. 確認: `nfs4xdr_getfacl /mnt/ssd/media/Library` に `owner@:rwxpDdaARWcCos:fd-----:allow` 相当の
+   行が出て、コンテナ（`1000`）と SMB ユーザの両方で `touch` できること
+   （`sudo -u '#1000' touch /mnt/ssd/media/Inbox/.acl-test && rm` と、SMB クライアントからの新規ファイル）
+
 定期スナップショットも UI で上の表どおりに設定する。
 
 ## 3. 移行後の照合

@@ -938,10 +938,25 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 ---
 
+## P4（予定）
+
+完了条件は未定。P0〜P3 の残課題から決めたものだけを置く。設計は着手時に行う。
+
+- [ ] **P4-1** CPU 系ジョブの共通並列予算（D-73）。`worker.rs` に共有 Semaphore（= コア数）、`rg` /
+      `transcode` / `flaccheck` / `hirescheck` が種別の上限に加えて取る。`GET /api/jobs` の `concurrency` に
+      `cpu_budget`。受け入れ: `tests/jobs.rs`（4 種同時投入で実行中の合計がコア数を超えない）
+- [ ] **P4-2** CD 確定フォームの「候補から写す範囲」（D-72）。既定は識別用の最小限（ALBUM / ALBUMARTIST /
+      DATE / DISCNUMBER / DISCTOTAL / TRACKTOTAL / MB id）、「全部写す」で LABEL / CATALOGNUMBER / BARCODE /
+      トラックのタイトル・アーティスト・ISRC も。`web/src/lib/cdState.ts` の reducer に 1 アクション。受け入れ:
+      `web/src/lib/cdState.test.ts`
+- [ ] **P4-3** プロパティタブのフィールド削除 / 追加（D-72）。右クリック（または行末の ×）で `delete` op、
+      「フィールドを追加」で新しいキーに `set` op。どちらも選択全体への一括編集（preview → apply）。
+      受け入れ: `web/src/lib/properties.test.ts`、`web/src/components` の vitest
+
 ## 着手前に確認が必要な残課題
 
-- Discogs / VGMdb 連携の要否（P3 以降）
-- `.fpl` 書き出しの要否（P4、非推奨）
+- ~~Discogs / VGMdb 連携の要否~~（2026-09-20。作らない。D-72）
+- ~~`.fpl` 書き出しの要否~~（2026-09-20。作らない。D-72）
 - ~~Inbox のポーリング間隔~~（P2-10 で決めた。60 秒 + 手動。D-68）
 - ~~一括リネーム後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）と
   空ディレクトリの扱い~~（P2-8 で決めた。D-67）

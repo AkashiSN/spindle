@@ -475,7 +475,8 @@ Phase 4  commit:     1 トランザクションで
    ↓            「リリース × medium」（DiscID を持つ medium は exact、トラック数の合う medium は近似。D-64）
    ↓            ※同人・VTuber・インディーズ国内盤は MusicBrainz 未登録が常態。
    ↓              照会結果ゼロでもウィザードが完走できることを必須要件とする。
-   ↓              候補も手入力も同じフォーム（候補を写して直す。D-65）に収束し、確定で
+   ↓              候補も手入力も同じフォーム（候補を写して直す。D-65。写す範囲は既定で識別用の
+   ↓              最小限、「全部写す」を選べる。D-72、P4-2）に収束し、確定で
    ↓              DiscMetadata（album / album_artist / date / label / catalog_number / barcode /
    ↓              disc_no / disc_count / tracks[{ number, title, artist, mb }]、source）になる。
    ↓              トラックリスト貼り付け（通販ページ等からのテキストを行解析して
@@ -1962,16 +1963,19 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 | インポート | Inbox + 承認キュー方式 | 外部ツリーを直接スキャンすると規約とタグ品質が混入する |
 | SMB | `casesensitivity=insensitive` / `normalization=formD` | 他クライアントが作るファイルと NFC/NFD 混在の事故を ZFS 層で潰す |
 | 移行方式 | 新規データセット作成 + rsync コピー | 上記 2 プロパティは作成時のみ指定可能 |
+| 外部メタデータ | MusicBrainz だけ。候補から写すのは既定で識別用の最小限（アルバム・アルバムアーティスト・年・ディスク / トラック数・MB id）。Discogs / VGMdb は作らない | 表記揺れが激しく値は結局手で入れる。外部の価値は盤の識別（D-72） |
+| `.fpl` | 非対応（確定） | .m3u8 とクエリ文字列で足りる。非公開バイナリで 1.x / 2.x が違う（D-72） |
+| ACL の再適用 | 移行後に TrueNAS の ACL エディタで手動（MIGRATION.md §2 のチェックリスト） | rsync は NFSv4 ACL を引き継げない。1 回しか使わないのでスクリプト化しない |
 
 ### 残課題
 
-- [ ] Discogs / VGMdb 連携（P3 以降の任意。国内盤カタログ番号とアートワーク補完）
-- [ ] `.fpl` 書き出し（P4 の任意。バイナリ形式の解析コストに見合うか要判断）
+- [x] Discogs / VGMdb 連携（2026-09-20。作らない。D-72）
+- [x] `.fpl` 書き出し（2026-09-20。作らない。D-72）
 - [x] `HAS` 等の演算子の foobar 実機との挙動突き合わせ（2026-09-19。部分一致で一致。D-55）
 - [x] 偽ハイレゾ検出のしきい値設計（2026-09-20。カットオフ ≤ 25 kHz かつ崖 ≥ 30 dB / 実効 ≤ 16 bit。計測値も保存。§7.10、D-71）
-- [ ] 移行後の NFSv4 ACL 再適用（rsync では引き継げない）
-- [ ] CPU 系ジョブ（rg / transcode / flaccheck / hirescheck）に共通の並列予算。いまは種別ごとの Semaphore で
-      同時に走ると合計が CPU コア数を超える（D-71 で hirescheck の並列を半分にして緩和したのみ）
+- [x] 移行後の NFSv4 ACL 再適用（2026-09-20。UI で手動。MIGRATION.md §2 のチェックリスト）
+- [x] CPU 系ジョブ（rg / transcode / flaccheck / hirescheck）に共通の並列予算（2026-09-20。共通 Semaphore =
+      コア数を P4 で実装。D-73）
 - [x] Inbox のポーリング間隔（2026-09-19。`[inbox].poll_interval_secs` 既定 60 秒 + 手動。D-68）
 - [x] 一括リネームで album 全体を動かした後、旧ディレクトリに残る同梱ファイル（cover.jpg /
       disc.cue / rip.log 等）の追随と空ディレクトリの扱い（2026-09-19。rename ジョブが commit 後に
