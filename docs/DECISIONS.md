@@ -2731,6 +2731,18 @@ hash アドレスへ変更。下の追記）。P4-4。
   （`keep_artists` で多値を保つ・false で 1 値・旧下書きの互換）、`web/src/lib/inbox.test.ts`（`pictureOf` /
   `itemCover` / `draftFrom` の旧下書き）
 
+**追記（2026-09-21。P4-13）**: 導線を操作タブの節から独立した YouTube 画面に移す（SPEC §12.6）。操作タブは
+選択したトラックへの操作の場所で、選択と無関係なダウンロードが混ざって見つけにくく、投入後の行方も
+ジョブ画面に埋もれていた。画面には ytdl ジョブの一覧（結果と「Inbox で確認」）を置き、`/youtube?url=` で
+URL を受ける（ブックマークレット。同一 origin の GET なので CORS / CSRF の話が無い）。再生リストの展開時に
+Library / Inbox に `SOURCE_URL` のある動画は投入しない（動画ごとのジョブが「取り込み済み」で失敗する
+のは同じ結果だが、一覧が失敗 200 行で埋まる。P4-14 で既存曲に `SOURCE_URL` が付いたので、再生リストを
+貼れば新しいものだけが落ちる）。`[ytmusic].ytdlp_args` で yt-dlp に毎回付ける引数を配列で渡せる
+（`--extractor-args` / `--cookies`。P4-16 の同期が常用になると要る）。**UA / Referer は付けない**: yt-dlp の
+YouTube 抽出は player client（web / ios / android …）の偽装で innertube API を叩くので、ブラウザ風の UA を
+上書きすると client の偽装と食い違って弾かれる（yt-dlp の公式見解）。Referer も innertube には効かない。
+ブロックへの対処は yt-dlp の更新（P4-12 (7)）と `ytdlp_args` の 2 つ。
+
 ## D-71 偽ハイレゾ検出は表示と絞り込みだけに使い、判定はカットオフの「崖」と実効ビットで下す
 
 **決定**: 可逆かつ `sample_rate > 48000` または `bit_depth > 16` のトラックを `hirescheck` ジョブ

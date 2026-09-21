@@ -1,4 +1,4 @@
-export type View = 'tracks' | 'albums' | 'inbox' | 'cd' | 'jobs' | 'history' | 'settings'
+export type View = 'tracks' | 'albums' | 'inbox' | 'cd' | 'youtube' | 'jobs' | 'history' | 'settings'
 
 /** 上部ナビの画面。「一覧」がホーム（SPEC §12.1） */
 /** 上部バーに並べる画面。「一覧」がホーム */
@@ -7,6 +7,7 @@ export const VIEWS: Array<[View, string]> = [
   ['albums', 'アルバム'],
   ['inbox', 'Inbox'],
   ['cd', 'CD'],
+  ['youtube', 'YouTube'],
   ['jobs', 'ジョブ'],
 ]
 

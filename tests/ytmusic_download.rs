@@ -797,3 +797,74 @@ async fn real_ytdlp_end_to_end() {
     assert_eq!(pictures.len(), 1);
     assert!(af.duration_ms.unwrap_or(0) > 15_000);
 }
+
+/// P4-13: 再生リストの展開時に、Library / Inbox に `SOURCE_URL` のある動画は投入しない（取り込み済みの
+/// 失敗ジョブで一覧を埋めない）
+#[tokio::test]
+async fn playlist_expansion_skips_videos_already_imported() {
+    let lib = lib!();
+    let pl = "https://www.youtube.com/playlist?list=PL2";
+    lib.dump(
+        pl,
+        r#"{"_type":"playlist","id":"PL2","title":"List","entries":[
+             {"_type":"url","id":"v1","url":"https://www.youtube.com/watch?v=v1"},
+             {"_type":"url","id":"v2","url":"https://www.youtube.com/watch?v=v2"},
+             {"_type":"url","id":"v3","url":"https://www.youtube.com/watch?v=v3"}]}"#,
+    );
+    lib.video(
+        "https://www.youtube.com/watch?v=v3",
+        "v3",
+        "KnownCh",
+        "Three",
+        true,
+    );
+    // v1 は Library、v2 は Inbox に取り込み済み
+    let c = lib.conn();
+    c.execute(
+        "INSERT INTO tracks (rel_path, rel_path_key, dev, inode, size, mtime_ns, ctime_ns, codec, lossless,
+           title, artist_display, album, albumartist, track_no, disc_no, seen_at)
+         VALUES ('A/01.opus', 'a/01.opus', 1, 1, 1, 1, 1, 'opus', 0, 'One', 'Ar', 'Al', 'AA', 1, 1, 1)",
+        [],
+    )
+    .unwrap();
+    let tid = c.last_insert_rowid();
+    c.execute(
+        "INSERT INTO track_tags (track_id, key, idx, value) VALUES (?1, 'SOURCE_URL', 0, 'https://www.youtube.com/watch?v=v1')",
+        [tid],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO inbox_items (rel_dir, rel_dir_key, state, detected_at, seen_at) VALUES ('youtube/x', 'youtube/x', 'pending', 1, 1)",
+        [],
+    )
+    .unwrap();
+    let iid = c.last_insert_rowid();
+    c.execute(
+        "INSERT INTO inbox_files (item_id, rel_path, rel_path_key, inode, size, mtime_ns, ctime_ns, codec, lossless, tags)
+         VALUES (?1, 'youtube/x/v2.opus', 'youtube/x/v2.opus', 2, 1, 1, 1, 'opus', 0, '[[\"SOURCE_URL\",\"https://www.youtube.com/watch?v=v2\"]]')",
+        [iid],
+    )
+    .unwrap();
+    drop(c);
+
+    lib.start();
+    let (id, st) = lib.run(pl).await;
+    assert_eq!(st, JobState::Done);
+    let ids: Vec<i64> = lib
+        .conn()
+        .prepare("SELECT id FROM jobs WHERE type = 'ytdl' AND dedup_key LIKE ?1 ORDER BY id")
+        .unwrap()
+        .query_map(
+            [format!("{DEDUP_PREFIX}https://www.youtube.com/watch%")],
+            |r| r.get(0),
+        )
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(ids.len(), 1, "v3 だけが投入される");
+    assert_eq!(lib.wait(ids[0]).await, JobState::Done);
+    assert!(lib
+        .inbox_path("youtube/Artist A/Songs of A/20260901 Song One [v3].opus")
+        .exists());
+    let _ = id;
+}

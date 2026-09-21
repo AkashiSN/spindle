@@ -34,3 +34,27 @@ P0 完了（P0-14 で実機へ移行のリハーサル済み。9,098 トラッ�
 環境変数も DB もパスワードが無いとロックモード（`/health` が `{"status":"locked"}`、
 それ以外は 503）で起動する。**初期化が済んだら compose から `SPINDLE_INITIAL_PASSWORD` の
 行を消してよい**（平文を残さないため。消しても DB のパスワードで起動する）。
+
+## YouTube の取り込み
+
+上部バーの「YouTube」画面に動画か再生リストの URL を 1 行 1 つ貼ると、音声を Inbox に置く
+（承認は Inbox）。再生リストは動画ごとに展開し、取り込み済み（`SOURCE_URL` が一致）の動画は飛ばす
+ので、同じ再生リストを何度貼っても新しいものだけが落ちる。
+
+URL を貼る手間を減らすブックマークレット（ブックマークの URL 欄に貼る。`<spindle>` は
+`http://truenas:8080` のような spindle の URL）:
+
+- **この動画を spindle へ**: いま見ているページの URL を spindle の YouTube 画面に入れて開く
+  ```
+  javascript:void(open('http://<spindle>/youtube?url='+encodeURIComponent(location.href)))
+  ```
+- **このページの動画リンクを全部集める**: チャンネルの動画一覧・検索結果・再生リストのページで
+  動画の URL を集め、改行区切りでクリップボードへ（spindle の欄に貼る）
+  ```
+  javascript:(()=>{const s=new Set([...document.querySelectorAll('a[href*="/watch?v="]')].map(a=>new URL(a.href).searchParams.get('v')).filter(Boolean));navigator.clipboard.writeText([...s].map(v=>'https://www.youtube.com/watch?v='+v).join('\n')).then(()=>alert(s.size+' 件をコピーした'))})()
+  ```
+
+YouTube に弾かれるようになったら、まず yt-dlp を新しくする（イメージの更新）。それでも駄目なら
+`config.toml` の `[ytmusic].ytdlp_args` に `--extractor-args` や `--cookies` を渡す（`sh -c` は使わない
+ので配列。UA / Referer は付けない）。
+

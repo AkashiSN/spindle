@@ -607,3 +607,49 @@ fn hires_section_is_optional_with_documented_defaults() {
     let err = Config::parse(&with_override("hires", "cliff_db = -1.0")).unwrap_err();
     assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
 }
+
+/// P4-13: yt-dlp に渡す追加引数（ブロック時の `--extractor-args` / `--cookies` の口）。既定は空、
+/// 要素の空文字は拒否。`sh -c` は使わないので配列でしか渡せない
+#[test]
+fn ytmusic_ytdlp_args_default_empty_and_reject_blank_elements() {
+    let cfg = Config::parse(&replace_section(
+        "ytmusic",
+        "enabled = true\nmetadata_command = [\"p\"]",
+    ))
+    .unwrap();
+    assert!(cfg.ytmusic.ytdlp_args.is_empty());
+    assert!(Config::parse(EXAMPLE)
+        .unwrap()
+        .ytmusic
+        .ytdlp_args
+        .is_empty());
+    let cfg = Config::parse(&replace_section(
+        "ytmusic",
+        "enabled = true\nmetadata_command = [\"p\"]\nytdlp_args = [\"--extractor-args\", \"youtube:player_client=web_safari\"]",
+    ))
+    .unwrap();
+    assert_eq!(
+        cfg.ytmusic.ytdlp_args,
+        ["--extractor-args", "youtube:player_client=web_safari"]
+    );
+    assert_eq!(
+        cfg.ytdlp_command(),
+        [
+            "yt-dlp",
+            "--extractor-args",
+            "youtube:player_client=web_safari"
+        ]
+    );
+    for body in [
+        "enabled = true\nmetadata_command = [\"p\"]\nytdlp_args = [\"\"]",
+        "enabled = true\nmetadata_command = [\"p\"]\nytdlp_args = [\"--cookies\", \" \"]",
+    ] {
+        assert!(
+            matches!(
+                Config::parse(&replace_section("ytmusic", body)),
+                Err(ConfigError::Invalid(_))
+            ),
+            "{body}"
+        );
+    }
+}

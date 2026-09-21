@@ -402,6 +402,11 @@ pub struct YtmusicConfig {
     /// yt-dlp のダウンロード 1 件の上限秒（D-70）
     #[serde(default = "default_download_timeout")]
     pub download_timeout_secs: u32,
+    /// yt-dlp に毎回付ける追加引数（P4-13）。ブロック時の `--extractor-args` / `--cookies` の口。
+    /// `sh -c` は使わないので配列。UA / Referer は付けない（YouTube の抽出は player client の偽装で
+    /// innertube を叩くので、ブラウザ UA を上書きすると食い違って弾かれる）
+    #[serde(default)]
+    pub ytdlp_args: Vec<String>,
 }
 
 fn default_metadata_timeout() -> u32 {
@@ -437,6 +442,14 @@ impl BinConfig {
 }
 
 impl Config {
+    /// yt-dlp の起動引数列（プログラム + `[ytmusic].ytdlp_args`）。dump / download の両方に付く
+    pub fn ytdlp_command(&self) -> Vec<String> {
+        let mut v = Vec::with_capacity(1 + self.ytmusic.ytdlp_args.len());
+        v.push(self.bin.ytdlp.clone());
+        v.extend(self.ytmusic.ytdlp_args.iter().cloned());
+        v
+    }
+
     /// TOML 文字列を解析し、値の妥当性を検証する。ファイルシステムは見ない
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
         let mut cfg: Config = toml::from_str(text)?;
@@ -598,6 +611,9 @@ impl Config {
             if self.ytmusic.download_timeout_secs == 0 {
                 return invalid("ytmusic.download_timeout_secs は 1 以上".into());
             }
+        }
+        if self.ytmusic.ytdlp_args.iter().any(|a| a.trim().is_empty()) {
+            return invalid("ytmusic.ytdlp_args に空の要素がある".into());
         }
 
         // [hires]

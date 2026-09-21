@@ -22,6 +22,7 @@ import { SmartRuleEditor, type RuleDraft } from './components/SmartRuleEditor'
 import { Sidebar, type Scope } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
 import { TrackTable } from './components/TrackTable'
+import { YoutubeView } from './components/YoutubeView'
 import { useAlbums } from './hooks/useAlbums'
 import { useBatchEdit } from './hooks/useBatchEdit'
 import { useDragSize } from './hooks/useDragSize'
@@ -37,6 +38,7 @@ import { useCdLookup } from './hooks/useCdLookup'
 import { useInbox } from './hooks/useInbox'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
+import { OPENED_WITH_URL, useYoutube } from './hooks/useYoutube'
 import { albumsOfRows } from './lib/albumGain'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
 import { scopeAfterPlaylistDelete, sortForScope } from './lib/playlists'
@@ -79,7 +81,8 @@ export default function App() {
 }
 
 function Shell({ onLogout }: { onLogout: () => void }) {
-  const [view, setView] = useState<View>('tracks')
+  // `/youtube?url=` で開かれたら YouTube 画面から始める（ブックマークレットの受け口。hooks/useYoutube）
+  const [view, setView] = useState<View>(OPENED_WITH_URL ? 'youtube' : 'tracks')
   const [scope, setScope] = useState<Scope>({})
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<Sort>(DEFAULT_SORT)
@@ -117,6 +120,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const playlists = usePlaylists(sseOpen)
   const refreshPlaylists = playlists.refresh
   const jobs = useJobSummary(sseOpen)
+  const youtube = useYoutube()
   // 履歴は画面を開いたときに取り、開いている間は batch イベントで取り直す
   const history = useHistory(sseOpen && view === 'history')
   /** ジョブ / 設定画面から「バッチ #n」で飛んできたときに開くバッチ */
@@ -551,6 +555,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           <InboxView inbox={inbox} onOpenAlbum={(id) => handleScope({ album_id: id })} />
         ) : view === 'cd' ? (
           <CdView cd={cd} />
+        ) : view === 'youtube' ? (
+          <YoutubeView youtube={youtube} jobs={jobs} onOpenInbox={() => setView('inbox')} />
         ) : view === 'jobs' ? (
           <JobsView
             jobs={jobs}

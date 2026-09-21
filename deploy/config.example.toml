@@ -80,6 +80,9 @@ enabled = true
 metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
 metadata_timeout_secs = 30
 download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
+# yt-dlp に毎回付ける追加引数（省略時は無し）。YouTube に弾かれるときの口。UA / Referer は付けない
+# ytdlp_args = ["--extractor-args", "youtube:player_client=web_safari"]
+# ytdlp_args = ["--cookies", "/data/cookies.txt"]
 
 [hires]                        # 偽ハイレゾ検出（D-71）
 check_on_import = true         # スキャン完了時に未検査の対象（可逆かつ >48 kHz または >16 bit）を自動投入

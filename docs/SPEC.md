@@ -884,7 +884,7 @@ multi_value_separator = " & "   # 多値フィールドの結合
 人が一度見てから Library に入る。
 
 - **入口**: `POST /api/ytmusic/download { urls }` が URL ごとに `ytdl` ジョブ（並列 1、dedup `ytdl:<url>`）を
-  投入。操作タブの「YouTube」節（1 行 1 URL）から呼ぶ
+  投入。YouTube 画面（1 行 1 URL。§12.6）から呼ぶ
 - **手順**（ジョブ 1 件 = URL 1 件。作業領域は `[paths].data/tmp/ytdl/<job_id>/`。全部引数配列、`--` の後に URL）
   1. `yt-dlp --dump-single-json --flat-playlist --no-download -- <url>`（120 秒）。`_type` が playlist なら
      `entries` の `url` ごとに `ytdl` を投入して終わり（展開だけ）。動画なら `id` / `webpage_url` / `uploader`
@@ -1612,7 +1612,7 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
-│ spindle  一覧 アルバム Inbox CD ジョブ●2 │ ⏮ ▶ ⏭ ■ 0:38 ━━━━━━━━ 3:37 曲名 — アーティスト │ RG track ☐原本 🔊━ │ ☰ │
+│ spindle  一覧 アルバム Inbox CD YouTube ジョブ●2 │ ⏮ ▶ ⏭ ■ 0:38 ━━━━━━━━ 3:37 曲名 — アーティスト │ RG track ☐原本 🔊━ │ ☰ │
 ├──────────────┬───────────────────────────────────────────────────────────────────────┤
 │ [検索 _____] │ プロパティ │ 一括編集 │ 操作                         選択 1,204 件 ▴ │ ← 右パネル
 │ ▾ All Music  │ Metadata                 │ Location                                   │
@@ -1771,8 +1771,14 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
 - **操作タブの「album gain」**（P4-5、D-74）: 「ReplayGain / FLAC」節に、選択行が属する album ごとの
   チェックボックス（`PATCH /api/albums/:id`。20 album を超えたら絞るよう促す）。アルバム画面は無く
   アルバム一覧は表を絞るだけなので、切り替えはここに置く
-- **操作タブの「YouTube」**（P3-3、D-70）: 1 行 1 URL のテキストエリアと「ダウンロード」
-  （`POST /api/ytmusic/download`）。投入した job_id を出し、進捗と失敗は Jobs タブ、結果は Inbox タブ
+- **YouTube**（P3-3 → P4-13、D-70 追記）: 上部バーの独立した画面（取り込み元は Inbox / CD / YouTube で
+  横並び、結果は Inbox に集まる）。(1) 1 行 1 URL のテキストエリアと「ダウンロード」（`POST /api/ytmusic/
+  download`。再生リストは動画ごとに展開し、Library / Inbox に `SOURCE_URL` のある動画は投入しない）、
+  (2) ytdl ジョブの一覧（`GET /api/jobs` の `type = ytdl` を新しい順。URL・結果（待ち / ダウンロード中 /
+  Inbox に置いた / 失敗の理由 / 再生リストを展開した）・時刻・取り消し / 再試行・完了なら「Inbox で確認」）、
+  (3) 購読（P4-16。いまは枠だけ）。`/youtube?url=<URL>` で開くと欄に入れた状態で開く（ブックマークレットの
+  受け口。同一 origin の GET なので CORS / CSRF を触らない。http / https 以外は受けない。README）。
+  操作タブの YouTube 節は廃止
 - **設定**: 「表示」（配色: OS に従う / ライト / ダーク。localStorage に保存。P4-10、D-58 追記）、
   `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
   退避 WAV（`archived_files`）の一覧と復元
@@ -1865,6 +1871,7 @@ enabled = true
 metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
 metadata_timeout_secs = 30
 download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
+# ytdlp_args = ["--extractor-args", "youtube:player_client=web_safari"]   # 弾かれたときの口（P4-13）。UA / Referer は付けない
 
 [hires]                        # 偽ハイレゾ検出（§7.10、D-71）
 check_on_import = true         # スキャン完了時に未検査の対象（可逆かつ >48 kHz または >16 bit）を自動投入

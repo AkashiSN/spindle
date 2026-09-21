@@ -1995,12 +1995,40 @@ table.inbox-tracks td.inbox-thumb-cell {
   white-space: nowrap;
   cursor: pointer;
 }
-/* 操作タブの YouTube（D-70） */
-.operations textarea.youtube-urls {
+/* YouTube 画面（SPEC §12.6、D-70 追記、P4-13） */
+.youtube {
+  padding: 0 12px 12px;
+  overflow: auto;
+  height: 100%;
+}
+.youtube h1 {
+  font-size: 16px;
+  margin: 0;
+}
+.youtube h2 {
+  font-size: 13px;
+  margin: 16px 0 6px;
+  color: var(--muted);
+}
+.youtube .op-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.youtube textarea.youtube-urls {
   width: 100%;
+  max-width: 720px;
   box-sizing: border-box;
   font: inherit;
   resize: vertical;
+}
+.youtube-jobs td.path a {
+  color: inherit;
+  word-break: break-all;
+}
+.youtube-jobs tr.failed td {
+  background: var(--conflict-bg);
 }
 /* ダウンローダの判定（D-70） */
 .inbox-destination {

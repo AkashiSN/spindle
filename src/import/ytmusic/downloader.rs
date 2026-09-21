@@ -114,8 +114,9 @@ impl From<crate::db::DbError> for DownloadError {
 /// ジョブ 1 件の結果
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Downloaded {
-    /// playlist を展開して entries ごとのジョブを投入した
-    Playlist { enqueued: usize },
+    /// playlist を展開して entries ごとのジョブを投入した。`skipped` は Library / Inbox に `SOURCE_URL` が
+    /// あって投入しなかった数（取り込み済みの失敗ジョブで一覧を埋めない。P4-13）
+    Playlist { enqueued: usize, skipped: usize },
     /// プラグインが `skip`。ダウンロードしていない
     Skipped { message: String },
     /// Inbox に置いた（Inbox 相対）
@@ -343,16 +344,29 @@ pub async fn download_one(
     {
         Dump::Playlist(urls) => {
             let mut enqueued = 0;
+            let mut skipped = 0;
             for u in urls {
                 check_cancel()?;
+                // 取り込み済み（Library / Inbox に SOURCE_URL）は投入しない。entries の URL は
+                // `https://www.youtube.com/watch?v=<id>` で、ファイルに書く webpage_url の正規形と同じ
+                let key = u.clone();
+                if env
+                    .db
+                    .read(move |c| find_source_url(c, &key))
+                    .await?
+                    .is_some()
+                {
+                    skipped += 1;
+                    continue;
+                }
                 if let crate::jobs::EnqueueResult::Inserted(_) =
                     env.jobs.enqueue(new_ytdl_job(&u)).await?
                 {
                     enqueued += 1;
                 }
             }
-            tracing::info!(url, enqueued, "playlist を展開した");
-            return Ok(Downloaded::Playlist { enqueued });
+            tracing::info!(url, enqueued, skipped, "playlist を展開した");
+            return Ok(Downloaded::Playlist { enqueued, skipped });
         }
         Dump::Video(v) => v,
     };

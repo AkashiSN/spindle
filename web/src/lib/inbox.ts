@@ -318,12 +318,3 @@ export function verdictLabel(s: InboxSource): { text: string; ok: boolean } {
   return s.verdict === 'ok' ? { text: '判定済み', ok: true } : { text: `未判定（${s.verdict}）`, ok: false }
 }
 
-/** 操作タブの「YouTube」の入力（1 行 1 URL）を URL の配列にする。空行を落とし、重複は 1 つ */
-export function parseUrlLines(text: string): string[] {
-  const out: string[] = []
-  for (const line of text.split(/\r?\n/)) {
-    const u = line.trim()
-    if (u !== '' && !out.includes(u)) out.push(u)
-  }
-  return out
-}

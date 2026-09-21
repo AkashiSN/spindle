@@ -365,7 +365,7 @@ async fn main() -> anyhow::Result<()> {
                 archive: Arc::clone(&archive_root),
                 jobs: Arc::clone(&state.jobs),
                 provider,
-                ytdlp: vec![state.config.bin.ytdlp.clone()],
+                ytdlp: state.config.ytdlp_command(),
                 ffmpeg: PathBuf::from(&state.config.bin.ffmpeg),
                 tmp_root: ytdl_tmp,
                 download_timeout: std::time::Duration::from_secs(u64::from(

@@ -10,7 +10,6 @@ import {
   draftForSubmit,
   draftFrom,
   itemTitle,
-  parseUrlLines,
   stateLabel,
   validateDraft,
   verdictLabel,
@@ -226,15 +225,6 @@ describe('destinationLabel / verdictLabel（D-70）', () => {
   })
 })
 
-describe('parseUrlLines（操作タブの YouTube）', () => {
-  it('1 行 1 URL。空行と前後の空白を落とし、重複は 1 つにする', () => {
-    expect(parseUrlLines(' https://youtu.be/a \n\nhttps://youtu.be/b\r\nhttps://youtu.be/a\n')).toEqual([
-      'https://youtu.be/a',
-      'https://youtu.be/b',
-    ])
-    expect(parseUrlLines('\n  \n')).toEqual([])
-  })
-})
 
 // ---------------------------------------------------------------- 忠実表示（P4-4、D-70）
 
