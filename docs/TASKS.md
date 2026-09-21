@@ -1100,7 +1100,14 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/jobs_api.rs`（`type=ytdl` で絞れる）、`tests/config.rs`（引数配列）、実機でブックマークレット →
       画面が開いて URL が入る → ダウンロード → 一覧に出て Inbox へ飛べる
 
-- [ ] **P4-14** 既存の webm 由来トラックへの `SOURCE_URL` 補填（一度きり。設計は着手時に行う）。D-70 の重複
+- [x] **P4-14** 既存の webm 由来トラックへの `SOURCE_URL` 補填（一度きり。2026-09-21 に実機で適用済み: 9 バッチ
+      #10〜#18、1,508 件 applied / conflict 0、Derived の aac 1,508 本がタグ追随。残り 6 件は再生リストに無い
+      曲（手で付ける）。`set_rows` op は D-42 追記、スクリプトは `scripts/backfill_source_url.py` +
+      `scripts/test_backfill_source_url.py`。実機で分かったこと: 開発機の古い yt-dlp（2026.06）は再生リストの
+      continuation を黙って取りこぼす（`entries < playlist_count` で中止する検出を入れた。`--ytdlp "ssh …
+      docker exec … yt-dlp"` で実機の版を使える）、再生リストから消えた動画の後ろは位置が 1 ずれる、
+      初期の動画は英題で Library の邦題と照合できない。対応付けは 位置 + タイトル → 未割り当て行から
+      タイトルで救済（近い位置を優先）→ 両隣が同じずれで対応する区間は位置推定、の 3 段）。D-70 の重複
       防止は `SOURCE_URL` を見るが、移行で取り込んだ webm 由来の Opus 1,512 本（実機。P3 で取り込んだ 1 本を除く）
       には無く、旧 `Original/*.webm` のメタデータにも id は無い（`encoder=google/video-file` のみ）。手掛かりは
       ユーザが YouTube 側で保守してきた**アーティストごとの再生リスト**: 旧パイプラインは「再生リスト名 =
