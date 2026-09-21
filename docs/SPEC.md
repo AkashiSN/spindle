@@ -2055,7 +2055,8 @@ ytdlp = "yt-dlp"
   バックアップから（OPERATIONS）
 - 依存の更新は Renovate（`renovate.json`。GitHub App）: Dockerfile の `FROM`（node / rust / debian /
   deno）、GitHub Actions、Cargo / npm（minor / patch は週 1 のまとめ）、**yt-dlp**（`ARG YTDLP_VERSION`
-  を `# renovate:` 注釈の custom manager で github-releases から追い、1 件ずつ即時）。マージは手動。
+  を `# renovate:` 注釈の custom manager で github-releases から追い、schedule の例外で 1 件ずつ即時）。
+  マージは手動。Dependency Dashboard の issue に保留中の更新と手動実行のチェックボックスが出る。
   マージすれば `edge` が作り直され、本番へは次の `vX.Y.Z` で届く（yt-dlp だけの更新でもパッチ版を切る）
 - スカッシュ（`db/migrations` を `0001` に畳む）は最初の `vX.Y.Z` より前に 1 回だけ（公開イメージで
   DB を作った後は既存ファイルを書き換えられない）

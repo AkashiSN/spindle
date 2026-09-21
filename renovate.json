@@ -1,8 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended",
-    ":disableDependencyDashboard"
+    "config:recommended"
   ],
   "timezone": "Asia/Tokyo",
   "schedule": [
@@ -31,6 +30,15 @@
         "patch"
       ],
       "groupName": "dependencies (non-major)"
+    },
+    {
+      "description": "yt-dlp（custom manager）は schedule に縛らず即時。YouTube に弾かれたとき週 1 を待たない（D-79）",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "schedule": [
+        "at any time"
+      ]
     }
   ],
   "customManagers": [
