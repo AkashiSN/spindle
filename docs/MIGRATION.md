@@ -163,12 +163,11 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
    1. `scripts/backfill_source_url.py --playlists … --spindle … --out …` で計画 CSV を出し、目視
       （`title-mismatch` / `no-track` / `extra-track` / `kept` を確認）→ `--apply` で `SOURCE_URL` を
       書く（アルバムごとに 1 バッチ。巻き戻し可）。既に `SOURCE_URL` を持つ行は上書きしない
-   2. `no-track`（再生リストにあって Library に無い動画）は再生リストの URL を YouTube 画面に貼って
-      取り込む。`SOURCE_URL` のある曲は「取り込み済み」で弾かれるので、無いものだけが Inbox に来る →
-      承認で末尾の番号に配置される
-   3. `scripts/backfill_source_url.py … --renumber` で `TRACKNUMBER` を再生リストの位置に揃え
-      （`set_rows` 1 バッチ）、続けてリネーム（`POST /api/rename/preview` → `apply`）でファイル名の
-      番号を追随させる。Derived（opus / aac）はタグ上書き・移動で追随する
-   これらは実データでは 1 回しか行わないが、リハーサル環境で一度通してから行う
+   2. YouTube 画面で 9 本の再生リストを購読に登録（追記先 = 各 `〜のお歌` album）し、「今すぐ同期」
+      （P4-16）。`SOURCE_URL` のある曲は飛ばされ、無いものだけが Inbox に来る → 承認で配置
+   3. 同期の番号揃えが `TRACKNUMBER` を再生リストの位置に揃え（`set_rows` の tags バッチ）、続けて
+      rename バッチでファイル名の番号を追随させる。Derived（opus / aac）はタグ上書き・移動で追随する。
+      購読の結果に出る「ずれの一覧」が空になれば完了
+   1 は実データでは 1 回しか行わない（以後は購読の同期が日常運用）。リハーサル環境で一度通してから行う
 4. 正式運用後、数日間問題が出ないことを確認してから `ssd/musics` を破棄する。`AAC/`（48G）は
    この破棄で一緒に消える

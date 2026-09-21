@@ -1085,7 +1085,9 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       ジョブ` にして `YouTube` 画面を置く（取り込み元は Inbox / CD / YouTube で横並び、結果は Inbox に集まる。
       SPEC §7.7、D-70）。画面: (1) URL 欄（1 行 1 つ。動画 / playlist。playlist は既に entries ごとに展開
       される）と「ダウンロード」、(2) その下に ytdl ジョブの一覧（`GET /api/jobs?type=ytdl`。URL・状態・
-      失敗理由・完了した件は「Inbox で確認」で件へ飛ぶ。SSE で追随）、(3) 「操作」タブの YouTube 節は消す
+      失敗理由・完了した件は「Inbox で確認」で件へ飛ぶ。SSE で追随）、(2') **購読の節**（P4-16 の UI。
+      再生リスト URL ↔ 追記先 album の一覧、登録 / 削除 / 有効・無効、「今すぐ同期」、最終同期時刻と
+      結果。P4-13 の時点では API が無ければ枠だけ置いて P4-16 で埋める）、(3) 「操作」タブの YouTube 節は消す
       （`lib/operations.ts` の `startYoutube` と `youtubeStartedMessage` を画面側へ）。(4) **URL の受け渡しを
       楽にする**: SPA のルート `/youtube?url=<URL>` で URL 欄を埋めて開く（同一 origin の GET なので CORS /
       CSRF の問題が無い。未ログインならログイン後にそのまま）。これで「いま見ている動画を spindle へ」の
@@ -1133,17 +1135,35 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       1 アルバムを dry-run → CSV 確認 → apply → `SOURCE_URL` が付き、同じ URL の再ダウンロードが
       「取り込み済み（Library）」で拒否される
 
-- [ ] **P4-15** `〜のお歌` の番号を再生リストの順に揃える（`backfill_source_url.py --renumber`。設計は着手時に
-      行う）。再生リストの途中に古い動画を足すと Library には末尾の番号で入る（Inbox の追記）ので、位置と
-      `TRACKNUMBER` がずれる。手順は MIGRATION.md §5-3: (1) `SOURCE_URL` で再生リストの位置（= 目標番号）と
-      Library の現在番号を突き合わせ、ずれている行だけ `TRACKNUMBER` を `set_rows` で書く（1 バッチ、巻き戻し
-      可。`SOURCE_URL` の無い行と再生リストに無い行は触らず一覧に出す）、(2) 続けて `POST /api/rename/preview`
-      → `apply` でファイル名（`{track:02} {title}`）を追随させる（スクリプトが投げるか、画面から。番号の
-      衝突は rename が一時名経由で処理する）、(3) Derived の opus / aac はタグ上書き・移動で追随。計画は
-      CSV（現在番号 → 目標番号）で見せてから `--apply`。受け入れ: `scripts/test_backfill_source_url.py`
-      （目標番号の算出: 未取り込みの動画の分だけ後続がずれる、`SOURCE_URL` 無しは触らない、既に一致なら
-      変更なし）、リハーサル環境で 再生リスト URL を貼って未取り込みの 3 本を Inbox → 承認 → `--renumber` →
-      リネーム → 番号・ファイル名・Derived が揃う。実データでは MIGRATION.md §5-3 の順で 1 回
+- [ ] **P4-16** 再生リストの購読と同期（P4-15「番号を再生リストの順に揃える」を吸収。設計は着手時に行う。
+      SPEC §7.7 に節を足し、D-xx に記録）。`SOURCE_URL`（P4-14）で「再生リストのどこまで持っているか」が
+      分かるので、URL を貼る運用をなくす。
+      (1) **購読**: 新しいマイグレーションで `playlist_subscriptions`（`list_id` / URL / 追記先 `album_id`
+      （無ければ `albumartist` + `album` で作る）/ `enabled` / `last_synced_at` / 最終結果）。API は
+      `GET / POST / PATCH / DELETE /api/playlists/subscriptions` と `POST /api/playlists/subscriptions/:id/sync`。
+      UI は P4-13 の YouTube 画面の購読の節。
+      (2) **同期ジョブ** `playlist_sync`（購読ごとに 1 本。手動 + `[ytmusic].sync_interval_hours`（既定 0 =
+      手動のみ）で定期）: `yt-dlp --flat-playlist --dump-single-json` で列挙（`entries < playlist_count` なら
+      「古い yt-dlp の取りこぼし」として失敗させ、何も投入しない）→ 各 entry の `webpage_url` 正規形を
+      Library（`track_tags`）/ Inbox（`inbox_files.tags`）/ 投入済み ytdl ジョブ（dedup_key）と突き合わせ →
+      **無いものだけ** ytdl ジョブを投入（payload に `subscription_id` / 宛先 `album_id` / 再生リストの位置）。
+      非公開・削除の動画は飛ばして件数だけ報告。再生リストから消えた動画には何もしない（ファイルが正）。
+      1 回の同期で投入する上限（既定 50）を設けて、誤登録した巨大なリストで数百本落とさない。
+      (3) **承認はそのまま**（D-70。判断は Inbox で人が行う）。宛先 album と位置が分かっているので、承認画面の
+      初期値（アルバムアーティスト / アルバム / category）は購読から埋め、プラグインの判定は補助にする。
+      (4) **番号揃え**: 配置（Inbox 承認）の後、同期ジョブ（または承認の後続）が「再生リストの位置 ↔ 現在の
+      `TRACKNUMBER`」のずれを `SOURCE_URL` で計算し、ずれている行だけ `TRACKNUMBER` を `set_rows` の tags
+      バッチで書き、続けて rename バッチでファイル名（`{track:02} {title}`）を追随させる（どちらも履歴に
+      載り巻き戻せる。Derived の opus / aac はタグ上書き・移動で追随）。`SOURCE_URL` の無い行と再生リストに
+      無い行は触らず、ずれの一覧を購読の結果に出す。「番号揃えをしない」購読も選べる（既定は揃える）。
+      (5) yt-dlp を定期的に叩くので、ブロック時の `--extractor-args` / `--cookies` の口（P4-13 の `[bin].ytdlp`
+      引数化）と yt-dlp の更新（P4-12 (7)）が前提。
+      受け入れ: `tests/migrations.rs`（0020）、`tests/playlist_sync.rs`（列挙は fixture の JSON を返す偽 yt-dlp
+      で: 無いものだけ投入、Inbox / 投入済みと重複しない、取りこぼしで失敗、上限、非公開を飛ばす）、
+      `tests/playlist_align.rs`（位置と番号のずれ → set_rows + rename バッチ。未取り込みの分だけ後続がずれる、
+      `SOURCE_URL` 無しは触らない、一致なら変更なし）、`tests/inbox_api.rs`（購読由来の件の初期値）、
+      `web/src/lib/subscriptions.test.ts`、リハーサル環境で 9 本を登録 → 同期 → 未取り込みの 3 本だけ Inbox に
+      来る → 承認 → 番号とファイル名が再生リストの順に揃う → 再同期で「変更なし」
 
 ## 着手前に確認が必要な残課題
 
