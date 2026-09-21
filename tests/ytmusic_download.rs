@@ -698,6 +698,10 @@ fn parse_dump_reads_videos_and_playlists_and_rejects_incomplete_ones() {
              {"id":"b2","url":"https://www.youtube.com/watch?v=b2&list=PLx","webpage_url":"https://www.youtube.com/watch?v=b2","ie_key":"Youtube"},
              {"url":"https://example.com/u","webpage_url":"https://example.com/w"},
              {"url":"https://example.com/only-url"},
+             {"id":"m1","url":"https://music.youtube.com/watch?v=m1"},
+             {"id":"x1","url":"https://notyoutube.com/x1"},
+             {"id":"x2","url":"https://example.com/path/youtube.com/x2"},
+             {"id":"x3","url":"https://example.com/?u=https://youtu.be/x3"},
              {"id":"c"}]}"#,
     )
     .unwrap();
@@ -708,6 +712,12 @@ fn parse_dump_reads_videos_and_playlists_and_rejects_incomplete_ones() {
             "https://www.youtube.com/watch?v=b2".into(),
             "https://example.com/w".into(),
             "https://example.com/only-url".into(),
+            // サブドメイン（music.youtube.com）は YouTube
+            "https://www.youtube.com/watch?v=m1".into(),
+            // ホスト名が youtube.com でない / path や query に youtube.com を含むだけのものは YouTube ではない
+            "https://notyoutube.com/x1".into(),
+            "https://example.com/path/youtube.com/x2".into(),
+            "https://example.com/?u=https://youtu.be/x3".into(),
         ])
     );
     // 不足

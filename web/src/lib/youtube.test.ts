@@ -71,7 +71,7 @@ describe('ytdlResultLabel', () => {
     expect(
       ytdlResultLabel(job({ state: 'done', note: '再生リストを展開した: 1 件を投入、224 件は取り込み済み' })),
     ).toBe('再生リストを展開した: 1 件を投入、224 件は取り込み済み')
-    expect(ytdlResultLabel(job({ state: 'done' }))).toBe('完了（結果は Inbox）')
+    expect(ytdlResultLabel(job({ state: 'done' }))).toBe('完了（詳細なし）')
     expect(ytdlResultLabel(job({ state: 'running', subject: 'https://www.youtube.com/playlist?list=PL1' }))).toBe(
       '再生リストを展開中',
     )

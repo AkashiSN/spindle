@@ -198,11 +198,22 @@ impl RawEntry {
     /// YouTube は `--flat-playlist` の `url` が youtu.be 形や `list=` 付きで来ることがあるので、id から
     /// `https://www.youtube.com/watch?v=<id>` を組む。それ以外は webpage_url → url の順
     fn canonical_url(self) -> Option<String> {
+        // ホスト名で判定する（path や query に youtube.com を含むだけの別サイトを YouTube にしない）
+        fn is_youtube_host(u: &str) -> bool {
+            url::Url::parse(u)
+                .ok()
+                .and_then(|p| p.host_str().map(|h| h.to_ascii_lowercase()))
+                .is_some_and(|h| {
+                    ["youtube.com", "youtu.be"]
+                        .iter()
+                        .any(|d| h == *d || h.ends_with(&format!(".{d}")))
+                })
+        }
         let is_youtube = self.ie_key.as_deref() == Some("Youtube")
             || [&self.url, &self.webpage_url]
                 .into_iter()
                 .flatten()
-                .any(|u| u.contains("youtube.com/") || u.contains("youtu.be/"));
+                .any(|u| is_youtube_host(u));
         if is_youtube {
             if let Some(id) = self.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 return Some(format!("https://www.youtube.com/watch?v={id}"));
