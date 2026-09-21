@@ -68,6 +68,8 @@ export function YoutubeView({
         </span>
       </div>
 
+      <SubscriptionsSection subs={subs} />
+
       <h2>ジョブ</h2>
       {list == null ? (
         <p className="muted">読み込み中…</p>
@@ -122,7 +124,6 @@ export function YoutubeView({
         </table>
       )}
 
-      <SubscriptionsSection subs={subs} />
     </section>
   )
 }
