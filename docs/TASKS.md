@@ -1045,6 +1045,9 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       (7) は Dependabot / 自作ワークフローでなく **Renovate**（`renovate.json`。yt-dlp は `# renovate:` 注釈の
       custom manager）。(8) の `v0.1.0` はまだ切らず `edge` までを完了とする（スカッシュと最初のタグは
       リリース時）。ユーザ側の作業: GHCR のパッケージを public に、Renovate の GitHub App をインストール）。
+      受け入れ確認済み: `main` への push で `edge` / `sha-<7>` が push され（`docker push` は load した
+      イメージで「unknown blob」になるので skopeo で daemon から複製）、リハーサル環境の compose を `edge` に
+      切り替えて `compose pull` → `/health` が `{"status":"ok","version":"a10fb0d","ytdlp":"2026.08.19"}`。
       以下は着手時の設計メモ。いまは `.github/workflows/ci.yml`
       が web（lint / build）→ rust（fmt / clippy / test）→ docker（build + `/health` 等の起動確認）まで行うが、
       イメージはどこにも push しておらず、`deploy/compose.yaml` の `ghcr.io/akashisn/spindle:latest` は存在
