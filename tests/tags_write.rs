@@ -328,3 +328,85 @@ fn mp4_keeps_standard_keys_in_standard_atoms_and_pairs_intact() {
     assert!(values(&p, "m4a", "TRACKNUMBER").is_empty());
     assert_eq!(values(&p, "m4a", "TRACKTOTAL"), ["12"]);
 }
+
+/// lofty で m4a の ilst にフリーフォーム atom を直接置く
+fn put_freeform(path: &Path, mean: &str, name: &str, value: &str) {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile as _;
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst};
+    use std::io::Seek as _;
+
+    let mut f = File::options().read(true).write(true).open(path).unwrap();
+    let mut mp4 = lofty::mp4::Mp4File::read_from(&mut f, ParseOptions::new()).unwrap();
+    let mut ilst = mp4.ilst().cloned().unwrap_or_else(Ilst::new);
+    ilst.insert(Atom::new(
+        AtomIdent::Freeform {
+            mean: mean.to_owned().into(),
+            name: name.to_owned().into(),
+        },
+        AtomData::UTF8(value.to_owned()),
+    ));
+    mp4.set_ilst(ilst);
+    f.seek(std::io::SeekFrom::Start(0)).unwrap();
+    mp4.save_to(&mut f, WriteOptions::default()).unwrap();
+}
+
+/// trkn の両側を同時に消すと atom ごと消える
+#[test]
+fn mp4_deleting_both_halves_removes_the_pair_atom() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "alac.m4a", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    write(&p, "m4a", &[change("TRACKTOTAL", Some(&["12"]))]);
+    assert!(ffprobe_tags(&p).contains("format.tags.track=\"3/12\""));
+    write(
+        &p,
+        "m4a",
+        &[change("TRACKNUMBER", None), change("TRACKTOTAL", None)],
+    );
+    assert!(values(&p, "m4a", "TRACKNUMBER").is_empty());
+    assert!(values(&p, "m4a", "TRACKTOTAL").is_empty());
+    let text = ffprobe_tags(&p);
+    assert!(!text.contains("format.tags.track="), "{text}");
+}
+
+/// 標準 atom に写像されるフリーフォーム（CATALOGNUMBER）も、大小文字違いの既存 atom を置き換える
+#[test]
+fn mp4_replaces_mapped_freeform_case_insensitively() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "alac.m4a", 0));
+    put_freeform(&p, "com.apple.iTunes", "catalognumber", "old");
+    assert_eq!(values(&p, "m4a", "CATALOGNUMBER"), ["old"]);
+    write(&p, "m4a", &[change("CATALOGNUMBER", Some(&["CAT-2"]))]);
+    assert_eq!(values(&p, "m4a", "CATALOGNUMBER"), ["CAT-2"]);
+    let text = ffprobe_tags(&p);
+    assert!(text.contains("CATALOGNUMBER=\"CAT-2\""), "{text}");
+    assert!(
+        !text.contains("catalognumber="),
+        "旧綴りが残っている: {text}"
+    );
+}
+
+/// `com.apple.iTunes` 以外の mean のフリーフォームは読まず、同名キーの書き込みでも消さない
+#[test]
+fn mp4_leaves_other_mean_freeform_atoms_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "alac.m4a", 0));
+    put_freeform(&p, "org.example", "SPINDLETEST", "theirs");
+    assert!(values(&p, "m4a", "SPINDLETEST").is_empty());
+    write(&p, "m4a", &[change("SPINDLETEST", Some(&["ours"]))]);
+    assert_eq!(values(&p, "m4a", "SPINDLETEST"), ["ours"]);
+    write(&p, "m4a", &[change("SPINDLETEST", None)]);
+    assert!(values(&p, "m4a", "SPINDLETEST").is_empty());
+    // lofty で直接読み、他の mean の atom が残っていることを確かめる
+    use lofty::config::ParseOptions;
+    use lofty::file::AudioFile as _;
+    let mp4 =
+        lofty::mp4::Mp4File::read_from(&mut File::open(&p).unwrap(), ParseOptions::new()).unwrap();
+    let ilst = mp4.ilst().unwrap();
+    let other = ilst.get(&lofty::mp4::AtomIdent::Freeform {
+        mean: "org.example".into(),
+        name: "SPINDLETEST".into(),
+    });
+    assert!(other.is_some(), "他の mean の atom が消えた");
+}
