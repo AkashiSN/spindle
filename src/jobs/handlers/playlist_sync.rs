@@ -32,6 +32,7 @@ use crate::db::inbox::{album_rows, inbox_has_source_url, library_rows_by_source_
 use crate::db::subscriptions::{self, BindOutcome, Subscription};
 use crate::db::{now_epoch, Db};
 use crate::domain::pathgen::Planned;
+use crate::domain::relpath::RelPath;
 use crate::domain::tags::TagChange;
 use crate::edit::{EditError, Editor, NewTagOp, RenameTarget};
 use crate::import::inbox::destination_of;
@@ -597,7 +598,10 @@ async fn align(
             Err(e) => return Err(e.into()),
         }
     }
-    // b. rename: 現在の TRACKNUMBER が目標位置と一致する対象行の全部（今回の applied には依らない）
+    // b. rename: 現在の TRACKNUMBER が目標位置と一致する対象行のうち、**ファイル名の先頭の番号が
+    //    合っていない行**（今回の applied には依らない = 番号だけ直して落ちた境界も拾う）。変えるのは
+    //    ファイル名だけで、ディレクトリは今のまま（テンプレートの dir は category 未推定の album を
+    //    _Unsorted へ動かしてしまう。名前の書式だけ違う行も触らない）
     let rows = env.db.read(move |c| album_rows(c, album_id)).await?;
     let position_of: HashMap<&str, u32> = entries
         .iter()
@@ -609,7 +613,7 @@ async fn align(
             *url_count.entry(u).or_default() += 1;
         }
     }
-    let candidates: Vec<i64> = rows
+    let numbered: Vec<i64> = rows
         .iter()
         .filter(|r| r.disc_no.unwrap_or(1) == 1)
         .filter(|r| {
@@ -622,19 +626,42 @@ async fn align(
         })
         .map(|r| r.track_id)
         .collect();
-    if candidates.is_empty() {
+    let track_no_of: HashMap<i64, i64> = rows
+        .iter()
+        .filter_map(|r| r.track_no.map(|n| (r.track_id, n)))
+        .collect();
+    if numbered.is_empty() {
         return Ok(out);
     }
-    let planned = env.editor.plan_rename(&candidates, &env.layout).await?;
+    let planned = env.editor.plan_rename(&numbered, &env.layout).await?;
     let mut targets = Vec::new();
     for p in planned {
+        let Ok(current) = RelPath::parse(&p.current_rel_path) else {
+            continue;
+        };
+        // 名前の先頭の番号が track_no と同じなら触らない
+        if leading_number(current.file_name()) == track_no_of.get(&p.track_id).copied() {
+            continue;
+        }
         match p.planned {
-            Planned::Path(new) => targets.push(RenameTarget {
-                track_id: p.track_id,
-                new_rel_path: new.as_str().to_owned(),
-                expected: None,
-                planned_conflict: None,
-            }),
+            Planned::Path(new) => {
+                // ディレクトリは今のまま、ファイル名だけテンプレートのもの
+                let Some(dir) = current.parent() else {
+                    continue;
+                };
+                let Ok(new_rel) = dir.join(new.file_name()) else {
+                    continue;
+                };
+                if new_rel.key() == current.key() {
+                    continue;
+                }
+                targets.push(RenameTarget {
+                    track_id: p.track_id,
+                    new_rel_path: new_rel.as_str().to_owned(),
+                    expected: None,
+                    planned_conflict: None,
+                });
+            }
             Planned::Unchanged => {}
             Planned::Conflict(reason) => targets.push(RenameTarget {
                 track_id: p.track_id,
@@ -725,4 +752,14 @@ pub fn spawn_dispatcher(
             }
         }
     })
+}
+
+/// ファイル名の先頭の番号（`03 title.opus` / `03. title.opus` / `3-title.opus` の 3）。無ければ None
+fn leading_number(file_name: &str) -> Option<i64> {
+    let digits: String = file_name
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }

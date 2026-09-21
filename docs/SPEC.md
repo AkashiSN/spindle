@@ -967,9 +967,11 @@ multi_value_separator = " & "   # 多値フィールドの結合
      `Failed`）、差分は待った後の DB から計算し直す（phase を永続化しない: 落ちて再実行しても、失敗した op は
      overlay がファイルの値に戻るので次回また差分になり、適用済みなら差分ゼロで通る）。ずれた行だけ
      `Editor::prepare_tags`（`TRACKNUMBER`。説明「再生リスト『…』に番号を揃える」）→ 終端待ち → album を
-     読み直し「**現在の TRACKNUMBER が目標位置と一致する対象行の全部**」を `plan_rename` → パスが変わる行
-     だけ `prepare_rename` → 終端待ち（今回のバッチの applied 集合には依らない = tags 適用後・rename 前に
-     落ちた境界を再実行で拾う）。どちらも履歴に載り巻き戻せる。Derived（opus / aac）はタグ上書き・移動で
+     読み直し「**現在の TRACKNUMBER が目標位置と一致する対象行のうち、ファイル名の先頭の番号が合っていない
+     行**」を `plan_rename` → **ファイル名だけ**テンプレートのものにして（ディレクトリは今のまま。テンプレートの
+     dir で動かすと category 未推定の album を `_Unsorted` へ移してしまう）`prepare_rename` → 終端待ち
+     （今回のバッチの applied 集合には依らない = tags 適用後・rename 前に落ちた境界を再実行で拾う。名前の
+     書式だけ違う行は触らない）。どちらも履歴に載り巻き戻せる。Derived（opus / aac）はタグ上書き・移動で
      追随する。揃え終わる前の失敗・キャンセルでは投入しない
   5. Library / Inbox / 別 album に無く、**取れる** entry を位置順に `max_enqueue` まで `ytdl` 投入（payload
      `{ url, subscription_id, position }`、dedup は今までどおり `ytdl:<url>`）。超えた分は「次回」。

@@ -689,6 +689,56 @@ async fn request_during_run_makes_the_job_run_again() {
     );
 }
 
+/// 改名はファイル名だけ（ディレクトリは今のまま）で、名前の番号が合っていない行だけ。album のディレクトリが
+/// テンプレートと違っても（category が未推定の実機）album を動かさず、番号の合った行の名前の書式も触らない
+#[tokio::test]
+async fn align_renames_only_the_file_name_of_rows_whose_name_number_is_stale() {
+    let lib = Lib::new();
+    let dir = lib.lib().join("Music/Art/Alb");
+    std::fs::create_dir_all(&dir).unwrap();
+    // 旧書式の名前。a=1（合っている）、b は番号 2 だが名前は「03.」（前の実行が番号だけ直した状態）、
+    // c は 5 番で再生リストでは 3 番
+    for (name, no, title, id) in [
+        ("01. aa.opus", 1u32, "aa", "a"),
+        ("03. bb.opus", 2, "bb", "b"),
+        ("05. cc.opus", 5, "cc", "c"),
+    ] {
+        let p = require_ffmpeg!(common::make_audio(&dir, name, "opus", no));
+        common::set_basic_tags(&p, title, "Art", "Alb", "Art", no, 1);
+        set_source_url(&p, id);
+    }
+    lib.scan().await;
+    lib.playlist("PL1", &["a", "b", "c"], Some(3));
+    let sub = lib.subscribe("PL1").await;
+    let album_id: i64 = lib
+        .conn()
+        .query_row(
+            "SELECT id FROM albums WHERE rel_dir = 'Music/Art/Alb'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    lib.db
+        .write(move |c| subscriptions::bind_album(c, sub, album_id))
+        .await
+        .unwrap();
+    lib.start();
+    let (job, st) = lib.sync(sub).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.last_error(job));
+    let r = lib.result(sub);
+    assert_eq!(r["align"]["moved"], 1, "c だけ番号が変わる");
+    assert_eq!(r["align"]["renamed"], 2, "b（名前の番号が古い）と c");
+    assert_eq!(
+        lib.album_layout(),
+        [
+            (1, "Music/Art/Alb/01. aa.opus".to_owned()),
+            (2, "Music/Art/Alb/02 bb.opus".to_owned()),
+            (3, "Music/Art/Alb/03 cc.opus".to_owned()),
+        ]
+    );
+    assert!(!lib.lib().join("_Unsorted").exists(), "album を動かさない");
+}
+
 // ---------------------------------------------------------------- dispatcher
 
 /// latch の立った購読は（interval に関わらず）投入され、interval > 0 なら last_attempted_at から
