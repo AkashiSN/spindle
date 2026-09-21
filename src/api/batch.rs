@@ -156,7 +156,7 @@ pub async fn preview(
                     continue;
                 }
                 let current = history::load_track_tags(&tx, row.id)?;
-                let new = apply_ops(&ops, &current, index)
+                let new = apply_ops(&ops, &current, index, row.id)
                     .map_err(|e| crate::db::DbError::Internal(e.to_string()))?;
                 let changes = changes_of(&current, &new);
                 if changes.is_empty() {
@@ -286,7 +286,7 @@ async fn apply_claimed(
     let eval: Arc<Evaluator> = {
         let ops = Arc::clone(&ops);
         Arc::new(move |t: &PlanTarget, current| {
-            apply_ops(&ops, current, t.index).map_err(|e| e.to_string())
+            apply_ops(&ops, current, t.index, t.track_id).map_err(|e| e.to_string())
         })
     };
     match editor

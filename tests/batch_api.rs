@@ -988,3 +988,76 @@ async fn token_survives_409_no_changes_and_pending() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"], "preview_stale");
 }
+
+// ---------------------------------------------------------------- set_rows（P4-14）
+
+/// 行ごとに違う値を 1 バッチで書く。preview は行ごとの差分、rows に無い行は変更なし
+#[tokio::test]
+async fn set_rows_writes_a_different_value_per_track_in_one_batch() {
+    let app = App::new().await;
+    setup!(app, "A/01.flac" => "a", "A/02.flac" => "b", "A/03.flac" => "c");
+    let c = app.cookie().await;
+    let a = app.track_id("A/01.flac");
+    let b = app.track_id("A/02.flac");
+    let d = app.track_id("A/03.flac");
+    let ops = serde_json::json!([{
+        "op": "set_rows",
+        "key": "SOURCE_URL",
+        "rows": {
+            a.to_string(): "https://www.youtube.com/watch?v=aaa",
+            b.to_string(): "https://www.youtube.com/watch?v=bbb"
+        }
+    }]);
+    let (status, pv) = app
+        .preview(
+            &c,
+            serde_json::json!({ "selection": { "ids": [a, b, d] }, "ops": ops }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pv}");
+    assert_eq!(pv["changed"], 2);
+    assert_eq!(pv["unchanged"], 1);
+    let items = pv["items"].as_array().unwrap();
+    let change_of = |id: i64| {
+        items
+            .iter()
+            .find(|i| i["id"] == id)
+            .map(|i| i["changes"]["SOURCE_URL"]["new"].clone())
+    };
+    assert_eq!(
+        change_of(a),
+        Some(serde_json::json!(["https://www.youtube.com/watch?v=aaa"]))
+    );
+    assert_eq!(
+        change_of(b),
+        Some(serde_json::json!(["https://www.youtube.com/watch?v=bbb"]))
+    );
+    assert_eq!(change_of(d), None);
+
+    let token = pv["selection_token"].as_str().unwrap();
+    let (status, body) = app
+        .apply(
+            &c,
+            serde_json::json!({ "selection_token": token, "ops": ops, "description": "SOURCE_URL 補填" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let batch_id = body["batch_id"].as_i64().unwrap();
+    assert_eq!(body["affected"], 2);
+
+    app.start_worker();
+    assert_eq!(app.wait_batch(batch_id).await, BatchState::Applied);
+    let url_of = |rel: &str| {
+        let af = read_audio_file(File::open(app.lib().join(rel)).unwrap(), Some("flac")).unwrap();
+        af.tags.first("SOURCE_URL").map(str::to_owned)
+    };
+    assert_eq!(
+        url_of("A/01.flac").as_deref(),
+        Some("https://www.youtube.com/watch?v=aaa")
+    );
+    assert_eq!(
+        url_of("A/02.flac").as_deref(),
+        Some("https://www.youtube.com/watch?v=bbb")
+    );
+    assert_eq!(url_of("A/03.flac"), None);
+}

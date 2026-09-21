@@ -1374,6 +1374,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //     { "op": "replace", "key": "TITLE",       "pattern": "…", "replacement": "$1" }
 //     { "op": "number",  "key": "TRACKNUMBER", "start": 1, "pad": 0 }        // sort 順に連番
 //     { "op": "delete",  "key": "COMMENT" }
+//     { "op": "set_rows","key": "SOURCE_URL", "rows": { "<track_id>": "…" | ["…"] } }
+//         行ごとに違う値（API 専用。UI には出さない。rows に無い行は変更なし。1〜10,000 行。P4-14）
 //   items は値が変わる行だけ。反映待ちの行は評価せず pending_excluded に数える
 { "selection_token": "…", "count": 1207,
   "changed": 1180, "unchanged": 24, "pending_excluded": 3,

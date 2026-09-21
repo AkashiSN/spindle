@@ -27,6 +27,7 @@ fn set_assigns_single_and_multi_values() {
         &ops(r#"[{"op":"set","key":"title","value":"b"},{"op":"set","key":"ARTIST","value":["A","B"]}]"#),
         &t,
         0,
+        0,
     )
     .unwrap();
     assert_eq!(values(&out, "TITLE"), ["b"]);
@@ -39,6 +40,7 @@ fn set_with_empty_value_deletes_and_delete_removes_key() {
     let out = apply_ops(
         &ops(r#"[{"op":"delete","key":"comment"},{"op":"set","key":"TITLE","value":""}]"#),
         &t,
+        0,
         0,
     )
     .unwrap();
@@ -53,6 +55,7 @@ fn ref_expands_field_references_with_first_value() {
         &ops(r#"[{"op":"ref","key":"ALBUMARTIST","template":"%artist% / %album% / %missing%"}]"#),
         &t,
         0,
+        0,
     )
     .unwrap();
     assert_eq!(values(&out, "ALBUMARTIST"), ["A / Al / "]);
@@ -65,6 +68,7 @@ fn ops_apply_in_order_and_see_previous_results() {
         &ops(r#"[{"op":"set","key":"ARTIST","value":"Z"},
                 {"op":"ref","key":"ALBUMARTIST","template":"%artist%"}]"#),
         &t,
+        0,
         0,
     )
     .unwrap();
@@ -85,6 +89,7 @@ fn replace_applies_regex_to_each_value_with_captures() {
         ),
         &t,
         0,
+        0,
     )
     .unwrap();
     assert_eq!(values(&out, "TITLE"), ["Song"]);
@@ -100,6 +105,7 @@ fn replace_on_missing_key_is_noop_and_lookaround_is_supported() {
                 {"op":"replace","key":"TITLE","pattern":"(?<=abc)\\d+","replacement":"N"}]"#,
         ),
         &t,
+        0,
         0,
     )
     .unwrap();
@@ -121,16 +127,22 @@ fn invalid_regex_is_rejected_at_parse() {
 fn number_assigns_sequence_from_index() {
     let t = tags(&[("TITLE", "t")]);
     let o = ops(r#"[{"op":"number","key":"TRACKNUMBER","start":1}]"#);
-    assert_eq!(values(&apply_ops(&o, &t, 0).unwrap(), "TRACKNUMBER"), ["1"]);
-    assert_eq!(values(&apply_ops(&o, &t, 4).unwrap(), "TRACKNUMBER"), ["5"]);
+    assert_eq!(
+        values(&apply_ops(&o, &t, 0, 0).unwrap(), "TRACKNUMBER"),
+        ["1"]
+    );
+    assert_eq!(
+        values(&apply_ops(&o, &t, 4, 0).unwrap(), "TRACKNUMBER"),
+        ["5"]
+    );
     let o = ops(r#"[{"op":"number","key":"TRACKNUMBER","start":10,"pad":2}]"#);
     assert_eq!(
-        values(&apply_ops(&o, &t, 0).unwrap(), "TRACKNUMBER"),
+        values(&apply_ops(&o, &t, 0, 0).unwrap(), "TRACKNUMBER"),
         ["10"]
     );
     let o = ops(r#"[{"op":"number","key":"TRACKNUMBER","start":1,"pad":2}]"#);
     assert_eq!(
-        values(&apply_ops(&o, &t, 2).unwrap(), "TRACKNUMBER"),
+        values(&apply_ops(&o, &t, 2, 0).unwrap(), "TRACKNUMBER"),
         ["03"]
     );
 }
@@ -156,7 +168,13 @@ fn unknown_op_or_bad_key_is_rejected() {
 #[test]
 fn keys_are_uppercased_and_values_normalized() {
     let t = tags(&[]);
-    let out = apply_ops(&ops(r#"[{"op":"set","key":"title","value":"が"}]"#), &t, 0).unwrap();
+    let out = apply_ops(
+        &ops(r#"[{"op":"set","key":"title","value":"が"}]"#),
+        &t,
+        0,
+        0,
+    )
+    .unwrap();
     assert_eq!(values(&out, "TITLE"), ["\u{304c}"]);
     assert!(values(&out, "title").is_empty());
 }
@@ -170,6 +188,75 @@ fn ops_roundtrip_to_json_for_snapshot_comparison() {
     let parsed = parse_ops(&v).unwrap();
     let back = serde_json::to_value(&parsed).unwrap();
     // 正規化（キー大文字化）を含む canonical な形になる
+    assert_eq!(back[0]["key"], "TITLE");
+    assert_eq!(parse_ops(&back).unwrap(), parsed);
+}
+
+// ---------------------------------------------------------------- set_rows（P4-14）
+
+#[test]
+fn set_rows_assigns_a_different_value_per_track_id_and_skips_absent_ids() {
+    let t = tags(&[("TITLE", "t"), ("SOURCE_URL", "old")]);
+    let o = ops(
+        r#"[{"op":"set_rows","key":"source_url","rows":{"7":"https://www.youtube.com/watch?v=a","9":["x","y"],"11":""}}]"#,
+    );
+    assert_eq!(
+        values(&apply_ops(&o, &t, 0, 7).unwrap(), "SOURCE_URL"),
+        ["https://www.youtube.com/watch?v=a"]
+    );
+    assert_eq!(
+        values(&apply_ops(&o, &t, 0, 9).unwrap(), "SOURCE_URL"),
+        ["x", "y"]
+    );
+    // 空値は削除
+    assert!(values(&apply_ops(&o, &t, 0, 11).unwrap(), "SOURCE_URL").is_empty());
+    // rows に無い id は触らない
+    assert_eq!(
+        values(&apply_ops(&o, &t, 0, 8).unwrap(), "SOURCE_URL"),
+        ["old"]
+    );
+    assert_eq!(values(&apply_ops(&o, &t, 0, 8).unwrap(), "TITLE"), ["t"]);
+}
+
+#[test]
+fn set_rows_values_are_nfc_normalized_and_keys_validated() {
+    let t = tags(&[]);
+    let out = apply_ops(
+        &ops(r#"[{"op":"set_rows","key":"comment","rows":{"1":"が"}}]"#),
+        &t,
+        0,
+        1,
+    )
+    .unwrap();
+    assert_eq!(values(&out, "COMMENT"), ["\u{304c}"]);
+    for bad in [
+        r#"[{"op":"set_rows","key":"PICTURE","rows":{"1":"x"}}]"#,
+        r#"[{"op":"set_rows","key":"TI=TLE","rows":{"1":"x"}}]"#,
+        r#"[{"op":"set_rows","key":"TITLE","rows":{"abc":"x"}}]"#,
+        r#"[{"op":"set_rows","key":"TITLE","rows":{"-1":"x"}}]"#,
+        r#"[{"op":"set_rows","key":"TITLE","rows":[]}]"#,
+        r#"[{"op":"set_rows","key":"TITLE"}]"#,
+    ] {
+        let v: serde_json::Value = serde_json::from_str(bad).unwrap();
+        assert!(parse_ops(&v).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn set_rows_rejects_too_many_rows_and_roundtrips_to_json() {
+    let mut rows = serde_json::Map::new();
+    for i in 0..=spindle::domain::tagops::MAX_SET_ROWS {
+        rows.insert(i.to_string(), serde_json::Value::String("v".into()));
+    }
+    let v = serde_json::json!([{"op":"set_rows","key":"TITLE","rows":rows}]);
+    assert!(parse_ops(&v).is_err());
+
+    let v: serde_json::Value =
+        serde_json::from_str(r#"[{"op":"set_rows","key":"title","rows":{"3":"c","1":["a","b"]}}]"#)
+            .unwrap();
+    let parsed = parse_ops(&v).unwrap();
+    let back = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(back[0]["op"], "set_rows");
     assert_eq!(back[0]["key"], "TITLE");
     assert_eq!(parse_ops(&back).unwrap(), parsed);
 }

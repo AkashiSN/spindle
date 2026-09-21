@@ -1,4 +1,5 @@
-//! 一括編集の操作（SPEC §12.3、D-42）: 固定値代入 / フィールド参照 / 正規表現置換 / 連番 / 削除。
+//! 一括編集の操作（SPEC §12.3、D-42）: 固定値代入 / フィールド参照 / 正規表現置換 / 連番 / 削除 /
+//! 行ごとの固定値（`set_rows`。API 専用、P4-14）。
 //!
 //! JSON の配列を [`parse_ops`] で解釈し、[`apply_ops`] で正規化タグ集合へ上から順に適用する。
 //! 各操作は前の操作の結果を見る（`set ARTIST` → `ref ALBUMARTIST %artist%` で新しい ARTIST が
@@ -7,6 +8,8 @@
 //!
 //! 正規表現は `fancy-regex`（後方参照・先読みが使える）。バックトラックの上限を設けて
 //! ユーザ入力のパターンで CPU を食い潰さない
+
+use std::collections::BTreeMap;
 
 use fancy_regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
@@ -20,6 +23,8 @@ const BACKTRACK_LIMIT: usize = 100_000;
 pub const MAX_OPS: usize = 64;
 /// 連番の 0 埋め桁数の上限
 pub const MAX_PAD: u8 = 6;
+/// `set_rows` の行数の上限（JSON で数 MB。移行の補填で 1 アルバム数百行）
+pub const MAX_SET_ROWS: usize = 10_000;
 /// 埋め込み画像の擬似キー。操作の対象にできない（P1-3 のアートワークで扱う）
 const PICTURE_KEY: &str = "PICTURE";
 
@@ -65,6 +70,27 @@ pub enum Op {
     Delete {
         key: String,
     },
+    /// 行ごとの固定値代入。`rows` はトラック id → 値（空は削除）。その行の id が無ければ何もしない。
+    /// 一括編集の UI には出さず、スクリプトからの補填（`SOURCE_URL` 等）に使う
+    #[serde(rename = "set_rows")]
+    SetRows {
+        key: String,
+        #[serde(serialize_with = "serialize_rows")]
+        rows: BTreeMap<i64, Vec<String>>,
+    },
+}
+
+/// JSON のキーは文字列なので、id を文字列にして書く
+fn serialize_rows<S: serde::Serializer>(
+    rows: &BTreeMap<i64, Vec<String>>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap as _;
+    let mut m = s.serialize_map(Some(rows.len()))?;
+    for (id, v) in rows {
+        m.serialize_entry(&id.to_string(), v)?;
+    }
+    m.end()
 }
 
 /// 比較はコンパイル済み正規表現を除く（パターン文字列が同じなら同じ操作）
@@ -109,6 +135,7 @@ impl PartialEq for Op {
                 },
             ) => a == d && b == e && c == f,
             (Op::Delete { key: a }, Op::Delete { key: b }) => a == b,
+            (Op::SetRows { key: a, rows: b }, Op::SetRows { key: c, rows: d }) => a == c && b == d,
             _ => false,
         }
     }
@@ -143,6 +170,11 @@ enum OpJson {
     Delete {
         key: String,
     },
+    #[serde(rename = "set_rows")]
+    SetRows {
+        key: String,
+        rows: BTreeMap<String, SetValue>,
+    },
 }
 
 fn one() -> i64 {
@@ -156,6 +188,20 @@ enum SetValue {
     Empty,
     One(String),
     Many(Vec<String>),
+}
+
+impl SetValue {
+    /// NFC に正規化し、空の値を落とす（空だけなら削除と同義）
+    fn into_values(self) -> Vec<String> {
+        match self {
+            SetValue::Empty => Vec::new(),
+            SetValue::One(s) => vec![nfc(&s)],
+            SetValue::Many(v) => v.iter().map(|s| nfc(s)).collect(),
+        }
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect()
+    }
 }
 
 fn nfc(s: &str) -> String {
@@ -200,62 +246,78 @@ pub fn parse_ops(v: &serde_json::Value) -> Result<Vec<Op>, TagOpsError> {
                 index,
                 message: e.to_string(),
             })?;
-        let op = match parsed {
-            OpJson::Set { key, value } => Op::Set {
-                key: normalize_key(index, &key)?,
-                value: match value {
-                    SetValue::Empty => Vec::new(),
-                    SetValue::One(s) => vec![nfc(&s)],
-                    SetValue::Many(v) => v.iter().map(|s| nfc(s)).collect(),
-                }
-                .into_iter()
-                .filter(|s| !s.is_empty())
-                .collect(),
-            },
-            OpJson::Ref { key, template } => Op::Ref {
-                key: normalize_key(index, &key)?,
-                template: nfc(&template),
-            },
-            OpJson::Replace {
-                key,
-                pattern,
-                replacement,
-            } => {
-                let regex = RegexBuilder::new(&pattern)
-                    .backtrack_limit(BACKTRACK_LIMIT)
-                    .build()
-                    .map_err(|e| TagOpsError::Regex {
-                        index,
-                        message: e.to_string(),
-                    })?;
-                Op::Replace {
+        let op =
+            match parsed {
+                OpJson::Set { key, value } => Op::Set {
                     key: normalize_key(index, &key)?,
+                    value: value.into_values(),
+                },
+                OpJson::SetRows { key, rows } => {
+                    if rows.is_empty() || rows.len() > MAX_SET_ROWS {
+                        return Err(TagOpsError::Invalid {
+                            index,
+                            message: format!("rows は 1 件以上 {MAX_SET_ROWS} 件以下"),
+                        });
+                    }
+                    let mut parsed = BTreeMap::new();
+                    for (id, value) in rows {
+                        let id: i64 = id.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+                            TagOpsError::Invalid {
+                                index,
+                                message: format!("rows のキーはトラック id: {id:?}"),
+                            }
+                        })?;
+                        parsed.insert(id, value.into_values());
+                    }
+                    Op::SetRows {
+                        key: normalize_key(index, &key)?,
+                        rows: parsed,
+                    }
+                }
+                OpJson::Ref { key, template } => Op::Ref {
+                    key: normalize_key(index, &key)?,
+                    template: nfc(&template),
+                },
+                OpJson::Replace {
+                    key,
                     pattern,
-                    replacement: nfc(&replacement),
-                    regex: Some(regex),
+                    replacement,
+                } => {
+                    let regex = RegexBuilder::new(&pattern)
+                        .backtrack_limit(BACKTRACK_LIMIT)
+                        .build()
+                        .map_err(|e| TagOpsError::Regex {
+                            index,
+                            message: e.to_string(),
+                        })?;
+                    Op::Replace {
+                        key: normalize_key(index, &key)?,
+                        pattern,
+                        replacement: nfc(&replacement),
+                        regex: Some(regex),
+                    }
                 }
-            }
-            OpJson::Number { key, start, pad } => {
-                let start = u32::try_from(start).map_err(|_| TagOpsError::Invalid {
-                    index,
-                    message: format!("start は 0 以上の整数: {start}"),
-                })?;
-                if pad > MAX_PAD {
-                    return Err(TagOpsError::Invalid {
+                OpJson::Number { key, start, pad } => {
+                    let start = u32::try_from(start).map_err(|_| TagOpsError::Invalid {
                         index,
-                        message: format!("pad は 0 以上 {MAX_PAD} 以下: {pad}"),
-                    });
+                        message: format!("start は 0 以上の整数: {start}"),
+                    })?;
+                    if pad > MAX_PAD {
+                        return Err(TagOpsError::Invalid {
+                            index,
+                            message: format!("pad は 0 以上 {MAX_PAD} 以下: {pad}"),
+                        });
+                    }
+                    Op::Number {
+                        key: normalize_key(index, &key)?,
+                        start,
+                        pad,
+                    }
                 }
-                Op::Number {
+                OpJson::Delete { key } => Op::Delete {
                     key: normalize_key(index, &key)?,
-                    start,
-                    pad,
-                }
-            }
-            OpJson::Delete { key } => Op::Delete {
-                key: normalize_key(index, &key)?,
-            },
-        };
+                },
+            };
         out.push(op);
     }
     Ok(out)
@@ -297,8 +359,13 @@ fn set_key(items: &mut Vec<(String, String)>, key: &str, values: Vec<String>) {
 }
 
 /// 操作リストを上から順に適用した新しいタグ集合。`index` は連番の 0 始まりの位置
-/// （選択集合を現在のソート順に並べたときの位置）
-pub fn apply_ops(ops: &[Op], tags: &TagSet, index: usize) -> Result<TagSet, TagOpsError> {
+/// （選択集合を現在のソート順に並べたときの位置）、`track_id` は `set_rows` が行を引く id
+pub fn apply_ops(
+    ops: &[Op],
+    tags: &TagSet,
+    index: usize,
+    track_id: i64,
+) -> Result<TagSet, TagOpsError> {
     let mut items: Vec<(String, String)> = tags.items().to_vec();
     for (i, op) in ops.iter().enumerate() {
         match op {
@@ -354,6 +421,11 @@ pub fn apply_ops(ops: &[Op], tags: &TagSet, index: usize) -> Result<TagSet, TagO
                 set_key(&mut items, key, vec![s]);
             }
             Op::Delete { key } => set_key(&mut items, key, Vec::new()),
+            Op::SetRows { key, rows } => {
+                if let Some(values) = rows.get(&track_id) {
+                    set_key(&mut items, key, values.clone());
+                }
+            }
         }
     }
     Ok(normalize_tags(items))
