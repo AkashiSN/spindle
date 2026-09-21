@@ -25,7 +25,7 @@ import type { Sort, SortKey } from '../lib/filter'
 import { formatArtistAlbum, formatDuration, formatTitleArtist, formatTrackNo } from '../lib/format'
 import { cellDiff, COLUMN_TAG, formatValues, type PreviewState } from '../lib/preview'
 import { dropTarget, parseDragIds, serializeDragIds, TRACK_DRAG_TYPE, type DropHalf } from '../lib/playlists'
-import { asNavKey, moveCursor } from '../lib/keynav'
+import { asNavKey, isInteractiveTarget, moveCursor, resolveCursor } from '../lib/keynav'
 import type { ClickModifiers, Selection, VisibleOrder } from '../lib/selection'
 import { isSelected } from '../lib/selection'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
@@ -288,13 +288,26 @@ export function TrackTable(props: TrackTableProps) {
 
   const order: VisibleOrder = useMemo(() => rows.map((r) => r.id), [rows])
   const showFilterHighlight = selection.kind !== 'filter' || highlightFilterSelection
-  // キーボードのカーソル行（id で持つ。ソート・フィルタで行が入れ替わっても別の行を指さない）
+  // キーボードのカーソル行（id で持つ。ソート・フィルタで行が入れ替わっても別の行を指さない。
+  // 表示から消えたら無効 = null として扱う）
   const [cursorId, setCursorId] = useState<number | null>(null)
+  const cursor = useMemo(() => resolveCursor(cursorId, order), [cursorId, order])
+  const rootRef = useRef<HTMLDivElement>(null)
   const handleRowClick = useCallback(
     (e: MouseEvent, id: number) => {
       e.preventDefault()
       setCursorId(id)
       props.onRowClick(id, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey }, order)
+    },
+    [order, props],
+  )
+  // 行内のチェックボックス（Ctrl+クリック相当）。フォーカスを表ルートへ戻し、続くキー操作を一覧のものにする
+  const handleCheckClick = useCallback(
+    (e: MouseEvent, id: number) => {
+      e.stopPropagation()
+      setCursorId(id)
+      rootRef.current?.focus()
+      props.onRowClick(id, { shift: e.shiftKey, ctrl: true }, order)
     },
     [order, props],
   )
@@ -304,6 +317,8 @@ export function TrackTable(props: TrackTableProps) {
   // Space（カーソル行をトグル）
   const handleKey = useCallback(
     (e: React.KeyboardEvent) => {
+      // ツールバーのボタン・列選択・行内のボタンなど入力部品からのキーは、その部品のもの
+      if (isInteractiveTarget(e.target instanceof HTMLElement ? e.target : null)) return
       const ctrl = e.ctrlKey || e.metaKey
       if (ctrl && e.key.toLowerCase() === 'a') {
         e.preventDefault()
@@ -320,9 +335,9 @@ export function TrackTable(props: TrackTableProps) {
         return
       }
       if (e.key === ' ') {
-        if (cursorId == null) return
+        if (cursor == null) return
         e.preventDefault()
-        props.onRowClick(cursorId, { shift: false, ctrl: true }, order)
+        props.onRowClick(cursor, { shift: false, ctrl: true }, order)
         return
       }
       const nav = asNavKey(e.key)
@@ -330,17 +345,17 @@ export function TrackTable(props: TrackTableProps) {
       e.preventDefault() // 既定のスクロールを止め、カーソルの移動で追随させる
       const el = scrollRef.current
       const pageRows = el ? Math.floor(el.clientHeight / ROW_HEIGHT) - 1 : 1
-      const cur = cursorId == null ? -1 : order.indexOf(cursorId)
+      const cur = cursor == null ? -1 : order.indexOf(cursor)
       const next = moveCursor(nav, cur < 0 ? null : cur, rows.length, pageRows)
       if (next == null) return
       const id = order[next]
       if (id == null) return
       setCursorId(id)
       virtualizer.scrollToIndex(next, { align: 'auto' })
-      if (e.shiftKey) props.onRangeSelect(id, order, cursorId)
+      if (e.shiftKey) props.onRangeSelect(id, order, cursor)
       else if (!ctrl) props.onRowClick(id, { shift: false, ctrl: false }, order)
     },
-    [props, selection.kind, cursorId, order, rows.length, virtualizer],
+    [props, selection.kind, cursor, order, rows.length, virtualizer],
   )
 
   // 行のドラッグ（P1-6）: 掴んだ行が選択に入っていれば選択中の行（表示順）、そうでなければその 1 行
@@ -401,7 +416,7 @@ export function TrackTable(props: TrackTableProps) {
   const sortable = (id: string) => SORT_OF[id]
 
   return (
-    <div className="track-table" onKeyDown={handleKey} tabIndex={0}>
+    <div className="track-table" ref={rootRef} onKeyDown={handleKey} tabIndex={0}>
       <div className="table-toolbar">
         <span className="muted">
           表示 {total == null ? '…' : total.toLocaleString('ja-JP')} 件
@@ -537,7 +552,7 @@ export function TrackTable(props: TrackTableProps) {
               const cls = [
                 'tr',
                 selected ? 'selected' : '',
-                cursorId === track.id ? 'cursor' : '',
+                cursor === track.id ? 'cursor' : '',
                 track.pending_batch_id != null ? 'pending' : '',
                 track.missing_since != null ? 'missing' : '',
                 previewUnchanged ? 'preview-unchanged' : '',
@@ -571,10 +586,7 @@ export function TrackTable(props: TrackTableProps) {
                               type="checkbox"
                               tabIndex={-1}
                               checked={selected}
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                props.onRowClick(track.id, { shift: e.shiftKey, ctrl: true }, order)
-                              }}
+                              onClick={(e) => handleCheckClick(e, track.id)}
                               onChange={() => {}}
                             />
                             <button
@@ -585,6 +597,7 @@ export function TrackTable(props: TrackTableProps) {
                               title="この行から再生"
                               onClick={(e) => {
                                 e.stopPropagation()
+                                rootRef.current?.focus()
                                 props.onPlay(track)
                               }}
                             >

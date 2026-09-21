@@ -38,3 +38,20 @@ export function moveCursor(key: NavKey, cursor: number | null, loaded: number, p
       return cursor == null ? last : clamp(cursor - page)
   }
 }
+
+/**
+ * 表示中の行に居るカーソルだけを有効にする。ソート・フィルタ・再取得で行が消えたら null
+ * （消えた id を Space で選択に足したり、そこから移動を始めたりしない）
+ */
+export function resolveCursor(cursorId: number | null, order: readonly number[]): number | null {
+  return cursorId != null && order.includes(cursorId) ? cursorId : null
+}
+
+/**
+ * キーの発生元が入力部品（ボタン・チェックボックス・入力欄など）なら、一覧の操作にしない。
+ * 表ルートの onKeyDown にはツールバーや行内のボタンからも bubbling で届くため
+ */
+export function isInteractiveTarget(t: { tagName: string; isContentEditable: boolean } | null): boolean {
+  if (!t) return false
+  return ['INPUT', 'BUTTON', 'SELECT', 'TEXTAREA'].includes(t.tagName) || t.isContentEditable
+}

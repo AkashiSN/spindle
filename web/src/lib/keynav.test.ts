@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { asNavKey, moveCursor } from './keynav'
+import { asNavKey, isInteractiveTarget, moveCursor, resolveCursor } from './keynav'
 
 describe('asNavKey', () => {
   it('矢印・Page・Home・End だけを移動キーとして扱う', () => {
@@ -59,5 +59,25 @@ describe('moveCursor', () => {
   it('画面の行数が 0 以下でも Page は最低 1 行動く', () => {
     expect(moveCursor('PageDown', 3, loaded, 0)).toBe(4)
     expect(moveCursor('PageUp', 3, loaded, -1)).toBe(2)
+  })
+})
+
+describe('resolveCursor', () => {
+  it('読み込み済みの行に居るカーソルだけ有効。消えていれば null', () => {
+    expect(resolveCursor(30, [10, 20, 30])).toBe(30)
+    expect(resolveCursor(40, [10, 20, 30])).toBeNull()
+    expect(resolveCursor(null, [10, 20, 30])).toBeNull()
+    expect(resolveCursor(10, [])).toBeNull()
+  })
+})
+
+describe('isInteractiveTarget', () => {
+  it('input / button / select / textarea / contenteditable からのキーは一覧の操作にしない', () => {
+    for (const tag of ['INPUT', 'BUTTON', 'SELECT', 'TEXTAREA']) {
+      expect(isInteractiveTarget({ tagName: tag, isContentEditable: false })).toBe(true)
+    }
+    expect(isInteractiveTarget({ tagName: 'DIV', isContentEditable: true })).toBe(true)
+    expect(isInteractiveTarget({ tagName: 'DIV', isContentEditable: false })).toBe(false)
+    expect(isInteractiveTarget(null)).toBe(false)
   })
 })
