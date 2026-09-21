@@ -1106,8 +1106,10 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       ユーザが YouTube 側で保守してきた**アーティストごとの再生リスト**: 旧パイプラインは「再生リスト名 =
       アルバム名（`花譜のお歌` 等 10 アルバム）、再生リスト内の位置 = `TRACKNUMBER`」で並べており（実機で
       確認: 各アルバムが 1 から連番、`花譜のお歌` は 244 曲で 1〜246 = 2 つ欠番）、非公開になった動画も
-      リストには `[Private video]` として id と位置が残る。手順: `scripts/backfill_source_url.py`（標準
-      ライブラリのみ。yt-dlp と spindle の API を使う）で (1) 再生リスト URL ごとに `yt-dlp --flat-playlist
+      リストには `[Private video]` として id と位置が残る。再生リストの URL 一覧と計画 CSV はリポジトリ外に保管する（公開リポジトリに
+      置かない。リリース時の再移行で `SOURCE_URL` は消えるので、同じ入力で再適用する）。手順:
+      `scripts/backfill_source_url.py`（標準ライブラリのみ。yt-dlp と spindle の API を使う）で (1) 再生リスト
+      URL ごとに `yt-dlp --flat-playlist
       --dump-single-json` を取り（非公開のリストは cookie が要るので、一時的に限定公開にするか `--cookies` を
       渡す）、(2) 位置 i+1 と `TRACKNUMBER`、リスト名と `ALBUM` で Library の行を引き、タイトルが取れる
       entry はメタデータプラグイン（`spindle-ytmusic-meta`）で判定した title と Library の `TITLE` を照合して
