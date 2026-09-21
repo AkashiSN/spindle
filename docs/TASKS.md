@@ -1146,7 +1146,10 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       列挙 → 揃え → 投入、phase 非永続の再計算（rename の候補は番号の合った行の全部）、Duplicate は
       「走行中」扱い、latch + Requeue + dispatcher、`album_id` の CAS 束ね。API は
       `/api/ytmusic/subscriptions`（下記の `/api/playlists/...` から変更）。(2') の「非公開 / 削除の別」は
-      現行 yt-dlp では出力から付かないので `kind: private | deleted | unknown` の hint に読み替え）。`SOURCE_URL`（P4-14）で「再生リストのどこまで持っているか」が
+      現行 yt-dlp では出力から付かないので `kind: private | deleted | unknown` の hint に読み替え。実装
+      レビューで足した規則: 購読 id は AUTOINCREMENT（0022）、同期が active の間は PATCH / DELETE を 409、重複
+      entry は固定、子バッチは全件 applied を要求、改名はファイル名だけ。リハーサル環境で 9 本を登録 → 同期
+      （明透 14 件ずらし + 2 本投入）→ 承認 → 後続の自動同期で変更なし、を確認済み）。`SOURCE_URL`（P4-14）で「再生リストのどこまで持っているか」が
       分かるので、URL を貼る運用をなくす。
       (1) **購読**: 新しいマイグレーションで `playlist_subscriptions`（`list_id` / URL / 追記先 `album_id`
       （無ければ `albumartist` + `album` で作る）/ `enabled` / `last_synced_at` / 最終結果）。API は
