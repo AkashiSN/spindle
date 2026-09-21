@@ -139,7 +139,12 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
     assert_eq!(body["archived"]["bytes"], 5);
     assert_eq!(body["derived"]["count"], 0);
     assert_eq!(body["artwork_dirs"]["count"], 0);
-    assert!(body["cutoff"].as_i64().unwrap() <= now - 30 * 86_400);
+    // cutoff はサーバが受信時刻から数える。テストの now より後なので、秒が進んだぶんだけ大きくなり得る
+    let cutoff = body["cutoff"].as_i64().unwrap();
+    assert!(
+        cutoff >= now - 30 * 86_400 && cutoff <= now_epoch() - 30 * 86_400,
+        "cutoff={cutoff} now={now}"
+    );
     // 何も消えていない
     let n: i64 = app
         .conn()
