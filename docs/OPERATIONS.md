@@ -31,8 +31,10 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
 3. `GET /health` の `version`（= `spindle --version`）が期待する版（Release のタグ、または `sha-<7>` の
    sha）になっていること、`ytdlp` が新しくなっていることを確認する。起動ログの「DB を開いた
    schema_version=」で前進したマイグレーションが分かる
-4. 戻すとき: 旧タグ（`X.Y.Z`）を指して再作成 → **DB はバックアップから復元**（新しい版が進めた
-   マイグレーションは旧版が知らない）
+4. 戻すとき（新しい版が進めたマイグレーションは旧版が知らないので、DB も一緒に戻す）: **アプリを止める** →
+   `/data/spindle.db`（と `-wal` / `-shm`）を退避し、更新前のバックアップから復元（下記「復元」の手順）→
+   旧タグ（`X.Y.Z`）を指して再作成 → `/health` の `version` で旧版を確認。順序を違えると、旧版を新 schema の
+   DB で起動したり、稼働中の DB を差し替えたりすることになる
 
 ### YouTube の取り込みが失敗し始めたら
 

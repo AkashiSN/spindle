@@ -3143,7 +3143,10 @@ Duplicate を「走行中」として次の同期に任せる規則で足りる�
 
 **決定**（2026-09-21、P4-12。SPEC §14「イメージの配布」）:
 - 置き場は GHCR `ghcr.io/akashisn/spindle`（public、`linux/amd64`）。`main` → `edge` / `sha-<7>`、
-  `vX.Y.Z` → `X.Y.Z` / `X.Y` / `latest`（+ Release）。PR は push しない
+  `vX.Y.Z`（この形だけ。他の `v*` は CI が拒む）→ `X.Y.Z` / `X.Y` / `latest`（+ Release）。PR は push しない。
+  書き込み権限（GHCR / Release）は push イベントだけの `publish` ジョブに限り、PR で走る `docker` ジョブは
+  `contents: read`（同一リポジトリの PR や Renovate のブランチでも write token を持たない）。publish は
+  docker ジョブが `docker save` した成果物を skopeo で複製する
 - CI の docker ジョブが `load` でビルドして起動確認し、**同じイメージ**を `docker push` する
   （二度ビルドしない。確認した digest = 配布する digest）
 - 版は `--build-arg SPINDLE_VERSION=$(git describe --tags --always)` → `build.rs` → `spindle --version` と

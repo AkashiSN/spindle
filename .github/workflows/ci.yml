@@ -53,21 +53,36 @@ jobs:
       - run: cargo test --locked
 
   docker:
-    # イメージを 1 回だけビルドし、起動確認に通ったものをそのまま GHCR へ push する（P4-12、D-79）。
-    # push するのは main への push（edge / sha-<7 桁>）と v* タグ（X.Y.Z / X.Y / latest）だけ。PR は確認のみ
-    name: docker build + /health + push
+    # イメージを 1 回だけビルドして起動確認する（PR でも走る。書き込み権限は持たない）。push は別ジョブ
+    # publish が、ここで確認した同じイメージ（docker save の成果物）を GHCR へ複製する（P4-12、D-79）
+    name: docker build + /health
     runs-on: ubuntu-latest
     needs: [web, rust]
     permissions:
-      contents: write     # v* タグの Release
-      packages: write     # GHCR
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0    # git describe のため
-      - name: 版（git describe --tags --always）
+      - name: 版（git describe --tags --always）と、v* タグなら vX.Y.Z の形の検査
         id: version
-        run: echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -eu
+          echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+          release=false
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              if echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+                release=true
+              else
+                echo "::error::リリースタグは vX.Y.Z の形だけ: $GITHUB_REF_NAME"; exit 1
+              fi ;;
+          esac
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - uses: docker/metadata-action@v5
         id: meta
         with:
@@ -77,7 +92,7 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.release == 'true' }}
           labels: |
             org.opencontainers.image.title=spindle
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
@@ -167,35 +182,55 @@ jobs:
           curl -fsS http://127.0.0.1:18080/health | grep -q '"status":"ok"'
           docker rm -f spindle-ci
 
-      - uses: docker/login-action@v3
+      - name: 起動確認に通ったイメージを publish ジョブへ渡す（push イベントだけ）
+        if: github.event_name == 'push'
+        run: docker save spindle:ci | zstd -T0 -3 -o image.tar.zst
+      - uses: actions/upload-artifact@v4
         if: github.event_name == 'push'
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: 起動確認に通ったイメージをそのまま push
-        if: github.event_name == 'push'
-        # docker push は buildx で load したイメージを GHCR に押すと「unknown blob」で落ちることがあるので、
-        # skopeo で daemon から直接コピーする（同じイメージ、全タグで同じ digest）
+          name: image
+          path: image.tar.zst
+          retention-days: 1
+
+  publish:
+    # 書き込み権限（GHCR / Release）はこのジョブだけ。main への push（edge / sha-<7 桁>）と vX.Y.Z タグ
+    # （X.Y.Z / X.Y / latest + Release）で走り、PR では走らない。docker ジョブが確認した同じイメージ
+    # （docker save の成果物）を skopeo で複製するので二度ビルドしない。docker push は buildx で load した
+    # イメージを GHCR に押すと「unknown blob」で落ちることがある
+    name: publish (GHCR)
+    runs-on: ubuntu-latest
+    needs: [docker]
+    if: github.event_name == 'push'
+    permissions:
+      contents: write     # vX.Y.Z の Release
+      packages: write     # GHCR
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - name: GHCR へ複製（全タグ同じ digest）
+        id: push
+        env:
+          TAGS: ${{ needs.docker.outputs.tags }}
+          CREDS: ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
           command -v skopeo >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo)
-          digest=""
-          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
+          zstd -d image.tar.zst -o image.tar
+          echo "$TAGS" | while read -r tag; do
             [ -n "$tag" ] || continue
-            skopeo copy --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-              docker-daemon:spindle:ci "docker://$tag"
+            skopeo copy --dest-creds "$CREDS" docker-archive:image.tar "docker://$tag"
           done
-          first=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
-          digest=$(skopeo inspect --creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" --format '{{.Digest}}' "docker://$first")
+          first=$(echo "$TAGS" | head -n1)
+          digest=$(skopeo inspect --creds "$CREDS" --format '{{.Digest}}' "docker://$first")
           echo "pushed: ${first%%:*}@$digest" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "digest=${IMAGE}@$digest" >> "$GITHUB_OUTPUT"
-        id: push
-      - name: GitHub Release（v* タグ。本文はイメージのタグと digest だけ）
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: GitHub Release（vX.Y.Z タグ。自動生成のノート + イメージのタグと digest）
+        if: needs.docker.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -eu
-          notes=$(printf 'Docker image: `%s`\n\n```\n%s\n```\n' "${IMAGE}:${GITHUB_REF_NAME#v}" "${{ steps.push.outputs.digest }}")
+          notes=$(printf 'Docker image: `%s`\n\n```\n%s\n```\n' "${IMAGE}:${GITHUB_REF_NAME#v}" "$DIGEST")
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --notes "$notes"

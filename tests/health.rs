@@ -95,6 +95,29 @@ fn version_flag_prints_the_version_and_exits() {
         String::from_utf8_lossy(&out.stdout).trim(),
         format!("spindle {}", spindle::version::VERSION)
     );
+    // 受けるのは --version / -V が単独のときだけ。他の引数が混ざれば exit 2
+    for args in [
+        vec!["foo"],
+        vec!["--version", "foo"],
+        vec!["foo", "--version"],
+        vec!["-V", "-V"],
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_spindle"))
+            .args(&args)
+            .env_remove("SPINDLE_CONFIG")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("不明な引数"),
+            "{args:?}"
+        );
+    }
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_spindle"))
+        .arg("-V")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
 }
 
 /// ビルド時の版: `SPINDLE_VERSION` が無ければ git describe か `dev`。空にはならない

@@ -2020,15 +2020,18 @@ ytdlp = "yt-dlp"
 ### イメージの配布（P4-12、D-79）
 
 - 置き場は GHCR `ghcr.io/akashisn/spindle`（public。pull にトークン不要）。`linux/amd64` のみ
-- CI（`.github/workflows/ci.yml`）は web → rust → docker の順で、docker ジョブが**イメージを 1 回だけ
-  ビルド**し（`docker/build-push-action` の `load`）、起動確認（`--version`、`/health` の `version` /
-  `ytdlp`、ロックモード、ログイン、CSRF、ジョブ API、同梱 SPA）に通ったものを**そのまま** push する
-  （二度ビルドしない = 確認した digest と配布する digest が同じ）。タグは `docker/metadata-action`:
-  `main` への push → `edge` と `sha-<7 桁>`、`vX.Y.Z` タグ → `X.Y.Z` / `X.Y` / `latest`（+ GitHub Release。
-  本文はイメージのタグと digest）。PR はビルドと起動確認だけで push しない
+- CI（`.github/workflows/ci.yml`）は web → rust → docker → publish の順。docker ジョブ（PR でも走る。
+  `contents: read` だけ）が**イメージを 1 回だけビルド**し（`docker/build-push-action` の `load`）、起動確認
+  （`--version`、`/health` の `version` / `ytdlp`、ロックモード、ログイン、CSRF、ジョブ API、同梱 SPA）に
+  通ったものを `docker save` して成果物に渡す。publish ジョブ（push イベントだけ。書き込み権限 = GHCR /
+  Release はここだけ）がそれを skopeo で GHCR へ複製する（二度ビルドしない = 確認した digest と配布する
+  digest が同じ。`docker push` は load したイメージで「unknown blob」になる）。タグは `docker/metadata-action`:
+  `main` への push → `edge` と `sha-<7 桁>`、`vX.Y.Z` タグ（この形だけ。他の `v*` は CI が拒む）→ `X.Y.Z` /
+  `X.Y` / `latest`（+ GitHub Release。自動生成のノートにイメージのタグと digest を添える）。PR はビルドと
+  起動確認だけで push しない
 - 版は build context に `.git` を入れないので、CI が `--build-arg SPINDLE_VERSION=$(git describe --tags
-  --always)` で渡し、`build.rs` が `cargo:rustc-env` で焼く（環境変数 > 作業ツリーの `git describe` >
-  `dev`）。OCI ラベル（`org.opencontainers.image.{source,revision,version,created,…}`）は metadata-action
+  --always)` で渡し、`build.rs` が `cargo:rustc-env` で焼く（環境変数 > 作業ツリーの `git describe`（HEAD /
+  その ref / packed-refs / index の変化で再計算。`--dirty` は付けない）> `dev`）。OCI ラベル（`org.opencontainers.image.{source,revision,version,created,…}`）は metadata-action
 - メタデータプラグイン（`spindle-ytmusic-meta`）はイメージに焼かず実行時マウントのまま（D-70）
 - **`edge` は開発用で DB の互換（マイグレーションの前進）以外は約束しない。** 本番は `latest`
   （= 最新の `vX.Y.Z`）か `X.Y` を指す。マイグレーションは起動時に自動で前進のみ = 戻すときは

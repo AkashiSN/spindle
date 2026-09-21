@@ -54,13 +54,19 @@ const INITIAL_PASSWORD_ENV: &str = "SPINDLE_INITIAL_PASSWORD";
 async fn main() -> anyhow::Result<()> {
     // `spindle --version` は版だけ出して終わる（設定を読まない。P4-12）。他の引数は取らない
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("spindle {}", spindle::version::VERSION);
-        return Ok(());
-    }
-    if let Some(unknown) = args.first() {
-        eprintln!("不明な引数: {unknown}（受けるのは --version だけ。設定は SPINDLE_CONFIG）");
-        std::process::exit(2);
+    match args.as_slice() {
+        [] => {}
+        [flag] if flag == "--version" || flag == "-V" => {
+            println!("spindle {}", spindle::version::VERSION);
+            return Ok(());
+        }
+        _ => {
+            eprintln!(
+                "不明な引数: {}（受けるのは --version だけ。設定は SPINDLE_CONFIG）",
+                args.join(" ")
+            );
+            std::process::exit(2);
+        }
     }
     logging::init();
     info!(version = spindle::version::VERSION, "spindle を起動する");
