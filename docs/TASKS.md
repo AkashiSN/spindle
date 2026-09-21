@@ -1055,13 +1055,19 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       クロスビルドが遅く需要も無い。要るときに足す）。(5) イメージに版を焼く: `org.opencontainers.image.
       {source,revision,version,created}` のラベルと、`spindle --version` / `GET /health` の `version`
       （`git describe` か sha。`build.rs` か `vergen` で埋める。実機の「いまどのコミットが動いているか」を
-      docker のログではなく `/health` で答えられるように）。(6) 実機の更新手順を `docker compose pull && up -d`
-      に置き換え、README「起動」と docs/OPERATIONS.md に書く（手順の `build.sh` は開発中の未コミット確認用に
-      残す）。リハーサル環境も GHCR の `edge` を使うようにし、`compose.yaml` の `image:` を揃える。
+      docker のログではなく `/health` で答えられるように）。(6) 本番は TrueNAS のカスタムアプリ（compose 相当）として動かす
+      ので、更新は TrueNAS の UI でイメージを pull し直す操作になる。自動配備は作らず、README「起動」と
+      docs/OPERATIONS.md に「カスタムアプリの作り方（`deploy/compose.yaml` を写す。デバイス・GID・
+      ボリューム・プラグインのマウント）と更新手順（`latest` / `X.Y` のどれを指すか、pull → 再作成、
+      `/health` の `version` で確認、DB のマイグレーションは起動時に自動で前進のみ = 戻すときは
+      バックアップから）」を書く。リハーサル環境は GHCR の `edge` を使うようにし、`build.sh` は開発中の
+      未コミット確認用に残す。
       (7) **yt-dlp の更新**を仕組みにする（YouTube の抽出は yt-dlp が古いと壊れる。いまは Dockerfile の
       `ARG YTDLP_VERSION=2026.08.19` 固定を手で上げている）: 週 1 の `schedule` で yt-dlp の最新リリースを
       GitHub API から取り、`ARG` を書き換える PR を自動で作る（Dependabot は `ADD https://…` の版を追えない）
-      → CI が通ればマージして `edge` を作り直す。あわせてベースイメージ（`debian:bookworm-slim` / `node` /
+      → CI が通ればマージして `edge` を作り直す。本番へは次の `vX.Y.Z` で届く（yt-dlp だけの更新でもパッチ版を
+      切る。カスタムアプリ側の更新は手動なので、OPERATIONS に「YouTube の取り込みが失敗し始めたらまず
+      イメージを更新する」と書く）。あわせてベースイメージ（`debian:bookworm-slim` / `node` /
       `rust` / `denoland/deno`）と GitHub Actions は Dependabot（`docker` / `github-actions`）で追う。
       `/health` に yt-dlp の版（`yt-dlp --version` を起動時診断で取る）を出し、実機で確認できるように。(8) `vX.Y.Z` の GitHub Release（自動生成のノート）を作るかは任意。Release には
       イメージのタグと digest だけ書く。**スカッシュ（`db/migrations` を `0001` に畳む）はこの前提**: 公開
