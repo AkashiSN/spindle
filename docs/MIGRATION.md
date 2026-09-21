@@ -156,5 +156,19 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
    `zfs destroy -r`（Derived / DB / バックアップも開発用なので捨てる）
 2. §0 から本手順をやり直す（preflight → migrate_plan → データセット作成 → readonly → snapshot →
    rsync → 検証 → chown → ACL / スナップショット設定 → 起動 → 照合）
-3. 正式運用後、数日間問題が出ないことを確認してから `ssd/musics` を破棄する。`AAC/`（48G）は
+3. **移行後の一度きりの手順**（webm 由来の `〜のお歌` アルバム。docs/TASKS.md P4-14 / P4-15）。
+   入力（アーティストごとの YouTube 再生リスト URL の TSV と前回の計画 CSV）はリポジトリ外に
+   保管してある。旧パイプラインは「再生リスト名 = アルバム名、リスト内の位置 = `TRACKNUMBER`」で
+   並べていたので、この順を正とする:
+   1. `scripts/backfill_source_url.py --playlists … --spindle … --out …` で計画 CSV を出し、目視
+      （`title-mismatch` / `no-track` / `extra-track` / `kept` を確認）→ `--apply` で `SOURCE_URL` を
+      書く（アルバムごとに 1 バッチ。巻き戻し可）。既に `SOURCE_URL` を持つ行は上書きしない
+   2. `no-track`（再生リストにあって Library に無い動画）は再生リストの URL を YouTube 画面に貼って
+      取り込む。`SOURCE_URL` のある曲は「取り込み済み」で弾かれるので、無いものだけが Inbox に来る →
+      承認で末尾の番号に配置される
+   3. `scripts/backfill_source_url.py … --renumber` で `TRACKNUMBER` を再生リストの位置に揃え
+      （`set_rows` 1 バッチ）、続けてリネーム（`POST /api/rename/preview` → `apply`）でファイル名の
+      番号を追随させる。Derived（opus / aac）はタグ上書き・移動で追随する
+   これらは実データでは 1 回しか行わないが、リハーサル環境で一度通してから行う
+4. 正式運用後、数日間問題が出ないことを確認してから `ssd/musics` を破棄する。`AAC/`（48G）は
    この破棄で一緒に消える

@@ -1133,6 +1133,18 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       1 アルバムを dry-run → CSV 確認 → apply → `SOURCE_URL` が付き、同じ URL の再ダウンロードが
       「取り込み済み（Library）」で拒否される
 
+- [ ] **P4-15** `〜のお歌` の番号を再生リストの順に揃える（`backfill_source_url.py --renumber`。設計は着手時に
+      行う）。再生リストの途中に古い動画を足すと Library には末尾の番号で入る（Inbox の追記）ので、位置と
+      `TRACKNUMBER` がずれる。手順は MIGRATION.md §5-3: (1) `SOURCE_URL` で再生リストの位置（= 目標番号）と
+      Library の現在番号を突き合わせ、ずれている行だけ `TRACKNUMBER` を `set_rows` で書く（1 バッチ、巻き戻し
+      可。`SOURCE_URL` の無い行と再生リストに無い行は触らず一覧に出す）、(2) 続けて `POST /api/rename/preview`
+      → `apply` でファイル名（`{track:02} {title}`）を追随させる（スクリプトが投げるか、画面から。番号の
+      衝突は rename が一時名経由で処理する）、(3) Derived の opus / aac はタグ上書き・移動で追随。計画は
+      CSV（現在番号 → 目標番号）で見せてから `--apply`。受け入れ: `scripts/test_backfill_source_url.py`
+      （目標番号の算出: 未取り込みの動画の分だけ後続がずれる、`SOURCE_URL` 無しは触らない、既に一致なら
+      変更なし）、リハーサル環境で 再生リスト URL を貼って未取り込みの 3 本を Inbox → 承認 → `--renumber` →
+      リネーム → 番号・ファイル名・Derived が揃う。実データでは MIGRATION.md §5-3 の順で 1 回
+
 ## 着手前に確認が必要な残課題
 
 - ~~Discogs / VGMdb 連携の要否~~（2026-09-20。作らない。D-72）
