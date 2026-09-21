@@ -1041,6 +1041,35 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/tags_read.rs`（フリーフォームの多値・小文字名・`iTunNORM`、標準 atom と同名は標準が勝つ）、
       `tests/edits.rs`（ALAC に `set` → `delete` が applied）、実機で ALAC の 1 曲に追加 → 削除
 
+- [ ] **P4-12** CI / CD の整理と Docker イメージの配布（設計は着手時に行う）。いまは `.github/workflows/ci.yml`
+      が web（lint / build）→ rust（fmt / clippy / test）→ docker（build + `/health` 等の起動確認）まで行うが、
+      イメージはどこにも push しておらず、`deploy/compose.yaml` の `ghcr.io/akashisn/spindle:latest` は存在
+      しない。実機は `git archive` → ホストで `docker build` → `spindle:local` の手作業（`/root/spindle-migration/
+      build.sh`）。決めること: (1) 置き場は GHCR（`ghcr.io/akashisn/spindle`。compose が既に指している）。
+      パッケージを public にして pull にトークンを不要にする。プラグイン（`spindle-ytmusic-meta`）は
+      D-70 どおり焼かず、実行時マウントのまま。(2) タグ: `main` への push で `edge` と `sha-<7 桁>`、`vX.Y.Z`
+      タグで `X.Y.Z` / `X.Y` / `latest`。PR は build と起動確認だけで push しない。(3) CI の docker ジョブで
+      作ったイメージを**そのまま** push する（起動確認に通ったものと同じ digest。二度ビルドしない。
+      `docker/build-push-action` の `load` + `push` か、`docker/metadata-action` でタグを組んで最後に push）。
+      buildx の GHA キャッシュは今のまま。(4) platform は `linux/amd64` のみ（TrueNAS。arm64 は Rust の
+      クロスビルドが遅く需要も無い。要るときに足す）。(5) イメージに版を焼く: `org.opencontainers.image.
+      {source,revision,version,created}` のラベルと、`spindle --version` / `GET /health` の `version`
+      （`git describe` か sha。`build.rs` か `vergen` で埋める。実機の「いまどのコミットが動いているか」を
+      docker のログではなく `/health` で答えられるように）。(6) 実機の更新手順を `docker compose pull && up -d`
+      に置き換え、README「起動」と docs/OPERATIONS.md に書く（手順の `build.sh` は開発中の未コミット確認用に
+      残す）。リハーサル環境も GHCR の `edge` を使うようにし、`compose.yaml` の `image:` を揃える。
+      (7) ベースイメージ・yt-dlp（`ARG YTDLP_VERSION`）の追随: 週 1 の `schedule` で `edge` を作り直すか、
+      Dependabot（github-actions / docker / cargo / npm）を入れるか。最小は Dependabot の github-actions と
+      docker だけ。(8) `vX.Y.Z` の GitHub Release（自動生成のノート）を作るかは任意。Release には
+      イメージのタグと digest だけ書く。**スカッシュ（`db/migrations` を `0001` に畳む）はこの前提**: 公開
+      イメージを誰かが pull して DB を作った後は既存ファイルを書き換えられないので、畳むなら最初の
+      `vX.Y.Z` より前（リリース時の再移行で DB を作り直すとき）に 1 回だけ行い、D-xx に記録する。
+      `edge` は開発用で DB の互換を約束しない旨を README に書く。受け入れ: `main` への push で GHCR に
+      `edge` / `sha-*` が push され、`docker pull ghcr.io/akashisn/spindle:edge` して `/health` が 200 かつ
+      `version` に sha が入る（CI の起動確認に `version` の検査を足す）、`vX.Y.Z` タグで `latest` が動く
+      （最初のタグはリリース時）、PR では push されない、実機を `compose pull` で更新して `/health` の
+      `version` が一致する、README / OPERATIONS の更新手順
+
 ## 着手前に確認が必要な残課題
 
 - ~~Discogs / VGMdb 連携の要否~~（2026-09-20。作らない。D-72）
