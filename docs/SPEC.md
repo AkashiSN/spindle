@@ -955,8 +955,8 @@ multi_value_separator = " & "   # 多値フィールドの結合
      `entries < playlist_count` なら**古い yt-dlp の取りこぼし**として `Failed`（再試行）で何も投入しない
   2. 追記先: `album_id` があればその album（missing なら `Fatal`）、無ければ引いて束ねる（別の購読が束ねて
      いれば `Fatal`。読んでから束ねるまでに配置が束ねていればそちらが正）。まだ無ければ揃えは無し（最初の
-     配置で束ねる）。同期が queued / running の間は PATCH を 409 `sync_running` で拒む（走行中の同期が
-     古い追記先で揃えたり投入したりしない。検査と UPDATE は同じ書き込み閉包 = 投入と直列）。加えて各段の
+     配置で束ねる）。同期が queued / running の間は PATCH / DELETE を 409 `sync_running` で拒む（走行中の同期が
+     古い追記先で揃えたり、消えた購読の album を揃えたり、死んだ id で投入したりしない。検査と UPDATE は同じ書き込み閉包 = 投入と直列）。加えて各段の
      前に購読を読み直し、消えていれば `Fatal`、`updated_at` が進んでいれば `Failed`（直接 DB を書いた場合の
      控え）
   3. entry ごとに正規 URL `https://www.youtube.com/watch?v=<id>` で Library の active 行を**全件**引く
@@ -1408,7 +1408,7 @@ POST   /api/ytmusic/subscriptions                 { url, albumartist, album, cat
 PATCH  /api/ytmusic/subscriptions/:id             { albumartist?, album?, category? (null で消す), align?, enabled?, max_enqueue? }
                                                   → 200 Subscription | 404 | 409 { error: "duplicate_target" | "sync_running" }
                                                   追記先を変えると album_id は NULL に戻る。同期が queued / running の間は sync_running
-DELETE /api/ytmusic/subscriptions/:id             → 204 | 404（Library のファイルは消えない）
+DELETE /api/ytmusic/subscriptions/:id             → 204 | 404 | 409 sync_running（PATCH と同じ。Library のファイルは消えない）
 POST   /api/ytmusic/subscriptions/:id/sync        → 202 { job_id } | 404 | 409 { error: "duplicate" }（走行中。latch は残るので終わった後に走る）
                                                   [ytmusic].enabled でなければすべて 404
 // Subscription = { id, list_id, url, album_id, albumartist, album, category, align, enabled, max_enqueue,

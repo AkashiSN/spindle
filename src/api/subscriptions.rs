@@ -234,11 +234,25 @@ pub async fn delete(
     if let Some(r) = disabled(&state) {
         return Ok(r);
     }
-    let deleted = state.db.write(move |c| dbsubs::delete(c, id)).await?;
-    Ok(if deleted {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        error_response(StatusCode::NOT_FOUND, "not_found")
+    // PATCH と同じく、走行中の同期があれば消さない（消えた購読の album を揃えたり、死んだ id で投入したり
+    // しない）
+    let deleted = state
+        .db
+        .write(move |c| {
+            if dbsubs::sync_active(c, id)? {
+                return Ok(None);
+            }
+            dbsubs::delete(c, id).map(Some)
+        })
+        .await?;
+    Ok(match deleted {
+        None => error_response_with_message(
+            StatusCode::CONFLICT,
+            "sync_running",
+            "同期の実行中は削除できない（終わるか取り消してから）",
+        ),
+        Some(true) => StatusCode::NO_CONTENT.into_response(),
+        Some(false) => error_response(StatusCode::NOT_FOUND, "not_found"),
     })
 }
 

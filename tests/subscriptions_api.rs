@@ -318,6 +318,15 @@ async fn patch_is_refused_while_a_sync_is_active() {
         .await;
     assert_eq!(st, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"], "sync_running");
+    let (st, body) = app
+        .call(
+            Method::DELETE,
+            &format!("/api/ytmusic/subscriptions/{id}"),
+            None,
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "sync_running");
     // 終端（ワーカーが無いので DB で done に）
     app.db
         .write(move |c| {
@@ -338,4 +347,12 @@ async fn patch_is_refused_while_a_sync_is_active() {
         .await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["album"], "C");
+    let (st, _) = app
+        .call(
+            Method::DELETE,
+            &format!("/api/ytmusic/subscriptions/{id}"),
+            None,
+        )
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
 }

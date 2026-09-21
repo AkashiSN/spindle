@@ -256,10 +256,10 @@ function SubscriptionRow({
           </a>
         </td>
         <td>
-          <input type="checkbox" aria-label="有効" checked={s.enabled} disabled={busy} onChange={(e) => onEnabled(e.target.checked)} />
+          <input type="checkbox" aria-label="有効" checked={s.enabled} disabled={busy || syncing} onChange={(e) => onEnabled(e.target.checked)} />
         </td>
         <td>
-          <input type="checkbox" aria-label="揃える" checked={s.align} disabled={busy} onChange={(e) => onAlign(e.target.checked)} />
+          <input type="checkbox" aria-label="揃える" checked={s.align} disabled={busy || syncing} onChange={(e) => onAlign(e.target.checked)} />
         </td>
         <td className="nowrap muted">{s.last_synced_at != null ? formatDateTime(s.last_synced_at) : '—'}</td>
         <td>
@@ -288,10 +288,10 @@ function SubscriptionRow({
               <button type="button" className="ghost" disabled={busy || syncing} onClick={onSync}>
                 同期
               </button>
-              <button type="button" className="ghost" disabled={busy} onClick={onEdit}>
+              <button type="button" className="ghost" disabled={busy || syncing} onClick={onEdit} title={syncing ? '同期中は変更できない' : undefined}>
                 編集
               </button>
-              <button type="button" className="ghost" disabled={busy} onClick={onRemove}>
+              <button type="button" className="ghost" disabled={busy || syncing} onClick={onRemove} title={syncing ? '同期中は削除できない' : undefined}>
                 削除
               </button>
             </>
