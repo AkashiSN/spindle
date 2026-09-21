@@ -2,11 +2,21 @@
 // 退避ファイル（archived_files）の一覧。復元は対応バッチの履歴から巻き戻す（バッチ #n で履歴へ）
 
 import type { SettingsState } from '../hooks/useSettings'
+import type { ThemeState } from '../hooks/useTheme'
 import { formatCount } from '../lib/format'
 import { formatDateTime } from '../lib/history'
 import { archiveReasonLabel, archiveStateLabel, formatBytes, gcPreviewRows } from '../lib/settings'
+import { THEME_PREFS } from '../lib/theme'
 
-export function SettingsView({ settings, onOpenBatch }: { settings: SettingsState; onOpenBatch: (batchId: number) => void }) {
+export function SettingsView({
+  settings,
+  theme,
+  onOpenBatch,
+}: {
+  settings: SettingsState
+  theme: ThemeState
+  onOpenBatch: (batchId: number) => void
+}) {
   const { config, archive, gcPreview, busy, notice, error } = settings
   const gcRows = gcPreview ? gcPreviewRows(gcPreview) : null
   const gcTotal = gcRows ? gcRows.reduce((a, r) => a + r.count, 0) : 0
@@ -29,6 +39,18 @@ export function SettingsView({ settings, onOpenBatch }: { settings: SettingsStat
         </button>
       </div>
       {error != null && <p className="error">{error}</p>}
+
+      <h2>表示</h2>
+      <fieldset className="theme-pref">
+        <legend className="small">配色</legend>
+        {THEME_PREFS.map(([pref, label]) => (
+          <label key={pref} className="small">
+            <input type="radio" name="theme-pref" checked={theme.pref === pref} onChange={() => theme.setPref(pref)} />{' '}
+            {label}
+          </label>
+        ))}
+        <span className="muted small">このブラウザにだけ保存する（localStorage）。OS に従う は prefers-color-scheme の変化に追随する</span>
+      </fieldset>
 
       <h2>ライブラリ</h2>
       <div className="op-row">

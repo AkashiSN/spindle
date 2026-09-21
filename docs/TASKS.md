@@ -1016,13 +1016,16 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       （終端書き込みを失敗させる DB フック or 読み取り専用化で `running` を作り、回収で queued に戻りロックが
       消える。実行中の本物の running は戻さない）、SPEC §8 に回収の記述
 
-- [ ] **P4-10** ダークテーマ（D-58 の未決。SPEC §12 の「ダークモードは対象外」を改める。設計は着手時に行う）。
-      配色を CSS 変数に集約する（今は `:root` の 9 変数のほかに、バッジ・状態色・差分表示・スクロール帯などに
-      直書きの色が 40 箇所以上ある）→ `prefers-color-scheme: dark` に追随しつつ、ライト / ダーク / OS に従う の
-      切り替えを置き（設定画面か上部バー）、`lib/storage` の localStorage に保存。ダークでも読めるバッジ・
-      差分（旧値 → 新値）・反映待ち・エラー・選択行・アルバムアートの枠の色を決める。受け入れ:
-      `web/src/lib/theme.test.ts`（設定の解決: 保存値 > OS、保存と読み出し）、`index.css` の直書き色が変数の
-      定義ブロック以外に無いことを vitest で固定、実機で一覧 / アルバム / Inbox / CD / ジョブ / 履歴 / 設定の目視
+- [x] **P4-10** ダークテーマ（D-58 追記、SPEC §12 / §12.6。2026-09-21）。`index.css` の直書き色 59 箇所を
+      `:root` の変数に集約（バッジは `--badge-<hue>-bg` / `-fg` の対）、ダークは `:root[data-theme='dark']` の
+      1 ブロックで全変数を差し替え（`color-scheme` も）。`lib/theme.ts`（`resolveTheme`: 保存値 > OS、
+      `load` / `saveThemePref`）、`hooks/useTheme.ts`（`prefers-color-scheme` の変化を購読して `<html data-theme>`
+      に書く）、`index.html` のインラインスクリプトで初回描画前に同じ規則で付ける（白飛び防止）。切り替えは
+      設定画面の「表示」節（OS に従う / ライト / ダーク）。受け入れ: `web/src/lib/theme.test.ts`（解決・保存・
+      不正値、`index.css?raw` を読んで直書き色が 2 ブロック以外に無いこと、両ブロックの変数集合が一致すること。
+      `vitest.config.ts` に `css: true`）、Vite の開発サーバから実機 API に中継して一覧（選択行・凡例・
+      プロパティ）/ アルバム / Inbox / CD / ジョブ / 履歴（partial の failed 行）/ 設定をダークで目視、
+      ラジオでライト → OS → ダークの切り替えとライトの回帰なしを確認
 
 - [x] **P4-11** Library の MP4（ALAC / AAC）に任意キーを読み書きする（D-77、SPEC §7.5「形式ごとの写像」。
       2026-09-21）。旧 Library 経路（`write_tag_changes` の `FileType::Mp4` → lofty の generic `Tag` →

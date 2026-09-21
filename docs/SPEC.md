@@ -1603,8 +1603,8 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 
 ## 12. UI
 
-デスクトップブラウザ専用。ダークモード・レスポンシブ・アニメーションは対象外。
-キーボードは Ctrl+A / Delete / Enter / Esc のみ。
+デスクトップブラウザ専用。レスポンシブ・アニメーションは対象外。配色はライト / ダーク
+（設定「表示」。既定は OS に従う。P4-10、D-58 追記）。キーボードは Ctrl+A / Delete / Enter / Esc のみ。
 
 ### 12.1 骨格（上部バー + 3 ペイン）
 
@@ -1771,7 +1771,8 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   アルバム一覧は表を絞るだけなので、切り替えはここに置く
 - **操作タブの「YouTube」**（P3-3、D-70）: 1 行 1 URL のテキストエリアと「ダウンロード」
   （`POST /api/ytmusic/download`）。投入した job_id を出し、進捗と失敗は Jobs タブ、結果は Inbox タブ
-- **設定**: `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
+- **設定**: 「表示」（配色: OS に従う / ライト / ダーク。localStorage に保存。P4-10、D-58 追記）、
+  `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
   退避 WAV（`archived_files`）の一覧と復元
 
 ---

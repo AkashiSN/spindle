@@ -32,6 +32,7 @@ import { useOperations } from './hooks/useOperations'
 import { usePlayer } from './hooks/usePlayer'
 import { usePlaylists } from './hooks/usePlaylists'
 import { useSettings } from './hooks/useSettings'
+import { useTheme } from './hooks/useTheme'
 import { useCdLookup } from './hooks/useCdLookup'
 import { useInbox } from './hooks/useInbox'
 import { useTrackDetails } from './hooks/useTrackDetails'
@@ -125,6 +126,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     setView('history')
   }, [])
   const settings = useSettings(sseOpen && view === 'settings')
+  const theme = useTheme()
   const cd = useCdLookup()
   // Inbox は画面を開いたときに取り、開いている間は inbox ジョブの job イベントで取り直す
   const inbox = useInbox(sseOpen && view === 'inbox')
@@ -557,7 +559,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         ) : view === 'history' ? (
           <HistoryView history={history} focusId={historyFocus} />
         ) : (
-          <SettingsView settings={settings} onOpenBatch={openBatch} />
+          <SettingsView settings={settings} theme={theme} onOpenBatch={openBatch} />
         )}
       </main>
       </div>

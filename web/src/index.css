@@ -1,4 +1,4 @@
-/* デスクトップブラウザ専用。ダークモード・レスポンシブは対象外（SPEC §12） */
+/* デスクトップブラウザ専用。レスポンシブは対象外（SPEC §12）。配色はライト / ダークを CSS 変数で切り替える */
 
 :root {
   --sidebar-w: 340px;
@@ -6,19 +6,110 @@
   --art-h: 320px;
   --bar-h: 44px;
   --row-h: 28px;
+  /* 配色。直書きの色はこのブロックと :root[data-theme='dark'] にだけ置く（web/src/lib/theme.test.ts
+     で固定）。ダークは同じ変数を差し替えるだけで、セレクタ側は変数しか見ない */
   --border: #d0d4da;
   --bg: #fff;
   --bg-alt: #f6f7f9;
   --fg: #1d2129;
   --muted: #6b7280;
+  --muted-2: #9ca3af;
   --accent: #2563eb;
   --accent-bg: #dbe7ff;
   --pending-bg: #eceef1;
+  --pending-selected-bg: #cfdcf7;
   --error: #b91c1c;
+  --ok: #16a34a;
+  --row-border: #eef0f3;
+  --missing-fg: #9ca3af;
+  --missing-line: #d1d5db;
+  --skeleton-a: #f3f4f6;
+  --skeleton-b: #fafafa;
+  --conflict-bg: #fff7ed;
+  --shadow: rgba(0, 0, 0, 0.12);
+  --shadow-strong: rgba(0, 0, 0, 0.2);
+  --backdrop: rgba(0, 0, 0, 0.25);
+  /* バッジ（色相ごとに bg / fg の対） */
+  --badge-bg: #e5e7eb;
+  --badge-fg: #374151;
+  --badge-missing-fg: #4b5563;
+  --badge-faint-bg: #f3f4f6;
+  --badge-faint-fg: #6b7280;
+  --badge-green-bg: #dcfce7;
+  --badge-green-fg: #15803d;
+  --badge-teal-bg: #d1fae5;
+  --badge-teal-fg: #047857;
+  --badge-red-bg: #fee2e2;
+  --badge-red-strong-bg: #fecaca;
+  --badge-red-fg: #991b1b;
+  --badge-indigo-bg: #e0e7ff;
+  --badge-indigo-fg: #3730a3;
+  --badge-amber-bg: #fef3c7;
+  --badge-amber-fg: #92400e;
+  --badge-amber-strong-bg: #fde68a;
+  --badge-amber-strong-fg: #78350f;
+  --badge-cyan-bg: #cffafe;
+  --badge-cyan-fg: #0e7490;
+  --badge-pink-bg: #fce7f3;
+  --badge-pink-fg: #9d174d;
+  --badge-violet-bg: #ede9fe;
+  --badge-violet-fg: #5b21b6;
+  color-scheme: light;
   font-family: system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
   font-size: 13px;
   color: var(--fg);
   background: var(--bg);
+}
+
+/* ダーク（SPEC §12.6「表示」、D-58 追記）。<html data-theme="dark"> は lib/theme.ts と
+   index.html のインラインスクリプトが付ける。値はライトと同じ変数を全部差し替える */
+:root[data-theme='dark'] {
+  --border: #3a3f47;
+  --bg: #16181d;
+  --bg-alt: #1f2229;
+  --fg: #e5e7eb;
+  --muted: #9aa3b2;
+  --muted-2: #6b7280;
+  --accent: #60a5fa;
+  --accent-bg: #1e3a6e;
+  --pending-bg: #2a2d33;
+  --pending-selected-bg: #274a80;
+  --error: #f87171;
+  --ok: #4ade80;
+  --row-border: #23262d;
+  --missing-fg: #6b7280;
+  --missing-line: #4b5563;
+  --skeleton-a: #1f2229;
+  --skeleton-b: #262a31;
+  --conflict-bg: #3b2a14;
+  --shadow: rgba(0, 0, 0, 0.5);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --backdrop: rgba(0, 0, 0, 0.55);
+  --badge-bg: #374151;
+  --badge-fg: #d1d5db;
+  --badge-missing-fg: #9ca3af;
+  --badge-faint-bg: #2a2e35;
+  --badge-faint-fg: #9aa3b2;
+  --badge-green-bg: #14532d;
+  --badge-green-fg: #86efac;
+  --badge-teal-bg: #064e3b;
+  --badge-teal-fg: #6ee7b7;
+  --badge-red-bg: #4c1d1d;
+  --badge-red-strong-bg: #5b1f1f;
+  --badge-red-fg: #fca5a5;
+  --badge-indigo-bg: #312e81;
+  --badge-indigo-fg: #c7d2fe;
+  --badge-amber-bg: #4a3a0a;
+  --badge-amber-fg: #fcd34d;
+  --badge-amber-strong-bg: #5a4408;
+  --badge-amber-strong-fg: #fde68a;
+  --badge-cyan-bg: #164e63;
+  --badge-cyan-fg: #67e8f9;
+  --badge-pink-bg: #831843;
+  --badge-pink-fg: #fbcfe8;
+  --badge-violet-bg: #4c1d95;
+  --badge-violet-fg: #ddd6fe;
+  color-scheme: dark;
 }
 
 * {
@@ -241,7 +332,7 @@ code {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 4px 16px var(--shadow);
   z-index: 20;
 }
 .top-bar .menu-list button {
@@ -476,10 +567,10 @@ table.kv tr.differs td {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #9ca3af;
+  background: var(--muted-2);
 }
 .dot.on {
-  background: #16a34a;
+  background: var(--ok);
 }
 .dot.off {
   background: var(--error);
@@ -510,7 +601,7 @@ table.kv tr.differs td {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
-  box-shadow: 0 4px 12px rgb(0 0 0 / 0.12);
+  box-shadow: 0 4px 12px var(--shadow);
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -532,7 +623,7 @@ table.kv tr.differs td {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
-  box-shadow: 0 4px 12px rgb(0 0 0 / 0.12);
+  box-shadow: 0 4px 12px var(--shadow);
   padding: 8px 12px;
   text-align: left;
   font-weight: 400;
@@ -624,7 +715,7 @@ table.kv tr.differs td {
   right: 0;
   display: flex;
   align-items: center;
-  border-bottom: 1px solid #eef0f3;
+  border-bottom: 1px solid var(--row-border);
   cursor: default;
   user-select: none;
   will-change: transform;
@@ -640,17 +731,17 @@ table.kv tr.differs td {
   background: var(--pending-bg);
 }
 .tr.pending.selected {
-  background: #cfdcf7;
+  background: var(--pending-selected-bg);
 }
 .tr.missing {
-  color: #9ca3af;
+  color: var(--missing-fg);
 }
 .tr.missing .td {
   text-decoration: line-through;
-  text-decoration-color: #d1d5db;
+  text-decoration-color: var(--missing-line);
 }
 .tr.skeleton {
-  background: repeating-linear-gradient(90deg, #f3f4f6 0 40%, #fafafa 50%, #f3f4f6 60% 100%);
+  background: repeating-linear-gradient(90deg, var(--skeleton-a) 0 40%, var(--skeleton-b) 50%, var(--skeleton-a) 60% 100%);
 }
 .td {
   flex: none;
@@ -673,7 +764,7 @@ table.kv tr.differs td {
   padding: 0 2px;
   border: 0;
   background: none;
-  color: var(--fg-muted, #888);
+  color: var(--muted);
   font-size: 10px;
   line-height: 1;
   cursor: pointer;
@@ -684,7 +775,7 @@ table.kv tr.differs td {
   visibility: visible;
 }
 .td-sel .play-row.on {
-  color: var(--accent, #2a7);
+  color: var(--accent);
 }
 .td-sel .play-row:disabled {
   cursor: default;
@@ -716,62 +807,62 @@ table.kv tr.differs td {
   font-size: 11px;
   line-height: 16px;
   text-align: center;
-  background: #e5e7eb;
-  color: #374151;
+  background: var(--badge-bg);
+  color: var(--badge-fg);
   cursor: help;
 }
 .badge.v-ar {
-  background: #dcfce7;
-  color: #15803d;
+  background: var(--badge-green-bg);
+  color: var(--badge-green-fg);
 }
 .badge.v-ctdb {
-  background: #d1fae5;
-  color: #047857;
+  background: var(--badge-teal-bg);
+  color: var(--badge-teal-fg);
 }
 .badge.v-mismatch {
-  background: #fee2e2;
+  background: var(--badge-red-bg);
   color: var(--error);
 }
 .badge.v-unverifiable {
-  background: #f3f4f6;
-  color: #6b7280;
-  border: 1px dashed #9ca3af;
+  background: var(--badge-faint-bg);
+  color: var(--badge-faint-fg);
+  border: 1px dashed var(--muted-2);
   line-height: 14px;
 }
 .badge.v-none {
-  background: #f3f4f6;
-  color: #9ca3af;
+  background: var(--badge-faint-bg);
+  color: var(--muted-2);
 }
 .badge.b-lossless {
-  background: #e0e7ff;
-  color: #3730a3;
+  background: var(--badge-indigo-bg);
+  color: var(--badge-indigo-fg);
 }
 .badge.b-lossy {
-  background: #f3f4f6;
-  color: #6b7280;
+  background: var(--badge-faint-bg);
+  color: var(--badge-faint-fg);
 }
 .badge.b-rg {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--badge-amber-bg);
+  color: var(--badge-amber-fg);
 }
 .badge.b-faded {
   opacity: 0.45;
 }
 .badge.b-derived {
-  background: #cffafe;
-  color: #0e7490;
+  background: var(--badge-cyan-bg);
+  color: var(--badge-cyan-fg);
 }
 .badge.b-pending {
-  background: #fde68a;
-  color: #78350f;
+  background: var(--badge-amber-strong-bg);
+  color: var(--badge-amber-strong-fg);
 }
 .badge.b-conflict {
-  background: #fecaca;
-  color: #991b1b;
+  background: var(--badge-red-strong-bg);
+  color: var(--badge-red-fg);
 }
 .badge.b-dup {
-  background: #fce7f3;
-  color: #9d174d;
+  background: var(--badge-pink-bg);
+  color: var(--badge-pink-fg);
 }
 .badge.b-flac-error {
   color: var(--error);
@@ -781,8 +872,8 @@ table.kv tr.differs td {
   color: var(--muted);
 }
 .badge.b-hires-suspect {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--badge-amber-bg);
+  color: var(--badge-amber-fg);
   font-weight: 600;
 }
 .badge.b-hires-inconclusive {
@@ -793,12 +884,12 @@ table.kv tr.differs td {
   font-weight: 600;
 }
 .badge.b-hardlink {
-  background: #ede9fe;
-  color: #5b21b6;
+  background: var(--badge-violet-bg);
+  color: var(--badge-violet-fg);
 }
 .badge.b-missing {
-  background: #e5e7eb;
-  color: #4b5563;
+  background: var(--badge-bg);
+  color: var(--badge-missing-fg);
 }
 
 /* ---------------------------------------------------------------- その他 */
@@ -940,7 +1031,7 @@ button.primary {
   padding: 0 4px;
 }
 .td.td-editing input[aria-invalid='true'] {
-  border-color: #d33;
+  border-color: var(--error);
 }
 
 /* ---------------------------------------------------------------- 編集履歴（SPEC §12.4） */
@@ -1001,7 +1092,7 @@ button.primary {
   word-break: break-all;
 }
 .ops-table tr.conflict td {
-  background: #fff7ed;
+  background: var(--conflict-bg);
 }
 .history-table td.nowrap,
 .ops-table td.nowrap {
@@ -1129,7 +1220,7 @@ button.primary {
   min-width: 140px;
   background: var(--bg);
   border: 1px solid var(--border);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 4px 12px var(--shadow);
   display: flex;
   flex-direction: column;
   padding: 4px 0;
@@ -1158,7 +1249,7 @@ button.primary {
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--backdrop);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1167,7 +1258,7 @@ button.primary {
   width: min(640px, 90vw);
   background: var(--bg);
   border: 1px solid var(--border);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 8px 24px var(--shadow-strong);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
@@ -1334,7 +1425,7 @@ button.primary {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
-  box-shadow: 0 2px 8px rgb(0 0 0 / 0.15);
+  box-shadow: 0 2px 8px var(--shadow);
   min-width: 12em;
 }
 .props-menu button {
@@ -1839,6 +1930,7 @@ table.inbox-tracks td:nth-child(4) {
   width: 30%;
 }
 /* CD 確定フォームの「候補から写す範囲」（P4-2、D-72） */
+.theme-pref,
 .cd-copy-scope {
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -1849,10 +1941,12 @@ table.inbox-tracks td:nth-child(4) {
   align-items: center;
   gap: 4px 12px;
 }
+.theme-pref legend,
 .cd-copy-scope legend {
   padding: 0 4px;
   color: var(--muted);
 }
+.theme-pref label,
 .cd-copy-scope label {
   white-space: nowrap;
   cursor: pointer;

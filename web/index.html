@@ -5,6 +5,19 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>spindle</title>
+    <script>
+      // React が動く前にテーマを付ける（白飛び防止）。規則は src/lib/theme.ts と同じ:
+      // localStorage の spindle:theme（'light' / 'dark' / 'system'）、system なら OS に従う
+      ;(function () {
+        var pref = 'system'
+        try {
+          var raw = localStorage.getItem('spindle:theme')
+          if (raw === '"light"' || raw === '"dark"') pref = JSON.parse(raw)
+        } catch (e) {}
+        var dark = pref === 'dark' || (pref === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
