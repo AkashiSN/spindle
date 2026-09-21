@@ -442,6 +442,8 @@ async fn youtube_item(app: &App, rel_dir: &str, category: Option<&str>, verdict:
             channel: Some("CH".into()),
             verdict: verdict.into(),
             message: (verdict != "ok").then(|| "ルールを足してください".to_owned()),
+            subscription_id: None,
+            position: None,
         },
     )
     .unwrap();

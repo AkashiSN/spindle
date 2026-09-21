@@ -18,6 +18,8 @@ fn entry(verdict: &str) -> FileEntry {
         channel: Some("CH".into()),
         verdict: verdict.into(),
         message: (verdict != "ok").then(|| "見つからない".to_owned()),
+        subscription_id: None,
+        position: None,
     }
 }
 

@@ -653,3 +653,24 @@ fn ytmusic_ytdlp_args_default_empty_and_reject_blank_elements() {
         );
     }
 }
+
+/// P4-16: 購読の定期同期の間隔（時間）。既定 0 = 手動と承認の後続だけ
+#[test]
+fn ytmusic_sync_interval_hours_defaults_to_zero() {
+    let cfg = Config::parse(&replace_section(
+        "ytmusic",
+        "enabled = true\nmetadata_command = [\"p\"]",
+    ))
+    .unwrap();
+    assert_eq!(cfg.ytmusic.sync_interval_hours, 0);
+    assert_eq!(
+        Config::parse(EXAMPLE).unwrap().ytmusic.sync_interval_hours,
+        0
+    );
+    let cfg = Config::parse(&replace_section(
+        "ytmusic",
+        "enabled = true\nmetadata_command = [\"p\"]\nsync_interval_hours = 24",
+    ))
+    .unwrap();
+    assert_eq!(cfg.ytmusic.sync_interval_hours, 24);
+}

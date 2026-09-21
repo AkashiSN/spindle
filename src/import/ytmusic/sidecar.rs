@@ -42,6 +42,11 @@ pub struct FileEntry {
     pub verdict: String,
     #[serde(default)]
     pub message: Option<String>,
+    /// 購読由来なら購読 id と再生リストの位置（P4-16。配置の後続で同期を投入する）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

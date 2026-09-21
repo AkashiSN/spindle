@@ -33,10 +33,12 @@ pub enum JobType {
     Gc,
     Backup,
     Hirescheck,
+    /// 再生リストの購読の同期（P4-16、D-78）
+    PlaylistSync,
 }
 
 impl JobType {
-    pub const ALL: [JobType; 15] = [
+    pub const ALL: [JobType; 16] = [
         JobType::Scan,
         JobType::Rip,
         JobType::Verify,
@@ -52,6 +54,7 @@ impl JobType {
         JobType::Gc,
         JobType::Backup,
         JobType::Hirescheck,
+        JobType::PlaylistSync,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -71,6 +74,7 @@ impl JobType {
             JobType::Gc => "gc",
             JobType::Backup => "backup",
             JobType::Hirescheck => "hirescheck",
+            JobType::PlaylistSync => "playlist_sync",
         }
     }
 
@@ -103,6 +107,8 @@ impl JobType {
             JobType::Backup => 1,
             // デコード + FFT。rg / transcode / flaccheck と同時に走る分を抑える（D-71）
             JobType::Hirescheck => (cpus / 2).max(1),
+            // 購読ごとに揃えとリネームを順に行う。yt-dlp の列挙も 1 本ずつ
+            JobType::PlaylistSync => 1,
         }
     }
 
@@ -298,6 +304,7 @@ pub fn subject_of(
         JobType::Scan => text_of("kind"),
         JobType::Ytdl => text_of("url"),
         JobType::Thumbnail => id_of("artwork_id").map(|id| format!("artwork #{id}")),
+        JobType::PlaylistSync => id_of("subscription_id").map(|id| format!("subscription #{id}")),
         JobType::Rip | JobType::Inbox | JobType::Gc | JobType::Backup => None,
     }
 }

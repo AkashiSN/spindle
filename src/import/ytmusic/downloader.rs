@@ -59,6 +59,84 @@ pub fn new_ytdl_job(url: &str) -> NewJob {
     .dedup_key(format!("{DEDUP_PREFIX}{url}"))
 }
 
+/// 購読の同期が投入する ytdl（P4-16）。dedup は同じ `ytdl:<url>`（別の投入が走行中なら Duplicate。
+/// その場合の扱いは同期側の規則: 「別の投入が走行中」として結果に出すだけ）
+pub fn new_subscription_ytdl_job(url: &str, subscription_id: i64, position: u32) -> NewJob {
+    NewJob::new(
+        crate::jobs::JobType::Ytdl,
+        serde_json::json!({ "url": url, "subscription_id": subscription_id, "position": position }),
+    )
+    .dedup_key(format!("{DEDUP_PREFIX}{url}"))
+}
+
+/// ytdl ジョブの入力（payload）
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DownloadRequest {
+    pub url: String,
+    /// 購読由来なら購読 id（追記先と category は購読から。P4-16）
+    #[serde(default)]
+    pub subscription_id: Option<i64>,
+    /// 再生リストの位置（購読の `align` が on なら TRACKNUMBER に書く）
+    #[serde(default)]
+    pub position: Option<u32>,
+}
+
+impl DownloadRequest {
+    pub fn url(url: &str) -> Self {
+        Self {
+            url: url.to_owned(),
+            subscription_id: None,
+            position: None,
+        }
+    }
+}
+
+/// 購読の追記先（`album_id` が束ねてあれば album 行の値、無ければ購読の文字列）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionTarget {
+    pub albumartist: String,
+    pub album: String,
+    pub category: Option<String>,
+    pub align: bool,
+}
+
+/// 購読の追記先を引く。購読が消えていれば None（通常の ytdl として振る舞う）
+pub fn subscription_target(
+    conn: &rusqlite::Connection,
+    subscription_id: i64,
+) -> Result<Option<SubscriptionTarget>, crate::db::DbError> {
+    use rusqlite::OptionalExtension;
+    let Some(sub) = crate::db::subscriptions::get(conn, subscription_id)? else {
+        return Ok(None);
+    };
+    let bound: Option<(Option<String>, Option<String>, Option<String>)> = match sub.album_id {
+        Some(album_id) => conn
+            .query_row(
+                "SELECT a.albumartist, a.album, c.name FROM albums a
+                   LEFT JOIN categories c ON c.id = a.category_id
+                  WHERE a.id = ?1 AND a.missing_since IS NULL",
+                [album_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?,
+        None => None,
+    };
+    Ok(Some(match bound {
+        Some((aa, al, cat)) => SubscriptionTarget {
+            albumartist: aa.filter(|s| !s.is_empty()).unwrap_or(sub.albumartist),
+            album: al.filter(|s| !s.is_empty()).unwrap_or(sub.album),
+            category: cat,
+            align: sub.align,
+        },
+        None => SubscriptionTarget {
+            albumartist: sub.albumartist,
+            album: sub.album,
+            category: sub.category,
+            align: sub.align,
+        },
+    }))
+}
+
 pub struct DownloaderEnv {
     pub db: Arc<Db>,
     pub inbox: Arc<RootDir>,
@@ -340,9 +418,10 @@ pub fn inbox_dir(track: Option<&Track>, channel: &str) -> Result<RelPath, String
 pub async fn download_one(
     env: &DownloaderEnv,
     job_id: i64,
-    url: &str,
+    request: &DownloadRequest,
     token: &CancellationToken,
 ) -> Result<Downloaded, DownloadError> {
+    let url = request.url.as_str();
     let check_cancel = || {
         if token.is_cancelled() {
             Err(DownloadError::Cancelled)
@@ -411,7 +490,10 @@ pub async fn download_one(
     let item = video.item();
     let (track, verdict, message) = match env.provider.resolve(&item, token).await {
         Ok(Outcome::Track(t)) => (Some(t), "ok".to_owned(), None),
-        Ok(Outcome::Declined { reason, message }) if reason == "skip" => {
+        // 購読由来は skip でも投入する（再生リストは人が選んだもの。P4-16）
+        Ok(Outcome::Declined { reason, message })
+            if reason == "skip" && request.subscription_id.is_none() =>
+        {
             tracing::info!(url, message, "プラグインが skip");
             return Ok(Downloaded::Skipped { message });
         }
@@ -423,6 +505,38 @@ pub async fn download_one(
             return Err(DownloadError::Cancelled)
         }
         Err(e) => return Err(DownloadError::Fatal(e.to_string())),
+    };
+    // 購読由来（P4-16）: 追記先（albumartist / album / category）は購読の値。プラグインの判定は
+    // TITLE / ARTIST に使い、skip / 判定不能でも投入する（再生リストは人が選んだもの）
+    let subscription = match request.subscription_id {
+        Some(id) => env.db.read(move |c| subscription_target(c, id)).await?,
+        None => None,
+    };
+    let (track, verdict) = match &subscription {
+        Some(t) => {
+            let track = match track {
+                Some(mut tr) => {
+                    tr.albumartist = t.albumartist.clone();
+                    tr.album = t.album.clone();
+                    tr.category = t.category.clone();
+                    tr
+                }
+                None => Track {
+                    title: video.title.clone(),
+                    artists: vec![t.albumartist.clone()],
+                    albumartist: t.albumartist.clone(),
+                    album: t.album.clone(),
+                    category: t.category.clone(),
+                    date: video
+                        .upload_date
+                        .as_deref()
+                        .map(|d| format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..8])),
+                    tags: Vec::new(),
+                },
+            };
+            (Some(track), verdict)
+        }
+        None => (track, verdict),
     };
     let title = track
         .as_ref()
@@ -439,8 +553,15 @@ pub async fn download_one(
         channel: Some(video.channel_key().to_owned()),
         verdict: verdict.clone(),
         message,
+        subscription_id: subscription.as_ref().and(request.subscription_id),
+        position: subscription.as_ref().and(request.position),
     };
     let category = track.as_ref().and_then(|t| t.category.clone());
+    // 揃える購読なら TRACKNUMBER = 再生リストの位置（同期が先に既存の行を揃えて隙間を空けている）
+    let track_no = match &subscription {
+        Some(t) if t.align => request.position.map(i64::from),
+        _ => None,
+    };
     // 3. 取り込み済み。Inbox の自分の宛先（rel_path_key で比べる）にあるなら「置いた後に落ちて走査が
     //    先に拾った」再実行の可能性があるので、実ファイルの SOURCE_URL を読み直して自分の成果物なら
     //    ダウンロードせずに続き（サイドカーと投入）だけ済ませる。行はキャッシュで、ファイルが正
@@ -522,7 +643,7 @@ pub async fn download_one(
         .run(token)
         .await?;
     // 6. タグ
-    let changes = tag_changes(track.as_ref(), &video);
+    let changes = tag_changes(track.as_ref(), &video, track_no);
     let picture = match std::fs::read(&thumb) {
         Ok(bytes) if !bytes.is_empty() => Some(
             lofty::picture::Picture::unchecked(bytes)
@@ -626,11 +747,11 @@ fn ytdlp(env: &DownloaderEnv) -> ExternalCommand {
     ExternalCommand::new(program).args(env.ytdlp.iter().skip(1))
 }
 
-/// ファイルに書くタグ。判定できたら `Track::tags(None)`（TRACKNUMBER 無し）、できなければ TITLE に
-/// 動画タイトル。どちらも `SOURCE_URL`
-fn tag_changes(track: Option<&Track>, video: &VideoInfo) -> Vec<TagChange> {
+/// ファイルに書くタグ。判定できたら `Track::tags(track_no)`（`track_no` は購読の位置。無ければ
+/// TRACKNUMBER 無しで採番は Inbox）、できなければ TITLE に動画タイトル。どちらも `SOURCE_URL`
+fn tag_changes(track: Option<&Track>, video: &VideoInfo, track_no: Option<i64>) -> Vec<TagChange> {
     let pairs: Vec<(String, String)> = match track {
-        Some(t) => t.tags(None),
+        Some(t) => t.tags(track_no),
         None => vec![("TITLE".to_owned(), video.title.clone())],
     };
     let mut changes: Vec<TagChange> = Vec::new();

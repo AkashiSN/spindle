@@ -15,8 +15,11 @@ use tokio_util::sync::CancellationToken;
 use crate::db::inbox::{self as dbinbox, ItemState};
 use crate::db::jobs as dbjobs;
 use crate::db::now_epoch;
+use crate::db::subscriptions;
 use crate::import::inbox::{place_item, scan_inbox, InboxError, PlaceItemEnv};
 use crate::import::scanner::resolve_album_artwork_now;
+use crate::jobs::handlers::playlist_sync::new_sync_job;
+use crate::jobs::EnqueueResult;
 use crate::jobs::{
     BoxFuture, Handler, HandlerResult, JobContext, JobError, JobType, NewJob, Outcome,
 };
@@ -160,6 +163,28 @@ impl InboxHandler {
                 Ok(p) => {
                     // placed は登録トランザクションの中で確定済み（place_item）
                     tracing::info!(job_id, item_id = id, album_id = p.album_id, "配置済み");
+                    // 購読由来なら追記先を束ねて同期を要求する（番号揃えの後続。P4-16、D-78）。
+                    // latch を書いてから投入するので、走行中の同期があっても要求は失われない
+                    for sid in p.subscription_ids {
+                        let album_id = p.album_id;
+                        ctx.db()
+                            .write(move |c| {
+                                let _ = subscriptions::bind_album(c, sid, album_id)?;
+                                subscriptions::request_sync(c, sid, now_epoch())
+                            })
+                            .await?;
+                        match self.env.jobs.enqueue(new_sync_job(sid)).await? {
+                            EnqueueResult::Inserted(sync_id) => {
+                                tracing::info!(
+                                    job_id,
+                                    subscription_id = sid,
+                                    sync_job = sync_id,
+                                    "配置の後続で同期を投入"
+                                )
+                            }
+                            EnqueueResult::Duplicate(_) => {}
+                        }
+                    }
                 }
                 Err(InboxError::Cancelled) => {
                     ctx.db()

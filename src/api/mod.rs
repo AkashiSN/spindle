@@ -27,6 +27,7 @@ pub mod selection;
 pub mod spa;
 mod state;
 pub mod stream;
+pub mod subscriptions;
 pub mod tracks;
 pub mod verify;
 pub mod ytmusic;
@@ -117,6 +118,18 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox/{id}/reopen", post(inbox::reopen))
         .route("/inbox/{id}/artwork/{hash}", get(inbox::artwork))
         .route("/ytmusic/download", post(ytmusic::download))
+        .route(
+            "/ytmusic/subscriptions",
+            get(subscriptions::list).post(subscriptions::create),
+        )
+        .route(
+            "/ytmusic/subscriptions/{id}",
+            patch(subscriptions::update).delete(subscriptions::delete),
+        )
+        .route(
+            "/ytmusic/subscriptions/{id}/sync",
+            post(subscriptions::sync),
+        )
         .fallback(api_not_found);
 
     let protected = Router::new()

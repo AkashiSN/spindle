@@ -262,6 +262,7 @@ macro_rules! lib {
 }
 
 const U1: &str = "https://youtu.be/v1";
+const U2: &str = "https://youtu.be/v2";
 
 #[tokio::test]
 async fn ok_video_is_staged_in_inbox_with_tags_sidecar_and_archive() {
@@ -914,4 +915,133 @@ async fn playlist_expansion_skips_videos_already_imported() {
         .inbox_path("youtube/Artist A/Songs of A/20260901 Song One [v3].opus")
         .exists());
     let _ = id;
+}
+
+// ---------------------------------------------------------------- 購読由来（P4-16、D-78）
+
+/// 購読を登録して id を返す
+async fn subscribe(
+    lib: &Lib,
+    albumartist: &str,
+    album: &str,
+    category: Option<&str>,
+    align: bool,
+) -> i64 {
+    use spindle::db::subscriptions::{insert, NewSubscription, WriteOutcome};
+    let s = NewSubscription {
+        list_id: "PL1".to_owned(),
+        url: "https://www.youtube.com/playlist?list=PL1".to_owned(),
+        albumartist: albumartist.to_owned(),
+        album: album.to_owned(),
+        category: category.map(str::to_owned),
+        align,
+        enabled: true,
+        max_enqueue: 50,
+    };
+    match lib.db.write(move |c| insert(c, &s, 1)).await.unwrap() {
+        WriteOutcome::Ok(id) => id,
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn run_for(lib: &Lib, url: &str, sub: i64, position: u32) -> (i64, JobState) {
+    use spindle::jobs::handlers::ytdl::new_subscription_ytdl_job;
+    let id = match lib
+        .jobs
+        .enqueue(new_subscription_ytdl_job(url, sub, position))
+        .await
+        .unwrap()
+    {
+        EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+    };
+    (id, lib.wait(id).await)
+}
+
+/// 購読由来: 追記先（ALBUMARTIST / ALBUM / category）は購読の値、TITLE / ARTIST はプラグイン、
+/// align なら TRACKNUMBER = 位置。サイドカーに購読 id と位置
+#[tokio::test]
+async fn subscription_download_uses_the_subscription_target_and_position() {
+    let lib = lib!();
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    let sub = subscribe(&lib, "Sub Artist", "Sub Album", Some("Rock"), true).await;
+    lib.start();
+    let (id, st) = run_for(&lib, U1, sub, 7).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    let rel = "youtube/Sub Artist/Sub Album/20260901 Song One [v1].opus";
+    let p = lib.inbox_path(rel);
+    assert!(p.exists(), "{}", p.display());
+    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("opus"))
+        .unwrap();
+    assert_eq!(af.tags.first("TITLE"), Some("Song One"));
+    assert_eq!(af.tags.first("ARTIST"), Some("Artist A"));
+    assert_eq!(af.tags.first("ALBUM"), Some("Sub Album"));
+    assert_eq!(af.tags.first("ALBUMARTIST"), Some("Sub Artist"));
+    assert_eq!(af.tags.first("TRACKNUMBER"), Some("7"));
+    let dir = spindle::domain::relpath::RelPath::parse("youtube/Sub Artist/Sub Album").unwrap();
+    let s = Sidecar::read(&lib.inbox, &dir).unwrap().unwrap();
+    assert_eq!(s.category.as_deref(), Some("Rock"));
+    let e = &s.files["20260901 Song One [v1].opus"];
+    assert_eq!((e.subscription_id, e.position), (Some(sub), Some(7)));
+    assert_eq!(e.verdict, "ok");
+}
+
+/// 購読由来は skip / 判定不能でも投入する（TITLE = 動画タイトル、ARTIST = albumartist）。align が
+/// off なら TRACKNUMBER は書かない
+#[tokio::test]
+async fn subscription_download_ignores_plugin_skip_and_unmatched() {
+    let lib = lib!();
+    lib.video(U1, "v1", "SkipCh", "Announcement", true);
+    lib.video(U2, "v2", "OtherCh", "Some Title", true);
+    let sub = subscribe(&lib, "Sub Artist", "Sub Album", None, false).await;
+    lib.start();
+    let (id, st) = run_for(&lib, U1, sub, 1).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    assert!(
+        lib.note(id).unwrap().starts_with("Inbox に置いた"),
+        "{:?}",
+        lib.note(id)
+    );
+    let (id2, st) = run_for(&lib, U2, sub, 2).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id2));
+    for (name, title, verdict) in [
+        ("20260901 Announcement [v1].opus", "Announcement", "skip"),
+        ("20260901 Some Title [v2].opus", "Some Title", "unmatched"),
+    ] {
+        let p = lib.inbox_path(&format!("youtube/Sub Artist/Sub Album/{name}"));
+        assert!(p.exists(), "{}", p.display());
+        let af =
+            spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("opus"))
+                .unwrap();
+        assert_eq!(af.tags.first("TITLE"), Some(title));
+        assert_eq!(af.tags.first("ARTIST"), Some("Sub Artist"));
+        assert_eq!(af.tags.first("ALBUMARTIST"), Some("Sub Artist"));
+        assert_eq!(af.tags.first("ALBUM"), Some("Sub Album"));
+        assert_eq!(
+            af.tags.first("TRACKNUMBER"),
+            None,
+            "align が off なら採番は Inbox"
+        );
+        let dir = spindle::domain::relpath::RelPath::parse("youtube/Sub Artist/Sub Album").unwrap();
+        let s = Sidecar::read(&lib.inbox, &dir).unwrap().unwrap();
+        assert_eq!(s.files[name].verdict, verdict);
+        assert_eq!(s.files[name].subscription_id, Some(sub));
+    }
+}
+
+/// 購読が消えていれば通常の ytdl として振る舞う（プラグインの宛先、購読の情報なし）
+#[tokio::test]
+async fn subscription_download_falls_back_when_the_subscription_is_gone() {
+    let lib = lib!();
+    lib.video(U1, "v1", "KnownCh", "Song One", true);
+    lib.start();
+    let (id, st) = run_for(&lib, U1, 999, 3).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    let p = lib.inbox_path("youtube/Artist A/Songs of A/20260901 Song One [v1].opus");
+    assert!(p.exists());
+    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("opus"))
+        .unwrap();
+    assert_eq!(af.tags.first("TRACKNUMBER"), None);
+    let dir = spindle::domain::relpath::RelPath::parse("youtube/Artist A/Songs of A").unwrap();
+    let s = Sidecar::read(&lib.inbox, &dir).unwrap().unwrap();
+    assert_eq!(s.files["20260901 Song One [v1].opus"].subscription_id, None);
 }

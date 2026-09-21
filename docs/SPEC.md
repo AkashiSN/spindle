@@ -1876,6 +1876,7 @@ metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メ�
 metadata_timeout_secs = 30
 download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
 # ytdlp_args = ["--extractor-args", "youtube:player_client=web_safari"]   # 弾かれたときの口（P4-13）。UA / Referer は付けない
+sync_interval_hours = 0        # 再生リストの購読を定期同期する間隔（時間）。0 = 手動と承認の後続だけ（D-78）
 
 [hires]                        # 偽ハイレゾ検出（§7.10、D-71）
 check_on_import = true         # スキャン完了時に未検査の対象（可逆かつ >48 kHz または >16 bit）を自動投入

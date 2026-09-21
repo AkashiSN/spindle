@@ -650,3 +650,114 @@ fn upgrade_to_0020_adds_jobs_note() {
     )
     .unwrap();
 }
+
+/// P4-16: 再生リストの購読（`playlist_subscriptions`）と jobs.type に playlist_sync。既存の jobs 行
+/// （note 込み）と参照する子表は保つ
+#[test]
+fn upgrade_to_0021_adds_playlist_subscriptions_and_playlist_sync_type() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let upto20: Vec<_> = list.iter().take(20).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto20).unwrap();
+    conn.execute_batch(
+        "INSERT INTO jobs (id, type, dedup_key, payload, state, note, created_at)
+           VALUES (7, 'ytdl', 'ytdl:u', '{}', 'done', 'Inbox に置いた: x', 1);
+         INSERT INTO job_mutexes (name, job_id, acquired_at) VALUES ('library', 7, 1);",
+    )
+    .unwrap();
+    // 0021 の前は playlist_sync が通らない
+    assert!(conn
+        .execute(
+            "INSERT INTO jobs (type, payload, created_at) VALUES ('playlist_sync', '{}', 1)",
+            [],
+        )
+        .is_err());
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 21);
+    let (note, mutex_job): (Option<String>, i64) = conn
+        .query_row(
+            "SELECT j.note, m.job_id FROM jobs j JOIN job_mutexes m ON m.job_id = j.id WHERE j.id = 7",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(note.as_deref(), Some("Inbox に置いた: x"));
+    assert_eq!(mutex_job, 7);
+    conn.execute(
+        "INSERT INTO jobs (type, dedup_key, payload, created_at) VALUES ('playlist_sync', 'playlist_sync:1', '{}', 1)",
+        [],
+    )
+    .unwrap();
+    assert!(conn
+        .execute(
+            "INSERT INTO jobs (type, dedup_key, payload, created_at) VALUES ('playlist_sync', 'playlist_sync:1', '{}', 1)",
+            [],
+        )
+        .is_err(), "dedup の部分一意索引が生きている");
+    let fk: i64 = conn
+        .query_row("PRAGMA foreign_key_check", [], |_| Ok(1))
+        .unwrap_or(0);
+    assert_eq!(fk, 0, "参照の整合が崩れていない");
+
+    // 購読: list_id と target_key は UNIQUE、album_id は非 NULL の間だけ UNIQUE、既定値
+    conn.execute(
+        "INSERT INTO playlist_subscriptions (list_id, url, target_key, albumartist, album, created_at, updated_at)
+           VALUES ('PL1', 'https://www.youtube.com/playlist?list=PL1', 'a/b', 'A', 'B', 1, 1)",
+        [],
+    )
+    .unwrap();
+    let (align, enabled, max_enqueue, album_id): (i64, i64, i64, Option<i64>) = conn
+        .query_row(
+            "SELECT align, enabled, max_enqueue, album_id FROM playlist_subscriptions WHERE list_id = 'PL1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((align, enabled, max_enqueue, album_id), (1, 1, 50, None));
+    assert!(conn
+        .execute(
+            "INSERT INTO playlist_subscriptions (list_id, url, target_key, albumartist, album, created_at, updated_at)
+               VALUES ('PL1', 'u', 'c/d', 'C', 'D', 1, 1)",
+            [],
+        )
+        .is_err(), "list_id は UNIQUE");
+    assert!(conn
+        .execute(
+            "INSERT INTO playlist_subscriptions (list_id, url, target_key, albumartist, album, created_at, updated_at)
+               VALUES ('PL2', 'u', 'a/b', 'A', 'B', 1, 1)",
+            [],
+        )
+        .is_err(), "target_key は UNIQUE");
+    conn.execute(
+        "INSERT INTO playlist_subscriptions (list_id, url, target_key, albumartist, album, created_at, updated_at)
+           VALUES ('PL2', 'u', 'c/d', 'C', 'D', 1, 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "INSERT INTO albums (id, rel_dir, rel_dir_key, albumartist, album) VALUES (5, 'A/B', 'a/b', 'A', 'B');
+         UPDATE playlist_subscriptions SET album_id = 5 WHERE list_id = 'PL1';",
+    )
+    .unwrap();
+    assert!(
+        conn.execute(
+            "UPDATE playlist_subscriptions SET album_id = 5 WHERE list_id = 'PL2'",
+            [],
+        )
+        .is_err(),
+        "album_id は非 NULL の間 UNIQUE"
+    );
+    // album を消しても購読は残り、album_id が NULL に戻る
+    conn.execute("DELETE FROM albums WHERE id = 5", []).unwrap();
+    let album_id: Option<i64> = conn
+        .query_row(
+            "SELECT album_id FROM playlist_subscriptions WHERE list_id = 'PL1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(album_id, None);
+}

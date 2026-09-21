@@ -883,6 +883,8 @@ fn sidecar_entry() -> spindle::import::ytmusic::sidecar::FileEntry {
         channel: Some("CH".into()),
         verdict: "ok".into(),
         message: None,
+        subscription_id: None,
+        position: None,
     }
 }
 
@@ -1521,4 +1523,77 @@ async fn appending_a_track_with_a_picture_resolves_an_album_without_one() {
         .optional()
         .unwrap();
     assert_eq!(sha, Some(ArtworkStore::hash_of(&pic).to_vec()));
+}
+
+/// P4-16: 購読由来の件（サイドカーに subscription_id）を配置したら、購読の追記先を束ね、同期を要求して
+/// `playlist_sync` を投入する（番号揃えの後続。D-78）
+#[tokio::test]
+async fn placing_a_subscription_item_binds_the_album_and_requests_a_sync() {
+    use spindle::db::subscriptions::{self, NewSubscription, WriteOutcome};
+    use spindle::import::ytmusic::sidecar::Sidecar;
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add(
+        "youtube/Artist/Album/20260901 One [abc].flac",
+        1,
+        "One",
+        "Album",
+        1,
+    ));
+    lib.conn()
+        .execute("INSERT INTO categories (name) VALUES ('Rock')", [])
+        .unwrap();
+    let sub = match subscriptions::insert(
+        &lib.conn(),
+        &NewSubscription {
+            list_id: "PL1".into(),
+            url: "https://www.youtube.com/playlist?list=PL1".into(),
+            albumartist: "Artist".into(),
+            album: "Album".into(),
+            category: Some("Rock".into()),
+            align: true,
+            enabled: true,
+            max_enqueue: 50,
+        },
+        1,
+    )
+    .unwrap()
+    {
+        WriteOutcome::Ok(id) => id,
+        other => panic!("{other:?}"),
+    };
+    let dir = spindle::domain::relpath::RelPath::parse("youtube/Artist/Album").unwrap();
+    let mut entry = sidecar_entry();
+    entry.subscription_id = Some(sub);
+    entry.position = Some(1);
+    Sidecar::upsert(
+        &lib.inbox,
+        &dir,
+        Some("Rock"),
+        "20260901 One [abc].flac",
+        entry,
+    )
+    .unwrap();
+    lib.scan(1000).await;
+    let item = lib.item("youtube/Artist/Album").unwrap();
+    lib.approve(
+        item.id,
+        &draft_for(
+            &[("youtube/Artist/Album/20260901 One [abc].flac", 1, "One")],
+            Some("Rock"),
+            "Album",
+        ),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), item.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    let s = subscriptions::get(&lib.conn(), sub).unwrap().unwrap();
+    assert_eq!(s.album_id, it.placed_album_id, "追記先を束ねた");
+    assert!(s.sync_requested_at.is_some(), "同期を要求した（latch）");
+    assert_eq!(
+        lib.count(&format!(
+            "SELECT count(*) FROM jobs WHERE type = 'playlist_sync' AND dedup_key = 'playlist_sync:{sub}' AND state = 'queued'"
+        )),
+        1
+    );
 }

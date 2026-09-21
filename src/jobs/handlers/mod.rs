@@ -7,6 +7,7 @@ pub mod gc;
 pub mod hirescheck;
 pub mod inbox;
 pub mod normalize;
+pub mod playlist_sync;
 pub mod rename;
 pub mod rg;
 pub mod scan;

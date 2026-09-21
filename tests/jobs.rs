@@ -391,6 +391,30 @@ fn hirescheck_job_type_runs_at_half_the_cores_and_is_versioned() {
     );
 }
 
+/// P4-16: 再生リストの同期は並列 1 で版を持たず、対象は購読 id
+#[test]
+fn playlist_sync_job_type_is_serial_and_names_the_subscription() {
+    assert_eq!(JobType::PlaylistSync.as_str(), "playlist_sync");
+    assert_eq!(
+        "playlist_sync".parse::<JobType>().unwrap(),
+        JobType::PlaylistSync
+    );
+    assert_eq!(JobType::PlaylistSync.concurrency(8), 1);
+    assert!(!JobType::PlaylistSync.cpu_bound());
+    assert!(JobType::ALL.contains(&JobType::PlaylistSync));
+    assert_eq!(JobType::PlaylistSync.version_field(), None);
+    assert_eq!(
+        spindle::db::jobs::subject_of(
+            JobType::PlaylistSync,
+            &serde_json::json!({ "subscription_id": 3 }),
+            None,
+            None,
+            None
+        ),
+        Some("subscription #3".to_owned())
+    );
+}
+
 #[tokio::test]
 async fn queued_job_with_future_run_after_is_not_claimed() {
     let h = Harness::new();

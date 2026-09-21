@@ -407,6 +407,9 @@ pub struct YtmusicConfig {
     /// innertube を叩くので、ブラウザ UA を上書きすると食い違って弾かれる）
     #[serde(default)]
     pub ytdlp_args: Vec<String>,
+    /// 再生リストの購読を定期的に同期する間隔（時間）。0 なら手動と承認の後続だけ（P4-16、D-78）
+    #[serde(default)]
+    pub sync_interval_hours: u32,
 }
 
 fn default_metadata_timeout() -> u32 {

@@ -360,3 +360,66 @@ pub fn find_source_url(conn: &Connection, url: &str) -> Result<Option<SourceLoca
         .optional()?;
     Ok(inbox.map(SourceLocated::Inbox))
 }
+
+// ---------------------------------------------------------------- 再生リストの同期（P4-16、D-78）
+
+/// `SOURCE_URL = url` を持つ Library の active な行（同期は URL ごとに全件見る。0 / 1 / 2 件以上を区別）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRow {
+    pub track_id: i64,
+    pub album_id: Option<i64>,
+    pub rel_path: String,
+}
+
+pub fn library_rows_by_source_url(conn: &Connection, url: &str) -> Result<Vec<SourceRow>> {
+    let mut st = conn.prepare_cached(
+        "SELECT t.id, t.album_id, t.rel_path FROM track_tags tt JOIN tracks t ON t.id = tt.track_id
+          WHERE tt.key = 'SOURCE_URL' AND tt.value = ?1 AND t.missing_since IS NULL
+          ORDER BY t.album_id, t.id",
+    )?;
+    let rows = st
+        .query_map([url], |r| {
+            Ok(SourceRow {
+                track_id: r.get(0)?,
+                album_id: r.get(1)?,
+                rel_path: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Inbox の件のファイルに `SOURCE_URL = url` があるか（取り込み中）
+pub fn inbox_has_source_url(conn: &Connection, url: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM inbox_files f, json_each(f.tags) je
+          WHERE json_extract(je.value, '$[0]') = 'SOURCE_URL'
+            AND json_extract(je.value, '$[1]') = ?1",
+        [url],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// album の active な行と `SOURCE_URL`（先頭値）。番号揃えの入力（id 順）
+pub fn album_rows(
+    conn: &Connection,
+    album_id: i64,
+) -> Result<Vec<crate::import::ytmusic::playlist::LibraryRow>> {
+    let mut st = conn.prepare_cached(
+        "SELECT t.id, t.disc_no, t.track_no,
+                (SELECT value FROM track_tags WHERE track_id = t.id AND key = 'SOURCE_URL' AND idx = 0)
+           FROM tracks t WHERE t.album_id = ?1 AND t.missing_since IS NULL ORDER BY t.id",
+    )?;
+    let rows = st
+        .query_map([album_id], |r| {
+            Ok(crate::import::ytmusic::playlist::LibraryRow {
+                track_id: r.get(0)?,
+                disc_no: r.get(1)?,
+                track_no: r.get(2)?,
+                source_url: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}

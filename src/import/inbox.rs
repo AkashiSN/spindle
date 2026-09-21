@@ -868,6 +868,8 @@ pub struct ItemPlaced {
     pub job_ids: Vec<i64>,
     /// 投入した normalize の編集バッチ
     pub normalize_batch: Option<i64>,
+    /// 件のサイドカーにあった購読 id（重複なし。配置の後続で同期を投入する。P4-16）
+    pub subscription_ids: Vec<i64>,
 }
 
 /// 計画（draft の順）
@@ -1115,6 +1117,33 @@ fn resolve_template(
 /// 件のファイルの MUSICBRAINZ_ALBUMID の最頻値（配置のリリースキー `mb:` の元）
 fn incoming_release_id(files: &[FileRow]) -> Option<String> {
     mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")))
+}
+
+/// albumartist / album / category から追記先の album を引く（購読の追記先。P4-16）。下書きの規則
+/// （[`destination`]）と同じで、Inbox の件が置かれる先と一致する
+pub fn destination_of(
+    conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    category: Option<&str>,
+    albumartist: &str,
+    album: &str,
+) -> Result<Option<Destination>, InboxError> {
+    let draft = InboxDraft {
+        category: category.map(str::to_owned),
+        albumartist: albumartist.to_owned(),
+        album: album.to_owned(),
+        date: None,
+        tracks: vec![DraftTrack {
+            rel_path: "x.opus".to_owned(),
+            disc_no: 1,
+            track_no: 1,
+            title: "x".to_owned(),
+            artist: String::new(),
+            keep_artists: None,
+        }],
+        album_gain: false,
+    };
+    destination(conn, layout, &draft, &[])
 }
 
 /// 下書きの宛先ディレクトリ（降格前の素のパス）に active な album があり、それが MB リリースでも
@@ -1722,6 +1751,13 @@ pub async fn place_item(
                 })??,
         )
     };
+    // 購読由来か（サイドカーは配置の成功で消えるので、消す前に読む。P4-16）
+    let subscription_ids: Vec<i64> = {
+        let (inbox, rel_dir) = (Arc::clone(&env.inbox), item.rel_dir.clone());
+        tokio::task::spawn_blocking(move || sidecar_subscription_ids(&inbox, &rel_dir))
+            .await
+            .unwrap_or_default()
+    };
     // 2. 計画
     let plan = {
         let (layout, item, draft, files, sources) = (
@@ -1826,5 +1862,28 @@ pub async fn place_item(
         track_ids: registered.track_ids,
         job_ids: registered.job_ids,
         normalize_batch: registered.normalize_batch,
+        subscription_ids,
     })
+}
+
+/// 件のサイドカーの項にある購読 id（昇順・重複なし）。サイドカーが無い・読めないなら空
+fn sidecar_subscription_ids(inbox: &RootDir, rel_dir: &str) -> Vec<i64> {
+    use crate::import::ytmusic::sidecar::Sidecar;
+    if rel_dir.is_empty() {
+        return Vec::new();
+    }
+    let Ok(dir) = RelPath::parse(rel_dir) else {
+        return Vec::new();
+    };
+    let Ok(Some(sidecar)) = Sidecar::read(inbox, &dir) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<i64> = sidecar
+        .files
+        .values()
+        .filter_map(|e| e.subscription_id)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }

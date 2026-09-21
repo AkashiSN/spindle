@@ -3,6 +3,7 @@
 
 pub mod downloader;
 pub mod metadata;
+pub mod playlist;
 pub mod sidecar;
 
 pub use metadata::{Item, MetadataProvider, Outcome, ProviderError, Track};

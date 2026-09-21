@@ -1,12 +1,15 @@
-//! `ytdl` ジョブ（SPEC §7.7 / §8、D-70、P3-3）。並列 1、dedup `ytdl:<url>`。payload は `{ "url" }`。
+//! `ytdl` ジョブ（SPEC §7.7 / §8、D-70、P3-3）。並列 1、dedup `ytdl:<url>`。payload は `{ "url" }`
+//! （購読由来なら `subscription_id` / `position` も。P4-16）。
 //! 本体は `import::ytmusic::downloader::download_one`。Fatal は再試行せず `failed`
 
 use std::sync::Arc;
 
-use crate::import::ytmusic::downloader::{download_one, DownloadError, Downloaded, DownloaderEnv};
+use crate::import::ytmusic::downloader::{
+    download_one, DownloadError, DownloadRequest, Downloaded, DownloaderEnv,
+};
 use crate::jobs::{BoxFuture, Handler, HandlerResult, JobContext, JobError, Outcome};
 
-pub use crate::import::ytmusic::downloader::new_ytdl_job;
+pub use crate::import::ytmusic::downloader::{new_subscription_ytdl_job, new_ytdl_job};
 
 pub struct YtdlHandler {
     env: Arc<DownloaderEnv>,
@@ -22,18 +25,16 @@ impl Handler for YtdlHandler {
     fn run(&self, ctx: JobContext) -> BoxFuture<'static, HandlerResult> {
         let env = Arc::clone(&self.env);
         Box::pin(async move {
-            let url = ctx
-                .job
-                .payload
-                .get("url")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|u| !u.is_empty())
-                .map(str::to_owned);
-            let Some(url) = url else {
-                return Err(JobError::Fatal(anyhow::anyhow!("payload に url が無い")));
+            let request: DownloadRequest = match serde_json::from_value(ctx.job.payload.clone()) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(JobError::Fatal(anyhow::anyhow!("payload を読めない: {e}")));
+                }
             };
-            match download_one(&env, ctx.job.id, &url, &ctx.cancel_token()).await {
+            if request.url.trim().is_empty() {
+                return Err(JobError::Fatal(anyhow::anyhow!("payload に url が無い")));
+            }
+            match download_one(&env, ctx.job.id, &request, &ctx.cancel_token()).await {
                 // 結果 1 行を note に残す（YouTube 画面が出す。done の中身を区別する）
                 Ok(Downloaded::Staged { rel_path, .. }) => Ok(Outcome::DoneWith(format!(
                     "Inbox に置いた: {}",

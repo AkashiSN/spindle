@@ -191,3 +191,85 @@ fn recover_placing_returns_stuck_items_to_approved() {
     );
     assert_eq!(inbox::recover_placing(&c).unwrap(), 0);
 }
+
+/// P4-16: 同期は URL ごとに Library の active 行を全件引く（`find_source_url` の LIMIT 1 でなく）。
+/// album の行は SOURCE_URL 付きで取れる
+#[test]
+fn library_rows_by_source_url_and_album_rows_with_source_url() {
+    use rusqlite::params;
+    use spindle::db::inbox::{album_rows, library_rows_by_source_url};
+
+    let c = open_memory_connection().unwrap();
+    c.execute_batch(
+        "INSERT INTO albums (id, rel_dir, rel_dir_key) VALUES (1, 'A', 'a'), (2, 'B', 'b');",
+    )
+    .unwrap();
+    let insert = |id: i64, album: i64, no: Option<i64>, missing: Option<i64>| {
+        c.execute(
+            "INSERT INTO tracks (id, album_id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                                 title, artist_display, album, albumartist, seen_at, disc_no, track_no, missing_since)
+             VALUES (?1, ?2, ?3, ?3, 0, 0, 0, 'opus', 0, 't', 'a', 'al', 'aa', 0, 1, ?4, ?5)",
+            params![id, album, format!("{album}/{id}.opus"), no, missing],
+        )
+        .unwrap();
+    };
+    insert(10, 1, Some(1), None);
+    insert(11, 1, Some(2), None);
+    insert(12, 2, Some(1), None);
+    insert(13, 1, Some(3), Some(5));
+    for (t, u) in [(10, "u1"), (11, "u2"), (12, "u1"), (13, "u1")] {
+        c.execute(
+            "INSERT INTO track_tags (track_id, key, idx, value) VALUES (?1, 'SOURCE_URL', 0, ?2)",
+            params![t, u],
+        )
+        .unwrap();
+    }
+    // missing は除く。album 順・id 順
+    let rows: Vec<(i64, Option<i64>, String)> = library_rows_by_source_url(&c, "u1")
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.track_id, r.album_id, r.rel_path))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (10, Some(1), "1/10.opus".to_owned()),
+            (12, Some(2), "2/12.opus".to_owned())
+        ]
+    );
+    assert!(library_rows_by_source_url(&c, "nope").unwrap().is_empty());
+    let rows = album_rows(&c, 1).unwrap();
+    assert_eq!(
+        rows,
+        [
+            spindle::import::ytmusic::playlist::LibraryRow {
+                track_id: 10,
+                disc_no: Some(1),
+                track_no: Some(1),
+                source_url: Some("u1".to_owned()),
+            },
+            spindle::import::ytmusic::playlist::LibraryRow {
+                track_id: 11,
+                disc_no: Some(1),
+                track_no: Some(2),
+                source_url: Some("u2".to_owned()),
+            },
+        ]
+    );
+    // Inbox 側の有無
+    c.execute_batch(
+        "INSERT INTO inbox_items (id, rel_dir, rel_dir_key, state, detected_at, seen_at) VALUES (1, 'x', 'x', 'pending', 0, 0);",
+    )
+    .unwrap();
+    inbox::replace_files(
+        &c,
+        1,
+        &[FileRow {
+            tags: vec![("SOURCE_URL".into(), "u9".into())],
+            ..file("x/a.opus", "a")
+        }],
+    )
+    .unwrap();
+    assert!(spindle::db::inbox::inbox_has_source_url(&c, "u9").unwrap());
+    assert!(!spindle::db::inbox::inbox_has_source_url(&c, "u1").unwrap());
+}

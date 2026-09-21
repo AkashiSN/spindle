@@ -23,6 +23,7 @@ use spindle::jobs::handlers::gc::{self as gc_job, GcHandler};
 use spindle::jobs::handlers::hirescheck::HirescheckHandler;
 use spindle::jobs::handlers::inbox::{self as inbox_job, InboxHandler};
 use spindle::jobs::handlers::normalize::NormalizeHandler;
+use spindle::jobs::handlers::playlist_sync::{self, PlaylistSyncHandler, SyncEnv};
 use spindle::jobs::handlers::rename::RenameHandler;
 use spindle::jobs::handlers::rg::RgHandler;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
@@ -373,8 +374,31 @@ async fn main() -> anyhow::Result<()> {
                 )),
             })),
         );
+        // 再生リストの購読の同期（P4-16、D-78）。列挙 → 番号揃え → ytdl 投入
+        let (pending_wait, pending_poll) = SyncEnv::default_waits();
+        registry.register(
+            JobType::PlaylistSync,
+            Arc::new(PlaylistSyncHandler::new(SyncEnv {
+                db: Arc::clone(&state.db),
+                jobs: Arc::clone(&state.jobs),
+                editor: Arc::clone(&editor),
+                layout: state.config.layout.clone(),
+                ytdlp: state.config.ytdlp_command(),
+                pending_wait,
+                pending_poll,
+            })),
+        );
     }
     let worker = state.jobs.start(registry, shutdown.clone());
+    // 購読の dispatcher（latch の回収と定期同期）。ytmusic が無効なら回さない
+    let subscription_dispatcher = state.config.ytmusic.enabled.then(|| {
+        playlist_sync::spawn_dispatcher(
+            Arc::clone(&state.jobs),
+            state.config.ytmusic.sync_interval_hours,
+            std::time::Duration::from_secs(30),
+            shutdown.clone(),
+        )
+    });
     // Inbox の周期検出（0 で無し）
     let inbox_scheduler = inbox_job::spawn_scheduler(
         Arc::clone(&state.jobs),
@@ -420,6 +444,9 @@ async fn main() -> anyhow::Result<()> {
     let _ = backup_scheduler.await;
     let _ = gc_scheduler.await;
     let _ = inbox_scheduler.await;
+    if let Some(h) = subscription_dispatcher {
+        let _ = h.await;
+    }
     let _ = autoexport.await;
     info!("停止した");
     Ok(())
