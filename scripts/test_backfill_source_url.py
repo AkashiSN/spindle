@@ -80,6 +80,9 @@ class TitleMatching(unittest.TestCase):
         self.assertTrue(title_matches("Can’t Wait ’Til Christmas - 宇多田ヒカル Covered by 理芽", "Can't Wait' Til Christmas (Cover)") or True)
         self.assertEqual(normalize_title("Can’t “x” ‘y’"), "can't \"x\" 'y'")
 
+    def test_spaces_are_ignored_when_comparing(self):
+        self.assertTrue(title_matches("花譜 # 140「ゲシュタルト-崩壊Remix-」【オリジナルMV】", "ゲシュタルト -崩壊Remix-"))
+
     def test_library_title_without_suffix_is_substring_of_video_title(self):
         self.assertTrue(title_matches("【歌ってみた】新世界ピグマリオン / VALIS", "新世界ピグマリオン"))
         self.assertTrue(title_matches("モザイクロール (Reloaded) covered by 春猿火", "モザイクロール (Reloaded) (Cover)"))
@@ -143,6 +146,25 @@ class Plan(unittest.TestCase):
         self.assertEqual((by_id[7]["status"], by_id[7]["video_id"]), ("verified-by-title", "v7"))
         self.assertEqual((by_id[8]["status"], by_id[8]["video_id"]), ("verified-by-title", "v8"))
         self.assertEqual(by_id[5]["status"], "extra-track")
+
+    def test_title_rescue_prefers_the_longest_matching_title(self):
+        # 「ゲシュタルト」（原曲）と「ゲシュタルト -崩壊Remix-」の両方が候補になる。長い方が正しい
+        entries = [entry("v1", "曲 1 / A"), entry("v2", "KAF #137 - Gestalt [MV]"), entry("v3", "曲 3 / A"),
+                   entry("v4", "花譜 # 140「ゲシュタルト-崩壊Remix-」【オリジナルMV】")]
+        tracks = [track(1, 1, "曲 1"), track(2, 2, "ゲシュタルト"), track(3, 3, "曲 3"), track(4, 4, "ゲシュタルト -崩壊Remix-")]
+        rows = build_plan("A のお歌", entries, tracks)
+        by_no = {r["track_no"]: r for r in rows}
+        self.assertEqual((by_no[4]["status"], by_no[4]["video_id"]), ("verified", "v4"))
+        self.assertEqual((by_no[2]["status"], by_no[2]["video_id"]), ("verified-by-neighbors", "v2"))
+
+    def test_playlist_video_without_a_library_row_is_no_track(self):
+        # 位置 2 の動画は Library に無く、位置の行は別の entry がタイトルで取った
+        entries = [entry("v1", "曲 1 / A"), entry("v2", "未DL / A"), entry("v3", "曲 2 / A")]
+        tracks = [track(1, 1, "曲 1"), track(2, 2, "曲 2")]
+        rows = build_plan("A", entries, tracks)
+        st = {(r["track_no"], r["video_id"]): r["status"] for r in rows}
+        self.assertEqual(st[(2, "v2")], "no-track")
+        self.assertEqual(st[(2, "v3")], "verified-by-title")
 
     def test_title_rescue_with_equidistant_candidates_stays_mismatch(self):
         entries = [entry("v1", "違う / A"), entry("v2", "同じ / A"), entry("v3", "別 / A")]

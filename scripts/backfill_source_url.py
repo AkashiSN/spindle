@@ -27,7 +27,7 @@ TRACKNUMBER」でファイルを並べていた。その再生リストを yt-dl
     title-mismatch     どれにも当てはまらない。人が見る（--include-mismatch は位置の行に書く。ずれの
                        後ろでは誤るので、plan.csv を見てから）
     already         既に同じ SOURCE_URL
-    no-track        その番号の行が Library に無い（欠番）
+    no-track           その動画の行が Library に無い（欠番、または未ダウンロード）
     extra-track     行はあるが再生リストにその位置が無い
 """
 
@@ -122,20 +122,27 @@ def normalize_title(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def title_matches(video_title: str, library_title: str) -> bool:
-    """Library のタイトル（末尾の括弧書きを 1 段ずつ外しながら）が動画タイトルに含まれるか"""
-    video = normalize_title(video_title)
+def match_length(video_title: str, library_title: str) -> int:
+    """Library のタイトル（末尾の括弧書き・共演者を 1 段ずつ外しながら）が動画タイトルに含まれるなら、
+    含まれた部分の長さ（空白抜き）。含まれなければ 0。長いほど確かな一致（`ゲシュタルト` より
+    `ゲシュタルト -崩壊Remix-` を優先する）。比較は空白を無視する（表記が揺れる）"""
+    video = normalize_title(video_title).replace(" ", "")
     cand = normalize_title(library_title)
     while cand:
-        if cand in video:
-            return True
+        compact = cand.replace(" ", "")
+        if compact and compact in video:
+            return len(compact)
         stripped = _SUFFIX.sub("", cand).strip()
         if stripped == cand:
             stripped = _TAIL.sub("", cand).strip()
         if stripped == cand:
             break
         cand = stripped
-    return False
+    return 0
+
+
+def title_matches(video_title: str, library_title: str) -> bool:
+    return match_length(video_title, library_title) > 0
 
 
 # ---------------------------------------------------------------- 対応付け
@@ -190,16 +197,24 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
             take(i, i, "position-only")
         elif title_matches(e["title"], t.get("title") or ""):
             take(i, i, "verified")
-    # 2. タイトルによる救済
+    # 2. タイトルによる救済（一致の長い行 → 期待位置に近い行 の順で選ぶ。同点なら決めない）
     for i, e in enumerate(entries, start=1):
         if i in assigned or not is_available(e):
             continue
-        cands = [no for no, t in by_no.items() if no not in claimed and title_matches(e["title"], t.get("title") or "")]
+        cands = []
+        for no, t in by_no.items():
+            if no in claimed:
+                continue
+            n_match = match_length(e["title"], t.get("title") or "")
+            if n_match:
+                cands.append((-n_match, abs(no - i), no))
         if not cands:
             continue
-        cands.sort(key=lambda no: (abs(no - i), no))
-        if len(cands) == 1 or abs(cands[0] - i) < abs(cands[1] - i):
-            take(i, cands[0], "verified-by-title")
+        cands.sort()
+        if len(cands) == 1 or cands[0][:2] != cands[1][:2]:
+            no = cands[0][2]
+            same = by_no[no].get("source_url") == (watch_url(e["id"]) if e["id"] else "")
+            take(i, no, "already" if same else "verified-by-title")
     # 3. 両隣が同じずれ幅で対応している区間は、そのずれで位置から採る。先頭の区間は右隣が
     #    ずれ 0 のとき、末尾の区間は左隣がずれ 0 で行が余っていないときだけ（欠落を見落とさない）
     max_no = max(by_no) if by_no else 0
@@ -228,22 +243,21 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
             continue
         if all((no + d) in by_no and (no + d) not in claimed for no in range(a, b + 1)):
             for pos in range(a, b + 1):
-                take(pos, pos + d, "verified-by-neighbors")
+                e = entries[pos - 1]
+                same = by_no[pos + d].get("source_url") == (watch_url(e["id"]) if e["id"] else "")
+                take(pos, pos + d, "already" if same else "verified-by-neighbors")
     # 行にする
     for i, e in enumerate(entries, start=1):
         if i in assigned:
             no, status = assigned[i]
             rows.append(_row(album, no, by_no[no], e, status))
-        elif by_no.get(i) is None:
+        elif by_no.get(i) is None or i in claimed:
+            # 位置に行が無い、または位置の行を別の entry がタイトルで取った = この動画は Library に無い
             rows.append(_row(album, i, None, e, "no-track"))
         else:
-            # 位置の行が空いていればそこに不一致として出す（人が見る。--include-mismatch の対象）。
-            # 埋まっていれば行なしで出す
-            t = None
-            if i not in claimed:
-                t = by_no[i]
-                claimed.add(i)
-            rows.append(_row(album, i, t, e, "title-mismatch"))
+            # 位置の行が空いていて、タイトルも合わない（人が見る。--include-mismatch の対象）
+            claimed.add(i)
+            rows.append(_row(album, i, by_no[i], e, "title-mismatch"))
     for no, t in sorted(by_no.items()):
         if no not in claimed:
             rows.append(_row(album, no, t, None, "extra-track"))
