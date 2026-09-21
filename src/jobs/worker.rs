@@ -34,7 +34,7 @@ const FINISH_RETRY_DELAYS: [u64; 6] = [1, 2, 4, 8, 16, 32];
 /// できないので、再試行のためにメッセージへ落とす
 #[derive(Debug, Clone)]
 enum Terminal {
-    Done,
+    Done(Option<String>),
     Requeue,
     Cancelled,
     Fatal(String),
@@ -44,7 +44,8 @@ enum Terminal {
 impl From<super::HandlerResult> for Terminal {
     fn from(r: super::HandlerResult) -> Self {
         match r {
-            Ok(Outcome::Done) => Terminal::Done,
+            Ok(Outcome::Done) => Terminal::Done(None),
+            Ok(Outcome::DoneWith(note)) => Terminal::Done(Some(note)),
             Ok(Outcome::Requeue) => Terminal::Requeue,
             Err(JobError::Cancelled) => Terminal::Cancelled,
             Err(JobError::Fatal(e)) => Terminal::Fatal(format!("{e:#}")),
@@ -329,7 +330,7 @@ async fn run_one(
             .write(move |c| {
                 let tx = c.transaction()?;
                 if !dbjobs::track_exists(&tx, track_id)? {
-                    dbjobs::mark_done(&tx, id, now_epoch())?;
+                    dbjobs::mark_done(&tx, id, now_epoch(), None)?;
                     tx.commit()?;
                     return Ok(Gate::Stale);
                 }
@@ -341,7 +342,7 @@ async fn run_one(
                 if dbjobs::is_stale(&tx, &job)? {
                     dbjobs::release_track_locks(&tx, id)?;
                     dbjobs::release_mutexes(&tx, id)?;
-                    dbjobs::mark_done(&tx, id, now_epoch())?;
+                    dbjobs::mark_done(&tx, id, now_epoch(), None)?;
                     tx.commit()?;
                     return Ok(Gate::Stale);
                 }
@@ -420,8 +421,8 @@ fn finish(
     dbjobs::release_mutexes(&tx, id)?;
     match terminal {
         // 完了直前に cancel が来ていても完了が勝つ（仕事は済んでいる。D-36）
-        Terminal::Done => {
-            dbjobs::mark_done(&tx, id, now)?;
+        Terminal::Done(note) => {
+            dbjobs::mark_done(&tx, id, now, note.as_deref())?;
             debug!(job_id = id, %ty, "完了");
         }
         Terminal::Requeue => match dbjobs::requeue(&tx, id, now, REQUEUE_DELAY_SECS)? {

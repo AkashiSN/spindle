@@ -94,9 +94,13 @@ impl Jobs {
         self.db.read(move |c| dbjobs::get(c, id)).await
     }
 
-    pub async fn list(&self) -> Result<(Vec<Job>, Summary, BTreeMap<String, TypeCounts>)> {
+    /// 一覧と要約。`job_type` があれば一覧をその種別だけにする（上限も種別内で数える）
+    pub async fn list(
+        &self,
+        job_type: Option<crate::jobs::JobType>,
+    ) -> Result<(Vec<Job>, Summary, BTreeMap<String, TypeCounts>)> {
         self.db
-            .read(|c| dbjobs::list_with_summary(c, LIST_LIMITS))
+            .read(move |c| dbjobs::list_with_summary(c, LIST_LIMITS, job_type))
             .await
     }
 

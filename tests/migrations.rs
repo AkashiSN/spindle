@@ -621,3 +621,32 @@ fn upgrade_to_0019_adds_variant_options_with_defaults() {
     );
     assert!(bad.is_err(), "lossy_sources は 0 / 1 のみ");
 }
+
+/// P4-13: ジョブの完了時の結果 1 行（`note`）。既存行は NULL のまま
+#[test]
+fn upgrade_to_0020_adds_jobs_note() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let upto19: Vec<_> = list.iter().take(19).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto19).unwrap();
+    conn.execute_batch(
+        "INSERT INTO jobs (type, dedup_key, payload, state, created_at) VALUES ('scan', 'scan', '{}', 'done', 1);",
+    )
+    .unwrap();
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 20);
+    let note: Option<String> = conn
+        .query_row("SELECT note FROM jobs WHERE dedup_key = 'scan'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(note, None);
+    conn.execute(
+        "UPDATE jobs SET note = 'Inbox に置いた: x' WHERE dedup_key = 'scan'",
+        [],
+    )
+    .unwrap();
+}

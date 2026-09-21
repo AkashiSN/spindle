@@ -5,7 +5,7 @@ import type { JobsState } from '../hooks/useJobSummary'
 import type { YoutubeState } from '../hooks/useYoutube'
 import { formatDateTime } from '../lib/history'
 import { canCancel, canRetry } from '../lib/jobs'
-import { isPlaylistUrl, parseUrlLines, ytdlJobs, ytdlResultLabel } from '../lib/youtube'
+import { parseUrlLines, ytdlResultLabel } from '../lib/youtube'
 
 export function YoutubeView({
   youtube,
@@ -17,7 +17,7 @@ export function YoutubeView({
   onOpenInbox: () => void
 }) {
   const { urls, busy, notice, error } = youtube
-  const list = jobs.items ? ytdlJobs(jobs.items) : null
+  const list = youtube.jobs
 
   return (
     <section className="youtube">
@@ -32,7 +32,7 @@ export function YoutubeView({
             </button>
           </span>
         )}
-        <button type="button" className="ghost" onClick={jobs.refresh}>
+        <button type="button" className="ghost" onClick={youtube.refresh}>
           更新
         </button>
       </div>
@@ -95,7 +95,7 @@ export function YoutubeView({
                 <td>{ytdlResultLabel(j)}</td>
                 <td className="nowrap muted">{formatDateTime(j.finished_at ?? j.started_at ?? j.created_at)}</td>
                 <td className="nowrap">
-                  {j.state === 'done' && !isPlaylistUrl(j.subject) && (
+                  {j.state === 'done' && j.note != null && j.note.startsWith('Inbox に置いた') && (
                     <button type="button" className="ghost" onClick={onOpenInbox}>
                       Inbox で確認
                     </button>

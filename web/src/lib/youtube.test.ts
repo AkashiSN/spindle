@@ -63,11 +63,15 @@ describe('ytdlResultLabel', () => {
   it('状態と結果を 1 行に', () => {
     expect(ytdlResultLabel(job({ state: 'queued' }))).toBe('待ち')
     expect(ytdlResultLabel(job({ state: 'running' }))).toBe('ダウンロード中')
-    expect(ytdlResultLabel(job({ state: 'done' }))).toBe('Inbox に置いた')
-    // 再生リストのジョブは動画ごとのジョブを投入して終わる（取り込み済みは投入しない）
-    expect(ytdlResultLabel(job({ state: 'done', subject: 'https://www.youtube.com/playlist?list=PL1' }))).toBe(
-      '再生リストを展開した（無いものだけ投入）',
+    // 完了はサーバの note（Staged / Skipped / Playlist を区別する）。無ければ断定しない
+    expect(ytdlResultLabel(job({ state: 'done', note: 'Inbox に置いた: youtube/A/x.opus' }))).toBe(
+      'Inbox に置いた: youtube/A/x.opus',
     )
+    expect(ytdlResultLabel(job({ state: 'done', note: 'プラグインが skip: 告知動画' }))).toBe('プラグインが skip: 告知動画')
+    expect(
+      ytdlResultLabel(job({ state: 'done', note: '再生リストを展開した: 1 件を投入、224 件は取り込み済み' })),
+    ).toBe('再生リストを展開した: 1 件を投入、224 件は取り込み済み')
+    expect(ytdlResultLabel(job({ state: 'done' }))).toBe('完了（結果は Inbox）')
     expect(ytdlResultLabel(job({ state: 'running', subject: 'https://www.youtube.com/playlist?list=PL1' }))).toBe(
       '再生リストを展開中',
     )

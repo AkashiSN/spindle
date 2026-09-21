@@ -2063,3 +2063,88 @@ async fn events_stream_signals_resync_when_lagged() {
     let first_job = buf.find("event: job").unwrap_or(usize::MAX);
     assert!(resync_at < first_job, "{buf}");
 }
+
+/// P4-13: `GET /api/jobs?type=<種別>` はその種別だけの一覧（上限も種別内で数える。YouTube 画面が
+/// 他種別の完了 300 件に押し出されない）。summary / by_type は全件のまま。不明な種別は 400
+#[tokio::test]
+async fn jobs_list_can_be_filtered_by_type() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    let EnqueueResult::Inserted(scan_id) = app.jobs.enqueue(scan_job()).await.unwrap() else {
+        panic!()
+    };
+    let ytdl = NewJob::new(
+        JobType::Ytdl,
+        serde_json::json!({"url": "https://youtu.be/x"}),
+    )
+    .dedup_key("ytdl:x");
+    let EnqueueResult::Inserted(ytdl_id) = app.jobs.enqueue(ytdl).await.unwrap() else {
+        panic!()
+    };
+    app.jobs
+        .db()
+        .write(move |c| {
+            c.execute(
+                "UPDATE jobs SET state = 'done', finished_at = 1 WHERE id = ?1",
+                [ytdl_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let res = send(
+        &app,
+        req(Method::GET, "/api/jobs?type=ytdl")
+            .header(header::COOKIE, &c)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json(res).await;
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], ytdl_id);
+    assert_eq!(items[0]["type"], "ytdl");
+    assert_eq!(body["summary"]["queued"], 1, "summary は全件");
+    assert_eq!(body["by_type"]["scan"]["queued"], 1);
+    let _ = scan_id;
+
+    let res = send(
+        &app,
+        req(Method::GET, "/api/jobs?type=nope")
+            .header(header::COOKIE, &c)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+/// P4-13: ハンドラが `Outcome::DoneWith(note)` を返すと、完了時の結果 1 行が `jobs.note` に残り
+/// `GET /api/jobs` の `note` で読める（ytdl の「Inbox に置いた: …」「プラグインが skip: …」等）
+#[tokio::test]
+async fn done_with_note_persists_the_note() {
+    let h = Harness::new();
+    let job = NewJob::new(JobType::Ytdl, serde_json::json!({ "url": "u" })).dedup_key("ytdl:u");
+    let EnqueueResult::Inserted(id) = h.jobs.enqueue(job).await.unwrap() else {
+        panic!()
+    };
+    let mut reg = Registry::new();
+    reg.register_fn(JobType::Ytdl, |_ctx| async {
+        Ok(Outcome::DoneWith("Inbox に置いた: youtube/x/y.opus".into()))
+    });
+    h.start(reg);
+    wait_state(&h, id, JobState::Done).await;
+    let note: Option<String> = h
+        .raw()
+        .query_row("SELECT note FROM jobs WHERE id = ?1", [id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(note.as_deref(), Some("Inbox に置いた: youtube/x/y.opus"));
+    let got = h.jobs.get(id).await.unwrap().unwrap();
+    assert_eq!(
+        got.note.as_deref(),
+        Some("Inbox に置いた: youtube/x/y.opus")
+    );
+}

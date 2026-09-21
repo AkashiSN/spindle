@@ -120,7 +120,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const playlists = usePlaylists(sseOpen)
   const refreshPlaylists = playlists.refresh
   const jobs = useJobSummary(sseOpen)
-  const youtube = useYoutube()
+  const youtube = useYoutube(sseOpen && view === 'youtube')
   // 履歴は画面を開いたときに取り、開いている間は batch イベントで取り直す
   const history = useHistory(sseOpen && view === 'history')
   /** ジョブ / 設定画面から「バッチ #n」で飛んできたときに開くバッチ */
@@ -222,6 +222,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     },
     onJob: (e) => {
       jobs.refresh()
+      youtube.refresh()
       if (e.state === 'done' || e.state === 'failed') scheduleRowRefresh()
       // inbox ジョブの完了は件の状態（走査の結果、placed / failed）を変える。job イベントに種別は
       // 無いので、Inbox を開いている間は完了のたびに取り直す（hook 側で 250ms に間引く）

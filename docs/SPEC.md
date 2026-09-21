@@ -1427,9 +1427,12 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //                               → 404 | 409 { "error": "not_terminal" | "already_reverted" | "pending" }
 // POST /api/history/:id/cancel  → 202 | 404 | 409 { "error": "not_cancellable" }
 
-// GET /api/jobs
+// GET /api/jobs?type=          // type（任意）: 種別で items を絞る（`ytdl` 等。上限も種別内で数える。YouTube 画面）。
+                                //   summary / by_type は全件のまま。不明な種別は 400
 { "items": [ { "id", "type", "state", "progress", "done", "total", "attempts", "last_error",
                "run_after", "edit_batch_id", "created_at", "started_at", "finished_at",
+               "note",          // 完了時の結果 1 行（ハンドラが返す。ytdl: "Inbox に置いた: <path>" /
+                                //   "プラグインが skip: <理由>" / "再生リストを展開した: N 件を投入、M 件は取り込み済み"。無ければ null）
                "subject" } ],   // subject = 対象の表示用文字列（track_id → Library のパス、album_id → ディレクトリ、
                                 //   batch_id → 説明、transcode は " [<variant>]" 付き、scan は kind、ytdl は url、
                                 //   thumbnail は "artwork #id"。行が消えていれば "track #id"、対象の無い種別は null）
@@ -1774,8 +1777,9 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
 - **YouTube**（P3-3 → P4-13、D-70 追記）: 上部バーの独立した画面（取り込み元は Inbox / CD / YouTube で
   横並び、結果は Inbox に集まる）。(1) 1 行 1 URL のテキストエリアと「ダウンロード」（`POST /api/ytmusic/
   download`。再生リストは動画ごとに展開し、Library / Inbox に `SOURCE_URL` のある動画は投入しない）、
-  (2) ytdl ジョブの一覧（`GET /api/jobs` の `type = ytdl` を新しい順。URL・結果（待ち / ダウンロード中 /
-  Inbox に置いた / 失敗の理由 / 再生リストを展開した）・時刻・取り消し / 再試行・完了なら「Inbox で確認」）、
+  (2) ytdl ジョブの一覧（`GET /api/jobs?type=ytdl` を新しい順。URL・結果（待ち / ダウンロード中 / 完了は
+  `note` = Inbox に置いた・プラグインが skip・再生リストを展開した N 件 / 失敗の理由）・時刻・取り消し /
+  再試行・Inbox に置いた行だけ「Inbox で確認」）、
   (3) 購読（P4-16。いまは枠だけ）。`/youtube?url=<URL>` で開くと欄に入れた状態で開く（ブックマークレットの
   受け口。同一 origin の GET なので CORS / CSRF を触らない。http / https 以外は受けない。README）。
   操作タブの YouTube 節は廃止

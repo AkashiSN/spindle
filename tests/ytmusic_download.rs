@@ -197,6 +197,12 @@ impl Lib {
         panic!("ytdl ジョブが終わらない");
     }
 
+    fn note(&self, id: i64) -> Option<String> {
+        self.conn()
+            .query_row("SELECT note FROM jobs WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    }
+
     fn job(&self, id: i64) -> (i64, Option<String>) {
         self.conn()
             .query_row(
@@ -344,10 +350,18 @@ async fn skip_is_done_without_downloading() {
     let lib = lib!();
     lib.video(U1, "v1", "SkipCh", "Announcement", true);
     lib.start();
-    let (_, st) = lib.run(U1).await;
+    let (id, st) = lib.run(U1).await;
     assert_eq!(st, JobState::Done);
     assert_eq!(lib.calls().len(), 1, "download を呼ばない");
     assert!(!lib.inbox_path("youtube").exists());
+    assert!(
+        lib.note(id)
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("プラグインが skip"),
+        "{:?}",
+        lib.note(id)
+    );
     assert_eq!(
         lib.count("SELECT count(*) FROM jobs WHERE type = 'inbox'"),
         0
@@ -675,12 +689,27 @@ fn parse_dump_reads_videos_and_playlists_and_rejects_incomplete_ones() {
     assert_eq!(v.upload_date, None);
     assert!(!v.has_webm_audio);
     assert_eq!(v.item().uploaded_at, None);
-    // playlist: url が無い entry は落とす
+    // playlist: YouTube の entry は id から正規形（https://www.youtube.com/watch?v=<id>）を組む。
+    // url が youtu.be 形・list= 付きでも、SOURCE_URL に書く webpage_url の正規形と一致する（P4-13）。
+    // YouTube 以外は webpage_url → url の順。どちらも無ければ落とす
     let p = parse_dump(
-        br#"{"_type":"playlist","entries":[{"url":"a"},{"webpage_url":"b"},{"id":"c"}]}"#,
+        br#"{"_type":"playlist","entries":[
+             {"id":"a1","url":"https://youtu.be/a1","ie_key":"Youtube"},
+             {"id":"b2","url":"https://www.youtube.com/watch?v=b2&list=PLx","webpage_url":"https://www.youtube.com/watch?v=b2","ie_key":"Youtube"},
+             {"url":"https://example.com/u","webpage_url":"https://example.com/w"},
+             {"url":"https://example.com/only-url"},
+             {"id":"c"}]}"#,
     )
     .unwrap();
-    assert_eq!(p, Dump::Playlist(vec!["a".into(), "b".into()]));
+    assert_eq!(
+        p,
+        Dump::Playlist(vec![
+            "https://www.youtube.com/watch?v=a1".into(),
+            "https://www.youtube.com/watch?v=b2".into(),
+            "https://example.com/w".into(),
+            "https://example.com/only-url".into(),
+        ])
+    );
     // 不足
     for body in [
         r#"{"title":"T","webpage_url":"u"}"#,
@@ -862,7 +891,15 @@ async fn playlist_expansion_skips_videos_already_imported() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(ids.len(), 1, "v3 だけが投入される");
+    assert_eq!(
+        lib.note(id).as_deref(),
+        Some("再生リストを展開した: 1 件を投入、2 件は取り込み済み")
+    );
     assert_eq!(lib.wait(ids[0]).await, JobState::Done);
+    assert_eq!(
+        lib.note(ids[0]).as_deref(),
+        Some("Inbox に置いた: youtube/Artist A/Songs of A/20260901 Song One [v3].opus")
+    );
     assert!(lib
         .inbox_path("youtube/Artist A/Songs of A/20260901 Song One [v3].opus")
         .exists());

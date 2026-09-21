@@ -206,6 +206,9 @@ pub struct Job {
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+    /// 完了時の結果 1 行（ハンドラが `Outcome::DoneWith` で返す。ytdl の「Inbox に置いた: …」等。P4-13）。
+    /// 失敗の理由は `last_error`
+    pub note: Option<String>,
     /// 対象の表示用文字列（`GET /api/jobs` の一覧だけが埋める。payload の track_id / album_id /
     /// batch_id を解決したもの。[`subject_of`]）
     pub subject: Option<String>,
@@ -213,7 +216,7 @@ pub struct Job {
 
 const JOB_COLUMNS: &str = "id, type, dedup_key, payload, state, edit_batch_id, priority, run_after,
      progress, total, done, attempts, max_attempts, last_error, cancel_requested_at,
-     created_at, started_at, finished_at";
+     created_at, started_at, finished_at, note";
 
 fn parse_col<T: FromStr<Err = String>>(row: &Row<'_>, idx: usize) -> rusqlite::Result<T> {
     let s: String = row.get(idx)?;
@@ -250,6 +253,7 @@ fn job_from_row(row: &Row<'_>) -> rusqlite::Result<Job> {
         created_at: row.get(15)?,
         started_at: row.get(16)?,
         finished_at: row.get(17)?,
+        note: row.get(18)?,
         subject: None,
     })
 }
@@ -501,29 +505,41 @@ impl Slice {
     }
 }
 
-fn list_slice(conn: &Connection, slice: Slice, limit: usize) -> Result<Vec<Job>> {
+fn list_slice(
+    conn: &Connection,
+    slice: Slice,
+    limit: usize,
+    job_type: Option<JobType>,
+) -> Result<Vec<Job>> {
     // 対象の解決（track / album / batch）。payload の id を JOIN するだけで、行が無ければ NULL
     let columns: Vec<String> = JOB_COLUMNS
         .split(',')
         .map(|c| format!("j.{}", c.trim()))
         .collect();
     let (filter, order) = slice.sql();
+    // 種別の絞り込み（`?type=`）。種別名は enum の固定文字列で、値はバインドする
+    let type_filter = if job_type.is_some() {
+        " AND j.type = ?2"
+    } else {
+        " AND ?2 IS NULL"
+    };
     let mut stmt = conn.prepare(&format!(
         "SELECT {}, t.rel_path, a.rel_dir, b.description
          FROM jobs j
          LEFT JOIN tracks t ON t.id = json_extract(j.payload, '$.track_id')
          LEFT JOIN albums a ON a.id = json_extract(j.payload, '$.album_id')
          LEFT JOIN edit_batches b ON b.id = json_extract(j.payload, '$.batch_id')
-         WHERE {filter}
+         WHERE {filter}{type_filter}
          ORDER BY {order}
          LIMIT ?1",
         columns.join(", ")
     ))?;
-    let rows = stmt.query_map([limit as i64], |row| {
+    let ty: Option<&str> = job_type.map(JobType::as_str);
+    let rows = stmt.query_map(params![limit as i64, ty], |row| {
         let mut job = job_from_row(row)?;
-        let track: Option<String> = row.get(18)?;
-        let album: Option<String> = row.get(19)?;
-        let batch: Option<String> = row.get(20)?;
+        let track: Option<String> = row.get(19)?;
+        let album: Option<String> = row.get(20)?;
+        let batch: Option<String> = row.get(21)?;
         job.subject = subject_of(
             job.job_type,
             &job.payload,
@@ -537,21 +553,23 @@ fn list_slice(conn: &Connection, slice: Slice, limit: usize) -> Result<Vec<Job>>
 }
 
 /// 一覧。実行中・待ち（上限まで）→ 完了（新しい順に上限まで）→ 失敗・取り消し（同）の順に並べる
-pub fn list(conn: &Connection, limits: ListLimits) -> Result<Vec<Job>> {
-    let mut items = list_slice(conn, Slice::Active, limits.active)?;
-    items.extend(list_slice(conn, Slice::Done, limits.done)?);
-    items.extend(list_slice(conn, Slice::Failed, limits.failed)?);
+pub fn list(conn: &Connection, limits: ListLimits, job_type: Option<JobType>) -> Result<Vec<Job>> {
+    let mut items = list_slice(conn, Slice::Active, limits.active, job_type)?;
+    items.extend(list_slice(conn, Slice::Done, limits.done, job_type)?);
+    items.extend(list_slice(conn, Slice::Failed, limits.failed, job_type)?);
     Ok(items)
 }
 
 /// 一覧・summary・種別ごとの件数を同じ読み取りスナップショットで取る（WAL では別 SELECT が別
-/// スナップになり得るため、明示トランザクションで囲う）
+/// スナップになり得るため、明示トランザクションで囲う）。`job_type` は一覧だけを絞る（上限も
+/// 種別内で数える）。summary / 件数は全件
 pub fn list_with_summary(
     conn: &Connection,
     limits: ListLimits,
+    job_type: Option<JobType>,
 ) -> Result<(Vec<Job>, Summary, BTreeMap<String, TypeCounts>)> {
     let tx = conn.unchecked_transaction()?;
-    let items = list(&tx, limits)?;
+    let items = list(&tx, limits, job_type)?;
     let summary = summary(&tx)?;
     let by_type = counts_by_type(&tx)?;
     tx.finish()?;
@@ -798,13 +816,13 @@ pub fn backoff_secs(attempts: i64) -> i64 {
     BASE.saturating_mul(1i64 << exp).min(MAX)
 }
 
-/// 正常終了。`running` からのみ遷移する
-pub fn mark_done(conn: &Connection, id: i64, now: i64) -> Result<bool> {
+/// 正常終了。`running` からのみ遷移する。`note` は完了時の結果 1 行（無ければ触らない）
+pub fn mark_done(conn: &Connection, id: i64, now: i64, note: Option<&str>) -> Result<bool> {
     let changed = conn.execute(
         "UPDATE jobs SET state = 'done', finished_at = ?2, progress = 1.0,
-                         done = COALESCE(total, done)
+                         done = COALESCE(total, done), note = COALESCE(?3, note)
          WHERE id = ?1 AND state = 'running'",
-        params![id, now],
+        params![id, now, note],
     )?;
     Ok(changed > 0)
 }

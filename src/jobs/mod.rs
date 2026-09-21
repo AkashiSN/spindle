@@ -36,10 +36,12 @@ pub use queue::{Jobs, EVENT_CAPACITY, LIST_LIMITS};
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// ハンドラの正常終了
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// 完了。`done` にする
     Done,
+    /// 完了。結果 1 行を `jobs.note` に残す（画面が出す。ytdl の「Inbox に置いた: …」等）
+    DoneWith(String),
     /// 前提（track_locks 等）が取れなかった。試行回数を数えずに `queued` へ戻す
     Requeue,
 }

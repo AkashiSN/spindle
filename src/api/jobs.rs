@@ -1,17 +1,17 @@
 //! `GET /api/jobs`、`POST /api/jobs/:id/cancel` / `retry`（SPEC §9、§12.5）
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::jobs::ListLimits;
 use crate::jobs::{CancelOutcome, Job, JobType, RetryOutcome, Summary, TypeCounts, LIST_LIMITS};
 
-use super::error::{error_response, ApiError};
+use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 
 #[derive(Serialize)]
@@ -28,8 +28,31 @@ pub struct JobList {
     pub limits: ListLimits,
 }
 
-pub async fn list(State(state): State<AppState>) -> Result<Json<JobList>, ApiError> {
-    let (items, summary, by_type) = state.jobs.list().await?;
+#[derive(Deserialize)]
+pub struct ListParams {
+    /// 種別で一覧を絞る（`ytdl` 等。YouTube 画面。上限も種別内で数える）。summary / by_type は全件
+    #[serde(rename = "type")]
+    pub job_type: Option<String>,
+}
+
+pub async fn list(
+    State(state): State<AppState>,
+    Query(params): Query<ListParams>,
+) -> Result<Response, ApiError> {
+    let job_type = match params.job_type.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(s) => match s.parse::<JobType>() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                return Ok(error_response_with_message(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    e,
+                ))
+            }
+        },
+    };
+    let (items, summary, by_type) = state.jobs.list(job_type).await?;
     let cpus = state.jobs.cpus();
     let concurrency = JobType::ALL
         .iter()
@@ -42,7 +65,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<JobList>, ApiErr
         cpu_budget: state.jobs.cpu_budget(),
         by_type,
         limits: LIST_LIMITS,
-    }))
+    })
+    .into_response())
 }
 
 pub async fn cancel(

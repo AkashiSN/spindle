@@ -184,9 +184,35 @@ struct RawFormat {
 #[derive(Deserialize)]
 struct RawEntry {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     url: Option<String>,
     #[serde(default)]
     webpage_url: Option<String>,
+    #[serde(default)]
+    ie_key: Option<String>,
+}
+
+impl RawEntry {
+    /// entry の URL を、ファイルに書く `SOURCE_URL`（動画の `webpage_url` の正規形）と同じ形にする。
+    /// YouTube は `--flat-playlist` の `url` が youtu.be 形や `list=` 付きで来ることがあるので、id から
+    /// `https://www.youtube.com/watch?v=<id>` を組む。それ以外は webpage_url → url の順
+    fn canonical_url(self) -> Option<String> {
+        let is_youtube = self.ie_key.as_deref() == Some("Youtube")
+            || [&self.url, &self.webpage_url]
+                .into_iter()
+                .flatten()
+                .any(|u| u.contains("youtube.com/") || u.contains("youtu.be/"));
+        if is_youtube {
+            if let Some(id) = self.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                return Some(format!("https://www.youtube.com/watch?v={id}"));
+            }
+        }
+        self.webpage_url
+            .or(self.url)
+            .map(|u| u.trim().to_owned())
+            .filter(|u| !u.is_empty())
+    }
 }
 
 /// yt-dlp の dump（JSON 1 つ）を解釈する。playlist は entries の URL だけ、動画は必要な値だけ取る
@@ -197,8 +223,7 @@ pub fn parse_dump(bytes: &[u8]) -> Result<Dump, String> {
         let urls = raw
             .entries
             .into_iter()
-            .filter_map(|e| e.url.or(e.webpage_url))
-            .filter(|u| !u.trim().is_empty())
+            .filter_map(RawEntry::canonical_url)
             .collect();
         return Ok(Dump::Playlist(urls));
     }

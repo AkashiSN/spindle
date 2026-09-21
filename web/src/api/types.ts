@@ -124,6 +124,8 @@ export type Job = {
   created_at: number
   started_at: number | null
   finished_at: number | null
+  /** 完了時の結果 1 行（ytdl の「Inbox に置いた: …」等。無ければ null） */
+  note?: string | null
   /** 対象（トラックのパス / アルバムのディレクトリ / バッチの説明など。種別に対象が無ければ null） */
   subject: string | null
 }

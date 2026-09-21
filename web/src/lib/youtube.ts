@@ -37,7 +37,9 @@ export function isPlaylistUrl(url: string | null): boolean {
   }
 }
 
-/** 状態と結果を 1 行に。失敗の理由（取り込み済み・URL 不正 等。D-70）はそのまま見せる */
+/** 状態と結果を 1 行に。完了はサーバの `note`（Inbox に置いた / プラグインが skip / 再生リストを展開した）を
+ *  そのまま出し、無ければ（旧サーバ）「完了」と断定しない。失敗の理由（取り込み済み・URL 不正 等。D-70）は
+ *  `last_error` をそのまま見せる */
 export function ytdlResultLabel(j: Job): string {
   const playlist = isPlaylistUrl(j.subject)
   switch (j.state) {
@@ -46,7 +48,7 @@ export function ytdlResultLabel(j: Job): string {
     case 'running':
       return playlist ? '再生リストを展開中' : 'ダウンロード中'
     case 'done':
-      return playlist ? '再生リストを展開した（無いものだけ投入）' : 'Inbox に置いた'
+      return j.note ?? '完了（結果は Inbox）'
     case 'failed':
       return j.last_error ?? '失敗'
     case 'cancelled':
