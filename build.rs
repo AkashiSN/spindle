@@ -39,10 +39,12 @@ fn git_watch_paths() -> Vec<String> {
     if !git.exists() {
         return Vec::new();
     }
+    // refs/tags はディレクトリ（`git tag` が作る loose tag を拾う。pack 後は packed-refs）
     let mut out = vec![
         ".git/HEAD".to_owned(),
         ".git/packed-refs".to_owned(),
         ".git/index".to_owned(),
+        ".git/refs/tags".to_owned(),
     ];
     if let Ok(head) = std::fs::read_to_string(git.join("HEAD")) {
         if let Some(r) = head.trim().strip_prefix("ref: ") {
@@ -52,15 +54,58 @@ fn git_watch_paths() -> Vec<String> {
     out
 }
 
+/// `git describe --tags --always`。10 秒で諦め、失敗の理由は `cargo:warning` に出す（version は `dev` に落ちる）
 fn git_describe() -> Option<String> {
-    let out = std::process::Command::new("git")
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut child = match Command::new("git")
         .args(["describe", "--tags", "--always"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()?;
-    if !out.status.success() {
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            println!("cargo:warning=git describe を起動できない（version は dev）: {e}");
+            return None;
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                println!("cargo:warning=git describe が 10 秒で終わらない（version は dev）");
+                return None;
+            }
+            Err(e) => {
+                println!("cargo:warning=git describe の待ちに失敗（version は dev）: {e}");
+                return None;
+            }
+        }
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut o) = child.stdout.take() {
+        let _ = o.read_to_string(&mut stdout);
+    }
+    if let Some(mut e) = child.stderr.take() {
+        let _ = e.read_to_string(&mut stderr);
+    }
+    if !status.success() {
+        println!(
+            "cargo:warning=git describe が失敗（{status}。version は dev）: {}",
+            stderr.trim()
+        );
         return None;
     }
-    let s = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    let s = stdout.trim().to_owned();
     (!s.is_empty()).then_some(s)
 }
