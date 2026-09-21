@@ -1058,9 +1058,12 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       docker のログではなく `/health` で答えられるように）。(6) 実機の更新手順を `docker compose pull && up -d`
       に置き換え、README「起動」と docs/OPERATIONS.md に書く（手順の `build.sh` は開発中の未コミット確認用に
       残す）。リハーサル環境も GHCR の `edge` を使うようにし、`compose.yaml` の `image:` を揃える。
-      (7) ベースイメージ・yt-dlp（`ARG YTDLP_VERSION`）の追随: 週 1 の `schedule` で `edge` を作り直すか、
-      Dependabot（github-actions / docker / cargo / npm）を入れるか。最小は Dependabot の github-actions と
-      docker だけ。(8) `vX.Y.Z` の GitHub Release（自動生成のノート）を作るかは任意。Release には
+      (7) **yt-dlp の更新**を仕組みにする（YouTube の抽出は yt-dlp が古いと壊れる。いまは Dockerfile の
+      `ARG YTDLP_VERSION=2026.08.19` 固定を手で上げている）: 週 1 の `schedule` で yt-dlp の最新リリースを
+      GitHub API から取り、`ARG` を書き換える PR を自動で作る（Dependabot は `ADD https://…` の版を追えない）
+      → CI が通ればマージして `edge` を作り直す。あわせてベースイメージ（`debian:bookworm-slim` / `node` /
+      `rust` / `denoland/deno`）と GitHub Actions は Dependabot（`docker` / `github-actions`）で追う。
+      `/health` に yt-dlp の版（`yt-dlp --version` を起動時診断で取る）を出し、実機で確認できるように。(8) `vX.Y.Z` の GitHub Release（自動生成のノート）を作るかは任意。Release には
       イメージのタグと digest だけ書く。**スカッシュ（`db/migrations` を `0001` に畳む）はこの前提**: 公開
       イメージを誰かが pull して DB を作った後は既存ファイルを書き換えられないので、畳むなら最初の
       `vX.Y.Z` より前（リリース時の再移行で DB を作り直すとき）に 1 回だけ行い、D-xx に記録する。
@@ -1069,6 +1072,27 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `version` に sha が入る（CI の起動確認に `version` の検査を足す）、`vX.Y.Z` タグで `latest` が動く
       （最初のタグはリリース時）、PR では push されない、実機を `compose pull` で更新して `/health` の
       `version` が一致する、README / OPERATIONS の更新手順
+
+- [ ] **P4-13** YouTube の導線を独立した画面に（設計は着手時に行う）。いまは右パネル「操作」タブの中の
+      `YouTube` 節（URL 欄 + ダウンロード）で、選択したトラックへの操作と混ざって見つけにくく、投入した後の
+      行方（ジョブ → Inbox）も自分で探す必要がある。上部バーを `一覧 / アルバム / Inbox / CD / YouTube /
+      ジョブ` にして `YouTube` 画面を置く（取り込み元は Inbox / CD / YouTube で横並び、結果は Inbox に集まる。
+      SPEC §7.7、D-70）。画面: (1) URL 欄（1 行 1 つ。動画 / playlist。playlist は既に entries ごとに展開
+      される）と「ダウンロード」、(2) その下に ytdl ジョブの一覧（`GET /api/jobs?type=ytdl`。URL・状態・
+      失敗理由・完了した件は「Inbox で確認」で件へ飛ぶ。SSE で追随）、(3) 「操作」タブの YouTube 節は消す
+      （`lib/operations.ts` の `startYoutube` と `youtubeStartedMessage` を画面側へ）。(4) **URL の受け渡しを
+      楽にする**: SPA のルート `/youtube?url=<URL>` で URL 欄を埋めて開く（同一 origin の GET なので CORS /
+      CSRF の問題が無い。未ログインならログイン後にそのまま）。これで「いま見ている動画を spindle へ」の
+      ブックマークレット（`javascript:open('http://<spindle>/youtube?url='+encodeURIComponent(location.href))`）
+      と、「このページの動画リンクを全部集めてクリップボードへ」のブックマークレット（チャンネルの動画一覧 /
+      検索結果 / playlist ページから `a[href*="/watch?v="]` を集めて改行区切りに）を README に載せる。
+      (5) `[bin].ytdlp` を引数付きにできるように（`ytdlp_args = ["--extractor-args", "youtube:player_client=…"]`
+      か `ytdlp = ["yt-dlp", …]` の配列。`sh -c` は使わない）。ブロック時に `--extractor-args` / `--cookies` を
+      設定で渡す口。UA / Referer は付けない（yt-dlp の YouTube 抽出は player client の偽装で innertube を叩く
+      ので、ブラウザ UA を上書きすると食い違って弾かれる。yt-dlp の公式見解）。受け入れ: `web/src/lib/
+      youtube.test.ts`（URL 行の解析は `parseUrlLines` を移す、`?url=` の取り出し、ジョブ行の整形）、
+      `tests/jobs_api.rs`（`type=ytdl` で絞れる）、`tests/config.rs`（引数配列）、実機でブックマークレット →
+      画面が開いて URL が入る → ダウンロード → 一覧に出て Inbox へ飛べる
 
 ## 着手前に確認が必要な残課題
 
