@@ -1100,6 +1100,30 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/jobs_api.rs`（`type=ytdl` で絞れる）、`tests/config.rs`（引数配列）、実機でブックマークレット →
       画面が開いて URL が入る → ダウンロード → 一覧に出て Inbox へ飛べる
 
+- [ ] **P4-14** 既存の webm 由来トラックへの `SOURCE_URL` 補填（一度きり。設計は着手時に行う）。D-70 の重複
+      防止は `SOURCE_URL` を見るが、移行で取り込んだ webm 由来の Opus 1,512 本（実機。P3 で取り込んだ 1 本を除く）
+      には無く、旧 `Original/*.webm` のメタデータにも id は無い（`encoder=google/video-file` のみ）。手掛かりは
+      ユーザが YouTube 側で保守してきた**アーティストごとの再生リスト**: 旧パイプラインは「再生リスト名 =
+      アルバム名（`花譜のお歌` 等 10 アルバム）、再生リスト内の位置 = `TRACKNUMBER`」で並べており（実機で
+      確認: 各アルバムが 1 から連番、`花譜のお歌` は 244 曲で 1〜246 = 2 つ欠番）、非公開になった動画も
+      リストには `[Private video]` として id と位置が残る。手順: `scripts/backfill_source_url.py`（標準
+      ライブラリのみ。yt-dlp と spindle の API を使う）で (1) 再生リスト URL ごとに `yt-dlp --flat-playlist
+      --dump-single-json` を取り（非公開のリストは cookie が要るので、一時的に限定公開にするか `--cookies` を
+      渡す）、(2) 位置 i+1 と `TRACKNUMBER`、リスト名と `ALBUM` で Library の行を引き、タイトルが取れる
+      entry はメタデータプラグイン（`spindle-ytmusic-meta`）で判定した title と Library の `TITLE` を照合して
+      `verified`、`[Private video]` / `[Deleted video]` は `position-only`、番号に行が無い・タイトル不一致は
+      `unmatched` として **計画 CSV を出す**（track_id / rel_path / id / 動画タイトル / 判定）、(3) 人が CSV を
+      見てから `--apply` で `SOURCE_URL = https://www.youtube.com/watch?v=<id>` の編集バッチを投入する。
+      決めること: 1 トラックずつ値が違う `set` をどう 1 バッチにするか（いまの `POST /api/tracks/batch` は
+      選択全体に同じ op。案 a: トラックごとに preview → apply で 1,512 バッチ（履歴が汚れる）、案 b: `ops` に
+      `{"op":"set_rows","key":…,"rows":[{"id":…,"value":[…]}]}` のような行ごとの値を足す（tagops の 1 op、
+      preview で差分が見える、巻き戻しは 1 回。こちらが筋）。書き込みは通常の tagwrite（tmp + rename、
+      `tag_version` +1）なので Derived の opus / aac がタグ上書きで追随する（1,512 × 2 本。音声は変えない）。
+      受け入れ: `tests/tagops.rs`（`set_rows` の解析と適用。無い id は無視、値の検証は `set` と同じ）、
+      スクリプトの単体テスト（位置と番号の対応、欠番、Private の扱い。yt-dlp の JSON は fixtures）、実機で
+      1 アルバムを dry-run → CSV 確認 → apply → `SOURCE_URL` が付き、同じ URL の再ダウンロードが
+      「取り込み済み（Library）」で拒否される
+
 ## 着手前に確認が必要な残課題
 
 - ~~Discogs / VGMdb 連携の要否~~（2026-09-20。作らない。D-72）
@@ -1108,4 +1132,7 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - ~~一括リネーム後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）と
   空ディレクトリの扱い~~（P2-8 で決めた。D-67）
 - ~~Library の ALAC（m4a）に任意キーを書けない~~（2026-09-21 に P4-3 の実機確認で観測 → P4-11 に昇格）
+- Inbox の承認画面で「Library に同名の曲がある」警告（`albumartist` + 正規化した `title` の一致）を出すか。
+  P4-14 で `SOURCE_URL` を補填すれば大半は URL で弾けるので、残るのは再生リストに無い動画だけ。要るなら
+  D-70 の「判断は Inbox で人が行う」の延長として警告のみ（自動で弾かない。Cover / Reloaded は正当な別曲）
 
