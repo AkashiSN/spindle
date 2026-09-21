@@ -935,8 +935,9 @@ multi_value_separator = " & "   # 多値フィールドの結合
 運用をなくす。再生リスト 1 本 → Library の album 1 つ（追記先）。`SOURCE_URL`（P4-14 で補填、ytdl が
 書く）で「再生リストのどこまで持っているか」が分かる。
 
-- **購読**（`db::subscriptions`、`/api/ytmusic/subscriptions`）: `list_id`（URL の `list=`。YouTube の
-  ホストだけ。UNIQUE）、`albumartist` / `album` / `category`（追記先の初期値と表示用）、`album_id`
+- **購読**（`db::subscriptions`、`/api/ytmusic/subscriptions`）: `id` は再利用しない（AUTOINCREMENT。0022。
+  ジョブの payload とサイドカーが裸の id を持つので、DELETE 直後に作った購読へ旧ジョブが誤帰属しない）、
+  `list_id`（URL の `list=`。YouTube のホストだけ。UNIQUE）、`albumartist` / `album` / `category`（追記先の初期値と表示用）、`album_id`
   （**追記先の同一性**。登録時は NULL。同期か配置が `import::inbox::destination_of`（Inbox の追記先と
   同じ規則）で引けたときに CAS（`album_id IS NULL` のときだけ）で束ねる。album 全体の移動は id を
   維持する（D-32）ので以後は album 行の値が正。album が消えれば SET NULL で再解決。albumartist /
@@ -953,14 +954,19 @@ multi_value_separator = " & "   # 多値フィールドの結合
      --dump-single-json`（`[ytmusic].ytdlp_args` 付き）で列挙。entry の位置（1 始まり）が再生リストの位置。
      `entries < playlist_count` なら**古い yt-dlp の取りこぼし**として `Failed`（再試行）で何も投入しない
   2. 追記先: `album_id` があればその album（missing なら `Fatal`）、無ければ引いて束ねる（別の購読が束ねて
-     いれば `Fatal`）。まだ無ければ揃えは無し（最初の配置で束ねる）
+     いれば `Fatal`。読んでから束ねるまでに配置が束ねていればそちらが正）。まだ無ければ揃えは無し（最初の
+     配置で束ねる）。**列挙・揃え・投入の各段の前に購読を読み直し**、消えていれば `Fatal`、PATCH で
+     `updated_at` が進んでいれば `Failed`（再試行で新しい行からやり直す。走行中の同期が古い追記先で揃えたり
+     投入したりしない）
   3. entry ごとに正規 URL `https://www.youtube.com/watch?v=<id>` で Library の active 行を**全件**引く
      （`find_source_url` の LIMIT 1 でなく 0 / 1 / 2 件以上を区別）。追記先にあれば「Library」、別の album
      なら「別の album にある」（触らない、投入しない）、Inbox にあれば「取り込み中」（投入しない）
   4. **番号揃え**（`align` が on。`import::ytmusic::playlist::plan_align`）: 対象 = 追記先の active 行で
      `SOURCE_URL` が entry に一致し disc 1（NULL 含む）で単一のもの。目標番号 = 位置。**固定行** = それ
      以外（`SOURCE_URL` 無し・再生リストに無い・`SOURCE_URL` 重複）の disc 1 の行で、その番号は塞がる。
-     目標番号が塞がれた対象と disc 2 以降・重複の対象は動かさず「揃えられない」一覧へ（理由付き）。対象
+     目標番号が塞がれた対象と disc 2 以降・重複の対象は動かさず「揃えられない」一覧へ（理由付き）。
+     **同じ動画が再生リストに複数回ある**ときも表現できない（1 行は 1 番号）ので、その行は固定して「揃え
+     られない」（`duplicate_entry`、位置の一覧）に出し、投入は最初の位置でだけ行う。対象
      同士の swap / cycle は可（番号は UNIQUE でなく、rename は一時パス経由）。非公開・削除・未取り込みの
      位置も数えるので、それらの分は番号が飛ぶ。
      **各段の前に追記先の active 行に pending の op が無くなるまで待ち**（2 秒間隔、上限 10 分。超えたら
@@ -971,8 +977,11 @@ multi_value_separator = " & "   # 多値フィールドの結合
      行**」を `plan_rename` → **ファイル名だけ**テンプレートのものにして（ディレクトリは今のまま。テンプレートの
      dir で動かすと category 未推定の album を `_Unsorted` へ移してしまう）`prepare_rename` → 終端待ち
      （今回のバッチの applied 集合には依らない = tags 適用後・rename 前に落ちた境界を再実行で拾う。名前の
-     書式だけ違う行は触らない）。どちらも履歴に載り巻き戻せる。Derived（opus / aac）はタグ上書き・移動で
-     追随する。揃え終わる前の失敗・キャンセルでは投入しない
+     書式だけ違う行は触らない）。計画の時点の衝突（同名のファイルがある等）は続く状態なので失敗にせず
+     「改名できない」として報告だけ。どちらも履歴に載り巻き戻せる。Derived（opus / aac）はタグ上書き・移動で
+     追随する。**子バッチ（tags / rename）が全件 applied でなければ**（外部の書き換えによる衝突・失敗・
+     キャンセル）揃えは終わっていないので `Failed`（再試行で差分から取り直す）。揃え終わる前の失敗・
+     キャンセルでは投入しない（そこまでのバッチ id と件数は結果に残す）
   5. Library / Inbox / 別 album に無く、**取れる** entry を位置順に `max_enqueue` まで `ytdl` 投入（payload
      `{ url, subscription_id, position }`、dedup は今までどおり `ytdl:<url>`）。超えた分は「次回」。
      Duplicate（手動貼り付け・別の購読の投入が走行中）は**満たしたと数えず「別の投入が走行中」**として
@@ -993,7 +1002,8 @@ multi_value_separator = " & "   # 多値フィールドの結合
   人が選んだもの。TITLE = 動画タイトル、ARTIST = albumartist、verdict はサイドカーに残す）。宛先は
   `Inbox/youtube/<albumartist>/<album>/`。`align` が on なら **TRACKNUMBER = 位置**を書く（同期が先に既存の
   行を揃えて隙間を空けている。承認画面の初期値がそのまま正しい番号になり、塞がっていれば承認の既存検査
-  （400）で人が直す）。off なら書かず Inbox が max+1 を振る。購読が消えていれば通常の ytdl として振る舞う
+  （400）で人が直す）。off なら書かず Inbox が max+1 を振る。購読が消えていれば通常の ytdl として振る舞う（skip も通常どおり。
+  購読の有無はプラグインを呼ぶ前に引く）
 - **承認はそのまま**（D-70。判断は Inbox で人が行う）。配置（`place_item`）はサイドカーを消す前に件の
   `subscription_id` を集め、inbox ジョブが配置後に追記先を束ね（CAS）、latch を立ててから `playlist_sync`
   を投入する（走行中なら Duplicate だが latch は残る）

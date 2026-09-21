@@ -1070,3 +1070,20 @@ async fn subscription_download_uses_the_bound_album_but_falls_back_to_its_own_ca
     let s = Sidecar::read(&lib.inbox, &dir).unwrap().unwrap();
     assert_eq!(s.category.as_deref(), Some("Rock"));
 }
+
+/// 購読が消えていれば skip も通常どおり（ダウンロードしない）
+#[tokio::test]
+async fn subscription_download_respects_skip_when_the_subscription_is_gone() {
+    let lib = lib!();
+    lib.video(U1, "v1", "SkipCh", "Announcement", true);
+    lib.start();
+    let (id, st) = run_for(&lib, U1, 999, 3).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    assert!(
+        lib.note(id).unwrap().starts_with("プラグインが skip"),
+        "{:?}",
+        lib.note(id)
+    );
+    assert!(!lib.inbox_path("youtube").exists());
+    assert_eq!(lib.calls().len(), 1, "download を呼ばない");
+}

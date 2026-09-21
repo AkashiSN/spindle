@@ -165,3 +165,48 @@ fn rows_without_a_number_are_moved_when_they_match() {
     let p = plan_align(&entries, &[row(10, None, Some("a"))]);
     assert_eq!(moves(&p), [(10, 1)]);
 }
+
+/// 再生リストに同じ動画が複数回あるときは表現できない（1 行は 1 番号）: その行は動かさず固定し
+/// 「揃えられない」に出す。他の行の揃えには影響しない。再実行しても同じ結果（往復しない）
+#[test]
+fn a_video_listed_twice_is_blocked_and_fixed_not_moved_back_and_forth() {
+    let entries = [entry(1, "a"), entry(2, "b"), entry(3, "a"), entry(4, "c")];
+    let rows = [
+        row(10, Some(1), Some("a")),
+        row(11, Some(2), Some("b")),
+        row(12, Some(3), Some("c")),
+    ];
+    let p = plan_align(&entries, &rows);
+    assert_eq!(moves(&p), [(12, 4)]);
+    assert_eq!(
+        p.blocked,
+        [spindle::import::ytmusic::playlist::AlignBlocked {
+            track_id: 10,
+            position: 1,
+            current_no: Some(1),
+            reason: BlockReason::DuplicateEntry {
+                positions: vec![1, 3]
+            },
+        }]
+    );
+    assert_eq!(p.unchanged, 1);
+    assert!(p.missing.is_empty());
+    // 揃えた後にもう一度計画しても変更なし
+    let rows = [
+        row(10, Some(1), Some("a")),
+        row(11, Some(2), Some("b")),
+        row(12, Some(4), Some("c")),
+    ];
+    let p = plan_align(&entries, &rows);
+    assert!(p.is_noop());
+    // 重複 entry の行は固定行として番号を塞ぐ（a が 3 番にいれば c は 3 番へ動けない）
+    let rows = [row(10, Some(3), Some("a")), row(12, Some(5), Some("c"))];
+    let entries = [entry(1, "a"), entry(2, "a"), entry(3, "c")];
+    let p = plan_align(&entries, &rows);
+    assert!(moves(&p).is_empty());
+    assert_eq!(p.blocked.len(), 2);
+    assert_eq!(
+        p.blocked[1].reason,
+        BlockReason::NumberTaken { by_track_id: 10 }
+    );
+}

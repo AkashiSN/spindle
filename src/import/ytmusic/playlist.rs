@@ -152,6 +152,8 @@ pub enum BlockReason {
     DuplicateSourceUrl,
     /// disc 2 以降の行
     OtherDisc { disc_no: i64 },
+    /// 同じ動画が再生リストに複数回ある（1 行は 1 番号しか持てない。動かさず固定する）
+    DuplicateEntry { positions: Vec<u32> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -188,25 +190,29 @@ impl AlignPlan {
 pub fn plan_align(entries: &[PlaylistEntry], rows: &[LibraryRow]) -> AlignPlan {
     let mut by_url: HashMap<&str, Vec<&LibraryRow>> = HashMap::new();
     let mut plan = AlignPlan::default();
-    let in_playlist: HashMap<&str, u32> = entries
-        .iter()
-        .map(|e| (e.url.as_str(), e.position))
-        .collect();
-    // 固定行 = 対象でない disc 1 の行が使っている番号（重複 URL の行も動かさないので固定）
+    // URL → 再生リストの位置（同じ動画が複数回あれば複数。その行は 1 番号しか持てないので固定する）
+    let mut positions: HashMap<&str, Vec<u32>> = HashMap::new();
+    for e in entries {
+        positions
+            .entry(e.url.as_str())
+            .or_default()
+            .push(e.position);
+    }
+    // 固定行 = 対象でない disc 1 の行が使っている番号（重複 URL の行・重複 entry の行も動かさないので固定）
     let mut fixed: BTreeMap<i64, i64> = BTreeMap::new();
     for r in rows {
         match r.source_url.as_deref() {
-            Some(u) if in_playlist.contains_key(u) => by_url.entry(u).or_default().push(r),
+            Some(u) if positions.contains_key(u) => by_url.entry(u).or_default().push(r),
             Some(_) => plan.outsiders += 1,
             None => plan.unnumbered += 1,
         }
     }
     let is_disc1 = |r: &LibraryRow| r.disc_no.unwrap_or(1) == 1;
     for r in rows {
-        let target = r
-            .source_url
-            .as_deref()
-            .is_some_and(|u| by_url.get(u).is_some_and(|v| v.len() == 1));
+        let target = r.source_url.as_deref().is_some_and(|u| {
+            by_url.get(u).is_some_and(|v| v.len() == 1)
+                && positions.get(u).is_some_and(|p| p.len() == 1)
+        });
         if !target && is_disc1(r) {
             if let Some(n) = r.track_no {
                 fixed.entry(n).or_insert(r.track_id);
@@ -218,6 +224,23 @@ pub fn plan_align(entries: &[PlaylistEntry], rows: &[LibraryRow]) -> AlignPlan {
             plan.missing.push(e.position);
             continue;
         };
+        let at = &positions[e.url.as_str()];
+        if at.len() > 1 {
+            // 最初の位置でだけ報告する（entry ごとに繰り返さない）
+            if at[0] == e.position {
+                for r in matched {
+                    plan.blocked.push(AlignBlocked {
+                        track_id: r.track_id,
+                        position: e.position,
+                        current_no: r.track_no,
+                        reason: BlockReason::DuplicateEntry {
+                            positions: at.clone(),
+                        },
+                    });
+                }
+            }
+            continue;
+        }
         if matched.len() > 1 {
             for r in matched {
                 plan.blocked.push(AlignBlocked {

@@ -761,3 +761,66 @@ fn upgrade_to_0021_adds_playlist_subscriptions_and_playlist_sync_type() {
         .unwrap();
     assert_eq!(album_id, None);
 }
+
+/// P4-16（レビュー）: 購読の id は DELETE 後も再利用しない（AUTOINCREMENT。ジョブの payload とサイドカーが
+/// 裸の id を持つ）。既存行は id を保つ
+#[test]
+fn upgrade_to_0022_makes_subscription_ids_non_reusable() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let upto21: Vec<_> = list.iter().take(21).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto21).unwrap();
+    conn.execute_batch(
+        "INSERT INTO albums (id, rel_dir, rel_dir_key) VALUES (5, 'A/B', 'a/b');
+         INSERT INTO playlist_subscriptions (id, list_id, url, album_id, target_key, albumartist, album, created_at, updated_at, last_result)
+           VALUES (7, 'PL1', 'u', 5, 'a/b', 'A', 'B', 1, 2, '{\"state\":\"done\"}');",
+    )
+    .unwrap();
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 22);
+    let (album_id, result): (Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT album_id, last_result FROM playlist_subscriptions WHERE id = 7",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (album_id, result.as_deref()),
+        (Some(5), Some("{\"state\":\"done\"}"))
+    );
+    conn.execute("DELETE FROM playlist_subscriptions WHERE id = 7", [])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO playlist_subscriptions (list_id, url, target_key, albumartist, album, created_at, updated_at)
+           VALUES ('PL2', 'u', 'c/d', 'C', 'D', 1, 1)",
+        [],
+    )
+    .unwrap();
+    assert_eq!(conn.last_insert_rowid(), 8, "消した 7 を再利用しない");
+    // UNIQUE と SET NULL は保つ
+    assert!(conn
+        .execute(
+            "INSERT INTO playlist_subscriptions (list_id, url, target_key, albumartist, album, created_at, updated_at)
+               VALUES ('PL2', 'u', 'e/f', 'E', 'F', 1, 1)",
+            [],
+        )
+        .is_err());
+    conn.execute(
+        "UPDATE playlist_subscriptions SET album_id = 5 WHERE id = 8",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM albums WHERE id = 5", []).unwrap();
+    let album_id: Option<i64> = conn
+        .query_row(
+            "SELECT album_id FROM playlist_subscriptions WHERE id = 8",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(album_id, None);
+}

@@ -184,6 +184,30 @@ describe('syncDetailLines', () => {
       'SOURCE_URL の無い行: 2 件（触らない）',
     ])
     expect(syncDetailLines(result({}))).toEqual([])
+    const dup = syncDetailLines(
+      result({
+        align: {
+          moved: 0,
+          unchanged: 1,
+          blocked: [{ track_id: 5, position: 1, current_no: 1, reason: { kind: 'duplicate_entry', positions: [1, 3] } }],
+          outsiders: 0,
+          unnumbered: 0,
+          renamed: 0,
+          rename_conflicts: [{ track_id: 6, reason: '同名のファイルがある' }],
+        },
+      }),
+    )
+    expect(dup).toEqual([
+      '揃えられない: #1（今 1）: 同じ動画が再生リストに複数回ある（#1、#3）',
+      '改名できない: track #6: 同名のファイルがある',
+    ])
+    expect(
+      syncSummary(
+        result({
+          align: { moved: 0, unchanged: 1, blocked: [], outsiders: 0, unnumbered: 0, renamed: 0, rename_conflicts: [{ track_id: 6, reason: 'x' }] },
+        }),
+      ),
+    ).toBe('4 件中 Library に 3、1 件は改名できない')
     expect(blockedReasonLabel({ track_id: 1, position: 1, current_no: null, reason: { kind: 'duplicate_source_url' } })).toBe(
       '同じ SOURCE_URL の行が複数ある',
     )

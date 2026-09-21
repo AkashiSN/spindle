@@ -56,6 +56,7 @@ export function syncSummary(r: SyncResult): string {
   if (a != null) {
     if (a.moved > 0 || a.renamed > 0) parts.push(`番号を ${a.moved} 件揃え ${a.renamed} 件を改名`)
     if (a.blocked.length > 0) parts.push(`${a.blocked.length} 件は揃えられない`)
+    if ((a.rename_conflicts?.length ?? 0) > 0) parts.push(`${a.rename_conflicts!.length} 件は改名できない`)
   }
   return parts.join('、')
 }
@@ -68,6 +69,8 @@ export function blockedReasonLabel(b: SyncBlocked): string {
       return '同じ SOURCE_URL の行が複数ある'
     case 'other_disc':
       return `disc ${b.reason.disc_no} の行`
+    case 'duplicate_entry':
+      return `同じ動画が再生リストに複数回ある（${b.reason.positions.map((p) => `#${p}`).join('、')}）`
   }
 }
 
@@ -93,6 +96,7 @@ export function syncDetailLines(r: SyncResult): string[] {
     if (a.rename != null) {
       out.push(`改名のバッチ #${a.rename.batch_id}: 適用 ${a.rename.applied} / 衝突 ${a.rename.conflict} / 失敗 ${a.rename.failed}`)
     }
+    for (const c of a.rename_conflicts ?? []) out.push(`改名できない: track #${c.track_id}: ${c.reason}`)
     if (a.outsiders > 0) out.push(`再生リストに無い SOURCE_URL 付きの行: ${a.outsiders} 件（触らない）`)
     if (a.unnumbered > 0) out.push(`SOURCE_URL の無い行: ${a.unnumbered} 件（触らない）`)
   }

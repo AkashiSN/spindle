@@ -487,14 +487,17 @@ pub async fn download_one(
         Dump::Video(v) => v,
     };
     check_cancel()?;
+    // 購読由来（P4-16）か。購読が消えていれば通常の ytdl として振る舞う（skip も通常どおり）
+    let subscription = match request.subscription_id {
+        Some(id) => env.db.read(move |c| subscription_target(c, id)).await?,
+        None => None,
+    };
     // 2. プラグイン（ダウンロードの前。skip ならここで終わり、宛先もここで決まる）
     let item = video.item();
     let (track, verdict, message) = match env.provider.resolve(&item, token).await {
         Ok(Outcome::Track(t)) => (Some(t), "ok".to_owned(), None),
         // 購読由来は skip でも投入する（再生リストは人が選んだもの。P4-16）
-        Ok(Outcome::Declined { reason, message })
-            if reason == "skip" && request.subscription_id.is_none() =>
-        {
+        Ok(Outcome::Declined { reason, message }) if reason == "skip" && subscription.is_none() => {
             tracing::info!(url, message, "プラグインが skip");
             return Ok(Downloaded::Skipped { message });
         }
@@ -509,10 +512,6 @@ pub async fn download_one(
     };
     // 購読由来（P4-16）: 追記先（albumartist / album / category）は購読の値。プラグインの判定は
     // TITLE / ARTIST に使い、skip / 判定不能でも投入する（再生リストは人が選んだもの）
-    let subscription = match request.subscription_id {
-        Some(id) => env.db.read(move |c| subscription_target(c, id)).await?,
-        None => None,
-    };
     let (track, verdict) = match &subscription {
         Some(t) => {
             let track = match track {

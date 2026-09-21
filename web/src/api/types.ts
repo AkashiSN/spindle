@@ -287,6 +287,7 @@ export type SyncBlocked = {
     | { kind: 'number_taken'; by_track_id: number }
     | { kind: 'duplicate_source_url' }
     | { kind: 'other_disc'; disc_no: number }
+    | { kind: 'duplicate_entry'; positions: number[] }
 }
 
 export type SyncAlign = {
@@ -298,6 +299,7 @@ export type SyncAlign = {
   tags?: SyncBatch
   renamed: number
   rename?: SyncBatch
+  rename_conflicts?: { track_id: number; reason: string }[]
 }
 
 /** 最終同期の結果（`playlist_subscriptions.last_result`） */

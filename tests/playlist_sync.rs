@@ -739,6 +739,108 @@ async fn align_renames_only_the_file_name_of_rows_whose_name_number_is_stale() {
     assert!(!lib.lib().join("_Unsorted").exists(), "album を動かさない");
 }
 
+/// 同期の間に PATCH で購読が変わったら（updated_at が進む）失敗して何も投入しない（古い追記先で投入しない）
+#[tokio::test]
+async fn patch_during_sync_fails_the_run_without_enqueueing() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add(1, "aa", Some("a")));
+    lib.scan().await;
+    lib.playlist("PL1", &["a", "b"], Some(2));
+    std::fs::write(lib.fake.join("slow"), "").unwrap();
+    let sub = lib.subscribe("PL1").await;
+    lib.start();
+    let job = match lib.jobs.enqueue(new_sync_job(sub)).await.unwrap() {
+        EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while lib.sub(sub).last_attempted_at.is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // 列挙（1 秒）の間に追記先を変える
+    lib.db
+        .write(move |c| {
+            subscriptions::update(
+                c,
+                sub,
+                &subscriptions::Patch {
+                    album: Some("Other".to_owned()),
+                    ..Default::default()
+                },
+                99,
+            )
+        })
+        .await
+        .unwrap();
+    let st = lib.wait(job).await;
+    assert_eq!(
+        st,
+        JobState::Queued,
+        "再試行待ち: {:?}",
+        lib.last_error(job)
+    );
+    assert!(lib.last_error(job).unwrap().contains("変更された"));
+    assert!(lib.ytdl_payloads().is_empty(), "投入しない");
+    assert_eq!(lib.sub(sub).album_id, None, "古い解決で束ねない");
+}
+
+/// 子バッチが全件 applied でなければ（ここでは外部の書き換えで tags が conflict）同期は失敗して投入しない
+#[tokio::test]
+async fn failed_child_batch_fails_the_sync_and_nothing_is_enqueued() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add(1, "aa", Some("a")));
+    let c = lib.add(2, "cc", Some("c")).unwrap();
+    lib.scan().await;
+    // c は 3 番へ動く（b が未取り込み）。走査の後にファイルを外部が書き換えている（事前条件が外れて
+    // tagwrite が skipped_conflict で閉じる）
+    common::retag(&c, |t| {
+        use lofty::tag::Accessor;
+        t.set_comment("外部の書き換え".to_owned())
+    });
+    lib.playlist("PL1", &["a", "b", "c"], Some(3));
+    let sub = lib.subscribe("PL1").await;
+    lib.start();
+    let (job, st) = lib.sync(sub).await;
+    assert_eq!(
+        st,
+        JobState::Queued,
+        "再試行待ち: {:?}",
+        lib.last_error(job)
+    );
+    let err = lib.last_error(job).unwrap();
+    assert!(err.contains("全件反映されていない"), "{err}");
+    assert!(lib.ytdl_payloads().is_empty(), "揃え終わる前は投入しない");
+    let r = lib.result(sub);
+    assert_eq!(r["state"], "failed");
+    assert_eq!(r["align"]["tags"]["conflict"], 1);
+}
+
+/// 同じ動画が再生リストに複数回あっても投入は 1 回、揃えは動かさず「揃えられない」
+#[tokio::test]
+async fn duplicate_entries_are_enqueued_once_and_not_aligned() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add(1, "aa", Some("a")));
+    lib.scan().await;
+    lib.playlist("PL1", &["a", "c", "c", "a"], Some(4));
+    let sub = lib.subscribe("PL1").await;
+    lib.start();
+    let (job, st) = lib.sync(sub).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.last_error(job));
+    let r = lib.result(sub);
+    assert_eq!(r["enqueued"], serde_json::json!([2]));
+    assert_eq!(r["running"], serde_json::json!([]));
+    assert_eq!(r["align"]["moved"], 0);
+    assert_eq!(
+        r["align"]["blocked"][0]["reason"]["kind"],
+        "duplicate_entry"
+    );
+    assert_eq!(lib.ytdl_payloads().len(), 1);
+    // 再実行しても同じ（往復しない）
+    let (job, st) = lib.sync(sub).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.last_error(job));
+    assert_eq!(lib.result(sub)["align"]["moved"], 0);
+}
+
 // ---------------------------------------------------------------- dispatcher
 
 /// latch の立った購読は（interval に関わらず）投入され、interval > 0 なら last_attempted_at から

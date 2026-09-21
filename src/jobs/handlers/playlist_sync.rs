@@ -116,6 +116,15 @@ pub struct AlignResult {
     pub renamed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rename: Option<BatchOutcome>,
+    /// 計画の時点で名前が衝突して改名できない行（同名のファイルがある等。触らない）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rename_conflicts: Vec<RenameConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenameConflict {
+    pub track_id: i64,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -180,6 +189,9 @@ impl SyncResult {
             }
             if !a.blocked.is_empty() {
                 parts.push(format!("{} 件は揃えられない", a.blocked.len()));
+            }
+            if !a.rename_conflicts.is_empty() {
+                parts.push(format!("{} 件は改名できない", a.rename_conflicts.len()));
             }
         }
         parts.join("、")
@@ -331,7 +343,8 @@ async fn sync_one(
         )));
     }
     ctx.check_cancel().await.map_err(|_| SyncError::Cancelled)?;
-    // 2. 追記先
+    // 2. 追記先（列挙の間に PATCH で変わっていたらやり直す）
+    check_unchanged(env, sub).await?;
     let target = resolve_target(env, sub).await?;
     result.album_id = target.as_ref().map(|t| t.album_id);
     // 3. 照合
@@ -388,16 +401,27 @@ async fn sync_one(
     // 4. 揃え
     if let Some(t) = &target {
         if sub.align {
-            result.align = Some(align(env, ctx, sub, t.album_id, &entries, token).await?);
+            check_unchanged(env, sub).await?;
+            // 途中で失敗しても、そこまでの結果（バッチ id と件数）は残す
+            let mut a = AlignResult::default();
+            let r = align(env, ctx, sub, t.album_id, &entries, &mut a).await;
+            result.align = Some(a);
+            r?;
         }
     }
-    // 5. 投入（Library / Inbox に無く、取れるものを位置順に上限まで）
+    // 5. 投入（Library / Inbox に無く、取れるものを位置順に上限まで。揃えの間に購読が変わっていたら投入しない）
+    check_unchanged(env, sub).await?;
     let mut budget = usize::try_from(sub.max_enqueue).unwrap_or(usize::MAX);
+    let mut seen_urls: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (e, m) in entries.iter().zip(&matched) {
         if m.in_target || m.in_inbox || !m.elsewhere.is_empty() {
             continue;
         }
         if e.availability != Availability::Available {
+            continue;
+        }
+        // 同じ動画が複数回あれば最初の位置でだけ投入する
+        if !seen_urls.insert(e.url.as_str()) {
             continue;
         }
         if budget == 0 {
@@ -456,6 +480,20 @@ async fn list_playlist(
         .map_err(|e| SyncError::Fatal(format!("yt-dlp の出力を読めない: {e}")))
 }
 
+/// 購読が消えていれば Fatal、PATCH で変わっていれば（`updated_at` が進んだ）Failed（再試行で新しい行から
+/// やり直す。走行中の同期が古い追記先で揃えたり投入したりしない）
+async fn check_unchanged(env: &SyncEnv, sub: &Subscription) -> Result<(), SyncError> {
+    let (id, updated_at) = (sub.id, sub.updated_at);
+    let now = env.db.read(move |c| subscriptions::get(c, id)).await?;
+    match now {
+        None => Err(SyncError::Fatal(format!("購読 #{id} は消えている"))),
+        Some(s) if s.updated_at != updated_at => Err(SyncError::Failed(anyhow::anyhow!(
+            "同期の間に購読が変更されたのでやり直す"
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
 /// 追記先 album。束ねてあればその album（missing なら失敗）、無ければ引いて CAS で束ねる。
 /// まだ無ければ None（揃えは無し。最初の配置で束ねる）
 async fn resolve_target(env: &SyncEnv, sub: &Subscription) -> Result<Option<Target>, SyncError> {
@@ -489,7 +527,9 @@ async fn resolve_target(env: &SyncEnv, sub: &Subscription) -> Result<Option<Targ
                 return Ok(Ok(None));
             };
             Ok(match subscriptions::bind_album(c, id, dest.album_id)? {
-                BindOutcome::Bound | BindOutcome::AlreadyBound(_) => Ok(Some(dest.album_id)),
+                BindOutcome::Bound => Ok(Some(dest.album_id)),
+                // 読んでから束ねるまでに配置が束ねた: そちらが正
+                BindOutcome::AlreadyBound(bound) => Ok(Some(bound)),
                 BindOutcome::TakenBy(other) => Err(format!(
                     "追記先の album #{} は購読 #{other} が使っている",
                     dest.album_id
@@ -551,10 +591,9 @@ async fn align(
     sub: &Subscription,
     album_id: i64,
     entries: &Arc<Vec<PlaylistEntry>>,
-    _token: &CancellationToken,
-) -> Result<AlignResult, SyncError> {
+    out: &mut AlignResult,
+) -> Result<(), SyncError> {
     let description = format!("再生リスト『{}』に番号を揃える", sub.album.trim());
-    let mut out = AlignResult::default();
     // a. tags（差分は pending が無くなった後の DB から）
     wait_pending(env, ctx, album_id).await?;
     let rows = env.db.read(move |c| album_rows(c, album_id)).await?;
@@ -585,7 +624,9 @@ async fn align(
                     "番号を揃える"
                 );
                 wait_pending(env, ctx, album_id).await?;
-                out.tags = Some(batch_outcome(env, p.batch_id).await?);
+                let b = batch_outcome(env, p.batch_id).await?;
+                out.tags = Some(b.clone());
+                require_all_applied("番号", &b)?;
             }
             // 直前に別の編集が入った: 待ってやり直す代わりに今回は失敗（再試行で差分から取り直す）
             Err(EditError::Pending { track_ids }) => {
@@ -613,12 +654,18 @@ async fn align(
             *url_count.entry(u).or_default() += 1;
         }
     }
+    // 同じ動画が複数回ある URL は対象外（plan_align と同じ）
+    let mut entry_count: HashMap<&str, usize> = HashMap::new();
+    for e in entries.iter() {
+        *entry_count.entry(e.url.as_str()).or_default() += 1;
+    }
     let numbered: Vec<i64> = rows
         .iter()
         .filter(|r| r.disc_no.unwrap_or(1) == 1)
         .filter(|r| {
             r.source_url.as_deref().is_some_and(|u| {
                 url_count.get(u) == Some(&1)
+                    && entry_count.get(u) == Some(&1)
                     && position_of
                         .get(u)
                         .is_some_and(|p| r.track_no == Some(i64::from(*p)))
@@ -631,7 +678,7 @@ async fn align(
         .filter_map(|r| r.track_no.map(|n| (r.track_id, n)))
         .collect();
     if numbered.is_empty() {
-        return Ok(out);
+        return Ok(());
     }
     let planned = env.editor.plan_rename(&numbered, &env.layout).await?;
     let mut targets = Vec::new();
@@ -663,21 +710,17 @@ async fn align(
                 });
             }
             Planned::Unchanged => {}
-            Planned::Conflict(reason) => targets.push(RenameTarget {
+            // 計画の時点の衝突（同名のファイルがある等）は続く状態なので、失敗にせず報告だけ
+            Planned::Conflict(reason) => out.rename_conflicts.push(RenameConflict {
                 track_id: p.track_id,
-                new_rel_path: p.current_rel_path.clone(),
-                expected: None,
-                planned_conflict: Some(reason),
+                reason,
             }),
         }
     }
     if targets.is_empty() {
-        return Ok(out);
+        return Ok(());
     }
-    out.renamed = targets
-        .iter()
-        .filter(|t| t.planned_conflict.is_none())
-        .count();
+    out.renamed = targets.len();
     match env.editor.prepare_rename(Some(&description), targets).await {
         Ok(p) => {
             tracing::info!(
@@ -687,7 +730,9 @@ async fn align(
                 "ファイル名を揃える"
             );
             wait_pending(env, ctx, album_id).await?;
-            out.rename = Some(batch_outcome(env, p.batch_id).await?);
+            let b = batch_outcome(env, p.batch_id).await?;
+            out.rename = Some(b.clone());
+            require_all_applied("改名", &b)?;
         }
         Err(EditError::Pending { track_ids }) => {
             return Err(SyncError::Failed(anyhow::anyhow!(
@@ -698,7 +743,7 @@ async fn align(
         Err(EditError::NoChanges) => out.renamed = 0,
         Err(e) => return Err(e.into()),
     }
-    Ok(out)
+    Ok(())
 }
 
 // ---------------------------------------------------------------- dispatcher
@@ -752,6 +797,20 @@ pub fn spawn_dispatcher(
             }
         }
     })
+}
+
+/// 子バッチが全件 applied でなければ（衝突・失敗・キャンセル）揃えは終わっていない: Failed（再試行で差分から
+/// 取り直す。投入はしない）
+fn require_all_applied(what: &str, b: &BatchOutcome) -> Result<(), SyncError> {
+    if b.conflict > 0 || b.failed > 0 {
+        return Err(SyncError::Failed(anyhow::anyhow!(
+            "{what}のバッチ #{} が全件反映されていない（衝突 {} / 失敗 {}）ので揃えをやり直す",
+            b.batch_id,
+            b.conflict,
+            b.failed
+        )));
+    }
+    Ok(())
 }
 
 /// ファイル名の先頭の番号（`03 title.opus` / `03. title.opus` / `3-title.opus` の 3）。無ければ None
