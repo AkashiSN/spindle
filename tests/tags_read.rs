@@ -210,3 +210,59 @@ fn io_kind_finds_io_errors_wrapped_by_lofty() {
     assert_eq!(direct.io_kind(), Some(ErrorKind::UnexpectedEof));
     assert_eq!(TagReadError::Unrecognized.io_kind(), None);
 }
+
+/// lofty で m4a の ilst にフリーフォーム atom を直接置く（外部ツールが書いた独自キーの模擬）
+fn put_freeform(path: &std::path::Path, entries: &[(&str, &[&str])]) {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile as _;
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst};
+
+    let mut f = File::options().read(true).write(true).open(path).unwrap();
+    let mut mp4 = lofty::mp4::Mp4File::read_from(&mut f, ParseOptions::new()).unwrap();
+    let mut ilst = mp4.ilst().cloned().unwrap_or_else(Ilst::new);
+    for (name, values) in entries {
+        let data = values
+            .iter()
+            .map(|v| AtomData::UTF8((*v).to_owned()))
+            .collect();
+        let atom = Atom::from_collection(
+            AtomIdent::Freeform {
+                mean: "com.apple.iTunes".into(),
+                name: (*name).to_owned().into(),
+            },
+            data,
+        )
+        .unwrap();
+        ilst.insert(atom);
+    }
+    mp4.set_ilst(ilst);
+    use std::io::Seek as _;
+    f.seek(std::io::SeekFrom::Start(0)).unwrap();
+    mp4.save_to(&mut f, WriteOptions::default()).unwrap();
+}
+
+#[test]
+fn m4a_reads_freeform_atoms_as_uppercased_keys_with_multi_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "alac.m4a", 0));
+    common::set_basic_tags(&p, "T", "Ar", "Al", "AA", 3, 1);
+    put_freeform(
+        &p,
+        &[
+            ("SPINDLETEST", &["x", "y"]),
+            ("MyKey", &["v"]),
+            ("iTunNORM", &[" 00000000 00000000"]),
+            // 標準 atom（©alb）と同名のフリーフォームは標準 atom が勝つ
+            ("ALBUM", &["shadow"]),
+        ],
+    );
+    let af = tags_of(&p, "m4a");
+    let vals = |k: &str| af.tags.values(k).collect::<Vec<_>>();
+    assert_eq!(vals("SPINDLETEST"), ["x", "y"]);
+    assert_eq!(vals("MYKEY"), ["v"]);
+    assert_eq!(vals("ITUNNORM"), [" 00000000 00000000"]);
+    assert_eq!(vals("ALBUM"), ["Al"]);
+    // 標準 atom の写像は従来どおり
+    assert_eq!(vals("TITLE"), ["T"]);
+    assert_eq!(vals("TRACKNUMBER"), ["3"]);
+}

@@ -3011,3 +3011,38 @@ transcode 88 本の終端書き込みが SQLITE_FULL で失敗、`failed` とし
 閾値はテストの時間依存を増やす）。回収で `attempts` を進める（ジョブの失敗ではなく基盤の障害。
 起動時リカバリも進めない）。
 
+## D-77 MP4（ALAC / AAC）の任意キーは `----:com.apple.iTunes:<KEY>` のフリーフォーム atom。読み書きの写像は 1 か所
+
+**決定**（2026-09-21。P4-11。仕様 SPEC §7.5「形式ごとの写像」）:
+
+- Library の MP4 への tagwrite は lofty の generic `Tag` を経由せず、ilst を直接編集する
+  （`domain::tags::apply_ilst`）。Vorbis 名が lofty の `ItemKey` に写像でき MP4 の atom を持つキーは
+  標準 atom（`©nam` `trkn` `cpil` `----:com.apple.iTunes:CATALOGNUMBER` 等。値の encode は lofty の
+  `Tag` → `Ilst` 変換に載せ、`trkn` / `disk` の対や bool の special-case を借りる）、写像表に無いキーは
+  `----:com.apple.iTunes:<KEY>` のフリーフォーム atom（多値は 1 atom の複数値）。`iTunNORM` は内部
+  キーが大文字でも綴りを固定する
+- 読み側（`collect_mp4`）も同じ写像。標準 atom は今までどおり generic `Tag` 経由で Vorbis 名に、
+  generic `Tag` が捨てるフリーフォーム atom は `mean = com.apple.iTunes` に限って名前を大文字化した
+  キーで取り込む（`TagSet` はキーを大文字化する。標準 atom と同名になるものは標準 atom を優先）。
+  他の `mean` は読み書きとも触らない
+- 置き換え・削除はフリーフォームの名前を**大小文字を無視して**消してから書く。外部ツールが
+  `MyKey` で書いた atom を spindle が `MYKEY` で上書きしたとき、旧綴りの atom が残ると読み戻しで
+  多値に見えて op が failed に閉じる
+- Derived の `aac` 系統（D-75、`write_mp4_tags`）も同じ `apply_ilst` で書く（空の ilst に
+  `TransferTags` をキーで束ねて渡す）。別名キー（LABEL / ORGANIZATION、TRACKTOTAL / TOTALTRACKS）が
+  両方あれば後勝ち、は変えない
+- MP3 / WAV 等は generic `Tag` のまま。写像できないキーは書けず、読み戻し照合で failed に閉じる
+
+**理由**: 2026-09-21 の実機（P4-3 の確認）で、ALAC のプロパティタブに `SPINDLETEST` を足すと tagwrite が
+「書き込み結果が意図と一致しない（この形式では表現できない）」で失敗した。lofty の generic `Tag` は
+`ItemKey` に無いキーを書けず、読み側でも `Ilst` → `Tag` の変換がフリーフォーム atom を捨てるので、
+外部ツール（foobar2000 / Picard）が書いた独自キーが DB に載らない = ファイルが正（不変条件 1）に
+反していた。P4-8 が Derived 向けに書いたフリーフォームの写像を Library の読み書きに使えば解け、
+写像を 1 か所にすると Derived と Library でキーの見え方がずれない。
+
+**却下**: 既存の ALAC は FLAC 正規化でいずれ消えるので放置（読み側の取りこぼしは残るし、Inbox に
+来る m4a も同じ経路）。lofty の `preserve_format_specific_items`（companion tag）に頼る（読み側の
+取り込みは解けず、書きは global option の状態に依存する）。フリーフォームの名前を元の綴りのまま
+読む（`TagSet` は大文字化する規約で、FLAC のキーも大文字化して DB に載っている。綴りを残すには
+DB とハッシュの規約を変える必要があり、往復の二重化は削除側を大小文字無視にすれば防げる）。
+

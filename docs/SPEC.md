@@ -673,6 +673,15 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
   1 回の書き込みで反映し、`tag_version` はトラックごと・バッチごとに 1 回だけ進める。
   結果（`result`）は op にだけ持ち、**フィールド単位の部分適用はしない**
   （1 フィールドでも事前条件に合わなければ op 全体が conflict）
+- **形式ごとの写像は読み書きで 1 つ。** FLAC / Opus / Ogg は Vorbis Comment に任意キー・多値を
+  そのまま書く。MP4（ALAC / AAC）は Vorbis 名を lofty の `ItemKey` に写像して ilst の標準 atom
+  （`©nam` `trkn` `disk` `----:com.apple.iTunes:CATALOGNUMBER` 等）に、写像表に無いキーは
+  `----:com.apple.iTunes:<KEY>` のフリーフォーム atom に書く（多値は 1 atom の複数値。`iTunNORM` は
+  綴りを固定。D-77）。読み側は同じ写像で、フリーフォーム atom を名前を大文字化したキーとして取り込む。
+  置き換え・削除は名前の大小文字を無視して既存 atom を消す（外部ツールが `MyKey` で書いた atom を
+  `MYKEY` で上書きしても二重化しない）。`trkn` / `disk` は番号と総数が同居するので、片側だけの変更は
+  相方を保つ。写像と書き手（`apply_ilst`）は Derived の `aac` 系統（§7.6）と共有する。MP3 / WAV 等は
+  lofty の generic `Tag` 経由で、写像できないキーは書けない（読み戻し照合で failed に閉じる）
 - **事前条件に `ctime_ns` と `tag_hash` を含める。** inode も mtime も保ったままの in-place
   更新（`touch -r` を伴うタグツール）は dev/inode/mtime では見えない。ただし外部 rename も
   ctime を進めるため、rel_path が記録時点と違う（スキャナが追随した）ときに限り ctime_ns だけの
@@ -779,7 +788,7 @@ D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に
 | 対象 | 可逆（flac / alac / wav）に加え、`lossy_sources = true` なら**非可逆も**（opus / ogg / mp3 / aac → AAC。世代劣化は承知の上で、ミュージック.app が Opus を読めないため。**D-8 の例外**）。原本が AAC でも同じ経路で再エンコードする（stream copy では RG の焼き込みとリサンプルができない。D-75）。`lossy_sources` を true → false にしても既存の非可逆の行とファイルは消さない（対象外 = Skip で凍結と同じ扱い。物理削除は GC のみ） |
 | 出力 | ffmpeg **1 パス**（中間 WAV なし。FD を stdin に繋ぐのは opus と同じ）: `-i /dev/stdin -map 0:a:0 -vn -map_metadata -1 -af volume=<gain>dB [-ar 48000] -c:a aac -b:a <bitrate>k -f mp4`（内蔵エンコーダ。既定 256 kbps）。48 kHz 超は 48 kHz へ落とす（`-ar 48000`）、44.1 / 48 は据え置き。`audio_profile` は `aac:<bitrate>:48k:bake1`、`tag_profile` は `aac:sep=<区切り>:itunnorm0:v1` |
 | RG | **track gain を音声に焼き込む**（`-af volume=<gain>dB`。gain は `min(rg_track_gain, −20·log10(rg_track_peak))` で**エンコーダ入力を 0 dBTP 以下に抑える**（peak は true peak なので 1.0 超なら減衰側に倒れる。AAC 再符号化後のオーバーシュートまでは保証しない。gain が有限でなければ 0、peak は有限かつ > 0 のときだけ上限を掛ける）。album gain は使わない）。**RG 未解析のトラックは作らず待つ**（「解析済み」= `rg_scanned_at` と `rg_track_gain` / `rg_track_peak` の 3 つが揃っていること。時刻だけ残った行は対象外。rg の保存で投入される。二度エンコードの回避）。RG の解析世代（`src_rg_scanned_at`）の差分は**再エンコード**（album gain の on / off も世代を進めるので、その album の aac は作り直される。track gain しか使わないが値ベースの判定に列を足すより単純で、まれな操作なので許容。D-75）。タグには `iTunNORM` を **0 dB 相当**で書き、端末のサウンドチェック ON でも二重に掛からないようにする。値は 10 個の 8 桁 16 進を空白区切り（先頭にも空白）で、1〜2 値目（基準 1/1000）は `000003E8`、3〜4 値目（同じ量の基準 1/2500 の表現）は `000009C4`、残り 6 値は `00000000`: `" 000003E8 000003E8 000009C4 000009C4 00000000 00000000 00000000 00000000 00000000 00000000"`。`REPLAYGAIN_*` / `R128_*` は書かない |
-| タグ | Library のタグを写す（`REPLAYGAIN_*` / `R128_*` / 既存の `ITUNNORM` は落とす）。**同じキーの複数値は出現順に `multi_value_separator`（既定 `" & "`）で 1 値に結合**（ミュージック.app は複数値の 1 つしか見せない。ARTIST / ALBUMARTIST / GENRE / COMPOSER など多値になり得る全フィールド）。Vorbis 名を lofty の `ItemKey` に写像して ilst の標準 atom（`©ART` `trkn` `disk` `©gen` 等）に書き、写像できないキーは `----:com.apple.iTunes:<KEY>` のフリーフォーム。`iTunNORM` は内部キーが大文字化されても atom 名を `iTunNORM` に固定する（大小文字を special-case） |
+| タグ | Library のタグを写す（`REPLAYGAIN_*` / `R128_*` / 既存の `ITUNNORM` は落とす）。**同じキーの複数値は出現順に `multi_value_separator`（既定 `" & "`）で 1 値に結合**（ミュージック.app は複数値の 1 つしか見せない。ARTIST / ALBUMARTIST / GENRE / COMPOSER など多値になり得る全フィールド）。写像は Library の tagwrite と同じ（§7.5「形式ごとの写像」）: Vorbis 名を lofty の `ItemKey` に写像して ilst の標準 atom（`©ART` `trkn` `disk` `©gen` 等）に書き、写像できないキーは `----:com.apple.iTunes:<KEY>` のフリーフォーム。`iTunNORM` は内部キーが大文字化されても atom 名を `iTunNORM` に固定する（大小文字を special-case） |
 | 画像 | `opus` と同じ選び方で、長辺 768 の **JPEG**（ミュージック.app は `covr` の WebP を読まない）。`thumbs/<hex>/768.jpg` をキャッシュに足す（thumbnail ジョブと同じ変換に形式を足したもの。`-pix_fmt yuvj420p -q:v 2`） |
 
 ```toml

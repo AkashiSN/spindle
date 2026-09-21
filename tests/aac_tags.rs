@@ -166,7 +166,7 @@ fn write_mp4_tags_maps_standard_atoms_and_freeform_and_covr() {
             .map(|s| s.starts_with("image/jpeg:")),
         Some(true)
     );
-    // フリーフォーム（CATEGORY / iTunNORM）は lofty の generic 読みでは落ちるので ffprobe で外部観測
+    // フリーフォーム（CATEGORY / iTunNORM）の atom 名と綴りは ffprobe で外部観測（P4-11 で読み側も取り込む）
     let text = ffprobe_tags(&p);
     assert!(
         text.contains(&format!("format.tags.iTunNORM=\"{ITUNNORM_ZERO_DB}\"")),

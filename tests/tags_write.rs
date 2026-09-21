@@ -204,3 +204,127 @@ fn flac_keeps_pictures_across_write() {
     assert_eq!(after.tags.first("PICTURE"), before.tags.first("PICTURE"));
     assert_eq!(values(&p, "flac", "TITLE"), ["x"]);
 }
+
+fn ffprobe_tags(p: &Path) -> String {
+    let out = std::process::Command::new("ffprobe")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-show_entries",
+            "format_tags",
+            "-of",
+            "flat",
+        ])
+        .arg(p)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// P4-11: 写像表に無いキーはフリーフォーム atom として書き、同じキーで読み戻せる（多値も）
+#[test]
+fn mp4_writes_arbitrary_keys_as_freeform_and_reads_them_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "alac.m4a", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    write(
+        &p,
+        "m4a",
+        &[
+            change("SPINDLETEST", Some(&["one", "two"])),
+            change("ITUNNORM", Some(&[" 00000000 00000000"])),
+            change("CATALOGNUMBER", Some(&["CAT-1"])),
+        ],
+    );
+    assert_eq!(values(&p, "m4a", "SPINDLETEST"), ["one", "two"]);
+    assert_eq!(values(&p, "m4a", "ITUNNORM"), [" 00000000 00000000"]);
+    assert_eq!(values(&p, "m4a", "CATALOGNUMBER"), ["CAT-1"]);
+    assert_eq!(values(&p, "m4a", "ALBUM"), ["alb"]);
+    let text = ffprobe_tags(&p);
+    // フリーフォームの atom 名は内部キーのまま。iTunNORM だけ Apple の綴りに固定する
+    assert!(text.contains("SPINDLETEST="), "{text}");
+    assert!(text.contains("iTunNORM="), "{text}");
+    assert!(!text.contains("ITUNNORM="), "{text}");
+
+    // 削除はフリーフォームでも効く。外部が小文字で書いた同名 atom も一緒に消える
+    write(&p, "m4a", &[change("SPINDLETEST", None)]);
+    assert!(values(&p, "m4a", "SPINDLETEST").is_empty());
+    assert_eq!(values(&p, "m4a", "ITUNNORM"), [" 00000000 00000000"]);
+}
+
+/// 大小文字違いの既存フリーフォームは置き換え時に二重化しない
+#[test]
+fn mp4_replaces_freeform_atoms_case_insensitively() {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile as _;
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst};
+    use std::io::Seek as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "alac.m4a", 0));
+    {
+        let mut f = File::options().read(true).write(true).open(&p).unwrap();
+        let mut mp4 = lofty::mp4::Mp4File::read_from(&mut f, ParseOptions::new()).unwrap();
+        let mut ilst = mp4.ilst().cloned().unwrap_or_else(Ilst::new);
+        ilst.insert(Atom::new(
+            AtomIdent::Freeform {
+                mean: "com.apple.iTunes".into(),
+                name: "MyKey".into(),
+            },
+            AtomData::UTF8("old".into()),
+        ));
+        mp4.set_ilst(ilst);
+        f.seek(std::io::SeekFrom::Start(0)).unwrap();
+        mp4.save_to(&mut f, WriteOptions::default()).unwrap();
+    }
+    assert_eq!(values(&p, "m4a", "MYKEY"), ["old"]);
+    write(&p, "m4a", &[change("MYKEY", Some(&["new"]))]);
+    assert_eq!(values(&p, "m4a", "MYKEY"), ["new"]);
+    let text = ffprobe_tags(&p);
+    assert!(
+        !text.contains("MyKey="),
+        "旧綴りの atom が残っている: {text}"
+    );
+}
+
+/// 標準キーは標準 atom のまま（フリーフォームに逃がさない）。trkn / disk の対は片側だけの
+/// 変更でもう片側を壊さない
+#[test]
+fn mp4_keeps_standard_keys_in_standard_atoms_and_pairs_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "alac.m4a", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    write(
+        &p,
+        "m4a",
+        &[
+            change("TITLE", Some(&["新しい"])),
+            change("GENRE", Some(&["J-Pop", "Anime"])),
+            change("TRACKTOTAL", Some(&["12"])),
+            change("DISCNUMBER", Some(&["2"])),
+            change("COMPILATION", Some(&["1"])),
+        ],
+    );
+    assert_eq!(values(&p, "m4a", "TITLE"), ["新しい"]);
+    assert_eq!(values(&p, "m4a", "GENRE"), ["J-Pop", "Anime"]);
+    assert_eq!(values(&p, "m4a", "TRACKNUMBER"), ["3"]);
+    assert_eq!(values(&p, "m4a", "TRACKTOTAL"), ["12"]);
+    assert_eq!(values(&p, "m4a", "DISCNUMBER"), ["2"]);
+    assert_eq!(values(&p, "m4a", "COMPILATION"), ["1"]);
+    let text = ffprobe_tags(&p);
+    assert!(text.contains("format.tags.title=\"新しい\""), "{text}");
+    assert!(text.contains("format.tags.track=\"3/12\""), "{text}");
+    assert!(text.contains("format.tags.disc=\"2\""), "{text}");
+    assert!(text.contains("format.tags.compilation=\"1\""), "{text}");
+    assert!(
+        !text.contains("TITLE="),
+        "標準キーがフリーフォームに逃げている: {text}"
+    );
+
+    // TRACKNUMBER を消しても TRACKTOTAL は残る
+    write(&p, "m4a", &[change("TRACKNUMBER", None)]);
+    assert!(values(&p, "m4a", "TRACKNUMBER").is_empty());
+    assert_eq!(values(&p, "m4a", "TRACKTOTAL"), ["12"]);
+}

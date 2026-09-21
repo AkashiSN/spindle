@@ -1332,3 +1332,44 @@ async fn history_helpers_expose_batch_and_ops() {
         .unwrap();
     assert_eq!(pending_track, id);
 }
+
+/// P4-11: ALAC（m4a）に写像表に無いキーを `set` → `delete` しても applied になる（フリーフォーム
+/// atom で書き、同じキーで読み戻せる）
+#[tokio::test]
+async fn arbitrary_key_set_and_delete_on_alac_are_applied() {
+    let lib = Lib::new();
+    let dir = lib.path("A");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = require_ffmpeg!(common::make_audio(&dir, "01.m4a", "alac.m4a", 1));
+    common::set_basic_tags(&p, "題", "Artist", "Album", "AlbumArtist", 1, 1);
+    lib.scan().await;
+    let id = lib.track_id("A/01.m4a");
+
+    let prepared = lib
+        .editor
+        .prepare_tags(None, vec![op(id, vec![set("SPINDLETEST", &["a", "b"])])])
+        .await
+        .unwrap();
+    lib.start();
+    assert_eq!(
+        lib.wait_batch_terminal(prepared.batch_id).await,
+        BatchState::Applied
+    );
+    assert_eq!(lib.ops(prepared.batch_id)[0].result, OpResult::Applied);
+    assert_eq!(file_tags(&p, "SPINDLETEST"), ["a", "b"]);
+    assert_eq!(lib.tag_values(id, "SPINDLETEST"), ["a", "b"]);
+    assert_eq!(file_tags(&p, "TITLE"), ["題"]);
+
+    let prepared = lib
+        .editor
+        .prepare_tags(None, vec![op(id, vec![del("SPINDLETEST")])])
+        .await
+        .unwrap();
+    assert_eq!(
+        lib.wait_batch_terminal(prepared.batch_id).await,
+        BatchState::Applied
+    );
+    assert_eq!(lib.ops(prepared.batch_id)[0].result, OpResult::Applied);
+    assert!(file_tags(&p, "SPINDLETEST").is_empty());
+    assert!(lib.tag_values(id, "SPINDLETEST").is_empty());
+}

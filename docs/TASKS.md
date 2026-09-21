@@ -1024,17 +1024,19 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `web/src/lib/theme.test.ts`（設定の解決: 保存値 > OS、保存と読み出し）、`index.css` の直書き色が変数の
       定義ブロック以外に無いことを vitest で固定、実機で一覧 / アルバム / Inbox / CD / ジョブ / 履歴 / 設定の目視
 
-- [ ] **P4-11** Library の MP4（ALAC / AAC）に任意キーを読み書きする（残課題から昇格。設計は着手時に行う）。
-      いまの Library 経路（`domain::tags::write_tag_changes` の `FileType::Mp4` → lofty の generic `Tag` →
-      `apply_generic`）は `ItemKey` に写像できないキー（`CATALOGNUMBER` や独自キー）を書けず、読み戻しの
-      照合で「書き込み結果が意図と一致しない（この形式では表現できない）」として安全側に失敗する。読み側
-      （`collect_generic`）も generic `Tag` 経由で、`----:com.apple.iTunes:<KEY>` のフリーフォーム atom が
-      Vorbis 名のキーとして見えるかを確かめる。P4-8 の Derived 向け `write_mp4_tags`（写像できるキーは標準
-      atom、写像不能は `AtomIdent::Freeform { mean: "com.apple.iTunes", name }` を `Ilst` に直接）と同じ写像を
-      Library の読み書きに使う（写像の表は 1 か所にまとめる。iTunNORM の大小文字の special-case も共有）。
-      受け入れ: `tests/tags_write.rs` / `tests/tags_read.rs`（m4a に任意キー・多値を書いて同じキーで読み戻す、
-      標準キーは標準 atom のまま = ffprobe で観測、既存のフリーフォームを読む）、`tests/edits.rs`（プロパティ
-      タブ相当の `set` / `delete` が ALAC で applied になる）、実機で ALAC の 1 曲に追加 → 削除
+- [x] **P4-11** Library の MP4（ALAC / AAC）に任意キーを読み書きする（D-77、SPEC §7.5「形式ごとの写像」。
+      2026-09-21）。旧 Library 経路（`write_tag_changes` の `FileType::Mp4` → lofty の generic `Tag` →
+      `apply_generic`）は `ItemKey` の写像表に無いキー（`SPINDLETEST` 等の独自キー。`CATALOGNUMBER` / `LABEL` /
+      `BARCODE` / MB id は lofty 0.25 が `----:com.apple.iTunes:*` に写像済み）を書けず、読み戻しの照合で
+      安全側に失敗していた。読み側（`Ilst` → `Tag`）もフリーフォーム atom を捨てていた。`domain::tags` に
+      `mp4_target`（写像は 1 か所。`ITUNNORM_KEY` を `derived.rs` から移して共有）と `apply_ilst`（標準 atom は
+      lofty の `Tag` → `Ilst` 変換に載せ、`trkn` / `disk` の相方を保つ。フリーフォームは大小文字無視で消して
+      から 1 atom の複数値で書く）を置き、Library の MP4 分岐と Derived の `write_mp4_tags` が共有する。読みは
+      `collect_mp4`（`split_tag` の残りから `com.apple.iTunes` のフリーフォームを大文字化したキーで取り込む）。
+      受け入れ: `tests/tags_write.rs`（独自キー・多値・`iTunNORM` の綴り・削除、大小文字違いの既存 atom の
+      置き換え、標準キーは標準 atom のまま = ffprobe、`TRACKTOTAL` だけ変えても `TRACKNUMBER` が残る）、
+      `tests/tags_read.rs`（フリーフォームの多値・小文字名・`iTunNORM`、標準 atom と同名は標準が勝つ）、
+      `tests/edits.rs`（ALAC に `set` → `delete` が applied）、実機で ALAC の 1 曲に追加 → 削除
 
 ## 着手前に確認が必要な残課題
 

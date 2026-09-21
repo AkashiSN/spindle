@@ -266,8 +266,7 @@ pub fn opus_tags(
     }
 }
 
-/// MP4 のフリーフォーム atom 名（大小文字はこの通り。内部キーの大文字化に関わらず固定する）
-pub const ITUNNORM_KEY: &str = "iTunNORM";
+pub use crate::domain::tags::ITUNNORM_KEY;
 /// Sound Check の 0 dB。1〜2 値目（基準 1/1000）と 3〜4 値目（同じ量の基準 1/2500 表現）に 0 dB、残りは 0
 pub const ITUNNORM_ZERO_DB: &str =
     " 000003E8 000003E8 000009C4 000009C4 00000000 00000000 00000000 00000000 00000000 00000000";

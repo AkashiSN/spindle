@@ -311,12 +311,7 @@ fn read_parts(
                 _ => return Err(TagReadError::Unsupported(ty)),
             };
             if let Some(ilst) = f.ilst() {
-                collect_generic(
-                    &mut set,
-                    &mut pictures,
-                    &lofty::tag::Tag::from(ilst.clone()),
-                    &mut HashSet::new(),
-                );
+                collect_mp4(&mut set, &mut pictures, ilst);
             }
             (codec, f.properties().clone().into())
         }
@@ -414,6 +409,41 @@ fn collect_generic(
     }
 }
 
+/// MP4 の ilst を取り込む。標準 atom は lofty の generic `Tag` 経由で Vorbis 名に写像し
+/// （[`collect_generic`]）、写像表に無い `----:com.apple.iTunes:<name>` のフリーフォーム atom は
+/// `name` を大文字化したキーで取り込む（generic `Tag` はこれを捨てる）。標準 atom と同名になる
+/// フリーフォームは標準 atom を優先する。他の `mean` の atom には触らない
+fn collect_mp4(
+    set: &mut TagSet,
+    pictures: &mut Vec<lofty::picture::Picture>,
+    ilst: &lofty::mp4::Ilst,
+) {
+    use lofty::mp4::{AtomData, AtomIdent, Ilst};
+    use lofty::tag::SplitTag as _;
+
+    let (remainder, tag) = ilst.clone().split_tag();
+    let mut seen = HashSet::new();
+    collect_generic(set, pictures, &tag, &mut seen);
+    let remainder: Ilst = remainder.into();
+    for atom in &remainder {
+        let AtomIdent::Freeform { mean, name } = atom.ident() else {
+            continue;
+        };
+        if mean != FREEFORM_MEAN {
+            continue;
+        }
+        let key = name.to_uppercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        let values = atom.data().filter_map(|d| match d {
+            AtomData::UTF8(s) | AtomData::UTF16(s) => Some((key.clone(), s.clone())),
+            _ => None,
+        });
+        set.extend(values);
+    }
+}
+
 // ---------------------------------------------------------------- 書き込み
 
 /// 1 キーの変更。`values` が `None` ならそのキーを削除する（空配列も削除と同義）
@@ -456,7 +486,8 @@ pub enum TagWriteError {
 /// 他のキー・多値は保つ。`pictures` が `Some` なら埋め込み画像を全部捨ててその列に置き換え、
 /// `None` なら画像に触らない（D-60）。呼び出し側が tmp にコピーした上で呼ぶこと（対象を直接
 /// 書き換えない。SPEC §7.5 tmp + rename）。FLAC / Opus / Vorbis は VorbisComments を直接、
-/// 他は lofty の generic `Tag` に Vorbis 名を写像して書く
+/// MP4 は ilst を直接（[`apply_ilst`]。写像できないキーはフリーフォーム）、他は lofty の
+/// generic `Tag` に Vorbis 名を写像して書く
 pub fn write_tag_changes(
     file: &mut File,
     ext: Option<&str>,
@@ -510,12 +541,21 @@ pub fn write_tag_changes(
             file.seek(SeekFrom::Start(0))?;
             f.save_to(file, write_opts)?;
         }
-        FileType::Mp4
-        | FileType::Mpeg
-        | FileType::Wav
-        | FileType::WavPack
-        | FileType::Ape
-        | FileType::Aiff => {
+        FileType::Mp4 => {
+            let mut f = lofty::mp4::Mp4File::read_from(&mut *file, opts)?;
+            let mut ilst = f.ilst().cloned().unwrap_or_default();
+            apply_ilst(&mut ilst, &changes);
+            if let Some(pics) = pictures {
+                ilst.remove_pictures();
+                for pic in pics {
+                    ilst.insert_picture(pic.clone());
+                }
+            }
+            f.set_ilst(ilst);
+            file.seek(SeekFrom::Start(0))?;
+            f.save_to(file, write_opts)?;
+        }
+        FileType::Mpeg | FileType::Wav | FileType::WavPack | FileType::Ape | FileType::Aiff => {
             let mut tagged = Probe::new(&mut *file)
                 .set_file_type(ty)
                 .options(opts)
@@ -660,48 +700,26 @@ pub fn write_opus_tags(file: &mut File, tags: &TransferTags) -> Result<(), TagWr
 }
 
 /// 生成した MP4（`file` は読み書きで開いた tmp）に [`TransferTags`] を書く（aac 系統の Derived。
-/// SPEC §7.6、D-75）。既存の ilst は置き換える。Vorbis 名を lofty の `ItemKey` に写像して ilst の
-/// 標準 atom（`©ART` `trkn` `disk` `©gen` …）に、写像できないキーは `----:com.apple.iTunes:<KEY>` の
-/// フリーフォームに直接置く（lofty の generic `Tag` → `Ilst` は未知キーを捨てるので迂回する）。
-/// `iTunNORM` は内部キーの大小文字に関わらず atom 名を固定する。画像は `covr`（JPEG / PNG）
+/// SPEC §7.6、D-75）。既存の ilst は置き換える。写像は Library の書き込みと同じ [`apply_ilst`]
+/// （標準 atom / `----:com.apple.iTunes:<KEY>` のフリーフォーム）。画像は `covr`（JPEG / PNG）
 pub fn write_mp4_tags(file: &mut File, tags: &TransferTags) -> Result<(), TagWriteError> {
-    use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst};
-
-    use crate::domain::derived::ITUNNORM_KEY;
+    use lofty::mp4::Ilst;
 
     file.seek(SeekFrom::Start(0))?;
     let mut f = lofty::mp4::Mp4File::read_from(&mut *file, ParseOptions::new())?;
-    let mut generic = Tag::new(TagType::Mp4Ilst);
-    let mut freeform: Vec<(String, String)> = Vec::new();
+    // キーごとに束ねる（出現順。同じキーの多値は 1 atom の複数値になる）
+    let mut changes: Vec<TagChange> = Vec::new();
     for (key, value) in &tags.items {
-        let mapped = ItemKey::from_key(TagType::VorbisComments, key)
-            .filter(|k| k.map_key(TagType::Mp4Ilst).is_some());
-        match mapped {
-            Some(k) => {
-                // 同じ ItemKey に写像される別名キーが 2 つある（LABEL / ORGANIZATION、TRACKTOTAL /
-                // TOTALTRACKS）と後勝ち。`push` だと両方残り、どちらを Apple が採るか決まらない
-                generic.insert(TagItem::new(k, ItemValue::Text(value.clone())));
-            }
-            None => {
-                let name = if key.eq_ignore_ascii_case(ITUNNORM_KEY) {
-                    ITUNNORM_KEY.to_owned()
-                } else {
-                    key.clone()
-                };
-                freeform.push((name, value.clone()));
-            }
+        match changes.iter_mut().find(|c| &c.key == key) {
+            Some(c) => c.values.get_or_insert_with(Vec::new).push(value.clone()),
+            None => changes.push(TagChange {
+                key: key.clone(),
+                values: Some(vec![value.clone()]),
+            }),
         }
     }
-    let mut ilst: Ilst = generic.into();
-    for (name, value) in freeform {
-        ilst.insert(Atom::new(
-            AtomIdent::Freeform {
-                mean: "com.apple.iTunes".into(),
-                name: name.into(),
-            },
-            AtomData::UTF8(value),
-        ));
-    }
+    let mut ilst = Ilst::new();
+    apply_ilst(&mut ilst, &changes);
     for pic in &tags.pictures {
         ilst.insert_picture(pic.clone());
     }
@@ -709,4 +727,130 @@ pub fn write_mp4_tags(file: &mut File, tags: &TransferTags) -> Result<(), TagWri
     file.seek(SeekFrom::Start(0))?;
     f.save_to(file, WriteOptions::default())?;
     Ok(())
+}
+
+// ---------------------------------------------------------------- MP4（ilst）の写像
+
+/// MP4 のフリーフォーム atom 名（大小文字はこの通り。内部キーの大文字化に関わらず固定する）
+pub const ITUNNORM_KEY: &str = "iTunNORM";
+
+/// フリーフォーム atom の `mean`。foobar2000 / MusicBrainz Picard / ffmpeg が読み書きする名前空間
+const FREEFORM_MEAN: &str = "com.apple.iTunes";
+
+/// Vorbis 名のキーが MP4 のどこに載るか（読み書きで共有する唯一の写像）
+enum Mp4Target {
+    /// lofty の写像表にある標準 atom（`©nam` `trkn` `----:com.apple.iTunes:CATALOGNUMBER` …）
+    Item(ItemKey),
+    /// 写像表に無いキー。`----:com.apple.iTunes:<name>` のフリーフォーム
+    Freeform(String),
+}
+
+fn mp4_target(key: &str) -> Mp4Target {
+    let mapped = ItemKey::from_key(TagType::VorbisComments, key)
+        .filter(|k| lofty::mp4::AtomIdent::try_from(k).is_ok());
+    match mapped {
+        Some(k) => Mp4Target::Item(k),
+        None if key.eq_ignore_ascii_case(ITUNNORM_KEY) => {
+            Mp4Target::Freeform(ITUNNORM_KEY.to_owned())
+        }
+        None => Mp4Target::Freeform(key.to_owned()),
+    }
+}
+
+fn freeform_ident(name: &str) -> lofty::mp4::AtomIdent<'static> {
+    lofty::mp4::AtomIdent::Freeform {
+        mean: FREEFORM_MEAN.into(),
+        name: name.to_owned().into(),
+    }
+}
+
+/// `----:com.apple.iTunes:<name>` の atom を大小文字を無視して全部消す。読み側はキーを大文字化する
+/// ので、外部が `MyKey` で書いた atom を `MYKEY` で置き換えても二重化しない
+fn remove_freeform_ci(ilst: &mut lofty::mp4::Ilst, name: &str) {
+    ilst.retain(|a| {
+        !matches!(a.ident(), lofty::mp4::AtomIdent::Freeform { mean, name: n }
+            if mean == FREEFORM_MEAN && n.eq_ignore_ascii_case(name))
+    });
+}
+
+/// `ilst` の `changes` のキーだけを置き換え・削除する（Library の tagwrite と Derived の書き出しで
+/// 共有）。標準 atom は lofty の generic `Tag` → `Ilst` の変換に載せて encode させる（`trkn` / `disk`
+/// の対、`cpil` の bool 等の special-case を借りる）。対の片側だけの変更は既存の相方を保つ。
+/// 写像できないキーは `----:com.apple.iTunes:<KEY>` のフリーフォームに直接置く（generic `Tag` は
+/// 未知キーを捨てる）。同じ ItemKey に写像される別名キー（LABEL / ORGANIZATION、TRACKTOTAL /
+/// TOTALTRACKS）が両方あれば後勝ち
+fn apply_ilst(ilst: &mut lofty::mp4::Ilst, changes: &[TagChange]) {
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst};
+
+    const TRACK_NUMBER: AtomIdent<'static> = AtomIdent::Fourcc(*b"trkn");
+    const DISC_NUMBER: AtomIdent<'static> = AtomIdent::Fourcc(*b"disk");
+
+    // 対の相方を補うために既存の値を写像済みの形で持つ
+    let existing = Tag::from(ilst.clone());
+    let mut staged = Tag::new(TagType::Mp4Ilst);
+    let mut staged_keys: Vec<ItemKey> = Vec::new();
+    let mut touched: Vec<AtomIdent<'static>> = Vec::new();
+    for c in changes {
+        match mp4_target(&c.key) {
+            Mp4Target::Item(key) => {
+                let Ok(ident) = AtomIdent::try_from(&key) else {
+                    continue; // mp4_target が写像を確かめている
+                };
+                let ident = ident.into_owned();
+                if !touched.contains(&ident) {
+                    touched.push(ident);
+                }
+                if !staged_keys.contains(&key) {
+                    staged_keys.push(key);
+                }
+                staged.remove_key(key);
+                if let Some(values) = &c.values {
+                    for v in values {
+                        staged.push(TagItem::new(key, ItemValue::Text(v.clone())));
+                    }
+                }
+            }
+            Mp4Target::Freeform(name) => {
+                remove_freeform_ci(ilst, &name);
+                let data: Vec<AtomData> = c
+                    .values
+                    .iter()
+                    .flatten()
+                    .map(|v| AtomData::UTF8(v.clone()))
+                    .collect();
+                if let Some(atom) = Atom::from_collection(freeform_ident(&name), data) {
+                    ilst.insert(atom);
+                }
+            }
+        }
+    }
+    // trkn / disk は番号と総数が 1 atom に同居する。片側だけ変えるときは相方を既存から写す
+    for (ident, pair) in [
+        (TRACK_NUMBER, [ItemKey::TrackNumber, ItemKey::TrackTotal]),
+        (DISC_NUMBER, [ItemKey::DiscNumber, ItemKey::DiscTotal]),
+    ] {
+        if !touched.contains(&ident) {
+            continue;
+        }
+        for key in pair {
+            if staged_keys.contains(&key) {
+                continue;
+            }
+            if let Some(v) = existing.get_string(key) {
+                staged.insert_text(key, v.to_owned());
+            }
+        }
+    }
+    for ident in &touched {
+        match ident {
+            AtomIdent::Freeform { name, .. } => remove_freeform_ci(ilst, name),
+            AtomIdent::Fourcc(_) => {
+                let _ = ilst.remove(ident);
+            }
+        }
+    }
+    let produced: Ilst = staged.into();
+    for atom in produced {
+        ilst.insert(atom);
+    }
 }
