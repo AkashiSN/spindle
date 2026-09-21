@@ -919,8 +919,9 @@ multi_value_separator = " & "   # 多値フィールドの結合
   { "version": 1,
     "category": "<統制語彙の名前>" | null,          // 件の category（プラグインの判定。最後に書いたものが勝つ）
     "files": { "<ファイル名>": { "source": "youtube", "url": "<webpage_url>", "channel": "<uploader>",
-                                 "verdict": "ok" | "unmatched" | "unknown_channel" | "<未知の reason>",
-                                 "message": "…" | null } } }
+                                 "verdict": "ok" | "unmatched" | "unknown_channel" | "skip" | "<未知の reason>",
+                                 "message": "…" | null,
+                                 "subscription_id": 3, "position": 17 } } }   // 購読由来のときだけ（P4-16）
   ```
 - **失敗の区分**: `Fatal`（再試行なし）は取り込み済み・webm の音声なし・プラグインの故障・対応していない
   URL・宛先の同名で別の内容。それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O、仕上げ）は `Failed` で指数
@@ -929,6 +930,78 @@ multi_value_separator = " & "   # 多値フィールドの結合
 - `POST /api/ytmusic/download` の URL は http / https でホストがあり空白・制御文字を含まないものだけ受ける
   （ホストは限定しない。対応していなければジョブが `Fatal` で伝える）
 - yt-dlp は YouTube の抽出に JS ランタイムを要求する版があるため、runtime イメージに deno を同梱する（§14）
+
+**再生リストの購読と同期**（`playlist_subscriptions`、`playlist_sync` ジョブ、P4-16、D-78）。URL を貼る
+運用をなくす。再生リスト 1 本 → Library の album 1 つ（追記先）。`SOURCE_URL`（P4-14 で補填、ytdl が
+書く）で「再生リストのどこまで持っているか」が分かる。
+
+- **購読**（`db::subscriptions`、`/api/ytmusic/subscriptions`）: `list_id`（URL の `list=`。YouTube の
+  ホストだけ。UNIQUE）、`albumartist` / `album` / `category`（追記先の初期値と表示用）、`album_id`
+  （**追記先の同一性**。登録時は NULL。同期か配置が `import::inbox::destination_of`（Inbox の追記先と
+  同じ規則）で引けたときに CAS（`album_id IS NULL` のときだけ）で束ねる。album 全体の移動は id を
+  維持する（D-32）ので以後は album 行の値が正。album が消えれば SET NULL で再解決。albumartist /
+  album / category を PATCH で変えると NULL に戻す）、`align`（番号揃えをするか。既定 on）、`enabled`
+  （定期と承認の後続の対象か。手動の同期は enabled に関わらず受ける）、`max_enqueue`（1 回の同期で
+  投入する上限。既定 50。誤登録した巨大なリストで数百本落とさない）。同じ追記先の購読は 1 つだけ
+  （`target_key` = `sanitize_component` した albumartist / album の canonical key、UNIQUE。`album_id` も
+  非 NULL の間 UNIQUE = 束ね同士の競合は DB で片方が失敗する）。Inbox の `youtube/<albumartist>/<album>`
+  = 1 購読 = 1 category になるので、サイドカーの category が dir 単位でも他の購読に波及しない
+- **同期ジョブ `playlist_sync`**（並列 1、dedup `playlist_sync:<id>`、payload `{ subscription_id }`）。
+  順序は **列挙 → 追記先 → 照合 → 番号揃え → ytdl 投入**（購読由来の ytdl は TRACKNUMBER = 位置を書くので、
+  先に既存の行を揃えて隙間を空ける）:
+  1. `last_attempted_at = now`、latch（`sync_requested_at`）を NULL に。`yt-dlp --flat-playlist
+     --dump-single-json`（`[ytmusic].ytdlp_args` 付き）で列挙。entry の位置（1 始まり）が再生リストの位置。
+     `entries < playlist_count` なら**古い yt-dlp の取りこぼし**として `Failed`（再試行）で何も投入しない
+  2. 追記先: `album_id` があればその album（missing なら `Fatal`）、無ければ引いて束ねる（別の購読が束ねて
+     いれば `Fatal`）。まだ無ければ揃えは無し（最初の配置で束ねる）
+  3. entry ごとに正規 URL `https://www.youtube.com/watch?v=<id>` で Library の active 行を**全件**引く
+     （`find_source_url` の LIMIT 1 でなく 0 / 1 / 2 件以上を区別）。追記先にあれば「Library」、別の album
+     なら「別の album にある」（触らない、投入しない）、Inbox にあれば「取り込み中」（投入しない）
+  4. **番号揃え**（`align` が on。`import::ytmusic::playlist::plan_align`）: 対象 = 追記先の active 行で
+     `SOURCE_URL` が entry に一致し disc 1（NULL 含む）で単一のもの。目標番号 = 位置。**固定行** = それ
+     以外（`SOURCE_URL` 無し・再生リストに無い・`SOURCE_URL` 重複）の disc 1 の行で、その番号は塞がる。
+     目標番号が塞がれた対象と disc 2 以降・重複の対象は動かさず「揃えられない」一覧へ（理由付き）。対象
+     同士の swap / cycle は可（番号は UNIQUE でなく、rename は一時パス経由）。非公開・削除・未取り込みの
+     位置も数えるので、それらの分は番号が飛ぶ。
+     **各段の前に追記先の active 行に pending の op が無くなるまで待ち**（2 秒間隔、上限 10 分。超えたら
+     `Failed`）、差分は待った後の DB から計算し直す（phase を永続化しない: 落ちて再実行しても、失敗した op は
+     overlay がファイルの値に戻るので次回また差分になり、適用済みなら差分ゼロで通る）。ずれた行だけ
+     `Editor::prepare_tags`（`TRACKNUMBER`。説明「再生リスト『…』に番号を揃える」）→ 終端待ち → album を
+     読み直し「**現在の TRACKNUMBER が目標位置と一致する対象行の全部**」を `plan_rename` → パスが変わる行
+     だけ `prepare_rename` → 終端待ち（今回のバッチの applied 集合には依らない = tags 適用後・rename 前に
+     落ちた境界を再実行で拾う）。どちらも履歴に載り巻き戻せる。Derived（opus / aac）はタグ上書き・移動で
+     追随する。揃え終わる前の失敗・キャンセルでは投入しない
+  5. Library / Inbox / 別 album に無く、**取れる** entry を位置順に `max_enqueue` まで `ytdl` 投入（payload
+     `{ url, subscription_id, position }`、dedup は今までどおり `ytdl:<url>`）。超えた分は「次回」。
+     Duplicate（手動貼り付け・別の購読の投入が走行中）は**満たしたと数えず「別の投入が走行中」**として
+     結果に出すだけ（そのジョブには購読の情報が無い。承認されれば次の同期が Library で拾い、失敗すれば
+     dedup が空いて購読の情報付きで再投入。同じ動画が複数の購読に出る場合も同じ規則で、先に取り込んだ側の
+     album に置かれ他方には「別の album にある」）
+  6. **取れない entry**（`title` が無い、旧版の `[Private video]` / `[Deleted video]`）: 投入しないが位置は
+     占める。Library にあれば（補填済み、公開だった頃に取り込んだ）何もしない。無ければ「取れない」一覧
+     `{ position, id, kind: private | deleted | unknown }`（現行の yt-dlp は `title: null` で来るので区別
+     できず `unknown`。旧版の題名から分かるときだけ private / deleted）。後で公開に戻れば次の同期で拾う
+  7. `last_result`（結果 JSON: entries / playlist_count / in_library / in_inbox / elsewhere / enqueued /
+     running / deferred / unavailable / align{moved, unchanged, blocked, outsiders, unnumbered, tags, renamed,
+     rename}、state = done / failed / cancelled）、成功なら `last_synced_at`、`jobs.note` に 1 行。終わる前に
+     latch が立っていれば（走行中に承認の後続・手動要求が来た）`Outcome::Requeue`（試行回数を数えず同じ
+     ジョブがもう一度走る）
+- **ytdl の購読由来**（payload に `subscription_id`）: ALBUMARTIST / ALBUM / category は購読の追記先（束ねて
+  あれば album 行の値）、プラグインの判定は TITLE / ARTIST に使う。**skip / 判定不能でも投入**（再生リストは
+  人が選んだもの。TITLE = 動画タイトル、ARTIST = albumartist、verdict はサイドカーに残す）。宛先は
+  `Inbox/youtube/<albumartist>/<album>/`。`align` が on なら **TRACKNUMBER = 位置**を書く（同期が先に既存の
+  行を揃えて隙間を空けている。承認画面の初期値がそのまま正しい番号になり、塞がっていれば承認の既存検査
+  （400）で人が直す）。off なら書かず Inbox が max+1 を振る。購読が消えていれば通常の ytdl として振る舞う
+- **承認はそのまま**（D-70。判断は Inbox で人が行う）。配置（`place_item`）はサイドカーを消す前に件の
+  `subscription_id` を集め、inbox ジョブが配置後に追記先を束ね（CAS）、latch を立ててから `playlist_sync`
+  を投入する（走行中なら Duplicate だが latch は残る）
+- **dispatcher**（常駐、30 秒ごと。`[ytmusic].enabled` のとき）: (a) latch の立った購読を投入（enabled に
+  関わらず。active なジョブがあれば Duplicate で何もせず、終端になった次の tick で投入される = handler の
+  最終確認から終端までの窓に立った latch、Failed / Cancelled で残った latch も必ず回収される）、(b)
+  `[ytmusic].sync_interval_hours`（既定 0 = 手動と承認の後続だけ）が 0 でなければ enabled で
+  `last_attempted_at`（成否を問わない開始時刻）から interval 経った購読を投入（最終 retry が failed に
+  なっても interval までは新しいジョブを作らない）
+- yt-dlp を定期的に叩くので、ブロック時の `ytdlp_args`（P4-13）と yt-dlp の更新（P4-12）が前提
 
 ### 7.8 Inbox 取り込み
 
@@ -1156,7 +1229,8 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
 | `flaccheck` | CPU コア数 | track_id + audio_version（版付き。D-57） |
 | `hirescheck` | max(1, CPU コア数 / 2) | track_id + audio_version（版付き。§7.10、D-71。rg / transcode / flaccheck と重なる分を抑える） |
 | `inbox` | 1 | 固定 |
-| `ytdl` | 1 | `ytdl:<url>`（playlist の展開で投入する分も同じ。D-70） |
+| `ytdl` | 1 | `ytdl:<url>`（playlist の展開・購読の同期で投入する分も同じ。D-70、D-78） |
+| `playlist_sync` | 1 | `playlist_sync:<subscription_id>`（列挙 → 番号揃え → ytdl 投入。§7.7「再生リストの購読と同期」、D-78） |
 | `gc` | 1 | 固定（scan と同じ排他 `library` を取れなければ Requeue。D-56） |
 | `backup` | 1 | 固定 |
 
@@ -1313,6 +1387,21 @@ POST   /api/inbox/:id/approve                     { category, albumartist, album
                                                   ジョブ投入。album_gain は既定 false（D-74）
 POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
 POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
+GET    /api/ytmusic/subscriptions                 → { items: [Subscription] }（albumartist / album 順。P4-16、D-78）
+POST   /api/ytmusic/subscriptions                 { url, albumartist, album, category?, align? = true, enabled? = true, max_enqueue? = 50 }
+                                                  → 201 Subscription | 400（YouTube の list= 付き URL でない、空、max_enqueue が 1〜1000 外）
+                                                  | 409 { error: "duplicate_list" | "duplicate_target" }
+PATCH  /api/ytmusic/subscriptions/:id             { albumartist?, album?, category? (null で消す), align?, enabled?, max_enqueue? }
+                                                  → 200 Subscription | 404 | 409 duplicate_target。追記先を変えると album_id は NULL に戻る
+DELETE /api/ytmusic/subscriptions/:id             → 204 | 404（Library のファイルは消えない）
+POST   /api/ytmusic/subscriptions/:id/sync        → 202 { job_id } | 404 | 409 { error: "duplicate" }（走行中。latch は残るので終わった後に走る）
+                                                  [ytmusic].enabled でなければすべて 404
+// Subscription = { id, list_id, url, album_id, albumartist, album, category, align, enabled, max_enqueue,
+//                  created_at, updated_at, last_attempted_at, last_synced_at, sync_requested_at,
+//                  last_result: { state, error?, synced_at, title?, entries, playlist_count?, album_id?, in_library, in_inbox,
+//                                 elsewhere: [{position, id, track_id, rel_path}], enqueued: [position], running: [position],
+//                                 deferred, unavailable: [{position, id, kind}], align?: { moved, unchanged, blocked: [{track_id,
+//                                 position, current_no, reason}], outsiders, unnumbered, tags?, renamed, rename? } } | null }
                                                   → 202 { job_ids }。`[ytmusic].enabled` でなければ 404（§7.7、D-70）
 POST   /api/gc                                    gc ジョブを投入（未完了があれば 409）
                                                   （202 + job_id。queued / running があれば 409 duplicate）
@@ -1432,7 +1521,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 { "items": [ { "id", "type", "state", "progress", "done", "total", "attempts", "last_error",
                "run_after", "edit_batch_id", "created_at", "started_at", "finished_at",
                "note",          // 完了時の結果 1 行（ハンドラが返す。ytdl: "Inbox に置いた: <path>" /
-                                //   "プラグインが skip: <理由>" / "再生リストを展開した: N 件を投入、M 件は取り込み済み"。無ければ null）
+                                //   "プラグインが skip: <理由>" / "再生リストを展開した: N 件を投入、M 件は取り込み済み"。
+                                //   playlist_sync: 同期の要約。無ければ null）
                "subject" } ],   // subject = 対象の表示用文字列（track_id → Library のパス、album_id → ディレクトリ、
                                 //   batch_id → 説明、transcode は " [<variant>]" 付き、scan は kind、ytdl は url、
                                 //   thumbnail は "artwork #id"。行が消えていれば "track #id"、対象の無い種別は null）
@@ -1780,7 +1870,15 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   (2) ytdl ジョブの一覧（`GET /api/jobs?type=ytdl` を新しい順。URL・結果（待ち / ダウンロード中 / 完了は
   `note` = Inbox に置いた・プラグインが skip・再生リストを展開した N 件 / 失敗の理由）・時刻・取り消し /
   再試行・Inbox に置いた行だけ「Inbox で確認」）、
-  (3) 購読（P4-16。いまは枠だけ）。`/youtube?url=<URL>` で開くと欄に入れた状態で開く（ブックマークレットの
+  (3) 購読（P4-16、D-78）: 一覧表（アルバムアーティスト / アルバム（category、束ねた album #）・再生リスト
+  （list_id、リンク）・有効・揃える（その場で PATCH）・最終同期・結果 1 行（走行中なら「同期中 / 同期待ち /
+  再試行待ち」を `GET /api/jobs?type=playlist_sync` から、無ければ `last_result` の要約）・「同期」「編集」
+  「削除」）。結果に詳細があれば「詳細」で行を開く（取れない一覧（非公開 / 削除 / 取れない）・別の album に
+  ある・走行中・持ち越し・揃えられない（理由付き）・番号 / 改名のバッチ id と適用 / 衝突 / 失敗）。追加
+  フォーム（URL（`list=` が無ければその場で注意）/ アルバムアーティスト / アルバム / category（語彙から
+  選択、空 = 未分類）/ 揃える / 上限）。編集はアルバムアーティスト / アルバム / category をその行で。
+  削除は確認ダイアログ。SSE job のたびに取り直す。
+  `/youtube?url=<URL>` で開くと欄に入れた状態で開く（ブックマークレットの
   受け口。同一 origin の GET なので CORS / CSRF を触らない。http / https 以外は受けない。README）。
   操作タブの YouTube 節は廃止
 - **設定**: 「表示」（配色: OS に従う / ライト / ダーク。localStorage に保存。P4-10、D-58 追記）、
@@ -2028,6 +2126,7 @@ src/
 │   ├── archive.rs       archived_files 台帳（退避・復元・GC の根拠）
 │   ├── categories.rs    統制語彙（canonical key で一意）
 │   ├── inbox.rs         inbox_items / inbox_files（承認キューの状態機械。D-68）
+│   ├── subscriptions.rs playlist_subscriptions（再生リストの購読。追記先の CAS 束ねと同期の latch。D-78）
 │   ├── playlists.rs  jobs.rs  history.rs
 ├── domain/
 │   ├── identity.rs      inode / audio_md5 による同一性解決
@@ -2074,10 +2173,12 @@ src/
 │   │                    （補正をタグに書いて pathgen::plan の宛先へ。source_type = download。D-68）
 │   └── ytmusic/         metadata.rs（メタデータプラグインのプロトコル v1 と呼び出し。D-69）、
 │                        downloader.rs（yt-dlp の dump / download、remux、タグ、Archive、Inbox への配置と
-│                        spindle-inbox.json。D-70）、sidecar.rs（spindle-inbox.json の読み書き。Inbox と共有）
+│                        spindle-inbox.json。D-70）、sidecar.rs（spindle-inbox.json の読み書き。Inbox と共有）、
+│                        playlist.rs（再生リストの列挙の解釈と番号揃えの計画。純粋。D-78）
 ├── jobs/
-│   ├── queue.rs  worker.rs  recovery.rs  scheduler.rs（backup / gc の周期投入。inbox は handlers/inbox.rs）
-│   └── handlers/
+│   ├── queue.rs  worker.rs  recovery.rs  scheduler.rs（backup / gc の周期投入。inbox は handlers/inbox.rs、
+│   │                        購読の dispatcher は handlers/playlist_sync.rs）
+│   └── handlers/        種別ごと（playlist_sync.rs = 購読の同期: 列挙 → 追記先 → 揃え → 投入。D-78）
 ├── gc/
 │   └── mod.rs           物理削除の唯一の経路。plan（判定・dry-run）と execute_*（5 区分。D-56）
 ├── playlist/
@@ -2087,7 +2188,7 @@ src/
 │   └── export.rs        m3u8 / pls / パスマッピング
 ├── api/
 │   ├── mod.rs  tracks.rs  albums.rs  categories.rs  selection.rs  batch.rs  rename.rs  normalize.rs
-│   │   history.rs  stream.rs  cd.rs  inbox.rs  events.rs
+│   │   history.rs  stream.rs  cd.rs  inbox.rs  events.rs  ytmusic.rs  subscriptions.rs
 │   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
 │   ├── state.rs  error.rs   AppState、`{ "error": code }` 応答
 └── web/                 SPA を rust-embed で同梱

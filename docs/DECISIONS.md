@@ -3080,3 +3080,53 @@ transcode 88 本の終端書き込みが SQLITE_FULL で失敗、`failed` とし
 読む（`TagSet` は大文字化する規約で、FLAC のキーも大文字化して DB に載っている。綴りを残すには
 DB とハッシュの規約を変える必要があり、往復の二重化は削除側を大小文字無視にすれば防げる）。
 
+---
+
+## D-78 再生リストの購読は album を `album_id` で束ね、同期は「列挙 → 揃え → 投入」を毎回 DB から計算し直す
+
+**決定**（2026-09-21、P4-16。SPEC §7.7「再生リストの購読と同期」）:
+- **購読 = 再生リスト 1 本 → Library の album 1 つ**（`playlist_subscriptions`）。追記先の同一性は
+  `album_id`（登録時は NULL。同期か配置が Inbox の追記先と同じ規則（`destination_of`）で引けたときに
+  CAS で束ねる。D-32 で album 全体の移動は id を維持する）。`albumartist` / `album` / `category` は束ねる前の
+  初期値と表示用で、PATCH で変えると NULL に戻る。同じ追記先の購読は 1 つだけ（`target_key` UNIQUE と
+  `album_id` の部分 UNIQUE で DB で閉じる）
+- **同期ジョブの順序は列挙 → 追記先 → 照合 → 番号揃え（tags → rename）→ ytdl 投入**。購読由来の ytdl は
+  `TRACKNUMBER` = 再生リストの位置を書くので、先に既存の行を揃えて隙間を空ける。揃え終わる前の失敗では
+  投入しない
+- **phase は永続化しない。** 各段の前に追記先の active 行に pending の op が無くなるまで待ち、差分は
+  待った後の DB から計算し直す。rename の候補は「現在の `TRACKNUMBER` が目標位置と一致する対象行の全部」
+  で、今回のバッチの applied 集合には依らない
+- **ytdl の dedup `ytdl:<url>` は変えない。** Duplicate は満たしたと数えず「別の投入が走行中」として結果に
+  出すだけ。承認されれば次の同期が Library で拾い、失敗すれば dedup が空いて購読の情報付きで再投入
+- **承認の後続は latch（`sync_requested_at`）+ Requeue + dispatcher。** 配置と手動要求は latch を書いてから
+  投入し、走行中の同期は終わる前に latch を見て `Outcome::Requeue`。handler の最終確認から終端までの窓に
+  立った latch と失敗で残った latch は常駐の dispatcher（30 秒ごと）が回収する。時刻の比較はしない
+- **取れない entry（非公開・削除）は位置を占め続ける。** Library に無ければ「取れない」一覧
+  （`kind: private | deleted | unknown`。現行の yt-dlp は `title: null` で来るので区別できず unknown）。
+  番号揃えもその位置を数えるので番号が飛ぶ。公開に戻れば次の同期で拾う
+- **固定行が番号を塞ぐ。** `SOURCE_URL` 無し・再生リストに無い・`SOURCE_URL` 重複の行は動かさず、その
+  番号への移動は「揃えられない」で報告する。対象同士の swap / cycle は可
+- プラグインが skip / 判定不能でも購読由来なら投入する（再生リストは人が選んだもの）。追記先は購読の値、
+  TITLE / ARTIST はプラグインの判定（無ければ動画タイトルと albumartist）
+- 上限（`max_enqueue`、既定 50）を超えた分は次回に持ち越す。定期同期は `last_attempted_at`（成否を問わない
+  開始時刻）を基準にする（最終 retry が failed になってもバックオフを迂回しない）
+- API は `/api/ytmusic/subscriptions`（TASKS の `/api/playlists/...` から変更。`/api/playlists` は spindle
+  自身の m3u8 プレイリスト）
+
+**理由**: P4-14 で `SOURCE_URL` が揃い「再生リストのどこまで持っているか」が分かるようになったので、URL を
+1 件ずつ貼る運用（P4-13）をなくせる。番号を再生リストの順に揃えたい（P4-15 の要求）が、Library に無い
+動画を正しい番号に挿入して後続をずらす操作は手作業では 3 段階の一括操作になるため、同期の一部として
+`SOURCE_URL` で計算する。設計レビュー（codex）で直した点: (1) 投入が揃えより先だと承認が揃えの前に進み
+番号が重なる、(2) phase を持たない再計算方式は「tags 適用後・rename 前に落ちた」境界を今回の applied 集合に
+頼ると取りこぼす、(3) Duplicate を満たしたと数えると購読の情報の無いジョブに項目を永久に取り違える、
+(4) 承認の後続を「走行中なら Duplicate」で流すと lost wakeup になり、時刻比較は UNIX 秒精度で同秒の要求を
+落とす、handler の最終確認から終端までの窓は generic worker を触らずに dispatcher で閉じる、(5) album を
+毎回パスで解決すると album のタグ変更や layout 変更で別 album を作り得る、(6) `find_source_url` の LIMIT 1 は
+重複 URL を隠す、(7) 定期投入を成功時刻だけで判定すると失敗後にバックオフを迂回する。
+
+**却下**: phase / バッチ id を job payload に永続化して再開（再計算で同じ安全性が得られ、並行する手動
+バッチも同じ経路で扱える）。URL 単位の download ジョブと購読の関連表（同じ動画が複数の購読に出るのは稀で、
+Duplicate を「走行中」として次の同期に任せる規則で足りる）。generic worker の終端トランザクションに購読の
+フックを足す（dispatcher で閉じる方が影響が狭い）。TRACKNUMBER を書かず Inbox の max+1 に任せて配置後に
+揃える（毎回 2 バッチ増える。位置を先に書けば通常は承認の初期値がそのまま正しい）。
+

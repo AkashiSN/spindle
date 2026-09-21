@@ -1,18 +1,22 @@
 // YouTube 画面（SPEC §12.6、D-70 追記、P4-13）: URL を貼って ytdl ジョブに投入し、その行方（ジョブ →
-// Inbox）を同じ画面で追う。購読の節は P4-16 で埋める
+// Inbox）を同じ画面で追う。購読の節（P4-16）は SubscriptionsSection
 
 import type { JobsState } from '../hooks/useJobSummary'
+import type { SubscriptionsState } from '../hooks/useSubscriptions'
 import type { YoutubeState } from '../hooks/useYoutube'
 import { formatDateTime } from '../lib/history'
 import { canCancel, canRetry } from '../lib/jobs'
 import { parseUrlLines, ytdlResultLabel } from '../lib/youtube'
+import { SubscriptionsSection } from './SubscriptionsSection'
 
 export function YoutubeView({
   youtube,
+  subs,
   jobs,
   onOpenInbox,
 }: {
   youtube: YoutubeState
+  subs: SubscriptionsState
   jobs: JobsState
   onOpenInbox: () => void
 }) {
@@ -37,6 +41,7 @@ export function YoutubeView({
         </button>
       </div>
       {error != null && <p className="error">{error}</p>}
+      {subs.error != null && <p className="error">{subs.error}</p>}
 
       <h2>ダウンロード</h2>
       <textarea
@@ -117,10 +122,7 @@ export function YoutubeView({
         </table>
       )}
 
-      <h2>購読</h2>
-      <p className="muted small">
-        再生リストを登録しておくと、無いものだけを自動で取り込む（P4-16 で追加。いまは URL を貼る）
-      </p>
+      <SubscriptionsSection subs={subs} />
     </section>
   )
 }

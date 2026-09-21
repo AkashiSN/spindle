@@ -38,6 +38,7 @@ import { useCdLookup } from './hooks/useCdLookup'
 import { useInbox } from './hooks/useInbox'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
+import { useSubscriptions } from './hooks/useSubscriptions'
 import { OPENED_WITH_URL, useYoutube } from './hooks/useYoutube'
 import { albumsOfRows } from './lib/albumGain'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
@@ -121,6 +122,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const refreshPlaylists = playlists.refresh
   const jobs = useJobSummary(sseOpen)
   const youtube = useYoutube(sseOpen && view === 'youtube')
+  const subs = useSubscriptions(sseOpen && view === 'youtube')
   // 履歴は画面を開いたときに取り、開いている間は batch イベントで取り直す
   const history = useHistory(sseOpen && view === 'history')
   /** ジョブ / 設定画面から「バッチ #n」で飛んできたときに開くバッチ */
@@ -223,6 +225,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     onJob: (e) => {
       jobs.refresh()
       youtube.refresh()
+      subs.refresh()
       if (e.state === 'done' || e.state === 'failed') scheduleRowRefresh()
       // inbox ジョブの完了は件の状態（走査の結果、placed / failed）を変える。job イベントに種別は
       // 無いので、Inbox を開いている間は完了のたびに取り直す（hook 側で 250ms に間引く）
@@ -557,7 +560,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         ) : view === 'cd' ? (
           <CdView cd={cd} />
         ) : view === 'youtube' ? (
-          <YoutubeView youtube={youtube} jobs={jobs} onOpenInbox={() => setView('inbox')} />
+          <YoutubeView youtube={youtube} subs={subs} jobs={jobs} onOpenInbox={() => setView('inbox')} />
         ) : view === 'jobs' ? (
           <JobsView
             jobs={jobs}

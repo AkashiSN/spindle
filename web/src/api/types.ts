@@ -272,3 +272,72 @@ export type RefreshResponse = { count: number; changed: boolean }
 /** 書き出しプロファイル名（`export_profiles` の seed。CRUD は P1-8） */
 export const EXPORT_PROFILES = ['internal', 'foobar', 'android'] as const
 export type ExportProfileName = (typeof EXPORT_PROFILES)[number]
+
+// ---------------------------------------------------------------- 再生リストの購読（P4-16、D-78）
+
+export type UnavailableKind = 'private' | 'deleted' | 'unknown'
+
+export type SyncBatch = { batch_id: number; applied: number; conflict: number; failed: number }
+
+export type SyncBlocked = {
+  track_id: number
+  position: number
+  current_no: number | null
+  reason:
+    | { kind: 'number_taken'; by_track_id: number }
+    | { kind: 'duplicate_source_url' }
+    | { kind: 'other_disc'; disc_no: number }
+}
+
+export type SyncAlign = {
+  moved: number
+  unchanged: number
+  blocked: SyncBlocked[]
+  outsiders: number
+  unnumbered: number
+  tags?: SyncBatch
+  renamed: number
+  rename?: SyncBatch
+}
+
+/** 最終同期の結果（`playlist_subscriptions.last_result`） */
+export type SyncResult = {
+  state: 'done' | 'failed' | 'cancelled'
+  error?: string
+  synced_at: number
+  title?: string
+  entries: number
+  playlist_count?: number
+  album_id?: number
+  in_library: number
+  in_inbox: number
+  elsewhere: { position: number; id: string; track_id: number; rel_path: string }[]
+  enqueued: number[]
+  running: number[]
+  deferred: number
+  unavailable: { position: number; id: string; kind: UnavailableKind }[]
+  align?: SyncAlign
+}
+
+export interface Subscription {
+  id: number
+  list_id: string
+  url: string
+  album_id: number | null
+  albumartist: string
+  album: string
+  category: string | null
+  align: boolean
+  enabled: boolean
+  max_enqueue: number
+  created_at: number
+  updated_at: number
+  last_attempted_at: number | null
+  last_synced_at: number | null
+  sync_requested_at: number | null
+  last_result: SyncResult | null
+}
+
+export interface SubscriptionList {
+  items: Subscription[]
+}

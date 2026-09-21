@@ -15,6 +15,8 @@ const TYPE_LABEL: Record<string, string> = {
   flaccheck: 'FLAC 検査',
   hirescheck: '偽ハイレゾ検出',
   inbox: 'Inbox 取り込み',
+  ytdl: 'YouTube ダウンロード',
+  playlist_sync: '再生リストの同期',
   gc: 'GC',
   backup: 'バックアップ',
 }

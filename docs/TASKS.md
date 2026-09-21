@@ -1141,8 +1141,12 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       1 アルバムを dry-run → CSV 確認 → apply → `SOURCE_URL` が付き、同じ URL の再ダウンロードが
       「取り込み済み（Library）」で拒否される
 
-- [ ] **P4-16** 再生リストの購読と同期（P4-15「番号を再生リストの順に揃える」を吸収。設計は着手時に行う。
-      SPEC §7.7 に節を足し、D-xx に記録）。`SOURCE_URL`（P4-14）で「再生リストのどこまで持っているか」が
+- [x] **P4-16** 再生リストの購読と同期（2026-09-21。P4-15「番号を再生リストの順に揃える」を吸収。
+      SPEC §7.7「再生リストの購読と同期」、D-78。設計は codex レビューで 4 点の P1 を直した: 順序は
+      列挙 → 揃え → 投入、phase 非永続の再計算（rename の候補は番号の合った行の全部）、Duplicate は
+      「走行中」扱い、latch + Requeue + dispatcher、`album_id` の CAS 束ね。API は
+      `/api/ytmusic/subscriptions`（下記の `/api/playlists/...` から変更）。(2') の「非公開 / 削除の別」は
+      現行 yt-dlp では出力から付かないので `kind: private | deleted | unknown` の hint に読み替え）。`SOURCE_URL`（P4-14）で「再生リストのどこまで持っているか」が
       分かるので、URL を貼る運用をなくす。
       (1) **購読**: 新しいマイグレーションで `playlist_subscriptions`（`list_id` / URL / 追記先 `album_id`
       （無ければ `albumartist` + `album` で作る）/ `enabled` / `last_synced_at` / 最終結果）。API は

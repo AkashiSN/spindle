@@ -54,6 +54,20 @@ URL を貼る手間を減らすブックマークレット（ブックマーク�
   javascript:(()=>{const s=new Set([...document.querySelectorAll('a[href*="/watch?v="]')].map(a=>new URL(a.href).searchParams.get('v')).filter(Boolean));navigator.clipboard.writeText([...s].map(v=>'https://www.youtube.com/watch?v='+v).join('\n')).then(()=>alert(s.size+' 件をコピーした'))})()
   ```
 
+### 再生リストの購読
+
+アーティストごとに再生リストを 1 本ずつ持っているなら、URL を貼るかわりに YouTube 画面の「購読」に
+登録する（再生リストの URL + 追記先のアルバムアーティスト / アルバム / category）。「同期」を押すと
+（`config.toml` の `[ytmusic].sync_interval_hours` を 0 以外にすれば定期的にも）、再生リストを列挙して
+
+1. 既に Library にある曲の `TRACKNUMBER` とファイル名を再生リストの位置に揃え（履歴に載り巻き戻せる）、
+2. Library にも Inbox にも無い動画だけを位置付きでダウンロードして Inbox に置く（1 回の上限は既定 50 本）。
+
+承認は今までどおり Inbox で行う（初期値の番号がそのまま位置）。配置されると自動でもう一度同期が走り、
+番号を揃え直す。非公開・削除になった動画は位置を占め続けるので、その番号は飛ぶ（購読の結果に「取れない」
+として出る。公開に戻れば次の同期で拾う）。`SOURCE_URL` の無い曲や再生リストに無い曲は触らない（その番号に
+入るべき曲は「揃えられない」として出るので、手で直す）。
+
 YouTube に弾かれるようになったら、まず yt-dlp を新しくする（イメージの更新）。それでも駄目なら
 `config.toml` の `[ytmusic].ytdlp_args` に `--extractor-args` や `--cookies` を渡す（`sh -c` は使わない
 ので配列。UA / Referer は付けない）。
