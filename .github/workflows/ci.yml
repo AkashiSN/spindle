@@ -29,7 +29,7 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: web-dist
           path: web/dist
@@ -185,7 +185,7 @@ jobs:
       - name: 起動確認に通ったイメージを publish ジョブへ渡す（push イベントだけ）
         if: github.event_name == 'push'
         run: docker save spindle:ci | zstd -T0 -3 -o image.tar.zst
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: github.event_name == 'push'
         with:
           name: image
@@ -205,7 +205,7 @@ jobs:
       contents: write     # vX.Y.Z の Release
       packages: write     # GHCR
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: image
       - name: GHCR へ複製（全タグ同じ digest）
