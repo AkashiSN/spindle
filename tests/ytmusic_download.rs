@@ -1045,3 +1045,28 @@ async fn subscription_download_falls_back_when_the_subscription_is_gone() {
     let s = Sidecar::read(&lib.inbox, &dir).unwrap().unwrap();
     assert_eq!(s.files["20260901 Song One [v1].opus"].subscription_id, None);
 }
+
+/// 束ねた album の category が未推定（NULL）なら購読の category を使う（宛先のディレクトリは category で決まる）
+#[tokio::test]
+async fn subscription_download_uses_the_bound_album_but_falls_back_to_its_own_category() {
+    let lib = lib!();
+    lib.video(U1, "v1", "KnownCh", "Song One", true);
+    let sub = subscribe(&lib, "Old Artist", "Old Album", Some("Rock"), true).await;
+    lib.conn()
+        .execute_batch(
+            "INSERT INTO albums (id, rel_dir, rel_dir_key, albumartist, album) VALUES (5, 'Rock/New Artist/New Album', 'rock/new artist/new album', 'New Artist', 'New Album');",
+        )
+        .unwrap();
+    assert_eq!(
+        spindle::db::subscriptions::bind_album(&lib.conn(), sub, 5).unwrap(),
+        spindle::db::subscriptions::BindOutcome::Bound
+    );
+    lib.start();
+    let (id, st) = run_for(&lib, U1, sub, 2).await;
+    assert_eq!(st, JobState::Done, "{:?}", lib.job(id));
+    let p = lib.inbox_path("youtube/New Artist/New Album/20260901 Song One [v1].opus");
+    assert!(p.exists(), "{}", p.display());
+    let dir = spindle::domain::relpath::RelPath::parse("youtube/New Artist/New Album").unwrap();
+    let s = Sidecar::read(&lib.inbox, &dir).unwrap().unwrap();
+    assert_eq!(s.category.as_deref(), Some("Rock"));
+}

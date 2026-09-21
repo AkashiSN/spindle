@@ -122,10 +122,11 @@ pub fn subscription_target(
         None => None,
     };
     Ok(Some(match bound {
+        // album 行の category が未推定（NULL）なら購読の値（宛先のディレクトリは category で決まる）
         Some((aa, al, cat)) => SubscriptionTarget {
             albumartist: aa.filter(|s| !s.is_empty()).unwrap_or(sub.albumartist),
             album: al.filter(|s| !s.is_empty()).unwrap_or(sub.album),
-            category: cat,
+            category: cat.or(sub.category),
             align: sub.align,
         },
         None => SubscriptionTarget {
