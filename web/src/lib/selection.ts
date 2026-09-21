@@ -84,6 +84,25 @@ export function clickRow(
   return { kind: 'ids', ids: new Set([id]), anchor: id }
 }
 
+/**
+ * キーボードの Shift + 移動（P4-17）。anchor からカーソル行までの範囲 **そのもの** に置き換える
+ * （縮む。クリックの Shift が「足す」のと違い、foobar2000 / Explorer の Shift + 矢印と同じ）。
+ * Ctrl で足した飛び地は消える。filter 形（Ctrl+A）は ids 形の範囲に置き換える。
+ * 選択に anchor が無ければ（Ctrl+A / Esc の直後）移動前のカーソル行 `cursor` を anchor にする。
+ * それも無い・表示から消えているときはその 1 件
+ */
+export function rangeSelect(
+  sel: Selection,
+  id: number,
+  order: VisibleOrder,
+  cursor: number | null = null,
+): Selection {
+  const anchor = (sel.kind === 'none' ? null : sel.anchor) ?? cursor
+  const range = anchor == null ? null : rangeIds(order, anchor, id)
+  if (!range || anchor == null) return { kind: 'ids', ids: new Set([id]), anchor: id }
+  return { kind: 'ids', ids: new Set(range), anchor }
+}
+
 /** Ctrl+A。表示中のフィルタ式を **その時点の値で** 固定する */
 export function selectAll(filterParam: string): Selection {
   return { kind: 'filter', filter: filterParam, excludeIds: new Set(), anchor: null }

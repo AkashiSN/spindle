@@ -3,6 +3,7 @@ import {
   clickRow,
   isSelected,
   NO_SELECTION,
+  rangeSelect,
   selectAll,
   selectionCount,
   settleFilterTotal,
@@ -114,5 +115,55 @@ describe('filter 形', () => {
   it('素のクリックは filter 形を捨てて ids 形にする', () => {
     const s = clickRow(selectAll(''), 30, plain, order)
     expect(ids(s)).toEqual([30])
+  })
+})
+
+describe('rangeSelect', () => {
+  it('選択が無ければその 1 件（anchor もそこ）', () => {
+    const s = rangeSelect(NO_SELECTION, 30, order)
+    expect(ids(s)).toEqual([30])
+    expect(rangeSelect(s, 50, order)).toMatchObject({ anchor: 30 })
+  })
+
+  it('anchor からカーソルまでの範囲そのものに置き換える（縮む。クリックの Shift と違って足さない）', () => {
+    let s = clickRow(NO_SELECTION, 20, plain, order)
+    s = rangeSelect(s, 40, order)
+    expect(ids(s)).toEqual([20, 30, 40])
+    s = rangeSelect(s, 30, order)
+    expect(ids(s)).toEqual([20, 30])
+    s = rangeSelect(s, 10, order)
+    expect(ids(s)).toEqual([10, 20]) // 逆方向。anchor は動かない
+    expect(s).toMatchObject({ anchor: 20 })
+  })
+
+  it('Ctrl で足した飛び地は範囲に置き換えると消える', () => {
+    let s = clickRow(NO_SELECTION, 20, plain, order)
+    s = clickRow(s, 50, ctrl, order) // anchor は 50
+    s = rangeSelect(s, 30, order)
+    expect(ids(s)).toEqual([30, 40, 50])
+  })
+
+  it('anchor が表示から消えていたらその 1 件', () => {
+    const s = clickRow(NO_SELECTION, 20, plain, order)
+    expect(ids(rangeSelect(s, 40, [30, 40, 50]))).toEqual([40])
+  })
+
+  it('filter 形（Ctrl+A）は ids 形の範囲に置き換える', () => {
+    let s: Selection = { kind: 'filter', filter: 'q', excludeIds: new Set(), anchor: 20 }
+    expect(ids(rangeSelect(s, 40, order))).toEqual([20, 30, 40])
+    s = selectAll('q') // anchor 無し
+    expect(ids(rangeSelect(s, 40, order))).toEqual([40])
+  })
+
+  it('anchor が無ければ移動前のカーソル行を anchor にする（Ctrl+A や Esc の直後）', () => {
+    const s = rangeSelect(selectAll('q'), 40, order, 20)
+    expect(ids(s)).toEqual([20, 30, 40])
+    expect(s).toMatchObject({ anchor: 20 })
+    expect(ids(rangeSelect(NO_SELECTION, 30, order, 50))).toEqual([30, 40, 50])
+    // カーソルも無ければその 1 件
+    expect(ids(rangeSelect(NO_SELECTION, 30, order, null))).toEqual([30])
+    // 選択に anchor があればそちらが優先
+    const t = clickRow(NO_SELECTION, 10, plain, order)
+    expect(ids(rangeSelect(t, 30, order, 50))).toEqual([10, 20, 30])
   })
 })

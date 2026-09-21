@@ -3,7 +3,8 @@
 // 行データは先頭から順に積まれる（hooks/useTracks）。仮想化の count は `total` なので、
 // 未読込の index は骨組みの行を描き、その index まで読むよう `ensure` を呼ぶ。
 // TanStack Table に渡す data は **表示中の窓だけ**（6 万行の Row オブジェクトを作り直さない）。
-// 選択はこのコンポーネントの外（lib/selection.ts）が持ち、ここは見え方とクリックの通知だけ
+// 選択はこのコンポーネントの外（lib/selection.ts）が持ち、ここは見え方とクリック・キーの通知だけ。
+// キーボードのカーソル行（P4-17）だけはここが持つ（選択とは別。見た目と移動の起点にすぎない）
 
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
@@ -24,6 +25,7 @@ import type { Sort, SortKey } from '../lib/filter'
 import { formatArtistAlbum, formatDuration, formatTitleArtist, formatTrackNo } from '../lib/format'
 import { cellDiff, COLUMN_TAG, formatValues, type PreviewState } from '../lib/preview'
 import { dropTarget, parseDragIds, serializeDragIds, TRACK_DRAG_TYPE, type DropHalf } from '../lib/playlists'
+import { asNavKey, moveCursor } from '../lib/keynav'
 import type { ClickModifiers, Selection, VisibleOrder } from '../lib/selection'
 import { isSelected } from '../lib/selection'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
@@ -157,6 +159,8 @@ export type TrackTableProps = {
   /** filter 形の選択をハイライトしてよいか（表示フィルタが選択時と同じとき。D-40） */
   highlightFilterSelection: boolean
   onRowClick: (id: number, mods: ClickModifiers, order: VisibleOrder) => void
+  /** Shift + 移動キー: anchor（無ければ移動前のカーソル行 `from`）からカーソル行までの範囲そのものに置き換える（P4-17） */
+  onRangeSelect: (id: number, order: VisibleOrder, from: number | null) => void
   onSelectAll: () => void
   onClearSelection: () => void
   /** 表示中の末尾 index（無効化時に取り直す件数の目安） */
@@ -238,11 +242,15 @@ export function TrackTable(props: TrackTableProps) {
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const count = total ?? rows.length
+  // tbody の前に sticky のヘッダ（1 行ぶん）がある。scrollMargin で行の座標をスクロール要素に合わせ、
+  // scrollPaddingStart で scrollToIndex がヘッダの下に行を出す
   const virtualizer = useVirtualizer({
     count,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 12,
+    scrollMargin: ROW_HEIGHT,
+    scrollPaddingStart: ROW_HEIGHT,
   })
   const items = virtualizer.getVirtualItems()
   const first = items[0]?.index ?? 0
@@ -280,28 +288,59 @@ export function TrackTable(props: TrackTableProps) {
 
   const order: VisibleOrder = useMemo(() => rows.map((r) => r.id), [rows])
   const showFilterHighlight = selection.kind !== 'filter' || highlightFilterSelection
+  // キーボードのカーソル行（id で持つ。ソート・フィルタで行が入れ替わっても別の行を指さない）
+  const [cursorId, setCursorId] = useState<number | null>(null)
   const handleRowClick = useCallback(
     (e: MouseEvent, id: number) => {
       e.preventDefault()
+      setCursorId(id)
       props.onRowClick(id, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey }, order)
     },
     [order, props],
   )
 
-  // キーボード: Ctrl+A（フィルタ形の全選択）、Esc（解除）、Delete（プレイリスト scope で選択を除外）
+  // キーボード（SPEC §12.2「キーボード」）: Ctrl+A（フィルタ形の全選択）、Esc（解除）、Delete（プレイリスト
+  // scope で選択を除外）、移動キー（P4-17: 素の移動 = その行だけ選択、Shift = anchor からの範囲、Ctrl = カーソルだけ）、
+  // Space（カーソル行をトグル）
   const handleKey = useCallback(
     (e: React.KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      const ctrl = e.ctrlKey || e.metaKey
+      if (ctrl && e.key.toLowerCase() === 'a') {
         e.preventDefault()
         props.onSelectAll()
-      } else if (e.key === 'Escape') {
+        return
+      }
+      if (e.key === 'Escape') {
         props.onClearSelection()
-      } else if (e.key === 'Delete' && props.playlist && selection.kind !== 'none') {
+        return
+      }
+      if (e.key === 'Delete' && props.playlist && selection.kind !== 'none') {
         e.preventDefault()
         props.playlist.onRemoveSelected()
+        return
       }
+      if (e.key === ' ') {
+        if (cursorId == null) return
+        e.preventDefault()
+        props.onRowClick(cursorId, { shift: false, ctrl: true }, order)
+        return
+      }
+      const nav = asNavKey(e.key)
+      if (!nav) return
+      e.preventDefault() // 既定のスクロールを止め、カーソルの移動で追随させる
+      const el = scrollRef.current
+      const pageRows = el ? Math.floor(el.clientHeight / ROW_HEIGHT) - 1 : 1
+      const cur = cursorId == null ? -1 : order.indexOf(cursorId)
+      const next = moveCursor(nav, cur < 0 ? null : cur, rows.length, pageRows)
+      if (next == null) return
+      const id = order[next]
+      if (id == null) return
+      setCursorId(id)
+      virtualizer.scrollToIndex(next, { align: 'auto' })
+      if (e.shiftKey) props.onRangeSelect(id, order, cursorId)
+      else if (!ctrl) props.onRowClick(id, { shift: false, ctrl: false }, order)
     },
-    [props, selection.kind],
+    [props, selection.kind, cursorId, order, rows.length, virtualizer],
   )
 
   // 行のドラッグ（P1-6）: 掴んだ行が選択に入っていれば選択中の行（表示順）、そうでなければその 1 行
@@ -484,7 +523,7 @@ export function TrackTable(props: TrackTableProps) {
                   <div
                     key={`skeleton-${item.index}`}
                     className="tr skeleton"
-                    style={{ transform: `translateY(${item.start}px)`, height: ROW_HEIGHT }}
+                    style={{ transform: `translateY(${item.start - ROW_HEIGHT}px)`, height: ROW_HEIGHT }}
                   />
                 )
               }
@@ -498,6 +537,7 @@ export function TrackTable(props: TrackTableProps) {
               const cls = [
                 'tr',
                 selected ? 'selected' : '',
+                cursorId === track.id ? 'cursor' : '',
                 track.pending_batch_id != null ? 'pending' : '',
                 track.missing_since != null ? 'missing' : '',
                 previewUnchanged ? 'preview-unchanged' : '',
@@ -512,7 +552,7 @@ export function TrackTable(props: TrackTableProps) {
                   aria-selected={selected}
                   aria-disabled={track.pending_batch_id != null}
                   className={cls}
-                  style={{ transform: `translateY(${item.start}px)`, height: ROW_HEIGHT }}
+                  style={{ transform: `translateY(${item.start - ROW_HEIGHT}px)`, height: ROW_HEIGHT }}
                   onClick={(e) => handleRowClick(e, track.id)}
                   draggable={editing == null}
                   onDragStart={(e) => {

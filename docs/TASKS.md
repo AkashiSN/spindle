@@ -1192,6 +1192,16 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       一致なら変更なし）、`tests/inbox_api.rs`（購読由来の件の初期値）、
       `web/src/lib/subscriptions.test.ts`、リハーサル環境で 9 本を登録 → 同期 → 未取り込みの 3 本だけ Inbox に
       来る → 承認 → 番号とファイル名が再生リストの順に揃う → 再同期で「変更なし」
+- [x] **P4-17** 一覧のキーボード操作（2026-09-22。SPEC §12.2「キーボード」、D-80）。表にフォーカスがあるとき
+      ↓ / ↑ / PageDown / PageUp / Home / End でカーソル行を動かし、素の移動はその行だけを選択、**Shift + 移動は
+      anchor からカーソルまでの範囲そのもの**（縮む）、Ctrl + 移動はカーソルだけ、Space はカーソル行のトグル。
+      クリックもカーソルを置く。カーソルは読み込み済みの行の中でだけ動く（未読込の骨組み行は id が無い。
+      末尾に着くと次のページが読まれるので End を繰り返せば進む）。仮想化は sticky ヘッダぶんの `scrollMargin`
+      / `scrollPaddingStart` で `scrollToIndex` がヘッダの下に行を出す。
+      受け入れ: `web/src/lib/keynav.test.ts`（端で止まる、Page は 1 画面、カーソル無しの起点、読み込み済みの外へ
+      出ない）、`web/src/lib/selection.test.ts`（`rangeSelect`: 縮む、飛び地が消える、filter 形は ids 形へ、anchor
+      が無ければ移動前のカーソル行）、dev サーバ + 実機 API でブラウザ確認（ヘッダ直下 / 下端に揃う、Ctrl+A →
+      Shift+↑、Esc → Shift+↓）
 
 ## 着手前に確認が必要な残課題
 

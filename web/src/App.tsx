@@ -55,6 +55,7 @@ import {
 } from './lib/filter'
 import {
   clickRow,
+  rangeSelect,
   isSelected,
   NO_SELECTION,
   selectAll,
@@ -259,6 +260,9 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     },
     [filterParam],
   )
+  const handleRangeSelect = useCallback((id: number, order: VisibleOrder, from: number | null) => {
+    setSelection((prev) => rangeSelect(prev, id, order, from))
+  }, [])
   const handleSelectAll = useCallback(() => {
     setSelection(selectAll(filterParam))
     // 1 ページ目が届く前なら null。同じフィルタの total が届いた時点で下の effect が一度だけ確定する
@@ -528,6 +532,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             selection={selection}
             highlightFilterSelection={selection.kind === 'filter' && selection.filter === filterParam}
             onRowClick={handleRowClick}
+            onRangeSelect={handleRangeSelect}
             onSelectAll={handleSelectAll}
             onClearSelection={clearSelection}
             onRangeChange={handleRange}
