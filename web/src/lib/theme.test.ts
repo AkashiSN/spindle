@@ -76,7 +76,8 @@ describe('index.css の配色', () => {
     for (let m = re.exec(css); m != null; m = re.exec(css)) {
       blocks.push({ header: m[1]!.trim(), body: m[2]! })
     }
-    const colour = /#[0-9a-fA-F]{3,8}\b|\brgba?\(/
+    // 色の関数（rgb / hsl / oklch …）と名前付きの色も直書きとみなす（transparent / inherit / currentColor は色ではない）
+    const colour = /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|oklch|oklab|lab|lch|color)\(|(?::|\s)(?:white|black|red|green|blue|gray|grey|orange|yellow|silver|navy|teal|purple|pink)(?=[\s;,)])/
     const isVarBlock = (h: string) => h === ':root' || h === ":root[data-theme='dark']"
     const offenders = blocks.filter((b) => !isVarBlock(b.header) && colour.test(b.body)).map((b) => b.header)
     expect(offenders).toEqual([])
@@ -91,7 +92,7 @@ describe('index.css の配色', () => {
       const i = css.indexOf(header + ' {')
       expect(i, header).toBeGreaterThanOrEqual(0)
       const body = css.slice(i, css.indexOf('}', i))
-      return new Set([...body.matchAll(/(--[a-z0-9-]+):\s*(#|rgba?\()/g)].map((m) => m[1]!))
+      return new Set([...body.matchAll(/(--[a-z0-9-]+):\s*(#|rgba?\(|hsla?\(|oklch\()/g)].map((m) => m[1]!))
     }
     const light = vars(':root')
     const dark = vars(":root[data-theme='dark']")
