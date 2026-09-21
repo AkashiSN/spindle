@@ -10,8 +10,8 @@ TRACKNUMBER」でファイルを並べていた。その再生リストを yt-dl
   usage:
     ./backfill_source_url.py --playlists ~/.local/share/spindle/backfill/playlists.tsv \
         --spindle http://truenas:8080 --out ~/.local/share/spindle/backfill/plan
-    ./backfill_source_url.py ... --apply                 # verified + position-only を書く
-    ./backfill_source_url.py ... --apply --include-mismatch
+    ./backfill_source_url.py ... --apply                 # verified / verified-by-title / position-only を書く
+    ./backfill_source_url.py ... --apply --include-inferred   # plan.csv の verified-by-neighbors を見てから
     ./backfill_source_url.py ... --only "存流のお歌"      # 1 アルバムだけ
 
   入力 TSV（リポジトリには置かない）: albumartist<TAB>album<TAB>再生リスト URL。`#` 行は無視。
@@ -22,7 +22,8 @@ TRACKNUMBER」でファイルを並べていた。その再生リストを yt-dl
     verified           位置が合い、動画タイトルに Library のタイトルが含まれる
     verified-by-title  位置は合わないが、未割り当ての行の中でタイトルが合う（順の入れ替え・欠落によるずれ。
                        候補が複数なら期待位置に最も近い行）
-    verified-by-neighbors  タイトルでは判定できない（英題など）が、両隣が位置どおりで区間の行数も合う
+    verified-by-neighbors  タイトルでは判定できない（英題など）が、両隣が同じずれ幅で対応し区間の行数も合う。
+                       区間内の入れ替えは検出できないので既定では書かず、--include-inferred で明示する
     position-only      非公開 / 削除でタイトルが無い（位置だけで対応付け）
     title-mismatch     どれにも当てはまらない。人が見る（--include-mismatch は位置の行に書く。ずれの
                        後ろでは誤るので、plan.csv を見てから）
@@ -131,7 +132,7 @@ def match_length(video_title: str, library_title: str) -> int:
     cand = normalize_title(library_title)
     while cand:
         compact = cand.replace(" ", "")
-        if compact and compact in video:
+        if compact and _bounded_in(compact, video):
             return len(compact)
         stripped = _SUFFIX.sub("", cand).strip()
         if stripped == cand:
@@ -140,6 +141,27 @@ def match_length(video_title: str, library_title: str) -> int:
             break
         cand = stripped
     return 0
+
+
+def _is_word_char(c: str) -> bool:
+    """ASCII 英数字と数字（全角は NFKC で半角になっている）。日本語は境界を要求しない"""
+    return c.isascii() and c.isalnum()
+
+
+def _bounded_in(needle: str, hay: str) -> bool:
+    """`needle` が `hay` に含まれ、両端が ASCII 英数字なら隣も英数字でない（`曲1` が `曲10` に、
+    `a` が `abc` に一致しない）"""
+    start = 0
+    while True:
+        i = hay.find(needle, start)
+        if i < 0:
+            return False
+        end = i + len(needle)
+        left_ok = not (_is_word_char(needle[0]) and i > 0 and _is_word_char(hay[i - 1]))
+        right_ok = not (_is_word_char(needle[-1]) and end < len(hay) and _is_word_char(hay[end]))
+        if left_ok and right_ok:
+            return True
+        start = i + 1
 
 
 def title_matches(video_title: str, library_title: str) -> bool:
@@ -282,8 +304,12 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
     return rows
 
 
-def rows_to_apply(rows: list[dict], include_mismatch: bool) -> dict[int, str]:
-    ok = {"verified", "verified-by-title", "verified-by-neighbors", "position-only"}
+def rows_to_apply(rows: list[dict], include_mismatch: bool, include_inferred: bool = False) -> dict[int, str]:
+    """書く行。verified-by-neighbors（位置推定）は区間内の入れ替えや欠落 + 追加の相殺を検出できないので、
+    plan.csv を見てから --include-inferred で明示したときだけ書く"""
+    ok = {"verified", "verified-by-title", "position-only"}
+    if include_inferred:
+        ok.add("verified-by-neighbors")
     if include_mismatch:
         ok.add("title-mismatch")
     return {
@@ -353,7 +379,9 @@ class Spindle:
 def dump_playlist(ytdlp: str, url: str, path: str, refresh: bool) -> dict:
     if os.path.exists(path) and not refresh:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            dump = json.load(f)
+        _reject_truncated(dump)
+        return dump
     # `--ytdlp` は前置き付きでもよい（例 "ssh host sudo docker exec spindle yt-dlp"）。`sh -c` は使わない。
     # ssh 越しは相手のシェルがもう一度解釈する（URL の `?` が glob になる）ので引数を quote する
     prefix = shlex.split(ytdlp)
@@ -365,14 +393,18 @@ def dump_playlist(ytdlp: str, url: str, path: str, refresh: bool) -> dict:
     if res.returncode != 0:
         raise SystemExit(f"yt-dlp が失敗 ({res.returncode}): {res.stderr.strip()[-500:]}")
     dump = json.loads(res.stdout)
-    if playlist_truncated(dump):
-        raise SystemExit(
-            f"yt-dlp が再生リストを途中までしか列挙できなかった（{len(dump.get('entries') or [])}/{dump.get('playlist_count')}）。"
-            " yt-dlp を更新するか --ytdlp で新しい版を指す"
-        )
+    _reject_truncated(dump)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(dump, f, ensure_ascii=False, indent=1)
     return dump
+
+
+def _reject_truncated(dump: dict) -> None:
+    if playlist_truncated(dump):
+        raise SystemExit(
+            f"yt-dlp が再生リストを途中までしか列挙できなかった（{len(dump.get('entries') or [])}/{dump.get('playlist_count')}）。"
+            " yt-dlp を更新するか --ytdlp で新しい版を指す（保存済みの dump なら --refresh で取り直す）"
+        )
 
 
 def find_album(albums: list[dict], albumartist: str, album: str) -> dict | None:
@@ -392,7 +424,8 @@ def main() -> int:
     ap.add_argument("--only", help="この album だけ（TSV の album 列）")
     ap.add_argument("--refresh", action="store_true", help="保存済みの dump を使わず取り直す")
     ap.add_argument("--apply", action="store_true", help="計画を編集バッチとして投入する")
-    ap.add_argument("--include-mismatch", action="store_true", help="title-mismatch も書く")
+    ap.add_argument("--include-inferred", action="store_true", help="verified-by-neighbors（位置推定）も書く。plan.csv を見てから")
+    ap.add_argument("--include-mismatch", action="store_true", help="title-mismatch も書く（位置の行に）")
     args = ap.parse_args()
 
     password = os.environ.get("SPINDLE_PASSWORD")
@@ -432,14 +465,17 @@ def main() -> int:
         all_rows.extend(rows)
 
         if args.apply:
-            targets = rows_to_apply(rows, args.include_mismatch)
+            targets = rows_to_apply(rows, args.include_mismatch, args.include_inferred)
             if not targets:
                 summary.append(f"[{album}] 書くものが無い")
                 continue
             ops = [{"op": "set_rows", "key": "SOURCE_URL", "rows": {str(k): v for k, v in targets.items()}}]
             pv = api.preview(sorted(targets), ops)
             if pv.get("pending_excluded"):
-                summary.append(f"[{album}] 反映待ちで除外 {pv['pending_excluded']} 件（後でやり直す）")
+                # apply は反映待ちがあると 409 で拒む（skip_pending で除外もできるが、補填は急がないので
+                # 全部そろってからやり直す）
+                summary.append(f"[{album}] 反映待ちの行が {pv['pending_excluded']} 件あるので見送り（終わってからやり直す）")
+                continue
             if not pv.get("changed"):
                 summary.append(f"[{album}] preview で変更なし（既に同じ値）")
                 continue

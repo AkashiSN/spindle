@@ -1,8 +1,12 @@
 """backfill_source_url.py の対応付けと判定（P4-14）。`python3 -m unittest scripts/test_backfill_source_url.py`"""
 
+import os
+import sys
 import unittest
 
-from backfill_source_url import (
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from backfill_source_url import (  # noqa: E402
     build_plan,
     normalize_title,
     parse_playlists_tsv,
@@ -78,11 +82,21 @@ class TitleMatching(unittest.TestCase):
 
     def test_nested_brackets_in_suffix_and_curly_quotes(self):
         self.assertTrue(title_matches("花譜「何者 -みんなで創る神椿幕張戦線MV-」【「怪歌(再)」Live Ver.】", "何者 【怪歌(再) Live ver.】"))
-        self.assertTrue(title_matches("Can’t Wait ’Til Christmas - 宇多田ヒカル Covered by 理芽", "Can't Wait' Til Christmas (Cover)") or True)
+        self.assertTrue(title_matches("Can’t Wait ’Til Christmas - 宇多田ヒカル Covered by 理芽", "Can't Wait' Til Christmas (Cover)"))
         self.assertEqual(normalize_title("Can’t “x” ‘y’"), "can't \"x\" 'y'")
 
     def test_spaces_are_ignored_when_comparing(self):
         self.assertTrue(title_matches("花譜 # 140「ゲシュタルト-崩壊Remix-」【オリジナルMV】", "ゲシュタルト -崩壊Remix-"))
+
+    def test_ascii_and_digit_matches_need_word_boundaries(self):
+        # 「曲 1」が「曲 10」に、「a」が「abc」に一致してはいけない
+        self.assertFalse(title_matches("曲 10 / A", "曲 1"))
+        self.assertFalse(title_matches("abc", "a"))
+        self.assertFalse(title_matches("Rumor2 covered by X", "Rumor"))
+        self.assertTrue(title_matches("曲 1 / A", "曲 1"))
+        self.assertTrue(title_matches("Rumor - ポリスピカデリー covered by 存流", "Rumor (Cover)"))
+        # 日本語は境界を要求しない（1 文字の題名もある）
+        self.assertTrue(title_matches("花譜 # 112「糸」【Live Ver.】", "糸"))
 
     def test_library_title_without_suffix_is_substring_of_video_title(self):
         self.assertTrue(title_matches("【歌ってみた】新世界ピグマリオン / VALIS", "新世界ピグマリオン"))
@@ -234,6 +248,33 @@ class Plan(unittest.TestCase):
         self.assertEqual({r["track_no"]: r["status"] for r in rows}, {1: "verified", 2: "kept"})
         self.assertEqual(rows_to_apply(rows, include_mismatch=True), {1: "https://www.youtube.com/watch?v=v1"})
 
+    def test_inferred_rows_are_opt_in_because_swaps_inside_a_run_are_invisible(self):
+        # 区間内で English Two / English Three が入れ替わっていても両端のずれ幅は同じで、位置推定は
+        # 気づけない。だから verified-by-neighbors は既定では書かず --include-inferred で明示する
+        entries = [entry("v1", "曲 1 / A"), entry("v3", "English Three"), entry("v2", "English Two"), entry("v4", "曲 4 / A")]
+        tracks = [track(1, 1, "曲 1"), track(2, 2, "邦題二"), track(3, 3, "邦題三"), track(4, 4, "曲 4")]
+        rows = build_plan("A", entries, tracks)
+        by_no = {r["track_no"]: r for r in rows}
+        self.assertEqual(by_no[2]["status"], "verified-by-neighbors")
+        self.assertEqual(rows_to_apply(rows, include_mismatch=False), {1: "https://www.youtube.com/watch?v=v1", 4: "https://www.youtube.com/watch?v=v4"})
+        self.assertEqual(
+            rows_to_apply(rows, include_mismatch=False, include_inferred=True),
+            {1: "https://www.youtube.com/watch?v=v1", 2: "https://www.youtube.com/watch?v=v3", 3: "https://www.youtube.com/watch?v=v2", 4: "https://www.youtube.com/watch?v=v4"},
+        )
+
+    def test_cached_dump_is_also_checked_for_truncation(self):
+        import json
+        import tempfile
+
+        from backfill_source_url import dump_playlist
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "x.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"playlist_count": 244, "entries": [{"id": "a"}] * 102}, f)
+            with self.assertRaises(SystemExit):
+                dump_playlist("yt-dlp", "https://x/list", path, refresh=False)
+
     def test_apply_set_selects_verified_and_position_only_by_default(self):
         rows = [
             {"track_id": 1, "status": "verified", "source_url": "u1"},
@@ -244,8 +285,9 @@ class Plan(unittest.TestCase):
         ]
         rows.append({"track_id": 6, "status": "verified-by-title", "source_url": "u6"})
         rows.append({"track_id": 7, "status": "verified-by-neighbors", "source_url": "u7"})
-        self.assertEqual(rows_to_apply(rows, include_mismatch=False), {1: "u1", 2: "u2", 6: "u6", 7: "u7"})
-        self.assertEqual(rows_to_apply(rows, include_mismatch=True), {1: "u1", 2: "u2", 3: "u3", 6: "u6", 7: "u7"})
+        self.assertEqual(rows_to_apply(rows, include_mismatch=False), {1: "u1", 2: "u2", 6: "u6"})
+        self.assertEqual(rows_to_apply(rows, include_mismatch=True), {1: "u1", 2: "u2", 3: "u3", 6: "u6"})
+        self.assertEqual(rows_to_apply(rows, include_mismatch=False, include_inferred=True), {1: "u1", 2: "u2", 6: "u6", 7: "u7"})
 
 
 if __name__ == "__main__":

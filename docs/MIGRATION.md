@@ -161,8 +161,10 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
    保管してある。旧パイプラインは「再生リスト名 = アルバム名、リスト内の位置 = `TRACKNUMBER`」で
    並べていたので、この順を正とする:
    1. `scripts/backfill_source_url.py --playlists … --spindle … --out …` で計画 CSV を出し、目視
-      （`title-mismatch` / `no-track` / `extra-track` / `kept` を確認）→ `--apply` で `SOURCE_URL` を
-      書く（アルバムごとに 1 バッチ。巻き戻し可）。既に `SOURCE_URL` を持つ行は上書きしない
+      （`title-mismatch` / `no-track` / `extra-track` / `kept` と、位置推定の `verified-by-neighbors` を
+      確認）→ `--apply` で `SOURCE_URL` を書く（アルバムごとに 1 バッチ。巻き戻し可）。位置推定は区間内の
+      入れ替えを検出できないので、CSV で確かめてから `--include-inferred` を付けて書く。既に
+      `SOURCE_URL` を持つ行は上書きしない
    2. YouTube 画面で 9 本の再生リストを購読に登録（追記先 = 各 `〜のお歌` album）し、「今すぐ同期」
       （P4-16）。`SOURCE_URL` のある曲は飛ばされ、無いものだけが Inbox に来る → 承認で配置
    3. 同期の番号揃えが `TRACKNUMBER` を再生リストの位置に揃え（`set_rows` の tags バッチ）、続けて

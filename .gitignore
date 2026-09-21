@@ -8,3 +8,5 @@ before.tsv
 after.tsv
 rename.sh
 pre.json
+__pycache__/
+*.pyc
