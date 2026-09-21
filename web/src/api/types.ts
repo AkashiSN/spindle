@@ -277,7 +277,7 @@ export type ExportProfileName = (typeof EXPORT_PROFILES)[number]
 
 export type UnavailableKind = 'private' | 'deleted' | 'unknown'
 
-export type SyncBatch = { batch_id: number; applied: number; conflict: number; failed: number }
+export type SyncBatch = { batch_id: number; total?: number; pending?: number; applied: number; conflict: number; failed: number }
 
 export type SyncBlocked = {
   track_id: number

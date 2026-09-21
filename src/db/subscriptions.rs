@@ -357,3 +357,15 @@ pub fn due(conn: &Connection, now: i64, interval_secs: i64) -> Result<Vec<i64>> 
         .collect::<rusqlite::Result<Vec<i64>>>()?;
     Ok(ids)
 }
+
+/// その購読の同期ジョブが queued / running か（PATCH は走行中を 409 にする。走行中の同期が古い追記先で
+/// 揃えたり投入したりしないための規則。書き込みは単一コネクションなので、この検査と UPDATE を同じ閉包で
+/// 行えば投入と競合しない）
+pub fn sync_active(conn: &Connection, id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM jobs WHERE dedup_key = ?1 AND state IN ('queued', 'running')",
+        [format!("playlist_sync:{id}")],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}

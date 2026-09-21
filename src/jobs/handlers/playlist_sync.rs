@@ -97,6 +97,8 @@ pub struct Elsewhere {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BatchOutcome {
     pub batch_id: i64,
+    pub total: i64,
+    pub pending: i64,
     pub applied: i64,
     pub conflict: i64,
     pub failed: i64,
@@ -579,10 +581,35 @@ async fn batch_outcome(env: &SyncEnv, batch_id: i64) -> Result<BatchOutcome, Syn
         .await?;
     Ok(BatchOutcome {
         batch_id,
+        total: c.total(),
+        pending: c.pending,
         applied: c.applied,
         conflict: c.conflict,
         failed: c.failed,
     })
+}
+
+/// 子バッチの op が全部終端になるまで待つ（album の行でなく batch_id で見る: 対象が走査で missing に
+/// なっても pending の op を見落とさない）。上限で Failed
+async fn wait_batch(env: &SyncEnv, ctx: &JobContext, batch_id: i64) -> Result<(), SyncError> {
+    let started = Instant::now();
+    loop {
+        let c: BatchCounts = env
+            .db
+            .read(move |c| history::batch_counts(c, batch_id))
+            .await?;
+        if c.pending == 0 {
+            return Ok(());
+        }
+        if started.elapsed() >= env.pending_wait {
+            return Err(SyncError::Failed(anyhow::anyhow!(
+                "バッチ #{batch_id} の反映が終わらない（{} 件が反映待ち）ので揃えを見送った",
+                c.pending
+            )));
+        }
+        ctx.check_cancel().await.map_err(|_| SyncError::Cancelled)?;
+        tokio::time::sleep(env.pending_poll).await;
+    }
 }
 
 async fn align(
@@ -623,7 +650,7 @@ async fn align(
                     moved = out.moved,
                     "番号を揃える"
                 );
-                wait_pending(env, ctx, album_id).await?;
+                wait_batch(env, ctx, p.batch_id).await?;
                 let b = batch_outcome(env, p.batch_id).await?;
                 out.tags = Some(b.clone());
                 require_all_applied("番号", &b)?;
@@ -729,7 +756,7 @@ async fn align(
                 renamed = out.renamed,
                 "ファイル名を揃える"
             );
-            wait_pending(env, ctx, album_id).await?;
+            wait_batch(env, ctx, p.batch_id).await?;
             let b = batch_outcome(env, p.batch_id).await?;
             out.rename = Some(b.clone());
             require_all_applied("改名", &b)?;
@@ -802,12 +829,15 @@ pub fn spawn_dispatcher(
 /// 子バッチが全件 applied でなければ（衝突・失敗・キャンセル）揃えは終わっていない: Failed（再試行で差分から
 /// 取り直す。投入はしない）
 fn require_all_applied(what: &str, b: &BatchOutcome) -> Result<(), SyncError> {
-    if b.conflict > 0 || b.failed > 0 {
+    if b.pending > 0 || b.conflict > 0 || b.failed > 0 || b.applied != b.total {
         return Err(SyncError::Failed(anyhow::anyhow!(
-            "{what}のバッチ #{} が全件反映されていない（衝突 {} / 失敗 {}）ので揃えをやり直す",
+            "{what}のバッチ #{} が全件反映されていない（適用 {} / {}、衝突 {} / 失敗 {} / 反映待ち {}）ので揃えをやり直す",
             b.batch_id,
+            b.applied,
+            b.total,
             b.conflict,
-            b.failed
+            b.failed,
+            b.pending
         )));
     }
     Ok(())

@@ -214,15 +214,21 @@ impl Lib {
 
     /// 同期・tagwrite・rename を動かす（ytdl は登録しない: 投入された ytdl は queued のまま検分する）
     fn start(&self) {
+        self.start_with(true, self.env());
+    }
+
+    fn start_with(&self, tagwrite: bool, env: SyncEnv) {
         let mut reg = Registry::new();
         reg.register(
             JobType::PlaylistSync,
-            Arc::new(PlaylistSyncHandler::new(self.env())),
+            Arc::new(PlaylistSyncHandler::new(env)),
         );
-        reg.register(
-            JobType::Tagwrite,
-            Arc::new(TagwriteHandler::new(self.editor.clone())),
-        );
+        if tagwrite {
+            reg.register(
+                JobType::Tagwrite,
+                Arc::new(TagwriteHandler::new(self.editor.clone())),
+            );
+        }
         reg.register(
             JobType::Rename,
             Arc::new(RenameHandler::new(self.editor.clone())),
@@ -839,6 +845,50 @@ async fn duplicate_entries_are_enqueued_once_and_not_aligned() {
     let (job, st) = lib.sync(sub).await;
     assert_eq!(st, JobState::Done, "{:?}", lib.last_error(job));
     assert_eq!(lib.result(sub)["align"]["moved"], 0);
+}
+
+/// 子バッチの終端は batch_id で待つ: 対象の行が走査で missing になっても pending の op が残っていれば
+/// 待ち続け、上限で失敗して投入しない（album の active 行だけ見ていると pending を見落とす）
+#[tokio::test]
+async fn pending_op_on_a_missing_track_is_not_mistaken_for_completion() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add(1, "aa", Some("a")));
+    lib.add(2, "cc", Some("c"));
+    lib.scan().await;
+    lib.playlist("PL1", &["a", "b", "c"], Some(3));
+    let sub = lib.subscribe("PL1").await;
+    // tagwrite を動かさない（op が pending のまま）。待ちの上限は短く
+    let mut env = lib.env();
+    env.pending_wait = Duration::from_millis(600);
+    lib.start_with(false, env);
+    let job = match lib.jobs.enqueue(new_sync_job(sub)).await.unwrap() {
+        EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+    };
+    // tags バッチが出来たら対象の行を missing にする
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while lib.batches() == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    lib.conn()
+        .execute(
+            "UPDATE tracks SET missing_since = 5 WHERE rel_path = '_Unsorted/Art/Alb/02 cc.opus'",
+            [],
+        )
+        .unwrap();
+    let st = lib.wait(job).await;
+    assert_eq!(
+        st,
+        JobState::Queued,
+        "再試行待ち: {:?}",
+        lib.last_error(job)
+    );
+    assert!(
+        lib.last_error(job).unwrap().contains("反映が終わらない"),
+        "{:?}",
+        lib.last_error(job)
+    );
+    assert!(lib.ytdl_payloads().is_empty(), "投入しない");
 }
 
 // ---------------------------------------------------------------- dispatcher

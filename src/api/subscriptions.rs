@@ -202,10 +202,24 @@ pub async fn update(
     {
         return Ok(bad(msg));
     }
+    // 走行中（queued / running）の同期があれば変更しない（同期が古い追記先で揃えたり投入したりしない。
+    // 検査と UPDATE は同じ書き込み閉包 = 投入と直列）
     let outcome = state
         .db
-        .write(move |c| dbsubs::update(c, id, &patch, now_epoch()))
+        .write(move |c| {
+            if dbsubs::sync_active(c, id)? {
+                return Ok(None);
+            }
+            dbsubs::update(c, id, &patch, now_epoch()).map(Some)
+        })
         .await?;
+    let Some(outcome) = outcome else {
+        return Ok(error_response_with_message(
+            StatusCode::CONFLICT,
+            "sync_running",
+            "同期の実行中は変更できない（終わるか取り消してから）",
+        ));
+    };
     if let Err(r) = write_outcome_response(outcome) {
         return Ok(*r);
     }

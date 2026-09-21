@@ -3114,8 +3114,9 @@ DB とハッシュの規約を変える必要があり、往復の二重化は�
   開始時刻）を基準にする（最終 retry が failed になってもバックオフを迂回しない）
 - API は `/api/ytmusic/subscriptions`（TASKS の `/api/playlists/...` から変更。`/api/playlists` は spindle
   自身の m3u8 プレイリスト）
-- 実装レビュー（codex）で足した規則: 購読の id は再利用しない（AUTOINCREMENT。0022）、各段の前に購読を
-  読み直して PATCH（`updated_at`）で変わっていれば `Failed`、同じ動画が再生リストに複数回あればその行は
+- 実装レビュー（codex）で足した規則: 購読の id は再利用しない（AUTOINCREMENT。0022）、同期が queued / running の間は PATCH を
+  409（`sync_running`）で拒み（各段の前の `updated_at` 検査は控え）、子バッチの終端は batch_id の
+  pending = 0 で待ち、同じ動画が再生リストに複数回あればその行は
   固定して投入は最初の位置だけ、子バッチが全件 applied でなければ `Failed` で投入しない（計画時の改名の
   衝突は報告だけ）、購読が消えていれば skip も通常どおり
 

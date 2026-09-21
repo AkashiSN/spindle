@@ -35,6 +35,7 @@ function message(e: unknown): string {
     if (e.code === 'duplicate_list') return '同じ再生リストの購読があります'
     if (e.code === 'duplicate_target') return '同じ追記先（アルバムアーティスト + アルバム）の購読があります'
     if (e.code === 'duplicate') return 'この購読の同期は既に投入されています'
+    if (e.code === 'sync_running') return '同期の実行中は変更できません（終わるか取り消してから）'
     if (e.code === 'not_found') return '購読が見つかりません（消えたか、YouTube 連携が無効）'
     if (e.message) return e.message
   }

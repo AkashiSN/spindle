@@ -290,3 +290,52 @@ async fn endpoints_require_a_session() {
     let res = app.router.clone().oneshot(r).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// 同期が queued / running の間は PATCH を 409 にする（走行中の同期が古い追記先で揃えたり投入したりしない）。
+/// 終端になれば通る
+#[tokio::test]
+async fn patch_is_refused_while_a_sync_is_active() {
+    let app = App::new(true).await;
+    let (_, body) = app
+        .post(json!({ "url": PL, "albumartist": "A", "album": "B" }))
+        .await;
+    let id = body["id"].as_i64().unwrap();
+    let (st, body) = app
+        .call(
+            Method::POST,
+            &format!("/api/ytmusic/subscriptions/{id}/sync"),
+            None,
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    let job_id = body["job_id"].as_i64().unwrap();
+    let (st, body) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/ytmusic/subscriptions/{id}"),
+            Some(json!({ "album": "C" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "sync_running");
+    // 終端（ワーカーが無いので DB で done に）
+    app.db
+        .write(move |c| {
+            c.execute(
+                "UPDATE jobs SET state = 'done', finished_at = 1 WHERE id = ?1",
+                [job_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, body) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/ytmusic/subscriptions/{id}"),
+            Some(json!({ "album": "C" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["album"], "C");
+}
