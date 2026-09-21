@@ -26,7 +26,8 @@ TRACKNUMBER」でファイルを並べていた。その再生リストを yt-dl
     position-only      非公開 / 削除でタイトルが無い（位置だけで対応付け）
     title-mismatch     どれにも当てはまらない。人が見る（--include-mismatch は位置の行に書く。ずれの
                        後ろでは誤るので、plan.csv を見てから）
-    already         既に同じ SOURCE_URL
+    already            既に同じ SOURCE_URL（位置に関わらず URL で照合）
+    kept               既に別の SOURCE_URL を持つ行。上書きしない（P3 以降の取り込みや前回の補填）
     no-track           その動画の行が Library に無い（欠番、または未ダウンロード）
     extra-track     行はあるが再生リストにその位置が無い
 """
@@ -186,14 +187,23 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
         assigned[pos] = (no, status)
         claimed.add(no)
 
+    # 0. 既に SOURCE_URL を持つ行は別の URL で上書きしない（P3 以降の取り込みや前回の補填を守る）。
+    #    同じ URL の entry があれば位置に関わらず already、無ければ kept
+    url_index: dict[str, int] = {}
+    for no, t in by_no.items():
+        if t.get("source_url"):
+            url_index.setdefault(t["source_url"], no)
+            claimed.add(no)
+    for i, e in enumerate(entries, start=1):
+        url = watch_url(e["id"]) if e["id"] else ""
+        if url and url in url_index and url_index[url] not in {a[0] for a in assigned.values()}:
+            take(i, url_index[url], "already")
+
     for i, e in enumerate(entries, start=1):
         t = by_no.get(i)
-        url = watch_url(e["id"]) if e["id"] else ""
-        if t is None:
+        if t is None or i in assigned or i in claimed:
             continue
-        if t.get("source_url") == url:
-            take(i, i, "already")
-        elif not is_available(e):
+        if not is_available(e):
             take(i, i, "position-only")
         elif title_matches(e["title"], t.get("title") or ""):
             take(i, i, "verified")
@@ -247,9 +257,11 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
                 same = by_no[pos + d].get("source_url") == (watch_url(e["id"]) if e["id"] else "")
                 take(pos, pos + d, "already" if same else "verified-by-neighbors")
     # 行にする
+    shown: set[int] = set()  # 行として出した track_no
     for i, e in enumerate(entries, start=1):
         if i in assigned:
             no, status = assigned[i]
+            shown.add(no)
             rows.append(_row(album, no, by_no[no], e, status))
         elif by_no.get(i) is None or i in claimed:
             # 位置に行が無い、または位置の行を別の entry がタイトルで取った = この動画は Library に無い
@@ -257,9 +269,14 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
         else:
             # 位置の行が空いていて、タイトルも合わない（人が見る。--include-mismatch の対象）
             claimed.add(i)
+            shown.add(i)
             rows.append(_row(album, i, by_no[i], e, "title-mismatch"))
     for no, t in sorted(by_no.items()):
-        if no not in claimed:
+        if no in shown:
+            continue
+        if t.get("source_url"):
+            rows.append(_row(album, no, t, None, "kept"))
+        else:
             rows.append(_row(album, no, t, None, "extra-track"))
     rows.sort(key=lambda r: (r["track_no"], r["status"]))
     return rows

@@ -7,6 +7,7 @@ from backfill_source_url import (
     normalize_title,
     parse_playlists_tsv,
     parse_flat_playlist,
+    rows_to_apply,
     title_matches,
     watch_url,
 )
@@ -212,9 +213,28 @@ class Plan(unittest.TestCase):
         rows = build_plan("A", entries, [track(1, 1, "曲 1"), track(2, 2, "糸"), track(3, 3, "余り")])
         self.assertEqual({r["track_no"]: r["status"] for r in rows}, {1: "verified", 2: "title-mismatch", 3: "extra-track"})
 
-    def test_apply_set_selects_verified_and_position_only_by_default(self):
-        from backfill_source_url import rows_to_apply
+    def test_existing_source_url_is_never_overwritten(self):
+        # Library の 3 は既に LiSA 版の URL を持つ（明透×琶舞）。再生リストで Vaundy 版を 3 に置いても
+        # 上書きしない: LiSA 版の entry は URL で already、Vaundy 版は no-track
+        entries = [entry("v1", "曲 1 / A"), entry("v2", "曲 2 / A"), entry("vaundy", "再会 - Vaundy covered by A"),
+                   entry("lisa", "再会 - LiSA,Uru covered by A×B")]
+        tracks = [track(1, 1, "曲 1"), track(2, 2, "曲 2"),
+                  track(3, 3, "再会 (Cover)", source_url="https://www.youtube.com/watch?v=lisa")]
+        rows = build_plan("A", entries, tracks)
+        st = {(r["track_no"], r["video_id"]): r["status"] for r in rows}
+        self.assertEqual(st[(3, "lisa")], "already")
+        self.assertEqual(st[(3, "vaundy")], "no-track")
+        self.assertNotIn("kept", {r["status"] for r in rows})
+        self.assertEqual(rows_to_apply(rows, include_mismatch=True), {1: "https://www.youtube.com/watch?v=v1", 2: "https://www.youtube.com/watch?v=v2"})
 
+    def test_track_with_a_url_from_elsewhere_is_kept(self):
+        entries = [entry("v1", "曲 1 / A")]
+        tracks = [track(1, 1, "曲 1"), track(2, 2, "別経路 (Cover)", source_url="https://www.youtube.com/watch?v=p3")]
+        rows = build_plan("A", entries, tracks)
+        self.assertEqual({r["track_no"]: r["status"] for r in rows}, {1: "verified", 2: "kept"})
+        self.assertEqual(rows_to_apply(rows, include_mismatch=True), {1: "https://www.youtube.com/watch?v=v1"})
+
+    def test_apply_set_selects_verified_and_position_only_by_default(self):
         rows = [
             {"track_id": 1, "status": "verified", "source_url": "u1"},
             {"track_id": 2, "status": "position-only", "source_url": "u2"},
