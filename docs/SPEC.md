@@ -1294,6 +1294,10 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
 ## 9. HTTP API
 
 ```
+GET    /health                                    認証の外。{ status: "ok" | "locked", version, ytdlp }
+                                                  version = ビルド時に焼いた版（CI の git describe --tags --always。
+                                                  `spindle --version` と同じ。P4-12、D-79）、ytdlp = 起動時診断で
+                                                  取った yt-dlp の版（取れなければ null）
 GET    /api/tracks?filter=&sort=&cursor=&limit=   カーソルページング（D-39）
                                                   filter = URL エンコードした JSON（下記）、
                                                   sort = album(既定) | title | artist | album_title |
@@ -2012,6 +2016,29 @@ ytdlp = "yt-dlp"
 ---
 
 ## 14. デプロイ
+
+### イメージの配布（P4-12、D-79）
+
+- 置き場は GHCR `ghcr.io/akashisn/spindle`（public。pull にトークン不要）。`linux/amd64` のみ
+- CI（`.github/workflows/ci.yml`）は web → rust → docker の順で、docker ジョブが**イメージを 1 回だけ
+  ビルド**し（`docker/build-push-action` の `load`）、起動確認（`--version`、`/health` の `version` /
+  `ytdlp`、ロックモード、ログイン、CSRF、ジョブ API、同梱 SPA）に通ったものを**そのまま** push する
+  （二度ビルドしない = 確認した digest と配布する digest が同じ）。タグは `docker/metadata-action`:
+  `main` への push → `edge` と `sha-<7 桁>`、`vX.Y.Z` タグ → `X.Y.Z` / `X.Y` / `latest`（+ GitHub Release。
+  本文はイメージのタグと digest）。PR はビルドと起動確認だけで push しない
+- 版は build context に `.git` を入れないので、CI が `--build-arg SPINDLE_VERSION=$(git describe --tags
+  --always)` で渡し、`build.rs` が `cargo:rustc-env` で焼く（環境変数 > 作業ツリーの `git describe` >
+  `dev`）。OCI ラベル（`org.opencontainers.image.{source,revision,version,created,…}`）は metadata-action
+- メタデータプラグイン（`spindle-ytmusic-meta`）はイメージに焼かず実行時マウントのまま（D-70）
+- **`edge` は開発用で DB の互換（マイグレーションの前進）以外は約束しない。** 本番は `latest`
+  （= 最新の `vX.Y.Z`）か `X.Y` を指す。マイグレーションは起動時に自動で前進のみ = 戻すときは
+  バックアップから（OPERATIONS）
+- 依存の更新は Renovate（`renovate.json`。GitHub App）: Dockerfile の `FROM`（node / rust / debian /
+  deno）、GitHub Actions、Cargo / npm（minor / patch は週 1 のまとめ）、**yt-dlp**（`ARG YTDLP_VERSION`
+  を `# renovate:` 注釈の custom manager で github-releases から追い、1 件ずつ即時）。マージは手動。
+  マージすれば `edge` が作り直され、本番へは次の `vX.Y.Z` で届く（yt-dlp だけの更新でもパッチ版を切る）
+- スカッシュ（`db/migrations` を `0001` に畳む）は最初の `vX.Y.Z` より前に 1 回だけ（公開イメージで
+  DB を作った後は既存ファイルを書き換えられない）
 
 ### TrueNAS Custom App (compose)
 

@@ -52,7 +52,18 @@ const INITIAL_PASSWORD_ENV: &str = "SPINDLE_INITIAL_PASSWORD";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `spindle --version` は版だけ出して終わる（設定を読まない。P4-12）。他の引数は取らない
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("spindle {}", spindle::version::VERSION);
+        return Ok(());
+    }
+    if let Some(unknown) = args.first() {
+        eprintln!("不明な引数: {unknown}（受けるのは --version だけ。設定は SPINDLE_CONFIG）");
+        std::process::exit(2);
+    }
     logging::init();
+    info!(version = spindle::version::VERSION, "spindle を起動する");
 
     let config_path = std::env::var_os("SPINDLE_CONFIG")
         .map(PathBuf::from)
@@ -63,6 +74,12 @@ async fn main() -> anyhow::Result<()> {
     // 外部プログラムの実行可否（無くても起動は通す。使うジョブが失敗する。D-70）
     for missing in config.probe_executables() {
         tracing::warn!("{missing}");
+    }
+    // yt-dlp の版（/health が出す。古いと YouTube の抽出が壊れるので実機で確認できるように。P4-12）
+    let ytdlp_version = probe_ytdlp_version(&config.bin.ytdlp).await;
+    match &ytdlp_version {
+        Some(v) => info!(ytdlp = %v, "yt-dlp の版"),
+        None => tracing::warn!("yt-dlp の版を取れない（無いか --version が失敗）"),
     }
     // 全 root を dirfd で開く。openat2 が無い（Linux 5.6 未満）ならここで止まる（D-31）
     let roots = Roots::open(&config.paths).context("ライブラリの root を開けない")?;
@@ -132,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let listen = config.server.listen;
-    let mut state = AppState::new(Arc::new(config), db, mode);
+    let mut state = AppState::new(Arc::new(config), db, mode).with_ytdlp_version(ytdlp_version);
 
     // 停止シグナルは共有 token を倒す。HTTP サーバ・ワーカー・SSE ストリームが同時に止まる
     // （SSE を先に閉じないと axum の graceful shutdown が接続の終了を待ち続ける）
@@ -469,4 +486,17 @@ async fn shutdown_signal() {
         _ = term.recv() => {},
     }
     info!("停止シグナルを受け取った");
+}
+
+/// `yt-dlp --version` を 1 回だけ叩く（5 秒で諦める）。1 行目を版として返す
+async fn probe_ytdlp_version(program: &str) -> Option<String> {
+    let out = spindle::jobs::process::ExternalCommand::new(program)
+        .arg("--version")
+        .timeout(std::time::Duration::from_secs(5))
+        .run(&tokio_util::sync::CancellationToken::new())
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.to_owned())
 }

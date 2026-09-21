@@ -29,6 +29,8 @@ pub struct AppState {
     pub editor: Option<Arc<Editor>>,
     /// アートワークのキャッシュ（P1-3）。無いと `/api/artwork` は 503
     pub artwork: Option<Arc<ArtworkStore>>,
+    /// 起動時診断で取った yt-dlp の版（`/health` が出す。P4-12）。取れなければ None
+    pub ytdlp_version: Option<Arc<str>>,
     /// 再生用の root（P1-9）。無いと `/api/stream` は 503
     pub library: Option<Arc<RootDir>>,
     pub derived: Option<Arc<RootDir>>,
@@ -56,6 +58,7 @@ impl AppState {
             shutdown: CancellationToken::new(),
             editor: None,
             artwork: None,
+            ytdlp_version: None,
             library: None,
             derived: None,
             playlists: None,
@@ -103,6 +106,11 @@ impl AppState {
 
     pub fn with_artwork(mut self, store: Arc<ArtworkStore>) -> Self {
         self.artwork = Some(store);
+        self
+    }
+
+    pub fn with_ytdlp_version(mut self, version: Option<String>) -> Self {
+        self.ytdlp_version = version.map(Arc::from);
         self
     }
 

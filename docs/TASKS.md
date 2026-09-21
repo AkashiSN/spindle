@@ -1041,7 +1041,11 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/tags_read.rs`（フリーフォームの多値・小文字名・`iTunNORM`、標準 atom と同名は標準が勝つ）、
       `tests/edits.rs`（ALAC に `set` → `delete` が applied）、実機で ALAC の 1 曲に追加 → 削除
 
-- [ ] **P4-12** CI / CD の整理と Docker イメージの配布（設計は着手時に行う）。いまは `.github/workflows/ci.yml`
+- [x] **P4-12** CI / CD の整理と Docker イメージの配布（2026-09-21。SPEC §14「イメージの配布」、D-79。
+      (7) は Dependabot / 自作ワークフローでなく **Renovate**（`renovate.json`。yt-dlp は `# renovate:` 注釈の
+      custom manager）。(8) の `v0.1.0` はまだ切らず `edge` までを完了とする（スカッシュと最初のタグは
+      リリース時）。ユーザ側の作業: GHCR のパッケージを public に、Renovate の GitHub App をインストール）。
+      以下は着手時の設計メモ。いまは `.github/workflows/ci.yml`
       が web（lint / build）→ rust（fmt / clippy / test）→ docker（build + `/health` 等の起動確認）まで行うが、
       イメージはどこにも push しておらず、`deploy/compose.yaml` の `ghcr.io/akashisn/spindle:latest` は存在
       しない。実機は `git archive` → ホストで `docker build` → `spindle:local` の手作業（`/root/spindle-migration/

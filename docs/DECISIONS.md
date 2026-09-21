@@ -3137,3 +3137,32 @@ Duplicate を「走行中」として次の同期に任せる規則で足りる�
 フックを足す（dispatcher で閉じる方が影響が狭い）。TRACKNUMBER を書かず Inbox の max+1 に任せて配置後に
 揃える（毎回 2 バッチ増える。位置を先に書けば通常は承認の初期値がそのまま正しい）。
 
+---
+
+## D-79 イメージは CI が 1 回ビルドして起動確認に通ったものをそのまま GHCR へ push する。版は `/health` が答え、依存の更新は Renovate
+
+**決定**（2026-09-21、P4-12。SPEC §14「イメージの配布」）:
+- 置き場は GHCR `ghcr.io/akashisn/spindle`（public、`linux/amd64`）。`main` → `edge` / `sha-<7>`、
+  `vX.Y.Z` → `X.Y.Z` / `X.Y` / `latest`（+ Release）。PR は push しない
+- CI の docker ジョブが `load` でビルドして起動確認し、**同じイメージ**を `docker push` する
+  （二度ビルドしない。確認した digest = 配布する digest）
+- 版は `--build-arg SPINDLE_VERSION=$(git describe --tags --always)` → `build.rs` → `spindle --version` と
+  `GET /health` の `version`。加えて `/health` に `ytdlp`（起動時に `yt-dlp --version` を 5 秒で 1 回）。
+  「いまどの版が動いているか」を docker のログでなく `/health` で答える
+- 本番は TrueNAS のカスタムアプリ（compose 相当）。自動配備は作らず、更新は UI で pull し直す手順を
+  OPERATIONS に書く。マイグレーションは前進のみ、戻すときはバックアップから
+- 依存の更新は **Renovate**（GitHub App）。yt-dlp は Dockerfile の `ARG` を `# renovate:` 注釈の
+  custom manager（github-releases）で追う。マージは手動
+- `edge` は開発用で DB の互換を約束しない。スカッシュは最初の `vX.Y.Z` の前に 1 回だけ
+
+**理由**: `deploy/compose.yaml` が指す `ghcr.io/akashisn/spindle:latest` は存在せず、実機は `git archive`
+→ ホストで `docker build` の手作業だった。YouTube の抽出は yt-dlp が古いと壊れるので、更新を仕組みに
+する必要があった。Renovate は GitHub App なので、その PR で CI（`pull_request`）が走る（`GITHUB_TOKEN`
+で作った PR は走らない）。自作の更新ワークフロー + PAT や Dependabot（`ADD https://…` の版を追えない）
+より少ない部品で済む。
+
+**却下**: 週 1 の自作ワークフローで yt-dlp の PR を作る（PAT が要る）。Dependabot（yt-dlp を追えない）。
+`arm64` のマルチプラットフォーム（Rust のクロスビルドが遅く需要が無い。要るときに足す）。自動配備
+（TrueNAS のカスタムアプリの更新は UI 操作。手動で十分）。CI で二度ビルドして push（`push: true` で
+別に走らせると確認したものと digest が変わり得る）。
+

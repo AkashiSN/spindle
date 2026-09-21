@@ -14,3 +14,4 @@ pub mod jobs;
 pub mod logging;
 pub mod media;
 pub mod playlist;
+pub mod version;

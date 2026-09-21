@@ -107,7 +107,7 @@ async fn lock_mode_when_no_password_anywhere() {
     )
     .await;
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(json(res).await, serde_json::json!({ "status": "locked" }));
+    assert_eq!(json(res).await["status"], "locked");
 
     for uri in ["/", "/index.html", "/api/tracks", "/api/auth/session"] {
         let res = send(
@@ -204,7 +204,7 @@ async fn spa_and_health_are_served_without_session() {
     )
     .await;
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(json(res).await, serde_json::json!({ "status": "ok" }));
+    assert_eq!(json(res).await["status"], "ok");
     // SPA（ログイン画面を出すため）はセッション不要。同梱の有無で 200 か 404
     let res = send(
         &app,

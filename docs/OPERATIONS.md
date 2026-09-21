@@ -3,6 +3,43 @@
 移行後の日常運用で、コードを読まずに済ませたい手順をまとめる。移行そのものは
 `docs/MIGRATION.md`。
 
+## イメージの更新（TrueNAS カスタムアプリ）
+
+イメージは GHCR `ghcr.io/akashisn/spindle`（public。pull にトークン不要）。タグは `latest`（最新の
+リリース `vX.Y.Z`）/ `X.Y` / `X.Y.Z` と、開発用の `edge`（`main` の最新）/ `sha-<7 桁>`。本番は
+`latest` か `X.Y` を指す。`edge` は DB の互換を（前進のマイグレーション以外）約束しない。
+
+### カスタムアプリの作り方
+
+TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deploy/compose.yaml` を写す。
+そのまま使えない箇所:
+
+- `devices` / `device_cgroup_rules` / `group_add`: CD ドライブ（`/dev/sr0` と `/dev/sg0`、cdrom グループの
+  GID）。ドライブが無い機体では 3 つとも消す
+- `user`: 既存ライブラリの所有者の UID:GID に合わせる（違うとタグ書き込みが全滅する）
+- `volumes`: Library / Derived / Archive / Inbox / Playlists / data の実パスと、メタデータプラグイン
+  （`spindle-ytmusic-meta`。イメージには入っていない）のマウント
+- `SPINDLE_INITIAL_PASSWORD`: 初回だけ。初期化が済んだら消す
+
+### 更新
+
+1. 更新前に DB のバックアップがあることを確認する（下記「バックアップ」。自動が動いていれば
+   `/data/backup/` の最新で足りる）。マイグレーションは**起動時に自動で前進のみ**で、戻す手段は
+   バックアップからの復元だけ
+2. TrueNAS の Apps でアプリを選び **Update / Pull image**（同じタグの新しい digest を取る）→ 再作成。
+   compose で動かしているなら `docker compose pull && docker compose up -d`
+3. `GET /health` の `version`（= `spindle --version`）が期待する版（Release のタグ、または `sha-<7>` の
+   sha）になっていること、`ytdlp` が新しくなっていることを確認する。起動ログの「DB を開いた
+   schema_version=」で前進したマイグレーションが分かる
+4. 戻すとき: 旧タグ（`X.Y.Z`）を指して再作成 → **DB はバックアップから復元**（新しい版が進めた
+   マイグレーションは旧版が知らない）
+
+### YouTube の取り込みが失敗し始めたら
+
+まずイメージを更新する（yt-dlp が古いと YouTube の抽出が壊れる。新版は Renovate が PR にし、マージ
+すると `edge`、次のリリースで `latest` に届く）。`/health` の `ytdlp` で版を確認する。それでも駄目なら
+`config.toml` の `[ytmusic].ytdlp_args`（README「YouTube の取り込み」）。
+
 ## バックアップ
 
 DB（`/data/spindle.db`）は原則キャッシュで、ファイルから再構築できる（SPEC §3）。

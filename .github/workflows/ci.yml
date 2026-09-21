@@ -3,10 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/akashisn/spindle
 
 jobs:
   web:
@@ -22,6 +24,8 @@ jobs:
       - run: npm ci
         working-directory: web
       - run: npm run lint
+        working-directory: web
+      - run: npx vitest run
         working-directory: web
       - run: npm run build
         working-directory: web
@@ -49,21 +53,52 @@ jobs:
       - run: cargo test --locked
 
   docker:
-    name: docker build + /health
+    # イメージを 1 回だけビルドし、起動確認に通ったものをそのまま GHCR へ push する（P4-12、D-79）。
+    # push するのは main への push（edge / sha-<7 桁>）と v* タグ（X.Y.Z / X.Y / latest）だけ。PR は確認のみ
+    name: docker build + /health + push
     runs-on: ubuntu-latest
     needs: [web, rust]
+    permissions:
+      contents: write     # v* タグの Release
+      packages: write     # GHCR
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # git describe のため
+      - name: 版（git describe --tags --always）
+        id: version
+        run: echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=edge,branch=main
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=spindle
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/Dockerfile
           load: true
-          tags: spindle:ci
+          platforms: linux/amd64
+          tags: |
+            spindle:ci
+            ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SPINDLE_VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: コンテナを起動して /health・ロックモード・ログイン・ジョブ API・同梱 SPA を確認
+      - name: コンテナを起動して /health（version 込み）・ロックモード・ログイン・ジョブ API・同梱 SPA を確認
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -eu
           root=$(mktemp -d)
@@ -86,6 +121,9 @@ jobs:
           }
           code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 
+          # 0. --version は設定無しで版を出す。イメージの版と一致する
+          test "$(docker run --rm spindle:ci --version)" = "spindle $EXPECTED_VERSION"
+
           # 1. パスワード未設定 → ロックモード: /health は locked、SPA を含め他は 503
           run_container
           curl -fsS http://127.0.0.1:18080/health | grep -q '"status":"locked"'
@@ -93,9 +131,13 @@ jobs:
           test "$(code http://127.0.0.1:18080/api/tracks)" = 503
           docker rm -f spindle-ci
 
-          # 2. 初期パスワードを与えて起動 → 未認証 401、ログイン → セッションで 200、CSRF 403
+          # 2. 初期パスワードを与えて起動 → 未認証 401、ログイン → セッションで 200、CSRF 403。
+          #    /health は version（ビルド時に焼いた git describe）と yt-dlp の版（同梱の yt-dlp）を返す
           run_container -e SPINDLE_INITIAL_PASSWORD=ci-password
-          curl -fsS http://127.0.0.1:18080/health | grep -q '"status":"ok"'
+          health=$(curl -fsS http://127.0.0.1:18080/health)
+          echo "$health" | grep -q '"status":"ok"'
+          echo "$health" | grep -q "\"version\":\"$EXPECTED_VERSION\""
+          echo "$health" | grep -Eq '"ytdlp":"[0-9]{4}\.[0-9]{2}\.[0-9]{2}'
           test "$(code http://127.0.0.1:18080/api/auth/session)" = 401
           jar=$(mktemp)
           test "$(code -c "$jar" -H 'Sec-Fetch-Site: none' -H 'Content-Type: application/json' \
@@ -124,3 +166,30 @@ jobs:
           run_container
           curl -fsS http://127.0.0.1:18080/health | grep -q '"status":"ok"'
           docker rm -f spindle-ci
+
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 起動確認に通ったイメージをそのまま push
+        if: github.event_name == 'push'
+        run: |
+          set -eu
+          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
+            [ -n "$tag" ] || continue
+            docker push "$tag"
+          done
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$(echo "${{ steps.meta.outputs.tags }}" | head -n1)")
+          echo "pushed: $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+        id: push
+      - name: GitHub Release（v* タグ。本文はイメージのタグと digest だけ）
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          notes=$(printf 'Docker image: `%s`\n\n```\n%s\n```\n' "${IMAGE}:${GITHUB_REF_NAME#v}" "${{ steps.push.outputs.digest }}")
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --notes "$notes"

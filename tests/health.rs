@@ -52,7 +52,57 @@ async fn health_returns_200_with_status_ok() {
     assert!(ct.starts_with("application/json"), "content-type: {ct}");
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json, serde_json::json!({ "status": "ok" }));
+    // P4-12: いまどの版が動いているかを /health で答える（version はビルド時に焼く。yt-dlp は起動時診断）
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["version"], spindle::version::VERSION);
+    assert!(!spindle::version::VERSION.is_empty());
+    assert_eq!(json["ytdlp"], serde_json::Value::Null, "診断前は null");
+    assert_eq!(json.as_object().unwrap().len(), 3, "{json}");
+}
+
+/// P4-12: yt-dlp の版は起動時診断で載せる
+#[tokio::test]
+async fn health_reports_the_ytdlp_version_when_probed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
+    let config = Arc::new(Config::parse(include_str!("../deploy/config.example.toml")).unwrap());
+    let mode = auth::bootstrap(&db, Some("pw".into())).await.unwrap();
+    let state = AppState::new(config, db, mode).with_ytdlp_version(Some("2026.08.19".to_owned()));
+    let res = api::router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ytdlp"], "2026.08.19");
+}
+
+/// P4-12: `spindle --version` は版だけを出して終わる（設定を読まない）
+#[test]
+fn version_flag_prints_the_version_and_exits() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_spindle"))
+        .arg("--version")
+        .env_remove("SPINDLE_CONFIG")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("spindle {}", spindle::version::VERSION)
+    );
+}
+
+/// ビルド時の版: `SPINDLE_VERSION` が無ければ git describe か `dev`。空にはならない
+#[test]
+fn version_is_never_empty_and_has_no_whitespace() {
+    let v = spindle::version::VERSION;
+    assert!(!v.is_empty());
+    assert!(!v.chars().any(char::is_whitespace), "{v:?}");
 }
 
 #[tokio::test]

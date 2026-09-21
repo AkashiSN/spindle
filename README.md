@@ -29,6 +29,12 @@ P0 完了（P0-14 で実機へ移行のリハーサル済み。9,098 トラッ�
 
 ## 起動
 
+イメージは GHCR にある: `ghcr.io/akashisn/spindle:latest`（最新のリリース `vX.Y.Z`。`X.Y` も可）と
+`edge`（`main` の最新。開発用で、DB の互換は前進のマイグレーション以外は約束しない）。
+`deploy/compose.yaml` を TrueNAS のカスタムアプリ（compose）として写す。作り方・更新・戻し方は
+`docs/OPERATIONS.md`「イメージの更新」。動いている版は `GET /health` の `version`（`spindle --version`
+と同じ）と `ytdlp` で確認できる。
+
 `SPINDLE_CONFIG`（既定 `/data/config.toml`）で設定を指す。初回起動では環境変数
 `SPINDLE_INITIAL_PASSWORD` を読んで argon2id で DB に保存し、以後は無視する。
 環境変数も DB もパスワードが無いとロックモード（`/health` が `{"status":"locked"}`、
@@ -68,7 +74,8 @@ URL を貼る手間を減らすブックマークレット（ブックマーク�
 として出る。公開に戻れば次の同期で拾う）。`SOURCE_URL` の無い曲や再生リストに無い曲は触らない（その番号に
 入るべき曲は「揃えられない」として出るので、手で直す）。
 
-YouTube に弾かれるようになったら、まず yt-dlp を新しくする（イメージの更新）。それでも駄目なら
+YouTube に弾かれるようになったら、まず yt-dlp を新しくする（イメージの更新。yt-dlp の新版は Renovate が
+PR にするので、マージ → `edge` → 次のリリース）。それでも駄目なら
 `config.toml` の `[ytmusic].ytdlp_args` に `--extractor-args` や `--cookies` を渡す（`sh -c` は使わない
 ので配列。UA / Referer は付けない）。
 

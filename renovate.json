@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":disableDependencyDashboard"
+  ],
+  "timezone": "Asia/Tokyo",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "prConcurrentLimit": 5,
+  "enabledManagers": [
+    "dockerfile",
+    "github-actions",
+    "cargo",
+    "npm",
+    "custom.regex"
+  ],
+  "packageRules": [
+    {
+      "description": "Cargo / npm の minor / patch は週 1 のまとめ PR（ロックファイルの更新込み）",
+      "matchManagers": [
+        "cargo",
+        "npm"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "dependencies (non-major)"
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "deploy/Dockerfile の ARG YTDLP_VERSION（直上の # renovate: 注釈で datasource と depName を指定）",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^deploy/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>[^\\s]+)\\s+ARG YTDLP_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      "versioningTemplate": "loose"
+    }
+  ]
+}
