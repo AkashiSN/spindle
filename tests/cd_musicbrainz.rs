@@ -891,7 +891,9 @@ fn address_family_orders_resolved_addresses() {
     // ipv6 / ipv4 はその族だけにする
     assert_eq!(select_addrs(all.clone(), AddressFamily::V6), vec![v6]);
     assert_eq!(select_addrs(all.clone(), AddressFamily::V4), vec![v4]);
-    // 指定した族が 1 つも無ければ、通らないより残っているものを使う
-    assert_eq!(select_addrs(vec![v4], AddressFamily::V6), vec![v4]);
-    assert_eq!(select_addrs(vec![], AddressFamily::V6), vec![]);
+    // 指定した族が 1 つも無ければ空（黙って塞がっている族へ倒すと、原因の分からない TLS エラーになる。
+    // 呼び側はここで「IPv6 のアドレスが無い」と分かる失敗にする）
+    assert!(select_addrs(vec![v4], AddressFamily::V6).is_empty());
+    assert!(select_addrs(vec![v6], AddressFamily::V4).is_empty());
+    assert!(select_addrs(vec![], AddressFamily::V6).is_empty());
 }

@@ -53,23 +53,18 @@ pub fn error_chain(e: &dyn std::error::Error) -> String {
 }
 
 /// 解決したアドレスから接続に使うものを選ぶ。`Auto` は解決順のまま、`V6` / `V4` はその族だけ。
-/// 指定した族が 1 つも無ければ、繋がらないよりはと全部残す
+/// 指定した族が 1 つも無ければ空（黙ってもう一方へ倒さない。塞がっている族へ落ちると、原因の
+/// 分からない TLS エラーになるだけなので、「そのアドレスが無い」と分かる失敗にする）
 pub fn select_addrs(addrs: Vec<SocketAddr>, family: AddressFamily) -> Vec<SocketAddr> {
     let want_v6 = match family {
         AddressFamily::Auto => return addrs,
         AddressFamily::V6 => true,
         AddressFamily::V4 => false,
     };
-    let picked: Vec<SocketAddr> = addrs
-        .iter()
-        .copied()
+    addrs
+        .into_iter()
         .filter(|a| a.is_ipv6() == want_v6)
-        .collect();
-    if picked.is_empty() {
-        addrs
-    } else {
-        picked
-    }
+        .collect()
 }
 
 /// `[musicbrainz].address_family` を反映する DNS 解決。reqwest には族を選ぶ設定が無いので、
@@ -84,7 +79,21 @@ impl reqwest::dns::Resolve for FamilyResolver {
             // ポートは接続時に差し替えられるので何でもよい
             let host = format!("{}:0", name.as_str());
             let addrs: Vec<SocketAddr> = tokio::net::lookup_host(host).await?.collect();
+            let found = addrs.len();
             let picked = select_addrs(addrs, family);
+            if picked.is_empty() {
+                // 1 回の解決で片方の族しか返らないことがある。どの族で失敗したかを残す
+                return Err(format!(
+                    "{} に {} のアドレスが無い（解決できたのは {found} 件）",
+                    name.as_str(),
+                    match family {
+                        AddressFamily::V6 => "IPv6",
+                        _ => "IPv4",
+                    }
+                )
+                .into());
+            }
+            tracing::debug!(host = name.as_str(), ?picked, "接続先を選んだ");
             Ok(Box::new(picked.into_iter()) as Box<dyn Iterator<Item = SocketAddr> + Send>)
         })
     }
