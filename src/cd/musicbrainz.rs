@@ -8,6 +8,12 @@
 //! 音声トラック数が同じもの（fuzzy）を候補にする。同人・VTuber・インディーズの国内盤は未登録が
 //! 常態なので、0 件は普通の結果（手入力経路は P2-4）。
 //!
+//! DiscID 以外の経路（D-64 追記）: トラック長が未登録のリリースは TOC の fuzzy では出ないので、
+//! ディスクから読んだ ISRC（`ws/2/recording?query=isrc:…` の検索 → 一致数の多いリリースから取得）、
+//! MCN = バーコード（`ws/2/release?query=barcode:…`）、ユーザが貼ったリリース URL / MBID
+//! （`ws/2/release/<id>`）でも引き、同じリリース × medium は 1 件に束ねて経路（[`MatchedBy`]）を
+//! 付ける。DiscID で当たったときは ISRC / バーコードは引かない（指定リリースだけ足す）
+//!
 //! MB の規約: UA 必須（`[musicbrainz].user_agent`）、1 req/s（`[musicbrainz].rate_limit_per_sec`）。
 //! 連続する照会はクライアント内で間隔を空け、503（負荷制限）は 1 度だけ待って再試行する
 
@@ -56,11 +62,29 @@ pub struct ReleaseCandidate {
     pub labels: Vec<(String, Option<String>)>,
     /// この medium が自分の DiscID を持つ
     pub exact: bool,
+    /// どの経路で出てきたか（強い順。[`merge_candidates`] が付ける）
+    pub matched_by: Vec<MatchedBy>,
     pub medium_position: u32,
     pub medium_count: usize,
     pub medium_title: Option<String>,
     pub format: Option<String>,
     pub tracks: Vec<TrackCandidate>,
+}
+
+/// 候補が出てきた経路。並びは強い順（束ねたときの表示順・並び順に使う）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchedBy {
+    /// medium が自分の DiscID を持つ
+    Discid,
+    /// ユーザが指定したリリース
+    Release,
+    /// ディスクの ISRC がそのリリースの recording に付いている
+    Isrc,
+    /// ディスクの MCN がリリースのバーコードと一致
+    Barcode,
+    /// TOC の fuzzy 照会
+    Toc,
 }
 
 /// 照会の結果
@@ -70,7 +94,24 @@ pub struct DiscLookup {
     /// DiscID そのもので引けた（false なら TOC の fuzzy 照会）
     pub exact: bool,
     pub candidates: Vec<ReleaseCandidate>,
+    /// 候補に入れられなかった理由（指定リリースにトラック数の合う medium が無い、など）
+    pub notes: Vec<String>,
 }
+
+/// 照会の入力。`isrcs` はディスクから読めたものだけ（None は除く）
+#[derive(Debug, Clone, Copy)]
+pub struct DiscQuery<'a> {
+    pub toc: &'a Toc,
+    pub isrcs: &'a [String],
+    pub mcn: Option<&'a str>,
+    /// ユーザが貼ったリリース URL か MBID（[`parse_release_ref`]）
+    pub release: Option<&'a str>,
+}
+
+/// ISRC 検索で 1 度に取りに行くリリースの上限（1 req/s なので秒数がそのまま増える）
+const ISRC_FETCH_LIMIT: usize = 5;
+/// バーコード検索で取りに行くリリースの上限
+const BARCODE_FETCH_LIMIT: usize = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MbParseError {
@@ -195,8 +236,151 @@ pub fn parse_lookup(
     audio_tracks: usize,
 ) -> Result<Vec<ReleaseCandidate>, MbParseError> {
     let resp: Response = serde_json::from_str(json)?;
+    Ok(candidates_from(&resp.releases, discid, audio_tracks))
+}
+
+/// `ws/2/release/<id>`（リリース 1 件）の応答を候補に直す。基準は [`parse_lookup`] と同じ
+pub fn parse_release(
+    json: &str,
+    discid: &str,
+    audio_tracks: usize,
+) -> Result<Vec<ReleaseCandidate>, MbParseError> {
+    let release: Release = serde_json::from_str(json)?;
+    Ok(candidates_from(
+        std::slice::from_ref(&release),
+        discid,
+        audio_tracks,
+    ))
+}
+
+/// `ws/2/recording?query=isrc:…`（検索）の応答から、recording が載るリリースの id を
+/// 「ディスクの ISRC が付いた recording の数」の多い順（同数は出てきた順）に
+pub fn parse_recording_search(json: &str) -> Result<Vec<String>, MbParseError> {
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        recordings: Vec<Rec>,
+    }
+    #[derive(Deserialize)]
+    struct Rec {
+        #[serde(default)]
+        releases: Vec<Ref>,
+    }
+    #[derive(Deserialize)]
+    struct Ref {
+        id: String,
+    }
+    let resp: Resp = serde_json::from_str(json)?;
+    let mut order: Vec<String> = Vec::new();
+    let mut hits: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for rec in &resp.recordings {
+        let mut seen_in_rec = std::collections::HashSet::new();
+        for r in &rec.releases {
+            if !seen_in_rec.insert(r.id.clone()) {
+                continue;
+            }
+            let n = hits.entry(r.id.clone()).or_insert(0);
+            if *n == 0 {
+                order.push(r.id.clone());
+            }
+            *n += 1;
+        }
+    }
+    // 一致数の多い順。安定ソートで出てきた順は保つ
+    order.sort_by_key(|id| std::cmp::Reverse(hits.get(id).copied().unwrap_or(0)));
+    Ok(order)
+}
+
+/// `ws/2/release?query=…`（検索）の応答からリリース id を順に
+pub fn parse_release_search(json: &str) -> Result<Vec<String>, MbParseError> {
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        releases: Vec<Ref>,
+    }
+    #[derive(Deserialize)]
+    struct Ref {
+        id: String,
+    }
+    let resp: Resp = serde_json::from_str(json)?;
+    Ok(resp.releases.into_iter().map(|r| r.id).collect())
+}
+
+/// ユーザが貼ったリリースの指定から MBID（小文字）を取り出す。素の UUID か、musicbrainz.org
+/// （サブドメイン可）の `/release/<uuid>` を含む URL。他のエンティティ（recording 等）は受けない
+pub fn parse_release_ref(s: &str) -> Option<String> {
+    let s = s.trim();
+    let is_uuid = |t: &str| {
+        t.len() == 36
+            && t.bytes().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
+    };
+    if is_uuid(s) {
+        return Some(s.to_ascii_lowercase());
+    }
+    let rest = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    let (host, path) = rest.split_once('/')?;
+    if !(host == "musicbrainz.org" || host.ends_with(".musicbrainz.org")) {
+        return None;
+    }
+    let after = path.strip_prefix("release/")?;
+    let id = after.split(['/', '?', '#']).next()?;
+    is_uuid(id).then(|| id.to_ascii_lowercase())
+}
+
+/// 経路ごとの候補を 1 つの一覧に束ねる。同じリリース × medium は 1 件（経路を強い順に並べて
+/// 持つ）。並びは最強の経路の順、同じ経路の中は出てきた順。DiscID を持つ medium は fuzzy の応答に
+/// 混ざっていても（D-64）discid 経路として扱う
+pub fn merge_candidates(groups: Vec<(MatchedBy, Vec<ReleaseCandidate>)>) -> Vec<ReleaseCandidate> {
+    let mut out: Vec<ReleaseCandidate> = Vec::new();
+    let mut index: std::collections::HashMap<(String, u32), usize> =
+        std::collections::HashMap::new();
+    let mut groups = groups;
+    groups.sort_by_key(|(by, _)| *by);
+    for (by, cands) in groups {
+        for mut c in cands {
+            let key = (c.release_id.clone(), c.medium_position);
+            match index.get(&key) {
+                Some(&i) => {
+                    let existing = &mut out[i];
+                    if !existing.matched_by.contains(&by) {
+                        existing.matched_by.push(by);
+                    }
+                    if c.exact {
+                        existing.exact = true;
+                    }
+                }
+                None => {
+                    c.matched_by = vec![by];
+                    index.insert(key, out.len());
+                    out.push(c);
+                }
+            }
+        }
+    }
+    for c in &mut out {
+        if c.exact && !c.matched_by.contains(&MatchedBy::Discid) {
+            c.matched_by.push(MatchedBy::Discid);
+        }
+        c.matched_by.sort();
+        c.matched_by.dedup();
+    }
+    out.sort_by_key(|c| c.matched_by.first().copied().unwrap_or(MatchedBy::Toc));
+    out
+}
+
+fn candidates_from(
+    releases: &[Release],
+    discid: &str,
+    audio_tracks: usize,
+) -> Vec<ReleaseCandidate> {
     let mut out = Vec::new();
-    for r in &resp.releases {
+    for r in releases {
         let artist = join_credit(&r.artist_credit);
         for m in &r.media {
             let exact = m.discs.iter().any(|d| d.id == discid);
@@ -241,6 +425,7 @@ pub fn parse_lookup(
                     })
                     .collect(),
                 exact,
+                matched_by: Vec::new(),
                 medium_position: m.position,
                 medium_count: r.media.len(),
                 medium_title: non_empty(m.title.clone()),
@@ -251,7 +436,7 @@ pub fn parse_lookup(
     }
     // exact を先に（安定ソートで MB の順は保つ）
     out.sort_by_key(|c| !c.exact);
-    Ok(out)
+    out
 }
 
 // ---------------------------------------------------------------- クライアント
@@ -319,52 +504,186 @@ impl MusicBrainzClient {
         Err(LookupError::Status(503))
     }
 
-    /// TOC から DiscID を出して引く。無ければ TOC で fuzzy に引く。どちらも無ければ候補は空
+    /// TOC だけで引く（DiscID → 無ければ TOC の fuzzy）。[`Self::lookup`] の省略形
     pub async fn lookup_disc(&self, toc: &Toc) -> Result<DiscLookup, LookupError> {
-        let discid = toc.musicbrainz_disc_id();
-        let audio_tracks = toc.audio_tracks().count();
+        self.lookup(&DiscQuery {
+            toc,
+            isrcs: &[],
+            mcn: None,
+            release: None,
+        })
+        .await
+    }
+
+    /// ディスクの識別子から候補を集める。DiscID で当たれば exact（ISRC / バーコードは引かない）、
+    /// 無ければ TOC の fuzzy + ISRC + バーコードを束ねる。指定リリースはどちらでも足す。
+    /// 個々の経路の「見つからない」は候補ゼロ（指定リリースだけ notes に理由）で、照会自体の失敗
+    /// （届かない・壊れている・503）だけ Err
+    pub async fn lookup(&self, q: &DiscQuery<'_>) -> Result<DiscLookup, LookupError> {
+        let discid = q.toc.musicbrainz_disc_id();
+        let audio_tracks = q.toc.audio_tracks().count();
+        let mut groups: Vec<(MatchedBy, Vec<ReleaseCandidate>)> = Vec::new();
+        let mut notes = Vec::new();
+        // 取得済みのリリース（経路をまたいで 1 回しか取らない。中身は経路ごとに使い回す）
+        let mut cache: std::collections::HashMap<String, Vec<ReleaseCandidate>> =
+            std::collections::HashMap::new();
+
         let path = format!("discid/{discid}");
         // cdstubs=no: 未登録 DiscID に CD stub（品質の低い匿名投稿）があると 200 で別の形が返り、
         // 404 → TOC の fuzzy に進めない。候補にも入れない（D-64）
         let (status, body) = self
             .get(&path, &[("inc", INC), ("fmt", "json"), ("cdstubs", "no")])
             .await?;
-        if status.is_success() {
-            let candidates = parse_lookup(&body, &discid, audio_tracks)
+        let exact = if status.is_success() {
+            let c = parse_lookup(&body, &discid, audio_tracks)
                 .map_err(|e| LookupError::Parse(e.to_string()))?;
-            return Ok(DiscLookup {
-                discid,
-                exact: true,
-                candidates,
-            });
-        }
-        if status != reqwest::StatusCode::NOT_FOUND {
-            return Err(LookupError::Status(status.as_u16()));
-        }
-        let mb_toc = toc.musicbrainz_toc();
-        let (status, body) = self
-            .get(
-                &path,
-                &[
-                    ("toc", mb_toc.as_str()),
-                    ("inc", INC),
-                    ("fmt", "json"),
-                    ("cdstubs", "no"),
-                ],
-            )
-            .await?;
-        let candidates = if status.is_success() {
-            parse_lookup(&body, &discid, audio_tracks)
-                .map_err(|e| LookupError::Parse(e.to_string()))?
+            groups.push((MatchedBy::Discid, c));
+            true
         } else if status == reqwest::StatusCode::NOT_FOUND {
-            Vec::new()
+            let mb_toc = q.toc.musicbrainz_toc();
+            let (status, body) = self
+                .get(
+                    &path,
+                    &[
+                        ("toc", mb_toc.as_str()),
+                        ("inc", INC),
+                        ("fmt", "json"),
+                        ("cdstubs", "no"),
+                    ],
+                )
+                .await?;
+            if status.is_success() {
+                let c = parse_lookup(&body, &discid, audio_tracks)
+                    .map_err(|e| LookupError::Parse(e.to_string()))?;
+                groups.push((MatchedBy::Toc, c));
+            } else if status != reqwest::StatusCode::NOT_FOUND {
+                return Err(LookupError::Status(status.as_u16()));
+            }
+            false
         } else {
             return Err(LookupError::Status(status.as_u16()));
         };
+
+        // 指定リリース
+        if let Some(r) = q.release {
+            match parse_release_ref(r) {
+                None => notes.push(format!(
+                    "リリースの指定を読めない: {r:?}（musicbrainz.org/release/<id> の URL か MBID）"
+                )),
+                Some(id) => match self.fetch_release(&id, &discid, audio_tracks).await? {
+                    Ok(c) if c.is_empty() => {
+                        cache.insert(id.clone(), Vec::new());
+                        notes.push(format!(
+                            "指定したリリース {id} に音声 {audio_tracks} トラックの medium が無い"
+                        ));
+                    }
+                    Ok(c) => {
+                        cache.insert(id.clone(), c.clone());
+                        groups.push((MatchedBy::Release, c));
+                    }
+                    Err(status) => {
+                        cache.insert(id.clone(), Vec::new());
+                        notes.push(format!("指定したリリース {id} を取れない（HTTP {status}）"));
+                    }
+                },
+            }
+        }
+
+        if !exact {
+            // ISRC: 検索を 1 回（複数 ISRC を OR）→ 一致数の多いリリースから上限まで取得
+            if !q.isrcs.is_empty() {
+                let query = q
+                    .isrcs
+                    .iter()
+                    .map(|i| format!("isrc:{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                let (status, body) = self
+                    .get("recording", &[("query", query.as_str()), ("fmt", "json")])
+                    .await?;
+                if !status.is_success() {
+                    return Err(LookupError::Status(status.as_u16()));
+                }
+                let ids =
+                    parse_recording_search(&body).map_err(|e| LookupError::Parse(e.to_string()))?;
+                let mut c = Vec::new();
+                for id in ids.into_iter().take(ISRC_FETCH_LIMIT) {
+                    c.extend(
+                        self.fetch_cached(&mut cache, &id, &discid, audio_tracks)
+                            .await?,
+                    );
+                }
+                groups.push((MatchedBy::Isrc, c));
+            }
+            // バーコード
+            if let Some(mcn) = q.mcn {
+                let query = format!("barcode:{mcn}");
+                let (status, body) = self
+                    .get("release", &[("query", query.as_str()), ("fmt", "json")])
+                    .await?;
+                if !status.is_success() {
+                    return Err(LookupError::Status(status.as_u16()));
+                }
+                let ids =
+                    parse_release_search(&body).map_err(|e| LookupError::Parse(e.to_string()))?;
+                let mut c = Vec::new();
+                for id in ids.into_iter().take(BARCODE_FETCH_LIMIT) {
+                    c.extend(
+                        self.fetch_cached(&mut cache, &id, &discid, audio_tracks)
+                            .await?,
+                    );
+                }
+                groups.push((MatchedBy::Barcode, c));
+            }
+        }
+
         Ok(DiscLookup {
             discid,
-            exact: false,
-            candidates,
+            exact,
+            candidates: merge_candidates(groups),
+            notes,
         })
+    }
+
+    /// リリースを 1 件取って候補に直す。404 等の「取れない」は `Ok(Err(status))`（経路ごとに
+    /// 扱いが違う: 指定なら notes、検索由来なら黙って飛ばす）
+    async fn fetch_release(
+        &self,
+        id: &str,
+        discid: &str,
+        audio_tracks: usize,
+    ) -> Result<Result<Vec<ReleaseCandidate>, u16>, LookupError> {
+        let (status, body) = self
+            .get(&format!("release/{id}"), &[("inc", INC), ("fmt", "json")])
+            .await?;
+        if !status.is_success() {
+            return Ok(Err(status.as_u16()));
+        }
+        let c = parse_release(&body, discid, audio_tracks)
+            .map_err(|e| LookupError::Parse(e.to_string()))?;
+        Ok(Ok(c))
+    }
+
+    /// 取得済みならその候補を、まだなら取って（取れなければ空。ログだけ）覚える。同じリリースが
+    /// 複数の経路に出たとき、中身は 1 回の取得で経路ごとに使い回す（束ねるときに経路が足される）
+    async fn fetch_cached(
+        &self,
+        cache: &mut std::collections::HashMap<String, Vec<ReleaseCandidate>>,
+        id: &str,
+        discid: &str,
+        audio_tracks: usize,
+    ) -> Result<Vec<ReleaseCandidate>, LookupError> {
+        if let Some(c) = cache.get(id) {
+            return Ok(c.clone());
+        }
+        let c = match self.fetch_release(id, discid, audio_tracks).await? {
+            Ok(c) => c,
+            Err(status) => {
+                tracing::info!(id, status, "検索に出たリリースを取れない。飛ばす");
+                Vec::new()
+            }
+        };
+        cache.insert(id.to_owned(), c.clone());
+        Ok(c)
     }
 }

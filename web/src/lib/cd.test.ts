@@ -9,7 +9,9 @@ import {
   fillEmptyTitles,
   finalizeDraft,
   initialSelection,
+  discidSubmissionUrl,
   lookupHeadline,
+  matchedByLabel,
   normalizeTocInput,
   outcomeAfterTocEdit,
   trackTags,
@@ -30,6 +32,7 @@ const base: ReleaseCandidate = {
   disambiguation: null,
   labels: [['DGC Records', 'DGCD-24425']],
   exact: true,
+  matched_by: ['discid'],
   medium_position: 1,
   medium_count: 1,
   medium_title: null,
@@ -79,19 +82,48 @@ describe('candidateSummary', () => {
   })
 })
 
+describe('matchedByLabel / discidSubmissionUrl', () => {
+  it('候補のバッジは経路を強い順に並べる', () => {
+    expect(matchedByLabel(base)).toBe('DiscID 一致')
+    expect(matchedByLabel({ ...base, matched_by: ['isrc', 'toc'] })).toBe('ISRC / TOC 近似')
+    expect(matchedByLabel({ ...base, matched_by: ['release'] })).toBe('指定')
+    expect(matchedByLabel({ ...base, matched_by: ['barcode'] })).toBe('バーコード')
+    expect(matchedByLabel({ ...base, matched_by: [] })).toBe('')
+  })
+  it('DiscID の登録 URL は libdiscid と同じ形（id・トラック数・TOC は + 区切り）', () => {
+    expect(discidSubmissionUrl('Pmj4hPdkGckCxpSFFMoexmR6r1s-', '1 2 40440 150 20294')).toBe(
+      'https://musicbrainz.org/cdtoc/attach?id=Pmj4hPdkGckCxpSFFMoexmR6r1s-&tracks=2&toc=1+2+40440+150+20294',
+    )
+  })
+})
+
 describe('candidateLengthMs / lookupHeadline', () => {
   it('長さの合計。不明があれば null', () => {
     expect(candidateLengthMs(base)).toBe(3500)
     expect(candidateLengthMs({ ...base, tracks: [{ ...base.tracks[0]!, length_ms: null }] })).toBeNull()
   })
-  it('見出しは exact / fuzzy / 0 件で変える', () => {
-    const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: true, candidates: [base], tracks: [] }
+  it('見出しは exact / 経路 / 0 件で変える', () => {
+    const r = {
+      discid: 'd',
+      mb_toc: '',
+      accuraterip_id: '',
+      ctdb_toc_id: '',
+      exact: true,
+      candidates: [base],
+      notes: [],
+      tracks: [],
+    }
     expect(lookupHeadline(r)).toBe('DiscID が一致: 1 件')
-    expect(lookupHeadline({ ...r, exact: false, candidates: [{ ...base, exact: false }] })).toBe(
-      'TOC の近い候補（DiscID は未登録）: 1 件',
+    const toc: ReleaseCandidate = { ...base, exact: false, matched_by: ['toc'] }
+    expect(lookupHeadline({ ...r, exact: false, candidates: [toc] })).toBe('候補: 1 件（TOC 近似。DiscID は未登録）')
+    // 経路は強い順に並べて全部出す（同じ候補が複数の経路で出ても 1 回）
+    const isrc: ReleaseCandidate = { ...base, exact: false, matched_by: ['isrc', 'barcode'] }
+    const given: ReleaseCandidate = { ...base, exact: false, matched_by: ['release', 'isrc'] }
+    expect(lookupHeadline({ ...r, exact: false, candidates: [given, isrc, toc] })).toBe(
+      '候補: 3 件（指定 / ISRC / バーコード / TOC 近似。DiscID は未登録）',
     )
     // fuzzy 経路でも候補側に DiscID 一致があれば「未登録」と言わない
-    expect(lookupHeadline({ ...r, exact: false, candidates: [base, { ...base, exact: false }] })).toBe(
+    expect(lookupHeadline({ ...r, exact: false, candidates: [base, toc] })).toBe(
       'TOC で照会（DiscID の一致する候補 1 件を含む）: 2 件',
     )
     expect(lookupHeadline({ ...r, exact: false, candidates: [] })).toBe('MusicBrainz に見つからない（手入力へ）')
@@ -99,7 +131,7 @@ describe('candidateLengthMs / lookupHeadline', () => {
 })
 
 describe('状態遷移', () => {
-  const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: true, candidates: [base], tracks: [] }
+  const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: true, candidates: [base], notes: [], tracks: [] }
   it('TOC を編集したら結果と選択を捨てる。同じ入力なら保つ', () => {
     const outcome = { result: r, selected: 0, error: null }
     expect(outcomeAfterTocEdit('a', 'b', outcome)).toEqual({ result: null, selected: null, error: null })

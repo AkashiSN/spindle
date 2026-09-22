@@ -1,6 +1,7 @@
 //! CD 取り込みの API（SPEC §9 `/api/cd/*`、§7.2）。P2-3 は照会だけ:
-//! `POST /api/cd/lookup { toc }` — TOC 文字列（CTDB 形式 `0:13915:…:leadout` か MusicBrainz 形式
-//! `1 12 leadout+150 offset+150 …`）から各種 DiscID を出し、MusicBrainz に照会して候補を返す。
+//! `POST /api/cd/lookup { toc, isrcs?, mcn?, release? }` — TOC 文字列（CTDB 形式 `0:13915:…:leadout` か
+//! MusicBrainz 形式 `1 12 leadout+150 offset+150 …`）から各種 DiscID を出し、MusicBrainz に照会して
+//! 候補を返す。ISRC / MCN（status が読んだもの）と貼り付けたリリース URL でも引く（D-64 追記）。
 //! `GET /api/cd/status`（P2-1 / P2-2）はポーラ（`cd::device`）が持つドライブの状態と TOC
 //! （lookup に渡すのと同じ CTDB 形式の文字列）を返し、`POST /api/cd/eject` はトレイを開けて
 //! 状態を見直す。ドライブが配線されていなければどちらも 503 `cd_unavailable`。
@@ -28,6 +29,10 @@ pub struct StatusResponse {
     pub state: DriveState,
     /// ディスクがあって TOC を読めたら CTDB 形式の文字列（`POST /api/cd/lookup` にそのまま渡せる）
     pub toc: Option<String>,
+    /// TOC と一緒に読んだ ISRC（音声トラック順。無いトラックは null）。TOC が無ければ空
+    pub isrcs: Vec<Option<String>>,
+    /// メディアカタログ番号（JAN / UPC）。入っていない盤は null
+    pub mcn: Option<String>,
     /// 直近の失敗（開けない・TOC を読めない）
     pub error: Option<String>,
     /// 最後にドライブを見た時刻（epoch 秒）。まだなら 0
@@ -46,6 +51,8 @@ pub async fn status(State(state): State<AppState>) -> Result<Response, ApiError>
     Ok(Json(StatusResponse {
         state: s.state,
         toc: s.toc.as_ref().map(Toc::ctdb_toc),
+        isrcs: s.ids.isrcs,
+        mcn: s.ids.mcn,
         error: s.error,
         checked_at: s.checked_at,
     })
@@ -78,6 +85,15 @@ pub async fn eject(State(state): State<AppState>) -> Result<Response, ApiError> 
 #[derive(Debug, Deserialize)]
 pub struct LookupBody {
     pub toc: String,
+    /// ディスクから読んだ ISRC（`GET /api/cd/status` の `isrcs`。読めなかったトラックは null）
+    #[serde(default)]
+    pub isrcs: Vec<Option<String>>,
+    /// メディアカタログ番号（同 `mcn`）
+    #[serde(default)]
+    pub mcn: Option<String>,
+    /// ユーザが貼った MusicBrainz のリリース URL か MBID
+    #[serde(default)]
+    pub release: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,9 +103,12 @@ pub struct LookupResponse {
     pub mb_toc: String,
     pub accuraterip_id: String,
     pub ctdb_toc_id: String,
-    /// DiscID そのもので引けた（false なら TOC の fuzzy 照会）
+    /// DiscID そのもので引けた（false なら TOC の fuzzy + ISRC + バーコード）
     pub exact: bool,
+    /// 経路（`matched_by`）付きの候補。強い経路の順
     pub candidates: Vec<ReleaseCandidate>,
+    /// 候補に入れられなかった理由（指定リリースが読めない・トラック数が合わない）
+    pub notes: Vec<String>,
     /// TOC の音声トラック（番号と長さ）。候補が無くても手入力フォーム（P2-4）の行数と長さの元になる
     pub tracks: Vec<TocTrackInfo>,
 }
@@ -141,7 +160,14 @@ pub async fn lookup(
             "musicbrainz_unavailable",
         ));
     };
-    let result = match client.lookup_disc(&toc).await {
+    let isrcs: Vec<String> = body.isrcs.iter().flatten().cloned().collect();
+    let query = crate::cd::musicbrainz::DiscQuery {
+        toc: &toc,
+        isrcs: &isrcs,
+        mcn: body.mcn.as_deref().filter(|m| !m.trim().is_empty()),
+        release: body.release.as_deref().filter(|r| !r.trim().is_empty()),
+    };
+    let result = match client.lookup(&query).await {
         Ok(r) => r,
         // 再試行しても 503（負荷制限）: 使えないのは一時的で、間を置けば通る
         Err(LookupError::Status(503)) => {
@@ -168,6 +194,7 @@ pub async fn lookup(
         ctdb_toc_id: toc.ctdb_toc_id(),
         exact: result.exact,
         candidates: result.candidates,
+        notes: result.notes,
         tracks: toc_tracks(&toc),
     })
     .into_response())

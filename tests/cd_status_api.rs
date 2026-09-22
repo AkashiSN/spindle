@@ -14,7 +14,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use spindle::api::{self, auth, AppState};
-use spindle::cd::device::{Drive, DriveError, DriveMonitor, DriveState};
+use spindle::cd::device::{DiscIds, Drive, DriveError, DriveMonitor, DriveState};
 use spindle::cd::toc::Toc;
 use spindle::config::Config;
 use spindle::db::Db;
@@ -35,6 +35,12 @@ impl Drive for FakeDrive {
     }
     fn read_toc(&self) -> Result<Toc, DriveError> {
         Ok(Toc::parse(TOC).unwrap())
+    }
+    fn read_ids(&self, _toc: &Toc) -> Result<DiscIds, DriveError> {
+        Ok(DiscIds {
+            isrcs: vec![Some("JPQ402600330".into()), None],
+            mcn: Some("4582515778491".into()),
+        })
     }
     fn eject(&self) -> Result<(), DriveError> {
         self.ejects.fetch_add(1, Ordering::SeqCst);
@@ -161,6 +167,8 @@ async fn status_before_first_poll_is_unknown() {
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["state"], "unknown");
     assert_eq!(body["toc"], Value::Null);
+    assert_eq!(body["isrcs"], serde_json::json!([]));
+    assert_eq!(body["mcn"], Value::Null);
     assert_eq!(body["error"], Value::Null);
     assert_eq!(body["checked_at"], 0);
 }
@@ -175,6 +183,9 @@ async fn status_reports_disc_and_toc_string() {
     assert_eq!(body["state"], "disc_ok");
     // lookup に渡す文字列と同じ形（CTDB 形式）
     assert_eq!(body["toc"], TOC);
+    // TOC と一緒に読んだ ISRC（音声トラック順。無いトラックは null）と MCN
+    assert_eq!(body["isrcs"], serde_json::json!(["JPQ402600330", null]));
+    assert_eq!(body["mcn"], "4582515778491");
     assert_eq!(body["error"], Value::Null);
     assert_eq!(body["checked_at"], 1_700_000_000_i64);
 }
@@ -190,6 +201,9 @@ async fn status_reports_no_drive_with_reason() {
             })
         }
         fn read_toc(&self) -> Result<Toc, DriveError> {
+            unreachable!()
+        }
+        fn read_ids(&self, _toc: &Toc) -> Result<DiscIds, DriveError> {
             unreachable!()
         }
         fn eject(&self) -> Result<(), DriveError> {

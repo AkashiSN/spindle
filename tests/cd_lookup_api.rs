@@ -23,6 +23,9 @@ const EXAMPLE: &str = include_str!("../deploy/config.example.toml");
 const LAN: &str = "192.168.1.23:50000";
 const NEVERMIND: &str = include_str!("fixtures/mb/nevermind.json");
 const NOTFOUND: &str = include_str!("fixtures/mb/notfound.json");
+const RELEASE_FIVE: &str = include_str!("fixtures/mb/release_five.json");
+const ISRC_SEARCH_FIVE: &str = include_str!("fixtures/mb/isrc_search_five.json");
+const FIVE_RELEASE: &str = "f1223d63-f359-457d-b935-fc27eb24a6de";
 const NEVERMIND_ID: &str = "y6Br7t4P.bldLe_6Im2d9Z42IU4-";
 const NEVERMIND_TOC: &str =
     "0:22593:41700:58133:71920:91198:104468:115188:131988:143758:159678:174415:191880";
@@ -44,8 +47,30 @@ async fn mb_handler(
     }
 }
 
+async fn release_handler(Path(id): Path<String>) -> (StatusCode, String) {
+    if id == FIVE_RELEASE {
+        (StatusCode::OK, RELEASE_FIVE.to_owned())
+    } else {
+        (StatusCode::NOT_FOUND, NOTFOUND.to_owned())
+    }
+}
+
+async fn recording_search_handler(Query(q): Query<Vec<(String, String)>>) -> (StatusCode, String) {
+    let hit = q
+        .iter()
+        .any(|(k, v)| k == "query" && v.contains("isrc:JPQ402600330"));
+    if hit {
+        (StatusCode::OK, ISRC_SEARCH_FIVE.to_owned())
+    } else {
+        (StatusCode::OK, r#"{"count":0,"recordings":[]}"#.to_owned())
+    }
+}
+
 async fn serve_mb() -> String {
-    let app = Router::new().route("/ws/2/discid/{discid}", get(mb_handler));
+    let app = Router::new()
+        .route("/ws/2/discid/{discid}", get(mb_handler))
+        .route("/ws/2/release/{id}", get(release_handler))
+        .route("/ws/2/recording", get(recording_search_handler));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -166,6 +191,40 @@ async fn lookup_accepts_the_musicbrainz_toc_form() {
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["discid"], NEVERMIND_ID);
     assert_eq!(body["candidates"].as_array().unwrap().len(), 2);
+}
+
+/// DiscID もトラック長も未登録の盤（嵐「Five」）は、ディスクの ISRC と貼り付けたリリース URL で当たる。
+/// `isrcs` の null（読めなかったトラック）は捨てる
+#[tokio::test]
+async fn lookup_uses_isrcs_and_a_pasted_release() {
+    let app = App::new(Some(serve_mb().await)).await;
+    let c = app.cookie().await;
+    let (st, body) = app
+        .post(
+            &c,
+            json!({
+                "toc": "0:20144:40290",
+                "isrcs": ["JPQ402600330", null],
+                "mcn": null,
+                "release": format!("https://musicbrainz.org/release/{FIVE_RELEASE}/disc/1"),
+            }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["exact"], false);
+    assert_eq!(body["notes"], json!([]));
+    let cands = body["candidates"].as_array().unwrap();
+    assert_eq!(cands.len(), 1, "{body}");
+    assert_eq!(cands[0]["release_id"], FIVE_RELEASE);
+    assert_eq!(cands[0]["title"], "Five");
+    assert_eq!(cands[0]["matched_by"], json!(["release", "isrc"]));
+    assert_eq!(cands[0]["tracks"].as_array().unwrap().len(), 2);
+    // 指定だけが読めないときは notes に理由（候補は他の経路のまま）
+    let (st, body) = app
+        .post(&c, json!({ "toc": "0:20144:40290", "release": "nonsense" }))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["notes"].as_array().unwrap().len(), 1, "{body}");
 }
 
 #[tokio::test]

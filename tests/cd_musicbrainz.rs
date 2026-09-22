@@ -7,6 +7,12 @@
 //! - fuzzy.json: DiscID 不一致 + `?toc=`（Nevermind の TOC。7 リリース）
 //! - fuzzy_none.json: 3 トラックの適当な TOC の fuzzy（1 リリース）
 //! - notfound.json: 未登録 DiscID の 404
+//! - isrc_search_five.json: `ws/2/recording?query=isrc:JPQ402600330 OR isrc:JPQ402600340`（嵐「Five」。
+//!   1 recording が 5 リリースに載る。340 のカラオケは未登録）
+//! - barcode_search_five.json: `ws/2/release?query=barcode:4582515778491`（1 件）
+//! - release_five.json: `ws/2/release/f1223d63-…`（CD 2 曲 + Blu-ray。DiscID 未登録、トラック長も無い =
+//!   TOC の fuzzy では出ない盤）
+//! - release_notfound.json: 不正な MBID の 400
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +23,10 @@ use axum::routing::get;
 use axum::Router;
 use tokio::sync::Mutex;
 
-use spindle::cd::musicbrainz::{parse_lookup, MusicBrainzClient, ReleaseCandidate};
+use spindle::cd::musicbrainz::{
+    merge_candidates, parse_lookup, parse_recording_search, parse_release, parse_release_ref,
+    parse_release_search, DiscQuery, MatchedBy, MusicBrainzClient, ReleaseCandidate,
+};
 use spindle::cd::toc::{Toc, TocTrack};
 
 const NEVERMIND: &str = include_str!("fixtures/mb/nevermind.json");
@@ -26,7 +35,15 @@ const FUZZY: &str = include_str!("fixtures/mb/fuzzy.json");
 const FUZZY_NONE: &str = include_str!("fixtures/mb/fuzzy_none.json");
 const NOTFOUND: &str = include_str!("fixtures/mb/notfound.json");
 
+const ISRC_SEARCH_FIVE: &str = include_str!("fixtures/mb/isrc_search_five.json");
+const BARCODE_SEARCH_FIVE: &str = include_str!("fixtures/mb/barcode_search_five.json");
+const RELEASE_FIVE: &str = include_str!("fixtures/mb/release_five.json");
+const RELEASE_NOTFOUND: &str = include_str!("fixtures/mb/release_notfound.json");
+
 const NEVERMIND_ID: &str = "y6Br7t4P.bldLe_6Im2d9Z42IU4-";
+const FIVE_RELEASE: &str = "f1223d63-f359-457d-b935-fc27eb24a6de";
+/// 嵐「Five」のシングル（実ドライブで読んだ TOC）
+const FIVE_TOC: &str = "0:20144:40290";
 
 // ---------------------------------------------------------------- 解釈
 
@@ -175,6 +192,157 @@ fn track_artist_falls_back_to_the_release_artist() {
 /// (DiscID, クエリ, User-Agent)
 type SeenRequest = (String, Vec<(String, String)>, String);
 
+// ---------------------------------------------------------------- DiscID 以外の経路（P2-3 拡張）
+
+#[test]
+fn recording_search_lists_releases_by_isrc_matches() {
+    // 1 recording（JPQ402600330）が 5 リリースに載る。順は MB の並び（一致数は全部 1）
+    let ids = parse_recording_search(ISRC_SEARCH_FIVE).unwrap();
+    assert_eq!(ids.len(), 5, "{ids:?}");
+    assert_eq!(ids[0], FIVE_RELEASE);
+    assert!(ids.iter().all(|i| i.len() == 36));
+}
+
+#[test]
+fn recording_search_ranks_releases_carrying_more_isrcs_first() {
+    // 合成: recording A（1 件目）は X と Y に、B は Y だけに載る → Y（2 本一致）が先
+    let json = r#"{"count":2,"recordings":[
+      {"id":"a","title":"A","releases":[{"id":"x","title":"X"},{"id":"y","title":"Y"}]},
+      {"id":"b","title":"B","releases":[{"id":"y","title":"Y"}]}]}"#;
+    assert_eq!(parse_recording_search(json).unwrap(), vec!["y", "x"]);
+}
+
+#[test]
+fn release_search_lists_release_ids() {
+    assert_eq!(
+        parse_release_search(BARCODE_SEARCH_FIVE).unwrap(),
+        vec![FIVE_RELEASE.to_owned()]
+    );
+}
+
+#[test]
+fn release_fetch_keeps_media_with_the_audio_track_count() {
+    // CD（2 曲）は候補、Blu-ray（1 トラック）は落ちる。DiscID は無いので exact でない
+    let c = parse_release(RELEASE_FIVE, "Pmj4hPdkGckCxpSFFMoexmR6r1s-", 2).unwrap();
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(c[0].release_id, FIVE_RELEASE);
+    assert_eq!(c[0].title, "Five");
+    assert_eq!(c[0].artist, "嵐");
+    assert_eq!(c[0].barcode.as_deref(), Some("4582515778491"));
+    assert_eq!(c[0].medium_position, 1);
+    assert_eq!(c[0].medium_count, 2);
+    assert_eq!(c[0].format.as_deref(), Some("CD"));
+    assert!(!c[0].exact);
+    assert_eq!(c[0].tracks[0].isrcs, vec!["JPQ402600330"]);
+    assert_eq!(c[0].tracks[1].title, "Five (オリジナル・カラオケ)");
+    // トラック数が合う medium が無ければ空
+    assert!(parse_release(RELEASE_FIVE, "x", 12).unwrap().is_empty());
+    assert!(parse_release(RELEASE_NOTFOUND, "x", 2).is_err());
+}
+
+#[test]
+fn release_ref_accepts_urls_and_bare_ids() {
+    let id = FIVE_RELEASE;
+    for s in [
+        id.to_owned(),
+        format!("https://musicbrainz.org/release/{id}"),
+        format!("https://musicbrainz.org/release/{id}/disc/1"),
+        format!("  https://beta.musicbrainz.org/release/{id}?tab=details  "),
+        format!("musicbrainz.org/release/{id}#x"),
+        id.to_uppercase(),
+    ] {
+        assert_eq!(parse_release_ref(&s).as_deref(), Some(id), "{s}");
+    }
+    for s in [
+        "",
+        "https://musicbrainz.org/recording/f1223d63-f359-457d-b935-fc27eb24a6de",
+        "f1223d63-f359-457d-b935",
+        "https://example.com/release/f1223d63-f359-457d-b935-fc27eb24a6de",
+    ] {
+        assert_eq!(parse_release_ref(s), None, "{s}");
+    }
+}
+
+fn cand(release: &str, medium: u32, exact: bool) -> ReleaseCandidate {
+    let mut c = parse_release(RELEASE_FIVE, "x", 2).unwrap().remove(0);
+    c.release_id = release.to_owned();
+    c.medium_position = medium;
+    c.exact = exact;
+    c.matched_by = Vec::new();
+    c
+}
+
+#[test]
+fn merge_dedupes_media_and_orders_by_the_strongest_route() {
+    // 同じリリース × medium が複数の経路で出たら 1 件に束ね、経路は強い順（discid > release >
+    // isrc > barcode > toc）。並びも最強の経路の順、同じ経路の中は出てきた順
+    let merged = merge_candidates(vec![
+        (
+            MatchedBy::Toc,
+            vec![cand("t1", 1, false), cand("f", 1, false)],
+        ),
+        (
+            MatchedBy::Isrc,
+            vec![cand("f", 1, false), cand("i2", 1, false)],
+        ),
+        (
+            MatchedBy::Barcode,
+            vec![cand("f", 1, false), cand("f", 2, false)],
+        ),
+        (MatchedBy::Release, vec![cand("r", 1, false)]),
+    ]);
+    let keys: Vec<(String, u32)> = merged
+        .iter()
+        .map(|c| (c.release_id.clone(), c.medium_position))
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            ("r".to_owned(), 1),
+            ("f".to_owned(), 1),
+            ("i2".to_owned(), 1),
+            ("f".to_owned(), 2),
+            ("t1".to_owned(), 1),
+        ]
+    );
+    assert_eq!(
+        merged[1].matched_by,
+        vec![MatchedBy::Isrc, MatchedBy::Barcode, MatchedBy::Toc]
+    );
+    assert_eq!(merged[0].matched_by, vec![MatchedBy::Release]);
+}
+
+#[test]
+fn merge_puts_discid_matches_first_and_marks_them_exact() {
+    let merged = merge_candidates(vec![
+        (
+            MatchedBy::Toc,
+            vec![cand("a", 1, false), cand("b", 1, true)],
+        ),
+        (MatchedBy::Discid, vec![cand("c", 1, true)]),
+    ]);
+    let ids: Vec<&str> = merged.iter().map(|c| c.release_id.as_str()).collect();
+    // b は fuzzy の応答に混ざった DiscID 持ち（D-64）。経路としては discid 扱いで前に出る
+    assert_eq!(ids, vec!["c", "b", "a"]);
+    assert!(merged[0].exact && merged[1].exact && !merged[2].exact);
+    assert_eq!(
+        merged[1].matched_by,
+        vec![MatchedBy::Discid, MatchedBy::Toc]
+    );
+}
+
+#[test]
+fn matched_by_serializes_snake_case() {
+    assert_eq!(
+        serde_json::to_string(&MatchedBy::Discid).unwrap(),
+        "\"discid\""
+    );
+    assert_eq!(
+        serde_json::to_string(&MatchedBy::Barcode).unwrap(),
+        "\"barcode\""
+    );
+}
+
 #[derive(Default)]
 struct Seen {
     requests: Vec<SeenRequest>,
@@ -222,10 +390,84 @@ async fn discid_handler(
     }
 }
 
+/// `ws/2/recording?query=isrc:…`（検索）。Five の ISRC なら実応答、他は 0 件
+async fn recording_search_handler(
+    State(seen): State<Shared>,
+    Query(q): Query<Vec<(String, String)>>,
+) -> (StatusCode, String) {
+    let mut s = seen.lock().await;
+    s.started.push(Instant::now());
+    s.requests
+        .push(("recording".to_owned(), q.clone(), String::new()));
+    let query = q
+        .iter()
+        .find(|(k, _)| k == "query")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    if query.contains("isrc:JPQ402600330") {
+        (StatusCode::OK, ISRC_SEARCH_FIVE.to_owned())
+    } else {
+        (
+            StatusCode::OK,
+            r#"{"count":0,"offset":0,"recordings":[]}"#.to_owned(),
+        )
+    }
+}
+
+/// `ws/2/release?query=barcode:…`（検索）
+async fn release_search_handler(
+    State(seen): State<Shared>,
+    Query(q): Query<Vec<(String, String)>>,
+) -> (StatusCode, String) {
+    let mut s = seen.lock().await;
+    s.started.push(Instant::now());
+    s.requests
+        .push(("release".to_owned(), q.clone(), String::new()));
+    let query = q
+        .iter()
+        .find(|(k, _)| k == "query")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    if query == "barcode:4582515778491" {
+        (StatusCode::OK, BARCODE_SEARCH_FIVE.to_owned())
+    } else {
+        (
+            StatusCode::OK,
+            r#"{"count":0,"offset":0,"releases":[]}"#.to_owned(),
+        )
+    }
+}
+
+/// `ws/2/release/{id}`（取得）。Five は実応答、`df1b88a4…`（ISRC 検索の 2 件目）は Five と同じ中身で
+/// id だけ違う盤、他は 404
+async fn release_handler(
+    State(seen): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<Vec<(String, String)>>,
+) -> (StatusCode, String) {
+    let mut s = seen.lock().await;
+    s.started.push(Instant::now());
+    s.requests
+        .push((format!("release/{id}"), q.clone(), String::new()));
+    if id == FIVE_RELEASE {
+        (StatusCode::OK, RELEASE_FIVE.to_owned())
+    } else if id.starts_with("df1b88a4") {
+        (StatusCode::OK, RELEASE_FIVE.replace(FIVE_RELEASE, &id))
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            r#"{"error":"Not Found","help":"For usage, please see: https://musicbrainz.org/development/mmd"}"#.to_owned(),
+        )
+    }
+}
+
 async fn serve() -> (String, Shared) {
     let seen: Shared = Arc::default();
     let app = Router::new()
         .route("/ws/2/discid/{discid}", get(discid_handler))
+        .route("/ws/2/recording", get(recording_search_handler))
+        .route("/ws/2/release", get(release_search_handler))
+        .route("/ws/2/release/{id}", get(release_handler))
         .with_state(Arc::clone(&seen));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -376,4 +618,185 @@ async fn unreachable_server_is_an_error() {
     )
     .expect("client");
     assert!(client.lookup_disc(&nevermind_toc()).await.is_err());
+}
+
+// ---------------------------------------------------------------- クライアント（複数経路）
+
+fn five_toc() -> Toc {
+    Toc::parse(FIVE_TOC).unwrap()
+}
+
+#[tokio::test]
+async fn client_combines_isrc_barcode_and_release_routes() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = five_toc();
+    let isrcs = ["JPQ402600330".to_owned(), "JPQ402600340".to_owned()];
+    let release = format!("https://musicbrainz.org/release/{FIVE_RELEASE}");
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &isrcs,
+            mcn: Some("4582515778491"),
+            release: Some(&release),
+        })
+        .await
+        .expect("lookup");
+    assert!(!r.exact);
+    assert!(r.notes.is_empty(), "{:?}", r.notes);
+    // Five の CD（medium 1）は 3 経路で出て 1 件に束なる。df1b88a4（同じ中身の別盤）は ISRC 経路だけ
+    let five = r
+        .candidates
+        .iter()
+        .find(|c| c.release_id == FIVE_RELEASE)
+        .expect("Five");
+    assert_eq!(five.medium_position, 1);
+    assert_eq!(
+        five.matched_by,
+        vec![MatchedBy::Release, MatchedBy::Isrc, MatchedBy::Barcode]
+    );
+    assert_eq!(
+        r.candidates[0].release_id, FIVE_RELEASE,
+        "指定したリリースが先頭"
+    );
+    let other = r
+        .candidates
+        .iter()
+        .find(|c| c.release_id.starts_with("df1b88a4"))
+        .expect("df1b88a4");
+    assert_eq!(other.matched_by, vec![MatchedBy::Isrc]);
+    // fuzzy（Nevermind の 12 曲）はトラック数が合わないので候補に入らない
+    assert_eq!(r.candidates.len(), 2, "{:?}", r.candidates);
+
+    let s = seen.lock().await;
+    let paths: Vec<&str> = s.requests.iter().map(|(p, _, _)| p.as_str()).collect();
+    // discid → toc の fuzzy → 指定リリース → ISRC 検索 → その上位（Five は取得済みなので省く）→
+    // バーコード検索（Five は取得済み）
+    assert_eq!(paths[0], toc.musicbrainz_disc_id());
+    assert_eq!(paths[1], toc.musicbrainz_disc_id());
+    assert_eq!(paths[2], format!("release/{FIVE_RELEASE}"));
+    assert_eq!(paths[3], "recording");
+    let get = |q: &Vec<(String, String)>, k: &str| {
+        q.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone())
+    };
+    assert_eq!(
+        get(&s.requests[3].1, "query").as_deref(),
+        Some("isrc:JPQ402600330 OR isrc:JPQ402600340")
+    );
+    let fetched: Vec<&str> = paths
+        .iter()
+        .filter(|p| p.starts_with("release/"))
+        .copied()
+        .collect();
+    assert_eq!(
+        fetched
+            .iter()
+            .filter(|p| **p == format!("release/{FIVE_RELEASE}"))
+            .count(),
+        1,
+        "同じリリースは 1 回しか取らない: {paths:?}"
+    );
+    // ISRC 検索の 5 件のうち Five 以外の 4 件を取り（404 も含む）、バーコード検索の 1 件は取得済み
+    assert_eq!(fetched.len(), 5, "{paths:?}");
+    assert_eq!(paths.iter().filter(|p| **p == "release").count(), 1);
+    assert_eq!(
+        get(&s.requests[paths.len() - 1].1, "query").as_deref(),
+        Some("barcode:4582515778491")
+    );
+    // 取得はどれも discid 照会と同じ inc
+    for (p, q, _) in &s.requests {
+        if p.starts_with("release/") {
+            assert!(
+                get(q, "inc").unwrap_or_default().contains("recordings"),
+                "{p}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn client_notes_a_release_without_a_matching_medium() {
+    let (base, _seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    // 12 曲の TOC に Five（2 曲）を指定 → 候補は空で、理由を notes に
+    let toc = nevermind_toc();
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &[],
+            mcn: None,
+            release: Some(FIVE_RELEASE),
+        })
+        .await
+        .expect("lookup");
+    assert!(r.candidates.iter().all(|c| c.release_id != FIVE_RELEASE));
+    assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+    assert!(r.notes[0].contains("12"), "{:?}", r.notes);
+    // 不正な指定・無いリリースも notes（照会全体は失敗にしない）
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &[],
+            mcn: None,
+            release: Some("not-an-id"),
+        })
+        .await
+        .expect("lookup");
+    assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &[],
+            mcn: None,
+            release: Some("00000000-0000-0000-0000-000000000000"),
+        })
+        .await
+        .expect("lookup");
+    assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+    assert!(r.notes[0].contains("404"), "{:?}", r.notes);
+}
+
+#[tokio::test]
+async fn client_skips_routes_without_inputs_and_after_an_exact_hit() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    // 入力が TOC だけなら discid → toc の 2 本
+    let toc = other_toc();
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &[],
+            mcn: None,
+            release: None,
+        })
+        .await
+        .expect("lookup");
+    assert_eq!(r.candidates.len(), 7);
+    assert!(r
+        .candidates
+        .iter()
+        .all(|c| c.matched_by == vec![MatchedBy::Toc]));
+    assert_eq!(seen.lock().await.requests.len(), 2);
+    // DiscID で当たれば ISRC / バーコードは引かない（指定リリースだけは足す）
+    let toc = nevermind_toc();
+    let isrcs = ["JPQ402600330".to_owned()];
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &isrcs,
+            mcn: Some("4582515778491"),
+            release: None,
+        })
+        .await
+        .expect("lookup");
+    assert!(r.exact);
+    assert_eq!(r.candidates.len(), 2);
+    assert!(r
+        .candidates
+        .iter()
+        .all(|c| c.exact && c.matched_by == vec![MatchedBy::Discid]));
+    assert_eq!(seen.lock().await.requests.len(), 3);
 }

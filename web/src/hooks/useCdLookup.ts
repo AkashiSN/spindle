@@ -9,14 +9,21 @@ import { normalizeTocInput, type CopyScope, type DiscDraft, type DiscTrackDraft,
 import { cdReducer, initialCdState, type CdState } from '../lib/cdState'
 import { Latest } from '../lib/latest'
 
+/** TOC 以外の識別子（`GET /api/cd/status` の isrcs / mcn と、貼り付けたリリース URL / MBID） */
+export type LookupExtra = {
+  isrcs?: Array<string | null>
+  mcn?: string | null
+  release?: string | null
+}
+
 export type CdLookupState = CdState & {
   setToc: (v: string) => void
   select: (i: number) => void
   setCopyScope: (scope: CopyScope) => void
   chosen: ReleaseCandidate | null
   lookup: () => Promise<void>
-  /** TOC を欄に入れて照会する（ドライブの検出から） */
-  lookupToc: (toc: string) => Promise<void>
+  /** TOC を欄に入れて照会する（ドライブの検出から。ISRC / MCN / 指定リリースも添えられる） */
+  lookupToc: (toc: string, extra?: LookupExtra) => Promise<void>
   reset: () => void
   startManual: () => void
   updateDraft: (patch: Partial<DiscDraft>) => void
@@ -47,7 +54,7 @@ export function useCdLookup(): CdLookupState {
   // 新しい TOC の下に居座らない）。TOC の編集と「結果を消す」も進行中の照会を無効にする
   const gen = useRef(new Latest())
 
-  const lookupToc = useCallback(async (toc: string) => {
+  const lookupToc = useCallback(async (toc: string, extra: LookupExtra = {}) => {
     const normalized = normalizeTocInput(toc)
     if (normalized === '') {
       gen.current.invalidate()
@@ -58,7 +65,12 @@ export function useCdLookup(): CdLookupState {
     dispatch({ type: 'set_toc', toc })
     dispatch({ type: 'lookup_start' })
     try {
-      const r = await apiPost<LookupResponse>('/api/cd/lookup', { toc: normalized })
+      const r = await apiPost<LookupResponse>('/api/cd/lookup', {
+        toc: normalized,
+        isrcs: extra.isrcs ?? [],
+        mcn: extra.mcn ?? null,
+        release: extra.release ?? null,
+      })
       if (gen.current.isCurrent(id)) dispatch({ type: 'lookup_ok', result: r })
     } catch (e) {
       if (gen.current.isCurrent(id)) dispatch({ type: 'lookup_error', error: describe(e) })

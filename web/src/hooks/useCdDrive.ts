@@ -30,7 +30,7 @@ function describe(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-export function useCdDrive(active: boolean, onNewDisc: (toc: string) => void): CdDriveState {
+export function useCdDrive(active: boolean, onNewDisc: (toc: string, status: DriveStatus) => void): CdDriveState {
   const [status, setStatus] = useState<DriveStatus | null>(null)
   const [unavailable, setUnavailable] = useState(false)
   const [ejecting, setEjecting] = useState(false)
@@ -53,7 +53,7 @@ export function useCdDrive(active: boolean, onNewDisc: (toc: string) => void): C
       setUnavailable(false)
       const toc = newDiscToc(lastSeen.current, s)
       lastSeen.current = s.toc
-      if (toc != null) onNew.current(toc)
+      if (toc != null) onNew.current(toc, s)
     } catch (e) {
       if (!gen.current.isCurrent(id)) return
       if (e instanceof ApiError && e.code === 'cd_unavailable') {

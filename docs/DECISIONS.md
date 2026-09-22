@@ -2363,6 +2363,20 @@ Cover Art Archive を引くか決める）。
 
 **未決**: fuzzy の候補が多いときの並べ方（今は MB の順）。手入力と候補の「補正」は D-65 で決めた。
 
+**追記（2026-09-22。P2-3 拡張。DiscID 以外の識別経路）**: 実盤（嵐「Five」の初回盤）が MusicBrainz に
+登録されているのに DiscID もトラック長も未登録で、TOC の fuzzy では原理的に出なかった。識別を 5 経路にする:
+(1) DiscID（exact）、(2) ユーザが貼ったリリース URL / MBID（`ws/2/release/<id>`。どんな盤でも当てられる保険）、
+(3) ディスクの Q サブチャネルから読んだ ISRC（`ws/2/recording?query=isrc:A OR isrc:B…` を 1 回 → 一致数の
+多いリリースから上限 5 件を取得）、(4) MCN = JAN / UPC（`ws/2/release?query=barcode:` → 上限 3 件）、
+(5) TOC の fuzzy。ISRC / MCN はドライブが TOC と同じ回に SG_IO の READ SUB-CHANNEL で読み
+（`GET /api/cd/status` の `isrcs` / `mcn`）、UI が照会に添える。DiscID で当たれば (3)(4) は引かない（(2) だけ
+足す）。同じリリース × medium は 1 件に束ね、出てきた経路を `matched_by`（discid > release > isrc >
+barcode > toc）で持って、その順に並べる。fuzzy の応答に混ざった DiscID 持ち（上記）は discid 経路として扱う。
+指定リリースが読めない・トラック数の合う medium が無いときは `notes` で返し、照会全体は失敗にしない。
+候補を選んだ後（DiscID 未登録のとき）は libdiscid と同じ形の登録 URL（`cdtoc/attach?id=&tracks=&toc=`）を
+UI に出し、登録は本人がブラウザで行う。上の「未決」の並べ方はこれで閉じる（経路の強さ、同じ経路の中は
+MB の順）。
+
 ---
 
 ## D-65 手入力は「候補を土台に編集する 1 つのフォーム」、貼り付けの行解析は決め打ち

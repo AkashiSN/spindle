@@ -480,6 +480,9 @@ Phase 4  commit:     1 トランザクションで
 [メタデータ照会] MusicBrainz → 候補提示 → ユーザ確認・手動補正
    ↓            DiscID で ws/2/discid を引き、無ければ同じ TOC で fuzzy に引く。候補は
    ↓            「リリース × medium」（DiscID を持つ medium は exact、トラック数の合う medium は近似。D-64）
+   ↓            DiscID もトラック長も未登録の盤のために、ディスクの ISRC（recording 検索）・MCN =
+   ↓            バーコード（release 検索）・ユーザが貼ったリリース URL / MBID でも引き、同じ medium は
+   ↓            1 件に束ねて経路（matched_by）を付ける（D-64 追記）。候補を選んだら DiscID の登録リンク
    ↓            ※同人・VTuber・インディーズ国内盤は MusicBrainz 未登録が常態。
    ↓              照会結果ゼロでもウィザードが完走できることを必須要件とする。
    ↓              候補も手入力も同じフォーム（候補を写して直す。D-65。写す範囲は既定で識別用の
@@ -1396,14 +1399,18 @@ POST   /api/auth/login, POST /api/auth/logout
 GET    /api/auth/session
 
 GET    /api/cd/status                             { state: unknown | no_drive | no_disc | tray_open | not_ready | disc_ok,
-                                                  toc: CTDB 形式の文字列 | null, error: 直近の失敗 | null, checked_at }
+                                                  toc: CTDB 形式の文字列 | null, isrcs: [音声トラック順。無ければ null],
+                                                  mcn: JAN/UPC | null, error: 直近の失敗 | null, checked_at }
                                                   （P2-1。ポーラの状態で、ドライブは叩かない。TOC は下の lookup に渡す
                                                   文字列と同じ形。ドライブ未配線なら 503 cd_unavailable）
-POST   /api/cd/lookup                             { toc }。TOC 文字列（CTDB 形式 0:13915:…:leadout か MusicBrainz 形式
-                                                  1 12 leadout+150 offset+150…）から各種 DiscID を出し、MusicBrainz に
-                                                  照会（P2-3、D-21 / D-64）。→ 200 { discid, mb_toc, accuraterip_id,
-                                                  ctdb_toc_id, exact, candidates: [リリース × medium],
-                                                  tracks: [{ number, length_ms }]（TOC の音声トラック。手入力フォームの行。D-65）}。
+POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release? }。TOC 文字列（CTDB 形式 0:13915:…:leadout か
+                                                  MusicBrainz 形式 1 12 leadout+150 offset+150…）から各種 DiscID を出し、
+                                                  MusicBrainz に照会（P2-3、D-21 / D-64）。isrcs / mcn は status が読んだもの
+                                                  （null は捨てる）、release は貼ったリリース URL か MBID。→ 200 { discid,
+                                                  mb_toc, accuraterip_id, ctdb_toc_id, exact, candidates: [リリース × medium。
+                                                  matched_by: [discid | release | isrc | barcode | toc] を強い順に持ち、その順に並ぶ],
+                                                  notes: [候補に入れられなかった理由], tracks: [{ number, length_ms }]（TOC の
+                                                  音声トラック。手入力フォームの行。D-65）}。
                                                   400 bad_request（TOC）、502 lookup_failed（届かない・応答が壊れている）、
                                                   503 musicbrainz_unavailable（再試行しても 503 の負荷制限、または未構成）
 POST   /api/cd/rip                                リップ開始
@@ -1907,7 +1914,10 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   ディスクあり（N トラック）/ ドライブが無い（理由））と「取り出す」を出す。新しいディスクの TOC が出たとき
   だけ（同じディスクの間は 1 回。`lib/cdDrive.ts` の `newDiscToc`）TOC 欄に入れて照会を自動で始める。
   TOC の貼り付け（CTDB 形式 / MusicBrainz 形式 / `cdrecord -toc` の出力）はドライブの無い環境とデバッグ用に
-  残す（P2-3、D-64）。
+  残す（P2-3、D-64）。照会にはドライブが読んだ ISRC / MCN を添え（貼り付けの TOC でも同じ）、「MusicBrainz の
+  リリース URL か MBID」の欄 + 「このリリースで照会」で指定リリースも引ける。候補のバッジは経路（DiscID 一致 /
+  指定 / ISRC / バーコード / TOC 近似。複数可）、見出しは経路の一覧、`notes` は赤字。DiscID 未登録なら
+  「MusicBrainz に DiscID を登録」リンク（`discidSubmissionUrl`。登録はブラウザで本人が行う）を出す。
   候補は DiscID 一致を先に出し、exact が 1 件なら選んでおく。選ぶとフォームに写り、そこから直せる。
   **写す範囲**（D-72、P4-2）は既定で識別用の最小限（アルバム・アルバムアーティスト・日付・ディスク番号 /
   枚数・`MUSICBRAINZ_ALBUMID`。`MUSICBRAINZ_DISCID` / `TRACKTOTAL` は吸い出し時に TOC から付く。トラック行は
@@ -2258,7 +2268,8 @@ src/
 │   └── artwork.rs       同梱 / 埋め込み画像の選択、判別、ハッシュアドレスのキャッシュ（P1-3）
 ├── cd/
 │   ├── mod.rs           TrackLayout（サンプル単位のトラック列）、照会用 HTTP クライアント
-│   ├── device.rs        ioctl（CDROM_DRIVE_STATUS / READ TOC / LOCKDOOR + EJECT）、Drive トレイト、DriveMonitor とポーラ
+│   ├── device.rs        ioctl（CDROM_DRIVE_STATUS / READ TOC / LOCKDOOR + EJECT）、SG_IO READ SUB-CHANNEL（ISRC / MCN）、
+│   │                    Drive トレイト、DriveMonitor とポーラ
 │   ├── toc.rs           TOC の検証、各種 DiscID 算出、サンプル数からの再構成（§7.3）
 │   ├── rip.rs           cd-paranoia、オフセット、分割
 │   ├── accuraterip.rs   ARv1/v2 CRC、DB の照会（dBAR-*.bin）、オフセット表

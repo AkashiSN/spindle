@@ -866,11 +866,22 @@ UA 必須、1req/s（D-64）。
 - [x] UI は CD タブ（`CdView` / `useCdLookup` / `lib/cd.ts`）: ドライブが無い間は TOC の貼り付け
       （`cdrecord -toc` の出力も可）→ 候補一覧（DiscID 一致 / 近似、要約、曲数、長さ）→ 選択でトラック対応
 
-受け入れ: `tests/cd_musicbrainz.rs`（実応答フィクスチャ tests/fixtures/mb/ の解釈: exact / Enhanced CD /
-fuzzy / 0 件 / joinphrase / フォールバック、ローカル HTTP で DiscID → toc の順・UA・inc・503 の再試行・
-間隔）、`tests/cd_lookup_api.rs`、`tests/cd_toc.rs`（文字列の往復）、`web/src/lib/cd.test.ts`
+- [x] DiscID 以外の識別経路（D-64 追記。2026-09-22）: ドライブが TOC と同じ回に ISRC / MCN を読み
+      （`cd/device.rs` の `read_ids`、SG_IO READ SUB-CHANNEL。`GET /api/cd/status` の `isrcs` / `mcn`）、
+      `POST /api/cd/lookup { toc, isrcs?, mcn?, release? }` が TOC 近似 + ISRC 検索 + バーコード検索 + 指定
+      リリースを束ねる（`MusicBrainzClient::lookup` / `DiscQuery` / `merge_candidates` / `MatchedBy`、
+      `parse_release_ref`）。UI は候補のバッジを経路に、リリース URL / MBID の入力欄、`notes`、DiscID の
+      登録リンク（`discidSubmissionUrl`）
 
-残り: 検出（P2-1）で入力源を差し替える
+受け入れ: `tests/cd_musicbrainz.rs`（実応答フィクスチャ tests/fixtures/mb/ の解釈: exact / Enhanced CD /
+fuzzy / 0 件 / joinphrase / フォールバック / ISRC 検索 / バーコード検索 / リリース取得 / URL の解釈 / 束ねと
+並び、ローカル HTTP で DiscID → toc の順・UA・inc・503 の再試行・間隔・複数経路の要求順と重複取得なし・
+指定リリースの notes・exact 時の省略）、`tests/cd_lookup_api.rs`（ISRC + 指定リリースで当たる、null の
+ISRC は捨てる）、`tests/cd_device.rs`（READ SUB-CHANNEL の解釈、TOC と一緒に 1 回だけ読む、読めなくても
+TOC は成立。実機は `#[ignore]`）、`tests/cd_toc.rs`（文字列の往復）、`web/src/lib/cd.test.ts`（バッジ・
+見出し・登録 URL）。実機（嵐「Five」。DiscID・トラック長とも未登録）で ISRC 経路から 2 盤が候補に出るのを確認
+
+残り: なし（検出は P2-1 で差し替え済み）
 
 ### P2-4 照会ゼロ件でも完走できる手入力経路とトラックリスト貼り付け
 

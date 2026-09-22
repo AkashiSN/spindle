@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use spindle::cd::device::{
-    toc_from_entries, Drive, DriveError, DriveMonitor, DriveState, LinuxDrive, TocEntry,
-    CONTROL_DATA,
+    parse_subchannel_isrc, parse_subchannel_mcn, toc_from_entries, DiscIds, Drive, DriveError,
+    DriveMonitor, DriveState, LinuxDrive, TocEntry, CONTROL_DATA,
 };
 use spindle::cd::toc::{Toc, TocError};
 
@@ -80,6 +80,83 @@ fn toc_from_entries_rejects_invalid_layout() {
     );
 }
 
+// ------------------------------------------------------------ ISRC / MCN（READ SUB-CHANNEL の応答）
+
+/// READ SUB-CHANNEL（format 2 = MCN / 3 = ISRC）の 24 バイト応答を組む。`valid` は byte 8 の bit 7
+fn subchannel(format: u8, valid: bool, text: &[u8]) -> [u8; 24] {
+    let mut b = [0u8; 24];
+    b[2] = 0;
+    b[3] = 20;
+    b[4] = format;
+    b[5] = 0x10;
+    b[8] = if valid { 0x80 } else { 0 };
+    b[9..9 + text.len()].copy_from_slice(text);
+    b
+}
+
+#[test]
+fn isrc_is_read_when_tcval_is_set() {
+    let b = subchannel(0x03, true, b"JPQ402600330");
+    assert_eq!(parse_subchannel_isrc(&b).as_deref(), Some("JPQ402600330"));
+}
+
+#[test]
+fn isrc_is_absent_when_tcval_is_clear_or_blank() {
+    assert_eq!(
+        parse_subchannel_isrc(&subchannel(0x03, false, b"JPQ402600330")),
+        None
+    );
+    // 有効ビットが立っていても中身が空・全部 0・ASCII でないなら無し
+    assert_eq!(
+        parse_subchannel_isrc(&subchannel(0x03, true, b"000000000000")),
+        None
+    );
+    assert_eq!(parse_subchannel_isrc(&subchannel(0x03, true, b"")), None);
+    assert_eq!(
+        parse_subchannel_isrc(&subchannel(0x03, true, b"JPQ4\xff\xfe600330")),
+        None
+    );
+    // 別の format の応答は読まない
+    assert_eq!(
+        parse_subchannel_isrc(&subchannel(0x02, true, b"JPQ402600330")),
+        None
+    );
+}
+
+#[test]
+fn isrc_is_trimmed_and_uppercased() {
+    assert_eq!(
+        parse_subchannel_isrc(&subchannel(0x03, true, b"jpq402600330")).as_deref(),
+        Some("JPQ402600330")
+    );
+}
+
+#[test]
+fn mcn_is_read_when_mcval_is_set() {
+    let b = subchannel(0x02, true, b"4582515778491");
+    assert_eq!(parse_subchannel_mcn(&b).as_deref(), Some("4582515778491"));
+}
+
+#[test]
+fn mcn_is_absent_when_mcval_is_clear_or_zero() {
+    assert_eq!(
+        parse_subchannel_mcn(&subchannel(0x02, false, b"4582515778491")),
+        None
+    );
+    assert_eq!(
+        parse_subchannel_mcn(&subchannel(0x02, true, b"0000000000000")),
+        None
+    );
+    assert_eq!(
+        parse_subchannel_mcn(&subchannel(0x02, true, b"45825157784A1")),
+        None
+    );
+    assert_eq!(
+        parse_subchannel_mcn(&subchannel(0x03, true, b"4582515778491")),
+        None
+    );
+}
+
 // ------------------------------------------------------------ ポーラの遷移
 
 /// 台本どおりに応答するドライブ。`status` は呼ぶたびに先頭から消費し、尽きたら最後を繰り返す
@@ -89,7 +166,9 @@ type Fail = (&'static str, &'static str);
 struct FakeDrive {
     states: Mutex<Vec<Result<DriveState, Fail>>>,
     tocs: Mutex<Vec<Result<Toc, Fail>>>,
+    ids: Mutex<Vec<Result<DiscIds, Fail>>>,
     toc_reads: AtomicUsize,
+    id_reads: AtomicUsize,
     ejects: AtomicUsize,
 }
 
@@ -98,9 +177,16 @@ impl FakeDrive {
         Self {
             states: Mutex::new(states),
             tocs: Mutex::new(tocs),
+            ids: Mutex::new(vec![Ok(DiscIds::default())]),
             toc_reads: AtomicUsize::new(0),
+            id_reads: AtomicUsize::new(0),
             ejects: AtomicUsize::new(0),
         }
+    }
+
+    fn with_ids(self, ids: Vec<Result<DiscIds, Fail>>) -> Self {
+        *self.ids.lock().unwrap() = ids;
+        self
     }
 }
 
@@ -125,10 +211,63 @@ impl Drive for FakeDrive {
         self.toc_reads.fetch_add(1, Ordering::SeqCst);
         take(&self.tocs)
     }
+    fn read_ids(&self, _toc: &Toc) -> Result<DiscIds, DriveError> {
+        self.id_reads.fetch_add(1, Ordering::SeqCst);
+        take(&self.ids)
+    }
     fn eject(&self) -> Result<(), DriveError> {
         self.ejects.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+fn five_ids() -> DiscIds {
+    DiscIds {
+        isrcs: vec![Some("JPQ402600330".into()), Some("JPQ402600340".into())],
+        mcn: Some("4582515778491".into()),
+    }
+}
+
+#[test]
+fn poll_reads_isrc_and_mcn_with_the_toc_once() {
+    let drive = FakeDrive::new(vec![Ok(DriveState::DiscOk)], vec![Ok(nevermind())])
+        .with_ids(vec![Ok(five_ids())]);
+    let mon = DriveMonitor::default();
+    mon.poll(&drive, 1);
+    let s = mon.snapshot();
+    assert_eq!(s.ids, five_ids());
+    mon.poll(&drive, 2);
+    assert_eq!(
+        drive.id_reads.load(Ordering::SeqCst),
+        1,
+        "TOC と同じく 1 回だけ"
+    );
+}
+
+#[test]
+fn poll_keeps_toc_when_ids_cannot_be_read() {
+    // ISRC / MCN は補助なので、読めなくても TOC は成立し error にもしない（ログだけ）
+    let drive = FakeDrive::new(vec![Ok(DriveState::DiscOk)], vec![Ok(nevermind())])
+        .with_ids(vec![Err(("READ SUB-CHANNEL", "Input/output error"))]);
+    let mon = DriveMonitor::default();
+    mon.poll(&drive, 1);
+    let s = mon.snapshot();
+    assert!(s.toc.is_some());
+    assert_eq!(s.ids, DiscIds::default());
+    assert_eq!(s.error, None);
+}
+
+#[test]
+fn poll_drops_ids_with_the_toc() {
+    let drive = FakeDrive::new(
+        vec![Ok(DriveState::DiscOk), Ok(DriveState::NoDisc)],
+        vec![Ok(nevermind())],
+    )
+    .with_ids(vec![Ok(five_ids())]);
+    let mon = DriveMonitor::default();
+    mon.poll(&drive, 1);
+    mon.poll(&drive, 2);
+    assert_eq!(mon.snapshot().ids, DiscIds::default());
 }
 
 fn nevermind() -> Toc {
@@ -293,6 +432,9 @@ impl Drive for StallingDrive {
     fn read_toc(&self) -> Result<Toc, DriveError> {
         Ok(nevermind())
     }
+    fn read_ids(&self, _toc: &Toc) -> Result<DiscIds, DriveError> {
+        Ok(DiscIds::default())
+    }
     fn eject(&self) -> Result<(), DriveError> {
         self.ejects.fetch_add(1, Ordering::SeqCst);
         self.ejected.store(true, Ordering::SeqCst);
@@ -357,6 +499,9 @@ fn real_drive_reports_disc_and_toc() {
         eprintln!("toc = {}", toc.ctdb_toc());
         eprintln!("discid = {}", toc.musicbrainz_disc_id());
         assert!(!toc.tracks().is_empty());
+        let ids = drive.read_ids(&toc).unwrap();
+        eprintln!("ids = {ids:?}");
+        assert_eq!(ids.isrcs.len(), toc.audio_tracks().count());
     }
 }
 

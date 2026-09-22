@@ -1780,6 +1780,11 @@ table.gc-table td.sample {
   font-family: var(--mono, monospace);
   font-size: 12px;
 }
+.cd .cd-release-ref {
+  flex: 1;
+  min-width: 240px;
+  max-width: 560px;
+}
 .cd-ids {
   display: grid;
   grid-template-columns: max-content 1fr;

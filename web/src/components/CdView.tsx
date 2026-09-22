@@ -13,7 +13,9 @@ import {
   candidateLengthMs,
   candidateSummary,
   COPY_SCOPE_LABELS,
+  discidSubmissionUrl,
   lookupHeadline,
+  matchedByLabel,
   trackTags,
   type CopyScope,
   type DiscMetadata,
@@ -23,6 +25,9 @@ import { formatDuration } from '../lib/format'
 export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }) {
   const { result, draft, confirmed } = cd
   const driveLabel = drive.unavailable ? null : driveStateLabel(drive.status)
+  // ドライブから読めた ISRC / MCN は照会に添える（貼り付けの TOC でもドライブの盤と同じなら効く）
+  const ids = { isrcs: drive.status?.isrcs ?? [], mcn: drive.status?.mcn ?? null }
+  const [releaseRef, setReleaseRef] = useState('')
   const canEject =
     drive.status != null && drive.status.state !== 'no_drive' && drive.status.state !== 'unknown' && !drive.ejecting
   return (
@@ -67,16 +72,52 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
         />
       </div>
       <div className="op-row">
-        <button type="button" className="primary" disabled={cd.busy} onClick={() => void cd.lookup()}>
+        <button type="button" className="primary" disabled={cd.busy} onClick={() => void cd.lookupToc(cd.toc, ids)}>
           {cd.busy ? '照会中…' : 'MusicBrainz に照会'}
         </button>
-        <span className="muted small">UA 付き・1 秒 1 回。同人・VTuber・インディーズの国内盤は未登録が普通</span>
+        <span className="muted small">
+          DiscID → 無ければ TOC 近似 + ディスクの ISRC / バーコード。UA 付き・1 秒 1 回。同人・VTuber・インディーズの国内盤は未登録が普通
+          {ids.isrcs.some((i) => i != null) ? `。ISRC: ${ids.isrcs.filter((i) => i != null).join(', ')}` : ''}
+          {ids.mcn != null ? `。バーコード: ${ids.mcn}` : ''}
+        </span>
+      </div>
+      <div className="op-row">
+        <input
+          type="text"
+          className="cd-release-ref"
+          aria-label="MusicBrainz のリリース URL か MBID"
+          placeholder="https://musicbrainz.org/release/… か MBID（DiscID もトラック長も未登録の盤はこれで当てる）"
+          value={releaseRef}
+          disabled={cd.busy}
+          onChange={(e) => setReleaseRef(e.target.value)}
+        />
+        <button
+          type="button"
+          disabled={cd.busy || releaseRef.trim() === ''}
+          onClick={() => void cd.lookupToc(cd.toc, { ...ids, release: releaseRef })}
+        >
+          このリリースで照会
+        </button>
       </div>
       {cd.error != null && <p className="error">{cd.error}</p>}
 
       {result != null && (
         <>
           <h2>{lookupHeadline(result)}</h2>
+          {result.notes.map((n) => (
+            <p key={n} className="error">
+              {n}
+            </p>
+          ))}
+          {!result.exact && (
+            <p className="muted small">
+              この DiscID は MusicBrainz に未登録。候補を選んだら{' '}
+              <a href={discidSubmissionUrl(result.discid, result.mb_toc)} target="_blank" rel="noopener noreferrer">
+                MusicBrainz に DiscID を登録
+              </a>
+              しておくと次からは DiscID で当たる（ブラウザで登録）
+            </p>
+          )}
           <dl className="cd-ids small">
             <dt>MusicBrainz DiscID</dt>
             <dd>
@@ -106,7 +147,7 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
                       onChange={() => cd.select(i)}
                     />{' '}
                     <strong>{c.artist}</strong> — {c.title}
-                    {c.exact ? <span className="badge">DiscID 一致</span> : <span className="badge muted">近似</span>}
+                    <span className={c.exact ? 'badge' : 'badge muted'}>{matchedByLabel(c)}</span>
                     <div className="muted small">
                       {candidateSummary(c)} · {c.tracks.length} 曲
                       {candidateLengthMs(c) != null ? ` · ${formatDuration(candidateLengthMs(c))}` : ''}

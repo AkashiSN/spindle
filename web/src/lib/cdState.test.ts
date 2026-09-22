@@ -14,6 +14,7 @@ const cand = (exact: boolean, title = 'T'): ReleaseCandidate => ({
   disambiguation: null,
   labels: [],
   exact,
+  matched_by: exact ? ['discid'] : ['toc'],
   medium_position: 1,
   medium_count: 1,
   medium_title: null,
@@ -36,6 +37,7 @@ const response = (candidates: ReleaseCandidate[], exact = candidates.some((c) =>
   ctdb_toc_id: '',
   exact,
   candidates,
+  notes: [],
   tracks,
 })
 

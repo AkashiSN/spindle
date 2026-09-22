@@ -137,7 +137,13 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const theme = useTheme()
   const cd = useCdLookup()
   // CD 画面を開いている間ドライブを見て、新しいディスクの TOC が出たら照会を自動で始める（P2-1）
-  const drive = useCdDrive(sseOpen && view === 'cd', cd.lookupToc)
+  const { lookupToc } = cd
+  const onNewDisc = useCallback(
+    (toc: string, s: { isrcs: Array<string | null>; mcn: string | null }) =>
+      void lookupToc(toc, { isrcs: s.isrcs, mcn: s.mcn }),
+    [lookupToc],
+  )
+  const drive = useCdDrive(sseOpen && view === 'cd', onNewDisc)
   // Inbox は画面を開いたときに取り、開いている間は inbox ジョブの job イベントで取り直す
   const inbox = useInbox(sseOpen && view === 'inbox')
   const visibleEnd = useRef(0)

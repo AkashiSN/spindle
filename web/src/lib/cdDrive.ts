@@ -6,6 +6,10 @@ export type DriveStatus = {
   state: DriveState
   /** ディスクがあって TOC を読めたら CTDB 形式（lookup にそのまま渡せる） */
   toc: string | null
+  /** TOC と一緒に読んだ ISRC（音声トラック順。無いトラックは null）。TOC が無ければ空 */
+  isrcs: Array<string | null>
+  /** メディアカタログ番号（JAN / UPC）。入っていない盤は null */
+  mcn: string | null
   error: string | null
   checked_at: number
 }

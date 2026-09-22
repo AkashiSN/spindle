@@ -12,6 +12,19 @@ export type TrackCandidate = {
   isrcs: string[]
 }
 
+/** 候補が出てきた経路（強い順。サーバの `MatchedBy`） */
+export type MatchedBy = 'discid' | 'release' | 'isrc' | 'barcode' | 'toc'
+
+export const MATCHED_BY_ORDER: MatchedBy[] = ['discid', 'release', 'isrc', 'barcode', 'toc']
+
+export const MATCHED_BY_LABELS: Record<MatchedBy, string> = {
+  discid: 'DiscID 一致',
+  release: '指定',
+  isrc: 'ISRC',
+  barcode: 'バーコード',
+  toc: 'TOC 近似',
+}
+
 export type ReleaseCandidate = {
   release_id: string
   release_group_id: string | null
@@ -24,6 +37,8 @@ export type ReleaseCandidate = {
   disambiguation: string | null
   labels: Array<[string, string | null]>
   exact: boolean
+  /** どの経路で出てきたか（強い順） */
+  matched_by: MatchedBy[]
   medium_position: number
   medium_count: number
   medium_title: string | null
@@ -44,7 +59,26 @@ export type LookupResponse = {
   ctdb_toc_id: string
   exact: boolean
   candidates: ReleaseCandidate[]
+  /** 候補に入れられなかった理由（指定リリースが読めない・トラック数が合わない） */
+  notes: string[]
   tracks: TocTrackInfo[]
+}
+
+/** 候補のバッジ: 経路を強い順に並べる */
+export function matchedByLabel(c: ReleaseCandidate): string {
+  return MATCHED_BY_ORDER.filter((m) => c.matched_by.includes(m))
+    .map((m) => MATCHED_BY_LABELS[m])
+    .join(' / ')
+}
+
+/**
+ * MusicBrainz に DiscID を登録するページ（libdiscid の submission URL と同じ形。登録はブラウザで本人が行う）。
+ * `mbToc` は MB 形式 `先頭 末尾 リードアウト+150 各オフセット+150…`（空白は + に）
+ */
+export function discidSubmissionUrl(discid: string, mbToc: string): string {
+  const parts = mbToc.trim().split(/\s+/)
+  const tracks = Math.max(0, parts.length - 3)
+  return `https://musicbrainz.org/cdtoc/attach?id=${encodeURIComponent(discid)}&tracks=${tracks}&toc=${parts.join('+')}`
 }
 
 /**
@@ -107,7 +141,10 @@ export function lookupHeadline(r: LookupResponse): string {
   if (n === 0) return r.exact ? 'DiscID は登録済みだが候補が無い' : 'MusicBrainz に見つからない（手入力へ）'
   if (r.exact) return `DiscID が一致: ${n} 件`
   if (exactCandidates > 0) return `TOC で照会（DiscID の一致する候補 ${exactCandidates} 件を含む）: ${n} 件`
-  return `TOC の近い候補（DiscID は未登録）: ${n} 件`
+  const routes = MATCHED_BY_ORDER.filter((m) => r.candidates.some((c) => c.matched_by.includes(m)))
+    .map((m) => MATCHED_BY_LABELS[m])
+    .join(' / ')
+  return `候補: ${n} 件（${routes}。DiscID は未登録）`
 }
 
 /** 照会後の状態（結果・選択・エラー）。TOC を編集したら古いものを捨てる */

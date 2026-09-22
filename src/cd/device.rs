@@ -4,7 +4,9 @@
 //! 見る（[`spawn_poller`]）。TOC は kernel の `CDROMREADTOCHDR` / `CDROMREADTOCENTRY` ioctl
 //! （中身は READ TOC コマンド。`/dev/sg*` も外部プロセスも要らない）で LBA 形式で読み、
 //! [`Toc`] へ組み立てる。DiscOk になってから TOC が取れるまでは毎周回読み直し、取れたら
-//! ディスクが抜かれるまで読み直さない。eject は `CDROMEJECT`。
+//! ディスクが抜かれるまで読み直さない。TOC が取れたら続けて ISRC（トラックごと）と MCN
+//! （JAN / UPC。入っている盤だけ）を SG_IO の READ SUB-CHANNEL で 1 回読む（[`DiscIds`]。
+//! MusicBrainz の DiscID 以外の識別経路。読めなくても TOC は成立する）。eject は `CDROMEJECT`。
 //!
 //! ioctl の呼び出しだけが unsafe で、[`LinuxDrive`] に閉じ込める。ポーラの遷移
 //! （[`DriveMonitor::poll`]）はドライブを [`Drive`] トレイトで受けるので、フェイクで検証できる
@@ -42,6 +44,47 @@ const CDROM_LEADOUT: u8 = 0xAA;
 pub const CONTROL_DATA: u8 = 0x04;
 /// ディスク検出の間隔（SPEC §7.2）
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// SG_IO（scsi/sg.h）
+const SG_IO: libc::c_ulong = 0x2285;
+const SG_INTERFACE_ID_ORIG: libc::c_int = b'S' as libc::c_int;
+const SG_DXFER_FROM_DEV: libc::c_int = -3;
+/// READ SUB-CHANNEL（MMC）: opcode と `Sub Q` ビット、format の MCN / ISRC
+const READ_SUBCHANNEL: u8 = 0x42;
+const SUBQ: u8 = 0x40;
+const SUBCHANNEL_MCN: u8 = 0x02;
+const SUBCHANNEL_ISRC: u8 = 0x03;
+/// READ SUB-CHANNEL の応答の長さ（ヘッダ 4 + データ 20）
+const SUBCHANNEL_LEN: usize = 24;
+/// SG_IO のタイムアウト（ms）。サブチャネルの読みは一瞬で、これは万一の保険
+const SG_TIMEOUT_MS: u32 = 10_000;
+
+/// `struct sg_io_hdr`（scsi/sg.h、64 bit）。ポインタは 8 バイト境界に置かれ、全体で 88 バイト
+#[repr(C)]
+struct SgIoHdr {
+    interface_id: libc::c_int,
+    dxfer_direction: libc::c_int,
+    cmd_len: u8,
+    mx_sb_len: u8,
+    iovec_count: u16,
+    dxfer_len: u32,
+    dxferp: *mut libc::c_void,
+    cmdp: *mut u8,
+    sbp: *mut u8,
+    timeout: u32,
+    flags: u32,
+    pack_id: libc::c_int,
+    usr_ptr: *mut libc::c_void,
+    status: u8,
+    masked_status: u8,
+    msg_status: u8,
+    sb_len_wr: u8,
+    host_status: u16,
+    driver_status: u16,
+    resid: libc::c_int,
+    duration: u32,
+    info: u32,
+}
 
 /// `struct cdrom_tochdr`
 #[repr(C)]
@@ -96,6 +139,8 @@ pub enum DriveError {
 pub trait Drive: Send + Sync {
     fn status(&self) -> Result<DriveState, DriveError>;
     fn read_toc(&self) -> Result<Toc, DriveError>;
+    /// TOC の音声トラックごとの ISRC と、ディスクの MCN。補助なので失敗しても TOC は成立する
+    fn read_ids(&self, toc: &Toc) -> Result<DiscIds, DriveError>;
     fn eject(&self) -> Result<(), DriveError>;
 }
 
@@ -119,6 +164,42 @@ pub fn toc_from_entries(entries: &[TocEntry], leadout_lba: u32) -> Result<Toc, T
         })
         .collect();
     Toc::new(tracks, leadout_lba)
+}
+
+/// TOC 以外のディスクの識別子（Q サブチャネル）。MusicBrainz の ISRC 照会 / バーコード照会に使う
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DiscIds {
+    /// 音声トラックごとの ISRC（TOC の音声トラックと同じ順。無いトラックは None）
+    pub isrcs: Vec<Option<String>>,
+    /// メディアカタログ番号（JAN / UPC の 13 桁）。入っていない盤が多い
+    pub mcn: Option<String>,
+}
+
+/// READ SUB-CHANNEL の応答の本体（byte 8 の bit 7 が有効ビット、9 から文字列）
+fn subchannel_text(resp: &[u8; SUBCHANNEL_LEN], format: u8, len: usize) -> Option<String> {
+    if resp[4] != format || resp[8] & 0x80 == 0 {
+        return None;
+    }
+    let raw = &resp[9..9 + len];
+    let text = std::str::from_utf8(raw).ok()?.trim_end_matches('\0').trim();
+    if text.is_empty()
+        || !text.is_ascii()
+        || text.chars().all(|c| c == '0')
+        || text.chars().any(|c| !c.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(text.to_ascii_uppercase())
+}
+
+/// READ SUB-CHANNEL（format 3）の応答から ISRC（12 文字）。Tcval が立っていて中身があるときだけ
+pub fn parse_subchannel_isrc(resp: &[u8; SUBCHANNEL_LEN]) -> Option<String> {
+    subchannel_text(resp, SUBCHANNEL_ISRC, 12)
+}
+
+/// READ SUB-CHANNEL（format 2）の応答から MCN（13 桁の数字）。MCval が立っていて全部 0 でないときだけ
+pub fn parse_subchannel_mcn(resp: &[u8; SUBCHANNEL_LEN]) -> Option<String> {
+    subchannel_text(resp, SUBCHANNEL_MCN, 13).filter(|t| t.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// `/dev/sr0` などを ioctl で扱う。開くのは操作のたび（ディスクの出し入れで FD の状態が
@@ -164,6 +245,62 @@ impl LinuxDrive {
             });
         }
         Ok(r)
+    }
+
+    /// READ SUB-CHANNEL を SG_IO で 1 回。`track` は ISRC のとき対象トラック（MCN では 0）
+    fn read_subchannel(
+        file: &std::fs::File,
+        format: u8,
+        track: u8,
+    ) -> Result<[u8; SUBCHANNEL_LEN], DriveError> {
+        let mut cdb = [0u8; 10];
+        cdb[0] = READ_SUBCHANNEL;
+        cdb[2] = SUBQ;
+        cdb[3] = format;
+        cdb[6] = track;
+        cdb[7] = (SUBCHANNEL_LEN >> 8) as u8;
+        cdb[8] = SUBCHANNEL_LEN as u8;
+        let mut resp = [0u8; SUBCHANNEL_LEN];
+        let mut sense = [0u8; 32];
+        let mut hdr = SgIoHdr {
+            interface_id: SG_INTERFACE_ID_ORIG,
+            dxfer_direction: SG_DXFER_FROM_DEV,
+            cmd_len: cdb.len() as u8,
+            mx_sb_len: sense.len() as u8,
+            iovec_count: 0,
+            dxfer_len: SUBCHANNEL_LEN as u32,
+            dxferp: resp.as_mut_ptr().cast(),
+            cmdp: cdb.as_mut_ptr(),
+            sbp: sense.as_mut_ptr(),
+            timeout: SG_TIMEOUT_MS,
+            flags: 0,
+            pack_id: 0,
+            usr_ptr: std::ptr::null_mut(),
+            status: 0,
+            masked_status: 0,
+            msg_status: 0,
+            sb_len_wr: 0,
+            host_status: 0,
+            driver_status: 0,
+            resid: 0,
+            duration: 0,
+            info: 0,
+        };
+        // hdr が指す cdb / resp / sense は呼び出しの間生きている（このスコープ）
+        Self::ioctl(file, "READ SUB-CHANNEL", SG_IO, &mut hdr as *mut _)?;
+        if hdr.status != 0 || hdr.host_status != 0 || hdr.driver_status != 0 {
+            return Err(DriveError::Io {
+                what: "READ SUB-CHANNEL",
+                source: std::io::Error::other(format!(
+                    "SCSI status {} host {} driver {} sense {:02x?}",
+                    hdr.status,
+                    hdr.host_status,
+                    hdr.driver_status,
+                    &sense[..usize::from(hdr.sb_len_wr).min(sense.len())]
+                )),
+            });
+        }
+        Ok(resp)
     }
 
     fn toc_entry(file: &std::fs::File, track: u8) -> Result<CdromTocEntry, DriveError> {
@@ -213,6 +350,30 @@ impl Drive for LinuxDrive {
         Ok(toc_from_entries(&entries, lba_from_kernel(leadout.addr)?)?)
     }
 
+    /// ISRC はトラックごとに READ SUB-CHANNEL（format 3）。MCN は format 2 を 1 回。
+    /// 1 トラックの読みが失敗しても他は続け、そのトラックだけ None にする（ログに出す）
+    fn read_ids(&self, toc: &Toc) -> Result<DiscIds, DriveError> {
+        let file = self.open()?;
+        let mut isrcs = Vec::new();
+        for t in toc.audio_tracks() {
+            match Self::read_subchannel(&file, SUBCHANNEL_ISRC, t.number) {
+                Ok(resp) => isrcs.push(parse_subchannel_isrc(&resp)),
+                Err(e) => {
+                    tracing::warn!(track = t.number, error = %e, "ISRC を読めない");
+                    isrcs.push(None);
+                }
+            }
+        }
+        let mcn = match Self::read_subchannel(&file, SUBCHANNEL_MCN, 0) {
+            Ok(resp) => parse_subchannel_mcn(&resp),
+            Err(e) => {
+                tracing::warn!(error = %e, "MCN を読めない");
+                None
+            }
+        };
+        Ok(DiscIds { isrcs, mcn })
+    }
+
     /// トレイを開ける。先に `CDROM_LOCKDOOR 0` で扉のロックを外す: kernel の CDROMEJECT も内部で
     /// 外すことになっているが、Pioneer BDR-209M（TrueNAS 25.10 の kernel 6.12）ではそれだけだと
     /// CHECK CONDITION（戻り値 2 = SCSI status。負でないので `ioctl` は成功扱い）でトレイが動かない。
@@ -247,6 +408,8 @@ pub struct DriveStatus {
     pub state: DriveState,
     /// DiscOk で TOC を読めたら Some。抜かれたら None に戻る
     pub toc: Option<Toc>,
+    /// TOC と一緒に読んだ ISRC / MCN。TOC が無ければ空
+    pub ids: DiscIds,
     /// 直近の失敗（開けない・状態を取れない・TOC を読めない）。成功したら None
     pub error: Option<String>,
     /// 最後にドライブを見た時刻（epoch 秒）。まだなら 0
@@ -258,6 +421,7 @@ impl Default for DriveStatus {
         Self {
             state: DriveState::Unknown,
             toc: None,
+            ids: DiscIds::default(),
             error: None,
             checked_at: 0,
         }
@@ -302,20 +466,30 @@ impl DriveMonitor {
             Err(e) => DriveStatus {
                 state: DriveState::NoDrive,
                 toc: None,
+                ids: DiscIds::default(),
                 error: Some(e.to_string()),
                 checked_at: now,
             },
             Ok(DriveState::DiscOk) => {
-                let (toc, error) = match prev.toc {
-                    Some(t) => (Some(t), None),
+                // TOC は 1 回読めたら抜かれるまで使い回す。ISRC / MCN も同じ回に読む（補助なので
+                // 失敗はログだけ）
+                let (toc, ids, error) = match prev.toc {
+                    Some(t) => (Some(t), prev.ids, None),
                     None => match drive.read_toc() {
-                        Ok(t) => (Some(t), None),
-                        Err(e) => (None, Some(e.to_string())),
+                        Ok(t) => {
+                            let ids = drive.read_ids(&t).unwrap_or_else(|e| {
+                                tracing::warn!(error = %e, "ISRC / MCN を読めない");
+                                DiscIds::default()
+                            });
+                            (Some(t), ids, None)
+                        }
+                        Err(e) => (None, DiscIds::default(), Some(e.to_string())),
                     },
                 };
                 DriveStatus {
                     state: DriveState::DiscOk,
                     toc,
+                    ids,
                     error,
                     checked_at: now,
                 }
@@ -323,6 +497,7 @@ impl DriveMonitor {
             Ok(state) => DriveStatus {
                 state,
                 toc: None,
+                ids: DiscIds::default(),
                 error: None,
                 checked_at: now,
             },
@@ -331,6 +506,8 @@ impl DriveMonitor {
             tracing::info!(
                 state = ?next.state,
                 toc = next.toc.as_ref().map(Toc::ctdb_toc),
+                isrcs = ?next.ids.isrcs,
+                mcn = next.ids.mcn.as_deref(),
                 error = next.error.as_deref(),
                 "CD ドライブの状態が変わった"
             );

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { driveStateLabel, newDiscToc, type DriveStatus } from './cdDrive'
 
 function st(state: DriveStatus['state'], toc: string | null = null, error: string | null = null): DriveStatus {
-  return { state, toc, error, checked_at: 1_700_000_000 }
+  return { state, toc, isrcs: [], mcn: null, error, checked_at: 1_700_000_000 }
 }
 
 describe('driveStateLabel', () => {
