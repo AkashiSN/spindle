@@ -94,6 +94,9 @@ pub struct LookupBody {
     /// ユーザが貼った MusicBrainz のリリース URL か MBID
     #[serde(default)]
     pub release: Option<String>,
+    /// 覚えている結果を捨てて引き直す（画面の「MusicBrainz に照会」。ディスク検出の自動照会は省略）
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,6 +208,7 @@ pub async fn lookup(
         isrcs: &isrcs,
         mcn: mcn.as_deref(),
         release: body.release.as_deref().filter(|r| !r.trim().is_empty()),
+        refresh: body.refresh,
     };
     let result = match client.lookup(&query).await {
         Ok(r) => r,

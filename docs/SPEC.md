@@ -1403,14 +1403,16 @@ GET    /api/cd/status                             { state: unknown | no_drive | 
                                                   mcn: JAN/UPC | null, error: 直近の失敗 | null, checked_at }
                                                   （P2-1。ポーラの状態で、ドライブは叩かない。TOC は下の lookup に渡す
                                                   文字列と同じ形。ドライブ未配線なら 503 cd_unavailable）
-POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release? }。TOC 文字列（CTDB 形式 0:13915:…:leadout か
+POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?, refresh? }。TOC 文字列（CTDB 形式 0:13915:…:leadout か
                                                   MusicBrainz 形式 1 12 leadout+150 offset+150…）から各種 DiscID を出し、
                                                   MusicBrainz に照会（P2-3、D-21 / D-64）。isrcs / mcn は status が読んだもの
                                                   （null は捨てる）、release は貼ったリリース URL か MBID。→ 200 { discid,
                                                   mb_toc, accuraterip_id, ctdb_toc_id, exact, candidates: [リリース × medium。
                                                   matched_by: [discid | release | isrc | barcode | toc] を強い順に持ち、その順に並ぶ],
                                                   notes: [候補に入れられなかった理由], tracks: [{ number, length_ms }]（TOC の
-                                                  音声トラック。手入力フォームの行。D-65）}。
+                                                  音声トラック。手入力フォームの行。D-65）}。同じ入力の照会結果は
+                                                  10 分覚えていて MusicBrainz を引き直さない（D-64 追記 3）。
+                                                  refresh: true で捨てて引き直す（画面の「MusicBrainz に照会」）。
                                                   400 bad_request（TOC）、502 lookup_failed（届かない・応答が壊れている）、
                                                   503 musicbrainz_unavailable（再試行しても 503 の負荷制限、または未構成）
 POST   /api/cd/rip                                リップ開始
@@ -1914,7 +1916,8 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   ディスクあり（N トラック）/ ドライブが無い（理由））と「取り出す」を出す。新しいディスクの TOC が出たとき
   だけ（同じディスクの間は 1 回。`lib/cdDrive.ts` の `newDiscToc`）TOC 欄に入れて照会を自動で始める。
   TOC の貼り付け（CTDB 形式 / MusicBrainz 形式 / `cdrecord -toc` の出力）はドライブの無い環境とデバッグ用に
-  残す（P2-3、D-64）。照会にはドライブが読んだ ISRC / MCN を添え（貼り付けの TOC でも同じ）、「MusicBrainz の
+  残す（P2-3、D-64）。自動の照会はサーバが覚えている結果を使い、ボタンからの照会は `refresh` で引き直す。
+  照会にはドライブが読んだ ISRC / MCN を添え（貼り付けの TOC でも同じ）、「MusicBrainz の
   リリース URL か MBID」の欄 + 「このリリースで照会」で指定リリースも引ける。候補のバッジは経路（DiscID 一致 /
   指定 / ISRC / バーコード / TOC 近似。複数可）、見出しは経路の一覧、`notes` は赤字。DiscID 未登録なら
   「MusicBrainz に DiscID を登録」リンク（`discidSubmissionUrl`。登録はブラウザで本人が行う）を出す。

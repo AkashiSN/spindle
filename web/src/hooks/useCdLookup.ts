@@ -14,6 +14,8 @@ export type LookupExtra = {
   isrcs?: Array<string | null>
   mcn?: string | null
   release?: string | null
+  /** サーバが覚えている結果を捨てて引き直す（画面のボタン。ディスク検出の自動照会は付けない） */
+  refresh?: boolean
 }
 
 export type CdLookupState = CdState & {
@@ -70,6 +72,7 @@ export function useCdLookup(): CdLookupState {
         isrcs: extra.isrcs ?? [],
         mcn: extra.mcn ?? null,
         release: extra.release ?? null,
+        refresh: extra.refresh ?? false,
       })
       if (gen.current.isCurrent(id)) dispatch({ type: 'lookup_ok', result: r })
     } catch (e) {

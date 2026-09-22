@@ -66,6 +66,33 @@ async fn recording_search_handler(Query(q): Query<Vec<(String, String)>>) -> (St
     }
 }
 
+/// 要求の回数を数える版（キャッシュの確認用）
+async fn serve_mb_counting() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = std::sync::Arc::clone(&count);
+    let app = Router::new()
+        .route("/ws/2/discid/{discid}", get(mb_handler))
+        .route("/ws/2/release/{id}", get(release_handler))
+        .route("/ws/2/recording", get(recording_search_handler))
+        .layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let c = std::sync::Arc::clone(&c);
+                async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    next.run(req).await
+                }
+            },
+        ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    (format!("http://{addr}/ws/2/"), count)
+}
+
 async fn serve_mb() -> String {
     let app = Router::new()
         .route("/ws/2/discid/{discid}", get(mb_handler))
@@ -271,6 +298,34 @@ async fn bad_isrcs_and_mcn_are_400() {
         .await;
     assert_eq!(st, StatusCode::OK, "{res}");
     assert_eq!(res["candidates"].as_array().unwrap().len(), 1, "{res}");
+}
+
+/// 同じディスクの照会は覚えている（D-64 追記 3）。`refresh` を付けたときだけ引き直す
+#[tokio::test]
+async fn lookup_is_cached_until_refresh() {
+    let (base, seen) = serve_mb_counting().await;
+    let app = App::new(Some(base)).await;
+    let c = app.cookie().await;
+    let body = json!({ "toc": NEVERMIND_TOC });
+    let (st, _) = app.post(&c, body.clone()).await;
+    assert_eq!(st, StatusCode::OK);
+    let n = seen.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(n > 0);
+    let (st, res) = app.post(&c, body.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    assert_eq!(
+        seen.load(std::sync::atomic::Ordering::SeqCst),
+        n,
+        "2 回目は MusicBrainz を引かない"
+    );
+    let (st, _) = app
+        .post(&c, json!({ "toc": NEVERMIND_TOC, "refresh": true }))
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        seen.load(std::sync::atomic::Ordering::SeqCst) > n,
+        "refresh は引き直す"
+    );
 }
 
 #[tokio::test]

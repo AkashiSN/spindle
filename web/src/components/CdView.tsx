@@ -74,11 +74,17 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
         />
       </div>
       <div className="op-row">
-        <button type="button" className="primary" disabled={cd.busy} onClick={() => void cd.lookupToc(cd.toc, ids)}>
+        <button
+          type="button"
+          className="primary"
+          disabled={cd.busy}
+          onClick={() => void cd.lookupToc(cd.toc, { ...ids, refresh: true })}
+        >
           {cd.busy ? '照会中…' : 'MusicBrainz に照会'}
         </button>
         <span className="muted small">
-          DiscID → 無ければ TOC 近似 + ディスクの ISRC / バーコード。UA 付き・1 秒 1 回。同人・VTuber・インディーズの国内盤は未登録が普通
+          DiscID → 無ければ TOC 近似 + ディスクの ISRC / バーコード。UA 付き・1 秒 1 回で、同じディスクの結果は
+          10 分覚えている（このボタンは引き直す）。同人・VTuber・インディーズの国内盤は未登録が普通
           {ids.isrcs.some((i) => i != null) ? `。ISRC: ${ids.isrcs.filter((i) => i != null).join(', ')}` : ''}
           {ids.mcn != null ? `。バーコード: ${ids.mcn}` : ''}
         </span>
@@ -96,7 +102,7 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
         <button
           type="button"
           disabled={cd.busy || releaseRef.trim() === ''}
-          onClick={() => void cd.lookupToc(cd.toc, { ...ids, release: releaseRef })}
+          onClick={() => void cd.lookupToc(cd.toc, { ...ids, release: releaseRef, refresh: true })}
         >
           このリリースで照会
         </button>

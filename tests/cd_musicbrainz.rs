@@ -479,6 +479,22 @@ async fn serve() -> (String, Shared) {
     (format!("http://{addr}/ws/2/"), seen)
 }
 
+/// 覚えている結果を使わずに引く（キャッシュの効き方は専用のテストで見る）
+async fn lookup_fresh(
+    client: &MusicBrainzClient,
+    toc: &Toc,
+) -> Result<spindle::cd::musicbrainz::DiscLookup, spindle::cd::LookupError> {
+    client
+        .lookup(&DiscQuery {
+            toc,
+            isrcs: &[],
+            mcn: None,
+            release: None,
+            refresh: true,
+        })
+        .await
+}
+
 fn nevermind_toc() -> Toc {
     let starts = [
         0, 22593, 41700, 58133, 71920, 91198, 104468, 115188, 131988, 143758, 159678, 174415,
@@ -578,7 +594,7 @@ async fn client_retries_once_on_503_then_gives_up() {
         .expect("1 回の 503 は再試行で通る");
     assert_eq!(r.candidates.len(), 2);
     seen.lock().await.fail_503 = 5;
-    assert!(client.lookup_disc(&nevermind_toc()).await.is_err());
+    assert!(lookup_fresh(&client, &nevermind_toc()).await.is_err());
     let s = seen.lock().await;
     assert_eq!(
         s.requests.len(),
@@ -596,7 +612,9 @@ async fn client_spaces_requests_by_the_minimum_interval() {
         .expect("client");
     let t0 = Instant::now();
     for _ in 0..3 {
-        client.lookup_disc(&nevermind_toc()).await.expect("lookup");
+        lookup_fresh(&client, &nevermind_toc())
+            .await
+            .expect("lookup");
     }
     assert!(
         t0.elapsed() >= Duration::from_millis(600),
@@ -640,6 +658,7 @@ async fn client_combines_isrc_barcode_and_release_routes() {
             isrcs: &isrcs,
             mcn: Some("4582515778491"),
             release: Some(&release),
+            refresh: false,
         })
         .await
         .expect("lookup");
@@ -728,6 +747,7 @@ async fn client_notes_a_release_without_a_matching_medium() {
             isrcs: &[],
             mcn: None,
             release: Some(FIVE_RELEASE),
+            refresh: false,
         })
         .await
         .expect("lookup");
@@ -741,6 +761,7 @@ async fn client_notes_a_release_without_a_matching_medium() {
             isrcs: &[],
             mcn: None,
             release: Some("not-an-id"),
+            refresh: false,
         })
         .await
         .expect("lookup");
@@ -751,6 +772,7 @@ async fn client_notes_a_release_without_a_matching_medium() {
             isrcs: &[],
             mcn: None,
             release: Some("00000000-0000-0000-0000-000000000000"),
+            refresh: false,
         })
         .await
         .expect("lookup");
@@ -771,6 +793,7 @@ async fn client_skips_routes_without_inputs_and_after_an_exact_hit() {
             isrcs: &[],
             mcn: None,
             release: None,
+            refresh: false,
         })
         .await
         .expect("lookup");
@@ -789,6 +812,7 @@ async fn client_skips_routes_without_inputs_and_after_an_exact_hit() {
             isrcs: &isrcs,
             mcn: Some("4582515778491"),
             release: None,
+            refresh: false,
         })
         .await
         .expect("lookup");
@@ -896,4 +920,130 @@ fn address_family_orders_resolved_addresses() {
     assert!(select_addrs(vec![v4], AddressFamily::V6).is_empty());
     assert!(select_addrs(vec![v6], AddressFamily::V4).is_empty());
     assert!(select_addrs(vec![], AddressFamily::V6).is_empty());
+}
+
+// ---------------------------------------------------------------- 照会結果のキャッシュ
+
+/// 同じディスクの照会は覚えておき、MusicBrainz を引き直さない（D-64 追記 3）。
+/// CD タブを開き直すたびに 1 枚で 10 本前後の要求が飛ぶのを止める（規約は 1 req/s）
+#[tokio::test]
+async fn lookup_is_cached_per_disc() {
+    let (base, seen) = serve().await;
+    let client = MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0))
+        .expect("client")
+        .with_cache_ttl(Duration::from_secs(60));
+    let toc = nevermind_toc();
+    let q = DiscQuery {
+        toc: &toc,
+        isrcs: &[],
+        mcn: None,
+        release: None,
+        refresh: false,
+    };
+    let first = client.lookup(&q).await.expect("lookup");
+    let n = seen.lock().await.requests.len();
+    assert!(n > 0);
+    let second = client.lookup(&q).await.expect("lookup");
+    assert_eq!(first, second);
+    assert_eq!(seen.lock().await.requests.len(), n, "2 回目は引き直さない");
+
+    // 入力が違えば別のディスク扱い（TOC / ISRC / バーコード / 指定リリースのどれが違っても）
+    let other = other_toc();
+    let isrcs = ["JPQ402600330".to_owned()];
+    for q2 in [
+        DiscQuery { toc: &other, ..q },
+        DiscQuery { isrcs: &isrcs, ..q },
+        DiscQuery {
+            mcn: Some("4582515778491"),
+            ..q
+        },
+        DiscQuery {
+            release: Some(FIVE_RELEASE),
+            ..q
+        },
+    ] {
+        let before = seen.lock().await.requests.len();
+        client.lookup(&q2).await.expect("lookup");
+        assert!(
+            seen.lock().await.requests.len() > before,
+            "入力が違えば引き直す"
+        );
+    }
+}
+
+/// 「MusicBrainz に照会」を押したとき（`refresh`）は覚えていても引き直し、結果を入れ替える
+#[tokio::test]
+async fn refresh_bypasses_the_cache() {
+    let (base, seen) = serve().await;
+    let client = MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0))
+        .expect("client")
+        .with_cache_ttl(Duration::from_secs(60));
+    let toc = nevermind_toc();
+    let q = DiscQuery {
+        toc: &toc,
+        isrcs: &[],
+        mcn: None,
+        release: None,
+        refresh: false,
+    };
+    client.lookup(&q).await.expect("lookup");
+    let n = seen.lock().await.requests.len();
+    client
+        .lookup(&DiscQuery { refresh: true, ..q })
+        .await
+        .expect("lookup");
+    let after = seen.lock().await.requests.len();
+    assert!(after > n, "refresh は引き直す");
+    // 引き直した結果が次回のキャッシュになる（refresh なしはまた覚えている方）
+    client.lookup(&q).await.expect("lookup");
+    assert_eq!(seen.lock().await.requests.len(), after);
+}
+
+/// 期限が切れたら引き直す
+#[tokio::test]
+async fn cache_expires() {
+    let (base, seen) = serve().await;
+    let client = MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0))
+        .expect("client")
+        .with_cache_ttl(Duration::from_millis(50));
+    let toc = nevermind_toc();
+    let q = DiscQuery {
+        toc: &toc,
+        isrcs: &[],
+        mcn: None,
+        release: None,
+        refresh: false,
+    };
+    client.lookup(&q).await.expect("lookup");
+    let n = seen.lock().await.requests.len();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    client.lookup(&q).await.expect("lookup");
+    assert!(seen.lock().await.requests.len() > n, "期限切れは引き直す");
+}
+
+/// 失敗は覚えない（接続が落ちた直後に押し直せば、また引きにいく）
+#[tokio::test]
+async fn failures_are_not_cached() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    drop(listener);
+    let client = MusicBrainzClient::new(
+        format!("http://{addr}/ws/2/"),
+        "spindle-test/0.1",
+        Duration::from_millis(0),
+    )
+    .expect("client")
+    .with_cache_ttl(Duration::from_secs(60));
+    let toc = nevermind_toc();
+    let q = DiscQuery {
+        toc: &toc,
+        isrcs: &[],
+        mcn: None,
+        release: None,
+        refresh: false,
+    };
+    assert!(client.lookup(&q).await.is_err());
+    assert!(client.lookup(&q).await.is_err(), "失敗は覚えない");
 }

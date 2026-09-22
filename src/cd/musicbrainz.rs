@@ -107,7 +107,28 @@ pub struct DiscQuery<'a> {
     pub mcn: Option<&'a str>,
     /// ユーザが貼ったリリース URL か MBID（[`parse_release_ref`]）
     pub release: Option<&'a str>,
+    /// 覚えている結果を捨てて引き直す（画面の「MusicBrainz に照会」。自動の照会は false）
+    pub refresh: bool,
 }
+
+impl DiscQuery<'_> {
+    /// 覚えるときの鍵。入力が同じなら同じ結果になる
+    fn cache_key(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.toc.ctdb_toc(),
+            self.isrcs.join(","),
+            self.mcn.unwrap_or(""),
+            self.release.and_then(parse_release_ref).unwrap_or_default()
+        )
+    }
+}
+
+/// 覚えておく期限。ディスクを入れ替えずに画面を開き直したときの引き直しを止めるのが目的で、
+/// 長く持つほどではない（DiscID を登録した直後に引き直したいことがある）
+const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+/// 覚えておく件数（1 セッションで扱う枚数は多くない）。超えたら古いものから捨てる
+const CACHE_CAPACITY: usize = 8;
 
 /// ISRC 検索で 1 度に取りに行くリリースの上限（1 req/s なので秒数がそのまま増える）
 const ISRC_FETCH_LIMIT: usize = 5;
@@ -447,6 +468,9 @@ fn candidates_from(
 pub struct MusicBrainzClient {
     base: String,
     http: reqwest::Client,
+    /// 照会結果（鍵 → 結果と時刻）。同じディスクで 1 枚あたり 10 本前後の要求が繰り返し飛ぶのを止める
+    cache: Arc<std::sync::Mutex<Vec<(String, DiscLookup, Instant)>>>,
+    cache_ttl: Duration,
     /// 直前の要求が**返った**時刻。ロックを持ったまま待って送るので、並行する照会も直列に
     /// 間隔が空く。送信前ではなく応答後に打つのは、規約が数えるのがサーバ側の受信間隔だから
     /// （送信前だと、1 本目の接続確立ぶんだけサーバから見た間隔が縮む）
@@ -478,9 +502,34 @@ impl MusicBrainzClient {
         Ok(Self {
             base,
             http: super::http_client_with(user_agent, family)?,
+            cache: Arc::new(std::sync::Mutex::new(Vec::new())),
+            cache_ttl: CACHE_TTL,
             last_request: Arc::new(tokio::sync::Mutex::new(None)),
             min_interval,
         })
+    }
+
+    /// 覚えておく期限を変える（テスト用。既定は [`CACHE_TTL`]）
+    pub fn with_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.cache_ttl = ttl;
+        self
+    }
+
+    /// 覚えている結果（期限内）
+    fn cached(&self, key: &str) -> Option<DiscLookup> {
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .iter()
+            .find_map(|(k, v, at)| (k == key && at.elapsed() < self.cache_ttl).then(|| v.clone()))
+    }
+
+    fn remember(&self, key: String, value: &DiscLookup) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.retain(|(k, _, at)| k != &key && at.elapsed() < self.cache_ttl);
+        cache.push((key, value.clone(), Instant::now()));
+        if cache.len() > CACHE_CAPACITY {
+            cache.remove(0);
+        }
     }
 
     /// 間隔を空けて GET。503（負荷制限）と接続の失敗（TLS の失敗・idle なコネクションの再利用・
@@ -537,6 +586,7 @@ impl MusicBrainzClient {
             isrcs: &[],
             mcn: None,
             release: None,
+            refresh: false,
         })
         .await
     }
@@ -546,6 +596,14 @@ impl MusicBrainzClient {
     /// 個々の経路の「見つからない」は候補ゼロ（指定リリースだけ notes に理由）で、照会自体の失敗
     /// （届かない・壊れている・503）だけ Err
     pub async fn lookup(&self, q: &DiscQuery<'_>) -> Result<DiscLookup, LookupError> {
+        // 同じ入力なら覚えている結果を返す（失敗は覚えないので、押し直せばまた引きにいく）
+        let key = q.cache_key();
+        if !q.refresh {
+            if let Some(hit) = self.cached(&key) {
+                tracing::debug!(key, "覚えている照会結果を返す");
+                return Ok(hit);
+            }
+        }
         let discid = q.toc.musicbrainz_disc_id();
         let audio_tracks = q.toc.audio_tracks().count();
         let mut groups: Vec<(MatchedBy, Vec<ReleaseCandidate>)> = Vec::new();
@@ -671,12 +729,14 @@ impl MusicBrainzClient {
             }
         }
 
-        Ok(DiscLookup {
+        let result = DiscLookup {
             discid,
             exact,
             candidates: merge_candidates(groups),
             notes,
-        })
+        };
+        self.remember(key, &result);
+        Ok(result)
     }
 
     /// リリースを 1 件取って候補に直す。404 等の「取れない」は `Ok(Err(status))`（経路ごとに

@@ -886,9 +886,13 @@ TOC は成立。実機は `#[ignore]`）、`tests/cd_toc.rs`（文字列の往�
       `cd::error_chain` で原因の末端までログと API 本文に出す。**この回線は MetaBrainz の IPv4 が塞がれて
       いる**（TCP は通るが TLS で切られる。IPv6 は通る）ので実機の config.toml は `address_family = "ipv6"`
 
+- [x] 照会結果のキャッシュ（D-64 追記 3。2026-09-22）: 入力ごとに 10 分・8 件（`DiscQuery::cache_key`。
+      失敗は覚えない）、`POST /api/cd/lookup` の `refresh` で引き直す。UI はボタンからの照会だけ refresh
+
 受け入れ（接続）: `tests/config.rs`（既定 auto、ipv6 / ipv4、未知の値は拒否）、`tests/cd_musicbrainz.rs`
 （`error_chain` の連結、`select_addrs` の絞り込みと空のときの扱い、最初の接続を閉じるサーバで 1 回張り直して
-通る）
+通る、キャッシュの再利用 / 入力違い / refresh / 期限切れ / 失敗は覚えない）、`tests/cd_lookup_api.rs`
+（2 回目は上流を引かない、refresh は引く）
 
 残り: なし（検出は P2-1 で差し替え済み）
 
