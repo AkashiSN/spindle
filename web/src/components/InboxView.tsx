@@ -29,7 +29,7 @@ import {
   type InboxItem,
   type InboxSource,
 } from '../lib/inbox'
-import { CategoryField } from './CdView'
+import { CategoryField } from './CdAlbumFields'
 
 export function InboxView({ inbox, onOpenAlbum }: { inbox: InboxState; onOpenAlbum: (albumId: number) => void }) {
   const [selectedId, setSelectedId] = useState<number | null>(null)

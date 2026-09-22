@@ -1846,13 +1846,42 @@ table.cd-tracks td {
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
-table.cd-tracks-edit input[type='text'] {
+table.cd-tracks input[type='text'] {
   width: 100%;
   box-sizing: border-box;
 }
-table.cd-tracks-edit td:nth-child(2),
-table.cd-tracks-edit td:nth-child(3) {
+table.cd-tracks td:nth-child(2),
+table.cd-tracks td:nth-child(3) {
   width: 40%;
+}
+table.cd-tracks .num {
+  text-align: right;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+/* 候補（P4-20）: 左にジャケット、右に一覧。ジャケットが無くても枠で場所を取る */
+.cd-candidates-row {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.cd-cover {
+  width: 160px;
+  height: 160px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-alt);
+}
+.cd-cover.empty {
+  display: block;
+}
+@media (max-width: 720px) {
+  .cd-candidates-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .cd-form {
   display: grid;

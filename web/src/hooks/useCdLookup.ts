@@ -5,7 +5,15 @@
 
 import { useCallback, useReducer, useRef } from 'react'
 import { ApiError, apiPost } from '../api/client'
-import { normalizeTocInput, type CopyScope, type DiscDraft, type DiscTrackDraft, type LookupResponse, type ReleaseCandidate } from '../lib/cd'
+import {
+  normalizeTocInput,
+  type CopyScope,
+  type DiscDraft,
+  type DiscTrackDraft,
+  type LookupResponse,
+  type ReleaseCandidate,
+  type TocTrackInfo,
+} from '../lib/cd'
 import { cdReducer, initialCdState, type CdState } from '../lib/cdState'
 import { Latest } from '../lib/latest'
 
@@ -16,6 +24,8 @@ export type LookupExtra = {
   release?: string | null
   /** サーバが覚えている結果を捨てて引き直す（画面のボタン。ディスク検出の自動照会は付けない） */
   refresh?: boolean
+  /** 段を打ち切らずに全部引く（「さらに広げて探す」。D-64 追記 4） */
+  widen?: boolean
 }
 
 export type CdLookupState = CdState & {
@@ -26,17 +36,17 @@ export type CdLookupState = CdState & {
   lookup: () => Promise<void>
   /** TOC を欄に入れて照会する（ドライブの検出から。ISRC / MCN / 指定リリースも添えられる） */
   lookupToc: (toc: string, extra?: LookupExtra) => Promise<void>
+  /** ドライブが読んだディスクを反映する（照会を待たずに表を出す） */
+  setDisc: (toc: string, tracks: TocTrackInfo[]) => void
+  /** 段を広げて引き直す（「さらに広げて探す」） */
+  widen: () => Promise<void>
   reset: () => void
   startManual: () => void
   updateDraft: (patch: Partial<DiscDraft>) => void
   updateTrack: (index: number, patch: Partial<DiscTrackDraft>) => void
-  fillTitles: () => void
   setPaste: (v: string) => void
   setPasteArtistFirst: (v: boolean) => void
   applyPaste: () => void
-  confirm: () => void
-  /** 確定を取り消してフォームに戻る */
-  unconfirm: () => void
 }
 
 function describe(e: unknown): string {
@@ -55,6 +65,8 @@ export function useCdLookup(): CdLookupState {
   // 照会の世代: 最新の要求の応答だけを reducer に入れる（ディスクを続けて替えたとき、古い TOC の候補が
   // 新しい TOC の下に居座らない）。TOC の編集と「結果を消す」も進行中の照会を無効にする
   const gen = useRef(new Latest())
+  /** 直前の照会に添えた識別子（「さらに広げて探す」で同じものを使う） */
+  const lastExtra = useRef<LookupExtra>({})
 
   const lookupToc = useCallback(async (toc: string, extra: LookupExtra = {}) => {
     const normalized = normalizeTocInput(toc)
@@ -63,6 +75,8 @@ export function useCdLookup(): CdLookupState {
       dispatch({ type: 'lookup_error', error: 'TOC を貼り付けてください' })
       return
     }
+    // 「さらに広げて探す」は直前と同じ識別子で引き直すので覚えておく
+    lastExtra.current = extra
     const id = gen.current.next()
     dispatch({ type: 'set_toc', toc })
     dispatch({ type: 'lookup_start' })
@@ -73,6 +87,7 @@ export function useCdLookup(): CdLookupState {
         mcn: extra.mcn ?? null,
         release: extra.release ?? null,
         refresh: extra.refresh ?? false,
+        widen: extra.widen ?? false,
       })
       if (gen.current.isCurrent(id)) dispatch({ type: 'lookup_ok', result: r })
     } catch (e) {
@@ -103,11 +118,16 @@ export function useCdLookup(): CdLookupState {
       (index: number, patch: Partial<DiscTrackDraft>) => dispatch({ type: 'update_track', index, patch }),
       [],
     ),
-    fillTitles: useCallback(() => dispatch({ type: 'fill_titles' }), []),
     setPaste: useCallback((text: string) => dispatch({ type: 'set_paste', text }), []),
     setPasteArtistFirst: useCallback((value: boolean) => dispatch({ type: 'set_paste_artist_first', value }), []),
     applyPaste: useCallback(() => dispatch({ type: 'apply_paste' }), []),
-    confirm: useCallback(() => dispatch({ type: 'confirm' }), []),
-    unconfirm: useCallback(() => dispatch({ type: 'unconfirm' }), []),
+    setDisc: useCallback(
+      (toc: string, tracks: TocTrackInfo[]) => dispatch({ type: 'set_disc', toc, tracks }),
+      [],
+    ),
+    widen: useCallback(
+      () => lookupToc(s.toc, { ...lastExtra.current, refresh: true, widen: true }),
+      [lookupToc, s.toc],
+    ),
   }
 }

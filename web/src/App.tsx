@@ -35,6 +35,7 @@ import { usePlaylists } from './hooks/usePlaylists'
 import { useSettings } from './hooks/useSettings'
 import { useTheme } from './hooks/useTheme'
 import { useCdDrive } from './hooks/useCdDrive'
+import type { DriveStatus } from './lib/cdDrive'
 import { useCdLookup } from './hooks/useCdLookup'
 import { useInbox } from './hooks/useInbox'
 import { useTrackDetails } from './hooks/useTrackDetails'
@@ -136,12 +137,15 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const settings = useSettings(sseOpen && view === 'settings')
   const theme = useTheme()
   const cd = useCdLookup()
-  // CD 画面を開いている間ドライブを見て、新しいディスクの TOC が出たら照会を自動で始める（P2-1）
-  const { lookupToc } = cd
+  // CD 画面を開いている間ドライブを見て、新しいディスクが出たら表を出してから照会を始める
+  // （P2-1、P4-20。setDisc が先: 照会を待たずにトラック表を出す）
+  const { lookupToc, setDisc } = cd
   const onNewDisc = useCallback(
-    (toc: string, s: { isrcs: Array<string | null>; mcn: string | null }) =>
-      void lookupToc(toc, { isrcs: s.isrcs, mcn: s.mcn }),
-    [lookupToc],
+    (toc: string, s: DriveStatus) => {
+      setDisc(toc, s.tracks)
+      void lookupToc(toc, { isrcs: s.isrcs, mcn: s.mcn })
+    },
+    [lookupToc, setDisc],
   )
   const drive = useCdDrive(sseOpen && view === 'cd', onNewDisc)
   // Inbox は画面を開いたときに取り、開いている間は inbox ジョブの job イベントで取り直す

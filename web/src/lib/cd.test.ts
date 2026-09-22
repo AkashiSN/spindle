@@ -6,7 +6,6 @@ import {
   candidateSummary,
   draftFromCandidate,
   emptyDraft,
-  fillEmptyTitles,
   finalizeDraft,
   initialSelection,
   discidSubmissionUrl,
@@ -99,7 +98,7 @@ describe('matchedByLabel / discidSubmissionUrl', () => {
     expect(matchedByLabel({ ...base, matched_by: [] })).toBe('')
   })
   it('登録の案内は DiscID が本当に未登録のときだけ（fuzzy に混ざった一致候補があれば出さない）', () => {
-    const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: false, candidates: [] as ReleaseCandidate[], notes: [], tracks: [] }
+    const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', stage: 'discid' as const, can_widen: false, exact: false, candidates: [] as ReleaseCandidate[], notes: [], tracks: [] }
     const toc: ReleaseCandidate = { ...base, exact: false, matched_by: ['toc'] }
     expect(offersDiscidSubmission({ ...r, candidates: [toc] })).toBe(true)
     expect(offersDiscidSubmission({ ...r, candidates: [] })).toBe(true)
@@ -124,6 +123,8 @@ describe('candidateLengthMs / lookupHeadline', () => {
       mb_toc: '',
       accuraterip_id: '',
       ctdb_toc_id: '',
+      stage: 'discid' as const,
+      can_widen: false,
       exact: true,
       candidates: [base],
       notes: [],
@@ -131,23 +132,40 @@ describe('candidateLengthMs / lookupHeadline', () => {
     }
     expect(lookupHeadline(r)).toBe('DiscID が一致: 1 件')
     const toc: ReleaseCandidate = { ...base, exact: false, matched_by: ['toc'] }
-    expect(lookupHeadline({ ...r, exact: false, candidates: [toc] })).toBe('候補: 1 件（TOC 近似。DiscID は未登録）')
+    expect(lookupHeadline({ ...r, exact: false, stage: 'toc', candidates: [toc] })).toBe(
+      '候補: 1 件（TOC 近似。DiscID は未登録）',
+    )
     // 経路は強い順に並べて全部出す（同じ候補が複数の経路で出ても 1 回）
     const isrc: ReleaseCandidate = { ...base, exact: false, matched_by: ['isrc', 'barcode'] }
     const given: ReleaseCandidate = { ...base, exact: false, matched_by: ['release', 'isrc'] }
-    expect(lookupHeadline({ ...r, exact: false, candidates: [given, isrc, toc] })).toBe(
-      '候補: 3 件（指定 / ISRC / バーコード / TOC 近似。DiscID は未登録）',
-    )
-    // fuzzy 経路でも候補側に DiscID 一致があれば「未登録」と言わない
-    expect(lookupHeadline({ ...r, exact: false, candidates: [base, toc] })).toBe(
-      'TOC で照会（DiscID の一致する候補 1 件を含む）: 2 件',
+    expect(lookupHeadline({ ...r, exact: false, stage: 'ids', candidates: [given, isrc] })).toBe(
+      '候補: 2 件（指定 / ISRC / バーコード。DiscID は未登録）',
     )
     expect(lookupHeadline({ ...r, exact: false, candidates: [] })).toBe('MusicBrainz に見つからない（手入力へ）')
+  })
+  // DiscID が 200 でも候補 0 件なら下の段へ落ちる（D-64 追記 4）。そのとき exact は真のままなので、
+  // 段だけを見て「未登録」と言うと嘘になる
+  it('DiscID が登録済みのまま下の段へ落ちたら、未登録と言わない', () => {
+    const r = {
+      discid: 'd',
+      mb_toc: '',
+      accuraterip_id: '',
+      ctdb_toc_id: '',
+      exact: true,
+      stage: 'ids' as const,
+      can_widen: true,
+      candidates: [{ ...base, exact: false, matched_by: ['isrc' as const] }],
+      notes: [],
+      tracks: [],
+    }
+    expect(lookupHeadline(r)).toBe('候補: 1 件（ISRC。DiscID は登録済みだが曲数の合う候補が無い）')
+    expect(lookupHeadline({ ...r, stage: 'toc', can_widen: false })).toContain('DiscID は登録済み')
+    expect(lookupHeadline(r)).not.toContain('未登録')
   })
 })
 
 describe('状態遷移', () => {
-  const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: true, candidates: [base], notes: [], tracks: [] }
+  const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', stage: 'discid' as const, can_widen: false, exact: true, candidates: [base], notes: [], tracks: [] }
   it('TOC を編集したら結果と選択を捨てる。同じ入力なら保つ', () => {
     const outcome = { result: r, selected: 0, error: null }
     expect(outcomeAfterTocEdit('a', 'b', outcome)).toEqual({ result: null, selected: null, error: null })
@@ -275,10 +293,11 @@ describe('applyTracklist', () => {
   })
 })
 
-describe('validateDraft / fillEmptyTitles / finalizeDraft', () => {
+describe('validateDraft / finalizeDraft', () => {
   it('アルバム名・アルバムアーティスト・各トラック名が要る。日付は YYYY[-MM[-DD]]', () => {
     const d = emptyDraft(toc)
-    expect(validateDraft(d)).toEqual(['アルバム名が空', 'アルバムアーティストが空', 'タイトルが空: 1, 2, 3'])
+    // 空のタイトルは確定を止めない（finalizeDraft が Track NN で埋める。P4-20）
+    expect(validateDraft(d)).toEqual(['アルバム名が空', 'アルバムアーティストが空'])
     const ok: DiscDraft = {
       ...d,
       album: 'X',
@@ -293,10 +312,11 @@ describe('validateDraft / fillEmptyTitles / finalizeDraft', () => {
     expect(validateDraft({ ...ok, album: '  ' })).toEqual(['アルバム名が空'])
     expect(validateDraft({ ...ok, disc_no: 3, disc_count: 2 })).toEqual(['ディスク番号 3 が枚数 2 を超える'])
   })
-  it('空のタイトルを Track NN で埋める（入力済みは触らない）', () => {
+  it('確定時に空のタイトルは Track NN で埋まる（入力済みは触らない）', () => {
     const d = emptyDraft(toc)
     d.tracks[1]!.title = 'two'
-    expect(fillEmptyTitles(d).tracks.map((t) => t.title)).toEqual(['Track 01', 'two', 'Track 03'])
+    const m = finalizeDraft({ ...d, album: 'X', album_artist: 'Y' })
+    expect(m.tracks.map((t) => t.title)).toEqual(['Track 01', 'two', 'Track 03'])
   })
   it('確定: 前後の空白を落とし、トラックのアーティストが空ならアルバムアーティスト', () => {
     const d: DiscDraft = {

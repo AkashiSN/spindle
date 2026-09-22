@@ -62,12 +62,19 @@ export type TocTrackInfo = {
   length_ms: number
 }
 
+/** 照会が止まった段（サーバの `LookupStage`）。上の段で候補が残れば下は引かない（D-64 追記 4） */
+export type LookupStage = 'discid' | 'ids' | 'toc'
+
 export type LookupResponse = {
   discid: string
   mb_toc: string
   accuraterip_id: string
   ctdb_toc_id: string
   exact: boolean
+  /** どの段で止まったか */
+  stage: LookupStage
+  /** まだ引いていない段がある（「さらに広げて探す」を出す） */
+  can_widen: boolean
   candidates: ReleaseCandidate[]
   /** 候補に入れられなかった理由（指定リリースが読めない・トラック数が合わない） */
   notes: string[]
@@ -273,14 +280,15 @@ export function candidateLengthMs(c: ReleaseCandidate): number | null {
  */
 export function lookupHeadline(r: LookupResponse): string {
   const n = r.candidates.length
-  const exactCandidates = r.candidates.filter((c) => c.exact).length
   if (n === 0) return r.exact ? 'DiscID は登録済みだが候補が無い' : 'MusicBrainz に見つからない（手入力へ）'
-  if (r.exact) return `DiscID が一致: ${n} 件`
-  if (exactCandidates > 0) return `TOC で照会（DiscID の一致する候補 ${exactCandidates} 件を含む）: ${n} 件`
+  if (r.stage === 'discid') return `DiscID が一致: ${n} 件`
   const routes = MATCHED_BY_ORDER.filter((m) => r.candidates.some((c) => c.matched_by.includes(m)))
     .map((m) => MATCHED_BY_LABELS[m])
     .join(' / ')
-  return `候補: ${n} 件（${routes}。DiscID は未登録）`
+  // `exact` のまま下の段へ落ちることがある（DiscID は登録済みだが曲数の合う medium が無い。
+  // D-64 追記 4）。ここで「DiscID は未登録」と言うと嘘になる
+  const discid = r.exact ? 'DiscID は登録済みだが曲数の合う候補が無い' : 'DiscID は未登録'
+  return `候補: ${n} 件（${routes}。${discid}）`
 }
 
 /** 照会後の状態（結果・選択・エラー）。TOC を編集したら古いものを捨てる */
@@ -463,21 +471,18 @@ export function validateDraft(d: DiscDraft): string[] {
   const errors: string[] = []
   if (d.album.trim() === '') errors.push('アルバム名が空')
   if (d.album_artist.trim() === '') errors.push('アルバムアーティストが空')
-  const untitled = d.tracks.filter((t) => t.title.trim() === '').map((t) => t.number)
-  if (untitled.length > 0) errors.push(`タイトルが空: ${untitled.join(', ')}`)
+  // 空のタイトルはエラーにしない（`finalizeDraft` が `Track NN` で埋める。P4-20）
   if (d.date.trim() !== '' && !DATE.test(d.date.trim())) errors.push('日付は YYYY / YYYY-MM / YYYY-MM-DD')
   if (d.disc_no > d.disc_count) errors.push(`ディスク番号 ${d.disc_no} が枚数 ${d.disc_count} を超える`)
   return errors
 }
 
-/** 空のタイトルを `Track NN` で埋める（タイトルの分からないディスクでも完走できるように） */
-export function fillEmptyTitles(d: DiscDraft): DiscDraft {
-  return {
-    ...d,
-    tracks: d.tracks.map((t) =>
-      t.title.trim() === '' ? { ...t, title: `Track ${String(t.number).padStart(2, '0')}` } : t,
-    ),
-  }
+/**
+ * 分からないトラックの既定の名前。表ではプレースホルダとして見せ、確定時に実値にする
+ * （タイトルの分からないディスクでも完走できるように。D-21 / D-65）
+ */
+export function defaultTitle(number: number): string {
+  return `Track ${String(number).padStart(2, '0')}`
 }
 
 function orNull(s: string): string | null {
@@ -503,7 +508,8 @@ export function finalizeDraft(d: DiscDraft): DiscMetadata {
     category: orNull(d.category ?? ''),
     tracks: d.tracks.map((t) => ({
       number: t.number,
-      title: t.title.trim(),
+      // 空のままなら Track NN（表ではプレースホルダとして見えている）
+      title: orNull(t.title) ?? defaultTitle(t.number),
       artist: orNull(t.artist) ?? album_artist,
       mb: t.mb,
     })),
