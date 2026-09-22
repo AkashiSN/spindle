@@ -489,7 +489,12 @@ async fn three_fields_are_written_in_one_rename_and_op_is_applied() {
     assert_eq!(ops[0].result, OpResult::Applied);
     assert!(ops[0].applied_at.is_some());
     assert_eq!(ops[0].job_id, Some(prepared.job_ids[0]));
-    assert_eq!(lib.job_state(prepared.job_ids[0]), JobState::Done);
+    // op の applied はハンドラの中で書かれ、ジョブの終端はその後にワーカーが書く。遅いランナーでは
+    // バッチが Applied になった直後はまだ running なので、終端まで待つ
+    assert_eq!(
+        lib.wait_job_terminal(prepared.job_ids[0]).await,
+        JobState::Done
+    );
 
     // DB は新 inode / 属性 / tag_hash に追随し、tag_version は prepare 時の 1 回のまま
     let after = lib.phys(id);
