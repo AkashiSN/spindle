@@ -1,16 +1,19 @@
 // CD 画面（SPEC §12.6、P2-3 / P2-4 / P4-20）。ドライブに CD が入っている前提で、
 // **上がディスクのトラック表、下が MusicBrainz の候補**。左カラム（ツリー）は出さない（§12.1）。
 //
-// 表は照会の前から出る（`GET /api/cd/status` の `tracks`）。タイトルは `Track NN` のプレースホルダで、
-// 候補を選ぶと実名が入る。「確定」の段は無く、表を直接編集して「取り込む」（吸い出しは P2-5 なので
-// いまは無効）。TOC の貼り付けと各種 ID は「詳細」の中（ドライブ無しの環境とデバッグ用）。
+// 表は照会の前から出る（`GET /api/cd/status` の `tracks`）。名前の分からないトラックは `Track NN` を
+// 薄字で見せ、候補を選ぶと実名が入る。
+//
+// **この画面では編集させない**（P4-20 追記）。吸い出したものは Inbox を通るので（D-67 追記）、
+// 値を直すのは Inbox の承認画面に一本化してある。ここは「何が入っていて、どの盤として取り込むか」を
+// 確かめる場所。TOC の貼り付けとリリース URL の指定は編集ではなく照会の入力なので「詳細」に残す
+// （ドライブ無しの環境とデバッグ用）。
 
 import { useState } from 'react'
 import type { CdDriveState } from '../hooks/useCdDrive'
 import type { CdLookupState } from '../hooks/useCdLookup'
 import { driveIdsFor, driveStateLabel } from '../lib/cdDrive'
-import { validateDraft } from '../lib/cd'
-import { CdAlbumFields } from './CdAlbumFields'
+import { CdAlbumSummary } from './CdAlbumSummary'
 import { CdCandidates } from './CdCandidates'
 import { CdTrackTable } from './CdTrackTable'
 
@@ -24,8 +27,6 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
   const canEject =
     drive.status != null && drive.status.state !== 'no_drive' && drive.status.state !== 'unknown' && !drive.ejecting
   const hasDisc = drive.status?.state === 'disc_ok'
-  const errors = draft != null ? validateDraft(draft) : []
-
   return (
     <section className="cd">
       <div className="table-toolbar">
@@ -81,23 +82,14 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
 
       {draft != null && (
         <>
-          <CdAlbumFields cd={cd} />
-          <CdTrackTable draft={draft} onTrack={cd.updateTrack} progress={null} readOnly={false} />
+          <CdAlbumSummary draft={draft} />
+          <CdTrackTable draft={draft} progress={null} />
           <div className="op-row">
             <button type="button" className="primary" disabled title="吸い出しは P2-5 で実装する">
               取り込む
             </button>
-            <span className="muted small">吸い出しと配置は P2-5 / P2-8。いまは内容の確認まで</span>
+            <span className="muted small">吸い出しは P2-5。取り込んだものは Inbox に入る</span>
           </div>
-          {errors.length > 0 && (
-            <ul className="cd-errors small">
-              {errors.map((e) => (
-                <li key={e} className="error">
-                  {e}
-                </li>
-              ))}
-            </ul>
-          )}
         </>
       )}
 

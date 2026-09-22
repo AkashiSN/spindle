@@ -1863,9 +1863,20 @@ table.cd-tracks td {
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
-table.cd-tracks input[type='text'] {
-  width: 100%;
-  box-sizing: border-box;
+/* 読み取り専用（P4-20 追記）。見た目はライブラリの表に寄せる */
+table.cd-tracks thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-alt);
+  color: var(--muted);
+  font-weight: normal;
+}
+table.cd-tracks tbody tr {
+  height: var(--row-h);
+}
+table.cd-tracks tbody tr:hover {
+  background: var(--bg-alt);
 }
 table.cd-tracks td:nth-child(2),
 table.cd-tracks td:nth-child(3) {
@@ -1875,6 +1886,32 @@ table.cd-tracks .num {
   text-align: right;
   white-space: nowrap;
   color: var(--muted);
+}
+
+/* アルバムの要約（P4-20 追記。読み取り専用） */
+.cd-summary {
+  margin-top: 10px;
+}
+.cd-summary-title {
+  margin: 0;
+}
+.cd-summary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 4px 0;
+  color: var(--muted);
+}
+.cd-summary-meta div {
+  display: flex;
+  gap: 4px;
+}
+.cd-summary-meta dt::after {
+  content: ':';
+}
+.cd-summary-meta dd {
+  margin: 0;
+  color: var(--fg);
 }
 
 /* 候補（P4-20）: 左にジャケット、右に一覧。ジャケットが無くても枠で場所を取る */

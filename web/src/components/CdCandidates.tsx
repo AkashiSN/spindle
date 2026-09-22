@@ -195,9 +195,11 @@ export function CdCandidates({ cd }: { cd: CdLookupState }) {
           {result.candidates.length > 0 && (
             <div className="op-row">
               <button type="button" disabled={cd.draft?.source === 'manual'} onClick={cd.startManual}>
-                候補を使わず手入力
+                どれも違う（候補を使わない）
               </button>
-              <span className="muted small">候補を選ぶと表に写る（編集中の内容は写し直しで消える）</span>
+              <span className="muted small">
+                候補を選ぶと表に名前が入る。どれも違うなら名前の無いまま取り込んで、Inbox の承認画面で入れる
+              </span>
             </div>
           )}
         </div>

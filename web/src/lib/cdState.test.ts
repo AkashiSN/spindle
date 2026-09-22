@@ -81,16 +81,16 @@ describe('cdReducer: 照会', () => {
   })
 })
 
-describe('cdReducer: 選択と手入力', () => {
+describe('cdReducer: 選択と「どれも違う」', () => {
   const two = response([cand(false, 'X'), cand(false, 'Y')])
-  it('select で候補をフォームに写す。編集中の内容は捨てる', () => {
-    let s = run([{ type: 'select', index: 0 }, { type: 'update_draft', patch: { album: 'edited' } }], looked(two))
-    expect(s.draft).toMatchObject({ album: 'edited', source: 'musicbrainz' })
+  it('select で候補を写し、選び直すと写し直す', () => {
+    let s = cdReducer(looked(two), { type: 'select', index: 0 })
+    expect(s.draft).toMatchObject({ album: 'X', source: 'musicbrainz' })
     s = cdReducer(s, { type: 'select', index: 1 })
     expect(s.selected).toBe(1)
     expect(s.draft).toMatchObject({ album: 'Y' })
   })
-  it('start_manual で空のフォーム、selected は外れる', () => {
+  it('start_manual（どれも違う）で名前の無いフォームに戻り、selected は外れる', () => {
     const s = run([{ type: 'select', index: 0 }, { type: 'start_manual' }], looked(two))
     expect(s.selected).toBeNull()
     expect(s.draft).toMatchObject({ source: 'manual', album: '' })
@@ -115,9 +115,8 @@ describe('cdReducer: 候補から写す範囲（D-72、P4-2）', () => {
     expect(t.draft).toMatchObject({ album: 'Y' })
     expect(t.draft!.tracks[0]).toMatchObject({ title: 'a' })
   })
-  it('set_copy_scope: minimal で選択中の候補を写し直すと空行になる（編集中の内容は捨てる）', () => {
-    let s = run([{ type: 'update_draft', patch: { album: 'edited' } }], looked(two))
-    s = cdReducer(s, { type: 'set_copy_scope', scope: 'minimal' })
+  it('set_copy_scope: minimal で選択中の候補を写し直すと空行になる', () => {
+    let s = cdReducer(looked(two), { type: 'set_copy_scope', scope: 'minimal' })
     expect(s.copyScope).toBe('minimal')
     expect(s.selected).toBe(0)
     expect(s.draft!.album).toBe('X')
@@ -136,48 +135,9 @@ describe('cdReducer: 候補から写す範囲（D-72、P4-2）', () => {
   })
 })
 
-describe('cdReducer: フォームの編集と貼り付け', () => {
-  const base = looked(response([]))
-  it('update_draft / update_track はフォームだけを変える', () => {
-    let s = cdReducer(base, { type: 'update_draft', patch: { album: 'X' } })
-    expect(s.draft!.album).toBe('X')
-    s = cdReducer(s, { type: 'update_track', index: 1, patch: { title: 'two' } })
-    // 空のままの行は `Track NN` を表でプレースホルダに出す（値は空。確定時に埋まる）
-    expect(s.draft!.tracks.map((t) => t.title)).toEqual(['', 'two'])
-  })
-  it('apply_paste は貼り付けを行に写し、警告を残す', () => {
-    const s = run(
-      [
-        { type: 'set_paste', text: '1. one / X\n2. two\n3. three' },
-        { type: 'apply_paste' },
-      ],
-      base,
-    )
-    expect(s.draft!.tracks.map((t) => [t.title, t.artist])).toEqual([
-      ['one', 'X'],
-      ['two', ''],
-    ])
-    expect(s.pasteWarnings).toEqual(['貼り付けの行数 3 が TOC の 2 と違う', 'TOC に無い番号: 3'])
-  })
-  it('読めない貼り付けは警告だけでフォームは変えない', () => {
-    const s = run([{ type: 'set_paste', text: '\n\n' }, { type: 'apply_paste' }], base)
-    expect(s.draft).toEqual(base.draft)
-    expect(s.pasteWarnings).toEqual(['貼り付けからトラックを読めない'])
-  })
-  it('artistFirst の向きは apply_paste に効く', () => {
-    const s = run(
-      [{ type: 'set_paste_artist_first', value: true }, { type: 'set_paste', text: '1. X / one' }, { type: 'apply_paste' }],
-      base,
-    )
-    expect(s.draft!.tracks[0]).toMatchObject({ title: 'one', artist: 'X' })
-  })
-})
-
 describe('cdReducer: ディスクの出し入れ（P4-20）', () => {
-  const filled = run(
-    [{ type: 'update_draft', patch: { album: 'X', album_artist: 'Y' } }],
-    looked(response([])),
-  )
+  // 候補を選んで名前の入った状態を作る（画面からは編集できないので select で作る）
+  const filled = cdReducer(looked(response([cand(false, 'X')])), { type: 'select', index: 0 })
   it('ディスクが入ったら照会の前からフォームができる', () => {
     const s = cdReducer(initialCdState, { type: 'set_disc', toc: '0:1000:2500', tracks })
     expect(s.toc).toBe('0:1000:2500')
@@ -187,13 +147,11 @@ describe('cdReducer: ディスクの出し入れ（P4-20）', () => {
   })
   it('同じディスクの set_disc は編集中の内容を消さない（2 秒ごとのポーリング）', () => {
     let s = cdReducer(initialCdState, { type: 'set_disc', toc: '0:1000:2500', tracks })
-    s = cdReducer(s, { type: 'update_draft', patch: { album: '書きかけ' } })
     const again = cdReducer(s, { type: 'set_disc', toc: '0:1000:2500', tracks })
     expect(again).toBe(s)
   })
   it('別のディスクに替わるとフォームごと作り直す', () => {
     let s = cdReducer(initialCdState, { type: 'set_disc', toc: '0:1000:2500', tracks })
-    s = cdReducer(s, { type: 'update_draft', patch: { album: '書きかけ' } })
     s = cdReducer(s, { type: 'set_disc', toc: '0:3000', tracks: [{ number: 1, length_ms: 40000 }] })
     expect(s.draft?.album).toBe('')
     expect(s.draft?.tracks).toHaveLength(1)
@@ -203,17 +161,12 @@ describe('cdReducer: ディスクの出し入れ（P4-20）', () => {
     expect(s.draft).toBe(filled.draft)
     expect(s.busy).toBe(true)
   })
-  it('照会に失敗しても表と編集中の内容は残る', () => {
+  it('照会に失敗しても表と写した内容は残る', () => {
     let s = cdReducer(filled, { type: 'lookup_start' })
     s = cdReducer(s, { type: 'lookup_error', error: 'MusicBrainz に届かない' })
     expect(s.draft?.album).toBe('X')
     expect(s.error).toBe('MusicBrainz に届かない')
     expect(s.busy).toBe(false)
-  })
-  it('手で直したあとの再照会でも、返るまで編集中の内容は残る', () => {
-    let s = cdReducer(filled, { type: 'update_track', index: 0, patch: { title: '手で入れた' } })
-    s = cdReducer(s, { type: 'lookup_start' })
-    expect(s.draft?.tracks[0]?.title).toBe('手で入れた')
   })
   it('照会中に結果を消しても busy が残らない', () => {
     let s = cdReducer(filled, { type: 'lookup_start' })
@@ -227,17 +180,14 @@ describe('cdReducer: ディスクの出し入れ（P4-20）', () => {
     expect(s.busy).toBe(false)
     expect(s.result).toBeNull()
   })
-  it('TOC を編集すると結果・フォーム・貼り付けの本文が消える（同じ TOC なら保つ）', () => {
-    const s = { ...filled, paste: 'p' }
-    const same = cdReducer(s, { type: 'set_toc', toc: s.toc })
-    expect(same.draft).toBe(s.draft)
-    const edited = cdReducer(s, { type: 'set_toc', toc: '0:2000' })
-    expect(edited).toMatchObject({ toc: '0:2000', result: null, draft: null, selected: null, paste: '' })
+  it('TOC を編集すると結果とフォームが消える（同じ TOC なら保つ）', () => {
+    const same = cdReducer(filled, { type: 'set_toc', toc: filled.toc })
+    expect(same.draft).toBe(filled.draft)
+    const edited = cdReducer(filled, { type: 'set_toc', toc: '0:2000' })
+    expect(edited).toMatchObject({ toc: '0:2000', result: null, draft: null, selected: null })
   })
-  it('照会のやり直しは貼り付けの本文を保つ（同じディスク）', () => {
-    const s = run([{ type: 'lookup_start' }, { type: 'lookup_ok', result: response([]) }], { ...filled, paste: 'p' })
-    expect(s.paste).toBe('p')
-    // 候補ゼロ件なら、TOC から作ってあるフォームがそのまま残る
+  it('照会をやり直しても、候補ゼロ件なら TOC から作ったフォームが残る', () => {
+    const s = run([{ type: 'lookup_start' }, { type: 'lookup_ok', result: response([]) }], filled)
     expect(s.draft).toBe(filled.draft)
   })
 })

@@ -1,9 +1,14 @@
 // CD 画面のトラック表（P4-20）。行は TOC の音声トラックと 1:1 で、**照会の前から出る**
-// （`GET /api/cd/status` の `tracks`）。タイトルが空の行は `Track NN` をプレースホルダで見せ、
-// 候補を選ぶと実名が入る（空のままなら確定時に `Track NN` が入る）。
+// （`GET /api/cd/status` の `tracks`）。
 //
-// 取り込み中だけ右端に進捗が出る（`progress` が null なら列ごと出さないので、P2-5 が入るまで
-// 表の見た目は変わらない）。
+// **読み取り専用**（P4-20 追記）。CD 画面は「何が入っていて、どの盤として取り込むか」を見せる場所で、
+// 値を直すのは Inbox の承認画面（吸い出したものは Inbox を通る。D-67 追記）。入力欄を置くと直す場所が
+// 2 つになり、どちらが効くのか分からなくなる。
+//
+// 見た目はライブラリの表に寄せる（`--row-h` の行高、sticky なヘッダ、行のホバー、番号と長さは右寄せ）。
+// 名前の分からないトラックは `Track NN` を薄字で出す（取り込むとこの名前になる）。
+//
+// 取り込み中だけ右端に進捗が出る（`progress` が null なら列ごと出さない）。
 
 import { defaultTitle, type DiscDraft, type DiscTrackDraft } from '../lib/cd'
 import { formatDuration } from '../lib/format'
@@ -41,17 +46,7 @@ function progressCell(t: DiscTrackDraft, progress: RipProgress | null): string {
   return PHASE_LABELS[progress.phase]
 }
 
-export function CdTrackTable({
-  draft,
-  onTrack,
-  progress,
-  readOnly,
-}: {
-  draft: DiscDraft
-  onTrack: (index: number, patch: Partial<DiscTrackDraft>) => void
-  progress: RipProgress | null
-  readOnly: boolean
-}) {
+export function CdTrackTable({ draft, progress }: { draft: DiscDraft; progress: RipProgress | null }) {
   return (
     <table className="cd-tracks">
       <thead>
@@ -64,39 +59,28 @@ export function CdTrackTable({
         </tr>
       </thead>
       <tbody>
-        {draft.tracks.map((t, i) => (
-          <tr key={t.number}>
-            {/* ISRC は列にしない（12 桁が並ぶと表が読めない）。番号のツールチップに出す */}
-            <td
-              className="num"
-              title={t.mb != null && t.mb.isrcs.length > 0 ? `ISRC: ${t.mb.isrcs.join(', ')}` : undefined}
-            >
-              {t.number}
-            </td>
-            <td>
-              <input
-                type="text"
-                aria-label={`トラック ${t.number} のタイトル`}
-                value={t.title}
-                placeholder={defaultTitle(t.number)}
-                disabled={readOnly}
-                onChange={(e) => onTrack(i, { title: e.target.value })}
-              />
-            </td>
-            <td>
-              <input
-                type="text"
-                aria-label={`トラック ${t.number} のアーティスト`}
-                value={t.artist}
-                placeholder={draft.album_artist || 'アルバムアーティスト'}
-                disabled={readOnly}
-                onChange={(e) => onTrack(i, { artist: e.target.value })}
-              />
-            </td>
-            <td className="num">{formatDuration(t.length_ms)}</td>
-            {progress != null && <td className="muted small">{progressCell(t, progress)}</td>}
-          </tr>
-        ))}
+        {draft.tracks.map((t) => {
+          const title = t.title.trim()
+          const artist = t.artist.trim()
+          return (
+            <tr key={t.number}>
+              {/* ISRC は列にしない（12 桁が並ぶと表が読めない）。番号のツールチップに出す */}
+              <td
+                className="num"
+                title={t.mb != null && t.mb.isrcs.length > 0 ? `ISRC: ${t.mb.isrcs.join(', ')}` : undefined}
+              >
+                {t.number}
+              </td>
+              {/* 名前が入っていない行は、取り込んだときに付く名前を薄字で見せる */}
+              <td className={title === '' ? 'muted' : undefined}>{title === '' ? defaultTitle(t.number) : title}</td>
+              <td className={artist === '' ? 'muted' : undefined}>
+                {artist === '' ? draft.album_artist.trim() : artist}
+              </td>
+              <td className="num">{formatDuration(t.length_ms)}</td>
+              {progress != null && <td className="muted small">{progressCell(t, progress)}</td>}
+            </tr>
+          )
+        })}
       </tbody>
     </table>
   )

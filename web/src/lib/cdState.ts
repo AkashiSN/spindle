@@ -10,18 +10,16 @@
 // 貼り付け欄の本文と busy も落とす（進行中の照会は hook 側が Latest で捨てるので、busy を残すと戻らない）
 
 import {
-  applyTracklist,
   draftFromCandidate,
   emptyDraft,
   initialSelection,
   outcomeAfterTocEdit,
   type CopyScope,
   type DiscDraft,
-  type DiscTrackDraft,
+
   type LookupResponse,
   type TocTrackInfo,
 } from './cd'
-import { parseTracklist } from './tracklist'
 
 export type CdState = {
   toc: string
@@ -34,9 +32,6 @@ export type CdState = {
   copyScope: CopyScope
   /** 編集中のフォーム。TOC が読めた時点で必ずある（表は照会の前から出る） */
   draft: DiscDraft | null
-  paste: string
-  pasteArtistFirst: boolean
-  pasteWarnings: string[]
 }
 
 export type CdAction =
@@ -50,11 +45,6 @@ export type CdAction =
   | { type: 'select'; index: number }
   | { type: 'set_copy_scope'; scope: CopyScope }
   | { type: 'start_manual' }
-  | { type: 'update_draft'; patch: Partial<DiscDraft> }
-  | { type: 'update_track'; index: number; patch: Partial<DiscTrackDraft> }
-  | { type: 'set_paste'; text: string }
-  | { type: 'set_paste_artist_first'; value: boolean }
-  | { type: 'apply_paste' }
 
 export const initialCdState: CdState = {
   toc: '',
@@ -65,9 +55,6 @@ export const initialCdState: CdState = {
   // CD 画面の既定は「全部写す」（D-72 追記 2、P4-20）。表が主役なので、候補を選んだら名前が入る
   copyScope: 'full',
   draft: null,
-  paste: '',
-  pasteArtistFirst: false,
-  pasteWarnings: [],
 }
 
 /**
@@ -75,7 +62,7 @@ export const initialCdState: CdState = {
  * （表は照会の前から出ていて、失敗しても編集中の内容を飛ばさない）
  */
 function beforeLookup(s: CdState): CdState {
-  return { ...s, result: null, selected: null, pasteWarnings: [] }
+  return { ...s, result: null, selected: null }
 }
 
 /**
@@ -83,12 +70,12 @@ function beforeLookup(s: CdState): CdState {
  * busy も落とす: 進行中の照会は hook が Latest で捨てるので、残すと戻らなくなる
  */
 function belowToc(s: CdState): CdState {
-  return { ...beforeLookup(s), draft: null, error: null, paste: '', busy: false }
+  return { ...beforeLookup(s), draft: null, error: null, busy: false }
 }
 
 /** フォームを差し替える（貼り付けの警告は消える） */
 function withDraft(s: CdState, selected: number | null, draft: DiscDraft): CdState {
-  return { ...s, selected, draft, pasteWarnings: [] }
+  return { ...s, selected, draft }
 }
 
 export function cdReducer(s: CdState, a: CdAction): CdState {
@@ -142,24 +129,5 @@ export function cdReducer(s: CdState, a: CdAction): CdState {
     case 'start_manual':
       if (s.result == null) return s
       return withDraft(s, null, emptyDraft(s.result.tracks))
-    case 'update_draft':
-      if (s.draft == null) return s
-      return { ...s, draft: { ...s.draft, ...a.patch } }
-    case 'update_track': {
-      if (s.draft == null) return s
-      const tracks = s.draft.tracks.map((t, i) => (i === a.index ? { ...t, ...a.patch } : t))
-      return { ...s, draft: { ...s.draft, tracks } }
-    }
-    case 'set_paste':
-      return { ...s, paste: a.text }
-    case 'set_paste_artist_first':
-      return { ...s, pasteArtistFirst: a.value }
-    case 'apply_paste': {
-      if (s.draft == null) return s
-      const parsed = parseTracklist(s.paste, { artistFirst: s.pasteArtistFirst })
-      if (parsed.tracks.length === 0) return { ...s, pasteWarnings: ['貼り付けからトラックを読めない'] }
-      const applied = applyTracklist(s.draft, parsed.tracks)
-      return { ...s, draft: applied.draft, pasteWarnings: [...parsed.warnings, ...applied.warnings] }
-    }
   }
 }

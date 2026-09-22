@@ -8,8 +8,6 @@ import { ApiError, apiPost } from '../api/client'
 import {
   normalizeTocInput,
   type CopyScope,
-  type DiscDraft,
-  type DiscTrackDraft,
   type LookupResponse,
   type ReleaseCandidate,
   type TocTrackInfo,
@@ -42,11 +40,6 @@ export type CdLookupState = CdState & {
   widen: () => Promise<void>
   reset: () => void
   startManual: () => void
-  updateDraft: (patch: Partial<DiscDraft>) => void
-  updateTrack: (index: number, patch: Partial<DiscTrackDraft>) => void
-  setPaste: (v: string) => void
-  setPasteArtistFirst: (v: boolean) => void
-  applyPaste: () => void
 }
 
 function describe(e: unknown): string {
@@ -113,14 +106,6 @@ export function useCdLookup(): CdLookupState {
       dispatch({ type: 'reset' })
     }, []),
     startManual: useCallback(() => dispatch({ type: 'start_manual' }), []),
-    updateDraft: useCallback((patch: Partial<DiscDraft>) => dispatch({ type: 'update_draft', patch }), []),
-    updateTrack: useCallback(
-      (index: number, patch: Partial<DiscTrackDraft>) => dispatch({ type: 'update_track', index, patch }),
-      [],
-    ),
-    setPaste: useCallback((text: string) => dispatch({ type: 'set_paste', text }), []),
-    setPasteArtistFirst: useCallback((value: boolean) => dispatch({ type: 'set_paste_artist_first', value }), []),
-    applyPaste: useCallback(() => dispatch({ type: 'apply_paste' }), []),
     setDisc: useCallback(
       (toc: string, tracks: TocTrackInfo[]) => dispatch({ type: 'set_disc', toc, tracks }),
       [],
