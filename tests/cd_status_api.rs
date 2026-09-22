@@ -167,6 +167,7 @@ async fn status_before_first_poll_is_unknown() {
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["state"], "unknown");
     assert_eq!(body["toc"], Value::Null);
+    assert_eq!(body["tracks"], serde_json::json!([]), "TOC が無ければ空");
     assert_eq!(body["isrcs"], serde_json::json!([]));
     assert_eq!(body["mcn"], Value::Null);
     assert_eq!(body["error"], Value::Null);
@@ -188,6 +189,13 @@ async fn status_reports_disc_and_toc_string() {
     assert_eq!(body["mcn"], "4582515778491");
     assert_eq!(body["error"], Value::Null);
     assert_eq!(body["checked_at"], 1_700_000_000_i64);
+    // 表は照会の前から出すので、TOC の音声トラック（番号と長さ）も返す（P4-20）
+    let tracks = body["tracks"].as_array().expect("tracks");
+    assert_eq!(tracks.len(), 2);
+    assert_eq!(tracks[0]["number"], 1);
+    assert_eq!(tracks[0]["length_ms"], 20144 * 1000 / 75);
+    assert_eq!(tracks[1]["number"], 2);
+    assert_eq!(tracks[1]["length_ms"], (40290 - 20144) * 1000 / 75);
 }
 
 #[tokio::test]
@@ -233,6 +241,7 @@ async fn eject_opens_tray_and_refreshes_status() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["state"], "tray_open");
     assert_eq!(body["toc"], Value::Null);
+    assert_eq!(body["tracks"], serde_json::json!([]), "TOC が無ければ空");
 }
 
 #[tokio::test]

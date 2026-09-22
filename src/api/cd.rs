@@ -6,7 +6,8 @@
 //! 応答の `stage` がどこで止まったか、`can_widen` がまだ引いていない段があるかを示し、要求の
 //! `widen` で段を打ち切らずに全部引く。
 //! `GET /api/cd/status`（P2-1 / P2-2）はポーラ（`cd::device`）が持つドライブの状態と TOC
-//! （lookup に渡すのと同じ CTDB 形式の文字列）を返し、`POST /api/cd/eject` はトレイを開けて
+//! （lookup に渡すのと同じ CTDB 形式の文字列。音声トラックの番号と長さも `tracks` で返す。P4-20）を
+//! 返し、`POST /api/cd/eject` はトレイを開けて
 //! 状態を見直す。ドライブが配線されていなければどちらも 503 `cd_unavailable`。
 //! 照会に失敗したら 502 `lookup_failed`、MusicBrainz が負荷制限（503）で通らない・クライアント
 //! 未構成なら 503 `musicbrainz_unavailable`（不一致や 0 件は 200 で候補が空）
@@ -32,6 +33,9 @@ pub struct StatusResponse {
     pub state: DriveState,
     /// ディスクがあって TOC を読めたら CTDB 形式の文字列（`POST /api/cd/lookup` にそのまま渡せる）
     pub toc: Option<String>,
+    /// TOC の音声トラック（番号と長さ）。TOC が読めていなければ空。
+    /// 照会を待たずに CD 画面のトラック表を出すために返す（P4-20）
+    pub tracks: Vec<TocTrackInfo>,
     /// TOC と一緒に読んだ ISRC（音声トラック順。無いトラックは null）。TOC が無ければ空
     pub isrcs: Vec<Option<String>>,
     /// メディアカタログ番号（JAN / UPC）。入っていない盤は null
@@ -51,9 +55,11 @@ pub async fn status(State(state): State<AppState>) -> Result<Response, ApiError>
         return Ok(cd_unavailable());
     };
     let s = cd.monitor.snapshot();
+    let tracks = s.toc.as_ref().map(toc_tracks).unwrap_or_default();
     Ok(Json(StatusResponse {
         state: s.state,
         toc: s.toc.as_ref().map(Toc::ctdb_toc),
+        tracks,
         isrcs: s.ids.isrcs,
         mcn: s.ids.mcn,
         error: s.error,

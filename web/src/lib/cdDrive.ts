@@ -1,5 +1,6 @@
 // CD ドライブの状態（`GET /api/cd/status`、P2-1）の型と表示。ポーリングは hooks/useCdDrive.ts
 
+import type { TocTrackInfo } from './cd'
 import { normalizeTocInput } from './cd'
 import { formatDuration } from './format'
 
@@ -9,6 +10,8 @@ export type DriveStatus = {
   state: DriveState
   /** ディスクがあって TOC を読めたら CTDB 形式（lookup にそのまま渡せる） */
   toc: string | null
+  /** TOC の音声トラック（番号と長さ）。照会の前からトラック表を出すために使う。TOC が無ければ空 */
+  tracks: TocTrackInfo[]
   /** TOC と一緒に読んだ ISRC（音声トラック順。無いトラックは null）。TOC が無ければ空 */
   isrcs: Array<string | null>
   /** メディアカタログ番号（JAN / UPC）。入っていない盤は null */
