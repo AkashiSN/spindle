@@ -109,7 +109,7 @@ export function cdReducer(s: CdState, a: CdAction): CdState {
       return withDraft(base, null, s.draft ?? emptyDraft(r.tracks))
     }
     case 'lookup_error':
-      // 失敗しても表と編集中の内容は残す
+      // 失敗しても表と写した内容は残す
       return { ...beforeLookup(s), busy: false, error: a.error }
     case 'reset':
       return belowToc(s)

@@ -141,7 +141,10 @@ describe('candidateLengthMs / lookupHeadline', () => {
     expect(lookupHeadline({ ...r, exact: false, stage: 'ids', candidates: [given, isrc] })).toBe(
       '候補: 2 件（指定 / ISRC / バーコード。DiscID は未登録）',
     )
-    expect(lookupHeadline({ ...r, exact: false, candidates: [] })).toBe('MusicBrainz に見つからない（手入力へ）')
+    // CD 画面では入力できないので「手入力へ」とは言わない（P4-20 追記）
+    expect(lookupHeadline({ ...r, exact: false, candidates: [] })).toBe(
+      'MusicBrainz に見つからない（そのまま取り込んで Inbox で名前を入れる）',
+    )
   })
   // DiscID が 200 でも候補 0 件なら下の段へ落ちる（D-64 追記 4）。そのとき exact は真のままなので、
   // 段だけを見て「未登録」と言うと嘘になる

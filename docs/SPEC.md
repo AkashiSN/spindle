@@ -501,8 +501,9 @@ Phase 4  commit:     1 トランザクションで
    ↓              DiscMetadata（album / album_artist / date / label / catalog_number / barcode /
    ↓              disc_no / disc_count / tracks[{ number, title, artist, mb }]、source）になる。
    ↓              トラックリスト貼り付け（通販ページ等からのテキストを行解析して
-   ↓              トラック番号・タイトル・アーティストへ割り付け。web/src/lib/tracklist.ts）を
-   ↓              一級の入力経路とする。行は TOC の音声トラックと 1:1 で、番号と長さは TOC から
+   ↓              トラック番号・タイトル・アーティストへ割り付け。web/src/lib/tracklist.ts）は
+   ↓              **Inbox の承認画面の**一級の入力経路とする（D-67 追記。CD 画面からは外した）。
+   ↓              行は TOC の音声トラックと 1:1 で、番号と長さは TOC から
    ↓
 [オフセット決定] INQUIRY でドライブ型番取得 → 同梱オフセット表を引く
    ↓            UI に必ず表示。手動上書き可

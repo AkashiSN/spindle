@@ -1,5 +1,9 @@
-// CD 取り込み（SPEC §7.2 / §12.6、P2-3 / P2-4）: 照会結果の型と表示用の整形、手入力フォーム（候補を土台に
-// 編集する 1 つの下書き）と、確定したメタデータ（吸い出し P2-5 / 配置 P2-8 の入力）
+// CD 取り込み（SPEC §7.2 / §12.6、P2-3 / P2-4 / P4-20）: 照会結果の型と表示用の整形、取り込む内容
+// （候補を写した 1 つの下書き）と、その確定形（吸い出し P2-5 の入力）。
+//
+// **CD 画面からは直せない**（P4-20 追記）。候補を選ぶ / 写す範囲を変える /「どれも違う」だけで、
+// 補正とトラックリスト貼り付けは Inbox の承認画面（取り込んだものは Inbox を通る。D-67 追記）。
+// P2-5 に渡す契約は**名前が空でもよい**（空名の盤は Inbox で名前を入れる。D-67 追記）。
 
 export type TrackCandidate = {
   number: string
@@ -56,7 +60,7 @@ export type ReleaseCandidate = {
   tracks: TrackCandidate[]
 }
 
-/** TOC の音声トラック（候補が無くても手入力フォームの行数と長さの元になる） */
+/** TOC の音声トラック（候補が無くても表の行数と長さの元になる） */
 export type TocTrackInfo = {
   number: number
   length_ms: number
@@ -280,7 +284,10 @@ export function candidateLengthMs(c: ReleaseCandidate): number | null {
  */
 export function lookupHeadline(r: LookupResponse): string {
   const n = r.candidates.length
-  if (n === 0) return r.exact ? 'DiscID は登録済みだが候補が無い' : 'MusicBrainz に見つからない（手入力へ）'
+  if (n === 0)
+    return r.exact
+      ? 'DiscID は登録済みだが候補が無い（そのまま取り込んで Inbox で名前を入れる）'
+      : 'MusicBrainz に見つからない（そのまま取り込んで Inbox で名前を入れる）'
   if (r.stage === 'discid') return `DiscID が一致: ${n} 件`
   const routes = MATCHED_BY_ORDER.filter((m) => r.candidates.some((c) => c.matched_by.includes(m)))
     .map((m) => MATCHED_BY_LABELS[m])
@@ -306,7 +313,7 @@ export function initialSelection(r: LookupResponse): number | null {
   return exact.length === 1 ? exact[0]! : null
 }
 
-// ---------------------------------------------------------------- 手入力（P2-4、D-21 / D-65）
+// ---------------------------------------------------------------- 取り込む内容（P2-4、D-21 / D-65）
 
 /** 候補から持ち越す MusicBrainz のトラック識別子（タグの MUSICBRAINZ_TRACKID 等。P2-8） */
 export type TrackMbIds = { recording_id: string; track_id: string; isrcs: string[] }
@@ -442,7 +449,7 @@ export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[], sco
  *
  * **P4-20 追記で CD 画面からは使わなくなった**（編集は Inbox の承認画面に一本化した）。
  * Inbox へ移すまでの置き場としてここに残してある（TASKS P2-10 の未完了項目）。
- *アーティストの無い行は既存の値を保つ。
+ * アーティストの無い行は既存の値を保つ。
  * TOC に無い番号は捨て、行数の違い・未設定の行とともに警告にする。元の draft は変えない
  */
 export function applyTracklist(

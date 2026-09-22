@@ -1,7 +1,8 @@
 // CD 画面（SPEC §12.6、P2-3 / P2-4）の状態: 遷移は lib/cdState.ts の reducer（vitest で固定）。
 // ここは非同期の照会（POST /api/cd/lookup）と dispatch の束ね。TOC はドライブ（P2-1 の
 // GET /api/cd/status → useCdDrive → lookupToc）から来るのが本線で、貼り付け欄はドライブ無しの環境用。
-// 確定したメタデータは吸い出し（P2-5）に渡す
+// 取り込む内容は吸い出し（P2-5）に渡す。**この画面からは直せない**（P4-20 追記。補正は Inbox の
+// 承認画面。D-67 追記）ので、ここが持つのは照会と候補の選択だけ
 
 import { useCallback, useReducer, useRef } from 'react'
 import { ApiError, apiPost } from '../api/client'
