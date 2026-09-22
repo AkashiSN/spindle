@@ -4,8 +4,9 @@
 //! CPU 系の種別（`JobType::cpu_bound`）は種別の許可に加えて共通の予算（= コア数。D-73）も取る。
 //! 取得順は「種別 → 共通」で、共通が取れなければ claim せずに次の周回で試す（ジョブは queued の
 //! まま。1 本のループで待つと他の種別を止めるので、許可を持ったまま待たずに手放して回る）。
-//! 予算を分け合う種別は 1 件ずつ**ラウンドロビン**で claim し、開始位置を周回ごとに回す（種別名順に
-//! 空きが尽きるまで取ると、先頭の種別のキューが尽きるまで残りが始まらない）
+//! 予算を分け合う種別は 1 件ずつ**ラウンドロビン**で claim し、次の周回は**最後に claim した種別の次**から
+//! 始める（種別名順に空きが尽きるまで取ると、先頭の種別のキューが尽きるまで残りが始まらない。周回ごとに
+//! 1 つ進めるだけだと、何も取れない周回（tick・別の wake）で開始位置がずれ、同じ種別に続けて予算が回る）
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,7 +79,7 @@ pub(super) async fn run(jobs: Arc<Jobs>, registry: Registry, shutdown: Cancellat
 
     let (cpu_slots, other_slots): (Vec<_>, Vec<_>) =
         slots.iter().cloned().partition(|(ty, _)| ty.cpu_bound());
-    // CPU 系のラウンドロビンの開始位置（周回ごとに 1 つ進める）
+    // CPU 系のラウンドロビンの開始位置（最後に claim した種別の次。claim が無ければ動かさない）
     let mut rotation = 0usize;
     let mut tasks: JoinSet<()> = JoinSet::new();
     loop {
@@ -124,22 +125,24 @@ pub(super) async fn run(jobs: Arc<Jobs>, registry: Registry, shutdown: Cancellat
                 == Claimed::Yes
             {}
         }
-        // CPU 系: 種別を 1 件ずつ順に回し、1 周で何も取れなくなるまで（予算切れ・空）繰り返す
+        // CPU 系: 種別を 1 件ずつ順に回し、1 周で何も取れなくなるまで（予算切れ・空）繰り返す。
+        // 各周は最後に claim した種別の次から始める
         if !cpu_slots.is_empty() {
-            let start = rotation % cpu_slots.len();
-            rotation = rotation.wrapping_add(1);
             loop {
-                let mut progressed = false;
+                let start = rotation % cpu_slots.len();
+                let mut last_claimed = None;
                 for i in 0..cpu_slots.len() {
-                    let (ty, sem) = &cpu_slots[(start + i) % cpu_slots.len()];
+                    let k = (start + i) % cpu_slots.len();
+                    let (ty, sem) = &cpu_slots[k];
                     if claim_one(&jobs, &registry, *ty, sem, &budget, &mut tasks, &shutdown).await
                         == Claimed::Yes
                     {
-                        progressed = true;
+                        last_claimed = Some(k);
                     }
                 }
-                if !progressed {
-                    break;
+                match last_claimed {
+                    Some(k) => rotation = k + 1,
+                    None => break,
                 }
             }
         }
