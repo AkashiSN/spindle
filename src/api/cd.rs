@@ -176,19 +176,18 @@ pub async fn lookup(
                 format!("ISRC の形が不正: {raw:?}（英数字 12 文字）"),
             ));
         }
-        if !isrcs.contains(&v) {
-            isrcs.push(v);
+        if isrcs.contains(&v) {
+            continue;
         }
-    }
-    if isrcs.len() > audio_tracks {
-        return Ok(error_response_with_message(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            format!(
-                "ISRC が {} 件で音声トラック数 {audio_tracks} を超えている",
-                isrcs.len()
-            ),
-        ));
+        // 上限は走査中に見る（超えた時点で 400。Vec が入力の長さに比例して伸びない）
+        if isrcs.len() >= audio_tracks {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                format!("ISRC が音声トラック数 {audio_tracks} を超えている"),
+            ));
+        }
+        isrcs.push(v);
     }
     let mcn = match body.mcn.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         None => None,
