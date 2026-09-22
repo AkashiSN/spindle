@@ -934,14 +934,30 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 
 ### P2-5 吸い出し
 
-**D-67 追記（2026-09-23）で取り込み先が変わった。吸い出したものは Library へ直行せず Inbox を通す。**
-`place_disc` はその形に作り直す（宛先が `[paths].inbox`、登録が `inbox_items` + サイドカー
-`spindle-inbox.json`。`albums` / `tracks` / 検証記録の登録は承認後の配置が行う）。既存の
-`tests/cd_place.rs` も書き換わる。
+**P2 の最後の山。これが入ると CD 取り込みが通しで動く。** 2026-09-23 時点で未着手。
 
-- [ ] 全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割
-- [ ] `place_disc` を Inbox 経由に作り直す（D-67 追記）: FLAC と rip.log / disc.cue / disc.toc を件の
-      ディレクトリへ、MusicBrainz から写した内容と `RipReport` をサイドカーへ、`inbox_items` に 1 件
+#### いまの状態（着手前に読む）
+
+- **CD 画面（P4-20）は完成していて、`DiscDraft` を作るところまで動く。** ドライブ検出 → 照会
+  （3 段の打ち切り。D-64 追記 4）→ 候補選択 → 読み取り専用の表、まで実機で確認済み。
+  画面の「取り込む」ボタンは **`disabled` のまま置いてある**（`web/src/components/CdView.tsx`）。
+  ここを有効にして `POST /api/cd/rip` を叩くのが入口
+- **`src/cd/place.rs` の `place_disc` はどこからも呼ばれていない**（P2-8 で作ってテストだけ通している）。
+  D-67 追記で宛先が Library → Inbox に変わったので、**このタスクで作り直す**
+- 使える部品はそろっている: CRC（P2-6 `src/cd/`）、CTDB の修復（P2-7 `src/cd/repair.rs`）、
+  照会（P2-9 `CtdbClient` / `AccurateRipClient`）、ドライブ（P2-1 `src/cd/device.rs`）、
+  TOC と各種 ID（P2-2 `src/cd/toc.rs`）
+- 進捗の器も用意済み: `web/src/components/CdTrackTable.tsx` の `RipProgress`（`progress` が `null` なら
+  列ごと出ないので、値を流せばそのまま出る）
+
+#### やること
+
+- [ ] 全ディスクを 1 本の PCM として取得（`cd-paranoia '1-' -`）→ オフセット適用 → 分割
+- [ ] `POST /api/cd/rip` と rip ジョブ。CD 画面の「取り込む」を有効にする
+- [ ] 2 回の走査に CTDB の修復を配線する（P2-7 の残り。直せなければ再リップ / `mismatch`）
+- [ ] `place_disc` を **Inbox 経由**に作り直す（D-67 追記）: FLAC と rip.log / disc.cue / disc.toc を件の
+      ディレクトリへ、MusicBrainz から写した内容と `RipReport` をサイドカーへ、`inbox_items` に 1 件。
+      PCM の切り方・エンコード（`flac -N --verify`）・タグの写像・同梱ファイルは既存のものをそのまま使う
 - [ ] Inbox の承認と配置が、サイドカーの `RipReport` から `album_verifications`（`source = 'rip'`）/
       `track_verifications` / `tracks.verification` と `source_type = 'cd_rip'` を入れる。
       **対応付けはファイルの basename**（配列順を信じない。Inbox では番号もタイトルも直せる）。
@@ -951,17 +967,20 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 - [ ] **リップの開始は空の名前を許す**（D-67 追記）。`DiscMetadata::validate` の
       `EmptyAlbum` / `EmptyAlbumArtist` は Library へ置くときの検証なので、開始の契約には使わない。
       web の `lib/cd.ts` の `validateDraft` は CD 画面から使われなくなったので、ここで消すか直す
-
-受け入れ（P2-5 で必ず見る）: **候補ゼロ件・アルバム名もアーティストも空のまま Inbox まで完走する**、
-サイドカーの basename 対応が 1 対 1 でないとき / CRC の件数や `disc_no` が合わないときは配置しない、
-承認で番号やタイトルを直しても検証記録が正しいトラックに付く
-
-- [ ] 実装後に **SPEC §7.2 の「Library へ直接置いていたときの記述」を現在形に置き換える**（いまは
-      「Inbox 経由にしたあとも使う部分」の注記付きで旧経路の説明を残してある）
 - [ ] 吸い出し中、トラック単位の進捗を SSE の `job` イベントで流す
       （`{ phase: read|verify|encode|place, disc_no, track_no, done, total }`）。CD 画面のトラック表の
       右端に出る（器は P4-20 の `CdTrackTable` の `RipProgress`）。**相ごとの `track_no` の進み方と、
       表の「完了」の表現はここで確定する**（read は 1 本の PCM なのでトラック単位に分かれない）
+- [ ] 実装後に **SPEC §7.2 の「Library へ直接置いていたときの記述」を現在形に置き換える**（いまは
+      「Inbox 経由にしたあとも使う部分」の注記付きで旧経路の説明を残してある）
+
+#### 受け入れ（必ず見る）
+
+- **候補ゼロ件・アルバム名もアーティストも空のまま Inbox まで完走する**（CD 画面から編集を外したので、
+  この経路が塞がっていると「どれも違う」盤を取り込めない）
+- サイドカーの basename 対応が 1 対 1 でないとき / CRC の件数や `disc_no` が合わないときは配置しない
+- 承認で番号やタイトルを直しても、検証記録が正しいトラックに付く
+- 既存の `tests/cd_place.rs` は Library 直行前提なので書き換わる。実ドライブのテストは `#[ignore]`
 
 ### P2-6 ARv1/v2 CRC と CTDB CRC32
 
@@ -1612,8 +1631,19 @@ Shift+↑、Esc → Shift+↓）
 `web/src/lib/cdState.test.ts`（`set_disc`、照会中もフォームが消えない、busy が残らない）、
 `web/src/lib/views.test.ts`（並びと左カラム）
 
+**完了**（2026-09-23。codex approve 済み）。実機（TrueNAS）で確認したこと:
+- 照会の前からトラック表が出る、候補を選ぶと名前が入る、ジャケットが出る（500x500）
+- 嵐「Five」で `stage=ids` / 候補 2 件。`widen` で 28 件（内訳 ISRC 2 / TOC 近似 26）= 以前ノイズだった
+  26 件が「さらに広げて探す」の裏に隠れた
+- タブの並び、CD 画面に左カラムが無いこと、入力欄が 0 個であること
+
+**実機でしか出なかった不具合**: ジャケットが IPv6 固定では取れなかった（coverartarchive.org から
+archive.org へ飛ぶ二段構えで、飛び先に AAAA が無い）。`CoverArtClient` は族を引数で受けず `Auto`
+固定にした（D-82 追記）。ユニットテストはローカルの HTTP サーバを模していたので素通りしていた。
+
 残り: トラックごとの進捗は P2-5（表の列と `RipProgress` の型だけ用意した）。Inbox 経由の取り込みも
-P2-5（D-67 追記）
+P2-5（D-67 追記）。**「取り込む」ボタンは `disabled` のまま**なので、CD 取り込みの通し確認と
+Inbox バッジが実際に増える様子は未確認
 
 ## 着手前に確認が必要な残課題
 
