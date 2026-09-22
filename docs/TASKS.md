@@ -898,6 +898,9 @@ TOC は成立。実機は `#[ignore]`）、`tests/cd_toc.rs`（文字列の往�
 通る、キャッシュの再利用 / 入力違い / refresh / 期限切れ / 失敗は覚えない）、`tests/cd_lookup_api.rs`
 （2 回目は上流を引かない、refresh は引く）
 
+- [ ] 照会の段階化（D-64 追記 4。2026-09-23。P4-20）: TOC 近似は DiscID / ISRC / バーコードで 1 件も
+      候補が残らなかったときだけ引く。`widen` で明示的に広げられる
+
 残り: なし（検出は P2-1 で差し替え済み）
 
 ### P2-4 照会ゼロ件でも完走できる手入力経路とトラックリスト貼り付け
@@ -923,6 +926,10 @@ D-65。候補も手入力も同じフォーム（`DiscDraft`。`lib/cd.ts` の `
 ### P2-5 吸い出し
 
 - [ ] 全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割
+- [ ] 吸い出し中、トラック単位の進捗を SSE の `job` イベントで流す
+      （`{ phase: read|verify|encode|place, disc_no, track_no, done, total }`）。CD 画面のトラック表の
+      右端に出る（器は P4-20 の `CdTrackTable` の `RipProgress`）。**相ごとの `track_no` の進み方と、
+      表の「完了」の表現はここで確定する**（read は 1 本の PCM なのでトラック単位に分かれない）
 
 ### P2-6 ARv1/v2 CRC と CTDB CRC32
 
@@ -1540,6 +1547,29 @@ Shift+↑、Esc → Shift+↓）
 `【Live ver.】` は別）、`tests/inbox_api.rs`（同名あり / `(Cover)` は出ない / missing は数えない / 追記先が
 無ければ空）、`web/src/lib/inbox.test.ts`（`sameTitleLabel` / `sameTitleCount`）、実機のデータで誤警告の量を
 測る（同一 album 内 27 グループ / 119 行。YouTube 由来 6 グループ）
+
+### P4-20 CD 画面の作り直しと取り込みの導線
+
+2026-09-23。ユーザ要望。SPEC §7.2 / §12.1 / §12.6、D-64 追記 4、D-82。
+
+- [ ] MusicBrainz の照会を 3 段の打ち切りに（`discid` → `ids` → `toc`）。`POST /api/cd/lookup` に
+      `widen`、応答に `stage` / `can_widen`
+- [ ] `GET /api/cd/status` に TOC の音声トラック（照会の前から表を出す）
+- [ ] `GET /api/cd/cover/{release_id}`（Cover Art Archive の中継。D-82）
+- [ ] `GET /api/inbox/summary`（上部バーのバッジ用。一覧を読まない固定 SQL の集計）
+- [ ] CD 画面: トラック表を主役に（タイトルは `Track NN` のプレースホルダ）、候補は左にジャケットを
+      付けて下へ、「確定」段を廃止（`CdView` を 4 ファイルに分割）
+- [ ] 上部バー: `ライブラリ / アルバム / CD / YouTube / Inbox`、☰ に `ジョブ / 履歴 / 設定`。
+      Inbox に承認待ちの赤バッジ。左カラムはツリーが効く画面（ライブラリ / アルバム）だけ
+
+受け入れ: `tests/cd_musicbrainz.rs`（段の打ち切り・落ち方・`widen`・キャッシュの鍵）、
+`tests/cd_lookup_api.rs`（`stage` / `can_widen` / `widen`）、`tests/cd_status_api.rs`（`tracks`）、
+`tests/cd_cover_api.rs`（中継・404・MBID でない id・未構成・上流異常は 502・リダイレクトの上限と
+ダウングレード）、`tests/inbox_api.rs`（要約）、`web/src/lib/cd.test.ts`（`Track NN` の埋め、見出し）、
+`web/src/lib/cdState.test.ts`（`set_disc`、照会中もフォームが消えない、busy が残らない）、
+`web/src/lib/views.test.ts`（並びと左カラム）
+
+残り: トラックごとの進捗は P2-5（表の列と `RipProgress` の型だけ用意した）
 
 ## 着手前に確認が必要な残課題
 
