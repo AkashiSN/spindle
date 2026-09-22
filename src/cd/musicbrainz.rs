@@ -111,16 +111,43 @@ pub struct DiscQuery<'a> {
     pub refresh: bool,
 }
 
+/// 覚えるときの鍵。入力が同じなら同じ結果になる。`DiscQuery` を全フィールド分解して作るので、
+/// 入力を足したらここが壊れて気づく
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CacheKey {
+    toc: String,
+    isrcs: Vec<String>,
+    mcn: Option<String>,
+    release: Option<ReleaseKey>,
+}
+
+/// リリースの指定。「無し」「読めない文字列」「MBID」は結果が違う（読めない指定は note を返す）ので
+/// 別の鍵にする
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReleaseKey {
+    Id(String),
+    Unparsable(String),
+}
+
 impl DiscQuery<'_> {
-    /// 覚えるときの鍵。入力が同じなら同じ結果になる
-    fn cache_key(&self) -> String {
-        format!(
-            "{}|{}|{}|{}",
-            self.toc.ctdb_toc(),
-            self.isrcs.join(","),
-            self.mcn.unwrap_or(""),
-            self.release.and_then(parse_release_ref).unwrap_or_default()
-        )
+    fn cache_key(&self) -> CacheKey {
+        let DiscQuery {
+            toc,
+            isrcs,
+            mcn,
+            release,
+            // 覚えるかどうかの指示で、結果そのものは変わらない
+            refresh: _,
+        } = *self;
+        CacheKey {
+            toc: toc.ctdb_toc(),
+            isrcs: isrcs.to_vec(),
+            mcn: mcn.map(str::to_owned),
+            release: release.map(|r| match parse_release_ref(r) {
+                Some(id) => ReleaseKey::Id(id),
+                None => ReleaseKey::Unparsable(r.to_owned()),
+            }),
+        }
     }
 }
 
@@ -469,7 +496,7 @@ pub struct MusicBrainzClient {
     base: String,
     http: reqwest::Client,
     /// 照会結果（鍵 → 結果と時刻）。同じディスクで 1 枚あたり 10 本前後の要求が繰り返し飛ぶのを止める
-    cache: Arc<std::sync::Mutex<Vec<(String, DiscLookup, Instant)>>>,
+    cache: Arc<std::sync::Mutex<Vec<(CacheKey, DiscLookup, Instant)>>>,
     cache_ttl: Duration,
     /// 直前の要求が**返った**時刻。ロックを持ったまま待って送るので、並行する照会も直列に
     /// 間隔が空く。送信前ではなく応答後に打つのは、規約が数えるのがサーバ側の受信間隔だから
@@ -516,14 +543,20 @@ impl MusicBrainzClient {
     }
 
     /// 覚えている結果（期限内）
-    fn cached(&self, key: &str) -> Option<DiscLookup> {
+    fn cached(&self, key: &CacheKey) -> Option<DiscLookup> {
         let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         cache
             .iter()
             .find_map(|(k, v, at)| (k == key && at.elapsed() < self.cache_ttl).then(|| v.clone()))
     }
 
-    fn remember(&self, key: String, value: &DiscLookup) {
+    /// 覚えているものを捨てる（`refresh`。引き直しが失敗しても古い結果は返さない）
+    fn forget(&self, key: &CacheKey) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.retain(|(k, _, at)| k != key && at.elapsed() < self.cache_ttl);
+    }
+
+    fn remember(&self, key: CacheKey, value: &DiscLookup) {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.retain(|(k, _, at)| k != &key && at.elapsed() < self.cache_ttl);
         cache.push((key, value.clone(), Instant::now()));
@@ -597,12 +630,14 @@ impl MusicBrainzClient {
     /// （届かない・壊れている・503）だけ Err
     pub async fn lookup(&self, q: &DiscQuery<'_>) -> Result<DiscLookup, LookupError> {
         // 同じ入力なら覚えている結果を返す（失敗は覚えないので、押し直せばまた引きにいく）
+        // `refresh` は引く前に捨てる: 引き直しが失敗したのに古い結果が残ると、次の自動照会が
+        // それを期限まで返してしまう
         let key = q.cache_key();
-        if !q.refresh {
-            if let Some(hit) = self.cached(&key) {
-                tracing::debug!(key, "覚えている照会結果を返す");
-                return Ok(hit);
-            }
+        if q.refresh {
+            self.forget(&key);
+        } else if let Some(hit) = self.cached(&key) {
+            tracing::debug!(?key, "覚えている照会結果を返す");
+            return Ok(hit);
         }
         let discid = q.toc.musicbrainz_disc_id();
         let audio_tracks = q.toc.audio_tracks().count();

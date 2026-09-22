@@ -1047,3 +1047,99 @@ async fn failures_are_not_cached() {
     assert!(client.lookup(&q).await.is_err());
     assert!(client.lookup(&q).await.is_err(), "失敗は覚えない");
 }
+
+/// `refresh` は覚えているものを**捨ててから**引き直す。引き直しが失敗したら、次の（自動の）照会は
+/// 古い結果ではなくもう一度上流へ行く（codex 指摘）
+#[tokio::test]
+async fn a_failed_refresh_drops_the_remembered_result() {
+    let (base, seen) = serve().await;
+    let client = MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0))
+        .expect("client")
+        .with_cache_ttl(Duration::from_secs(60));
+    let toc = nevermind_toc();
+    let q = DiscQuery {
+        toc: &toc,
+        isrcs: &[],
+        mcn: None,
+        release: None,
+        refresh: false,
+    };
+    client.lookup(&q).await.expect("lookup");
+    // 引き直しが失敗する（503 が続く）
+    seen.lock().await.fail_503 = 5;
+    assert!(client
+        .lookup(&DiscQuery { refresh: true, ..q })
+        .await
+        .is_err());
+    seen.lock().await.fail_503 = 0;
+    let before = seen.lock().await.requests.len();
+    let after_failure = client.lookup(&q).await.expect("lookup");
+    assert!(
+        seen.lock().await.requests.len() > before,
+        "失敗した引き直しの後は、古い結果を返さずもう一度引く"
+    );
+    assert_eq!(after_failure.candidates.len(), 2);
+}
+
+/// リリースの指定は「無し」「読めない文字列」「MBID」を別の鍵にする（codex 指摘）。
+/// 読めない指定は note を返すので、指定無しの結果と混ざってはいけない
+#[tokio::test]
+async fn an_unparsable_release_is_a_different_key() {
+    let (base, _seen) = serve().await;
+    let client = MusicBrainzClient::new(base.clone(), "spindle-test/0.1", Duration::from_millis(0))
+        .expect("client")
+        .with_cache_ttl(Duration::from_secs(60));
+    let toc = nevermind_toc();
+    let none = DiscQuery {
+        toc: &toc,
+        isrcs: &[],
+        mcn: None,
+        release: None,
+        refresh: false,
+    };
+    let bad = DiscQuery {
+        release: Some("nonsense"),
+        ..none
+    };
+    // 指定無し → 読めない指定: note が出る（覚えている「指定無し」を返さない）
+    assert!(client.lookup(&none).await.expect("lookup").notes.is_empty());
+    assert_eq!(client.lookup(&bad).await.expect("lookup").notes.len(), 1);
+    // 逆順（読めない指定を refresh で覚えた後の自動照会）でも note が混ざらない
+    let client2 = MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0))
+        .expect("client")
+        .with_cache_ttl(Duration::from_secs(60));
+    assert_eq!(
+        client2
+            .lookup(&DiscQuery {
+                refresh: true,
+                ..bad
+            })
+            .await
+            .expect("lookup")
+            .notes
+            .len(),
+        1
+    );
+    assert!(client2
+        .lookup(&none)
+        .await
+        .expect("lookup")
+        .notes
+        .is_empty());
+    // 別の MBID どうしも別の鍵
+    let a = client
+        .lookup(&DiscQuery {
+            release: Some(FIVE_RELEASE),
+            ..none
+        })
+        .await
+        .expect("lookup");
+    let b = client
+        .lookup(&DiscQuery {
+            release: Some("00000000-0000-0000-0000-000000000000"),
+            ..none
+        })
+        .await
+        .expect("lookup");
+    assert_ne!(a.notes, b.notes);
+}
