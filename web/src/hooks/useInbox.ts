@@ -1,5 +1,9 @@
 // Inbox タブ（SPEC §12.6、D-68）の状態。一覧は画面表示時と inbox ジョブの job イベントのたびに取り直す
-// （250ms で間引く）。承認 / 却下 / 再開は成功したら一覧を取り直し、失敗は notice に出す
+// （250ms で間引く）。承認 / 却下 / 再開は成功したら一覧を取り直し、失敗は notice に出す。
+//
+// 件数が変わる操作は `onChanged` でも知らせる（P4-20）。上部バーのバッジ（useInboxSummary）は
+// 別の経路で数えているので、ここで知らせないと次の周期（60 秒）まで古い数字が残る。
+// 却下・下書きに戻すはジョブを作らないので、SSE の job イベントでは拾えない
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPost } from '../api/client'
@@ -36,7 +40,7 @@ function describe(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-export function useInbox(enabled: boolean): InboxState {
+export function useInbox(enabled: boolean, onChanged?: () => void): InboxState {
   const [items, setItems] = useState<InboxItem[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [watch, setWatch] = useState<InboxWatch | null>(null)
@@ -92,9 +96,12 @@ export function useInbox(enabled: boolean): InboxState {
       } finally {
         setBusy(false)
         fetchNow()
+        // 承認 / 却下 / 下書きに戻す はどれも状態を変える = 上部バーの件数が変わる。
+        // 却下と下書きに戻すはジョブを作らないので、ここで知らせないとバッジが古いまま残る
+        onChanged?.()
       }
     },
-    [fetchNow],
+    [fetchNow, onChanged],
   )
 
   const scan = useCallback(async () => {

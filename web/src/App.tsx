@@ -149,10 +149,12 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     [lookupToc, setDisc],
   )
   const drive = useCdDrive(sseOpen && view === 'cd', onNewDisc)
-  // Inbox は画面を開いたときに取り、開いている間は inbox ジョブの job イベントで取り直す
-  const inbox = useInbox(sseOpen && view === 'inbox')
   // 上部バーのバッジは画面に関わらず要る（取り込んだ次にどこを見るかの導線。P4-20）
   const inboxSummary = useInboxSummary(sseOpen)
+  // Inbox は画面を開いたときに取り、開いている間は inbox ジョブの job イベントで取り直す。
+  // 承認 / 却下 / 下書きに戻す は件数を変えるので、バッジにも知らせる（却下と下書きに戻すは
+  // ジョブを作らないため、job イベントでは拾えない）
+  const inbox = useInbox(sseOpen && view === 'inbox', inboxSummary.refresh)
   const visibleEnd = useRef(0)
 
   // filter 形の選択の「うち反映待ち」。選択集合は immutable でも中の行の pending はバッチの進行で
@@ -192,8 +194,11 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     tracks.reload(Math.max(visibleEnd.current + 1, 1))
     refreshPending()
     bumpDetails()
+    // 切れている間に Inbox が変わっていることがある（周期監視の走査・配置）。
+    // バッジは 60 秒の周期でしか直らないので、ここでも取り直す（P4-20）
+    inboxSummary.refresh()
     if (view === 'history') history.refresh()
-  }, [jobs, albums, refreshPlaylists, tracks, refreshPending, bumpDetails, view, history])
+  }, [jobs, albums, refreshPlaylists, tracks, refreshPending, bumpDetails, inboxSummary, view, history])
   // SSE が切れたとき（401 で閉じられた場合を含む）にセッションを確かめる。401 なら
   // apiFetch の onUnauthorized 経由でログイン画面へ戻る。連続するエラーは 5 秒に 1 回に間引くが、
   // 最後のエラーは必ず確認する（サーバ再起動直後は接続拒否 → 再接続で 401 の順に来る。
