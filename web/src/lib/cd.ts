@@ -480,12 +480,13 @@ export function applyTracklist(
 
 const DATE = /^\d{4}(?:-\d{2}(?:-\d{2})?)?$/
 
-/** 確定できない理由（空なら確定できる） */
+/**
+ * 取り込めない理由（空なら取り込める。サーバの `DiscMetadata::validate` と同じ規則）。
+ * **名前は空でもよい**（D-67 追記。候補の無い盤は名前の無いまま Inbox へ置き、承認画面で直す。
+ * 空のタイトルは `finalizeDraft` が `Track NN` で埋める）
+ */
 export function validateDraft(d: DiscDraft): string[] {
   const errors: string[] = []
-  if (d.album.trim() === '') errors.push('アルバム名が空')
-  if (d.album_artist.trim() === '') errors.push('アルバムアーティストが空')
-  // 空のタイトルはエラーにしない（`finalizeDraft` が `Track NN` で埋める。P4-20）
   if (d.date.trim() !== '' && !DATE.test(d.date.trim())) errors.push('日付は YYYY / YYYY-MM / YYYY-MM-DD')
   if (d.disc_no > d.disc_count) errors.push(`ディスク番号 ${d.disc_no} が枚数 ${d.disc_count} を超える`)
   return errors
@@ -504,7 +505,7 @@ function orNull(s: string): string | null {
   return t === '' ? null : t
 }
 
-/** 確定。前後の空白を落とし、トラックのアーティストが空ならアルバムアーティストにする（validate が通っている前提） */
+/** 取り込みの入力（`POST /api/cd/rip`）にする。前後の空白を落とし、トラックのアーティストが空ならアルバムアーティストにする（validateDraft が通っている前提） */
 export function finalizeDraft(d: DiscDraft): DiscMetadata {
   const album_artist = d.album_artist.trim()
   return {

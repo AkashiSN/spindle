@@ -955,9 +955,11 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 - [ ] 全ディスクを 1 本の PCM として取得（`cd-paranoia '1-' -`）→ オフセット適用 → 分割
 - [ ] `POST /api/cd/rip` と rip ジョブ。CD 画面の「取り込む」を有効にする
 - [ ] 2 回の走査に CTDB の修復を配線する（P2-7 の残り。直せなければ再リップ / `mismatch`）
-- [ ] `place_disc` を **Inbox 経由**に作り直す（D-67 追記）: FLAC と rip.log / disc.cue / disc.toc を件の
+- [x] `place_disc` を **Inbox 経由**に作り直す（D-67 追記）: FLAC と rip.log / disc.cue / disc.toc を件の
       ディレクトリへ、MusicBrainz から写した内容と `RipReport` をサイドカーへ、`inbox_items` に 1 件。
       PCM の切り方・エンコード（`flac -N --verify`）・タグの写像・同梱ファイルは既存のものをそのまま使う
+      （隠しディレクトリ `.spindle-rip-<DiscID>` で組み立てて `CD/<名前> [<DiscID>]` へ公開し、`inbox` ジョブを
+      投入。件は走査で出る。D-67 追記 2、SPEC §7.2）
 - [x] Inbox の承認と配置が、サイドカーの `RipReport` から `album_verifications`（`source = 'rip'`）/
       `track_verifications` / `tracks.verification` と `source_type = 'cd_rip'` を入れる。
       **対応付けはファイルの basename**（配列順を信じない。Inbox では番号もタイトルも直せる）。
@@ -965,15 +967,15 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
       （`import::inbox::bind_rip` / `register_item`。D-67 追記 2）
 - [x] サイドカー v1 に `RipReport` を入れる形を足す（`import/sidecar.rs` の `RipEntry`。モジュールを
       ytmusic から移した）。CD の件は `album_gain = true` で提案する（D-74。web の初期値も提案に従う）
-- [ ] **リップの開始は空の名前を許す**（D-67 追記）。`DiscMetadata::validate` の
-      `EmptyAlbum` / `EmptyAlbumArtist` は Library へ置くときの検証なので、開始の契約には使わない。
-      web の `lib/cd.ts` の `validateDraft` は CD 画面から使われなくなったので、ここで消すか直す
+- [x] **リップの開始は空の名前を許す**（D-67 追記）。`DiscMetadata::validate` から名前の必須を外した
+      （`EmptyAlbum` / `EmptyAlbumArtist` / `EmptyTitle` を削除。空のタイトルは `with_placeholder_titles` で
+      `Track NN`）。web の `validateDraft` も同じ規則に直した（`POST /api/cd/rip` の前に使う）
 - [ ] 吸い出し中、トラック単位の進捗を SSE の `job` イベントで流す
       （`{ phase: read|verify|encode|place, disc_no, track_no, done, total }`）。CD 画面のトラック表の
       右端に出る（器は P4-20 の `CdTrackTable` の `RipProgress`）。**相ごとの `track_no` の進み方と、
       表の「完了」の表現はここで確定する**（read は 1 本の PCM なのでトラック単位に分かれない）
-- [ ] 実装後に **SPEC §7.2 の「Library へ直接置いていたときの記述」を現在形に置き換える**（いまは
-      「Inbox 経由にしたあとも使う部分」の注記付きで旧経路の説明を残してある）
+- [x] 実装後に **SPEC §7.2 の「Library へ直接置いていたときの記述」を現在形に置き換える**（配置の段落は
+      置き換えた。吸い出し・修復・再リップの段は rip ジョブの実装で見直す）
 
 #### 受け入れ（必ず見る）
 
@@ -985,6 +987,8 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 - 承認で番号やタイトルを直しても、検証記録が正しいトラックに付く（済: `tests/inbox_job.rs` の
   `cd_item_is_placed_with_verification_bound_by_file_name`）
 - 既存の `tests/cd_place.rs` は Library 直行前提なので書き換わる。実ドライブのテストは `#[ignore]`
+  （済: `tests/cd_place.rs` を Inbox 前提に書き直した。`nameless_disc_completes_to_inbox_and_through_approval`
+  が 1 つ目の受け入れを Inbox の配置まで通す。吸い出し本体から通すのは rip ジョブで）
 
 ### P2-6 ARv1/v2 CRC と CTDB CRC32
 

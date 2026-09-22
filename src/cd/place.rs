@@ -1,28 +1,28 @@
-//! CD の配置（SPEC §7.2「エンコード」「ログ出力」「後続ジョブ投入」、D-67、P2-8）。
-//! 吸い出しジョブ（P2-5）の最終段として [`place_disc`] を呼ぶ。
+//! CD の吸い出し結果を Inbox に置く（SPEC §7.2「エンコード」「ログ出力」、D-67 追記、P2-5）。
+//! 吸い出しジョブの最終段として [`place_disc`] を呼ぶ。Library へは直接置かない: 名前と category は
+//! Inbox の承認画面で直し、配置（`import::inbox::place_item`）が `source_type = 'cd_rip'` と検証記録を
+//! 入れる。
 //!
 //! ```text
-//! 1. 検証        DiscMetadata を TOC と照合、PCM の長さ = TOC のサンプル数 × 4
+//! 1. 検証        DiscMetadata を TOC と照合（名前は空でもよい）、PCM の長さ = TOC のサンプル数 × 4
 //! 2. MD5         トラックごとに PCM の MD5（STREAMINFO と同じ流儀。冪等性の判定に使う）
-//! 3. 計画        [layout] のテンプレート（category 無し → unsorted、複数枚組 → multi_disc）で
-//!                pathgen::plan。複数枚組の 2 枚目以降は宛先の同名 album に合流
-//! 4. エンコード   raw PCM を flac -N --verify --skip/--until で tmp へ。STREAMINFO の MD5 が
-//!                PCM の MD5 と一致するときだけ成果物。タグは lofty で書く
-//! 5. 配置        job_mutexes の `library` を取り（scan / gc と同じ排他）、ディレクトリを作り、
-//!                トラックと同梱ファイル（rip.log / disc.cue / disc.toc）を tmp → fsync →
-//!                RENAME_NOREPLACE → dir fsync で置く
-//! 6. 登録        1 トランザクションで albums / tracks（source_type = cd_rip、verification）/
-//!                track_tags / album_verifications（source = rip）/ track_verifications
-//! 7. 後続        rg（album）と transcode（Derived）を投入し、library イベントを流す
+//! 3. エンコード   raw PCM を flac -N --verify --skip/--until で tmp へ。STREAMINFO の MD5 が
+//!                PCM の MD5 と一致するときだけ成果物。タグは lofty で書く（空のタイトルは Track NN）
+//! 4. 組み立て    Inbox 直下の隠しディレクトリ `.spindle-rip-<DiscID>` に `NN.flac`、rip.log /
+//!                disc.cue / disc.toc、サイドカー（category と吸い出しの記録）を置く
+//! 5. 公開        `CD/<albumartist - album> [<DiscID>]`（名前が無ければ `CD/[<DiscID>]`）へ
+//!                ディレクトリごと RENAME_NOREPLACE
+//! 6. 後続        inbox ジョブを投入して件を出す
 //! ```
 //!
-//! 冪等性は MD5 で判定する: 宛先に既にファイルがあれば STREAMINFO の MD5 が自分の PCM の MD5 と
-//! 一致するときだけ自分の成果物とみなして飛ばす。DB に同じ `rel_path` の行があり `audio_md5` も
-//! 一致すれば（配置の後に落ちてスキャナが先に拾った）その行を採用して出自と検証だけ書く。
-//! どちらでもなければ [`PlaceError::Conflict`] で失敗し、この呼び出しで置いたファイルは消す
-//! （Library を汚さない）
+//! 走査は `.` で始まるディレクトリを見ないので、組み立て中の盤が件として見え、サイドカーが揃う前に
+//! 承認されることはない。公開の rename は 1 回で、件はファイルが全部揃った状態で現れる。
+//!
+//! 冪等性: 公開先が既にあり、全トラックの STREAMINFO の MD5 が自分の PCM と一致し、サイドカーの
+//! 記録が同じファイル名を持つなら自分の成果物（公開の後に落ちた再実行）とみなして組み立てを飛ばす。
+//! 違えば [`PlaceError::Conflict`]。組み立ての残骸（前の実行の隠しディレクトリ）は自分のものなので
+//! 消してから作り直す
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use md5::{Digest as _, Md5};
-use rusqlite::{params, Connection, OptionalExtension as _};
 use tokio_util::sync::CancellationToken;
 
 use super::metadata::{DiscMetadata, MetadataError};
@@ -38,50 +37,37 @@ use super::riplog::{companion_names, render_cue, render_log, render_toc, RipRepo
 use super::toc::Toc;
 use super::verify::track_state;
 use super::{LayoutError, TrackLayout};
-use crate::config::LayoutConfig;
-use crate::db::jobs as dbjobs;
-use crate::db::now_epoch;
-use crate::db::scans::{self, AlbumMeta, Fingerprint, PictureState};
-use crate::db::verify::{self as dbv, RecordOutcome, VerifySource};
-use crate::db::{Db, DbError};
-use crate::domain::pathgen::{
-    self, AlbumVariant, Occupancy, PlanItem, Planned, Template, TrackFields,
-};
-use crate::domain::relpath::{canonical_key, RelPath};
-use crate::domain::tags::{read_audio_file, write_flac_tags, TagWriteError, TransferTags};
-use crate::fsroot::{self, FsError, RootDir};
-use crate::import::placement::{
-    find_or_create_album, place_one, register_track, release_key, remove_placed, PlacedFile,
-    PlacementError,
-};
-use crate::import::scanner::track_content;
-use crate::jobs::handlers::rg::new_album_job;
+use crate::db::jobs::EnqueueResult;
+use crate::domain::pathgen::sanitize_component;
+use crate::domain::relpath::RelPath;
+use crate::domain::tags::{write_flac_tags, TagWriteError, TransferTags};
+use crate::fsroot::{FileKind, FsError, RootDir};
+use crate::import::placement::{place_one, PlacementError};
+use crate::import::sidecar::{RipEntry, Sidecar, SidecarError};
+use crate::jobs::handlers::inbox::new_inbox_job;
 use crate::jobs::process::{ExternalCommand, PathStyle, ProcessError};
-use crate::jobs::{Event, Jobs, LibraryEvent, TempGuard};
+use crate::jobs::{Jobs, TempGuard};
 use crate::media::fingerprint::flac_streaminfo_md5;
 
-/// `job_mutexes` の名前（scan / gc と同じ）
-const LIBRARY_MUTEX: &str = "library";
 /// 1 トラックのエンコードのタイムアウト
 const ENCODE_TIMEOUT: Duration = Duration::from_secs(1800);
 /// tmp のエンコード出力の前置き
 const TMP_PREFIX: &str = "spindle-rip-";
+/// 公開先の親（Inbox 相対）
+pub const INBOX_CD_DIR: &str = "CD";
+/// 公開先のディレクトリ名に使う名前部分の上限（バイト。DiscID と括弧を足しても 255 に収める）
+const LABEL_MAX_BYTES: usize = 160;
 
 pub struct PlaceEnv {
-    pub db: Arc<Db>,
-    pub root: Arc<RootDir>,
+    pub inbox: Arc<RootDir>,
     pub jobs: Arc<Jobs>,
     pub flac: PathBuf,
     pub compression: u8,
     /// エンコード出力の作業領域（`[paths].data/tmp`）
     pub tmp_dir: PathBuf,
-    pub layout: LayoutConfig,
-    /// テスト用: エンコードの後・排他の前に呼ぶ（その間にライブラリが動いた状況を作る）
+    /// テスト用: 組み立ての後・公開の前に呼ぶ（その間に落ちた / 公開先ができた状況を作る）
     #[doc(hidden)]
-    pub before_lock: Option<PlaceHook>,
-    /// テスト用: 配置の後・登録の前に呼ぶ（rename が並走した状況を作る）
-    #[doc(hidden)]
-    pub before_register: Option<PlaceHook>,
+    pub before_publish: Option<PlaceHook>,
 }
 
 /// テスト用フック
@@ -89,6 +75,7 @@ pub type PlaceHook = Arc<dyn Fn() + Send + Sync>;
 
 pub struct PlaceInput<'a> {
     pub toc: &'a Toc,
+    /// 吸い出しを始めたときの内容（名前は空でもよい）
     pub metadata: &'a DiscMetadata,
     /// オフセット適用済みの s16le / 2ch / 44.1 kHz の raw PCM（TOC の音声部分ぴったり）
     pub pcm: &'a Path,
@@ -97,15 +84,14 @@ pub struct PlaceInput<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placed {
-    pub album_id: i64,
+    /// Inbox 相対の件のディレクトリ
     pub rel_dir: RelPath,
-    /// 音声トラック順
-    pub track_ids: Vec<i64>,
-    pub job_ids: Vec<i64>,
-    /// 既存の行を採用した数（配置の後に落ちてスキャナが拾っていた）
-    pub adopted: usize,
-    /// 宛先に既にあった自分の成果物を使った数
-    pub reused_files: usize,
+    /// 音声トラック順のファイル名
+    pub files: Vec<String>,
+    /// 公開先に自分の成果物が既にあった（組み立てを飛ばした）
+    pub reused: bool,
+    /// 投入した inbox ジョブ
+    pub inbox_job: i64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,24 +104,22 @@ pub enum PlaceError {
     PcmLength { expected: u64, actual: u64 },
     #[error("エンコードした FLAC の MD5 が PCM と一致しない: トラック {number}")]
     Md5Mismatch { number: u8 },
-    #[error("配置先が衝突: {0}")]
+    #[error("Inbox の置き場所が衝突: {0}")]
     Conflict(String),
-    #[error("library の排他を取れない（scan / gc が走っている）")]
-    Busy,
     #[error("エンコードに失敗: {0}")]
     Encode(#[from] ProcessError),
     #[error("タグを書けない: {0}")]
     Tag(#[from] TagWriteError),
+    #[error("サイドカーを書けない: {0}")]
+    Sidecar(#[from] SidecarError),
     #[error(transparent)]
     Fs(#[from] FsError),
-    #[error(transparent)]
-    Db(#[from] DbError),
-    #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Placement(PlacementError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("inbox ジョブを投入できない: {0}")]
+    Enqueue(String),
     #[error("キャンセルされた")]
     Cancelled,
 }
@@ -179,224 +163,51 @@ pub fn pcm_md5s(pcm: &Path, layout: &TrackLayout) -> std::io::Result<Vec<[u8; 16
     Ok(out)
 }
 
-// ---------------------------------------------------------------- 計画
+// ---------------------------------------------------------------- 名前
 
-/// パスの計画
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Plan {
-    /// 音声トラック順の宛先
-    pub paths: Vec<RelPath>,
-    pub rel_dir: RelPath,
-    /// 合流する既存 album（複数枚組の 2 枚目以降）
-    pub join_album: Option<i64>,
-    /// リリースの同一性キー（D-43）
-    pub release: String,
-    /// 語彙に一致した category（DB の表記）
-    pub category: Option<(i64, String)>,
-}
-
-fn parse_template(name: &str, s: &str) -> Result<Template, PlaceError> {
-    Template::parse(s).map_err(|e| PlaceError::Conflict(format!("[layout].{name} が不正: {e}")))
-}
-
-/// パスを決める（読み取りのみ）。テンプレートの選択・降格・衝突は D-43 の規則
-pub fn plan_paths(
-    conn: &Connection,
-    layout_cfg: &LayoutConfig,
-    toc: &Toc,
-    meta: &DiscMetadata,
-    md5s: &[[u8; 16]],
-) -> Result<Plan, PlaceError> {
-    meta.validate(toc)?;
-    let category = match meta.category.as_deref().map(str::trim) {
-        Some(name) if !name.is_empty() => {
-            crate::db::categories::find_by_key(conn, name)?.map(|c| (c.id, c.name))
-        }
-        _ => None,
-    };
-    let template = if category.is_none() {
-        parse_template("unsorted", &layout_cfg.unsorted)?
-    } else if meta.disc_count > 1 {
-        parse_template("multi_disc", &layout_cfg.multi_disc)?
-    } else {
-        parse_template("single_disc", &layout_cfg.single_disc)?
-    };
-    let fields: Vec<TrackFields> = meta
-        .tracks
-        .iter()
-        .enumerate()
-        .map(|(i, t)| TrackFields {
-            category: category.as_ref().map(|(_, n)| n.clone()),
-            albumartist: Some(meta.album_artist.trim().to_owned()),
-            artist: Some(meta.track_artist(i).to_owned()),
-            album: Some(meta.album.trim().to_owned()),
-            title: Some(t.title.trim().to_owned()),
-            disc_no: Some(i64::from(meta.disc_no)),
-            track_no: Some(i64::from(t.number)),
-            year: meta.year(),
-            edition: None,
-            ext: "flac".to_owned(),
-            stem: format!("{:02}", t.number),
-        })
-        .collect();
-    let Some(first) = fields.first() else {
-        return Err(PlaceError::Metadata(MetadataError::TrackCount {
-            expected: toc.audio_tracks().count(),
-            got: 0,
-        }));
-    };
-    // 素の宛先ディレクトリ（降格前）で合流先を探す
-    let plain_dir = template
-        .render(first, AlbumVariant::Plain)
-        .map_err(|e| PlaceError::Conflict(e.to_string()))?
-        .parent();
-    // 合流は release_id の無い（手入力の）複数枚組だけ。release_id があれば同一性は `mb:` で決まり、
-    // 別リリースなら降格する（合流先を持ったまま降格すると「ディレクトリ = album」が壊れる）
-    let has_release_id = meta
-        .release_id
-        .as_deref()
-        .is_some_and(|r| !r.trim().is_empty());
-    let join = match &plain_dir {
-        Some(dir) if !has_release_id => find_join_album(conn, dir, meta)?,
-        _ => None,
-    };
-    // リリースキーは既存行の規則（`load_occupancy`: mb → disc → album）に揃える。自分が登録した
-    // album も `discid` を持つので、再実行で自分の成果物を別リリースと見ない
-    let release = match (&meta.release_id, &join) {
-        (Some(mb), _) if !mb.trim().is_empty() => format!("mb:{}", mb.trim()),
-        (_, Some((_, release))) => release.clone(),
-        _ => format!("disc:{}", toc.musicbrainz_disc_id()),
-    };
-    // 占有: 自分と同じ音声（MD5 一致）の行は除く（再実行で自分の成果物を衝突にしない）
-    let mut occ: Occupancy = crate::edit::rename::load_occupancy(conn, &HashSet::new())?;
-    {
-        let mut st = conn.prepare_cached(
-            "SELECT rel_path_key FROM tracks WHERE audio_md5 = ?1 AND missing_since IS NULL",
-        )?;
-        for md5 in md5s {
-            let keys = st
-                .query_map([md5.as_slice()], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for k in keys {
-                occ.path_keys.remove(&k);
-            }
-        }
-    }
-    let items: Vec<PlanItem> = fields
+/// 件のディレクトリ（Inbox 相対）: `CD/<albumartist - album> [<DiscID>]`。名前が両方空なら
+/// `CD/[<DiscID>]`、片方なら空でない方。名前は `sanitize_component` を通し、先頭の `.` は落とす。
+/// DiscID は `.` で始まり得るので必ず括弧で包む（隠しディレクトリにすると走査に見えない）。DiscID は
+/// 盤ごとに違うので、複数枚組もディスクごとに別の件になる
+pub fn inbox_dir(toc: &Toc, meta: &DiscMetadata) -> Result<RelPath, PlaceError> {
+    let disc_id = toc.musicbrainz_disc_id();
+    let names: Vec<&str> = [meta.album_artist.trim(), meta.album.trim()]
         .into_iter()
-        .enumerate()
-        .map(|(i, f)| PlanItem {
-            track_id: -(i as i64) - 1,
-            template: template.clone(),
-            fields: f,
-            release: release.clone(),
-            current_rel_path: String::new(),
-        })
+        .filter(|s| !s.is_empty())
         .collect();
-    let mut paths = Vec::with_capacity(items.len());
-    for (planned, t) in pathgen::plan(&items, &occ).into_iter().zip(&meta.tracks) {
-        match planned {
-            Planned::Path(p) => paths.push(p),
-            Planned::Conflict(r) => {
-                return Err(PlaceError::Conflict(format!("トラック {}: {r}", t.number)))
-            }
-            Planned::Unchanged => {
-                return Err(PlaceError::Conflict(format!(
-                    "トラック {}: パスを決められない",
-                    t.number
-                )))
-            }
+    let bare = format!("[{disc_id}]");
+    let name = if names.is_empty() {
+        bare
+    } else {
+        let label = sanitize_component(&names.join(" - "));
+        let label = label.trim_start_matches('.');
+        let mut cut = label.len().min(LABEL_MAX_BYTES);
+        while !label.is_char_boundary(cut) {
+            cut -= 1;
         }
-    }
-    let Some(rel_dir) = paths.first().and_then(RelPath::parent) else {
-        return Err(PlaceError::Conflict("宛先が root 直下になる".into()));
+        let label = label[..cut].trim_end_matches(['.', ' ']);
+        if label.is_empty() {
+            bare
+        } else {
+            format!("{label} {bare}")
+        }
     };
-    if paths.iter().any(|p| p.parent().as_ref() != Some(&rel_dir)) {
-        return Err(PlaceError::Conflict(
-            "トラックの宛先が 1 つのディレクトリに揃わない".into(),
-        ));
-    }
-    Ok(Plan {
-        paths,
-        rel_dir,
-        join_album: join.map(|(id, _)| id),
-        release,
-        category,
-    })
+    RelPath::parse(&format!("{INBOX_CD_DIR}/{name}"))
+        .map_err(|e| PlaceError::Conflict(format!("件のディレクトリ名を作れない: {e}")))
 }
 
-/// 複数枚組の合流先: 宛先ディレクトリに albumartist と album が一致する album があり、
-/// どちらかが複数枚組で、その `disc_no` のトラックがまだ無ければ `(album_id, release key)`
-fn find_join_album(
-    conn: &Connection,
-    dir: &RelPath,
-    meta: &DiscMetadata,
-) -> Result<Option<(i64, String)>, PlaceError> {
-    struct AlbumRow {
-        id: i64,
-        albumartist: Option<String>,
-        album: Option<String>,
-        disc_count: Option<i64>,
-        mb: Option<String>,
-        discid: Option<String>,
-    }
-    let row: Option<AlbumRow> = conn
-        .query_row(
-            "SELECT id, albumartist, album, disc_count, mb_release_id, discid FROM albums
-              WHERE rel_dir_key = ?1 AND missing_since IS NULL",
-            [dir.key()],
-            |r| {
-                Ok(AlbumRow {
-                    id: r.get(0)?,
-                    albumartist: r.get(1)?,
-                    album: r.get(2)?,
-                    disc_count: r.get(3)?,
-                    mb: r.get(4)?,
-                    discid: r.get(5)?,
-                })
-            },
-        )
-        .optional()?;
-    let Some(AlbumRow {
-        id,
-        albumartist,
-        album,
-        disc_count,
-        mb,
-        discid,
-    }) = row
-    else {
-        return Ok(None);
-    };
-    let same = |a: Option<&str>, b: &str| a.is_some_and(|a| canonical_key(a) == canonical_key(b));
-    if !same(albumartist.as_deref(), meta.album_artist.trim())
-        || !same(album.as_deref(), meta.album.trim())
-    {
-        return Ok(None);
-    }
-    // 宛先の既存 album が複数枚組であること（D-67。`disc_count > 1`、または active な構成トラックの
-    // disc_no の最大が 2 以上。D-43 の multi_disc 判定と同じ）。1 枚組の album には合流しない
-    let max_disc: Option<i64> = conn.query_row(
-        "SELECT max(disc_no) FROM tracks WHERE album_id = ?1 AND missing_since IS NULL",
-        [id],
-        |r| r.get(0),
-    )?;
-    let existing_multi = disc_count.is_some_and(|n| n > 1) || max_disc.is_some_and(|n| n > 1);
-    if meta.disc_count <= 1 || !existing_multi {
-        return Ok(None);
-    }
-    let n: i64 = conn.query_row(
-        "SELECT count(*) FROM tracks WHERE album_id = ?1 AND disc_no = ?2 AND missing_since IS NULL",
-        params![id, i64::from(meta.disc_no)],
-        |r| r.get(0),
-    )?;
-    if n > 0 {
-        return Ok(None);
-    }
-    Ok(Some((
-        id,
-        release_key(id, mb.as_deref(), discid.as_deref()),
-    )))
+/// 組み立て用の隠しディレクトリ（Inbox 直下。同じ盤の再実行は同じ名前）
+fn staging_dir(toc: &Toc) -> Result<RelPath, PlaceError> {
+    RelPath::parse(&format!(".spindle-rip-{}", toc.musicbrainz_disc_id()))
+        .map_err(|e| PlaceError::Conflict(format!("組み立て用のディレクトリ名を作れない: {e}")))
+}
+
+/// 音声トラック順のファイル名（`NN.flac`。TOC の番号）。名前での対応付けの鍵になるので、承認で
+/// 変わる値（タイトル）を入れない
+pub fn track_file_names(toc: &Toc) -> Vec<String> {
+    toc.audio_tracks()
+        .map(|t| format!("{:02}.flac", t.number))
+        .collect()
 }
 
 // ---------------------------------------------------------------- エンコード
@@ -480,252 +291,125 @@ pub async fn encode_tracks(
     Ok(out)
 }
 
-// ---------------------------------------------------------------- 配置
-
-/// 配置の結果（登録の材料）
-struct PlacedFiles {
-    tracks: Vec<(scans::Physical, scans::TrackContent)>,
-    reused_files: usize,
-    /// この呼び出しで新しく置いたファイル（登録に失敗したら消す）
-    placed_new: Vec<RelPath>,
-}
+// ---------------------------------------------------------------- 組み立てと公開
 
 struct Companion {
     name: String,
     body: String,
 }
 
-/// ディレクトリを作り、トラックと同梱ファイルを置く。失敗したらこの呼び出しで新しく置いたものを消す
-fn place_files(
-    root: &RootDir,
-    plan: &Plan,
-    encoded: &[PathBuf],
-    md5s: &[[u8; 16]],
-    companions: &[Companion],
-) -> Result<PlacedFiles, PlaceError> {
-    root.create_dir_all(&plan.rel_dir)?;
-    let mut placed_new: Vec<RelPath> = Vec::new();
-    let mut reused_files = 0;
-    let result = (|| -> Result<Vec<(scans::Physical, scans::TrackContent)>, PlaceError> {
-        let mut tracks = Vec::with_capacity(plan.paths.len());
-        for (i, target) in plan.paths.iter().enumerate() {
-            let src = File::open(&encoded[i])?;
-            let expected = md5s[i];
-            let outcome = place_one(
-                root,
-                &plan.rel_dir,
-                target,
-                src,
-                |_| Ok(()),
-                move |mut f| {
-                    let md5 = flac_streaminfo_md5(&mut f)
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                    Ok(md5 == Some(expected))
-                },
-            )?;
-            match outcome {
-                PlacedFile::New => placed_new.push(target.clone()),
-                PlacedFile::Reused => reused_files += 1,
-            }
-            let file = root.open_file(target)?;
-            let st = fsroot::fstat(&file)?;
-            let af = read_audio_file(file, Some("flac"))
-                .map_err(|e| std::io::Error::other(format!("{target}: {e}")))?;
-            let mut content = track_content(af);
-            content.picture = PictureState::Absent;
-            tracks.push((st.into(), content));
-        }
-        for c in companions {
-            let target = plan
-                .rel_dir
-                .join(&c.name)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let body = c.body.clone();
-            let outcome = place_one(
-                root,
-                &plan.rel_dir,
-                &target,
-                c.body.as_bytes(),
-                |_| Ok(()),
-                move |mut f| {
-                    let mut existing = String::new();
-                    f.read_to_string(&mut existing)?;
-                    Ok(existing == body)
-                },
-            )?;
-            match outcome {
-                PlacedFile::New => placed_new.push(target),
-                PlacedFile::Reused => reused_files += 1,
-            }
-        }
-        root.fsync_dir(Some(&plan.rel_dir))?;
-        Ok(tracks)
-    })();
-    match result {
-        Ok(tracks) => Ok(PlacedFiles {
-            tracks,
-            reused_files,
-            placed_new,
-        }),
-        Err(e) => {
-            remove_placed(root, &plan.rel_dir, &placed_new);
-            Err(e)
-        }
-    }
-}
-
-// ---------------------------------------------------------------- 登録
-
-struct Registered {
-    album_id: i64,
-    track_ids: Vec<i64>,
-    job_ids: Vec<i64>,
-    adopted: usize,
-    reused_files: usize,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn register(
-    conn: &mut Connection,
-    plan: &Plan,
-    toc: &Toc,
-    meta: &DiscMetadata,
-    report: &RipReport,
-    placed: &PlacedFiles,
-    md5s: &[[u8; 16]],
-    log_rel: &str,
-    job_id: i64,
-) -> Result<Result<Registered, PlaceError>, DbError> {
-    let tx = conn.transaction()?;
-    let now = now_epoch();
-    let key = plan.rel_dir.key();
-    // album: 合流 → 既存（missing なら復活）→ 新規
-    let album_id = match plan.join_album {
-        Some(id) => {
-            // 合流先が計画どおりの場所に active であること（計画と登録は同じ排他の中だが、
-            // 「ディレクトリ = album」を登録の時点でも確かめる）
-            let at: Option<(String, Option<i64>)> = tx
-                .query_row(
-                    "SELECT rel_dir_key, missing_since FROM albums WHERE id = ?1",
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            match at {
-                Some((dir_key, None)) if dir_key == key => id,
-                _ => {
-                    drop(tx);
-                    return Ok(Err(PlaceError::Conflict(format!(
-                        "合流先の album {id} が {} に無い",
-                        plan.rel_dir
-                    ))));
-                }
-            }
-        }
-        None => {
-            let meta_row = AlbumMeta {
-                category_id: plan.category.as_ref().map(|(id, _)| *id),
-                albumartist: Some(meta.album_artist.trim().to_owned()),
-                album: Some(meta.album.trim().to_owned()),
-                date: meta.date.clone(),
-                original_date: None,
-                mb_release_id: meta.release_id.clone(),
-                discid: Some(toc.musicbrainz_disc_id()),
-                disc_count: Some(i64::from(meta.disc_count)),
-            };
-            match find_or_create_album(&tx, &plan.rel_dir, &plan.release, &meta_row) {
-                Ok(Ok(id)) => id,
-                Ok(Err(reason)) => {
-                    drop(tx);
-                    return Ok(Err(PlaceError::Conflict(reason)));
-                }
-                Err(e) => {
-                    drop(tx);
-                    return Ok(Err(e.into()));
-                }
-            }
-        }
+/// 組み立て用のディレクトリを消す（中は平らなファイルだけのはず。ディレクトリがあれば Err）
+fn remove_staging(inbox: &RootDir, dir: &RelPath) -> Result<(), PlaceError> {
+    let entries = match inbox.read_dir(Some(dir)) {
+        Ok(e) => e,
+        Err(FsError::NotFound) => return Ok(()),
+        Err(e) => return Err(e.into()),
     };
-    let album_name: Option<String> = tx
-        .query_row("SELECT album FROM albums WHERE id = ?1", [album_id], |r| {
-            r.get(0)
-        })
-        .optional()?
-        .flatten();
-    // tracks: 同じパスに同じ MD5 の行があれば採用、無ければ挿入
-    let mut track_ids = Vec::with_capacity(plan.paths.len());
-    let mut expected = Vec::with_capacity(plan.paths.len());
-    let mut adopted = 0;
-    for (i, rel) in plan.paths.iter().enumerate() {
-        let (ph, content) = &placed.tracks[i];
-        let id = match register_track(&tx, rel, ph, content, Fingerprint::Md5(Some(md5s[i])), now) {
-            Ok(Ok(r)) => {
-                if r.adopted {
-                    adopted += 1;
-                }
-                expected.push((r.id, r.audio_version));
-                r.id
-            }
-            Ok(Err(reason)) => {
-                drop(tx);
-                return Ok(Err(PlaceError::Conflict(reason)));
-            }
-            Err(e) => {
-                drop(tx);
-                return Ok(Err(e.into()));
-            }
+    for e in entries {
+        let Some(name) = e.name.to_str() else {
+            return Err(PlaceError::Conflict(format!(
+                "{dir} に UTF-8 でない名前がある"
+            )));
         };
-        scans::set_track_album(&tx, id, album_id, album_name.as_deref())?;
-        scans::set_source_type(&tx, id, "cd_rip")?;
-        track_ids.push(id);
-    }
-    let disc = report.disc_record(i64::from(meta.disc_no), &track_ids);
-    match dbv::record_album(
-        &tx,
-        album_id,
-        Some(job_id),
-        VerifySource::Rip,
-        &expected,
-        &[disc],
-        Some(log_rel),
-        now,
-    )? {
-        RecordOutcome::Recorded(_) | RecordOutcome::AlreadyRecorded => {}
-        RecordOutcome::Changed { track_id } => {
-            drop(tx);
-            return Ok(Err(PlaceError::Conflict(format!(
-                "track {track_id} の音声版が登録の途中で進んだ"
-            ))));
+        if e.kind == FileKind::Dir {
+            return Err(PlaceError::Conflict(format!(
+                "{dir} に想定しないディレクトリがある: {name}"
+            )));
+        }
+        let rel = dir
+            .join(name)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        match inbox.unlink(&rel) {
+            Ok(()) | Err(FsError::NotFound) => {}
+            Err(e) => return Err(e.into()),
         }
     }
-    // CD 取り込みの album は album gain on（アルバムとして通して聴く単位。D-74）。合流でも on にする
-    let _ = crate::db::replaygain::set_album_gain(&tx, album_id, true, now)?;
-    let mut job_ids = vec![dbjobs::enqueue(&tx, &new_album_job(album_id), now)?.id()];
-    for &id in &track_ids {
-        job_ids.extend(crate::db::derived::enqueue_if_stale(&tx, id, now)?);
+    match inbox.remove_dir(dir) {
+        Ok(()) | Err(FsError::NotFound) => Ok(()),
+        Err(e) => Err(e.into()),
     }
-    tx.commit()?;
-    Ok(Ok(Registered {
-        album_id,
-        track_ids,
-        job_ids,
-        adopted,
-        reused_files: 0,
-    }))
 }
 
-// ---------------------------------------------------------------- 本体
+/// 組み立て用のディレクトリにトラック・同梱ファイル・サイドカーを置く
+fn build_staging(
+    inbox: &RootDir,
+    staging: &RelPath,
+    files: &[String],
+    encoded: &[PathBuf],
+    companions: &[Companion],
+    sidecar: &Sidecar,
+) -> Result<(), PlaceError> {
+    remove_staging(inbox, staging)?;
+    inbox.create_dir_all(staging)?;
+    let join = |name: &str| {
+        staging
+            .join(name)
+            .map_err(|e| PlaceError::Io(std::io::Error::other(e.to_string())))
+    };
+    for (name, src) in files.iter().zip(encoded) {
+        place_one(
+            inbox,
+            staging,
+            &join(name)?,
+            File::open(src)?,
+            |_| Ok(()),
+            |_| Ok(false),
+        )?;
+    }
+    for c in companions {
+        place_one(
+            inbox,
+            staging,
+            &join(&c.name)?,
+            c.body.as_bytes(),
+            |_| Ok(()),
+            |_| Ok(false),
+        )?;
+    }
+    sidecar.write(inbox, staging)?;
+    inbox.fsync_dir(Some(staging))?;
+    Ok(())
+}
 
-/// 吸い出した PCM と確定したメタデータを Library に配置して登録する（モジュールの説明を見よ）
+/// 公開先が自分の成果物か: 全トラックが STREAMINFO の MD5 で一致し、サイドカーの記録が同じ
+/// ファイル名を持つ
+fn is_own_result(
+    inbox: &RootDir,
+    dir: &RelPath,
+    files: &[String],
+    md5s: &[[u8; 16]],
+) -> Result<bool, PlaceError> {
+    for (name, md5) in files.iter().zip(md5s) {
+        let rel = dir
+            .join(name)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let mut f = match inbox.open_file(&rel) {
+            Ok(f) => f,
+            Err(FsError::NotFound) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        // FLAC として読めないものも自分の成果物ではない
+        let got = flac_streaminfo_md5(&mut f).ok().flatten();
+        if got != Some(*md5) {
+            return Ok(false);
+        }
+    }
+    Ok(match Sidecar::read(inbox, dir) {
+        Ok(Some(s)) => s.rip.is_some_and(|r| r.files == files),
+        Ok(None) | Err(_) => false,
+    })
+}
+
+/// 吸い出した PCM を Inbox に 1 件として置き、inbox ジョブを投入する（モジュールの説明を見よ）
 pub async fn place_disc(
     env: &PlaceEnv,
     input: PlaceInput<'_>,
-    job_id: i64,
     token: &CancellationToken,
 ) -> Result<Placed, PlaceError> {
     let toc = input.toc.clone();
-    let meta = input.metadata.clone();
-    meta.validate(&toc)?;
+    let original = input.metadata.clone();
+    original.validate(&toc)?;
+    let meta = original.with_placeholder_titles();
     let layout = toc.track_layout()?;
     let expected_len = layout.total_samples() * 4;
     let actual_len = std::fs::metadata(input.pcm)?.len();
@@ -742,157 +426,136 @@ pub async fn place_disc(
             .await
             .map_err(|e| std::io::Error::other(format!("MD5 タスクが異常終了: {e}")))??
     };
-    // エンコード（数分〜数十分）の前に一度計画して、衝突ならその前に止める。確定する計画は排他の
-    // 中で取り直す（その間に scan / rename が album を動かし得る）
-    plan_for(env, &toc, &meta, &md5s).await?;
-    let encoded = encode_tracks(env, input.pcm, &layout, &toc, &meta, &md5s, token).await?;
-    if let Some(hook) = &env.before_lock {
-        hook();
-    }
-    if token.is_cancelled() {
-        return Err(PlaceError::Cancelled);
-    }
+    let rel_dir = inbox_dir(&toc, &meta)?;
+    let staging = staging_dir(&toc)?;
+    let files = track_file_names(&toc);
 
-    // 排他。以降は必ず解放してから返す
-    let acquired = env
-        .db
-        .write(move |c| dbjobs::acquire_mutex(c, LIBRARY_MUTEX, job_id, now_epoch()))
-        .await?;
-    if !acquired {
-        return Err(PlaceError::Busy);
-    }
-    let result = place_locked(env, &toc, &meta, input.report, &encoded, &md5s, job_id).await;
-    if let Err(e) = env
-        .db
-        .write(move |c| dbjobs::release_mutexes(c, job_id))
+    // 公開の後に落ちた再実行なら、公開先は自分の成果物
+    let existing = {
+        let (inbox, dir, files, md5s) = (
+            Arc::clone(&env.inbox),
+            rel_dir.clone(),
+            files.clone(),
+            md5s.clone(),
+        );
+        tokio::task::spawn_blocking(move || -> Result<Option<bool>, PlaceError> {
+            match inbox.stat(&dir) {
+                Ok(_) => Ok(Some(is_own_result(&inbox, &dir, &files, &md5s)?)),
+                Err(FsError::NotFound) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
         .await
-    {
-        tracing::warn!(job_id, error = %e, "library の排他を解放できない");
-    }
-    let (plan, registered) = result?;
-    drop(encoded);
-    env.jobs.notify_enqueued(&registered.job_ids).await;
-    // rip には走査が無いので scan_run_id は 0
-    env.jobs.publish(Event::Library(LibraryEvent::Ids {
-        scan_run_id: 0,
-        track_ids: registered.track_ids.clone(),
-    }));
-    tracing::info!(
-        job_id,
-        album_id = registered.album_id,
-        dir = %plan.rel_dir,
-        tracks = registered.track_ids.len(),
-        adopted = registered.adopted,
-        "CD を配置した"
-    );
-    Ok(Placed {
-        album_id: registered.album_id,
-        rel_dir: plan.rel_dir.clone(),
-        track_ids: registered.track_ids,
-        job_ids: registered.job_ids,
-        adopted: registered.adopted,
-        reused_files: registered.reused_files,
-    })
-}
+        .map_err(|e| std::io::Error::other(format!("確認タスクが異常終了: {e}")))??
+    };
+    let reused = match existing {
+        Some(true) => true,
+        Some(false) => {
+            return Err(PlaceError::Conflict(format!(
+                "Inbox に同じ名前の件が既にある: {rel_dir}"
+            )))
+        }
+        None => false,
+    };
 
-/// 計画（読み取りのみ）
-async fn plan_for(
-    env: &PlaceEnv,
-    toc: &Toc,
-    meta: &DiscMetadata,
-    md5s: &[[u8; 16]],
-) -> Result<Plan, PlaceError> {
-    let (layout_cfg, toc, meta, md5s) =
-        (env.layout.clone(), toc.clone(), meta.clone(), md5s.to_vec());
-    env.db
-        .read(move |c| Ok(plan_paths(c, &layout_cfg, &toc, &meta, &md5s)))
-        .await?
-}
-
-/// `library` の排他を持っている間の処理: 計画の取り直し → 同梱ファイルの描画 → 配置 → 登録
-async fn place_locked(
-    env: &PlaceEnv,
-    toc: &Toc,
-    meta: &DiscMetadata,
-    report: &RipReport,
-    encoded: &[TempGuard],
-    md5s: &[[u8; 16]],
-    job_id: i64,
-) -> Result<(Plan, Registered), PlaceError> {
-    let plan = plan_for(env, toc, meta, md5s).await?;
-    let file_names: Vec<String> = plan
-        .paths
-        .iter()
-        .map(|p| p.file_name().to_owned())
-        .collect();
-    let names = companion_names(meta.disc_no, meta.disc_count);
-    let states: Vec<&str> = (0..plan.paths.len())
-        .map(|i| {
-            track_state(report.ctdb.as_ref(), report.accuraterip.as_ref(), i)
+    if !reused {
+        let encoded = encode_tracks(env, input.pcm, &layout, &toc, &meta, &md5s, token).await?;
+        if token.is_cancelled() {
+            return Err(PlaceError::Cancelled);
+        }
+        let names = companion_names(meta.disc_no, meta.disc_count);
+        let states: Vec<&str> = (0..files.len())
+            .map(|i| {
+                track_state(
+                    input.report.ctdb.as_ref(),
+                    input.report.accuraterip.as_ref(),
+                    i,
+                )
                 .map(|s| s.as_str())
                 .unwrap_or("not_attempted")
-        })
-        .collect();
-    let companions = vec![
-        Companion {
-            name: names.cue.clone(),
-            body: render_cue(toc, meta, &file_names),
-        },
-        Companion {
-            name: names.toc.clone(),
-            body: render_toc(toc, meta, &file_names),
-        },
-        Companion {
-            name: names.log.clone(),
-            body: render_log(toc, meta, &file_names, report, &states),
-        },
-    ];
-    let log_rel = format!("{}/{}", plan.rel_dir, names.log);
-    let placed = {
-        let root = Arc::clone(&env.root);
-        let plan = plan.clone();
-        let paths: Vec<PathBuf> = encoded.iter().map(|g| g.path().to_path_buf()).collect();
-        let md5s = md5s.to_vec();
-        tokio::task::spawn_blocking(move || place_files(&root, &plan, &paths, &md5s, &companions))
+            })
+            .collect();
+        let companions = vec![
+            Companion {
+                name: names.cue.clone(),
+                body: render_cue(&toc, &meta, &files),
+            },
+            Companion {
+                name: names.toc.clone(),
+                body: render_toc(&toc, &meta, &files),
+            },
+            Companion {
+                name: names.log.clone(),
+                body: render_log(&toc, &meta, &files, input.report, &states),
+            },
+        ];
+        let mut sidecar = Sidecar::default();
+        sidecar.category = original
+            .category
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned);
+        sidecar.rip = Some(RipEntry {
+            toc: toc.ctdb_toc(),
+            metadata: original.clone(),
+            files: files.clone(),
+            log: names.log.clone(),
+            report: input.report.clone(),
+        });
+        {
+            let (inbox, staging, files) = (Arc::clone(&env.inbox), staging.clone(), files.clone());
+            let paths: Vec<PathBuf> = encoded.iter().map(|g| g.path().to_path_buf()).collect();
+            tokio::task::spawn_blocking(move || {
+                build_staging(&inbox, &staging, &files, &paths, &companions, &sidecar)
+            })
             .await
-            .map_err(|e| std::io::Error::other(format!("配置タスクが異常終了: {e}")))??
-    };
-    if let Some(hook) = &env.before_register {
-        hook();
-    }
-    let reused_files = placed.reused_files;
-    let placed_new = placed.placed_new.clone();
-    let (plan_tx, toc, meta, report, md5s) = (
-        plan.clone(),
-        toc.clone(),
-        meta.clone(),
-        report.clone(),
-        md5s.to_vec(),
-    );
-    let registered = env
-        .db
-        .write(move |c| {
-            register(
-                c, &plan_tx, &toc, &meta, &report, &placed, &md5s, &log_rel, job_id,
-            )
-        })
-        .await;
-    // 登録できなかったら（衝突・DB エラー）この呼び出しで新しく置いたファイルを Library に残さない
-    let registered: Result<Registered, PlaceError> = match registered {
-        Ok(inner) => inner,
-        Err(e) => Err(PlaceError::Db(e)),
-    };
-    let registered = match registered {
-        Ok(r) => r,
-        Err(e) => {
-            let root = Arc::clone(&env.root);
-            let dir = plan.rel_dir.clone();
-            let _ =
-                tokio::task::spawn_blocking(move || remove_placed(&root, &dir, &placed_new)).await;
-            return Err(e);
+            .map_err(|e| std::io::Error::other(format!("組み立てタスクが異常終了: {e}")))??;
         }
+        drop(encoded);
+        if let Some(hook) = &env.before_publish {
+            hook();
+        }
+        if token.is_cancelled() {
+            return Err(PlaceError::Cancelled);
+        }
+        let (inbox, from, to) = (Arc::clone(&env.inbox), staging.clone(), rel_dir.clone());
+        tokio::task::spawn_blocking(move || -> Result<(), PlaceError> {
+            let parent = to
+                .parent()
+                .ok_or_else(|| PlaceError::Conflict(format!("{to} の親が無い")))?;
+            inbox.create_dir_all(&parent)?;
+            let published = match inbox.rename_noreplace(&from, &to) {
+                Ok(()) => Ok(()),
+                Err(FsError::Exists) => Err(PlaceError::Conflict(format!(
+                    "Inbox に同じ名前の件が既にある: {to}"
+                ))),
+                Err(e) => Err(e.into()),
+            };
+            if let Err(e) = published {
+                // 組み立てたものは自分のものなので残さない（次の実行も作り直す）
+                if let Err(re) = remove_staging(&inbox, &from) {
+                    tracing::warn!(dir = %from, error = %re, "組み立て用のディレクトリを消せない");
+                }
+                return Err(e);
+            }
+            inbox.fsync_dir(Some(&parent))?;
+            inbox.fsync_dir(None)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("公開タスクが異常終了: {e}")))??;
+    }
+
+    let inbox_job = match env.jobs.enqueue(new_inbox_job()).await {
+        Ok(EnqueueResult::Inserted(id) | EnqueueResult::Duplicate(id)) => id,
+        Err(e) => return Err(PlaceError::Enqueue(e.to_string())),
     };
-    let mut registered = registered;
-    registered.reused_files = reused_files;
-    Ok((plan, registered))
+    tracing::info!(dir = %rel_dir, tracks = files.len(), reused, "CD を Inbox に置いた");
+    Ok(Placed {
+        rel_dir,
+        files,
+        reused,
+        inbox_job,
+    })
 }

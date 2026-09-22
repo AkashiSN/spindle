@@ -297,10 +297,10 @@ describe('applyTracklist', () => {
 })
 
 describe('validateDraft / finalizeDraft', () => {
-  it('アルバム名・アルバムアーティスト・各トラック名が要る。日付は YYYY[-MM[-DD]]', () => {
+  it('名前は空でもよい（候補の無い盤を Inbox へ。D-67 追記）。日付は YYYY[-MM[-DD]]', () => {
     const d = emptyDraft(toc)
-    // 空のタイトルは確定を止めない（finalizeDraft が Track NN で埋める。P4-20）
-    expect(validateDraft(d)).toEqual(['アルバム名が空', 'アルバムアーティストが空'])
+    // 空のタイトルも止めない（finalizeDraft が Track NN で埋める。P4-20）
+    expect(validateDraft(d)).toEqual([])
     const ok: DiscDraft = {
       ...d,
       album: 'X',
@@ -312,7 +312,7 @@ describe('validateDraft / finalizeDraft', () => {
     expect(validateDraft({ ...ok, date: '2024-03' })).toEqual([])
     expect(validateDraft({ ...ok, date: '2024-03-09' })).toEqual([])
     expect(validateDraft({ ...ok, date: '2024/03/09' })).toEqual(['日付は YYYY / YYYY-MM / YYYY-MM-DD'])
-    expect(validateDraft({ ...ok, album: '  ' })).toEqual(['アルバム名が空'])
+    expect(validateDraft({ ...ok, album: '  ' })).toEqual([])
     expect(validateDraft({ ...ok, disc_no: 3, disc_count: 2 })).toEqual(['ディスク番号 3 が枚数 2 を超える'])
   })
   it('確定時に空のタイトルは Track NN で埋まる（入力済みは触らない）', () => {
@@ -320,6 +320,9 @@ describe('validateDraft / finalizeDraft', () => {
     d.tracks[1]!.title = 'two'
     const m = finalizeDraft({ ...d, album: 'X', album_artist: 'Y' })
     expect(m.tracks.map((t) => t.title)).toEqual(['Track 01', 'two', 'Track 03'])
+    // 名前が空のままでも取り込みの入力になる
+    const nameless = finalizeDraft(d)
+    expect([nameless.album, nameless.album_artist]).toEqual(['', ''])
   })
   it('確定: 前後の空白を落とし、トラックのアーティストが空ならアルバムアーティスト', () => {
     const d: DiscDraft = {

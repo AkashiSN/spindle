@@ -524,19 +524,27 @@ Phase 4  commit:     1 トランザクションで
 [後続ジョブ投入] rg（album 単位。配置した album は album gain on。D-74）→ transcode(Derived) → thumbnail
 ```
 
-配置（`src/cd/place.rs`、D-67。**D-67 追記で Inbox 経由に変える。実装は P2-5**）: rip ジョブの最終段。
-以下は Library へ直接置いていたときの記述で、Inbox 経由にしたあとも「PCM の切り方・エンコード・
-タグの写像・同梱ファイル」はそのまま使う。宛先と登録先だけが `[paths].inbox` と `inbox_items` +
-サイドカーに変わり、`albums` / `tracks` / 検証記録の登録は承認後の配置が行う。
-PCM を `TrackLayout` で切り、raw のまま
-`flac -8 --verify` でエンコード（PCM の MD5 と STREAMINFO の MD5 が一致するときだけ成果物）、
-タグは確定フォームの写像（D-65）+ `TRACKTOTAL` / `MUSICBRAINZ_DISCID`。パスは `[layout]` の
-テンプレート（確定フォームで選んだ category。無ければ `_Unsorted`）で `pathgen::plan` に通し、
-複数枚組の 2 枚目以降は宛先の同名 album に合流する。`job_mutexes` の `library` を取って
-tmp → fsync → `RENAME_NOREPLACE` で置き、1 トランザクションで `albums` / `tracks`
-（`source_type = 'cd_rip'`、`verification`）/ `track_tags` / `album_verifications`（`source = 'rip'`）/
-`track_verifications` を登録して `rg` と `transcode` を投入する。再実行は MD5 で自分の成果物を
-見分ける（宛先のファイル、スキャナが先に拾った行）。同梱ファイルは 1 枚なら `disc.cue` /
+Inbox への配置（`src/cd/place.rs` の `place_disc`、D-67 追記、P2-5）: rip ジョブの最終段。
+入力は `Toc`、吸い出しを始めたときの `DiscMetadata`（**名前は空でもよい**。`validate` は TOC との
+行の対応・日付・ディスク番号・category だけを見る。必須の検証は Inbox の承認が担う）、オフセット
+適用済みの tmp の PCM、`RipReport`。PCM を `TrackLayout` で切り、raw のまま `flac -N --verify` で
+エンコード（トラックごとの PCM の MD5 と STREAMINFO の MD5 が一致するときだけ成果物）、タグは
+下書きの写像（D-65）+ `TRACKTOTAL` / `MUSICBRAINZ_DISCID`。空のタイトルは `Track NN`、空の名前は
+タグに書かない。`category` はタグに書かず（パス専用。SPEC §5）サイドカーで渡す。
+
+- **組み立ててから公開する。** Inbox 直下の隠しディレクトリ `.spindle-rip-<DiscID>` に `NN.flac`
+  （TOC の番号。名前での対応付けの鍵なので承認で変わる値を入れない）、同梱ファイル、サイドカー
+  （`category` と `rip`。§7.8）を置き、`CD/<albumartist - album> [<DiscID>]`（名前が空なら
+  `CD/[<DiscID>]`。DiscID は `.` で始まり得るので括弧で包む）へディレクトリごと `RENAME_NOREPLACE`。
+  走査は `.` で始まるディレクトリを見ないので、揃う前の盤が件として見えて承認されることはない。
+  公開したら `inbox` ジョブを投入する。複数枚組は DiscID が違うのでディスクごとに別の件になる
+- **冪等性。** 公開先が既にあり、全トラックの STREAMINFO の MD5 が自分の PCM と一致し、サイドカーの
+  記録が同じファイル名を持てば自分の成果物（公開の後に落ちた再実行）として組み立てを飛ばす。違えば
+  衝突。前の実行の組み立ての残骸は消して作り直し、公開が衝突したら組み立てたものを消す
+- `albums` / `tracks` / 検証記録の登録、パスの計画（`[layout]`）、`library` の排他、`rg` / `transcode` の
+  投入は承認後の Inbox の配置（§7.8）が行う
+
+同梱ファイルは 1 枚なら `disc.cue` /
 `disc.toc` / `rip.log`、複数枚組は `disc<N>.cue` / `disc<N>.toc` / `rip<N>.log`。`disc.cue` は
 EAC 流の複数ファイル cue（ギャップは前トラック末尾。INDEX 00 は書かない）、`disc.toc` は `Toc` から
 cdrdao 構文で生成、`rip.log` は先頭行 `spindle rip log v1` の自前形式でドライブ・オフセット・

@@ -44,20 +44,32 @@ fn valid_metadata_passes() {
     assert_eq!(meta().validate(&toc()), Ok(()));
 }
 
+/// 名前は空でもよい（D-67 追記。候補の無い盤は名前の無いまま Inbox へ置き、承認画面で直す）
 #[test]
-fn rejects_empty_album_artist_title_and_bad_numbers() {
+fn accepts_empty_names_and_fills_placeholder_titles() {
     let mut m = meta();
     m.album = " ".into();
-    assert_eq!(m.validate(&toc()), Err(MetadataError::EmptyAlbum));
-    let mut m = meta();
     m.album_artist.clear();
-    assert_eq!(m.validate(&toc()), Err(MetadataError::EmptyAlbumArtist));
-    let mut m = meta();
     m.tracks[3].title = String::new();
-    assert_eq!(
-        m.validate(&toc()),
-        Err(MetadataError::EmptyTitle { number: 4 })
+    assert_eq!(m.validate(&toc()), Ok(()));
+    let filled = m.with_placeholder_titles();
+    assert_eq!(filled.tracks[3].title, "Track 04");
+    assert_eq!(filled.tracks[0].title, m.tracks[0].title);
+    // 空の名前はタグに書かない（ALBUM / ALBUMARTIST が出ない）
+    let keys: Vec<String> = filled
+        .tags_for(&toc(), 3)
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert!(
+        !keys.iter().any(|k| k == "ALBUM" || k == "ALBUMARTIST"),
+        "{keys:?}"
     );
+    assert!(keys.iter().any(|k| k == "TITLE"));
+}
+
+#[test]
+fn rejects_bad_numbers() {
     let mut m = meta();
     m.tracks.pop();
     assert_eq!(

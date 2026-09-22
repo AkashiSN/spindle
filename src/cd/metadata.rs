@@ -1,5 +1,7 @@
-//! 確定したディスクのメタデータ（SPEC §7.2、D-65 / D-67、P2-8）。web の確定フォーム
-//! （`web/src/lib/cd.ts` の `DiscMetadata`）と同じ形を JSON で受け、検証し、タグに写す。
+//! 吸い出しを始めるときのディスクのメタデータ（SPEC §7.2、D-65 / D-67、P2-8 / P2-5）。web の
+//! CD 画面の下書き（`web/src/lib/cd.ts` の `DiscMetadata`）と同じ形を JSON で受け、検証し、タグに写す。
+//! **名前は空でもよい**（D-67 追記。候補の無い盤は名前の無いまま Inbox へ置き、承認画面で直す。
+//! 必須の検証は Inbox の `InboxDraft` が担う）。空のタイトルはタグに `Track NN` を入れる
 //! タグの写像は web の `albumTags` / `trackTags` と同じキー・同じ順（確定画面がタグ名で見せる
 //! ものをそのまま書く）で、`TRACKTOTAL` と `MUSICBRAINZ_DISCID` を TOC から足す。
 //! `category` は配置先（`[layout]` の `{category}`）にだけ使い、タグには書かない（SPEC §5）
@@ -68,16 +70,10 @@ pub struct DiscMetadata {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MetadataError {
-    #[error("アルバム名が空")]
-    EmptyAlbum,
-    #[error("アルバムアーティストが空")]
-    EmptyAlbumArtist,
     #[error("トラック数が TOC と合わない: 期待 {expected}、受信 {got}")]
     TrackCount { expected: usize, got: usize },
     #[error("{index} 番目のトラック番号が TOC と合わない: 期待 {expected}、受信 {got}")]
     TrackNumber { index: usize, expected: u8, got: u8 },
-    #[error("トラック {number} のタイトルが空")]
-    EmptyTitle { number: u8 },
     #[error("日付の形が不正: {0}（YYYY / YYYY-MM / YYYY-MM-DD）")]
     BadDate(String),
     #[error("ディスク番号が不正: {disc_no} / {disc_count}")]
@@ -120,16 +116,10 @@ fn push_opt(out: &mut Vec<(String, String)>, key: &str, value: Option<&str>) {
 }
 
 impl DiscMetadata {
-    /// 確定の条件（D-65）: アルバム名・アルバムアーティスト・各トラックのタイトル。行は TOC の
-    /// 音声トラックと 1:1 で番号が一致。日付は `YYYY[-MM[-DD]]` か無し。ディスク番号は 1 以上で
-    /// 枚数以下。category は指定するなら空でない
+    /// 吸い出しの開始の条件: 行は TOC の音声トラックと 1:1 で番号が一致。日付は `YYYY[-MM[-DD]]` か
+    /// 無し。ディスク番号は 1 以上で枚数以下。category は指定するなら空でない。**名前（アルバム名・
+    /// アルバムアーティスト・タイトル）は空でもよい**（D-67 追記）
     pub fn validate(&self, toc: &Toc) -> Result<(), MetadataError> {
-        if self.album.trim().is_empty() {
-            return Err(MetadataError::EmptyAlbum);
-        }
-        if self.album_artist.trim().is_empty() {
-            return Err(MetadataError::EmptyAlbumArtist);
-        }
         if self.disc_no == 0 || self.disc_count == 0 || self.disc_no > self.disc_count {
             return Err(MetadataError::BadDisc {
                 disc_no: self.disc_no,
@@ -161,11 +151,19 @@ impl DiscMetadata {
                     got: t.number,
                 });
             }
-            if t.title.trim().is_empty() {
-                return Err(MetadataError::EmptyTitle { number: t.number });
-            }
         }
         Ok(())
+    }
+
+    /// 空のタイトルを `Track NN`（TOC の番号、2 桁）で埋めたもの（タグとファイルに書く値）
+    pub fn with_placeholder_titles(&self) -> DiscMetadata {
+        let mut out = self.clone();
+        for t in &mut out.tracks {
+            if t.title.trim().is_empty() {
+                t.title = format!("Track {:02}", t.number);
+            }
+        }
+        out
     }
 
     /// トラック `index` のアーティスト（空ならアルバムアーティスト。D-65）
