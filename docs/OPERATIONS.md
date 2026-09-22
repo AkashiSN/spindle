@@ -40,7 +40,7 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
 
 まずイメージを更新する（yt-dlp が古いと YouTube の抽出が壊れる。新版は Renovate が PR にし、マージ
 すると `edge`、次のリリースで `latest` に届く）。`/health` の `ytdlp` で版を確認する。それでも駄目なら
-`config.toml` の `[ytmusic].ytdlp_args`（README「YouTube の取り込み」）。
+`config.toml` の `[ytmusic].ytdlp_args`（`USERGUIDE.md` §11.3「YouTube」）。
 
 ## バックアップ
 

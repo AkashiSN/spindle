@@ -1943,7 +1943,7 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   選択、空 = 未分類）/ 揃える / 上限）。編集はアルバムアーティスト / アルバム / category をその行で。
   削除は確認ダイアログ。SSE job のたびに取り直す。
   `/youtube?url=<URL>` で開くと欄に入れた状態で開く（ブックマークレットの
-  受け口。同一 origin の GET なので CORS / CSRF を触らない。http / https 以外は受けない。README）。
+  受け口。同一 origin の GET なので CORS / CSRF を触らない。http / https 以外は受けない。USERGUIDE §11.3）。
   操作タブの YouTube 節は廃止
 - **設定**: 「表示」（配色: OS に従う / ライト / ダーク。localStorage に保存。P4-10、D-58 追記）、
   `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、

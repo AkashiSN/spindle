@@ -396,360 +396,421 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 実データでの検証は P0-14 のリハーサル環境（`ssh truenas`、`/root/spindle-migration/`、
 `/mnt/ssd/media/Library` 9,098 トラック）で行う。`ssd/musics` は正なので触らない。
 
-- [x] **P1-0** 初回 deep scan の高速化（P0-14 の後続課題。リリース時の再移行でも効く。D-50）:
-      `Scanner` Phase 2 の直列 `audio_md5` を、既存行が md5 で突き合わせを要するときだけ計算するか
-      Phase 3 の並列読みへ回す。Phase 2 中も進捗を出す。`symphonia` / `lofty` のファイルごとの
-      WARN を既定フィルタで落とす（ALAC 7,572 本で 75 分 → 並列度分だけ短縮が目安）
-      - [x] `identity::resolve`: 段 1 は行が md5 を持つときだけ、段 2 は移動候補があるときだけ md5 を要求。
-            `identity::md5_requests` で要求されうる集合を先に求める（初回・移動なしは 0 件）
-      - [x] `Scanner::compute_md5s`: 要求分を Phase 3 と同じ並列度で計算し、`resolve` と Phase 3 に渡す。
-            `Progress` に相（`ScanPhase::Md5` / `Read`）を持たせて Phase 2 も進捗を出す
-      - [x] `logging::default_filter`: `lofty` / `symphonia*` を error に
+### P1-0 初回 deep scan の高速化
 
-      受け入れ: `tests/identity.rs`（初回・移動元が残っている・段 1 で claim 済みなら md5 を要求しない、
-      行が md5 を持たない inode 再利用は要求しない、移動候補があるときだけ未決分を要求、`md5_requests` が
-      `resolve` の要求を含む）、`tests/scanner.rs`（初回と変更なしの増分で `Md5` 相が出ない、コピー + 削除で
-      `Md5` 相が未決 2 本で出て移動として解決）、`tests/logging.rs`
+P0-14 の後続課題。リリース時の再移行でも効く（D-50）。
+`Scanner` Phase 2 の直列 `audio_md5` を、既存行が md5 で突き合わせを要するときだけ計算するか
+Phase 3 の並列読みへ回す。Phase 2 中も進捗を出す。`symphonia` / `lofty` のファイルごとの
+WARN を既定フィルタで落とす（ALAC 7,572 本で 75 分 → 並列度分だけ短縮が目安）。
 
-      計測（2026-09-17、リハーサル環境 9,098 トラック / ALAC 7,570 本、12 コア）: 空 DB からの初回
-      deep scan **552 秒**（P0-14 時点の 3,583 秒 → 約 6.5 倍速）、既存 DB への deep scan 554 秒、
-      変更なしの増分 1 秒未満。Phase 5（アートワーク 721 album）は 1 秒未満。errors 0
-- [x] **P1-1** ReplayGain スキャン（`ebur128`、album は `album_id` 単位、
-      2ch 以外は集計から除外。D-47）
-      - [x] `domain::replaygain`: `LoudnessMeter`（積分ラウドネス + true peak、フレーム端数の持ち越し）、
-            `album_loudness`（構成トラックの状態をまとめてゲートし直す）、無音は gain 0
-      - [x] `media::decode`: symphonia（FLAC / ALAC / WAV / AIFF / MP3 / AAC / Vorbis）→ Opus は
-            OpusHead の情報 + ffmpeg `f32le`、WavPack / APE は lofty の属性 + ffmpeg。
-            `ExternalCommand::stdout_channel` で stdout をチャンクのまま受ける
-      - [x] `jobs::handlers::rg`: `{"album_id"}` / `{"track_id"}`、構成トラックを id 昇順に全件ロック、
-            2ch だけ album 集計、all-or-nothing、`rg_scanned_at` のみ更新
-      - [x] `POST /api/rg { selection }`（`api::rg`）。UI の起動導線は P1-12 の操作タブ
+- [x] `identity::resolve`: 段 1 は行が md5 を持つときだけ、段 2 は移動候補があるときだけ md5 を要求。
+      `identity::md5_requests` で要求されうる集合を先に求める（初回・移動なしは 0 件）
+- [x] `Scanner::compute_md5s`: 要求分を Phase 3 と同じ並列度で計算し、`resolve` と Phase 3 に渡す。
+      `Progress` に相（`ScanPhase::Md5` / `Read`）を持たせて Phase 2 も進捗を出す
+- [x] `logging::default_filter`: `lofty` / `symphonia*` を error に
 
-      受け入れ: `tests/replaygain.rs`（正弦波の LUFS / peak、album の電力平均、無音）、`tests/decode.rs`
-      （FLAC / Opus / WavPack が同じ形で流れる、キャンセル、失敗）、`tests/rg_job.rs`（track / album の
-      値、6ch の除外、missing の除外、album 無し、失敗で何も書かない、cancel）、`tests/rg_api.rs`
+受け入れ: `tests/identity.rs`（初回・移動元が残っている・段 1 で claim 済みなら md5 を要求しない、
+行が md5 を持たない inode 再利用は要求しない、移動候補があるときだけ未決分を要求、`md5_requests` が
+`resolve` の要求を含む）、`tests/scanner.rs`（初回と変更なしの増分で `Md5` 相が出ない、コピー + 削除で
+`Md5` 相が未決 2 本で出て移動として解決）、`tests/logging.rs`
 
-      `audio_version` が上がったときの `rg_scanned_at` の扱い（D-47）は P1-13 で解決
-- [x] **P1-2** RG タグ書き込み（Opus のみ -23 LUFS 基準の Q7.8:
-      `round((G18 - 5.0) * 256)` を符号付き 16bit に飽和。SPEC §6 のテストベクトルを
-      単体テストに置く。`rg_scanned_at` と `rg_written_at` を分離。D-48）
-      - [x] `domain::replaygain`: `opus_r128` / `rg2_gain_db` / `tag_changes`（形式ごとの固定キー集合。
-            値の無いキーは削除）/ `file_matches`
-      - [x] `Editor::prepare_rg_write`: 解析済みトラックを tags op の編集バッチとして記録（旧値・overlay・
-            tagwrite・巻き戻しはタグ編集と共通）。DB のタグが既に一致する行は `rg_written_at` だけ立てる
-      - [x] `rg_written_at` はファイルの現在値から判定（`db::replaygain::sync_written_at`。applied の追随・
-            overlay の解消・巻き戻し・手編集で自動的に立つ / 消える）
-      - [x] `POST /api/rg/write { selection, description?, skip_pending? }`（`api::rg::write`。missing は対象外）、
-            フィルタ `rg_unwritten`。UI の起動導線は P1-12 の操作タブ
+計測（2026-09-17、リハーサル環境 9,098 トラック / ALAC 7,570 本、12 コア）: 空 DB からの初回
+deep scan **552 秒**（P0-14 時点の 3,583 秒 → 約 6.5 倍速）、既存 DB への deep scan 554 秒、
+変更なしの増分 1 秒未満。Phase 5（アートワーク 721 album）は 1 秒未満。errors 0
 
-      受け入れ: `tests/replaygain.rs`（SPEC §6 のテストベクトル、飽和、書式、形式ごとのキー集合、
-      `file_matches`）、`tests/rg_write.rs`（FLAC / Opus / MP4 への書き込みと `rg_written_at`、一致済みは
-      バッチ無し、未解析の除外、pending、巻き戻し・手編集・conflict で NULL、再解析後の再書き込み）、
-      `tests/rg_write_api.rs`
+### P1-1 ReplayGain スキャン
 
-      スキャナが外部のタグ変更を取り込んだときの `rg_written_at` の判定（D-48）は P1-13 で解決
-- [x] **P1-3** アートワーク（読みは埋め込み / 同梱画像の両対応、書きは埋め込み統一で一括差し替え、
-      WebP サムネイル生成とキャッシュ。アルバムグリッド画面 → クリックで表を `album_id` に絞る）
-      - [x] 読み側（D-49）: `media::artwork`（同梱画像の名前の優先順、ヘッダでの判別、埋め込みの選択、
-            `ArtworkStore` = `<data>/thumbs/<hex>/orig.<ext>` + `<size>.webp`）
-      - [x] スキャンの Phase 5（`Scanner::with_artwork`）: Phase 4 が新旧 album の再解決を予約
-            （`artwork_resolved_at = NULL`）し、Phase 5 は予約 + 同梱画像の stat 変化 + 原画像の欠損だけを
-            解決し直す（マイグレーション 0004）。決められない album は状態を動かさない。原画像を
-            キャッシュへ置き `thumbnail` ジョブを投入。Phase 5 の cancel / 失敗は run を戻さない
-      - [x] `jobs::handlers::thumbnail`: ffmpeg で 256 / 768 の WebP（長辺、拡大なし、tmp + rename、冪等）
-      - [x] `GET /api/artwork/:hash?size=`（`api::artwork`。未生成なら原画像へ倒す）、
-            `GET /api/albums` の `artwork_hash`
-      - [x] UI: アルバムグリッド（`AlbumGrid`）→ クリックで一覧を `album_id` に絞る
-      - [x] 書き側（D-60。埋め込み統一。cover ファイルは書かず抽出も作らない）: `POST /api/artwork/upload`
-            （ヘッダで判別、32 MiB、`ArtworkStore` + `artwork` 行 + thumbnail）→ `POST /api/artwork/embed`
-            （`Editor::prepare_picture`: `PICTURE` を `[<mime>:<hex>]` にする tags op。全画像を捨てて 1 枚）。
-            `stage_tags` は書く前に旧画像を store へ退避、`write_tag_changes` に `pictures` を足す。
-            GC 区分 E は `edits` の `PICTURE` 値が参照する画像を残し、行にも 24 時間の猶予。applied で
-            album を `mark_unresolved` して増分スキャンを投入。UI は操作タブの「アートワーク」節と
-            履歴の `PICTURE` サムネイル
+`ebur128`、album は `album_id` 単位、2ch 以外は集計から除外（D-47）。
 
-      受け入れ（書き側）: `tests/picture_write.rs`（FLAC / Opus / MP4 への差し替えと `tag_version` +1、旧画像の
-      退避、同じ画像は差分なし、巻き戻しで旧画像が戻る、外部変更で conflict、キャッシュ欠損で failed、
-      AlreadyMatches、album の予約）、`tests/artwork_api.rs`（upload の形式判定・上限・400、embed の 404 / 409）、
-      `tests/gc.rs`（`edits` が参照する画像は残す、行の 24 時間の猶予）、`web/src/lib/operations.test.ts`、
-      `web/src/lib/artwork.test.ts`（`PICTURE` 値の分解、アップロードの要約）。ローカル起動で upload →
-      差し替え → 履歴のサムネイル → 巻き戻しを agent-browser で確認済み（2026-09-18）
+- [x] `domain::replaygain`: `LoudnessMeter`（積分ラウドネス + true peak、フレーム端数の持ち越し）、
+      `album_loudness`（構成トラックの状態をまとめてゲートし直す）、無音は gain 0
+- [x] `media::decode`: symphonia（FLAC / ALAC / WAV / AIFF / MP3 / AAC / Vorbis）→ Opus は
+      OpusHead の情報 + ffmpeg `f32le`、WavPack / APE は lofty の属性 + ffmpeg。
+      `ExternalCommand::stdout_channel` で stdout をチャンクのまま受ける
+- [x] `jobs::handlers::rg`: `{"album_id"}` / `{"track_id"}`、構成トラックを id 昇順に全件ロック、
+      2ch だけ album 集計、all-or-nothing、`rg_scanned_at` のみ更新
+- [x] `POST /api/rg { selection }`（`api::rg`）。UI の起動導線は P1-12 の操作タブ
 
-      受け入れ: `tests/artwork.rs`（名前の優先順、判別、埋め込みの選択、キャッシュの配置）、
-      `tests/artwork_scan.rs`（同梱 > 埋め込み、最初のトラック、無し → NULL、名前の優先順、同梱画像の
-      差し替え / 削除の検出、未解決 album の解決、deep、同じ画像の共有、読めない同梱画像、missing、
-      画像付きトラックの移動で新旧 album を解決、commit 後の cancel で run は completed のまま次回再開、
-      キャッシュ書き込み失敗 / 読めないトラックで状態を動かさない、原画像の欠損を incremental で復旧）、
-      `tests/thumbnail_job.rs`（寸法・アスペクト比・拡大なし・冪等・原画像なし）、`tests/artwork_api.rs`
-- [x] **P1-3c** トラック単位のアートワーク（D-61。トラックごとに画像が違う album 向け）:
-      - [x] マイグレーション 0012 `tracks.artwork_id`。`TrackContent.picture`（Unread / Absent / Found）を
-            スキャナ Phase 3 と tagwrite の読み戻しが埋め、`insert_track` / `update_content` が記録する。
-            サムネイルが無い画像は Phase 4 が thumbnail ジョブを投入
-      - [x] Derived は `COALESCE(tracks.artwork_id, albums.artwork_id)` を埋める（D-51 の改訂）
-      - [x] GC 区分 E の参照に `tracks.artwork_id` を足す
-      - [x] `TrackRow` / `GET /api/tracks/:id` の `artwork_hash`、左下のアートワークはトラック自身 → album
+受け入れ: `tests/replaygain.rs`（正弦波の LUFS / peak、album の電力平均、無音）、`tests/decode.rs`
+（FLAC / Opus / WavPack が同じ形で流れる、キャンセル、失敗）、`tests/rg_job.rs`（track / album の
+値、6ch の除外、missing の除外、album 無し、失敗で何も書かない、cancel）、`tests/rg_api.rs`
 
-      受け入れ: `tests/artwork_scan.rs`（トラックごとの画像、front cover 優先、無しは NULL、同じ画像は 1 行、
-      store 無しは NULL のまま → deep で埋まる、外部差し替えで更新）、`tests/picture_write.rs`（差し替え・
-      巻き戻しで追随）、`tests/derived*.rs`（トラック自身 → album の順）、`tests/gc.rs`（参照の保護）、
-      `tests/tracks_api.rs`（`artwork_hash`）、`tests/migrations.rs`（0012）、`web/src/lib/artwork.test.ts`。
-      ローカル起動でトラックごとに違う画像の 2 曲について、左下の表示と Derived の埋め込み（ffprobe で
-      300×300 / 400×300）がそれぞれ自身の画像になることを確認済み（2026-09-18）
+`audio_version` が上がったときの `rg_scanned_at` の扱い（D-47）は P1-13 で解決
 
-      計測（2026-09-18、リハーサル環境 9,098 トラック / 721 album、12 コア）: 0011 / 0012 適用後の deep scan
-      **568 秒**（P1-0 の 552 秒 + 3%）で全行に `artwork_id` が付き、`artwork` 2,241 行（+1,520。thumbs 2.1 GB）、
-      thumbnail 1,523 本・transcode 再タグ 35 本、errors 0。トラックごとに画像が違う album は 15
-      （神椿系「〜のお歌」9 dir が主。すべて Opus で Derived は無い）。UI で自身の画像が出ることを確認
-- [x] **P1-4** ロスレス → FLAC 正規化（WAV / ALAC / AIFF。D-45 / D-46。変換前後の PCM MD5 照合。
-      不一致なら中止。一致時は元ファイルを `Archive/` へ move し `edit_ops(kind='archive')` と
-      `archived_files` 台帳に記録。**即時削除しない**。`audio_version` は据え置き。
-      移行で取り込んだ ALAC 7,572 本が主対象）
-      - [x] `POST /api/normalize/preview` / `apply`（selection。rename と同型。`api::normalize`。
-            UI は P1-12 の操作タブ。`[normalize].wav_to_flac = false` で 409）
-      - [x] `edit::normalize`: `edit_ops(kind='archive')` + `edits(rel_path / codec)`、DB は先行更新
-            しない。track 単位の `normalize` ジョブ（並列 2、`jobs::handlers::normalize`）
-      - [x] `media::encode::FlacEncoder`: ffmpeg デコード（root の FD を `/dev/stdin` で渡す）→
-            `flac -8 --verify`。STREAMINFO MD5 を symphonia の PCM MD5 と照合。タグ・画像は lofty で
-            写す（`tags::read_transfer_tags` / `write_flac_tags`）。`tag_hash` が変わったときだけ
-            `tag_version++`
-      - [x] 破壊フェーズ: 元を一時名 `spindle-normalize-<op_id>.<ext>` へ退避（inode 確認）→ Archive へ
-            実コピー + SHA-256 の読み戻し照合（`edits.source_sha256` に記録）→ unlink 直前に同じ FD の
-            stat とバイト列を再照合 → unlink。conflict は元パスへ戻して生成物を消す。台帳 `db::archive`
-      - [x] 巻き戻し（`revert_archive`）: Archive からコピーで復元、FLAC は Archive へ move して
-            `reason='restore'`（マイグレーション 0003）。redo は同じ台帳行を `held` に戻す
-      - [x] 冪等（宛先 / 一時名 / Archive の実体と記録した SHA-256 から続きを判定）、cancel（Library を
-            触る前まで）、スキャナが作業中のパス（元・一時名・宛先）を避け、inventory 後に確定された
-            宛先を `Identity::New` で挿入しない（`PendingOp::target_rel_path`）
-      - [x] symphonia の `aiff` feature を有効化（AIFF の PCM MD5 が計算できていなかった）
+### P1-2 RG タグ書き込み
 
-      受け入れ: `tests/normalize.rs` / `tests/normalize_api.rs` / `tests/encode.rs`。WAV / ALAC / AIFF が
-      FLAC になり `audio_md5` / `audio_version` が変わらない。MD5 不一致（ffmpeg を差し替えた模擬）で
-      元ファイルが無傷のまま failed。事前条件不一致・宛先の占有が conflict。revert → redo が通り
-      Archive の実体が減らない。配置後 / 退避後 / unlink 後のクラッシュから再投入で完了。Archive のコピー
-      中・unlink 直前の in-place 更新と元パスの差し替えでユーザデータを失わない。Archive のコピーが
-      壊れた状態からの復旧は conflict で何も消さない。I/O 失敗は生成物を消して再試行できる。作業中に
-      走ったスキャンが宛先を新規登録せず、inventory 後に確定されても走査が失敗しない。
+Opus のみ -23 LUFS 基準の Q7.8: `round((G18 - 5.0) * 256)` を符号付き 16bit に飽和。SPEC §6 の
+テストベクトルを単体テストに置く。`rg_scanned_at` と `rg_written_at` を分離（D-48）。
 
-      閉じた未決（2026-09-18）: 20 bit などの ffmpeg PCM エンコーダが無いビット深度は failed のまま。
-      実データは 16 bit 7,447 / 24 bit 123 で 20 bit は 0 本、ALAC の正規化は全件完了済み、今後入るのは
-      主に CD（16 bit）。failed はデータを壊さないので、出てきたら raw → `flac --bps` の経路を足す
-- [x] **P1-5** FLAC 健全性チェック（`flac -t`、MD5 未設定の補填。
-      補填時は `audio_version` 据え置き）。D-57。**補填は P1-5b に切り出し**（実データに FLAC が無く、
-      今後の FLAC は自前の `flac -8 --verify` と CD リップで MD5 が付く）
-      - [x] マイグレーション 0010: `tracks.flac_check` / `flac_checked_at` / `flac_check_version` /
-            `flac_check_error`
-      - [x] `jobs::handlers::flaccheck`: 版付き（`flaccheck:<id>:<audio_version>`、stale ゲート、
-            `track_locks`）。root で開いた FD を fstat して行と照合 → STREAMINFO の MD5 → `flac -t -`
-            （FD を stdin、タイムアウト、終了コード、stderr）→ 版を再確認して 1 UPDATE。ファイルは書かない
-      - [x] `db::flaccheck`: `enqueue_selection` / `enqueue_all_unchecked`（スキャン完了時、
-            `[normalize].flac_verify_on_import`）
-      - [x] `POST /api/flaccheck { selection }`、一覧の `flac_check { status, checked_at, stale, error }`、
-            フィルタ `flac_unchecked` / `flac_error`
-      - [x] UI: バッジ（`decode_error` は赤、`md5_missing` は薄く、古い結果は点付き）とサイドバーの
-            固定フィルタ。起動導線は P1-12 の操作タブ
+- [x] `domain::replaygain`: `opus_r128` / `rg2_gain_db` / `tag_changes`（形式ごとの固定キー集合。
+      値の無いキーは削除）/ `file_matches`
+- [x] `Editor::prepare_rg_write`: 解析済みトラックを tags op の編集バッチとして記録（旧値・overlay・
+      tagwrite・巻き戻しはタグ編集と共通）。DB のタグが既に一致する行は `rg_written_at` だけ立てる
+- [x] `rg_written_at` はファイルの現在値から判定（`db::replaygain::sync_written_at`。applied の追随・
+      overlay の解消・巻き戻し・手編集で自動的に立つ / 消える）
+- [x] `POST /api/rg/write { selection, description?, skip_pending? }`（`api::rg::write`。missing は対象外）、
+      フィルタ `rg_unwritten`。UI の起動導線は P1-12 の操作タブ
 
-      受け入れ: `tests/flaccheck_job.rs`（ok / md5_missing（ファイルを触らない）/ decode_error（stderr）/
-      非 FLAC と missing は no-op / stale 版と差し替えは書かない / flac 無しで失敗 /
-      `enqueue_all_unchecked` の対象 / scan 完了時の自動投入と 2 回目は投入しない）、
-      `tests/flaccheck_api.rs`（投入件数・skip・重複・行の値・フィルタ・stale・409・401）、
-      `web/src/lib/badges.test.ts`
+受け入れ: `tests/replaygain.rs`（SPEC §6 のテストベクトル、飽和、書式、形式ごとのキー集合、
+`file_matches`）、`tests/rg_write.rs`（FLAC / Opus / MP4 への書き込みと `rg_written_at`、一致済みは
+バッチ無し、未解析の除外、pending、巻き戻し・手編集・conflict で NULL、再解析後の再書き込み）、
+`tests/rg_write_api.rs`
 
-      P1-5b（MD5 補填）と UI の起動導線（P1-12）は実施済み
-- [x] **P1-5b** FLAC の MD5 補填（`flac_fix_missing_md5`）。`md5_missing` のトラックを選んで、デコードした
-      PCM MD5 を STREAMINFO に書く編集バッチ（`edit_ops.kind` に `md5` を足すマイグレーション 0011、旧値 = 全ゼロ
-      を `edits` に残して巻き戻し可、`audio_version` 据え置き、inode / mtime は追随）。D-57 / D-59。
-      `POST /api/md5fill`、操作タブの「MD5 を補填」。受け入れ: `tests/migrations.rs`（0011 で参照行が残る）、
-      `tests/fingerprint.rs`（MD5 の位置）、`tests/md5fill.rs`（補填 / 対象外 / 巻き戻し / conflict）、
-      `tests/md5fill_api.rs`（409 の各コード）
-- [x] **P1-6** プレイリスト（手動、並べ替え、m3u8 書き出し。D-53）
-      - [x] `db::playlists`: CRUD（名前の一意性は `name_key` = canonical key。マイグレーション 0006）、
-            項目の追加（同じトラックは 1 回）・除外・移動（`before` の直前 / 末尾）、`position` の振り直し、
-            書き出し記録、`export_profiles` の読み出し
-      - [x] `sort=position`（`filter.playlist_id` と組でだけ有効。`playlist_items` を JOIN して主キー順、
-            カーソルページング可）
-      - [x] `playlist::export`（m3u8 の生成とパス写像: relative は `../../`、absolute は prefix、区切りの
-            置換）、`playlist::import`（行の正規化 → `rel_path_key` 完全一致 → stem 一致、active 優先、
-            複数なら曖昧として未解決。root 名の無い絶対パスは未解決）
-      - [x] API: `GET/POST /api/playlists`、`GET/PATCH/DELETE /:id`、`POST/DELETE /:id/items`、
-            `POST /:id/items/move`、`GET /:id/export?profile=`（本文。CIDR allowlist）/ `POST`
-            （`Playlists/<profile>/<name>.m3u8` に tmp + rename、`playlist_exports` に記録）、
-            `GET/POST /api/playlists/import`（Playlists root 下の m3u8 の一覧 / 取り込み）
-      - [x] UI: サイドバーのプレイリスト区画（一覧・作成・改名・削除・書き出し・取り込み）、表の行を
-            プレイリストへドラッグで追加、右パネルの「プレイリストへ追加」（Ctrl+A のフィルタ形も可）、
-            プレイリスト scope では position 順、行のドラッグで並べ替え、「除外」ボタンと Delete キー
+スキャナが外部のタグ変更を取り込んだときの `rg_written_at` の判定（D-48）は P1-13 で解決
 
-      受け入れ: `tests/playlist_export.rs`（3 プロファイルの写像、EXTINF、BOM なし）、
-      `tests/playlist_import.rs`（BOM / `#` 行 / `\` / `../` / root 名 / UNC・ドライブレター / 完全一致 vs
-      stem / active 優先 / 曖昧 / 未解決 / 重複）、`tests/playlists_db.rs`（作成・重複（大小文字 / NFC-NFD）、
-      追加の順と skip、除外、移動、改名、削除の
-      CASCADE、件数と記録、`export_tracks` の missing 除外と delivery）、`tests/tracks_query.rs`（position
-      順とカーソル、playlist_id 必須、temp B-tree なし、selection の position 順）、
-      `tests/playlists_api.rs`（CRUD、名前の検証、項目、export の GET / POST / CIDR / 503、import）、
-      `web/src/lib/playlists.test.ts`（scope とソートの連動、ドラッグの payload、並べ替えの移動先）
+### P1-3 アートワーク
 
-      取り込み（2026-09-17、リハーサル環境）: `Playlists/m3u8/` の 28 本を `POST /api/playlists/import` で
-      全件取り込み。14,205 行すべてが解決（未解決 0、重複 0。旧 `../<Category>/…/<n>. Title.opus` 行が
-      stem 一致で ALAC / Opus の Library 行に当たった）。`00_Anime` の android 書き出し 4,741 件も確認
-      （`Playlists/android/00_Anime.m3u8`、`../../Derived/…`）
+読みは埋め込み / 同梱画像の両対応、書きは埋め込み統一で一括差し替え、WebP サムネイル生成と
+キャッシュ。アルバムグリッド画面 → クリックで表を `album_id` に絞る。
 
-      自動再書き出しは P1-7（D-54 の `playlist::autoexport`）で実施済み。スマートの表示（`kind='smart'` は
-      ⚙ で出すだけ）
-- [x] **P1-7** スマートプレイリスト（`docs/DSL.md`。pest → AST → SQL。D-54）
-      - [x] `playlist::dsl`: `dsl.pest` の文法（キーワードは大小文字無視、値は引用可、`NOT` > `AND` > `OR`）→
-            AST（DSL.md の JSON 形で `rule_ast` に保存、原文は `rule_source`）、構文エラーは行・桁付き
-      - [x] `playlist::compile`: ホワイトリストの列解決、任意タグは `track_tags` の EXISTS、値は全てバインド、
-            `regexp()` を全コネクションに登録、`missing` を参照しない限り active 限定、型に合わない演算子は
-            実行前にエラー。`evaluate` で並び付きの id 列
-      - [x] マイグレーション 0007: `tracks.added_at`（`added` フィールド。スキャナが INSERT 時に設定）
-      - [x] `filter.dsl`（一覧のプレビュー。WHERE だけ。D-39）
-      - [x] API: `POST /api/playlists { name, rule }` / `PATCH { rule }`（再評価）、`POST /api/playlists/preview`、
-            `POST /:id/refresh`、smart への項目操作は 409
-      - [x] `playlist::autoexport`: library / 終端 batch / 完了 job をデバウンスして全 smart を再評価、
-            `auto_export = 1` で記録のあるプレイリストを記録済みプロファイルへ再書き出し（起動時にも 1 回）
-      - [x] UI: サイドバー「＋⚙」→ 中央のルール編集（250ms で検証・件数、表は `filter.dsl` で追随、
-            Ctrl+Enter で保存）、smart 行の「ルールを編集」「再評価」、smart は ⚙ 表示でドロップ・並べ替え不可
+- [x] 読み側（D-49）: `media::artwork`（同梱画像の名前の優先順、ヘッダでの判別、埋め込みの選択、
+      `ArtworkStore` = `<data>/thumbs/<hex>/orig.<ext>` + `<size>.webp`）
+- [x] スキャンの Phase 5（`Scanner::with_artwork`）: Phase 4 が新旧 album の再解決を予約
+      （`artwork_resolved_at = NULL`）し、Phase 5 は予約 + 同梱画像の stat 変化 + 原画像の欠損だけを
+      解決し直す（マイグレーション 0004）。決められない album は状態を動かさない。原画像を
+      キャッシュへ置き `thumbnail` ジョブを投入。Phase 5 の cancel / 失敗は run を戻さない
+- [x] `jobs::handlers::thumbnail`: ffmpeg で 256 / 768 の WebP（長辺、拡大なし、tmp + rename、冪等）
+- [x] `GET /api/artwork/:hash?size=`（`api::artwork`。未生成なら原画像へ倒す）、
+      `GET /api/albums` の `artwork_hash`
+- [x] UI: アルバムグリッド（`AlbumGrid`）→ クリックで一覧を `album_id` に絞る
+- [x] 書き側（D-60。埋め込み統一。cover ファイルは書かず抽出も作らない）: `POST /api/artwork/upload`
+      （ヘッダで判別、32 MiB、`ArtworkStore` + `artwork` 行 + thumbnail）→ `POST /api/artwork/embed`
+      （`Editor::prepare_picture`: `PICTURE` を `[<mime>:<hex>]` にする tags op。全画像を捨てて 1 枚）。
+      `stage_tags` は書く前に旧画像を store へ退避、`write_tag_changes` に `pictures` を足す。
+      GC 区分 E は `edits` の `PICTURE` 値が参照する画像を残し、行にも 24 時間の猶予。applied で
+      album を `mark_unresolved` して増分スキャンを投入。UI は操作タブの「アートワーク」節と
+      履歴の `PICTURE` サムネイル
 
-      受け入れ: `tests/dsl.rs`（優先順位・括弧・引用・大小文字・全演算子・PRESENT/MISSING・ORDER/LIMIT・
-      エラー位置・AST の往復）、`tests/dsl_compile.rs`（`:memory:` での評価: NOCASE、暗黙 missing、HAS /
-      MATCHES / presence、任意タグの多値、数値と duration、拡張フィールド、date / added、ORDER / LIMIT /
-      random、型エラー、値がバインドされる）、`tests/tracks_query.rs`（`filter.dsl`）、
-      `tests/smart_playlists.rs`（作成で materialize、400 の位置、preview、refresh / ルール差し替え、
-      項目操作の 409、autoexport のデバウンスと再書き出し・`auto_export = 0`）
+受け入れ: `tests/artwork.rs`（名前の優先順、判別、埋め込みの選択、キャッシュの配置）、
+`tests/artwork_scan.rs`（同梱 > 埋め込み、最初のトラック、無し → NULL、名前の優先順、同梱画像の
+差し替え / 削除の検出、未解決 album の解決、deep、同じ画像の共有、読めない同梱画像、missing、
+画像付きトラックの移動で新旧 album を解決、commit 後の cancel で run は completed のまま次回再開、
+キャッシュ書き込み失敗 / 読めないトラックで状態を動かさない、原画像の欠損を incremental で復旧）、
+`tests/thumbnail_job.rs`（寸法・アスペクト比・拡大なし・冪等・原画像なし）、`tests/artwork_api.rs`
 
-      foobar Autoplaylist クエリ変換は P1-8 で実施済み、`HAS` の語境界は実機で確認済み（D-55）。
-      UI の並び替え（smart は ORDER BY で決まるので表のソート変更は表示だけ）
-- [x] **P1-8** エクスポートプロファイル（foobar / android / internal、
-      foobar Autoplaylist クエリ生成）。**依存: P1-10**（`delivery` プロファイルが Derived を前提）。
-      タグ鮮度が必要な export / 同期は `stale_tags` の件数を明示するか追随ジョブの完了を待つ。D-55
-      - [x] `playlist::fb2k`: AST → `{ query, sort, notes }`（写像表、後置 PRESENT / MISSING、date の
-            AFTER / BEFORE、引用規則、変換不能な葉の脱落と親の畳み込み、ORDER BY の分離）
-      - [x] `GET /api/playlists/:id/fb2k_query`（smart のみ。manual は 409）
-      - [x] UI: smart のメニュー「foobar クエリ」→ コピーボタン付きダイアログ（`Fb2kQueryDialog`）
-      - [x] `export_tracks` が `delivery` のタグ追随待ちを数え、`POST …/export` の応答と UI の通知に
-            `stale_tags`。自動再書き出しはログ
-      - [x] `[export].fb2k_prefix` を正として起動時に `export_profiles.foobar.path_prefix` を揃える。
-            プロファイル CRUD と `.pls` は作らない
+受け入れ（書き側）: `tests/picture_write.rs`（FLAC / Opus / MP4 への差し替えと `tag_version` +1、旧画像の
+退避、同じ画像は差分なし、巻き戻しで旧画像が戻る、外部変更で conflict、キャッシュ欠損で failed、
+AlreadyMatches、album の予約）、`tests/artwork_api.rs`（upload の形式判定・上限・400、embed の 404 / 409）、
+`tests/gc.rs`（`edits` が参照する画像は残す、行の 24 時間の猶予）、`web/src/lib/operations.test.ts`、
+`web/src/lib/artwork.test.ts`（`PICTURE` 値の分解、アップロードの要約）。ローカル起動で upload →
+差し替え → 履歴のサムネイル → 巻き戻しを agent-browser で確認済み（2026-09-18）
 
-      受け入れ: `tests/fb2k.rs`（写像表全件、技術フィールド、spindle 固有の脱落、後置 PRESENT、
-      AFTER / BEFORE、MATCHES、引用規則と `"` の警告、括弧、脱落による親の畳み込み、sort と DESC、
-      random / LIMIT、DSL.md の例）、`tests/smart_playlists.rs`（fb2k_query の 200 / 409 / 404 / 401）、
-      `tests/playlists_db.rs`（`stale_tags` の集計、prefix の同期）、`tests/playlists_api.rs`
-      （android の `stale_tags`、internal は 0）、`web/src/lib/playlists.test.ts`（通知文）
+### P1-3c トラック単位のアートワーク
 
-      foobar 実機との突き合わせ（2026-09-19）: `HAS` は部分一致で spindle と同じ、技術情報フィールドの
-      `PRESENT` / `MISSING` も効く。二重引用符は挙動を変えず、単一引用符は一致しなくなる（D-55）。
-      変換器の変更は不要
-- [x] **P1-9** 再生（Range 対応、ALAC は既定で Opus 変換、
-      `canPlayType()` によるクライアント能力判定。下部バー左側の再生 UI: 再生・停止・
-      シーク・音量・RG の off / track / album）。D-52
-      - [x] `api::stream`: `GET /api/stream/:id`（原本、Range / HEAD / ETag、開いた FD を行と照合して
-            不一致は 409 `stale`）、`?transcode=opus`（`delivery` が Derived を指せば直送、無ければ ffmpeg で
-            Ogg/Opus を chunked、`start=` で `-ss`。非可逆は変換しない）
-      - [x] `GET /api/tracks` の行に `rg`（解析値。未解析なら null）
-      - [x] UI: 行先頭の ▶（ホバー表示、その行から表示順に連続再生）、下部バーの再生
-            （`<audio>` + Web Audio の GainNode で RG、音量、シーク、原本 / Derived の切替）、
-            `canPlayType()` による URL の選択（`lib/playback`）
-      - [x] RG の album モード（`album_gain` が無ければ track に倒す。`playback.test.ts`）
-      - [x] テスト: `tests/stream_api.rs`（Range / HEAD / ETag / 416 / stale / missing / CIDR / MIME /
-            Derived 直送 / ffmpeg フォールバックと `start=` / ffmpeg 無し 503）、
-            `web/src/lib/playback.test.ts`
+D-61。トラックごとに画像が違う album 向け。
 
-      閉じた未決（2026-09-18。D-52）: Safari 向けの AAC 変換（Safari 18.4+ は Ogg Opus をネイティブ
-      再生する。実機の Safari で確認済み）。ハイレゾのサンプルレート変換。可逆は既定で Derived
-      の Opus（48 kHz）を再生するので、96 kHz（64 本）がそのまま流れるのは「原本」を選んだときだけ。原本を
-      選んだ人にリサンプルを掛けるのは逆なので作らない
-- [x] **P1-10** Derived 自動生成と追随（`audio_version` / `tag_version` 差分判定、
-      Library の移動・削除への追随。`delivery` ビューの版一致フォールバックの結合テスト）。
-      P1-8 の `delivery` プロファイルと Android 同期がこれを前提にするため P3 から前倒し。D-51
-      - [x] マイグレーション 0005: `derived_files.src_artwork_id` / `src_rg_scanned_at`
-            （タグ版に乗らない 2 つの世代）
-      - [x] `domain::derived`: 期待パス（拡張子を `.opus` に）、対象判定（可逆・active・1ch / 2ch）、
-            `plan`（Skip / Encode / Move / Retag / MoveAndRetag / UpToDate）、Opus に書くタグ集合
-            （`TransferTags` + DB の RG を `R128_*` へ + album のカバー 1 枚）
-      - [x] `media::encode::OpusEncoder`: ffmpeg → WAV → `opusenc --vbr --music`。
-            `domain::tags::write_opus_tags` でタグと画像
-      - [x] `db::derived`: 行の読み書き、`enqueue_if_stale`、scan 完了時の一括投入
-            （`enqueue_all_stale`）、占有行の明け渡し
-      - [x] `jobs::handlers::transcode`: 現在値に揃える（no-op / 再エンコード / rename / retag）。
-            Library の FD を DB の行と照合、期待パスの排他予約（`derived_path_locks`）と占有の確定
-            （`claim_path`）を物理書き込みの前に、宛先の tmp + `replace_file`、cancel、冪等。画像は album の `768.webp`（キャッシュに
-            無ければ生成、原画像も無ければ画像なしで `src_artwork_id = NULL`）。起動時の取り残し回収
-            （`sweep_tmp`）
-      - [x] 投入契機: scan ジョブ完了、tagwrite applied（`enqueue_derived_retag` を置換）、
-            rename applied、RG 保存
-      - [x] `delivery` ビューの結合テスト（生成 → Derived、`audio_version++` → Library、
-            `tag_version++` → `stale_tags`、retag → 解消）
+- [x] マイグレーション 0012 `tracks.artwork_id`。`TrackContent.picture`（Unread / Absent / Found）を
+      スキャナ Phase 3 と tagwrite の読み戻しが埋め、`insert_track` / `update_content` が記録する。
+      サムネイルが無い画像は Phase 4 が thumbnail ジョブを投入
+- [x] Derived は `COALESCE(tracks.artwork_id, albums.artwork_id)` を埋める（D-51 の改訂）
+- [x] GC 区分 E の参照に `tracks.artwork_id` を足す
+- [x] `TrackRow` / `GET /api/tracks/:id` の `artwork_hash`、左下のアートワークはトラック自身 → album
 
-      受け入れ: `tests/derived.rs`（純粋な判定）、`tests/derived_db.rs`（投入判定）、
-      `tests/opus_encode.rs`、`tests/transcode_job.rs`（初回・no-op・retag・再エンコード・stale・
-      外部移動・消失・カバー差し替え・RG 後追い・FD 不一致・占有・占有確定後の復活との競合・
-      同じ期待パスの並走・retag 中の claim 待ち・swap / 3 件循環の追随（音声差し替え付き・実体無しを
-      含む）・move 失敗時の予約解放・
-      画像キャッシュ欠損からの復旧・cancel・取り残し回収）、
-      `tests/derived_sync.rs`
-      （4 つの契機と `delivery` の end-to-end）。UI の起動導線は無し（scan 完了時の自動投入で足りる）
+受け入れ: `tests/artwork_scan.rs`（トラックごとの画像、front cover 優先、無しは NULL、同じ画像は 1 行、
+store 無しは NULL のまま → deep で埋まる、外部差し替えで更新）、`tests/picture_write.rs`（差し替え・
+巻き戻しで追随）、`tests/derived*.rs`（トラック自身 → album の順）、`tests/gc.rs`（参照の保護）、
+`tests/tracks_api.rs`（`artwork_hash`）、`tests/migrations.rs`（0012）、`web/src/lib/artwork.test.ts`。
+ローカル起動でトラックごとに違う画像の 2 曲について、左下の表示と Derived の埋め込み（ffprobe で
+300×300 / 400×300）がそれぞれ自身の画像になることを確認済み（2026-09-18）
 
-      計測（2026-09-17、リハーサル環境 9,098 トラック / 可逆は ALAC 7,570 本、12 コア、並列 11）:
-      起動時スキャンの完了で 7,570 件を投入 → **39 分**で全件 done（failed 0、警告 0、tmp の残り 0）。
-      Derived は 30 GB（全件に album の WebP カバー入り）。`delivery` は可逆 7,570 が Derived、
-      非可逆 1,528 が Library 原本
+計測（2026-09-18、リハーサル環境 9,098 トラック / 721 album、12 コア）: 0011 / 0012 適用後の deep scan
+**568 秒**（P1-0 の 552 秒 + 3%）で全行に `artwork_id` が付き、`artwork` 2,241 行（+1,520。thumbs 2.1 GB）、
+thumbnail 1,523 本・transcode 再タグ 35 本、errors 0。トラックごとに画像が違う album は 15
+（神椿系「〜のお歌」9 dir が主。すべて Opus で Derived は無い）。UI で自身の画像が出ることを確認
 
-      閉じた未決（2026-09-18。D-51）: マルチチャンネルのダウンミックス（全 9,098 トラックが 2ch）、
-      非可逆の `force_transcode`（非可逆は Opus 1,512 / MP3 14 / AAC 2。Opus は変換の意味が無く残りは
-      16 本）、Derived 側の `cover.jpg` ミラー（全件に WebP を埋め込み済み。Library は D-49 で同梱ファイルを
-      書かない方針なので Derived にだけ書くと方針が割れる）。需要が出たら再開
-- [x] **P1-11** GC ジョブ（`missing_since` 30 日超の行、`Archive/` へ退避した WAV、
-      Derived の孤児。**物理削除を行う唯一の経路**。dry-run と削除件数のログを必須にする）。D-56
-      - [x] `gc::plan`（読み取りのみ）: A missing トラック（`stat` で実体が無いことを再確認）、B missing
-            アルバム（構成 0）、C `archived_files` の `held` で期限超、D Derived の孤児（`.spindle-tmp-*` と
-            24 時間以内は除外）、E 参照の無い `artwork` 行と行の無い `thumbs/<hex>/`
-      - [x] `gc::execute_*`: A → B → E(行) を 1 トランザクション（条件を再確認）→ C（`held` と期限を
-            再確認しトラックをロックしてから unlink → CAS で `deleted`）→ D（行が無ければ transcode と
-            同じ `derived_path_locks` の予約を取り、unlink 直前に inode / mtime を照合、空ディレクトリも
-            消す。マイグレーション 0008）→ E(dir)（行が無く猶予超を再確認）。
-            失敗はログして続行、区分ごとの件数・バイト数を `info!`
-      - [x] `jobs::handlers::gc`: scan と同じ名前付き排他 `library`（`job_mutexes`。マイグレーション
-            0009、`JobContext::lock_mutex`）を取れなければ `Requeue`。`jobs::scheduler` に backup と共通の
-            周期投入を切り出し、1 日 1 回自動投入
-      - [x] `GET /api/gc/preview`（dry-run。`plan` を同期で返す）、`POST /api/gc`。UI は作らない
-      - [x] `RootDir::remove_dir`
+### P1-4 ロスレス → FLAC 正規化
 
-      受け入れ: `tests/gc.rs`（期限前後と実体の有無、CASCADE と履歴の残存、アルバムの構成判定、Archive
-      の状態遷移と unlink 失敗、Derived の孤児・tmp・猶予・同じ実行で消える missing の Derived・空
-      ディレクトリ・一覧後の差し替え、アートワークの行と dir、scan 中の待ちと dedup、計画後の
-      restored / 期限延長 / 他ジョブのロック / 復活 / claim / 参照の出現 / dir の更新で消えないこと、
-      GC の予約中は transcode が claim できず残骸は奪えること、mutex を持つ相手がいれば待つこと、
-      scan と gc を同時に 5 回投入して両方が完走すること）、
-      `tests/gc_api.rs`
-      （preview が何も消さない、POST の 202 / 409 / 401、root 無しの 503）
+WAV / ALAC / AIFF（D-45 / D-46）。変換前後の PCM MD5 照合。不一致なら中止。一致時は元ファイルを
+`Archive/` へ move し `edit_ops(kind='archive')` と `archived_files` 台帳に記録。**即時削除しない**。
+`audio_version` は据え置き。移行で取り込んだ ALAC 7,572 本が主対象。
 
-      設定画面からの起動は P1-12 (e) で実施済み。Library の同梱ファイルの回収（D-43）は P2-8 で決める
+- [x] `POST /api/normalize/preview` / `apply`（selection。rename と同型。`api::normalize`。
+      UI は P1-12 の操作タブ。`[normalize].wav_to_flac = false` で 409）
+- [x] `edit::normalize`: `edit_ops(kind='archive')` + `edits(rel_path / codec)`、DB は先行更新
+      しない。track 単位の `normalize` ジョブ（並列 2、`jobs::handlers::normalize`）
+- [x] `media::encode::FlacEncoder`: ffmpeg デコード（root の FD を `/dev/stdin` で渡す）→
+      `flac -8 --verify`。STREAMINFO MD5 を symphonia の PCM MD5 と照合。タグ・画像は lofty で
+      写す（`tags::read_transfer_tags` / `write_flac_tags`）。`tag_hash` が変わったときだけ
+      `tag_version++`
+- [x] 破壊フェーズ: 元を一時名 `spindle-normalize-<op_id>.<ext>` へ退避（inode 確認）→ Archive へ
+      実コピー + SHA-256 の読み戻し照合（`edits.source_sha256` に記録）→ unlink 直前に同じ FD の
+      stat とバイト列を再照合 → unlink。conflict は元パスへ戻して生成物を消す。台帳 `db::archive`
+- [x] 巻き戻し（`revert_archive`）: Archive からコピーで復元、FLAC は Archive へ move して
+      `reason='restore'`（マイグレーション 0003）。redo は同じ台帳行を `held` に戻す
+- [x] 冪等（宛先 / 一時名 / Archive の実体と記録した SHA-256 から続きを判定）、cancel（Library を
+      触る前まで）、スキャナが作業中のパス（元・一時名・宛先）を避け、inventory 後に確定された
+      宛先を `Identity::New` で挿入しない（`PendingOp::target_rel_path`）
+- [x] symphonia の `aiff` feature を有効化（AIFF の PCM MD5 が計算できていなかった）
 
-- [x] **P1-13** スキャナの ReplayGain 追随（D-47 / D-48 の未決）: 外部で音声が差し替わった行は解析値を
-      捨てる（`reset_analysis`。tagwrite の overlay 解消も同じ）、外部のタグ変更を取り込んだ行は
-      `rg_written_at` を判定し直す（`sync_written_at`。`Scanner::with_replaygain_reference`）。
-      受け入れ: `tests/rg_write.rs`（音声差し替えで NULL・タグだけの変更は据え置き、RG タグの削除 /
-      一致する書き込みで `rg_written_at` が動く、tagwrite の conflict で読んだ音声差し替え）
-- [x] **P1-12** UI の再構成と起動導線（foobar2000 のレイアウトに寄せる。D-58）。P1 の完了条件
-      「foobar2000 を開かずに日常運用が回る」に対して、API だけで UI が無い機能（リネーム / 正規化 /
-      RG / FLAC 検査 / GC）の起動導線と、ジョブ・設定画面を揃える
-      - [x] (a) レイアウト: ヘッダ → プレイヤーバー（下部バーを上へ）→ 左（ツリー + プレイリスト +
-            固定フィルタ / アルバムアート）・右（プロパティ領域 / 表）。境界はドラッグで可変・永続化。
-            ツリーの表示形式（パターン。組み込み 4 + ユーザ定義）、`filter.album_ids`、既定列
-      - [x] (b) プロパティタブ（Metadata / Location / General、共通値、ダブルクリック編集）と
-            `GET /api/tracks/:id` の `detail`
-      - [x] (c) 操作タブ（リネーム / 正規化の preview → 適用、RG 解析 / 書き込み、FLAC 検査、
-            プレイリストへ追加）
-      - [x] (d) ジョブ画面（SPEC §12.5）。`GET /api/jobs` に `concurrency`（種別ごとの並列度）を追加
-      - [x] (e) 設定画面（SPEC §12.6）: `GET /api/config`、再スキャン / deep scan、GC preview → 実行、
-            `GET /api/archive`
+受け入れ: `tests/normalize.rs` / `tests/normalize_api.rs` / `tests/encode.rs`。WAV / ALAC / AIFF が
+FLAC になり `audio_md5` / `audio_version` が変わらない。MD5 不一致（ffmpeg を差し替えた模擬）で
+元ファイルが無傷のまま failed。事前条件不一致・宛先の占有が conflict。revert → redo が通り
+Archive の実体が減らない。配置後 / 退避後 / unlink 後のクラッシュから再投入で完了。Archive のコピー
+中・unlink 直前の in-place 更新と元パスの差し替えでユーザデータを失わない。Archive のコピーが
+壊れた状態からの復旧は conflict で何も消さない。I/O 失敗は生成物を消して再試行できる。作業中に
+走ったスキャンが宛先を新規登録せず、inventory 後に確定されても走査が失敗しない。
 
-      受け入れ: `web/src/lib/tree.test.ts`（パターンのパース・ツリーの構築・`album_ids`）、
-      `web/src/lib/properties.test.ts`（共通値の畳み込み）、`web/src/lib/operations.test.ts`（件数の
-      メッセージと 409 の日本語化）、`web/src/lib/jobs.test.ts`（種別集計・絞り込み）、`tests/jobs.rs`
-      （`concurrency`）、`web/src/lib/settings.test.ts`（GC preview の表）、`tests/tracks_query.rs`（`album_ids`）、
-      `tests/tracks_api.rs`（`detail`）、`tests/config_api.rs`、`tests/archive_api.rs`。
-      各段階で clippy / test / build / lint を通し、(a) はスクショで確認する
+閉じた未決（2026-09-18）: 20 bit などの ffmpeg PCM エンコーダが無いビット深度は failed のまま。
+実データは 16 bit 7,447 / 24 bit 123 で 20 bit は 0 本、ALAC の正規化は全件完了済み、今後入るのは
+主に CD（16 bit）。failed はデータを壊さないので、出てきたら raw → `flac --bps` の経路を足す
+
+### P1-5 FLAC 健全性チェック
+
+`flac -t`、MD5 未設定の補填。補填時は `audio_version` 据え置き（D-57）。**補填は P1-5b に切り出し**
+（実データに FLAC が無く、今後の FLAC は自前の `flac -8 --verify` と CD リップで MD5 が付く）。
+
+- [x] マイグレーション 0010: `tracks.flac_check` / `flac_checked_at` / `flac_check_version` /
+      `flac_check_error`
+- [x] `jobs::handlers::flaccheck`: 版付き（`flaccheck:<id>:<audio_version>`、stale ゲート、
+      `track_locks`）。root で開いた FD を fstat して行と照合 → STREAMINFO の MD5 → `flac -t -`
+      （FD を stdin、タイムアウト、終了コード、stderr）→ 版を再確認して 1 UPDATE。ファイルは書かない
+- [x] `db::flaccheck`: `enqueue_selection` / `enqueue_all_unchecked`（スキャン完了時、
+      `[normalize].flac_verify_on_import`）
+- [x] `POST /api/flaccheck { selection }`、一覧の `flac_check { status, checked_at, stale, error }`、
+      フィルタ `flac_unchecked` / `flac_error`
+- [x] UI: バッジ（`decode_error` は赤、`md5_missing` は薄く、古い結果は点付き）とサイドバーの
+      固定フィルタ。起動導線は P1-12 の操作タブ
+
+受け入れ: `tests/flaccheck_job.rs`（ok / md5_missing（ファイルを触らない）/ decode_error（stderr）/
+非 FLAC と missing は no-op / stale 版と差し替えは書かない / flac 無しで失敗 /
+`enqueue_all_unchecked` の対象 / scan 完了時の自動投入と 2 回目は投入しない）、
+`tests/flaccheck_api.rs`（投入件数・skip・重複・行の値・フィルタ・stale・409・401）、
+`web/src/lib/badges.test.ts`
+
+P1-5b（MD5 補填）と UI の起動導線（P1-12）は実施済み
+
+### P1-5b FLAC の MD5 補填
+
+`flac_fix_missing_md5`。`md5_missing` のトラックを選んで、デコードした PCM MD5 を STREAMINFO に書く
+編集バッチ（D-57 / D-59）。
+
+- [x] `edit_ops.kind` に `md5` を足すマイグレーション 0011。旧値 = 全ゼロを `edits` に残して巻き戻し可、
+      `audio_version` 据え置き、inode / mtime は追随
+- [x] `POST /api/md5fill`、操作タブの「MD5 を補填」
+
+受け入れ: `tests/migrations.rs`（0011 で参照行が残る）、`tests/fingerprint.rs`（MD5 の位置）、
+`tests/md5fill.rs`（補填 / 対象外 / 巻き戻し / conflict）、`tests/md5fill_api.rs`（409 の各コード）
+
+### P1-6 プレイリスト
+
+手動、並べ替え、m3u8 書き出し（D-53）。
+
+- [x] `db::playlists`: CRUD（名前の一意性は `name_key` = canonical key。マイグレーション 0006）、
+      項目の追加（同じトラックは 1 回）・除外・移動（`before` の直前 / 末尾）、`position` の振り直し、
+      書き出し記録、`export_profiles` の読み出し
+- [x] `sort=position`（`filter.playlist_id` と組でだけ有効。`playlist_items` を JOIN して主キー順、
+      カーソルページング可）
+- [x] `playlist::export`（m3u8 の生成とパス写像: relative は `../../`、absolute は prefix、区切りの
+      置換）、`playlist::import`（行の正規化 → `rel_path_key` 完全一致 → stem 一致、active 優先、
+      複数なら曖昧として未解決。root 名の無い絶対パスは未解決）
+- [x] API: `GET/POST /api/playlists`、`GET/PATCH/DELETE /:id`、`POST/DELETE /:id/items`、
+      `POST /:id/items/move`、`GET /:id/export?profile=`（本文。CIDR allowlist）/ `POST`
+      （`Playlists/<profile>/<name>.m3u8` に tmp + rename、`playlist_exports` に記録）、
+      `GET/POST /api/playlists/import`（Playlists root 下の m3u8 の一覧 / 取り込み）
+- [x] UI: サイドバーのプレイリスト区画（一覧・作成・改名・削除・書き出し・取り込み）、表の行を
+      プレイリストへドラッグで追加、右パネルの「プレイリストへ追加」（Ctrl+A のフィルタ形も可）、
+      プレイリスト scope では position 順、行のドラッグで並べ替え、「除外」ボタンと Delete キー
+
+受け入れ: `tests/playlist_export.rs`（3 プロファイルの写像、EXTINF、BOM なし）、
+`tests/playlist_import.rs`（BOM / `#` 行 / `\` / `../` / root 名 / UNC・ドライブレター / 完全一致 vs
+stem / active 優先 / 曖昧 / 未解決 / 重複）、`tests/playlists_db.rs`（作成・重複（大小文字 / NFC-NFD）、
+追加の順と skip、除外、移動、改名、削除の
+CASCADE、件数と記録、`export_tracks` の missing 除外と delivery）、`tests/tracks_query.rs`（position
+順とカーソル、playlist_id 必須、temp B-tree なし、selection の position 順）、
+`tests/playlists_api.rs`（CRUD、名前の検証、項目、export の GET / POST / CIDR / 503、import）、
+`web/src/lib/playlists.test.ts`（scope とソートの連動、ドラッグの payload、並べ替えの移動先）
+
+取り込み（2026-09-17、リハーサル環境）: `Playlists/m3u8/` の 28 本を `POST /api/playlists/import` で
+全件取り込み。14,205 行すべてが解決（未解決 0、重複 0。旧 `../<Category>/…/<n>. Title.opus` 行が
+stem 一致で ALAC / Opus の Library 行に当たった）。`00_Anime` の android 書き出し 4,741 件も確認
+（`Playlists/android/00_Anime.m3u8`、`../../Derived/…`）
+
+自動再書き出しは P1-7（D-54 の `playlist::autoexport`）で実施済み。スマートの表示（`kind='smart'` は
+⚙ で出すだけ）
+
+### P1-7 スマートプレイリスト
+
+`docs/DSL.md`。pest → AST → SQL（D-54）。
+
+- [x] `playlist::dsl`: `dsl.pest` の文法（キーワードは大小文字無視、値は引用可、`NOT` > `AND` > `OR`）→
+      AST（DSL.md の JSON 形で `rule_ast` に保存、原文は `rule_source`）、構文エラーは行・桁付き
+- [x] `playlist::compile`: ホワイトリストの列解決、任意タグは `track_tags` の EXISTS、値は全てバインド、
+      `regexp()` を全コネクションに登録、`missing` を参照しない限り active 限定、型に合わない演算子は
+      実行前にエラー。`evaluate` で並び付きの id 列
+- [x] マイグレーション 0007: `tracks.added_at`（`added` フィールド。スキャナが INSERT 時に設定）
+- [x] `filter.dsl`（一覧のプレビュー。WHERE だけ。D-39）
+- [x] API: `POST /api/playlists { name, rule }` / `PATCH { rule }`（再評価）、`POST /api/playlists/preview`、
+      `POST /:id/refresh`、smart への項目操作は 409
+- [x] `playlist::autoexport`: library / 終端 batch / 完了 job をデバウンスして全 smart を再評価、
+      `auto_export = 1` で記録のあるプレイリストを記録済みプロファイルへ再書き出し（起動時にも 1 回）
+- [x] UI: サイドバー「＋⚙」→ 中央のルール編集（250ms で検証・件数、表は `filter.dsl` で追随、
+      Ctrl+Enter で保存）、smart 行の「ルールを編集」「再評価」、smart は ⚙ 表示でドロップ・並べ替え不可
+
+受け入れ: `tests/dsl.rs`（優先順位・括弧・引用・大小文字・全演算子・PRESENT/MISSING・ORDER/LIMIT・
+エラー位置・AST の往復）、`tests/dsl_compile.rs`（`:memory:` での評価: NOCASE、暗黙 missing、HAS /
+MATCHES / presence、任意タグの多値、数値と duration、拡張フィールド、date / added、ORDER / LIMIT /
+random、型エラー、値がバインドされる）、`tests/tracks_query.rs`（`filter.dsl`）、
+`tests/smart_playlists.rs`（作成で materialize、400 の位置、preview、refresh / ルール差し替え、
+項目操作の 409、autoexport のデバウンスと再書き出し・`auto_export = 0`）
+
+foobar Autoplaylist クエリ変換は P1-8 で実施済み、`HAS` の語境界は実機で確認済み（D-55）。
+UI の並び替え（smart は ORDER BY で決まるので表のソート変更は表示だけ）
+
+### P1-8 エクスポートプロファイル
+
+foobar / android / internal、foobar Autoplaylist クエリ生成（D-55）。**依存: P1-10**（`delivery`
+プロファイルが Derived を前提）。タグ鮮度が必要な export / 同期は `stale_tags` の件数を明示するか
+追随ジョブの完了を待つ。
+
+- [x] `playlist::fb2k`: AST → `{ query, sort, notes }`（写像表、後置 PRESENT / MISSING、date の
+      AFTER / BEFORE、引用規則、変換不能な葉の脱落と親の畳み込み、ORDER BY の分離）
+- [x] `GET /api/playlists/:id/fb2k_query`（smart のみ。manual は 409）
+- [x] UI: smart のメニュー「foobar クエリ」→ コピーボタン付きダイアログ（`Fb2kQueryDialog`）
+- [x] `export_tracks` が `delivery` のタグ追随待ちを数え、`POST …/export` の応答と UI の通知に
+      `stale_tags`。自動再書き出しはログ
+- [x] `[export].fb2k_prefix` を正として起動時に `export_profiles.foobar.path_prefix` を揃える。
+      プロファイル CRUD と `.pls` は作らない
+
+受け入れ: `tests/fb2k.rs`（写像表全件、技術フィールド、spindle 固有の脱落、後置 PRESENT、
+AFTER / BEFORE、MATCHES、引用規則と `"` の警告、括弧、脱落による親の畳み込み、sort と DESC、
+random / LIMIT、DSL.md の例）、`tests/smart_playlists.rs`（fb2k_query の 200 / 409 / 404 / 401）、
+`tests/playlists_db.rs`（`stale_tags` の集計、prefix の同期）、`tests/playlists_api.rs`
+（android の `stale_tags`、internal は 0）、`web/src/lib/playlists.test.ts`（通知文）
+
+foobar 実機との突き合わせ（2026-09-19）: `HAS` は部分一致で spindle と同じ、技術情報フィールドの
+`PRESENT` / `MISSING` も効く。二重引用符は挙動を変えず、単一引用符は一致しなくなる（D-55）。
+変換器の変更は不要
+
+### P1-9 再生
+
+Range 対応、ALAC は既定で Opus 変換、`canPlayType()` によるクライアント能力判定。下部バー左側の
+再生 UI: 再生・停止・シーク・音量・RG の off / track / album（D-52）。
+
+- [x] `api::stream`: `GET /api/stream/:id`（原本、Range / HEAD / ETag、開いた FD を行と照合して
+      不一致は 409 `stale`）、`?transcode=opus`（`delivery` が Derived を指せば直送、無ければ ffmpeg で
+      Ogg/Opus を chunked、`start=` で `-ss`。非可逆は変換しない）
+- [x] `GET /api/tracks` の行に `rg`（解析値。未解析なら null）
+- [x] UI: 行先頭の ▶（ホバー表示、その行から表示順に連続再生）、下部バーの再生
+      （`<audio>` + Web Audio の GainNode で RG、音量、シーク、原本 / Derived の切替）、
+      `canPlayType()` による URL の選択（`lib/playback`）
+- [x] RG の album モード（`album_gain` が無ければ track に倒す。`playback.test.ts`）
+- [x] テスト: `tests/stream_api.rs`（Range / HEAD / ETag / 416 / stale / missing / CIDR / MIME /
+      Derived 直送 / ffmpeg フォールバックと `start=` / ffmpeg 無し 503）、
+      `web/src/lib/playback.test.ts`
+
+閉じた未決（2026-09-18。D-52）: Safari 向けの AAC 変換（Safari 18.4+ は Ogg Opus をネイティブ
+再生する。実機の Safari で確認済み）。ハイレゾのサンプルレート変換。可逆は既定で Derived
+の Opus（48 kHz）を再生するので、96 kHz（64 本）がそのまま流れるのは「原本」を選んだときだけ。原本を
+選んだ人にリサンプルを掛けるのは逆なので作らない
+
+### P1-10 Derived 自動生成と追随
+
+`audio_version` / `tag_version` 差分判定、Library の移動・削除への追随。`delivery` ビューの版一致
+フォールバックの結合テスト。P1-8 の `delivery` プロファイルと Android 同期がこれを前提にするため
+P3 から前倒し（D-51）。
+
+- [x] マイグレーション 0005: `derived_files.src_artwork_id` / `src_rg_scanned_at`
+      （タグ版に乗らない 2 つの世代）
+- [x] `domain::derived`: 期待パス（拡張子を `.opus` に）、対象判定（可逆・active・1ch / 2ch）、
+      `plan`（Skip / Encode / Move / Retag / MoveAndRetag / UpToDate）、Opus に書くタグ集合
+      （`TransferTags` + DB の RG を `R128_*` へ + album のカバー 1 枚）
+- [x] `media::encode::OpusEncoder`: ffmpeg → WAV → `opusenc --vbr --music`。
+      `domain::tags::write_opus_tags` でタグと画像
+- [x] `db::derived`: 行の読み書き、`enqueue_if_stale`、scan 完了時の一括投入
+      （`enqueue_all_stale`）、占有行の明け渡し
+- [x] `jobs::handlers::transcode`: 現在値に揃える（no-op / 再エンコード / rename / retag）。
+      Library の FD を DB の行と照合、期待パスの排他予約（`derived_path_locks`）と占有の確定
+      （`claim_path`）を物理書き込みの前に、宛先の tmp + `replace_file`、cancel、冪等。画像は album の `768.webp`（キャッシュに
+      無ければ生成、原画像も無ければ画像なしで `src_artwork_id = NULL`）。起動時の取り残し回収
+      （`sweep_tmp`）
+- [x] 投入契機: scan ジョブ完了、tagwrite applied（`enqueue_derived_retag` を置換）、
+      rename applied、RG 保存
+- [x] `delivery` ビューの結合テスト（生成 → Derived、`audio_version++` → Library、
+      `tag_version++` → `stale_tags`、retag → 解消）
+
+受け入れ: `tests/derived.rs`（純粋な判定）、`tests/derived_db.rs`（投入判定）、
+`tests/opus_encode.rs`、`tests/transcode_job.rs`（初回・no-op・retag・再エンコード・stale・
+外部移動・消失・カバー差し替え・RG 後追い・FD 不一致・占有・占有確定後の復活との競合・
+同じ期待パスの並走・retag 中の claim 待ち・swap / 3 件循環の追随（音声差し替え付き・実体無しを
+含む）・move 失敗時の予約解放・
+画像キャッシュ欠損からの復旧・cancel・取り残し回収）、
+`tests/derived_sync.rs`
+（4 つの契機と `delivery` の end-to-end）。UI の起動導線は無し（scan 完了時の自動投入で足りる）
+
+計測（2026-09-17、リハーサル環境 9,098 トラック / 可逆は ALAC 7,570 本、12 コア、並列 11）:
+起動時スキャンの完了で 7,570 件を投入 → **39 分**で全件 done（failed 0、警告 0、tmp の残り 0）。
+Derived は 30 GB（全件に album の WebP カバー入り）。`delivery` は可逆 7,570 が Derived、
+非可逆 1,528 が Library 原本
+
+閉じた未決（2026-09-18。D-51）: マルチチャンネルのダウンミックス（全 9,098 トラックが 2ch）、
+非可逆の `force_transcode`（非可逆は Opus 1,512 / MP3 14 / AAC 2。Opus は変換の意味が無く残りは
+16 本）、Derived 側の `cover.jpg` ミラー（全件に WebP を埋め込み済み。Library は D-49 で同梱ファイルを
+書かない方針なので Derived にだけ書くと方針が割れる）。需要が出たら再開
+
+### P1-11 GC ジョブ
+
+`missing_since` 30 日超の行、`Archive/` へ退避した WAV、Derived の孤児。**物理削除を行う唯一の経路**。
+dry-run と削除件数のログを必須にする（D-56）。
+
+- [x] `gc::plan`（読み取りのみ）: A missing トラック（`stat` で実体が無いことを再確認）、B missing
+      アルバム（構成 0）、C `archived_files` の `held` で期限超、D Derived の孤児（`.spindle-tmp-*` と
+      24 時間以内は除外）、E 参照の無い `artwork` 行と行の無い `thumbs/<hex>/`
+- [x] `gc::execute_*`: A → B → E(行) を 1 トランザクション（条件を再確認）→ C（`held` と期限を
+      再確認しトラックをロックしてから unlink → CAS で `deleted`）→ D（行が無ければ transcode と
+      同じ `derived_path_locks` の予約を取り、unlink 直前に inode / mtime を照合、空ディレクトリも
+      消す。マイグレーション 0008）→ E(dir)（行が無く猶予超を再確認）。
+      失敗はログして続行、区分ごとの件数・バイト数を `info!`
+- [x] `jobs::handlers::gc`: scan と同じ名前付き排他 `library`（`job_mutexes`。マイグレーション
+      0009、`JobContext::lock_mutex`）を取れなければ `Requeue`。`jobs::scheduler` に backup と共通の
+      周期投入を切り出し、1 日 1 回自動投入
+- [x] `GET /api/gc/preview`（dry-run。`plan` を同期で返す）、`POST /api/gc`。UI は作らない
+- [x] `RootDir::remove_dir`
+
+受け入れ: `tests/gc.rs`（期限前後と実体の有無、CASCADE と履歴の残存、アルバムの構成判定、Archive
+の状態遷移と unlink 失敗、Derived の孤児・tmp・猶予・同じ実行で消える missing の Derived・空
+ディレクトリ・一覧後の差し替え、アートワークの行と dir、scan 中の待ちと dedup、計画後の
+restored / 期限延長 / 他ジョブのロック / 復活 / claim / 参照の出現 / dir の更新で消えないこと、
+GC の予約中は transcode が claim できず残骸は奪えること、mutex を持つ相手がいれば待つこと、
+scan と gc を同時に 5 回投入して両方が完走すること）、
+`tests/gc_api.rs`
+（preview が何も消さない、POST の 202 / 409 / 401、root 無しの 503）
+
+設定画面からの起動は P1-12 (e) で実施済み。Library の同梱ファイルの回収（D-43）は P2-8 で決める
+
+### P1-13 スキャナの ReplayGain 追随
+
+D-47 / D-48 の未決。
+
+- [x] 外部で音声が差し替わった行は解析値を捨てる（`reset_analysis`。tagwrite の overlay 解消も同じ）
+- [x] 外部のタグ変更を取り込んだ行は `rg_written_at` を判定し直す（`sync_written_at`。
+      `Scanner::with_replaygain_reference`）
+
+受け入れ: `tests/rg_write.rs`（音声差し替えで NULL・タグだけの変更は据え置き、RG タグの削除 /
+一致する書き込みで `rg_written_at` が動く、tagwrite の conflict で読んだ音声差し替え）
+
+### P1-12 UI の再構成と起動導線
+
+foobar2000 のレイアウトに寄せる（D-58）。P1 の完了条件「foobar2000 を開かずに日常運用が回る」に
+対して、API だけで UI が無い機能（リネーム / 正規化 / RG / FLAC 検査 / GC）の起動導線と、ジョブ・
+設定画面を揃える。
+
+- [x] (a) レイアウト: ヘッダ → プレイヤーバー（下部バーを上へ）→ 左（ツリー + プレイリスト +
+      固定フィルタ / アルバムアート）・右（プロパティ領域 / 表）。境界はドラッグで可変・永続化。
+      ツリーの表示形式（パターン。組み込み 4 + ユーザ定義）、`filter.album_ids`、既定列
+- [x] (b) プロパティタブ（Metadata / Location / General、共通値、ダブルクリック編集）と
+      `GET /api/tracks/:id` の `detail`
+- [x] (c) 操作タブ（リネーム / 正規化の preview → 適用、RG 解析 / 書き込み、FLAC 検査、
+      プレイリストへ追加）
+- [x] (d) ジョブ画面（SPEC §12.5）。`GET /api/jobs` に `concurrency`（種別ごとの並列度）を追加
+- [x] (e) 設定画面（SPEC §12.6）: `GET /api/config`、再スキャン / deep scan、GC preview → 実行、
+      `GET /api/archive`
+
+受け入れ: `web/src/lib/tree.test.ts`（パターンのパース・ツリーの構築・`album_ids`）、
+`web/src/lib/properties.test.ts`（共通値の畳み込み）、`web/src/lib/operations.test.ts`（件数の
+メッセージと 409 の日本語化）、`web/src/lib/jobs.test.ts`（種別集計・絞り込み）、`tests/jobs.rs`
+（`concurrency`）、`web/src/lib/settings.test.ts`（GC preview の表）、`tests/tracks_query.rs`（`album_ids`）、
+`tests/tracks_api.rs`（`detail`）、`tests/config_api.rs`、`tests/archive_api.rs`。
+各段階で clippy / test / build / lint を通し、(a) はスクショで確認する
 
 ---
 
@@ -757,100 +818,154 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 完了条件: **新規 CD が検証付きで取り込め、既存 FLAC が格付けされる。**
 
-- [ ] **P2-1** ドライブ制御（デバイス割当、`CDROM_DRIVE_STATUS` ポーリング、eject）
-- [ ] **P2-2** TOC 取得と各種 DiscID 算出（MusicBrainz / AccurateRip / FreeDB）
-  - [ ] TOC 取得（`cdrdao read-toc` / SG_IO READ TOC → `Toc`）。ドライブが要る
-  - [x] ID 算出（`src/cd/toc.rs`。ドライブ不要）: `Toc`（LBA、データトラックのフラグ、リードアウト）から
-        MusicBrainz DiscID と `?toc=` 文字列、FreeDB ID、AccurateRip id1 / id2、CTDB の TOC 文字列と TOCID、
-        CRC 用の `TrackLayout`。§7.3 の `from_audio_sample_counts`（588 の倍数でなければ拒否）。
-        Enhanced CD は音声部分の終端をデータトラック開始 − 11400 とし、MB / CTDB はデータトラックを
-        数えない。AccurateRip は CUETools 式（id1 / id2 は音声だけ、リードアウトは実値、FreeDB は
-        データトラックも数える）を既定とし、データトラックを落とした `audio_session()` から作る
-        libdiscid 式の ID も AccurateRip DB に別キーとしてあることを実サーバで確認した。
-        受け入れ: `tests/cd_toc.rs`（MB ドキュメントの 6 トラック例と CD-Extra 例、Nevermind、
-        Hybrid Theory JP Enhanced CD。DiscID は MB ドキュメント / `ws/2` で、AccurateRip ID は
-        実サーバの `dBAR-*.bin` で照合した値。再構成、不正な TOC の拒否、u32 境界）
-- [x] **P2-3** MusicBrainz 照会（UA 必須、1req/s）と候補選択 UI。D-64。`src/cd/musicbrainz.rs`
-      （`MusicBrainzClient`: DiscID → 404 なら `?toc=` の fuzzy、間隔待ち、503 の再試行。`parse_lookup`:
-      リリース × medium の候補、exact / 近似）、`Toc::parse`（CTDB 形式 / MusicBrainz 形式）、
-      `POST /api/cd/lookup { toc }`、設定 `[musicbrainz].url`。UI は CD タブ（`CdView` / `useCdLookup` /
-      `lib/cd.ts`）: ドライブが無い間は TOC の貼り付け（`cdrecord -toc` の出力も可）→ 候補一覧（DiscID 一致 /
-      近似、要約、曲数、長さ）→ 選択でトラック対応。受け入れ: `tests/cd_musicbrainz.rs`（実応答フィクスチャ
-      tests/fixtures/mb/ の解釈: exact / Enhanced CD / fuzzy / 0 件 / joinphrase / フォールバック、ローカル HTTP で
-      DiscID → toc の順・UA・inc・503 の再試行・間隔）、`tests/cd_lookup_api.rs`、`tests/cd_toc.rs`（文字列の往復）、
-      `web/src/lib/cd.test.ts`。残り: 検出（P2-1）で入力源を差し替える
-- [x] **P2-4** **照会ゼロ件でも完走できる手入力経路**とトラックリスト貼り付け。D-65。候補も手入力も
-      同じフォーム（`DiscDraft`。`lib/cd.ts` の `draftFromCandidate` / `emptyDraft`）に写して直し、確定で
-      `DiscMetadata`（`validateDraft` / `finalizeDraft`。P2-5 / P2-8 の入力）。行は TOC の音声トラックと 1:1
-      （`POST /api/cd/lookup` の応答に `tracks: [{ number, length_ms }]`。`Toc::audio_track_sectors`）。
-      貼り付けの行解析は `web/src/lib/tracklist.ts`（番号・時間・アーティストの区切り・表・見出し）で、
-      番号で行に写す（`applyTracklist`。行数の違い・TOC に無い番号・未設定の行を警告）。UI は `CdView` の
-      フォーム（候補ゼロ件なら空のフォームに直行、「候補を使わず手入力」、「空のタイトルを Track NN で埋める」、
-      確定後はタグ名で表示。遷移は `lib/cdState.ts` の reducer）。受け入れ: `web/src/lib/tracklist.test.ts`
-      （番号の形 10 種と全角、年 / 100 以上は番号にしない、番号の重複・飛びの警告、見出し、時間の形と全角、
-      区切りの優先と端・ぶら下がり、artistFirst、タブ区切り）、`web/src/lib/cd.test.ts`（候補の写し・空フォーム・
-      貼り付けの適用と警告・検証・埋め・確定・タグ名の写像）、`web/src/lib/cdState.test.ts`（照会 → 選択 / 手入力 →
-      編集・貼り付け → 確定 → TOC 編集 / reset で下の段が消える）、
-      `tests/cd_toc.rs` / `tests/cd_lookup_api.rs`（`tracks`）。残り: 検出（P2-1）で TOC の入力源を差し替え、
-      吸い出し（P2-5）で `DiscMetadata` を受ける
-- [ ] **P2-5** 吸い出し（全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割）
-- [x] **P2-6** ARv1/v2 CRC と CTDB CRC32（先頭・末尾トラックの除外規則に注意）。`src/cd/`
-      （`TrackLayout` にサンプルを順に流すストリーミング計算。吸い出し PCM と既存 FLAC のデコード結果の
-      両方に同じ形で使う。80 分のディスクで 0.3 秒）。定義は CUETools の `AccurateRip.cs` / `CDRepair.cs`
-      に合わせた: ARv1 は先頭トラックの頭 5×588−1、末尾トラックの尻 5×588 を除外（非対称）、
-      ARv2 は 64 bit 積の上位も加算、AccurateRip DB のプレス違い検出に使う crc450 も併せて算出。
-      CTDB は zlib CRC32 で、ディスクは頭 10 セクタと尻 (10 セクタ + 総数 mod 5880)、トラックは先頭の頭と
-      末尾の尻に同じ除外。受け入れ: `tests/cd_crc.rs`（手計算できる閉じた式での除外規則、v2 の上位加算、
-      語の詰め方、crc450、細切れ push の一致、奇数長の持ち越しと L 余りの拒否、サンプル数の過不足）と、CUETools の定義から独立に書いた
-      Python 実装（`scripts/gen_cd_crc_fixture.py` → `tests/fixtures/cd_crc_reference.json`）との突き合わせ
-- [x] **P2-7** CTDB 照会・修復適用、AccurateRip は補助。照会は P2-9 で済み。修復は `src/cd/repair.rs`
-      （D-66。CUETools `CDRepair` / `RsDecode` / `Parity2Syndrome` の定義: GF(2^16) 0x1100B、stride 11760 語、
-      `SyndromeSampler` → `SyndromeTable`（80 分 3〜5 秒）、`find_offset`（列 0、±2939）、`plan`（BM → Chien →
-      Forney、列あたり npar/2 個まで、直した後の CRC が合うときだけ）、`RepairApplier`（2 回目の走査で XOR）、
-      `decode_entry_syndrome`（`syndrome` / 旧 `parity` 属性）、`DbSyndromes::parse`（面順）)と
-      `CtdbClient::fetch_syndromes`（`hasparity` を Range で先頭 npar 面）。受け入れ: `tests/cd_repair.rs`
-      （表を使わない GF 演算との一致、直接の定義との一致、ずらした列の再計算との一致、LFSR パリティ →
-      シンドローム、実応答の `syndrome` 属性、面順、列ごとの能力内の修復とオフセット付き修復、能力超え、
-      CRC 不一致、範囲外の誤り、乱数ストレス、本番 stride で 1 セクタ丸ごと）、`tests/cd_lookup.rs`
-      （Range の 206 / 200、列 0 の検証、npar 超え、404。実サーバは `#[ignore]`）。残り: 吸い出し（P2-5）で
-      2 回の走査に配線し、直せなければ再リップ / `mismatch`
-- [x] **P2-8** エンコードと配置、`rip.log` / `disc.cue` / `disc.toc` の出力。D-67。
-      `src/cd/place.rs`（`place_disc`: `DiscMetadata` の検証 → トラックごとの PCM MD5 → `pathgen::plan`
+### P2-1 ドライブ制御
+
+- [ ] デバイス割当、`CDROM_DRIVE_STATUS` ポーリング、eject
+
+### P2-2 TOC 取得と各種 DiscID 算出
+
+MusicBrainz / AccurateRip / FreeDB。
+
+- [ ] TOC 取得（`cdrdao read-toc` / SG_IO READ TOC → `Toc`）。ドライブが要る
+- [x] ID 算出（`src/cd/toc.rs`。ドライブ不要）: `Toc`（LBA、データトラックのフラグ、リードアウト）から
+      MusicBrainz DiscID と `?toc=` 文字列、FreeDB ID、AccurateRip id1 / id2、CTDB の TOC 文字列と TOCID、
+      CRC 用の `TrackLayout`。§7.3 の `from_audio_sample_counts`（588 の倍数でなければ拒否）。
+      Enhanced CD は音声部分の終端をデータトラック開始 − 11400 とし、MB / CTDB はデータトラックを
+      数えない。AccurateRip は CUETools 式（id1 / id2 は音声だけ、リードアウトは実値、FreeDB は
+      データトラックも数える）を既定とし、データトラックを落とした `audio_session()` から作る
+      libdiscid 式の ID も AccurateRip DB に別キーとしてあることを実サーバで確認した
+
+受け入れ（ID 算出）: `tests/cd_toc.rs`（MB ドキュメントの 6 トラック例と CD-Extra 例、Nevermind、
+Hybrid Theory JP Enhanced CD。DiscID は MB ドキュメント / `ws/2` で、AccurateRip ID は
+実サーバの `dBAR-*.bin` で照合した値。再構成、不正な TOC の拒否、u32 境界）
+
+### P2-3 MusicBrainz 照会と候補選択 UI
+
+UA 必須、1req/s（D-64）。
+
+- [x] `src/cd/musicbrainz.rs`（`MusicBrainzClient`: DiscID → 404 なら `?toc=` の fuzzy、間隔待ち、503 の
+      再試行。`parse_lookup`: リリース × medium の候補、exact / 近似）、`Toc::parse`（CTDB 形式 /
+      MusicBrainz 形式）、`POST /api/cd/lookup { toc }`、設定 `[musicbrainz].url`
+- [x] UI は CD タブ（`CdView` / `useCdLookup` / `lib/cd.ts`）: ドライブが無い間は TOC の貼り付け
+      （`cdrecord -toc` の出力も可）→ 候補一覧（DiscID 一致 / 近似、要約、曲数、長さ）→ 選択でトラック対応
+
+受け入れ: `tests/cd_musicbrainz.rs`（実応答フィクスチャ tests/fixtures/mb/ の解釈: exact / Enhanced CD /
+fuzzy / 0 件 / joinphrase / フォールバック、ローカル HTTP で DiscID → toc の順・UA・inc・503 の再試行・
+間隔）、`tests/cd_lookup_api.rs`、`tests/cd_toc.rs`（文字列の往復）、`web/src/lib/cd.test.ts`
+
+残り: 検出（P2-1）で入力源を差し替える
+
+### P2-4 照会ゼロ件でも完走できる手入力経路とトラックリスト貼り付け
+
+D-65。候補も手入力も同じフォーム（`DiscDraft`。`lib/cd.ts` の `draftFromCandidate` / `emptyDraft`）に
+写して直し、確定で `DiscMetadata`（`validateDraft` / `finalizeDraft`。P2-5 / P2-8 の入力）。
+
+- [x] 行は TOC の音声トラックと 1:1（`POST /api/cd/lookup` の応答に `tracks: [{ number, length_ms }]`。
+      `Toc::audio_track_sectors`）
+- [x] 貼り付けの行解析は `web/src/lib/tracklist.ts`（番号・時間・アーティストの区切り・表・見出し）で、
+      番号で行に写す（`applyTracklist`。行数の違い・TOC に無い番号・未設定の行を警告）
+- [x] UI は `CdView` のフォーム（候補ゼロ件なら空のフォームに直行、「候補を使わず手入力」、「空のタイトルを
+      Track NN で埋める」、確定後はタグ名で表示。遷移は `lib/cdState.ts` の reducer）
+
+受け入れ: `web/src/lib/tracklist.test.ts`（番号の形 10 種と全角、年 / 100 以上は番号にしない、番号の
+重複・飛びの警告、見出し、時間の形と全角、区切りの優先と端・ぶら下がり、artistFirst、タブ区切り）、
+`web/src/lib/cd.test.ts`（候補の写し・空フォーム・貼り付けの適用と警告・検証・埋め・確定・タグ名の写像）、
+`web/src/lib/cdState.test.ts`（照会 → 選択 / 手入力 → 編集・貼り付け → 確定 → TOC 編集 / reset で下の段が
+消える）、`tests/cd_toc.rs` / `tests/cd_lookup_api.rs`（`tracks`）
+
+残り: 検出（P2-1）で TOC の入力源を差し替え、吸い出し（P2-5）で `DiscMetadata` を受ける
+
+### P2-5 吸い出し
+
+- [ ] 全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割
+
+### P2-6 ARv1/v2 CRC と CTDB CRC32
+
+先頭・末尾トラックの除外規則に注意。`src/cd/`（`TrackLayout` にサンプルを順に流すストリーミング計算。
+吸い出し PCM と既存 FLAC のデコード結果の両方に同じ形で使う。80 分のディスクで 0.3 秒）。
+
+- [x] 定義は CUETools の `AccurateRip.cs` / `CDRepair.cs` に合わせた: ARv1 は先頭トラックの頭 5×588−1、
+      末尾トラックの尻 5×588 を除外（非対称）、ARv2 は 64 bit 積の上位も加算、AccurateRip DB のプレス違い
+      検出に使う crc450 も併せて算出
+- [x] CTDB は zlib CRC32 で、ディスクは頭 10 セクタと尻 (10 セクタ + 総数 mod 5880)、トラックは先頭の頭と
+      末尾の尻に同じ除外
+
+受け入れ: `tests/cd_crc.rs`（手計算できる閉じた式での除外規則、v2 の上位加算、語の詰め方、crc450、
+細切れ push の一致、奇数長の持ち越しと L 余りの拒否、サンプル数の過不足）と、CUETools の定義から独立に
+書いた Python 実装（`scripts/gen_cd_crc_fixture.py` → `tests/fixtures/cd_crc_reference.json`）との
+突き合わせ
+
+### P2-7 CTDB 照会・修復適用
+
+AccurateRip は補助。照会は P2-9 で済み。
+
+- [x] 修復は `src/cd/repair.rs`（D-66。CUETools `CDRepair` / `RsDecode` / `Parity2Syndrome` の定義:
+      GF(2^16) 0x1100B、stride 11760 語、`SyndromeSampler` → `SyndromeTable`（80 分 3〜5 秒）、
+      `find_offset`（列 0、±2939）、`plan`（BM → Chien → Forney、列あたり npar/2 個まで、直した後の CRC が
+      合うときだけ）、`RepairApplier`（2 回目の走査で XOR）、`decode_entry_syndrome`（`syndrome` / 旧
+      `parity` 属性）、`DbSyndromes::parse`（面順））
+- [x] `CtdbClient::fetch_syndromes`（`hasparity` を Range で先頭 npar 面）
+
+受け入れ: `tests/cd_repair.rs`（表を使わない GF 演算との一致、直接の定義との一致、ずらした列の再計算との
+一致、LFSR パリティ → シンドローム、実応答の `syndrome` 属性、面順、列ごとの能力内の修復とオフセット
+付き修復、能力超え、CRC 不一致、範囲外の誤り、乱数ストレス、本番 stride で 1 セクタ丸ごと）、
+`tests/cd_lookup.rs`（Range の 206 / 200、列 0 の検証、npar 超え、404。実サーバは `#[ignore]`）
+
+残り: 吸い出し（P2-5）で 2 回の走査に配線し、直せなければ再リップ / `mismatch`
+
+### P2-8 エンコードと配置
+
+`rip.log` / `disc.cue` / `disc.toc` の出力（D-67）。
+
+- [x] `src/cd/place.rs`（`place_disc`: `DiscMetadata` の検証 → トラックごとの PCM MD5 → `pathgen::plan`
       （category 無しは `unsorted`、複数枚組は `multi_disc`。2 枚目以降は宛先の同名 album に合流）→
       raw PCM を `flac -N --verify --skip/--until` で tmp へ（STREAMINFO の MD5 が PCM と一致するときだけ）
       → lofty でタグ → `library` の排他 → tmp + `RENAME_NOREPLACE` で配置 → 1 トランザクションで `albums` /
       `tracks`（`source_type = cd_rip`、`verification`）/ `track_tags` / `album_verifications`（`source = rip`）/
-      `track_verifications` → `rg` と `transcode` を投入。再実行は MD5 で自分の成果物を見分ける）、
-      `src/cd/metadata.rs`（web の `DiscMetadata` と同じ形 + `category`。検証とタグ写像）、
-      `src/cd/riplog.rs`（`RipReport`、`rip.log` / `disc.cue` / `disc.toc` の描画。複数枚組は `disc<N>.*` /
-      `rip<N>.log`）、`GET/POST /api/categories` と確定フォームの category（`useCategories`）。
-      D-43 の残課題: rename ジョブが commit 後に、album 全体の移動で active な行が無くなった旧ディレクトリの
-      既知の同梱ファイルを宛先へ移し、空なら rmdir（`edit::rename::follow_companions`）。スキャナは spindle の
-      rip.log（先頭行の署名）があるディレクトリの新規行を `cd_rip` にする。verify.log は `data/verify` のまま。
-      受け入れ: `tests/cd_place.rs`（配置・タグ・同梱 3 ファイル・DB 行・後続ジョブ・次のスキャンで不変、
-      not_attempted、複数枚組の合流、別リリースの `({year})` 降格、同じ盤の再実行の冪等性と別音声の衝突、
-      配置後に落ちてスキャナが拾った行の採用、排他中の Busy、PCM 長 / メタデータの拒否）、
-      `tests/cd_metadata.rs`、`tests/cd_riplog.rs`、`tests/scanner.rs`（rip.log → cd_rip）、`tests/rename.rs`
-      （同梱ファイルの追随・衝突・巻き戻し）、`tests/categories_api.rs`、`web/src/lib/cd.test.ts`。
-      残り: P2-5 で `PlaceEnv` を `AppState` から組み立てて `place_disc` を配線する（`Busy` は Requeue、
-      `Conflict` は最終失敗で tmp の PCM を残す）。`POST /api/cd/rip` も P2-5
-- [x] **P2-9** 遡及照合（44.1/16/2ch かつサンプル数が 588 の倍数のときのみ）。D-63。
-      `verify` ジョブ（album 単位、並列 2。`src/jobs/handlers/verify.rs`）: ディスクごとに STREAMINFO の
+      `track_verifications` → `rg` と `transcode` を投入。再実行は MD5 で自分の成果物を見分ける）
+- [x] `src/cd/metadata.rs`（web の `DiscMetadata` と同じ形 + `category`。検証とタグ写像）
+- [x] `src/cd/riplog.rs`（`RipReport`、`rip.log` / `disc.cue` / `disc.toc` の描画。複数枚組は `disc<N>.*` /
+      `rip<N>.log`）
+- [x] `GET/POST /api/categories` と確定フォームの category（`useCategories`）
+- [x] D-43 の残課題: rename ジョブが commit 後に、album 全体の移動で active な行が無くなった旧ディレクトリの
+      既知の同梱ファイルを宛先へ移し、空なら rmdir（`edit::rename::follow_companions`）
+- [x] スキャナは spindle の rip.log（先頭行の署名）があるディレクトリの新規行を `cd_rip` にする。
+      verify.log は `data/verify` のまま
+
+受け入れ: `tests/cd_place.rs`（配置・タグ・同梱 3 ファイル・DB 行・後続ジョブ・次のスキャンで不変、
+not_attempted、複数枚組の合流、別リリースの `({year})` 降格、同じ盤の再実行の冪等性と別音声の衝突、
+配置後に落ちてスキャナが拾った行の採用、排他中の Busy、PCM 長 / メタデータの拒否）、
+`tests/cd_metadata.rs`、`tests/cd_riplog.rs`、`tests/scanner.rs`（rip.log → cd_rip）、`tests/rename.rs`
+（同梱ファイルの追随・衝突・巻き戻し）、`tests/categories_api.rs`、`web/src/lib/cd.test.ts`
+
+残り: P2-5 で `PlaceEnv` を `AppState` から組み立てて `place_disc` を配線する（`Busy` は Requeue、
+`Conflict` は最終失敗で tmp の PCM を残す）。`POST /api/cd/rip` も P2-5
+
+### P2-9 遡及照合
+
+44.1/16/2ch かつサンプル数が 588 の倍数のときのみ（D-63）。
+
+- [x] `verify` ジョブ（album 単位、並列 2。`src/jobs/handlers/verify.rs`）: ディスクごとに STREAMINFO の
       サンプル数から TOC を再構成 → デコードして CRC 表（`src/cd/crctable.rs`。1 回流して ±2939 の
       全オフセットの CRC が出る）→ CTDB / AccurateRip に照会（`CtdbClient` / `AccurateRipClient`。
       **P2-7 の照会部分はここで実装済み**、残りは修復適用）→ オフセットを探して照合
       （`src/cd/verify.rs`）→ `album_verifications`（手法 × ディスク。migration 0013 で `disc_no` と、
       再実行の冪等キー `job_id`）/ `track_verifications` / `tracks.verification` と
-      `data/verify/<album_id>.log`（1 トランザクション。`audio_version` と fstat の再照合が通るときだけ）。
-      `POST /api/verify { selection }` と操作タブの「遡及照合」、設定 `[verify]`（照会先の URL）。
-      受け入れ: `tests/cd_crctable.rs`（ずらした列への直接計算と全オフセットで一致、crc32 combine）、
-      `tests/cd_lookup.rs`（実サーバから保存した bin / XML の解釈、ローカル HTTP でパス・クエリ・
-      UA・404）、`tests/cd_verify.rs`（合成エントリでのオフセット検出、壊れたトラック、候補の絞り込み）、
-      `tests/verify_job.rs`（ffmpeg で作った FLAC で verified / offset / AR のみ / mismatch / not_found /
-      unverifiable / 不完全 / 複数ディスク / 照会失敗 / 再照合の履歴 / 照合中の版更新・差し替え・
-      キャンセル / 原子性 / ログ確定失敗の巻き戻し / commit 後の再実行の冪等性）、`tests/verify_api.rs`
-- [x] **P2-10** Inbox 取り込み（ステージング → 承認キュー → 配置）。D-68。
-      `src/import/inbox.rs`（`scan_inbox`: `[paths].inbox` を走査して音声のあるディレクトリを 1 件として
+      `data/verify/<album_id>.log`（1 トランザクション。`audio_version` と fstat の再照合が通るときだけ）
+- [x] `POST /api/verify { selection }` と操作タブの「遡及照合」、設定 `[verify]`（照会先の URL）
+
+受け入れ: `tests/cd_crctable.rs`（ずらした列への直接計算と全オフセットで一致、crc32 combine）、
+`tests/cd_lookup.rs`（実サーバから保存した bin / XML の解釈、ローカル HTTP でパス・クエリ・
+UA・404）、`tests/cd_verify.rs`（合成エントリでのオフセット検出、壊れたトラック、候補の絞り込み）、
+`tests/verify_job.rs`（ffmpeg で作った FLAC で verified / offset / AR のみ / mismatch / not_found /
+unverifiable / 不完全 / 複数ディスク / 照会失敗 / 再照合の履歴 / 照合中の版更新・差し替え・
+キャンセル / 原子性 / ログ確定失敗の巻き戻し / commit 後の再実行の冪等性）、`tests/verify_api.rs`
+
+### P2-10 Inbox 取り込み
+
+ステージング → 承認キュー → 配置（D-68）。
+
+- [x] `src/import/inbox.rs`（`scan_inbox`: `[paths].inbox` を走査して音声のあるディレクトリを 1 件として
       `inbox_items` / `inbox_files` に登録（root 直下は rel_dir ""）。ファイルが変われば読み直して pending に
       戻し、消えた件は行ごと消す。`proposal`: タグから下書き（albumartist / album / date / category は
       genre 写像、トラックは DISCNUMBER / TRACKNUMBER / TITLE / ARTIST、無ければファイル名順）。
@@ -858,18 +973,20 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       （MUSICBRAINZ_ALBUMID → 自分の成果物の album のキー → `inbox:<id>` のリリースキーで `pathgen::plan` →
       tmp + `RENAME_NOREPLACE`、補正はファイルのタグに書く → 1 トランザクションで `albums` / `tracks`
       （`source_type = download`）/ `track_tags` → Inbox 側を消す → `rg` / `transcode`、wav / alac / aiff は
-      `[normalize].wav_to_flac` なら normalize バッチも投入。再実行は音声の指紋で自分の成果物を見分ける）、
-      `src/import/placement.rs`（CD の配置と共通の tmp + rename / album の解決 / 行の登録。リリースキーは
-      登録トランザクションで再検証）、`src/jobs/handlers/inbox.rs`（`inbox` ジョブ = 走査 + 承認済みの配置。
-      `[inbox].poll_interval_secs`（既定 60、0 で自動なし）の周期投入と「今すぐ確認」）、`db/migrations/0014`、
-      `src/db/inbox.rs`、`src/api/inbox.rs`（`GET /api/inbox`、`POST /api/inbox/scan`、
-      `POST /api/inbox/{id}/approve|reject|reopen`）、web の Inbox タブ（`lib/inbox.ts` / `useInbox` /
-      `InboxView`: 件の一覧とアルバム単位 + トラック単位の補正フォーム、placed からアルバムへ）。
-      受け入れ: `tests/inbox_job.rs`（検出、変更の読み直しと承認の取り消し、消えた件、placed の期限切れ、
-      補正付きの配置と同梱ファイル・DB 行・後続ジョブ・Inbox の消費、wav の normalize 投入の有無、
-      衝突 → failed と後始末、排他が取れないときの再投入、配置中の変更、再実行の冪等性、placing のまま
-      落ちた件の回復、コピー前の差し替えの検出、登録前 / 登録後に落ちた後の完了、placed のディレクトリに残った音声、normalize の投入と登録の原子性）、
-      `tests/inbox_draft.rs`、`tests/inbox_db.rs`、`tests/inbox_api.rs`、`web/src/lib/inbox.test.ts`
+      `[normalize].wav_to_flac` なら normalize バッチも投入。再実行は音声の指紋で自分の成果物を見分ける）
+- [x] `src/import/placement.rs`（CD の配置と共通の tmp + rename / album の解決 / 行の登録。リリースキーは
+      登録トランザクションで再検証）
+- [x] `src/jobs/handlers/inbox.rs`（`inbox` ジョブ = 走査 + 承認済みの配置。`[inbox].poll_interval_secs`
+      （既定 60、0 で自動なし）の周期投入と「今すぐ確認」）、`db/migrations/0014`、`src/db/inbox.rs`
+- [x] `src/api/inbox.rs`（`GET /api/inbox`、`POST /api/inbox/scan`、`POST /api/inbox/{id}/approve|reject|reopen`）
+- [x] web の Inbox タブ（`lib/inbox.ts` / `useInbox` / `InboxView`: 件の一覧とアルバム単位 + トラック単位の
+      補正フォーム、placed からアルバムへ）
+
+受け入れ: `tests/inbox_job.rs`（検出、変更の読み直しと承認の取り消し、消えた件、placed の期限切れ、
+補正付きの配置と同梱ファイル・DB 行・後続ジョブ・Inbox の消費、wav の normalize 投入の有無、
+衝突 → failed と後始末、排他が取れないときの再投入、配置中の変更、再実行の冪等性、placing のまま
+落ちた件の回復、コピー前の差し替えの検出、登録前 / 登録後に落ちた後の完了、placed のディレクトリに残った音声、normalize の投入と登録の原子性）、
+`tests/inbox_draft.rs`、`tests/inbox_db.rs`、`tests/inbox_api.rs`、`web/src/lib/inbox.test.ts`
 
 ---
 
@@ -877,64 +994,90 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 完了条件: **ytmusic CLI を廃止できる。**
 
-- [x] **P3-1** タイトルパーサ → **メタデータプラグインのプロトコル v1**。D-69。タイトルの慣習は spindle に
-      置かず、外部コマンド（`[ytmusic].metadata_command`。参照実装 `AkashiSN/spindle-ytmusic-meta`。Python 版
-      ytmusic のテスト 98 件から生成したフィクスチャで一致を保証）に JSON で問い合わせる。
-      `src/import/ytmusic/metadata.rs`（`Request` / `Response` / `Track`、`MetadataProvider::resolve`:
+### P3-1 タイトルパーサ → メタデータプラグインのプロトコル v1
+
+D-69。タイトルの慣習は spindle に置かず、外部コマンド（`[ytmusic].metadata_command`。参照実装
+`AkashiSN/spindle-ytmusic-meta`。Python 版 ytmusic のテスト 98 件から生成したフィクスチャで一致を
+保証）に JSON で問い合わせる。
+
+- [x] `src/import/ytmusic/metadata.rs`（`Request` / `Response` / `Track`、`MetadataProvider::resolve`:
       引数配列で起動 → stdin に Request → stdout の Response を検証。タイムアウト・非ゼロ終了・不正な JSON・
-      必須の値の欠落は `ProviderError`、`ok: false` は `Outcome::Declined { reason, message }`）。
-      受け入れ: `tests/ytmusic_metadata.rs`（偽のプラグインで: 往復と stdin の内容、`ok: false` の各 reason、
-      非ゼロ終了、不正な JSON、プロトコル違い、空の必須値、タイムアウト、起動失敗）、`tests/config.rs`、
-      `tests/docker_context.rs`（`include_str!` / rust-embed の埋め込み元が Dockerfile の build stage に
-      COPY されている）。`ExternalCommand::stdin_bytes`（stdin へ書いて閉じる）を追加
-- [x] **P3-2** チャンネル定義とカテゴリ写像 → チャンネル定義はプラグイン側（D-69）。spindle は `Track` を
-      タグ（`Track::tags(track_no)`: TITLE / ARTIST 多値 / ALBUM / ALBUMARTIST / DATE / TRACKNUMBER + 追加タグ）と
-      `pathgen::TrackFields`（`Track::track_fields`）に写し、`category` は `db::categories::ensure` で無ければ
-      語彙に追加する。受け入れ: `tests/ytmusic_metadata.rs`（写像）、`tests/categories_api.rs`（ensure）
-- [x] **P3-3** ダウンローダ（yt-dlp を subprocess）→ **Inbox に置くところまで**（D-70。配置・採番・後続は Inbox）
-      - [x] ジョブ基盤: `JobError::Fatal`（バックオフせず `failed`）、`JobType::Ytdl`（並列 1）
-      - [x] `[ytmusic].download_timeout_secs`、起動時診断（`metadata_command[0]` と yt-dlp の実行可否を警告）
-      - [x] サイドカー `spindle-inbox.json` の読み書き（`import/ytmusic/sidecar.rs`。merge は tmp + rename）
-      - [x] Inbox: 既存 album の採用（MB キー無し同士）、TRACKNUMBER 無しの採番（max + 1 から名前順）、承認と
-            登録トランザクションでの `(disc_no, track_no)` の重複検証、`destination` / `source` の応答、
-            サイドカーの category 提案と配置成功時の削除、pending に戻った件の下書き merge
-      - [x] `downloader.rs` + `handlers/ytdl.rs`: dump（playlist 展開）→ SOURCE_URL の重複 → プラグイン →
-            download → remux → タグ（PICTURE / SOURCE_URL）→ Archive/youtube/<id>.webm → Inbox + サイドカー → inbox 投入
-      - [x] `POST /api/ytmusic/download`、操作タブの「YouTube」節、Inbox タブの宛先表示と判定バッジ / message
-      - [x] Dockerfile に deno（yt-dlp の JS ランタイム）。compose のプラグインのマウント例
-      - [x] 受け入れ: `tests/ytmusic_download.rs`（偽 yt-dlp（bash）+ 偽プラグインで ok / unmatched / skip /
-            playlist / 重複 / Fatal と Failed の区別、dump の解釈、ファイル名。実 yt-dlp の通しは `#[ignore]`）、
-            `tests/ytmusic_api.rs`、`tests/ytmusic_sidecar.rs`、`tests/inbox_job.rs`（追記・番号の再検証・
-            サイドカーの削除）、`tests/inbox_api.rs`（destination / source / 採番 / 400 / merge）、
-            `tests/inbox_draft.rs`、`tests/jobs.rs`（Fatal）、`tests/config.rs`（起動時診断）
-- [x] **P3-4** ~~ytmusic ダウンロード後の Derived 投入~~ → **配置直後のアートワーク解決**に縮小。Opus 原本に
-      Derived は無く（非可逆 → 非可逆禁止）、rg は Inbox の配置で投入済み。残っていた「次のスキャンまで画像が
-      出ない」を、配置の直後にその album だけ解決して thumbnail を投入する形で埋めた
-      （`scanner::resolve_album_artwork_now`、`PlaceItemEnv.artwork`。D-68 追記）。受け入れ:
-      `tests/inbox_job.rs`（埋め込み画像から解決して thumbnail 投入、画像なしは「なし」で解決）
-- [x] **P3-5** 偽ハイレゾ検出（`rustfft`、任意機能。SPEC §7.10、D-71。表示と絞り込みだけで、判定を消費する
-      自動処理は無い）
-      - [x] `media/hires.rs`: `HiresSink`（PcmSink。Hann 8192 / ホップ 8192 の FFT をチャンネルごとに累積、
-            無音フレーム除外、サンプルの OR）→ `Measurement { cutoff_hz, cliff_db, effective_bits }`（候補は
-            1/3 オクターブ平滑化、エッジは平滑化前の段差最大、崖は平滑化前。境界は SPEC §7.10）→ `[hires]` の
-            しきい値で `Verdict`。受け入れ: `tests/hires_analysis.rs`（逆 FFT の合成信号で: 96 kHz の 22.05 kHz と
-            24 kHz の brickwall → upsampled でエッジ ± 数百 Hz、帯域外が完全ゼロでも有限、緩やかなロールオフ →
-            inconclusive、全帯域 → ok（cutoff = Nyquist）、下位 8 bit ゼロ → padded / both、44.1k はスペクトル
-            なし、全無音・32 bit → inconclusive で計測値 NULL、2ch は cutoff 最大の ch と対の cliff、判定の優先順位）
-      - [x] `db/migrations/0016_hires_check.sql`: `tracks.hires_check*` + `hires_cutoff_hz` / `hires_cliff_db` /
-            `hires_effective_bits`、`jobs.type` に `hirescheck`（0015 と同じ表の作り直し）。`db/hires.rs`（Status /
-            Target / record / enqueue_all_unchecked / enqueue_selection）。受け入れ: `tests/migrations.rs`、
-            `tests/hires_db.rs`、`tests/jobs.rs`
-      - [x] `jobs/handlers/hirescheck.rs`（並列 = max(1, コア数 / 2)、`version_field` で stale ゲートと track_locks、
-            fstat 照合 → decode → デコード後の再照合 → 版付き record。デコード失敗は `decode_error`）。`[hires]` 設定
-            （`tests/config.rs`）。スキャン commit での自動投入。受け入れ: `tests/hires_job.rs`（合成 24/96 FLAC で
-            ok / padded、44.1k の 24 bit はスペクトルなし、対象外・差し替え済み・版が進んだ件は記録なし、壊れた
-            ファイルは decode_error、スキャンの自動投入と再投入なし、ffmpeg 経路（WavPack）の整数スケール）
-      - [x] `tracks` の行に `hires_check`、`Flag::HiresUnchecked` / `HiresSuspect`、DSL の `hirescheck` / `cutoff` /
-            `cliff`（`Kind::Float`）/ `effectivebits`、fb2k は変換不能。`POST /api/hirescheck`。受け入れ:
-            `tests/dsl_compile.rs`、`tests/fb2k.rs`、`tests/hirescheck_api.rs`
-      - [x] UI: H バッジ（疑い / inconclusive / エラー、stale は •）、プロパティ「Hi-Res check」（判定 + 計測値）、
-            フィルタ、操作タブ「偽ハイレゾを検出」、ジョブ名。`web/src/lib/{badges,properties,operations}.test.ts`
+      必須の値の欠落は `ProviderError`、`ok: false` は `Outcome::Declined { reason, message }`）
+- [x] `ExternalCommand::stdin_bytes`（stdin へ書いて閉じる）を追加
+
+受け入れ: `tests/ytmusic_metadata.rs`（偽のプラグインで: 往復と stdin の内容、`ok: false` の各 reason、
+非ゼロ終了、不正な JSON、プロトコル違い、空の必須値、タイムアウト、起動失敗）、`tests/config.rs`、
+`tests/docker_context.rs`（`include_str!` / rust-embed の埋め込み元が Dockerfile の build stage に
+COPY されている）
+
+### P3-2 チャンネル定義とカテゴリ写像
+
+チャンネル定義はプラグイン側（D-69）。
+
+- [x] spindle は `Track` をタグ（`Track::tags(track_no)`: TITLE / ARTIST 多値 / ALBUM / ALBUMARTIST / DATE /
+      TRACKNUMBER + 追加タグ）と `pathgen::TrackFields`（`Track::track_fields`）に写し、`category` は
+      `db::categories::ensure` で無ければ語彙に追加する
+
+受け入れ: `tests/ytmusic_metadata.rs`（写像）、`tests/categories_api.rs`（ensure）
+
+### P3-3 ダウンローダ
+
+yt-dlp を subprocess で呼び、**Inbox に置くところまで**（D-70。配置・採番・後続は Inbox）。
+
+- [x] ジョブ基盤: `JobError::Fatal`（バックオフせず `failed`）、`JobType::Ytdl`（並列 1）
+- [x] `[ytmusic].download_timeout_secs`、起動時診断（`metadata_command[0]` と yt-dlp の実行可否を警告）
+- [x] サイドカー `spindle-inbox.json` の読み書き（`import/ytmusic/sidecar.rs`。merge は tmp + rename）
+- [x] Inbox: 既存 album の採用（MB キー無し同士）、TRACKNUMBER 無しの採番（max + 1 から名前順）、承認と
+      登録トランザクションでの `(disc_no, track_no)` の重複検証、`destination` / `source` の応答、
+      サイドカーの category 提案と配置成功時の削除、pending に戻った件の下書き merge
+- [x] `downloader.rs` + `handlers/ytdl.rs`: dump（playlist 展開）→ SOURCE_URL の重複 → プラグイン →
+      download → remux → タグ（PICTURE / SOURCE_URL）→ Archive/youtube/<id>.webm → Inbox + サイドカー → inbox 投入
+- [x] `POST /api/ytmusic/download`、操作タブの「YouTube」節、Inbox タブの宛先表示と判定バッジ / message
+- [x] Dockerfile に deno（yt-dlp の JS ランタイム）。compose のプラグインのマウント例
+
+受け入れ: `tests/ytmusic_download.rs`（偽 yt-dlp（bash）+ 偽プラグインで ok / unmatched / skip /
+playlist / 重複 / Fatal と Failed の区別、dump の解釈、ファイル名。実 yt-dlp の通しは `#[ignore]`）、
+`tests/ytmusic_api.rs`、`tests/ytmusic_sidecar.rs`、`tests/inbox_job.rs`（追記・番号の再検証・
+サイドカーの削除）、`tests/inbox_api.rs`（destination / source / 採番 / 400 / merge）、
+`tests/inbox_draft.rs`、`tests/jobs.rs`（Fatal）、`tests/config.rs`（起動時診断）
+
+### P3-4 配置直後のアートワーク解決
+
+~~ytmusic ダウンロード後の Derived 投入~~ から縮小。Opus 原本に Derived は無く（非可逆 → 非可逆禁止）、
+rg は Inbox の配置で投入済み。
+
+- [x] 残っていた「次のスキャンまで画像が出ない」を、配置の直後にその album だけ解決して thumbnail を
+      投入する形で埋めた（`scanner::resolve_album_artwork_now`、`PlaceItemEnv.artwork`。D-68 追記）
+
+受け入れ: `tests/inbox_job.rs`（埋め込み画像から解決して thumbnail 投入、画像なしは「なし」で解決）
+
+### P3-5 偽ハイレゾ検出
+
+`rustfft`、任意機能（SPEC §7.10、D-71）。表示と絞り込みだけで、判定を消費する自動処理は無い。
+
+- [x] `media/hires.rs`: `HiresSink`（PcmSink。Hann 8192 / ホップ 8192 の FFT をチャンネルごとに累積、
+      無音フレーム除外、サンプルの OR）→ `Measurement { cutoff_hz, cliff_db, effective_bits }`（候補は
+      1/3 オクターブ平滑化、エッジは平滑化前の段差最大、崖は平滑化前。境界は SPEC §7.10）→ `[hires]` の
+      しきい値で `Verdict`
+- [x] `db/migrations/0016_hires_check.sql`: `tracks.hires_check*` + `hires_cutoff_hz` / `hires_cliff_db` /
+      `hires_effective_bits`、`jobs.type` に `hirescheck`（0015 と同じ表の作り直し）。`db/hires.rs`（Status /
+      Target / record / enqueue_all_unchecked / enqueue_selection）
+- [x] `jobs/handlers/hirescheck.rs`（並列 = max(1, コア数 / 2)、`version_field` で stale ゲートと track_locks、
+      fstat 照合 → decode → デコード後の再照合 → 版付き record。デコード失敗は `decode_error`）。`[hires]` 設定
+      （`tests/config.rs`）。スキャン commit での自動投入
+- [x] `tracks` の行に `hires_check`、`Flag::HiresUnchecked` / `HiresSuspect`、DSL の `hirescheck` / `cutoff` /
+      `cliff`（`Kind::Float`）/ `effectivebits`、fb2k は変換不能。`POST /api/hirescheck`
+- [x] UI: H バッジ（疑い / inconclusive / エラー、stale は •）、プロパティ「Hi-Res check」（判定 + 計測値）、
+      フィルタ、操作タブ「偽ハイレゾを検出」、ジョブ名
+
+受け入れ: `tests/hires_analysis.rs`（逆 FFT の合成信号で: 96 kHz の 22.05 kHz と 24 kHz の brickwall →
+upsampled でエッジ ± 数百 Hz、帯域外が完全ゼロでも有限、緩やかなロールオフ → inconclusive、全帯域 →
+ok（cutoff = Nyquist）、下位 8 bit ゼロ → padded / both、44.1k はスペクトルなし、全無音・32 bit →
+inconclusive で計測値 NULL、2ch は cutoff 最大の ch と対の cliff、判定の優先順位）、`tests/migrations.rs`、
+`tests/hires_db.rs`、`tests/jobs.rs`、`tests/hires_job.rs`（合成 24/96 FLAC で ok / padded、44.1k の 24 bit は
+スペクトルなし、対象外・差し替え済み・版が進んだ件は記録なし、壊れたファイルは decode_error、スキャンの
+自動投入と再投入なし、ffmpeg 経路（WavPack）の整数スケール）、`tests/dsl_compile.rs`、`tests/fb2k.rs`、
+`tests/hirescheck_api.rs`、`web/src/lib/{badges,properties,operations}.test.ts`
 
 ---
 
@@ -942,289 +1085,416 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 
 完了条件は未定。P0〜P3 の残課題から決めたものだけを置く。設計は着手時に行う。
 
-- [x] **P4-1** CPU 系ジョブの共通並列予算（D-73。2026-09-20）。`worker.rs` に共有 Semaphore（= コア数）、`rg` /
-      `transcode` / `flaccheck` / `hirescheck` が種別の上限に加えて取る。`GET /api/jobs` に `cpu_budget`
-      （`concurrency` の兄弟。D-73 追記）。受け入れ: `tests/jobs.rs`（コア数 2 で rg + flaccheck の同時投入で
-      実行中の合計が 2 を超えない、4 種を固めて投入しても先頭 6 本に 4 種が揃う（ラウンドロビン）、thumbnail は
-      縛られない）、`web/src/lib/jobs.test.ts`（脚注）
-- [x] **P4-2** CD 確定フォームの「候補から写す範囲」（D-72。2026-09-21）。既定は識別用の最小限（ALBUM / ALBUMARTIST /
-      DATE / DISCNUMBER / DISCTOTAL / TRACKTOTAL / MB id）、「全部写す」で LABEL / CATALOGNUMBER / BARCODE /
-      トラックのタイトル・アーティスト・ISRC も。`web/src/lib/cdState.ts` の reducer に 1 アクション。受け入れ:
-      `web/src/lib/cdState.test.ts`
-- [x] **P4-3** プロパティタブのフィールド削除 / 追加（D-72。2026-09-21）。右クリック（または行末の ×）で `delete` op、
-      「フィールドを追加」で新しいキーに `set` op。どちらも選択全体への一括編集（preview → apply）。
-      受け入れ: `web/src/lib/properties.test.ts`（コンポーネントテストの基盤が無いので、画面は実機で確認）
-- [x] **P4-4** Inbox 承認画面の忠実表示（D-70 追記。2026-09-20）。ARTIST の全値を `;` 区切りで見せ、`keep_artists` で
-      「そのまま保つ / 1 値で書く」を明示。Inbox のファイルの埋め込み画像を返す `GET /api/inbox/:id/artwork/:hash`
-      （`PICTURE` のハッシュで実体を照合、Library の artwork と同じ ETag / キャッシュ）と承認画面のサムネイル。
-      受け入れ: `tests/inbox_api.rs`、`tests/inbox_job.rs`、`web/src/lib/inbox.test.ts`
-- [x] **P4-5** album gain を album ごとの属性に（D-74。2026-09-20）。`db/migrations/0017_album_gain.sql`（`albums.album_gain`
-      既定 0、既存の `tracks.rg_album_*` を NULL）。rg の投入経路（`POST /api/rg`、承認後、CD 配置後。スキャンは投入しない）
-      は属性で album / track 単位を選ぶ。`cd/place.rs` は true で作る。承認画面のチェックボックス（既定 off、追記先
-      album の現在値が初期値）。アルバム画面の切り替え（`PATCH /api/albums/:id { album_gain }` → true なら album 単位
-      の rg を投入、false なら `rg_album_*` を NULL にして未書込に）。書き出しは false なら album のキーを書かず、
-      あれば消す。受け入れ: `tests/migrations.rs`、`tests/rg_job.rs`（track 単位の投入と album の集計なし）、
-      `tests/rg_api.rs`、`tests/cd_place.rs`、`tests/inbox_api.rs`、`tests/albums_api.rs`。実装: 切り替えは操作タブ
-      （アルバム画面は無い）、`tests/rg_db.rs`（属性の読み書きと投入単位）、`tests/inbox_job.rs`（下書きの album_gain）、
-      web は `lib/albumGain.ts` / `lib/inbox.ts`
-- [x] **P4-6** アルバム一覧をトラック一覧と同じフィルタで絞る（D-58 追記。2026-09-20）。`GET /api/albums?filter=`（トラック一覧と
-      同じ JSON フィルタ。指定があれば一致する active なトラックを 1 本以上持つ album だけ。`WHERE a.id IN (SELECT
-      t.album_id FROM tracks t … WHERE <db/tracks.rs の既存の WHERE>)` で、ツリーの `album_ids` / `category` /
-      `playlist_id`（静的・スマート）/ `flags` / `dsl` / `q` をそのまま再利用）。web は `useAlbums(filterParam)` で
-      ツリー・プレイリスト・検索語の変更で取り直す。受け入れ: `tests/albums_api.rs`（album_ids / category /
-      静的プレイリスト / スマートプレイリスト / q で絞れる、フィルタ無しは全件、不正なフィルタは 400）
-- [x] **P4-7** Derived の系統化と Opus 256k（D-9 追記、D-51 追記、D-75、SPEC §7.6。2026-09-20）。新しい連番のマイグレーションで
-      `delivery` ビューを DROP → `derived_files` を `(track_id, variant)` 主キー + `audio_profile` / `tag_profile` で
-      作り直し（既存行は `variant = 'opus'`、`audio_profile = 'opus:128:v1'`、`tag_profile = 'opus:v1'`）→ ビューを
-      `variant = 'opus'` で再作成。`[encode]` を `[encode.derived.opus] { enabled, bitrate }` に改め（`derived_codec` /
-      `derived_bitrate` は廃止。deploy/config.example.toml と SPEC §13 を揃える）、`domain/derived.rs` の `plan()` に
-      variant と `audio_profile`（違えば Encode）/ `tag_profile`（違えば Retag）、`enabled = false` の凍結（Skip）を
-      足す。パスは `Derived/opus/…`。`transcode` の dedup キーとロックに variant、scan 完了時の投入は enabled な
-      系統ごと。`playlist/compile.rs` の `has_derived` と `db/tracks.rs` の `Flag` / `derived` 集約を `variant = 'opus'`
-      に限定。`GET /api/tracks` の `derived` を系統ごとの形に（web の `TrackRow.derived`、D バッジは opus のまま、
-      プロパティ Location 列に系統ごとの行）。受け入れ: `tests/migrations.rs`（ビュー DROP → 作り直し → 再作成の順、
-      既存行の variant / profile、`delivery` が opus だけを指す）、`tests/derived_plan.rs`（`audio_profile` 差分で
-      Encode、`tag_profile` 差分で Retag、enabled=false で Skip、旧ルート直下の行は 128k → 256k なら Encode で
-      `opus/` へ、profile 一致でパスだけ違えば Move）、`tests/transcode_job.rs`（Encode 後の旧パスの退避と削除、
-      Move で `opus/` 配下へ）、`tests/dsl_compile.rs`（`has_derived` が opus 限定）、`tests/config.rs`、
-      `tests/tracks_api.rs`（2 系統あっても行は 1 つで `derived` に両方）、`web/src/lib/properties.test.ts`
-- [x] **P4-8** Apple 向け `aac` 系統（D-75、D-8 追記、SPEC §7.6。2026-09-20）。`[encode.derived.aac] { enabled（節省略時
-      false）, bitrate, lossy_sources, multi_value_separator }`、0019 で `derived_variants` に `lossy_sources` /
-      `multi_value_separator`（`sync_variants(&DerivedConfig)` が両系統を写す）。`media/encode.rs` に `AacEncoder`
-      （ffmpeg 1 パス: `-af volume=<gain>dB [-ar 48000] -c:a aac -b:a <k>k -f mp4`。aac 原本も同じ経路）。
-      `domain/derived.rs`: `Target.rg_ready`（時刻 + gain + peak）、`eligible(&VariantSettings, &Target)`（`aac` は
-      `lossy_sources` で非可逆も、RG 未解析は待つ）、`aac` の RG 世代差分 → Encode、`bake_gain_db`（true peak で
-      頭打ち、非有限は 0 / 上限なし）、`aac_tags`（多値を区切りで結合、RG 系と既存 ITUNNORM を落として `iTunNORM`
-      0 dB）。`domain/tags.rs::write_mp4_tags`（ilst 標準 atom + `----:com.apple.iTunes:<KEY>` フリーフォーム +
-      `covr`）。画像は `ThumbFormat::Jpeg` の 768（`thumbs/<hex>/768.jpg`）。transcode ハンドラは両エンコーダを持ち
-      系統で分岐（予約・占有・配置・退避・drift は共通）。Dockerfile の変更なし。受け入れ: `tests/migrations.rs`
-      （0019）、`tests/config.rs`、`tests/derived_db.rs`（sync と RG 待ちの投入）、`tests/derived.rs`（非可逆の対象化、
-      RG 未解析で Skip、RG 世代で Encode、`tag_profile` で Retag、`bake_gain_db` の境界）、`tests/aac_tags.rs`
-      （結合、iTunNORM、RG キー無し、`ffprobe` でフリーフォーム atom を外部観測）、`tests/aac_encode.rs`（ebur128 で
-      gain 0 / 負 / 正、96k → 48k、44.1k / 48k 据え置き、非可逆 3 形式、cancel）、`tests/artwork.rs`（JPEG 768）、
-      `tests/transcode_job.rs`（可逆 → AAC の読み戻し・焼き込み・peak 上限・96k → 48k・opus / aac 原本の再エンコード・
-      RG 世代の作り直し・`lossy_sources` off の据え置き・タグ上書き・区切り変更の Retag・両系統の共存）
+### P4-1 CPU 系ジョブの共通並列予算
 
-- [x] **P4-9** 終端を書けなかった `running` の稼働中回収（SPEC §8、D-76）。ジョブの
-      終端状態（done / failed / requeue）を DB に書けなかったとき（2026-09-20 の実機でディスク満杯により 88 本）、
-      `src/jobs/worker.rs::execute` のフォールバック（failed の記録）も同じ理由で失敗し、行が `running` のまま
-      次回起動のリカバリまで残る（ロックも残る）。候補: (a) 終端書き込みをバックオフ付きで再試行（数十秒〜数分。
-      一時的な満杯・ロックなら自力で復帰）、(b) ワーカーのループで `Jobs.running`（実行中の token 表）に無い
-      `running` 行を定期的に queued へ戻し、`track_locks` / `derived_path_locks` / `job_mutexes` も解放する
-      （起動時リカバリの稼働中版。単一インスタンス前提なので安全）。両方入れるのが妥当。docker のログも満杯で
-      落ちるので、回収したことは次に書けたときにログとジョブの `last_error` に残す。受け入れ: `tests/jobs.rs`
-      （終端書き込みを失敗させる DB フック or 読み取り専用化で `running` を作り、回収で queued に戻りロックが
-      消える。実行中の本物の running は戻さない）、SPEC §8 に回収の記述
+D-73。2026-09-20。
 
-- [x] **P4-10** ダークテーマ（D-58 追記、SPEC §12 / §12.6。2026-09-21）。`index.css` の直書き色 59 箇所を
-      `:root` の変数に集約（バッジは `--badge-<hue>-bg` / `-fg` の対）、ダークは `:root[data-theme='dark']` の
-      1 ブロックで全変数を差し替え（`color-scheme` も）。`lib/theme.ts`（`resolveTheme`: 保存値 > OS、
-      `load` / `saveThemePref`）、`hooks/useTheme.ts`（`prefers-color-scheme` の変化を購読して `<html data-theme>`
-      に書く）、`index.html` のインラインスクリプトで初回描画前に同じ規則で付ける（白飛び防止）。切り替えは
-      設定画面の「表示」節（OS に従う / ライト / ダーク）。受け入れ: `web/src/lib/theme.test.ts`（解決・保存・
-      不正値、`index.css?raw` を読んで直書き色が 2 ブロック以外に無いこと、両ブロックの変数集合が一致すること。
-      `vitest.config.ts` に `css: true`）、Vite の開発サーバから実機 API に中継して一覧（選択行・凡例・
-      プロパティ）/ アルバム / Inbox / CD / ジョブ / 履歴（partial の failed 行）/ 設定をダークで目視、
-      ラジオでライト → OS → ダークの切り替えとライトの回帰なしを確認
+- [x] `worker.rs` に共有 Semaphore（= コア数）、`rg` / `transcode` / `flaccheck` / `hirescheck` が種別の
+      上限に加えて取る
+- [x] `GET /api/jobs` に `cpu_budget`（`concurrency` の兄弟。D-73 追記）
 
-- [x] **P4-11** Library の MP4（ALAC / AAC）に任意キーを読み書きする（D-77、SPEC §7.5「形式ごとの写像」。
-      2026-09-21）。旧 Library 経路（`write_tag_changes` の `FileType::Mp4` → lofty の generic `Tag` →
-      `apply_generic`）は `ItemKey` の写像表に無いキー（`SPINDLETEST` 等の独自キー。`CATALOGNUMBER` / `LABEL` /
-      `BARCODE` / MB id は lofty 0.25 が `----:com.apple.iTunes:*` に写像済み）を書けず、読み戻しの照合で
-      安全側に失敗していた。読み側（`Ilst` → `Tag`）もフリーフォーム atom を捨てていた。`domain::tags` に
-      `mp4_target`（写像は 1 か所。`ITUNNORM_KEY` を `derived.rs` から移して共有）と `apply_ilst`（標準 atom は
-      lofty の `Tag` → `Ilst` 変換に載せ、`trkn` / `disk` の相方を保つ。フリーフォームは大小文字無視で消して
-      から 1 atom の複数値で書く）を置き、Library の MP4 分岐と Derived の `write_mp4_tags` が共有する。読みは
-      `collect_mp4`（`split_tag` の残りから `com.apple.iTunes` のフリーフォームを大文字化したキーで取り込む）。
-      受け入れ: `tests/tags_write.rs`（独自キー・多値・`iTunNORM` の綴り・削除、大小文字違いの既存 atom の
-      置き換え、標準キーは標準 atom のまま = ffprobe、`TRACKTOTAL` だけ変えても `TRACKNUMBER` が残る）、
-      `tests/tags_read.rs`（フリーフォームの多値・小文字名・`iTunNORM`、標準 atom と同名は標準が勝つ）、
-      `tests/edits.rs`（ALAC に `set` → `delete` が applied）、実機で ALAC の 1 曲に追加 → 削除
+受け入れ: `tests/jobs.rs`（コア数 2 で rg + flaccheck の同時投入で実行中の合計が 2 を超えない、4 種を
+固めて投入しても先頭 6 本に 4 種が揃う（ラウンドロビン）、thumbnail は縛られない）、
+`web/src/lib/jobs.test.ts`（脚注）
 
-- [x] **P4-12** CI / CD の整理と Docker イメージの配布（2026-09-21。SPEC §14「イメージの配布」、D-79。
-      (7) は Dependabot / 自作ワークフローでなく **Renovate**（`renovate.json`。yt-dlp は `# renovate:` 注釈の
-      custom manager）。(8) の `v0.1.0` はまだ切らず `edge` までを完了とする（スカッシュと最初のタグは
-      リリース時）。ユーザ側の作業: GHCR のパッケージを public に、Renovate の GitHub App をインストール）。
-      受け入れ確認済み: `main` への push で `edge` / `sha-<7>` が push され（`docker push` は load した
-      イメージで「unknown blob」になるので skopeo で daemon から複製）、リハーサル環境の compose を `edge` に
-      切り替えて `compose pull` → `/health` が `{"status":"ok","version":"a10fb0d","ytdlp":"2026.08.19"}`。
-      以下は着手時の設計メモ。いまは `.github/workflows/ci.yml`
-      が web（lint / build）→ rust（fmt / clippy / test）→ docker（build + `/health` 等の起動確認）まで行うが、
-      イメージはどこにも push しておらず、`deploy/compose.yaml` の `ghcr.io/akashisn/spindle:latest` は存在
-      しない。実機は `git archive` → ホストで `docker build` → `spindle:local` の手作業（`/root/spindle-migration/
-      build.sh`）。決めること: (1) 置き場は GHCR（`ghcr.io/akashisn/spindle`。compose が既に指している）。
-      パッケージを public にして pull にトークンを不要にする。プラグイン（`spindle-ytmusic-meta`）は
-      D-70 どおり焼かず、実行時マウントのまま。(2) タグ: `main` への push で `edge` と `sha-<7 桁>`、`vX.Y.Z`
-      タグで `X.Y.Z` / `X.Y` / `latest`。PR は build と起動確認だけで push しない。(3) CI の docker ジョブで
-      作ったイメージを**そのまま** push する（起動確認に通ったものと同じ digest。二度ビルドしない。
-      `docker/build-push-action` の `load` + `push` か、`docker/metadata-action` でタグを組んで最後に push）。
-      buildx の GHA キャッシュは今のまま。(4) platform は `linux/amd64` のみ（TrueNAS。arm64 は Rust の
-      クロスビルドが遅く需要も無い。要るときに足す）。(5) イメージに版を焼く: `org.opencontainers.image.
-      {source,revision,version,created}` のラベルと、`spindle --version` / `GET /health` の `version`
-      （`git describe` か sha。`build.rs` か `vergen` で埋める。実機の「いまどのコミットが動いているか」を
-      docker のログではなく `/health` で答えられるように）。(6) 本番は TrueNAS のカスタムアプリ（compose 相当）として動かす
-      ので、更新は TrueNAS の UI でイメージを pull し直す操作になる。自動配備は作らず、README「起動」と
-      docs/OPERATIONS.md に「カスタムアプリの作り方（`deploy/compose.yaml` を写す。デバイス・GID・
-      ボリューム・プラグインのマウント）と更新手順（`latest` / `X.Y` のどれを指すか、pull → 再作成、
-      `/health` の `version` で確認、DB のマイグレーションは起動時に自動で前進のみ = 戻すときは
-      バックアップから）」を書く。リハーサル環境は GHCR の `edge` を使うようにし、`build.sh` は開発中の
-      未コミット確認用に残す。
-      (7) **yt-dlp の更新**を仕組みにする（YouTube の抽出は yt-dlp が古いと壊れる。いまは Dockerfile の
-      `ARG YTDLP_VERSION=2026.08.19` 固定を手で上げている）: 週 1 の `schedule` で yt-dlp の最新リリースを
-      GitHub API から取り、`ARG` を書き換える PR を自動で作る（Dependabot は `ADD https://…` の版を追えない）
-      → CI が通ればマージして `edge` を作り直す。本番へは次の `vX.Y.Z` で届く（yt-dlp だけの更新でもパッチ版を
-      切る。カスタムアプリ側の更新は手動なので、OPERATIONS に「YouTube の取り込みが失敗し始めたらまず
-      イメージを更新する」と書く）。あわせてベースイメージ（`debian:bookworm-slim` / `node` /
-      `rust` / `denoland/deno`）と GitHub Actions は Dependabot（`docker` / `github-actions`）で追う。
-      `/health` に yt-dlp の版（`yt-dlp --version` を起動時診断で取る）を出し、実機で確認できるように。(8) `vX.Y.Z` の GitHub Release（自動生成のノート）を作るかは任意。Release には
-      イメージのタグと digest だけ書く。**スカッシュ（`db/migrations` を `0001` に畳む）はこの前提**: 公開
-      イメージを誰かが pull して DB を作った後は既存ファイルを書き換えられないので、畳むなら最初の
-      `vX.Y.Z` より前（リリース時の再移行で DB を作り直すとき）に 1 回だけ行い、D-xx に記録する。
-      `edge` は開発用で DB の互換を約束しない旨を README に書く。受け入れ: `main` への push で GHCR に
-      `edge` / `sha-*` が push され、`docker pull ghcr.io/akashisn/spindle:edge` して `/health` が 200 かつ
-      `version` に sha が入る（CI の起動確認に `version` の検査を足す）、`vX.Y.Z` タグで `latest` が動く
-      （最初のタグはリリース時）、PR では push されない、実機を `compose pull` で更新して `/health` の
-      `version` が一致する、README / OPERATIONS の更新手順
+### P4-2 CD 確定フォームの「候補から写す範囲」
 
-- [x] **P4-13** YouTube の導線を独立した画面に（D-70 追記、SPEC §12.6。2026-09-21。ジョブ一覧は
-      `GET /api/jobs?type=ytdl`（上限は種別内。全種別共通の上限だと transcode の完了 300 件に押し出される）。
-      完了の中身は 0020 の `jobs.note`（`Outcome::DoneWith`）で区別する。再生リストの展開時に `SOURCE_URL` の
-      ある動画は投入しない = 実機で再生リストを貼ると新しいものだけ落ちる。entries の URL は id から正規形を組む。
-      codex のレビューで修正）。いまは右パネル「操作」タブの中の
-      `YouTube` 節（URL 欄 + ダウンロード）で、選択したトラックへの操作と混ざって見つけにくく、投入した後の
-      行方（ジョブ → Inbox）も自分で探す必要がある。上部バーを `一覧 / アルバム / Inbox / CD / YouTube /
-      ジョブ` にして `YouTube` 画面を置く（取り込み元は Inbox / CD / YouTube で横並び、結果は Inbox に集まる。
-      SPEC §7.7、D-70）。画面: (1) URL 欄（1 行 1 つ。動画 / playlist。playlist は既に entries ごとに展開
-      される）と「ダウンロード」、(2) その下に ytdl ジョブの一覧（`GET /api/jobs?type=ytdl`。URL・状態・
-      失敗理由・完了した件は「Inbox で確認」で件へ飛ぶ。SSE で追随）、(2') **購読の節**（P4-16 の UI。
-      再生リスト URL ↔ 追記先 album の一覧、登録 / 削除 / 有効・無効、「今すぐ同期」、最終同期時刻と
-      結果。P4-13 の時点では API が無ければ枠だけ置いて P4-16 で埋める）、(3) 「操作」タブの YouTube 節は消す
-      （`lib/operations.ts` の `startYoutube` と `youtubeStartedMessage` を画面側へ）。(4) **URL の受け渡しを
-      楽にする**: SPA のルート `/youtube?url=<URL>` で URL 欄を埋めて開く（同一 origin の GET なので CORS /
-      CSRF の問題が無い。未ログインならログイン後にそのまま）。これで「いま見ている動画を spindle へ」の
-      ブックマークレット（`javascript:open('http://<spindle>/youtube?url='+encodeURIComponent(location.href))`）
-      と、「このページの動画リンクを全部集めてクリップボードへ」のブックマークレット（チャンネルの動画一覧 /
-      検索結果 / playlist ページから `a[href*="/watch?v="]` を集めて改行区切りに）を README に載せる。
-      (5) `[bin].ytdlp` を引数付きにできるように（`ytdlp_args = ["--extractor-args", "youtube:player_client=…"]`
+D-72。2026-09-21。
+
+- [x] 既定は識別用の最小限（ALBUM / ALBUMARTIST / DATE / DISCNUMBER / DISCTOTAL / TRACKTOTAL / MB id）、
+      「全部写す」で LABEL / CATALOGNUMBER / BARCODE / トラックのタイトル・アーティスト・ISRC も。
+      `web/src/lib/cdState.ts` の reducer に 1 アクション
+
+受け入れ: `web/src/lib/cdState.test.ts`
+
+### P4-3 プロパティタブのフィールド削除 / 追加
+
+D-72。2026-09-21。
+
+- [x] 右クリック（または行末の ×）で `delete` op、「フィールドを追加」で新しいキーに `set` op。どちらも
+      選択全体への一括編集（preview → apply）
+
+受け入れ: `web/src/lib/properties.test.ts`（コンポーネントテストの基盤が無いので、画面は実機で確認）
+
+### P4-4 Inbox 承認画面の忠実表示
+
+D-70 追記。2026-09-20。
+
+- [x] ARTIST の全値を `;` 区切りで見せ、`keep_artists` で「そのまま保つ / 1 値で書く」を明示
+- [x] Inbox のファイルの埋め込み画像を返す `GET /api/inbox/:id/artwork/:hash`（`PICTURE` のハッシュで実体を
+      照合、Library の artwork と同じ ETag / キャッシュ）と承認画面のサムネイル
+
+受け入れ: `tests/inbox_api.rs`、`tests/inbox_job.rs`、`web/src/lib/inbox.test.ts`
+
+### P4-5 album gain を album ごとの属性に
+
+D-74。2026-09-20。
+
+- [x] `db/migrations/0017_album_gain.sql`（`albums.album_gain` 既定 0、既存の `tracks.rg_album_*` を NULL）
+- [x] rg の投入経路（`POST /api/rg`、承認後、CD 配置後。スキャンは投入しない）は属性で album / track 単位を
+      選ぶ。`cd/place.rs` は true で作る
+- [x] 承認画面のチェックボックス（既定 off、追記先 album の現在値が初期値）
+- [x] 切り替え（`PATCH /api/albums/:id { album_gain }` → true なら album 単位の rg を投入、false なら
+      `rg_album_*` を NULL にして未書込に）。切り替えは操作タブ（アルバム画面は無い）
+- [x] 書き出しは false なら album のキーを書かず、あれば消す
+- [x] web は `lib/albumGain.ts` / `lib/inbox.ts`
+
+受け入れ: `tests/migrations.rs`、`tests/rg_job.rs`（track 単位の投入と album の集計なし）、`tests/rg_api.rs`、
+`tests/rg_db.rs`（属性の読み書きと投入単位）、`tests/cd_place.rs`、`tests/inbox_api.rs`、
+`tests/inbox_job.rs`（下書きの album_gain）、`tests/albums_api.rs`
+
+### P4-6 アルバム一覧をトラック一覧と同じフィルタで絞る
+
+D-58 追記。2026-09-20。
+
+- [x] `GET /api/albums?filter=`（トラック一覧と同じ JSON フィルタ。指定があれば一致する active なトラックを
+      1 本以上持つ album だけ。`WHERE a.id IN (SELECT t.album_id FROM tracks t … WHERE <db/tracks.rs の既存の
+      WHERE>)` で、ツリーの `album_ids` / `category` / `playlist_id`（静的・スマート）/ `flags` / `dsl` / `q` を
+      そのまま再利用）
+- [x] web は `useAlbums(filterParam)` でツリー・プレイリスト・検索語の変更で取り直す
+
+受け入れ: `tests/albums_api.rs`（album_ids / category / 静的プレイリスト / スマートプレイリスト / q で絞れる、
+フィルタ無しは全件、不正なフィルタは 400）
+
+### P4-7 Derived の系統化と Opus 256k
+
+D-9 追記、D-51 追記、D-75、SPEC §7.6。2026-09-20。
+
+- [x] 新しい連番のマイグレーションで `delivery` ビューを DROP → `derived_files` を `(track_id, variant)` 主キー +
+      `audio_profile` / `tag_profile` で作り直し（既存行は `variant = 'opus'`、`audio_profile = 'opus:128:v1'`、
+      `tag_profile = 'opus:v1'`）→ ビューを `variant = 'opus'` で再作成
+- [x] `[encode]` を `[encode.derived.opus] { enabled, bitrate }` に改め（`derived_codec` / `derived_bitrate` は
+      廃止。deploy/config.example.toml と SPEC §13 を揃える）
+- [x] `domain/derived.rs` の `plan()` に variant と `audio_profile`（違えば Encode）/ `tag_profile`（違えば
+      Retag）、`enabled = false` の凍結（Skip）を足す。パスは `Derived/opus/…`
+- [x] `transcode` の dedup キーとロックに variant、scan 完了時の投入は enabled な系統ごと
+- [x] `playlist/compile.rs` の `has_derived` と `db/tracks.rs` の `Flag` / `derived` 集約を `variant = 'opus'`
+      に限定
+- [x] `GET /api/tracks` の `derived` を系統ごとの形に（web の `TrackRow.derived`、D バッジは opus のまま、
+      プロパティ Location 列に系統ごとの行）
+
+受け入れ: `tests/migrations.rs`（ビュー DROP → 作り直し → 再作成の順、既存行の variant / profile、`delivery` が
+opus だけを指す）、`tests/derived_plan.rs`（`audio_profile` 差分で Encode、`tag_profile` 差分で Retag、
+enabled=false で Skip、旧ルート直下の行は 128k → 256k なら Encode で `opus/` へ、profile 一致でパスだけ
+違えば Move）、`tests/transcode_job.rs`（Encode 後の旧パスの退避と削除、Move で `opus/` 配下へ）、
+`tests/dsl_compile.rs`（`has_derived` が opus 限定）、`tests/config.rs`、`tests/tracks_api.rs`（2 系統あっても
+行は 1 つで `derived` に両方）、`web/src/lib/properties.test.ts`
+
+### P4-8 Apple 向け `aac` 系統
+
+D-75、D-8 追記、SPEC §7.6。2026-09-20。
+
+- [x] `[encode.derived.aac] { enabled（節省略時 false）, bitrate, lossy_sources, multi_value_separator }`、
+      0019 で `derived_variants` に `lossy_sources` / `multi_value_separator`（`sync_variants(&DerivedConfig)`
+      が両系統を写す）
+- [x] `media/encode.rs` に `AacEncoder`（ffmpeg 1 パス: `-af volume=<gain>dB [-ar 48000] -c:a aac -b:a <k>k
+      -f mp4`。aac 原本も同じ経路）
+- [x] `domain/derived.rs`: `Target.rg_ready`（時刻 + gain + peak）、`eligible(&VariantSettings, &Target)`
+      （`aac` は `lossy_sources` で非可逆も、RG 未解析は待つ）、`aac` の RG 世代差分 → Encode、
+      `bake_gain_db`（true peak で頭打ち、非有限は 0 / 上限なし）、`aac_tags`（多値を区切りで結合、RG 系と
+      既存 ITUNNORM を落として `iTunNORM` 0 dB）
+- [x] `domain/tags.rs::write_mp4_tags`（ilst 標準 atom + `----:com.apple.iTunes:<KEY>` フリーフォーム +
+      `covr`）。画像は `ThumbFormat::Jpeg` の 768（`thumbs/<hex>/768.jpg`）
+- [x] transcode ハンドラは両エンコーダを持ち系統で分岐（予約・占有・配置・退避・drift は共通）。
+      Dockerfile の変更なし
+
+受け入れ: `tests/migrations.rs`（0019）、`tests/config.rs`、`tests/derived_db.rs`（sync と RG 待ちの投入）、
+`tests/derived.rs`（非可逆の対象化、RG 未解析で Skip、RG 世代で Encode、`tag_profile` で Retag、
+`bake_gain_db` の境界）、`tests/aac_tags.rs`（結合、iTunNORM、RG キー無し、`ffprobe` でフリーフォーム atom を
+外部観測）、`tests/aac_encode.rs`（ebur128 で gain 0 / 負 / 正、96k → 48k、44.1k / 48k 据え置き、非可逆
+3 形式、cancel）、`tests/artwork.rs`（JPEG 768）、`tests/transcode_job.rs`（可逆 → AAC の読み戻し・焼き込み・
+peak 上限・96k → 48k・opus / aac 原本の再エンコード・RG 世代の作り直し・`lossy_sources` off の据え置き・
+タグ上書き・区切り変更の Retag・両系統の共存）
+
+### P4-9 終端を書けなかった `running` の稼働中回収
+
+SPEC §8、D-76。ジョブの終端状態（done / failed / requeue）を DB に書けなかったとき（2026-09-20 の実機で
+ディスク満杯により 88 本）、`src/jobs/worker.rs::execute` のフォールバック（failed の記録）も同じ理由で
+失敗し、行が `running` のまま次回起動のリカバリまで残る（ロックも残る）。候補 (a) / (b) の両方を入れるのが
+妥当。
+
+- [x] (a) 終端書き込みをバックオフ付きで再試行（数十秒〜数分。一時的な満杯・ロックなら自力で復帰）
+- [x] (b) ワーカーのループで `Jobs.running`（実行中の token 表）に無い `running` 行を定期的に queued へ戻し、
+      `track_locks` / `derived_path_locks` / `job_mutexes` も解放する（起動時リカバリの稼働中版。
+      単一インスタンス前提なので安全）
+- [x] docker のログも満杯で落ちるので、回収したことは次に書けたときにログとジョブの `last_error` に残す
+
+受け入れ: `tests/jobs.rs`（終端書き込みを失敗させる DB フック or 読み取り専用化で `running` を作り、
+回収で queued に戻りロックが消える。実行中の本物の running は戻さない）、SPEC §8 に回収の記述
+
+### P4-10 ダークテーマ
+
+D-58 追記、SPEC §12 / §12.6。2026-09-21。
+
+- [x] `index.css` の直書き色 59 箇所を `:root` の変数に集約（バッジは `--badge-<hue>-bg` / `-fg` の対）、
+      ダークは `:root[data-theme='dark']` の 1 ブロックで全変数を差し替え（`color-scheme` も）
+- [x] `lib/theme.ts`（`resolveTheme`: 保存値 > OS、`load` / `saveThemePref`）、`hooks/useTheme.ts`
+      （`prefers-color-scheme` の変化を購読して `<html data-theme>` に書く）、`index.html` のインライン
+      スクリプトで初回描画前に同じ規則で付ける（白飛び防止）
+- [x] 切り替えは設定画面の「表示」節（OS に従う / ライト / ダーク）
+
+受け入れ: `web/src/lib/theme.test.ts`（解決・保存・不正値、`index.css?raw` を読んで直書き色が 2 ブロック
+以外に無いこと、両ブロックの変数集合が一致すること。`vitest.config.ts` に `css: true`）、Vite の開発
+サーバから実機 API に中継して一覧（選択行・凡例・プロパティ）/ アルバム / Inbox / CD / ジョブ / 履歴
+（partial の failed 行）/ 設定をダークで目視、ラジオでライト → OS → ダークの切り替えとライトの回帰なしを
+確認
+
+### P4-11 Library の MP4（ALAC / AAC）に任意キーを読み書きする
+
+D-77、SPEC §7.5「形式ごとの写像」。2026-09-21。旧 Library 経路（`write_tag_changes` の `FileType::Mp4` →
+lofty の generic `Tag` → `apply_generic`）は `ItemKey` の写像表に無いキー（`SPINDLETEST` 等の独自キー。
+`CATALOGNUMBER` / `LABEL` / `BARCODE` / MB id は lofty 0.25 が `----:com.apple.iTunes:*` に写像済み）を
+書けず、読み戻しの照合で安全側に失敗していた。読み側（`Ilst` → `Tag`）もフリーフォーム atom を捨てていた。
+
+- [x] `domain::tags` に `mp4_target`（写像は 1 か所。`ITUNNORM_KEY` を `derived.rs` から移して共有）と
+      `apply_ilst`（標準 atom は lofty の `Tag` → `Ilst` 変換に載せ、`trkn` / `disk` の相方を保つ。
+      フリーフォームは大小文字無視で消してから 1 atom の複数値で書く）を置き、Library の MP4 分岐と
+      Derived の `write_mp4_tags` が共有する
+- [x] 読みは `collect_mp4`（`split_tag` の残りから `com.apple.iTunes` のフリーフォームを大文字化したキーで
+      取り込む）
+
+受け入れ: `tests/tags_write.rs`（独自キー・多値・`iTunNORM` の綴り・削除、大小文字違いの既存 atom の
+置き換え、標準キーは標準 atom のまま = ffprobe、`TRACKTOTAL` だけ変えても `TRACKNUMBER` が残る）、
+`tests/tags_read.rs`（フリーフォームの多値・小文字名・`iTunNORM`、標準 atom と同名は標準が勝つ）、
+`tests/edits.rs`（ALAC に `set` → `delete` が applied）、実機で ALAC の 1 曲に追加 → 削除
+
+### P4-12 CI / CD の整理と Docker イメージの配布
+
+2026-09-21。SPEC §14「イメージの配布」、D-79。
+
+- [x] (1) 置き場は GHCR（`ghcr.io/akashisn/spindle`）。パッケージは public。プラグイン
+      （`spindle-ytmusic-meta`）は D-70 どおり焼かず、実行時マウントのまま
+- [x] (2) タグ: `main` への push で `edge` と `sha-<7 桁>`、`vX.Y.Z` タグで `X.Y.Z` / `X.Y` / `latest`。
+      PR は build と起動確認だけで push しない
+- [x] (3) CI の docker ジョブで作ったイメージを**そのまま** push する（起動確認に通ったものと同じ digest。
+      `docker push` は load したイメージで「unknown blob」になるので skopeo で daemon から複製）
+- [x] (4) platform は `linux/amd64` のみ
+- [x] (5) イメージに版を焼く: `org.opencontainers.image.{source,revision,version,created}` のラベルと、
+      `spindle --version` / `GET /health` の `version`
+- [x] (6) README「起動」と docs/OPERATIONS.md にカスタムアプリの作り方と更新手順。リハーサル環境は GHCR の
+      `edge` を使い、`build.sh` は開発中の未コミット確認用に残す
+- [x] (7) yt-dlp の更新は Dependabot / 自作ワークフローでなく **Renovate**（`renovate.json`。yt-dlp は
+      `# renovate:` 注釈の custom manager）。`/health` に yt-dlp の版
+- [x] (8) `v0.1.0` はまだ切らず `edge` までを完了とする（スカッシュと最初のタグはリリース時）。
+      ユーザ側の作業: GHCR のパッケージを public に、Renovate の GitHub App をインストール
+
+受け入れ（確認済み）: `main` への push で `edge` / `sha-<7>` が push され、リハーサル環境の compose を
+`edge` に切り替えて `compose pull` → `/health` が `{"status":"ok","version":"a10fb0d","ytdlp":"2026.08.19"}`。
+`docker pull ghcr.io/akashisn/spindle:edge` して `/health` が 200 かつ `version` に sha が入る（CI の
+起動確認に `version` の検査を足す）、`vX.Y.Z` タグで `latest` が動く（最初のタグはリリース時）、PR では
+push されない、実機を `compose pull` で更新して `/health` の `version` が一致する、README / OPERATIONS の
+更新手順
+
+着手時の設計メモ: いまは `.github/workflows/ci.yml`
+が web（lint / build）→ rust（fmt / clippy / test）→ docker（build + `/health` 等の起動確認）まで行うが、
+イメージはどこにも push しておらず、`deploy/compose.yaml` の `ghcr.io/akashisn/spindle:latest` は存在
+しない。実機は `git archive` → ホストで `docker build` → `spindle:local` の手作業（`/root/spindle-migration/
+build.sh`）。決めること: (1) 置き場は GHCR（`ghcr.io/akashisn/spindle`。compose が既に指している）。
+パッケージを public にして pull にトークンを不要にする。プラグイン（`spindle-ytmusic-meta`）は
+D-70 どおり焼かず、実行時マウントのまま。(2) タグ: `main` への push で `edge` と `sha-<7 桁>`、`vX.Y.Z`
+タグで `X.Y.Z` / `X.Y` / `latest`。PR は build と起動確認だけで push しない。(3) CI の docker ジョブで
+作ったイメージを**そのまま** push する（起動確認に通ったものと同じ digest。二度ビルドしない。
+`docker/build-push-action` の `load` + `push` か、`docker/metadata-action` でタグを組んで最後に push）。
+buildx の GHA キャッシュは今のまま。(4) platform は `linux/amd64` のみ（TrueNAS。arm64 は Rust の
+クロスビルドが遅く需要も無い。要るときに足す）。(5) イメージに版を焼く: `org.opencontainers.image.
+{source,revision,version,created}` のラベルと、`spindle --version` / `GET /health` の `version`
+（`git describe` か sha。`build.rs` か `vergen` で埋める。実機の「いまどのコミットが動いているか」を
+docker のログではなく `/health` で答えられるように）。(6) 本番は TrueNAS のカスタムアプリ（compose 相当）として動かす
+ので、更新は TrueNAS の UI でイメージを pull し直す操作になる。自動配備は作らず、README「起動」と
+docs/OPERATIONS.md に「カスタムアプリの作り方（`deploy/compose.yaml` を写す。デバイス・GID・
+ボリューム・プラグインのマウント）と更新手順（`latest` / `X.Y` のどれを指すか、pull → 再作成、
+`/health` の `version` で確認、DB のマイグレーションは起動時に自動で前進のみ = 戻すときは
+バックアップから）」を書く。リハーサル環境は GHCR の `edge` を使うようにし、`build.sh` は開発中の
+未コミット確認用に残す。
+(7) **yt-dlp の更新**を仕組みにする（YouTube の抽出は yt-dlp が古いと壊れる。いまは Dockerfile の
+`ARG YTDLP_VERSION=2026.08.19` 固定を手で上げている）: 週 1 の `schedule` で yt-dlp の最新リリースを
+GitHub API から取り、`ARG` を書き換える PR を自動で作る（Dependabot は `ADD https://…` の版を追えない）
+→ CI が通ればマージして `edge` を作り直す。本番へは次の `vX.Y.Z` で届く（yt-dlp だけの更新でもパッチ版を
+切る。カスタムアプリ側の更新は手動なので、OPERATIONS に「YouTube の取り込みが失敗し始めたらまず
+イメージを更新する」と書く）。あわせてベースイメージ（`debian:bookworm-slim` / `node` /
+`rust` / `denoland/deno`）と GitHub Actions は Dependabot（`docker` / `github-actions`）で追う。
+`/health` に yt-dlp の版（`yt-dlp --version` を起動時診断で取る）を出し、実機で確認できるように。(8) `vX.Y.Z` の GitHub Release（自動生成のノート）を作るかは任意。Release には
+イメージのタグと digest だけ書く。**スカッシュ（`db/migrations` を `0001` に畳む）はこの前提**: 公開
+イメージを誰かが pull して DB を作った後は既存ファイルを書き換えられないので、畳むなら最初の
+`vX.Y.Z` より前（リリース時の再移行で DB を作り直すとき）に 1 回だけ行い、D-xx に記録する。
+`edge` は開発用で DB の互換を約束しない旨を README に書く。
+
+### P4-13 YouTube の導線を独立した画面に
+
+D-70 追記、SPEC §12.6。2026-09-21。それまでは右パネル「操作」タブの中の `YouTube` 節（URL 欄 +
+ダウンロード）で、選択したトラックへの操作と混ざって見つけにくく、投入した後の行方（ジョブ → Inbox）も
+自分で探す必要があった。上部バーを `一覧 / アルバム / Inbox / CD / YouTube / ジョブ` にして `YouTube`
+画面を置く（取り込み元は Inbox / CD / YouTube で横並び、結果は Inbox に集まる。SPEC §7.7、D-70）。
+
+- [x] (1) URL 欄（1 行 1 つ。動画 / playlist。playlist は entries ごとに展開される）と「ダウンロード」。
+      再生リストの展開時に `SOURCE_URL` のある動画は投入しない = 実機で再生リストを貼ると新しいものだけ
+      落ちる。entries の URL は id から正規形を組む
+- [x] (2) その下に ytdl ジョブの一覧（`GET /api/jobs?type=ytdl`。上限は種別内。全種別共通の上限だと
+      transcode の完了 300 件に押し出される。URL・状態・失敗理由・完了した件は「Inbox で確認」で件へ飛ぶ。
+      SSE で追随）。完了の中身は 0020 の `jobs.note`（`Outcome::DoneWith`）で区別する
+- [x] (2') **購読の節**（P4-16 の UI。再生リスト URL ↔ 追記先 album の一覧、登録 / 削除 / 有効・無効、
+      「今すぐ同期」、最終同期時刻と結果。P4-13 の時点では API が無ければ枠だけ置いて P4-16 で埋める）
+- [x] (3) 「操作」タブの YouTube 節は消す（`lib/operations.ts` の `startYoutube` と `youtubeStartedMessage`
+      を画面側へ）
+- [x] (4) **URL の受け渡しを楽にする**: SPA のルート `/youtube?url=<URL>` で URL 欄を埋めて開く（同一 origin
+      の GET なので CORS / CSRF の問題が無い。未ログインならログイン後にそのまま）。「いま見ている動画を
+      spindle へ」のブックマークレット（`javascript:open('http://<spindle>/youtube?url='+encodeURIComponent(location.href))`）
+      と、「このページの動画リンクを全部集めてクリップボードへ」のブックマークレット（チャンネルの動画
+      一覧 / 検索結果 / playlist ページから `a[href*="/watch?v="]` を集めて改行区切りに）を README に載せる
+      （2026-09-22 に `docs/USERGUIDE.md` §11.3 へ移した）
+- [x] (5) `[bin].ytdlp` を引数付きにできるように（`ytdlp_args = ["--extractor-args", "youtube:player_client=…"]`
       か `ytdlp = ["yt-dlp", …]` の配列。`sh -c` は使わない）。ブロック時に `--extractor-args` / `--cookies` を
-      設定で渡す口。UA / Referer は付けない（yt-dlp の YouTube 抽出は player client の偽装で innertube を叩く
-      ので、ブラウザ UA を上書きすると食い違って弾かれる。yt-dlp の公式見解）。受け入れ: `web/src/lib/
-      youtube.test.ts`（URL 行の解析は `parseUrlLines` を移す、`?url=` の取り出し、ジョブ行の整形）、
-      `tests/jobs_api.rs`（`type=ytdl` で絞れる）、`tests/config.rs`（引数配列）、実機でブックマークレット →
-      画面が開いて URL が入る → ダウンロード → 一覧に出て Inbox へ飛べる
+      設定で渡す口。UA / Referer は付けない（yt-dlp の YouTube 抽出は player client の偽装で innertube を
+      叩くので、ブラウザ UA を上書きすると食い違って弾かれる。yt-dlp の公式見解）
+- [x] codex のレビューで修正
 
-- [x] **P4-14** 既存の webm 由来トラックへの `SOURCE_URL` 補填（一度きり。2026-09-21 に実機で適用済み: 9 バッチ
-      #10〜#18、1,508 件 applied / conflict 0、Derived の aac 1,508 本がタグ追随。残り 6 件のうち 5 件は
-      ユーザが再生リストに追加 → 再実行のバッチ #19〜#23 で付いた。再生リストが無い `柊マグネタイトの曲` の
-      1 曲だけリポジトリ外の `singles.tsv` に URL を保管し、リリース時の再移行で手で付ける（MIGRATION §5-3-2）。
-      `set_rows` op は D-42 追記、スクリプトは `scripts/backfill_source_url.py` +
-      `scripts/test_backfill_source_url.py`。実機で分かったこと: 開発機の古い yt-dlp（2026.06）は再生リストの
-      continuation を黙って取りこぼす（`entries < playlist_count` で中止する検出を入れた。`--ytdlp "ssh …
-      docker exec … yt-dlp"` で実機の版を使える）、再生リストから消えた動画の後ろは位置が 1 ずれる、
-      初期の動画は英題で Library の邦題と照合できない。対応付けは 位置 + タイトル → 未割り当て行から
-      タイトルで救済（一致の長い行 → 近い位置を優先）→ 両隣が同じずれで対応する区間は位置推定、の 3 段。
-      位置推定は区間内の入れ替えを検出できないので既定では書かず `--include-inferred` で明示、部分一致は
-      ASCII 英数字の境界を要求、既に `SOURCE_URL` を持つ行は上書きしない。codex のレビューで修正）。D-70 の重複
-      防止は `SOURCE_URL` を見るが、移行で取り込んだ webm 由来の Opus 1,512 本（実機。P3 で取り込んだ 1 本を除く）
-      には無く、旧 `Original/*.webm` のメタデータにも id は無い（`encoder=google/video-file` のみ）。手掛かりは
-      ユーザが YouTube 側で保守してきた**アーティストごとの再生リスト**: 旧パイプラインは「再生リスト名 =
-      アルバム名（`花譜のお歌` 等 10 アルバム）、再生リスト内の位置 = `TRACKNUMBER`」で並べており（実機で
-      確認: 各アルバムが 1 から連番、`花譜のお歌` は 244 曲で 1〜246 = 2 つ欠番）、非公開になった動画も
-      リストには `[Private video]` として id と位置が残る。再生リストの URL 一覧と計画 CSV はリポジトリ外に保管する（公開リポジトリに
-      置かない。リリース時の再移行で `SOURCE_URL` は消えるので、同じ入力で再適用する）。手順:
-      `scripts/backfill_source_url.py`（標準ライブラリのみ。yt-dlp と spindle の API を使う）で (1) 再生リスト
-      URL ごとに `yt-dlp --flat-playlist
+受け入れ: `web/src/lib/youtube.test.ts`（URL 行の解析は `parseUrlLines` を移す、`?url=` の取り出し、ジョブ行の
+整形）、`tests/jobs_api.rs`（`type=ytdl` で絞れる）、`tests/config.rs`（引数配列）、実機でブックマークレット →
+画面が開いて URL が入る → ダウンロード → 一覧に出て Inbox へ飛べる
+
+### P4-14 既存の webm 由来トラックへの `SOURCE_URL` 補填
+
+一度きり。D-70 の重複防止は `SOURCE_URL` を見るが、移行で取り込んだ webm 由来の Opus 1,512 本（実機。P3 で
+取り込んだ 1 本を除く）には無く、旧 `Original/*.webm` のメタデータにも id は無い（`encoder=google/video-file`
+のみ）。手掛かりはユーザが YouTube 側で保守してきた**アーティストごとの再生リスト**: 旧パイプラインは
+「再生リスト名 = アルバム名（`花譜のお歌` 等 10 アルバム）、再生リスト内の位置 = `TRACKNUMBER`」で並べて
+おり（実機で確認: 各アルバムが 1 から連番、`花譜のお歌` は 244 曲で 1〜246 = 2 つ欠番）、非公開になった
+動画もリストには `[Private video]` として id と位置が残る。再生リストの URL 一覧と計画 CSV はリポジトリ外に
+保管する（公開リポジトリに置かない。リリース時の再移行で `SOURCE_URL` は消えるので、同じ入力で再適用する）。
+
+- [x] `set_rows` op（D-42 追記）: `ops` に `{"op":"set_rows","key":…,"rows":[{"id":…,"value":[…]}]}` の行ごとの
+      値を足す（tagops の 1 op、preview で差分が見える、巻き戻しは 1 回）。書き込みは通常の tagwrite
+      （tmp + rename、`tag_version` +1）なので Derived の opus / aac がタグ上書きで追随する（1,512 × 2 本。
+      音声は変えない）
+- [x] `scripts/backfill_source_url.py`（標準ライブラリのみ。yt-dlp と spindle の API を使う）+
+      `scripts/test_backfill_source_url.py`: (1) 再生リスト URL ごとに `yt-dlp --flat-playlist
       --dump-single-json` を取り（非公開のリストは cookie が要るので、一時的に限定公開にするか `--cookies` を
       渡す）、(2) 位置 i+1 と `TRACKNUMBER`、リスト名と `ALBUM` で Library の行を引き、タイトルが取れる
       entry はメタデータプラグイン（`spindle-ytmusic-meta`）で判定した title と Library の `TITLE` を照合して
       `verified`、`[Private video]` / `[Deleted video]` は `position-only`、番号に行が無い・タイトル不一致は
       `unmatched` として **計画 CSV を出す**（track_id / rel_path / id / 動画タイトル / 判定）、(3) 人が CSV を
-      見てから `--apply` で `SOURCE_URL = https://www.youtube.com/watch?v=<id>` の編集バッチを投入する。
-      決めること: 1 トラックずつ値が違う `set` をどう 1 バッチにするか（いまの `POST /api/tracks/batch` は
-      選択全体に同じ op。案 a: トラックごとに preview → apply で 1,512 バッチ（履歴が汚れる）、案 b: `ops` に
-      `{"op":"set_rows","key":…,"rows":[{"id":…,"value":[…]}]}` のような行ごとの値を足す（tagops の 1 op、
-      preview で差分が見える、巻き戻しは 1 回。こちらが筋）。書き込みは通常の tagwrite（tmp + rename、
-      `tag_version` +1）なので Derived の opus / aac がタグ上書きで追随する（1,512 × 2 本。音声は変えない）。
-      受け入れ: `tests/tagops.rs`（`set_rows` の解析と適用。無い id は無視、値の検証は `set` と同じ）、
-      スクリプトの単体テスト（位置と番号の対応、欠番、Private の扱い。yt-dlp の JSON は fixtures）、実機で
-      1 アルバムを dry-run → CSV 確認 → apply → `SOURCE_URL` が付き、同じ URL の再ダウンロードが
-      「取り込み済み（Library）」で拒否される
+      見てから `--apply` で `SOURCE_URL = https://www.youtube.com/watch?v=<id>` の編集バッチを投入する
+- [x] 対応付けは 位置 + タイトル → 未割り当て行からタイトルで救済（一致の長い行 → 近い位置を優先）→
+      両隣が同じずれで対応する区間は位置推定、の 3 段。位置推定は区間内の入れ替えを検出できないので既定では
+      書かず `--include-inferred` で明示、部分一致は ASCII 英数字の境界を要求、既に `SOURCE_URL` を持つ行は
+      上書きしない。codex のレビューで修正
+- [x] 2026-09-21 に実機で適用済み: 9 バッチ #10〜#18、1,508 件 applied / conflict 0、Derived の aac 1,508 本が
+      タグ追随。残り 6 件のうち 5 件はユーザが再生リストに追加 → 再実行のバッチ #19〜#23 で付いた。
+      再生リストが無い `柊マグネタイトの曲` の 1 曲だけリポジトリ外の `singles.tsv` に URL を保管し、
+      リリース時の再移行で手で付ける（MIGRATION §5-3-2）
 
-- [x] **P4-16** 再生リストの購読と同期（2026-09-21。P4-15「番号を再生リストの順に揃える」を吸収。
-      SPEC §7.7「再生リストの購読と同期」、D-78。設計は codex レビューで 4 点の P1 を直した: 順序は
-      列挙 → 揃え → 投入、phase 非永続の再計算（rename の候補は番号の合った行の全部）、Duplicate は
-      「走行中」扱い、latch + Requeue + dispatcher、`album_id` の CAS 束ね。API は
-      `/api/ytmusic/subscriptions`（下記の `/api/playlists/...` から変更）。(2') の「非公開 / 削除の別」は
-      現行 yt-dlp では出力から付かないので `kind: private | deleted | unknown` の hint に読み替え。実装
-      レビューで足した規則: 購読 id は AUTOINCREMENT（0022）、同期が active の間は PATCH / DELETE を 409、重複
-      entry は固定、子バッチは全件 applied を要求、改名はファイル名だけ。リハーサル環境で 9 本を登録 → 同期
-      （明透 14 件ずらし + 2 本投入）→ 承認 → 後続の自動同期で変更なし、を確認済み）。`SOURCE_URL`（P4-14）で「再生リストのどこまで持っているか」が
-      分かるので、URL を貼る運用をなくす。
-      (1) **購読**: 新しいマイグレーションで `playlist_subscriptions`（`list_id` / URL / 追記先 `album_id`
-      （無ければ `albumartist` + `album` で作る）/ `enabled` / `last_synced_at` / 最終結果）。API は
-      `GET / POST / PATCH / DELETE /api/playlists/subscriptions` と `POST /api/playlists/subscriptions/:id/sync`。
-      UI は P4-13 の YouTube 画面の購読の節。
-      (2) **同期ジョブ** `playlist_sync`（購読ごとに 1 本。手動 + `[ytmusic].sync_interval_hours`（既定 0 =
+受け入れ: `tests/tagops.rs`（`set_rows` の解析と適用。無い id は無視、値の検証は `set` と同じ）、
+スクリプトの単体テスト（位置と番号の対応、欠番、Private の扱い。yt-dlp の JSON は fixtures）、実機で
+1 アルバムを dry-run → CSV 確認 → apply → `SOURCE_URL` が付き、同じ URL の再ダウンロードが
+「取り込み済み（Library）」で拒否される
+
+実機で分かったこと: 開発機の古い yt-dlp（2026.06）は再生リストの continuation を黙って取りこぼす
+（`entries < playlist_count` で中止する検出を入れた。`--ytdlp "ssh … docker exec … yt-dlp"` で実機の版を
+使える）、再生リストから消えた動画の後ろは位置が 1 ずれる、初期の動画は英題で Library の邦題と照合できない
+
+着手時に検討した案: 1 トラックずつ値が違う `set` をどう 1 バッチにするか（いまの `POST /api/tracks/batch`
+は選択全体に同じ op。案 a: トラックごとに preview → apply で 1,512 バッチ（履歴が汚れる）、案 b: `ops` に
+行ごとの値を足す `set_rows`。こちらが筋 → 採用）
+
+### P4-16 再生リストの購読と同期
+
+2026-09-21。P4-15「番号を再生リストの順に揃える」を吸収。SPEC §7.7「再生リストの購読と同期」、D-78。
+`SOURCE_URL`（P4-14）で「再生リストのどこまで持っているか」が分かるので、URL を貼る運用をなくす。
+
+- [x] (1) **購読**: マイグレーションで `playlist_subscriptions`（`list_id` / URL / 追記先 `album_id`（無ければ
+      `albumartist` + `album` で作る）/ `enabled` / `last_synced_at` / 最終結果）。API は
+      `GET / POST / PATCH / DELETE /api/ytmusic/subscriptions` と `POST /api/ytmusic/subscriptions/:id/sync`
+      （設計時の `/api/playlists/subscriptions` から変更）。UI は P4-13 の YouTube 画面の購読の節
+- [x] (2) **同期ジョブ** `playlist_sync`（購読ごとに 1 本。手動 + `[ytmusic].sync_interval_hours`（既定 0 =
       手動のみ）で定期）: `yt-dlp --flat-playlist --dump-single-json` で列挙（`entries < playlist_count` なら
       「古い yt-dlp の取りこぼし」として失敗させ、何も投入しない）→ 各 entry の `webpage_url` 正規形を
       Library（`track_tags`）/ Inbox（`inbox_files.tags`）/ 投入済み ytdl ジョブ（dedup_key）と突き合わせ →
       **無いものだけ** ytdl ジョブを投入（payload に `subscription_id` / 宛先 `album_id` / 再生リストの位置）。
       再生リストから消えた動画には何もしない（ファイルが正）。1 回の同期で投入する上限（既定 50）を
-      設けて、誤登録した巨大なリストで数百本落とさない。
-      (2') **非公開・削除の動画**（`[Private video]` / `[Deleted video]`。`--flat-playlist` でも id と位置は
+      設けて、誤登録した巨大なリストで数百本落とさない
+- [x] (2') **非公開・削除の動画**（`[Private video]` / `[Deleted video]`。`--flat-playlist` でも id と位置は
       取れる）: ダウンロードはできないので投入しないが、**位置は占め続ける**ものとして扱う。Library に
       あれば（補填済み、または公開だった頃に取り込んだ）`SOURCE_URL` で一致するので何もしない。Library に
       無ければ「取れない」として購読の結果に一覧で出す（id・位置・非公開 / 削除の別）。後で公開に戻れば
-      次の同期で普通の未取り込みとして拾う。番号揃え (4) もこれらの位置を数える（Library に無い非公開の
-      分は番号が飛ぶ。既存の `花譜のお歌` が 244 曲で 1〜246 なのと同じ規則）。
-      (3) **承認はそのまま**（D-70。判断は Inbox で人が行う）。宛先 album と位置が分かっているので、承認画面の
-      初期値（アルバムアーティスト / アルバム / category）は購読から埋め、プラグインの判定は補助にする。
-      (4) **番号揃え**: 配置（Inbox 承認）の後、同期ジョブ（または承認の後続）が「再生リストの位置 ↔ 現在の
-      `TRACKNUMBER`」のずれを `SOURCE_URL` で計算し（目標番号 = 再生リストの位置。非公開・削除・未取り込みの
-      位置も数えるので、それらの分は番号が飛ぶ）、ずれている行だけ `TRACKNUMBER` を `set_rows` の tags
-      バッチで書き、続けて rename バッチでファイル名（`{track:02} {title}`）を追随させる（どちらも履歴に
-      載り巻き戻せる。Derived の opus / aac はタグ上書き・移動で追随）。`SOURCE_URL` の無い行と再生リストに
-      無い行は触らず、ずれの一覧を購読の結果に出す。「番号揃えをしない」購読も選べる（既定は揃える）。
-      (5) yt-dlp を定期的に叩くので、ブロック時の `--extractor-args` / `--cookies` の口（P4-13 の `[bin].ytdlp`
-      引数化）と yt-dlp の更新（P4-12 (7)）が前提。
-      受け入れ: `tests/migrations.rs`（0020）、`tests/playlist_sync.rs`（列挙は fixture の JSON を返す偽 yt-dlp
-      で: 無いものだけ投入、Inbox / 投入済みと重複しない、取りこぼしで失敗、上限、非公開は投入せず Library に
-      無ければ「取れない」一覧に出る、公開に戻ったら拾う）、`tests/playlist_align.rs`（位置と番号のずれ →
-      set_rows + rename バッチ。非公開・未取り込みの位置は番号が飛ぶ、`SOURCE_URL` 無しは触らない、
-      一致なら変更なし）、`tests/inbox_api.rs`（購読由来の件の初期値）、
-      `web/src/lib/subscriptions.test.ts`、リハーサル環境で 9 本を登録 → 同期 → 未取り込みの 3 本だけ Inbox に
-      来る → 承認 → 番号とファイル名が再生リストの順に揃う → 再同期で「変更なし」
-- [x] **P4-17** 一覧のキーボード操作（2026-09-22。SPEC §12.2「キーボード」、D-80）。表にフォーカスがあるとき
-      ↓ / ↑ / PageDown / PageUp / Home / End でカーソル行を動かし、素の移動はその行だけを選択、**Shift + 移動は
-      anchor からカーソルまでの範囲そのもの**（縮む）、Ctrl + 移動はカーソルだけ、Space はカーソル行のトグル。
-      クリックもカーソルを置く。カーソルは読み込み済みの行の中でだけ動く（未読込の骨組み行は id が無い。
-      末尾に着くと次のページが読まれるので End を繰り返せば進む）。仮想化は sticky ヘッダぶんの `scrollMargin`
-      / `scrollPaddingStart` で `scrollToIndex` がヘッダの下に行を出す。
-      受け入れ: `web/src/lib/keynav.test.ts`（端で止まる、Page は 1 画面、カーソル無しの起点、読み込み済みの外へ
-      出ない）、`web/src/lib/selection.test.ts`（`rangeSelect`: 縮む、飛び地が消える、filter 形は ids 形へ、anchor
-      が無ければ移動前のカーソル行）、dev サーバ + 実機 API でブラウザ確認（ヘッダ直下 / 下端に揃う、Ctrl+A →
-      Shift+↑、Esc → Shift+↓）
-- [x] **P4-18** ジョブ一覧の衛生（2026-09-22。D-81、D-68 追記）。(1) Inbox の周期監視をジョブの外へ: 指紋
-      （`import::inbox::fingerprint`）が前回投入時と違うとき・配置待ち・期限切れの placed・起動直後だけ投入
-      （`jobs::handlers::inbox::spawn_watcher`。Duplicate なら次の周回で投入し直す）。`GET /api/inbox` の `watch`
-      を Inbox 画面が「最後に確認」で出す。(2) ytdl の「取り込み済み」は `done` + note。(3) `DELETE /api/jobs/:id`
-      （終端だけ）と `DELETE /api/jobs?state=failed`、ジョブ画面の [消す] / [失敗をすべて消す]。(4) GC が
-      `[gc].jobs_done_days`（7）/ `jobs_failed_days`（30）を過ぎた終端の行を消す（preview に `jobs`）。
-      受け入れ: `tests/inbox_job.rs`（指紋は音声だけで決まる、監視は変化・配置待ち・期限切れ・起動直後だけ
-      投入し Duplicate を取りこぼさない）、`tests/inbox_api.rs`（`watch`）、`tests/ytmusic_download.rs`
-      （取り込み済み → done + note）、`tests/jobs.rs`（終端の削除、queued は 409、failed の一括、done は 400）、
-      `tests/gc.rs`（保持期間で消す、0 は消さない、gc 自身は残る）、`tests/gc_api.rs`（preview の `jobs`）、
-      `tests/config.rs`（既定と 0）、web の `canRemove` / `watchLabel`
+      次の同期で普通の未取り込みとして拾う。番号揃え (4) もこれらの位置を数える（Library に無い非公開の分は番号が飛ぶ。
+      既存の `花譜のお歌` が 244 曲で 1〜246 なのと同じ規則）。「非公開 / 削除の別」は現行 yt-dlp では
+      出力から付かないので `kind: private | deleted | unknown` の hint に読み替え
+- [x] (3) **承認はそのまま**（D-70。判断は Inbox で人が行う）。宛先 album と位置が分かっているので、承認画面の
+      初期値（アルバムアーティスト / アルバム / category）は購読から埋め、プラグインの判定は補助にする
+- [x] (4) **番号揃え**: 配置（Inbox 承認）の後、同期ジョブ（または承認の後続）が「再生リストの位置 ↔ 現在の `TRACKNUMBER`」の
+      ずれを `SOURCE_URL` で計算し（目標番号 = 再生リストの位置。非公開・削除・未取り込みの位置も数えるので、
+      それらの分は番号が飛ぶ）、ずれている行だけ `TRACKNUMBER` を `set_rows` の tags バッチで書き、続けて
+      rename バッチでファイル名（`{track:02} {title}`）を追随させる（どちらも履歴に載り巻き戻せる。Derived の
+      opus / aac はタグ上書き・移動で追随）。`SOURCE_URL` の無い行と再生リストに無い行は触らず、ずれの一覧を
+      購読の結果に出す。「番号揃えをしない」購読も選べる（既定は揃える）
+- [x] (5) yt-dlp を定期的に叩くので、ブロック時の `--extractor-args` / `--cookies` の口（P4-13 の `[bin].ytdlp`
+      引数化）と yt-dlp の更新（P4-12 (7)）が前提
+- [x] 設計は codex レビューで 4 点の P1 を直した: 順序は列挙 → 揃え → 投入、phase 非永続の再計算（rename の
+      候補は番号の合った行の全部）、Duplicate は「走行中」扱い、latch + Requeue + dispatcher、`album_id` の
+      CAS 束ね
+- [x] 実装レビューで足した規則: 購読 id は AUTOINCREMENT（0022）、同期が active の間は PATCH / DELETE を 409、
+      重複 entry は固定、子バッチは全件 applied を要求、改名はファイル名だけ
 
-- [x] **P4-19** Inbox の同名の警告（2026-09-22。D-70 追記、SPEC §7.8 / §9 / §12.6）。追記先の album に同じ
-      タイトル鍵（`import::inbox::title_key` = NFKD + casefold + 空白の畳み込み。注記は落とさない）の active な
-      行があれば `GET /api/inbox` の `tracks[].same_title` に返し、承認画面がタイトル欄の下に「⚠ Library に同名:
-      <ファイル名>（長さ）」、件の一覧に「同名 N」を出す（**承認は止めない**）。`SOURCE_URL` の補填漏れ・別 URL の
-      再アップロードによる二重取り込みを人が気づけるようにするもので、リリース後の再移行（MIGRATION §5-3）の
-      取りこぼし対策。受け入れ: `src/import/inbox.rs` の `title_key` の単体テスト（全角・半角と空白は同じ、
-      `(Cover)` / `【Live ver.】` は別）、`tests/inbox_api.rs`（同名あり / `(Cover)` は出ない / missing は数えない /
-      追記先が無ければ空）、`web/src/lib/inbox.test.ts`（`sameTitleLabel` / `sameTitleCount`）、実機のデータで
-      誤警告の量を測る（同一 album 内 27 グループ / 119 行。YouTube 由来 6 グループ）
+受け入れ: `tests/migrations.rs`（0020）、`tests/playlist_sync.rs`（列挙は fixture の JSON を返す偽 yt-dlp
+で: 無いものだけ投入、Inbox / 投入済みと重複しない、取りこぼしで失敗、上限、非公開は投入せず Library に
+無ければ「取れない」一覧に出る、公開に戻ったら拾う）、`tests/playlist_align.rs`（位置と番号のずれ →
+set_rows + rename バッチ。非公開・未取り込みの位置は番号が飛ぶ、`SOURCE_URL` 無しは触らない、
+一致なら変更なし）、`tests/inbox_api.rs`（購読由来の件の初期値）、`web/src/lib/subscriptions.test.ts`、
+リハーサル環境で 9 本を登録 → 同期 → 未取り込みの 3 本だけ Inbox に来る → 承認 → 番号とファイル名が
+再生リストの順に揃う → 再同期で「変更なし」
+
+確認済み（リハーサル環境）: 9 本を登録 → 同期（明透 14 件ずらし + 2 本投入）→ 承認 → 後続の自動同期で
+変更なし
+
+### P4-17 一覧のキーボード操作
+
+2026-09-22。SPEC §12.2「キーボード」、D-80。
+
+- [x] 表にフォーカスがあるとき ↓ / ↑ / PageDown / PageUp / Home / End でカーソル行を動かし、素の移動はその
+      行だけを選択、**Shift + 移動は anchor からカーソルまでの範囲そのもの**（縮む）、Ctrl + 移動はカーソル
+      だけ、Space はカーソル行のトグル。クリックもカーソルを置く
+- [x] カーソルは読み込み済みの行の中でだけ動く（未読込の骨組み行は id が無い。末尾に着くと次のページが
+      読まれるので End を繰り返せば進む）
+- [x] 仮想化は sticky ヘッダぶんの `scrollMargin` / `scrollPaddingStart` で `scrollToIndex` がヘッダの下に行を
+      出す
+
+受け入れ: `web/src/lib/keynav.test.ts`（端で止まる、Page は 1 画面、カーソル無しの起点、読み込み済みの外へ
+出ない）、`web/src/lib/selection.test.ts`（`rangeSelect`: 縮む、飛び地が消える、filter 形は ids 形へ、anchor
+が無ければ移動前のカーソル行）、dev サーバ + 実機 API でブラウザ確認（ヘッダ直下 / 下端に揃う、Ctrl+A →
+Shift+↑、Esc → Shift+↓）
+
+### P4-18 ジョブ一覧の衛生
+
+2026-09-22。D-81、D-68 追記。
+
+- [x] (1) Inbox の周期監視をジョブの外へ: 指紋（`import::inbox::fingerprint`）が前回投入時と違うとき・
+      配置待ち・期限切れの placed・起動直後だけ投入（`jobs::handlers::inbox::spawn_watcher`。Duplicate なら
+      次の周回で投入し直す）。`GET /api/inbox` の `watch` を Inbox 画面が「最後に確認」で出す
+- [x] (2) ytdl の「取り込み済み」は `done` + note
+- [x] (3) `DELETE /api/jobs/:id`（終端だけ）と `DELETE /api/jobs?state=failed`、ジョブ画面の [消す] /
+      [失敗をすべて消す]
+- [x] (4) GC が `[gc].jobs_done_days`（7）/ `jobs_failed_days`（30）を過ぎた終端の行を消す（preview に `jobs`）
+
+受け入れ: `tests/inbox_job.rs`（指紋は音声だけで決まる、監視は変化・配置待ち・期限切れ・起動直後だけ
+投入し Duplicate を取りこぼさない）、`tests/inbox_api.rs`（`watch`）、`tests/ytmusic_download.rs`
+（取り込み済み → done + note）、`tests/jobs.rs`（終端の削除、queued は 409、failed の一括、done は 400）、
+`tests/gc.rs`（保持期間で消す、0 は消さない、gc 自身は残る）、`tests/gc_api.rs`（preview の `jobs`）、
+`tests/config.rs`（既定と 0）、web の `canRemove` / `watchLabel`
+
+### P4-19 Inbox の同名の警告
+
+2026-09-22。D-70 追記、SPEC §7.8 / §9 / §12.6。`SOURCE_URL` の補填漏れ・別 URL の再アップロードによる
+二重取り込みを人が気づけるようにするもので、リリース後の再移行（MIGRATION §5-3）の取りこぼし対策。
+
+- [x] 追記先の album に同じタイトル鍵（`import::inbox::title_key` = NFKD + casefold + 空白の畳み込み。注記は
+      落とさない）の active な行があれば `GET /api/inbox` の `tracks[].same_title` に返す
+- [x] 承認画面がタイトル欄の下に「⚠ Library に同名: <ファイル名>（長さ）」、件の一覧に「同名 N」を出す
+      （**承認は止めない**）
+
+受け入れ: `src/import/inbox.rs` の `title_key` の単体テスト（全角・半角と空白は同じ、`(Cover)` /
+`【Live ver.】` は別）、`tests/inbox_api.rs`（同名あり / `(Cover)` は出ない / missing は数えない / 追記先が
+無ければ空）、`web/src/lib/inbox.test.ts`（`sameTitleLabel` / `sameTitleCount`）、実機のデータで誤警告の量を
+測る（同一 album 内 27 グループ / 119 行。YouTube 由来 6 グループ）
 
 ## 着手前に確認が必要な残課題
 
@@ -1236,4 +1506,3 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - ~~Library の ALAC（m4a）に任意キーを書けない~~（2026-09-21 に P4-3 の実機確認で観測 → P4-11 に昇格）
 - ~~Inbox の承認画面で「Library に同名の曲がある」警告~~（2026-09-22 に P4-19 で実装。判定は
   「追記先の album の中で同じタイトル鍵」に絞った。albumartist 単位だと 720 行が該当して無視されるため）
-
