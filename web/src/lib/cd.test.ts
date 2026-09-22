@@ -413,6 +413,18 @@ describe('候補の見分け（P2-3 の UI 改修）', () => {
 
   it('収録構成は全媒体を並べ、いま見ている枚を示す', () => {
     expect(mediaSummary(five)).toBe('CD + Blu-ray の 1 枚目')
+    // 同じ形式が複数あれば枚数を残す（CD 2 枚 + Blu-ray と CD + Blu-ray は別の版）
+    expect(
+      mediaSummary({
+        ...five,
+        media: [
+          { position: 1, format: 'CD', track_count: 2 },
+          { position: 2, format: 'CD', track_count: 3 },
+          { position: 3, format: 'Blu-ray', track_count: 1 },
+        ],
+        medium_count: 3,
+      }),
+    ).toBe('CD 2 枚 + Blu-ray の 1 枚目')
     expect(
       mediaSummary({
         ...five,
@@ -431,13 +443,41 @@ describe('候補の見分け（P2-3 の UI 改修）', () => {
     expect(mediaSummary({ ...five, media: [], medium_count: 1, format: 'CD' })).toBe('CD')
   })
 
-  it('吸い出せるのは CD 系の medium だけ', () => {
-    expect(isCdMedium(five)).toBe(true)
-    expect(isCdMedium({ ...five, format: 'Enhanced CD' })).toBe(true)
-    expect(isCdMedium({ ...five, format: 'HDCD' })).toBe(true)
-    expect(isCdMedium({ ...five, format: 'Digital Media' })).toBe(false)
-    expect(isCdMedium({ ...five, format: 'Blu-ray' })).toBe(false)
-    expect(isCdMedium({ ...five, format: 'DVD-Video' })).toBe(false)
+  it('吸い出せるのは CD 系の medium だけ（MusicBrainz の形式名）', () => {
+    for (const f of [
+      'CD',
+      'CD-R',
+      '8cm CD',
+      'Enhanced CD',
+      'HDCD',
+      'Copy Control CD',
+      'SHM-CD',
+      'Blu-spec CD',
+      'HQCD',
+      'DTS CD',
+      'CD+G',
+      'Hybrid SACD (CD layer)',
+      'DualDisc (CD side)',
+    ]) {
+      expect(isCdMedium({ ...five, format: f }), f).toBe(true)
+    }
+    for (const f of [
+      'Digital Media',
+      'Blu-ray',
+      'DVD-Video',
+      'DVD-Audio',
+      'HD-DVD',
+      'SACD',
+      'SHM-SACD',
+      'Hybrid SACD (SACD layer)',
+      'VCD',
+      'SVCD',
+      'DualDisc (DVD-Video side)',
+      '12" Vinyl',
+      'Cassette',
+    ]) {
+      expect(isCdMedium({ ...five, format: f }), f).toBe(false)
+    }
     // 形式が分からないものは隠さない
     expect(isCdMedium({ ...five, format: null })).toBe(true)
   })

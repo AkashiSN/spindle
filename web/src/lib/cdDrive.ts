@@ -17,20 +17,30 @@ export type DriveStatus = {
   checked_at: number
 }
 
-/** TOC 文字列のトラック数（`:` 区切りの最後がリードアウト） */
-function trackCount(toc: string): number {
-  return toc.split(':').length - 1
-}
+/** セッション間隙（セクタ）。音声セッションの終端はデータトラック開始 − これ（SPEC §7.2、`cd/toc.rs`） */
+const SESSION_GAP_SECTORS = 11400
 
-/** TOC 文字列（CTDB 形式の LBA 列）から音声の総時間（ms）。読めなければ null */
-export function tocDurationMs(toc: string): number | null {
-  const parts = toc.split(':').map((p) => Number(p.replace('-', '')))
-  if (parts.length < 2 || parts.some((n) => !Number.isFinite(n))) return null
-  const first = parts[0]!
-  const leadout = parts[parts.length - 1]!
-  if (leadout <= first) return null
+/**
+ * TOC 文字列（CTDB 形式の LBA 列。データトラックは `-` 前置、最後がリードアウト）から
+ * 音声トラック数と音声区間の長さ。サーバの `Toc::audio_track_sectors` と同じ規則で、データトラックは
+ * 数えず、最後の音声トラックの次がデータなら終端を 11400 セクタ手前にする。読めなければ null
+ */
+export function audioTocSummary(toc: string): { tracks: number; durationMs: number } | null {
+  const parts = toc.split(':').map((p) => p.trim())
+  if (parts.length < 2) return null
+  const entries = parts.slice(0, -1).map((p) => ({ data: p.startsWith('-'), lba: Number(p.replace('-', '')) }))
+  const leadout = Number(parts[parts.length - 1])
+  if (!Number.isFinite(leadout) || entries.some((e) => !Number.isFinite(e.lba))) return null
+  const audio = entries.filter((e) => !e.data)
+  if (audio.length === 0) return null
+  const lastAudio = entries.map((e) => e.data).lastIndexOf(false)
+  const next = entries[lastAudio + 1]
+  // 最後の音声トラックの次がデータトラックなら、音声の終端はその手前（Enhanced CD）
+  const end = next?.data === true ? next.lba - SESSION_GAP_SECTORS : leadout
+  const start = audio[0]!.lba
+  if (end <= start) return null
   // 1 秒 = 75 セクタ
-  return ((leadout - first) * 1000) / 75
+  return { tracks: audio.length, durationMs: ((end - start) * 1000) / 75 }
 }
 
 /** 状態の一行。まだ取れていなければ null */
@@ -49,9 +59,9 @@ export function driveStateLabel(s: DriveStatus | null): string | null {
       return 'ドライブの準備中…'
     case 'disc_ok':
       if (s.toc != null) {
-        const ms = tocDurationMs(s.toc)
-        const time = ms == null ? '' : `・${formatDuration(ms)}`
-        return `ディスクあり（${trackCount(s.toc)} トラック${time}）`
+        const summary = audioTocSummary(s.toc)
+        if (summary == null) return 'ディスクあり'
+        return `ディスクあり（${summary.tracks} トラック・${formatDuration(summary.durationMs)}）`
       }
       return s.error != null ? `ディスクあり（TOC を読めない: ${s.error}）` : 'ディスクあり（TOC を読み取り中…）'
   }

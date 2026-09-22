@@ -143,13 +143,23 @@ export function releaseUrl(c: ReleaseCandidate): string {
   return `https://musicbrainz.org/release/${c.release_id}`
 }
 
+/** CD 系でない形式（先に見る。SACD / VCD / DVD / Blu-ray など） */
+const NOT_CD = /DVD|Blu-?ray|HD-?DVD|S?VCD|SACD|Digital Media|Vinyl|Cassette|Reel|MiniDisc|Shellac/i
+/** CD 系の層・面を持つ複合ディスク（`Hybrid SACD (CD layer)` / `DualDisc (CD side)`） */
+const CD_LAYER = /\bCD (layer|side)\b/i
+
 /**
- * 吸い出せる medium か（CD 系）。`Enhanced CD` / `HDCD` / `Copy Control CD` なども CD。
- * 形式が分からないものは隠さない（MB の登録漏れで CD のことがある）
+ * 吸い出せる medium か（CD 系）。`Enhanced CD` / `HDCD` / `SHM-CD` / `CD+G` などは CD、
+ * `Hybrid SACD (CD layer)` / `DualDisc (CD side)` も CD 面を持つので CD 扱い。
+ * SACD / VCD / SVCD / DVD / Blu-ray / デジタル配信は除く。形式が分からないものは隠さない
+ * （MB の登録漏れで CD のことがある）
  */
 export function isCdMedium(c: ReleaseCandidate): boolean {
-  if (c.format == null) return true
-  return /(^|\s|-)CD($|\s|-)|CD$|^CD/i.test(c.format) && !/DVD|Blu-?ray|HD-?DVD/i.test(c.format)
+  const f = c.format
+  if (f == null) return true
+  if (CD_LAYER.test(f)) return true
+  if (NOT_CD.test(f)) return false
+  return /CD/i.test(f)
 }
 
 /** CD 系の候補とそれ以外に分ける（それぞれ元の順序を保つ） */
@@ -169,12 +179,19 @@ export function splitByMedium(candidates: ReleaseCandidate[]): {
  */
 export function mediaSummary(c: ReleaseCandidate): string {
   const formats = c.media.length > 0 ? c.media.map((m) => m.format ?? '形式不明') : [c.format ?? '形式不明']
-  const uniq = [...new Set(formats)]
-  // 同じ形式が続くなら「CD 2 枚組」、違えば「CD + Blu-ray」
-  const all = uniq.length === 1 ? (formats.length === 1 ? uniq[0]! : `${uniq[0]} ${formats.length} 枚組`) : uniq.join(' + ')
+  // 形式ごとの枚数を出てきた順に（CD 2 枚 + Blu-ray と CD + Blu-ray は別の版）
+  const counts = new Map<string, number>()
+  for (const f of formats) counts.set(f, (counts.get(f) ?? 0) + 1)
+  const single = counts.size === 1
+  const all =
+    single && formats.length === 1
+      ? formats[0]!
+      : single
+        ? `${[...counts.keys()][0]} ${formats.length} 枚組`
+        : [...counts].map(([f, n]) => (n > 1 ? `${f} ${n} 枚` : f)).join(' + ')
   if (c.medium_count <= 1) return all
   // 「CD 2 枚組の 1 枚目」「CD + Blu-ray の 1 枚目」
-  const joiner = uniq.length === 1 ? 'の' : ' の'
+  const joiner = single ? 'の' : ' の'
   return `${all}${joiner} ${c.medium_position} 枚目`
 }
 

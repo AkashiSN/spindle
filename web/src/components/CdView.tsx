@@ -54,6 +54,16 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
   const split = splitByMedium(result?.candidates ?? [])
   // 候補の番号は元の一覧のもの（選択は index で持つ）
   const indexOf = (c: ReleaseCandidate) => (result?.candidates ?? []).indexOf(c)
+  // 別の結果になったら「CD 以外」は畳み直す（既定で隠すため。描画中に直す React の作法で、
+  // effect にすると 1 回余計に描画される）
+  const [shownFor, setShownFor] = useState(result)
+  if (shownFor !== result) {
+    setShownFor(result)
+    setShowOther(false)
+  }
+  // 選ばれている候補が CD 以外の側なら、畳んだままにしない
+  const selected = cd.selected != null ? (result?.candidates[cd.selected] ?? null) : null
+  const otherOpen = showOther || (selected != null && split.other.includes(selected))
   return (
     <section className="cd">
       <div className="table-toolbar">
@@ -158,11 +168,11 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
           {split.other.length > 0 && (
             <div className="cd-other">
               <label className="small">
-                <input type="checkbox" checked={showOther} onChange={(e) => setShowOther(e.target.checked)} />{' '}
+                <input type="checkbox" checked={otherOpen} onChange={(e) => setShowOther(e.target.checked)} />{' '}
                 CD 以外の媒体に当たった候補も表示（{split.other.length} 件。デジタル配信・DVD・Blu-ray など、
                 このドライブでは吸い出せない）
               </label>
-              {showOther && (
+              {otherOpen && (
                 <ul className="cd-candidates">
                   {split.other.map((c) => (
                     <li key={`${c.release_id}:${c.medium_position}`}>
@@ -208,68 +218,6 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
               </span>
             </fieldset>
           )}
-          <details className="cd-details">
-            <summary className="small">詳細（ID・用語・手入力の TOC）</summary>
-            <dl className="cd-ids small">
-              <dt title="MusicBrainz がディスクを識別する ID。TOC から計算する">MusicBrainz DiscID</dt>
-              <dd>
-                <code>{result.discid}</code>
-              </dd>
-              <dt title="吸い出した音声の照合に使う DB の ID（AccurateRip）">AccurateRip</dt>
-              <dd>
-                <code>{result.accuraterip_id}</code>
-              </dd>
-              <dt title="CUETools Database。吸い出しの照合と傷の修復に使う">CTDB TOCID</dt>
-              <dd>
-                <code>{result.ctdb_toc_id}</code>
-              </dd>
-              <dt title="Table Of Contents。ディスクのトラックの開始位置">TOC</dt>
-              <dd>
-                <code>{cd.toc}</code>
-              </dd>
-              <dt>音声トラック</dt>
-              <dd>{result.tracks.length} 曲</dd>
-            </dl>
-            <p className="muted small">
-              用語: <b>DiscID</b> は TOC から計算する MusicBrainz のディスク識別子、<b>ISRC</b> は録音ごとの国際コード、
-              <b>JAN/UPC</b> は商品のバーコード、<b>MBID</b> は MusicBrainz の各項目の ID、<b>medium</b> は
-              リリースに入っている 1 枚（CD / DVD / Blu-ray / デジタル）。候補のバッジは当たった経路
-              （DiscID 一致 / 指定 / ISRC / バーコード / TOC 近似）
-            </p>
-            <div className="op-row">
-              <textarea
-                aria-label="TOC"
-                rows={2}
-                value={cd.toc}
-                disabled={cd.busy}
-                placeholder="0:22593:41700:…（ドライブが無い環境用。CTDB 形式 / MusicBrainz 形式 / cdrecord -toc の出力）"
-                onChange={(e) => cd.setToc(e.target.value)}
-              />
-            </div>
-            <div className="op-row">
-              <button type="button" disabled={cd.busy} onClick={() => void cd.lookupToc(cd.toc, { ...ids, refresh: true })}>
-                この TOC で照会
-              </button>
-            </div>
-            <div className="op-row">
-              <input
-                type="text"
-                className="cd-release-ref"
-                aria-label="MusicBrainz のリリース URL か MBID"
-                placeholder="https://musicbrainz.org/release/… か MBID（候補に出ない盤はこれで当てる）"
-                value={releaseRef}
-                disabled={cd.busy}
-                onChange={(e) => setReleaseRef(e.target.value)}
-              />
-              <button
-                type="button"
-                disabled={cd.busy || releaseRef.trim() === ''}
-                onClick={() => void cd.lookupToc(cd.toc, { ...ids, release: releaseRef, refresh: true })}
-              >
-                このリリースで照会
-              </button>
-            </div>
-          </details>
           {confirmed == null && (
             <div className="op-row">
               <button type="button" disabled={draft?.source === 'manual'} onClick={cd.startManual}>
@@ -282,6 +230,70 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
           )}
         </>
       )}
+      <details className="cd-details">
+        <summary className="small">詳細（ID・用語・手入力の TOC）</summary>
+        {result != null && (
+          <dl className="cd-ids small">
+            <dt title="MusicBrainz がディスクを識別する ID。TOC から計算する">MusicBrainz DiscID</dt>
+            <dd>
+              <code>{result.discid}</code>
+            </dd>
+            <dt title="吸い出した音声の照合に使う DB の ID（AccurateRip）">AccurateRip</dt>
+            <dd>
+              <code>{result.accuraterip_id}</code>
+            </dd>
+            <dt title="CUETools Database。吸い出しの照合と傷の修復に使う">CTDB TOCID</dt>
+            <dd>
+              <code>{result.ctdb_toc_id}</code>
+            </dd>
+            <dt title="Table Of Contents。ディスクのトラックの開始位置">TOC</dt>
+            <dd>
+              <code>{cd.toc}</code>
+            </dd>
+            <dt>音声トラック</dt>
+            <dd>{result.tracks.length} 曲</dd>
+          </dl>
+        )}
+        <p className="muted small">
+          用語: <b>DiscID</b> は TOC から計算する MusicBrainz のディスク識別子、<b>ISRC</b> は録音ごとの国際コード、
+          <b>JAN/UPC</b> は商品のバーコード、<b>MBID</b> は MusicBrainz の各項目の ID、<b>medium</b> は
+          リリースに入っている 1 枚（CD / DVD / Blu-ray / デジタル）。候補のバッジは当たった経路
+          （DiscID 一致 / 指定 / ISRC / バーコード / TOC 近似）
+        </p>
+        <div className="op-row">
+          <textarea
+            aria-label="TOC"
+            rows={2}
+            value={cd.toc}
+            disabled={cd.busy}
+            placeholder="0:22593:41700:…（ドライブが無い環境用。CTDB 形式 / MusicBrainz 形式 / cdrecord -toc の出力）"
+            onChange={(e) => cd.setToc(e.target.value)}
+          />
+        </div>
+        <div className="op-row">
+          <button type="button" disabled={cd.busy} onClick={() => void cd.lookupToc(cd.toc, { ...ids, refresh: true })}>
+            この TOC で照会
+          </button>
+        </div>
+        <div className="op-row">
+          <input
+            type="text"
+            className="cd-release-ref"
+            aria-label="MusicBrainz のリリース URL か MBID"
+            placeholder="https://musicbrainz.org/release/… か MBID（候補に出ない盤はこれで当てる）"
+            value={releaseRef}
+            disabled={cd.busy}
+            onChange={(e) => setReleaseRef(e.target.value)}
+          />
+          <button
+            type="button"
+            disabled={cd.busy || releaseRef.trim() === ''}
+            onClick={() => void cd.lookupToc(cd.toc, { ...ids, release: releaseRef, refresh: true })}
+          >
+            このリリースで照会
+          </button>
+        </div>
+      </details>
 
       {draft != null && confirmed == null && <DraftForm cd={cd} />}
       {confirmed != null && <Confirmed meta={confirmed} onEdit={cd.unconfirm} />}

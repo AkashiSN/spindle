@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { driveIdsFor, driveStateLabel, newDiscToc, type DriveStatus } from './cdDrive'
+import { audioTocSummary, driveIdsFor, driveStateLabel, newDiscToc, type DriveStatus } from './cdDrive'
 
 function st(state: DriveStatus['state'], toc: string | null = null, error: string | null = null): DriveStatus {
   return { state, toc, isrcs: [], mcn: null, error, checked_at: 1_700_000_000 }
@@ -20,6 +20,32 @@ describe('driveIdsFor', () => {
   })
 })
 
+describe('audioTocSummary', () => {
+  it('音声トラックだけ数え、総時間は音声区間の長さ', () => {
+    // 2 トラック、リードアウト 40290 セクタ = 8:57
+    expect(audioTocSummary('0:20144:40290')).toEqual({ tracks: 2, durationMs: (40290 * 1000) / 75 })
+  })
+  it('Enhanced CD はデータトラックを数えず、音声の終端はデータ開始 − 11400（D-64 / SPEC §7.2）', () => {
+    // 音声 2 本 + データ 1 本。音声の終端は 125824 − 11400 = 114424 セクタ
+    expect(audioTocSummary('0:13959:-125824:188333')).toEqual({
+      tracks: 2,
+      durationMs: (114424 * 1000) / 75,
+    })
+  })
+  it('先頭にデータがある Mixed Mode は音声の開始から数える', () => {
+    // データ 1 本 + 音声 2 本（データが先頭）。音声は 2 本、区間は 30000 → 90000
+    expect(audioTocSummary('-0:30000:60000:90000')).toEqual({
+      tracks: 2,
+      durationMs: (60000 * 1000) / 75,
+    })
+  })
+  it('読めない TOC は null', () => {
+    expect(audioTocSummary('x:y')).toBeNull()
+    expect(audioTocSummary('')).toBeNull()
+    expect(audioTocSummary('-0:1000')).toBeNull()
+  })
+})
+
 describe('driveStateLabel', () => {
   it('状態ごとの日本語', () => {
     expect(driveStateLabel(st('unknown'))).toBe('ドライブを確認中…')
@@ -31,8 +57,10 @@ describe('driveStateLabel', () => {
     expect(driveStateLabel(st('not_ready'))).toBe('ドライブの準備中…')
     // 総時間も出す（40290 − 0 セクタ = 8:57）
     expect(driveStateLabel(st('disc_ok', '0:20144:40290'))).toBe('ディスクあり（2 トラック・8:57）')
-    // 読めない TOC はトラック数だけ
-    expect(driveStateLabel(st('disc_ok', 'x:y'))).toBe('ディスクあり（1 トラック）')
+    // Enhanced CD は音声トラックだけ数える
+    expect(driveStateLabel(st('disc_ok', '0:13959:-125824:188333'))).toBe('ディスクあり（2 トラック・25:26）')
+    // 読めない TOC はディスクがあることだけ
+    expect(driveStateLabel(st('disc_ok', 'x:y'))).toBe('ディスクあり')
   })
   it('ディスクはあるが TOC を読めていない', () => {
     expect(driveStateLabel(st('disc_ok', null))).toBe('ディスクあり（TOC を読み取り中…）')
