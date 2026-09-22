@@ -183,6 +183,13 @@ code {
     'nav nav nav'
     'left vdiv right';
 }
+/* 左カラムを出さない画面（CD / YouTube / Inbox / ジョブ / 履歴 / 設定。P4-20） */
+.shell.full {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    'nav'
+    'right';
+}
 .left-col {
   grid-area: left;
   display: flex;
@@ -258,6 +265,16 @@ code {
   border-radius: 8px;
   background: var(--accent-bg);
   color: var(--accent);
+}
+/* Inbox の承認待ち（P4-20）。ジョブの件数と同じ形だが、導線を示すので赤で塗る */
+.top-bar .inbox-count {
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 5px;
+  margin-left: 4px;
+  border-radius: 8px;
+  background: var(--error);
+  color: var(--bg);
 }
 .top-bar .jobs-failed {
   display: inline-block;

@@ -38,6 +38,7 @@ import { useCdDrive } from './hooks/useCdDrive'
 import type { DriveStatus } from './lib/cdDrive'
 import { useCdLookup } from './hooks/useCdLookup'
 import { useInbox } from './hooks/useInbox'
+import { useInboxSummary } from './hooks/useInboxSummary'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
 import { useSubscriptions } from './hooks/useSubscriptions'
@@ -45,7 +46,7 @@ import { OPENED_WITH_URL, useYoutube } from './hooks/useYoutube'
 import { albumsOfRows } from './lib/albumGain'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
 import { scopeAfterPlaylistDelete, sortForScope } from './lib/playlists'
-import type { View } from './lib/views'
+import { hasSidebar, type View } from './lib/views'
 import {
   DEFAULT_SORT,
   filterToParam,
@@ -150,6 +151,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const drive = useCdDrive(sseOpen && view === 'cd', onNewDisc)
   // Inbox は画面を開いたときに取り、開いている間は inbox ジョブの job イベントで取り直す
   const inbox = useInbox(sseOpen && view === 'inbox')
+  // 上部バーのバッジは画面に関わらず要る（取り込んだ次にどこを見るかの導線。P4-20）
+  const inboxSummary = useInboxSummary(sseOpen)
   const visibleEnd = useRef(0)
 
   // filter 形の選択の「うち反映待ち」。選択集合は immutable でも中の行の pending はバッチの進行で
@@ -243,7 +246,11 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       if (e.state === 'done' || e.state === 'failed') scheduleRowRefresh()
       // inbox ジョブの完了は件の状態（走査の結果、placed / failed）を変える。job イベントに種別は
       // 無いので、Inbox を開いている間は完了のたびに取り直す（hook 側で 250ms に間引く）
-      if (view === 'inbox' && (e.state === 'done' || e.state === 'failed')) inbox.refresh()
+      if (e.state === 'done' || e.state === 'failed') {
+        // バッジは画面に関わらず更新する（Inbox を開いていなくても数字が増える）
+        inboxSummary.refresh()
+        if (view === 'inbox') inbox.refresh()
+      }
     },
     onBatch: () => {
       jobs.refresh()
@@ -472,16 +479,22 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     return albumId == null ? null : (albums.albums.find((a) => a.id === albumId) ?? null)
   }, [artTrack, albums.albums])
 
+  // ツリーの選択が表に効く画面（ライブラリ / アルバム）だけ左カラムを出す（P4-20、SPEC §12.1）
+  const sidebar = hasSidebar(view)
+
   return (
-    <div className="shell">
+    <div className={`shell${sidebar ? '' : ' full'}`}>
       <TopBar
         view={view}
         onView={setView}
         summary={jobs.summary}
+        inbox={inboxSummary.summary}
         connected={connected}
         onLogout={logout}
         player={player}
       />
+      {sidebar && (
+      <>
       <div className="left-col">
       <Sidebar
         albums={albums.albums}
@@ -505,6 +518,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       <AlbumArt track={artTrack} album={artAlbum} />
       </div>
       <div className="divider-v" onMouseDown={sideDrag.onMouseDown} title="ドラッグで幅を変更" />
+      </>
+      )}
       <div className="right-col">
       {view === 'tracks' && (
       <RightPanel
