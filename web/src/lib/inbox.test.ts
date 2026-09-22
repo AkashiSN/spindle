@@ -361,4 +361,3 @@ describe('watchLabel', () => {
     expect(watchLabel({ checked_at: 5, poll_interval_secs: 60 }, t)).toBe('最後に確認: T5（60 秒ごと）')
   })
 })
-
