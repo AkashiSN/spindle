@@ -1657,8 +1657,10 @@ async fn watcher_enqueues_only_when_inbox_changes_or_items_need_attention() {
             )
             .unwrap();
     };
+    // 回数ベースだと遅いランナーで足りないので、経過時間で待つ
     let wait_count = |n: i64| async move {
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
             if count() == n {
                 return;
             }

@@ -398,7 +398,11 @@ async fn scheduler_enqueues_once_and_stops_on_shutdown() {
         Duration::from_millis(20),
         shutdown.clone(),
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // 投入されるまで待つ（遅いランナーでは 300 ms の固定待ちでは足りない）
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while backup_jobs(&lib.conn()).is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(backup_jobs(&lib.conn()), [(1, "queued".to_owned())]);
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(5), h)

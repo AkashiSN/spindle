@@ -490,7 +490,13 @@ async fn gc_job_waits_while_a_scan_holds_the_library_mutex() {
         EnqueueResult::Inserted(id) | EnqueueResult::Duplicate(id) => id,
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(env.job_state(gc_id), JobState::Queued);
+    // 排他を取れない gc は claim されて running → Requeue → queued を毎 tick 繰り返すので、状態は
+    // queued か running のどちらかになる（終端になっていない = 走れていないことを確かめる）
+    assert!(
+        matches!(env.job_state(gc_id), JobState::Queued | JobState::Running),
+        "{:?}",
+        env.job_state(gc_id)
+    );
     assert_eq!(env.count("SELECT count(*) FROM tracks"), 1);
     // scan が終端になれば（mutex が解放されれば）走る
     release.cancel();
@@ -864,7 +870,12 @@ async fn scan_waits_while_gc_holds_the_library_mutex() {
         EnqueueResult::Inserted(id) | EnqueueResult::Duplicate(id) => id,
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(env.job_state(scan_id), JobState::Queued);
+    // 上と同じ理由（queued と running を往復する）
+    assert!(
+        matches!(env.job_state(scan_id), JobState::Queued | JobState::Running),
+        "{:?}",
+        env.job_state(scan_id)
+    );
     release.cancel();
     assert_eq!(env.wait_job(gc_id).await, JobState::Done);
     assert_eq!(env.wait_job(scan_id).await, JobState::Done);
