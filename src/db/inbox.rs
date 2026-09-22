@@ -137,6 +137,16 @@ pub fn list_by_state(conn: &Connection, state: ItemState) -> Result<Vec<Item>> {
     Ok(rows)
 }
 
+/// 状態ごとの件数（上部バーのバッジ用。P4-20）。一覧を読まずに数える
+/// （`list` は下書き / 失敗理由の JSON まで読むので、60 秒ごとに叩く経路には重い）
+pub fn count_by_state(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut st = conn.prepare("SELECT state, COUNT(*) FROM inbox_items GROUP BY state")?;
+    let rows = st
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn insert_item(conn: &Connection, rel_dir: &str, rel_dir_key: &str, now: i64) -> Result<i64> {
     conn.execute(
         "INSERT INTO inbox_items (rel_dir, rel_dir_key, state, detected_at, seen_at)

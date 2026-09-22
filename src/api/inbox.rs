@@ -69,6 +69,35 @@ fn unavailable(state: &AppState) -> Option<Response> {
         .then(|| error_response(StatusCode::SERVICE_UNAVAILABLE, "inbox_unavailable"))
 }
 
+#[derive(Debug, Serialize)]
+pub struct SummaryResponse {
+    /// 承認待ち（上部バーの赤い件数）。DB が返す型に合わせて i64
+    pub pending: i64,
+    /// 失敗（赤点）
+    pub failed: i64,
+}
+
+/// 上部バーのバッジ用の要約（P4-20）。一覧は下書き / 失敗理由まで読むので、
+/// 60 秒ごとに叩くこの経路では固定 SQL の集計だけを使う
+pub async fn summary(State(state): State<AppState>) -> Result<Response, ApiError> {
+    if let Some(r) = unavailable(&state) {
+        return Ok(r);
+    }
+    let counts = state.db.read(dbinbox::count_by_state).await?;
+    let count_of = |name: &str| {
+        counts
+            .iter()
+            .find(|(s, _)| s == name)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    };
+    Ok(Json(SummaryResponse {
+        pending: count_of(ItemState::Pending.as_str()),
+        failed: count_of(ItemState::Failed.as_str()),
+    })
+    .into_response())
+}
+
 pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
     if let Some(r) = unavailable(&state) {
         return Ok(r);

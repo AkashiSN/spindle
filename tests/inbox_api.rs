@@ -1021,3 +1021,72 @@ async fn list_has_no_same_title_warning_without_a_destination_album() {
         "{it}"
     );
 }
+
+/// 上部バーのバッジ用の要約（P4-20）。pending と failed の件数だけ返す。
+/// 一覧（`GET /api/inbox`）は下書き / 失敗理由まで読むので、60 秒ごとに叩く経路には使わない
+#[tokio::test]
+async fn summary_counts_pending_and_failed() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let first = app.item("A").await;
+    let second = app.item("B").await;
+
+    // 作った直後はどちらも pending
+    let (st, body) = app.get(&c, "/api/inbox/summary").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["pending"], 2);
+    assert_eq!(body["failed"], 0);
+
+    // 却下した件は pending にも failed にも数えない
+    let (st, _) = app
+        .post(&c, &format!("/api/inbox/{first}/reject"), json!({}))
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (_, body) = app.get(&c, "/api/inbox/summary").await;
+    assert_eq!(body["pending"], 1);
+    assert_eq!(body["failed"], 0);
+
+    // 失敗も数える（この API は状態を数えるだけなので、行を直接 failed にして見る）
+    app.db
+        .write(move |c| inbox::set_state(c, second, ItemState::Failed, Some("配置できない"), 2000))
+        .await
+        .unwrap();
+    let (_, body) = app.get(&c, "/api/inbox/summary").await;
+    assert_eq!(body["pending"], 0);
+    assert_eq!(body["failed"], 1);
+}
+
+/// `[paths].inbox` が無ければ 503（バッジを出さない）
+#[tokio::test]
+async fn summary_is_unavailable_without_an_inbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
+    let config = Arc::new(Config::parse(EXAMPLE).unwrap());
+    let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
+        .await
+        .unwrap();
+    // with_inbox を呼ばない（Inbox の root が無い）
+    let router = api::router(AppState::new(config, db, mode));
+    let login = req(Method::POST, "/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from(r#"{"password":"correct horse"}"#))
+        .unwrap();
+    let res = router.clone().oneshot(login).await.unwrap();
+    let cookie = res
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let r = req(Method::GET, "/api/inbox/summary")
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap();
+    let res = router.oneshot(r).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
