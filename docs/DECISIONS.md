@@ -2625,6 +2625,27 @@ CTDB への提出（自分のシンドロームを面順にした `DbSyndromes::
 **未決**: 同梱ファイルの追随が衝突で残ったときの回収（今は警告だけ）。cdrdao の `read-toc` が持つ
 ISRC / pre-emphasis / CD-TEXT を `Toc` に持たせて disc.toc に書く（P2-2 のドライブ実装で決める）。
 
+**追記**（2026-09-23。ユーザ要望。**実装は P2-5**）: **吸い出したものは Library へ直接置かず、Inbox を
+通す。** CD 画面からは編集を外し、値を直す場所を Inbox の承認画面に一本化する。
+
+- 吸い出した FLAC は `[paths].inbox` の下に 1 ディレクトリ = 1 枚で置く（複数枚組はディスクごと）
+- **MusicBrainz から写した内容と検証結果はサイドカー `spindle-inbox.json` に書く**（D-70 が
+  ytmusic 用に作った仕組みをそのまま使う）。これで承認画面に候補の値が最初から入り、打ち直しが要らない。
+  タグにも書くが、`category` はタグに書かない（パス専用。SPEC §5）ので、サイドカーが唯一の伝え方になる
+- `rip.log` / `disc.cue` / `disc.toc` も件のディレクトリに置き、承認して配置するときに Library へ運ぶ
+  （既存の同梱ファイルの追随と同じ扱い）
+- **AccurateRip / CTDB の照合結果は配置時に登録する。** `album_verifications` / `track_verifications` /
+  `tracks.verification` は `tracks` の行が要るので、Inbox に居る間は登録できない。サイドカーに
+  `RipReport` を入れておき、Inbox の配置がそれを読んで `source = 'rip'` で入れる
+- `source_type = 'cd_rip'` も配置時に付ける（スキャナの rip.log 判定は残す。外から置かれた rip にも効く）
+
+**理由**: ユーザの導線は「入力（CD / YouTube）→ Inbox → ライブラリ」で、CD だけ Library へ直行するのは
+一貫しない。また CD 画面と承認画面の両方に入力欄があると、どちらで直すのか分からなくなる。承認を
+挟むことで、取り込んだ直後に名前を直してから Library に入る。
+
+**この追記で `place_disc` は作り直しになる**（宛先が Library から Inbox へ、登録が `tracks` から
+`inbox_items` + サイドカーへ変わる）。既存の `tests/cd_place.rs` も書き換わる。P2-5 でまとめて行う。
+
 ---
 
 ## D-68 Inbox は 1 ディレクトリ = 1 件の承認キューにし、配置は CD と同じ経路で登録する

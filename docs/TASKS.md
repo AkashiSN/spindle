@@ -929,7 +929,16 @@ TOC 編集 / reset で下の段が消える、照会中もフォームが消え�
 
 ### P2-5 吸い出し
 
+**D-67 追記（2026-09-23）で取り込み先が変わった。吸い出したものは Library へ直行せず Inbox を通す。**
+`place_disc` はその形に作り直す（宛先が `[paths].inbox`、登録が `inbox_items` + サイドカー
+`spindle-inbox.json`。`albums` / `tracks` / 検証記録の登録は承認後の配置が行う）。既存の
+`tests/cd_place.rs` も書き換わる。
+
 - [ ] 全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割
+- [ ] `place_disc` を Inbox 経由に作り直す（D-67 追記）: FLAC と rip.log / disc.cue / disc.toc を件の
+      ディレクトリへ、MusicBrainz から写した内容と `RipReport` をサイドカーへ、`inbox_items` に 1 件
+- [ ] Inbox の承認と配置が、サイドカーの `RipReport` から `album_verifications`（`source = 'rip'`）/
+      `track_verifications` / `tracks.verification` と `source_type = 'cd_rip'` を入れる
 - [ ] 吸い出し中、トラック単位の進捗を SSE の `job` イベントで流す
       （`{ phase: read|verify|encode|place, disc_no, track_no, done, total }`）。CD 画面のトラック表の
       右端に出る（器は P4-20 の `CdTrackTable` の `RipProgress`）。**相ごとの `track_no` の進み方と、
@@ -1565,6 +1574,11 @@ Shift+↑、Esc → Shift+↓）
 - [x] `GET /api/inbox/summary`（上部バーのバッジ用。一覧を読まない固定 SQL の集計）
 - [x] CD 画面: トラック表を主役に（タイトルは `Track NN` のプレースホルダ）、候補は左にジャケットを
       付けて下へ、「確定」段を廃止（`CdView` を 4 ファイルに分割）
+- [x] 候補から写す範囲の既定を「全部写す」に（D-72 追記 2。2026-09-23）
+- [x] **CD 画面から編集を外し、読み取り専用のライブラリ風の表に**（2026-09-23。ユーザ要望）。
+      値を直すのは Inbox の承認画面に一本化する（D-67 追記。取り込み先を Inbox にする実装は P2-5）。
+      `CdAlbumFields` → `CdAlbumSummary`、`CategoryField` は `components/CategoryField.tsx` へ、
+      cdState から編集系のアクションと paste の state を削除
 - [x] 上部バー: `ライブラリ / アルバム / CD / YouTube / Inbox`、☰ に `ジョブ / 履歴 / 設定`。
       Inbox に承認待ちの赤バッジ。左カラムはツリーが効く画面（ライブラリ / アルバム）だけ
 
@@ -1575,7 +1589,9 @@ Shift+↑、Esc → Shift+↓）
 `web/src/lib/cdState.test.ts`（`set_disc`、照会中もフォームが消えない、busy が残らない）、
 `web/src/lib/views.test.ts`（並びと左カラム）
 
-残り: トラックごとの進捗は P2-5（表の列と `RipProgress` の型だけ用意した）
+残り: トラックごとの進捗は P2-5（表の列と `RipProgress` の型だけ用意した）。Inbox 経由の取り込みも
+P2-5（D-67 追記）。トラックリスト貼り付け（`lib/tracklist.ts` / `applyTracklist`）を Inbox の承認画面へ
+移すのは別タスク（パーサとテストは残してある）
 
 ## 着手前に確認が必要な残課題
 
