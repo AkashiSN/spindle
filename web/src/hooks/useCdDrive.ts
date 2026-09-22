@@ -1,10 +1,13 @@
 // CD ドライブの監視（P2-1）: CD 画面を開いている間 `GET /api/cd/status` を 2 秒間隔で取り、
 // 新しいディスクの TOC が出たら `onNewDisc` に渡す（照会の自動起動は呼び側）。`POST /api/cd/eject` も束ねる。
-// 「新しい」の判定は lib/cdDrive.ts の newDiscToc（同じディスクの間は 1 回だけ）
+// 「新しい」の判定は lib/cdDrive.ts の newDiscToc（同じディスクの間は 1 回だけ）。
+// 応答は世代（lib/latest.ts）で最新だけ採用し、前回の応答待ちの間は次の周回を飛ばす。画面を閉じたら
+// 進行中の応答は捨てる（閉じた後に onNewDisc が走らない）
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPost } from '../api/client'
 import { newDiscToc, type DriveStatus } from '../lib/cdDrive'
+import { Latest } from '../lib/latest'
 
 export const DRIVE_POLL_MS = 2000
 
@@ -37,35 +40,44 @@ export function useCdDrive(active: boolean, onNewDisc: (toc: string) => void): C
   useEffect(() => {
     onNew.current = onNewDisc
   }, [onNewDisc])
+  const gen = useRef(new Latest())
+  const inflight = useRef(false)
 
   const refresh = useCallback(async () => {
+    const id = gen.current.next()
+    inflight.current = true
     try {
       const s = await apiFetch<DriveStatus>('/api/cd/status')
+      if (!gen.current.isCurrent(id)) return
       setStatus(s)
       setUnavailable(false)
       const toc = newDiscToc(lastSeen.current, s)
       lastSeen.current = s.toc
       if (toc != null) onNew.current(toc)
     } catch (e) {
+      if (!gen.current.isCurrent(id)) return
       if (e instanceof ApiError && e.code === 'cd_unavailable') {
         setUnavailable(true)
         return
       }
       setError(describe(e))
+    } finally {
+      if (gen.current.isCurrent(id)) inflight.current = false
     }
   }, [])
 
   useEffect(() => {
     if (!active) return
-    let stopped = false
+    const g = gen.current
+    inflight.current = false
     const tick = () => {
-      if (!stopped) void refresh()
+      if (!inflight.current) void refresh()
     }
     tick()
     const id = window.setInterval(tick, DRIVE_POLL_MS)
     return () => {
-      stopped = true
       window.clearInterval(id)
+      g.invalidate()
     }
   }, [active, refresh])
 
@@ -74,6 +86,7 @@ export function useCdDrive(active: boolean, onNewDisc: (toc: string) => void): C
     setError(null)
     try {
       await apiPost<undefined>('/api/cd/eject', {})
+      // 取り出しの直後の状態を取り直す（進行中の周回があっても、こちらが最新になる）
       await refresh()
     } catch (e) {
       setError(describe(e))

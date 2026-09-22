@@ -3,10 +3,11 @@
 // GET /api/cd/status → useCdDrive → lookupToc）から来るのが本線で、貼り付け欄はドライブ無しの環境用。
 // 確定したメタデータは吸い出し（P2-5）に渡す
 
-import { useCallback, useReducer } from 'react'
+import { useCallback, useReducer, useRef } from 'react'
 import { ApiError, apiPost } from '../api/client'
 import { normalizeTocInput, type CopyScope, type DiscDraft, type DiscTrackDraft, type LookupResponse, type ReleaseCandidate } from '../lib/cd'
 import { cdReducer, initialCdState, type CdState } from '../lib/cdState'
+import { Latest } from '../lib/latest'
 
 export type CdLookupState = CdState & {
   setToc: (v: string) => void
@@ -42,20 +43,25 @@ function describe(e: unknown): string {
 
 export function useCdLookup(): CdLookupState {
   const [s, dispatch] = useReducer(cdReducer, initialCdState)
+  // 照会の世代: 最新の要求の応答だけを reducer に入れる（ディスクを続けて替えたとき、古い TOC の候補が
+  // 新しい TOC の下に居座らない）。TOC の編集と「結果を消す」も進行中の照会を無効にする
+  const gen = useRef(new Latest())
 
   const lookupToc = useCallback(async (toc: string) => {
     const normalized = normalizeTocInput(toc)
     if (normalized === '') {
+      gen.current.invalidate()
       dispatch({ type: 'lookup_error', error: 'TOC を貼り付けてください' })
       return
     }
+    const id = gen.current.next()
     dispatch({ type: 'set_toc', toc })
     dispatch({ type: 'lookup_start' })
     try {
       const r = await apiPost<LookupResponse>('/api/cd/lookup', { toc: normalized })
-      dispatch({ type: 'lookup_ok', result: r })
+      if (gen.current.isCurrent(id)) dispatch({ type: 'lookup_ok', result: r })
     } catch (e) {
-      dispatch({ type: 'lookup_error', error: describe(e) })
+      if (gen.current.isCurrent(id)) dispatch({ type: 'lookup_error', error: describe(e) })
     }
   }, [])
   const lookup = useCallback(() => lookupToc(s.toc), [lookupToc, s.toc])
@@ -66,10 +72,16 @@ export function useCdLookup(): CdLookupState {
     chosen,
     lookup,
     lookupToc,
-    setToc: useCallback((toc: string) => dispatch({ type: 'set_toc', toc }), []),
+    setToc: useCallback((toc: string) => {
+      gen.current.invalidate()
+      dispatch({ type: 'set_toc', toc })
+    }, []),
     select: useCallback((index: number) => dispatch({ type: 'select', index }), []),
     setCopyScope: useCallback((scope: CopyScope) => dispatch({ type: 'set_copy_scope', scope }), []),
-    reset: useCallback(() => dispatch({ type: 'reset' }), []),
+    reset: useCallback(() => {
+      gen.current.invalidate()
+      dispatch({ type: 'reset' })
+    }, []),
     startManual: useCallback(() => dispatch({ type: 'start_manual' }), []),
     updateDraft: useCallback((patch: Partial<DiscDraft>) => dispatch({ type: 'update_draft', patch }), []),
     updateTrack: useCallback(

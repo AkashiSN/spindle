@@ -11,7 +11,7 @@
 
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -264,10 +264,13 @@ impl Default for DriveStatus {
     }
 }
 
-/// ポーラが更新し、API が読む状態
+/// ポーラが更新し、API が読む状態。ドライブ操作（定期 poll、eject + 直後の poll）は `io` で
+/// 直列化する: 読み → ドライブ → 書きを一体にしないと、定期 poll が古い DiscOk / TOC を eject の
+/// 後に書き戻し、次のディスクでも「TOC がある」として読み直さなくなる
 #[derive(Debug, Default)]
 pub struct DriveMonitor {
     status: RwLock<DriveStatus>,
+    io: Mutex<()>,
 }
 
 impl DriveMonitor {
@@ -280,6 +283,19 @@ impl DriveMonitor {
 
     /// 1 周回。状態を取り、DiscOk で TOC が無ければ読む（blocking。`spawn_blocking` の中で呼ぶ）
     pub fn poll(&self, drive: &dyn Drive, now: i64) {
+        let _io = self.io.lock().unwrap_or_else(|e| e.into_inner());
+        self.poll_locked(drive, now);
+    }
+
+    /// トレイを開けて、同じ排他の中で状態を見直す（次の周期を待たずに反映する）
+    pub fn eject_and_poll(&self, drive: &dyn Drive, now: i64) -> Result<(), DriveError> {
+        let _io = self.io.lock().unwrap_or_else(|e| e.into_inner());
+        let r = drive.eject();
+        self.poll_locked(drive, now);
+        r
+    }
+
+    fn poll_locked(&self, drive: &dyn Drive, now: i64) {
         let prev = self.snapshot();
         let had_toc = prev.toc.is_some();
         let next = match drive.status() {

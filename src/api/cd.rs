@@ -58,9 +58,7 @@ pub async fn eject(State(state): State<AppState>) -> Result<Response, ApiError> 
         return Ok(cd_unavailable());
     };
     let result = tokio::task::spawn_blocking(move || {
-        let r = cd.drive.eject();
-        cd.monitor.poll(cd.drive.as_ref(), now_epoch());
-        r
+        cd.monitor.eject_and_poll(cd.drive.as_ref(), now_epoch())
     })
     .await
     .map_err(|e| ApiError::Internal(format!("eject のタスクが異常終了: {e}")))?;

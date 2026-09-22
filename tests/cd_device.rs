@@ -2,8 +2,8 @@
 //! ioctl の生の TOC エントリから `Toc` を組み立てる純粋な部分と、ポーラの遷移（DiscOk になった
 //! ときだけ TOC を読み、抜かれたら捨てる）をフェイクのドライブで確かめる。実ドライブは `#[ignore]`
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use spindle::cd::device::{
     toc_from_entries, Drive, DriveError, DriveMonitor, DriveState, LinuxDrive, TocEntry,
@@ -251,6 +251,95 @@ fn drive_state_serializes_snake_case() {
         serde_json::to_string(&DriveState::NoDrive).unwrap(),
         "\"no_drive\""
     );
+}
+
+// ------------------------------------------------------------ eject と定期 poll の直列化
+
+/// `status()` の 1 回目で止まり、`release` されるまで返さないドライブ。eject すると以後 TrayOpen
+struct StallingDrive {
+    entered: Arc<(Mutex<bool>, Condvar)>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+    ejected: Arc<AtomicBool>,
+    stalled_once: AtomicBool,
+    ejects: AtomicUsize,
+}
+
+fn wait_flag(pair: &(Mutex<bool>, Condvar)) {
+    let (m, cv) = pair;
+    let mut g = m.lock().unwrap();
+    while !*g {
+        g = cv.wait(g).unwrap();
+    }
+}
+
+fn set_flag(pair: &(Mutex<bool>, Condvar)) {
+    let (m, cv) = pair;
+    *m.lock().unwrap() = true;
+    cv.notify_all();
+}
+
+impl Drive for StallingDrive {
+    fn status(&self) -> Result<DriveState, DriveError> {
+        if !self.stalled_once.swap(true, Ordering::SeqCst) {
+            set_flag(&self.entered);
+            wait_flag(&self.release);
+        }
+        Ok(if self.ejected.load(Ordering::SeqCst) {
+            DriveState::TrayOpen
+        } else {
+            DriveState::DiscOk
+        })
+    }
+    fn read_toc(&self) -> Result<Toc, DriveError> {
+        Ok(nevermind())
+    }
+    fn eject(&self) -> Result<(), DriveError> {
+        self.ejects.fetch_add(1, Ordering::SeqCst);
+        self.ejected.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// 定期 poll がドライブを見ている最中に eject が来ても、古い DiscOk / TOC が後から書き戻されない。
+/// eject + 直後の poll は定期 poll と同じ排他の中で走る（codex 指摘: 後勝ちで抜いたディスクの
+/// TOC が復活し、次のディスクでも読み直されない）
+#[test]
+fn eject_is_serialized_with_periodic_poll() {
+    let drive = Arc::new(StallingDrive {
+        entered: Arc::new((Mutex::new(false), Condvar::new())),
+        release: Arc::new((Mutex::new(false), Condvar::new())),
+        ejected: Arc::new(AtomicBool::new(false)),
+        stalled_once: AtomicBool::new(false),
+        ejects: AtomicUsize::new(0),
+    });
+    let mon = Arc::new(DriveMonitor::default());
+    // 定期 poll: status() の中で止まる
+    let periodic = {
+        let (d, m) = (Arc::clone(&drive), Arc::clone(&mon));
+        std::thread::spawn(move || m.poll(d.as_ref(), 1))
+    };
+    wait_flag(&drive.entered);
+    // その間に eject が来る。排他で待たされ、ドライブにはまだ届かない
+    let ejecting = {
+        let (d, m) = (Arc::clone(&drive), Arc::clone(&mon));
+        std::thread::spawn(move || m.eject_and_poll(d.as_ref(), 2))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(
+        drive.ejects.load(Ordering::SeqCst),
+        0,
+        "定期 poll の途中で eject が割り込んではいけない"
+    );
+    set_flag(&drive.release);
+    periodic.join().unwrap();
+    ejecting.join().unwrap().unwrap();
+    let s = mon.snapshot();
+    assert_eq!(s.state, DriveState::TrayOpen);
+    assert!(
+        s.toc.is_none(),
+        "抜いたディスクの TOC が残ってはいけない: {s:?}"
+    );
+    assert_eq!(s.checked_at, 2);
 }
 
 // ------------------------------------------------------------ 実ドライブ
