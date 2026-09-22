@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use spindle::db::Db;
 use spindle::fsroot::RootDir;
+use spindle::import::sidecar::Sidecar;
 use spindle::import::ytmusic::downloader::{DownloaderEnv, DEDUP_PREFIX};
-use spindle::import::ytmusic::sidecar::Sidecar;
 use spindle::import::ytmusic::MetadataProvider;
 use spindle::jobs::handlers::ytdl::{new_ytdl_job, YtdlHandler};
 use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};

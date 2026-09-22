@@ -839,7 +839,16 @@ async fn recording_is_atomic_across_discs() {
     let res = lib
         .db
         .transaction(move |c| {
-            record_album(c, album, 1, VerifySource::Retro, &expected, &discs, None, 1)
+            record_album(
+                c,
+                album,
+                Some(1),
+                VerifySource::Retro,
+                &expected,
+                &discs,
+                None,
+                1,
+            )
         })
         .await;
     assert!(res.is_err(), "FK 違反で失敗する: {res:?}");
@@ -972,7 +981,9 @@ async fn record_album_is_idempotent_per_job() {
         let (d, e) = (vec![disc.clone()], vec![(track_id, version)]);
         let out = lib
             .db
-            .transaction(move |c| record_album(c, album, job, VerifySource::Retro, &e, &d, None, 1))
+            .transaction(move |c| {
+                record_album(c, album, Some(job), VerifySource::Retro, &e, &d, None, 1)
+            })
             .await
             .unwrap();
         if expect_first {

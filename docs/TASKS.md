@@ -958,12 +958,13 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 - [ ] `place_disc` を **Inbox 経由**に作り直す（D-67 追記）: FLAC と rip.log / disc.cue / disc.toc を件の
       ディレクトリへ、MusicBrainz から写した内容と `RipReport` をサイドカーへ、`inbox_items` に 1 件。
       PCM の切り方・エンコード（`flac -N --verify`）・タグの写像・同梱ファイルは既存のものをそのまま使う
-- [ ] Inbox の承認と配置が、サイドカーの `RipReport` から `album_verifications`（`source = 'rip'`）/
+- [x] Inbox の承認と配置が、サイドカーの `RipReport` から `album_verifications`（`source = 'rip'`）/
       `track_verifications` / `tracks.verification` と `source_type = 'cd_rip'` を入れる。
       **対応付けはファイルの basename**（配列順を信じない。Inbox では番号もタイトルも直せる）。
       登録は `register_item` と同じトランザクション、`log_path` は移動後の Library 相対
-- [ ] サイドカー v1 に `RipReport` を入れる形を足す（いまは `category` / `files` だけ。`RipReport` も
-      serde 型でない）。CD の件は `album_gain = true` で提案する（D-74）
+      （`import::inbox::bind_rip` / `register_item`。D-67 追記 2）
+- [x] サイドカー v1 に `RipReport` を入れる形を足す（`import/sidecar.rs` の `RipEntry`。モジュールを
+      ytmusic から移した）。CD の件は `album_gain = true` で提案する（D-74。web の初期値も提案に従う）
 - [ ] **リップの開始は空の名前を許す**（D-67 追記）。`DiscMetadata::validate` の
       `EmptyAlbum` / `EmptyAlbumArtist` は Library へ置くときの検証なので、開始の契約には使わない。
       web の `lib/cd.ts` の `validateDraft` は CD 画面から使われなくなったので、ここで消すか直す
@@ -979,7 +980,10 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 - **候補ゼロ件・アルバム名もアーティストも空のまま Inbox まで完走する**（CD 画面から編集を外したので、
   この経路が塞がっていると「どれも違う」盤を取り込めない）
 - サイドカーの basename 対応が 1 対 1 でないとき / CRC の件数や `disc_no` が合わないときは配置しない
-- 承認で番号やタイトルを直しても、検証記録が正しいトラックに付く
+  （済: `tests/inbox_draft.rs` の `bind_rip_*`、`tests/inbox_job.rs` の `cd_item_is_not_placed_*`、
+  `tests/inbox_sidecar.rs` の `rip_entry_*`）
+- 承認で番号やタイトルを直しても、検証記録が正しいトラックに付く（済: `tests/inbox_job.rs` の
+  `cd_item_is_placed_with_verification_bound_by_file_name`）
 - 既存の `tests/cd_place.rs` は Library 直行前提なので書き換わる。実ドライブのテストは `#[ignore]`
 
 ### P2-6 ARv1/v2 CRC と CTDB CRC32
@@ -1133,7 +1137,7 @@ yt-dlp を subprocess で呼び、**Inbox に置くところまで**（D-70。�
 
 - [x] ジョブ基盤: `JobError::Fatal`（バックオフせず `failed`）、`JobType::Ytdl`（並列 1）
 - [x] `[ytmusic].download_timeout_secs`、起動時診断（`metadata_command[0]` と yt-dlp の実行可否を警告）
-- [x] サイドカー `spindle-inbox.json` の読み書き（`import/ytmusic/sidecar.rs`。merge は tmp + rename）
+- [x] サイドカー `spindle-inbox.json` の読み書き（`import/sidecar.rs`。merge は tmp + rename）
 - [x] Inbox: 既存 album の採用（MB キー無し同士）、TRACKNUMBER 無しの採番（max + 1 から名前順）、承認と
       登録トランザクションでの `(disc_no, track_no)` の重複検証、`destination` / `source` の応答、
       サイドカーの category 提案と配置成功時の削除、pending に戻った件の下書き merge
@@ -1144,7 +1148,7 @@ yt-dlp を subprocess で呼び、**Inbox に置くところまで**（D-70。�
 
 受け入れ: `tests/ytmusic_download.rs`（偽 yt-dlp（bash）+ 偽プラグインで ok / unmatched / skip /
 playlist / 重複 / Fatal と Failed の区別、dump の解釈、ファイル名。実 yt-dlp の通しは `#[ignore]`）、
-`tests/ytmusic_api.rs`、`tests/ytmusic_sidecar.rs`、`tests/inbox_job.rs`（追記・番号の再検証・
+`tests/ytmusic_api.rs`、`tests/inbox_sidecar.rs`、`tests/inbox_job.rs`（追記・番号の再検証・
 サイドカーの削除）、`tests/inbox_api.rs`（destination / source / 採番 / 400 / merge）、
 `tests/inbox_draft.rs`、`tests/jobs.rs`（Fatal）、`tests/config.rs`（起動時診断）
 
@@ -1646,6 +1650,9 @@ P2-5（D-67 追記）。**「取り込む」ボタンは `disabled` のまま**�
 Inbox バッジが実際に増える様子は未確認
 
 ## 着手前に確認が必要な残課題
+
+- Inbox 経由で置いた CD の album は `albums.discid` が NULL だが、DB 再構築後はスキャナがタグの
+  `MUSICBRAINZ_DISCID` から復元する（D-67 追記 2）。複数枚組の合流規則と一緒に揃え方を決める
 
 - ~~Discogs / VGMdb 連携の要否~~（2026-09-20。作らない。D-72）
 - ~~`.fpl` 書き出しの要否~~（2026-09-20。作らない。D-72）

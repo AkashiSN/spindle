@@ -207,6 +207,25 @@ pub enum RecordOutcome {
     AlreadyRecorded,
 }
 
+/// `track_ids` のすべてに吸い出し（`source = 'rip'`）の記録が既にあるか（空なら false）。Inbox 経由の
+/// 吸い出しの記録は `job_id` を持たないので、再配置で同じ行を採用したときはこれで二重記録を避ける
+pub fn all_have_rip_records(conn: &Connection, track_ids: &[i64]) -> Result<bool> {
+    if track_ids.is_empty() {
+        return Ok(false);
+    }
+    let mut st = conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM track_verifications tv
+                          JOIN album_verifications av ON av.id = tv.verification_id
+                         WHERE tv.track_id = ?1 AND av.source = 'rip')",
+    )?;
+    for &id in track_ids {
+        if !st.query_row([id], |r| r.get::<_, bool>(0))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// このジョブが既に記録しているか（commit の後に落ちて再実行されたとき）
 pub fn has_records_for_job(conn: &Connection, job_id: i64) -> Result<bool> {
     let n: i64 = conn.query_row(
@@ -220,20 +239,25 @@ pub fn has_records_for_job(conn: &Connection, job_id: i64) -> Result<bool> {
 /// アルバムの照合結果をまとめて記録する。呼び出し側がトランザクションの中で呼ぶこと
 /// （`Db::transaction`）。`expected` は照合を始めたときの `(track_id, audio_version)` で、
 /// 1 本でも現在値と違えば何も書かずに [`RecordOutcome::Changed`]（部分記録も stale な記録もしない）。
-/// 同じ `job_id` の行が既にあれば（commit 後の再実行）何も書かずに [`RecordOutcome::AlreadyRecorded`]
+/// 同じ `job_id` の行が既にあれば（commit 後の再実行）何も書かずに [`RecordOutcome::AlreadyRecorded`]。
+/// `job_id` が None なら冪等性は呼び出し側が持つ。Inbox の配置は 1 回の inbox ジョブが複数の件を置くので
+/// ジョブ id が鍵にならず、登録の commit の後・Inbox を消す前に落ちると走査が件を `pending` に戻して
+/// 再配置されるので、呼び出し側が [`all_have_rip_records`] で二重記録を避ける
 #[allow(clippy::too_many_arguments)]
 pub fn record_album(
     conn: &Connection,
     album_id: i64,
-    job_id: i64,
+    job_id: Option<i64>,
     source: VerifySource,
     expected: &[(i64, i64)],
     discs: &[DiscRecord],
     log_path: Option<&str>,
     now: i64,
 ) -> Result<RecordOutcome> {
-    if has_records_for_job(conn, job_id)? {
-        return Ok(RecordOutcome::AlreadyRecorded);
+    if let Some(job_id) = job_id {
+        if has_records_for_job(conn, job_id)? {
+            return Ok(RecordOutcome::AlreadyRecorded);
+        }
     }
     let mut st = conn.prepare_cached(
         "SELECT audio_version FROM tracks WHERE id = ?1 AND missing_since IS NULL",
@@ -277,7 +301,7 @@ pub fn record_album(
 fn record_disc(
     conn: &Connection,
     album_id: i64,
-    job_id: i64,
+    job_id: Option<i64>,
     source: VerifySource,
     disc_no: i64,
     method: Method,

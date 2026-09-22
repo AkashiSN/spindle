@@ -42,10 +42,7 @@ use crate::config::LayoutConfig;
 use crate::db::jobs as dbjobs;
 use crate::db::now_epoch;
 use crate::db::scans::{self, AlbumMeta, Fingerprint, PictureState};
-use crate::db::verify::{
-    self as dbv, DiscRecord, DiscResult, Method, MethodRecord, RecordOutcome, TrackRecord,
-    VerifySource,
-};
+use crate::db::verify::{self as dbv, RecordOutcome, VerifySource};
 use crate::db::{Db, DbError};
 use crate::domain::pathgen::{
     self, AlbumVariant, Occupancy, PlanItem, Planned, Template, TrackFields,
@@ -587,66 +584,6 @@ struct Registered {
     reused_files: usize,
 }
 
-/// 検証の記録（手法ごと。照会していない手法は行を作らない）
-fn disc_record(report: &RipReport, meta: &DiscMetadata, track_ids: &[i64]) -> DiscRecord {
-    let disc_result = |m: &super::verify::MethodResult| match m.outcome {
-        super::verify::Outcome::Verified => DiscResult::Verified,
-        super::verify::Outcome::Mismatch => DiscResult::Mismatch,
-        super::verify::Outcome::NotFound => DiscResult::NotFound,
-    };
-    let mut methods = Vec::new();
-    if let Some(m) = &report.ctdb {
-        methods.push(MethodRecord {
-            method: Method::Ctdb,
-            result: disc_result(m),
-            detected_offset: Some(m.offset),
-            confidence: Some(m.confidence),
-            tracks: track_ids
-                .iter()
-                .enumerate()
-                .map(|(i, &id)| TrackRecord {
-                    track_id: id,
-                    crc_v1: None,
-                    crc_v2: None,
-                    ctdb_crc: Some(report.crcs.get(i).map(|c| c.ctdb).unwrap_or(0)),
-                    matched: m.tracks.get(i).is_some_and(|v| v.matched),
-                })
-                .collect(),
-        });
-    }
-    if let Some(m) = &report.accuraterip {
-        methods.push(MethodRecord {
-            method: Method::AccurateRip,
-            result: disc_result(m),
-            detected_offset: Some(m.offset),
-            confidence: Some(m.confidence),
-            tracks: track_ids
-                .iter()
-                .enumerate()
-                .map(|(i, &id)| TrackRecord {
-                    track_id: id,
-                    crc_v1: Some(report.crcs.get(i).map(|c| c.ar_v1).unwrap_or(0)),
-                    crc_v2: Some(report.crcs.get(i).map(|c| c.ar_v2).unwrap_or(0)),
-                    ctdb_crc: None,
-                    matched: m.tracks.get(i).is_some_and(|v| v.matched),
-                })
-                .collect(),
-        });
-    }
-    let states = track_ids
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &id)| {
-            track_state(report.ctdb.as_ref(), report.accuraterip.as_ref(), i).map(|s| (id, s))
-        })
-        .collect();
-    DiscRecord {
-        disc_no: i64::from(meta.disc_no),
-        methods,
-        states,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn register(
     conn: &mut Connection,
@@ -742,11 +679,11 @@ fn register(
         scans::set_source_type(&tx, id, "cd_rip")?;
         track_ids.push(id);
     }
-    let disc = disc_record(report, meta, &track_ids);
+    let disc = report.disc_record(i64::from(meta.disc_no), &track_ids);
     match dbv::record_album(
         &tx,
         album_id,
-        job_id,
+        Some(job_id),
         VerifySource::Rip,
         &expected,
         &[disc],

@@ -14,7 +14,7 @@ use crate::db::scans;
 use crate::import::inbox::{
     destination, embedded_picture, propose, Destination, InboxDraft, SameTitle,
 };
-use crate::import::ytmusic::sidecar::FileEntry;
+use crate::import::sidecar::FileEntry;
 use crate::jobs::handlers::inbox::new_inbox_job;
 use crate::jobs::EnqueueResult;
 

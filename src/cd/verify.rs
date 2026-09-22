@@ -14,13 +14,16 @@
 //!
 //! 「不一致は不良を意味しない」（D-13）。結果の解釈と表示は呼び出し側
 
+use serde::{Deserialize, Serialize};
+
 use super::accuraterip::ArDiscEntry;
 use super::crctable::{CrcTable, MAX_OFFSET};
 use super::ctdb::CtdbEntry;
 use super::toc::{Toc, SESSION_GAP_SECTORS};
 
 /// 1 手法（AccurateRip / CTDB）の結論
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// 全トラックが一致
     Verified,
@@ -30,7 +33,7 @@ pub enum Outcome {
     NotFound,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackVerdict {
     pub matched: bool,
     /// 選んだオフセットで一致したエントリの信頼度の和
@@ -69,7 +72,7 @@ pub fn track_state(
     any.then_some(TrackState::Mismatch)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MethodResult {
     pub outcome: Outcome,
     /// 選んだオフセット（DB の窓が自分のデータのどこから始まるか。サンプル）

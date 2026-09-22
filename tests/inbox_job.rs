@@ -876,8 +876,8 @@ fn set_tags(path: &std::path::Path, ext: &str, tags: &[(&str, &[&str])]) {
     spindle::domain::tags::write_tag_changes(&mut f, Some(ext), &changes, None).unwrap();
 }
 
-fn sidecar_entry() -> spindle::import::ytmusic::sidecar::FileEntry {
-    spindle::import::ytmusic::sidecar::FileEntry {
+fn sidecar_entry() -> spindle::import::sidecar::FileEntry {
+    spindle::import::sidecar::FileEntry {
         source: "youtube".into(),
         url: Some("https://www.youtube.com/watch?v=abc".into()),
         channel: Some("CH".into()),
@@ -892,7 +892,7 @@ fn sidecar_entry() -> spindle::import::ytmusic::sidecar::FileEntry {
 /// サイドカーは Library に持っていかず、配置の成功で消える
 #[tokio::test]
 async fn second_item_appends_to_the_existing_album_and_removes_the_sidecar() {
-    use spindle::import::ytmusic::sidecar::{Sidecar, SIDECAR_NAME};
+    use spindle::import::sidecar::{Sidecar, SIDECAR_NAME};
     let lib = Lib::new();
     require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
     lib.conn()
@@ -1530,7 +1530,7 @@ async fn appending_a_track_with_a_picture_resolves_an_album_without_one() {
 #[tokio::test]
 async fn placing_a_subscription_item_binds_the_album_and_requests_a_sync() {
     use spindle::db::subscriptions::{self, NewSubscription, WriteOutcome};
-    use spindle::import::ytmusic::sidecar::Sidecar;
+    use spindle::import::sidecar::Sidecar;
     let lib = Lib::new();
     require_ffmpeg!(lib.add(
         "youtube/Artist/Album/20260901 One [abc].flac",
@@ -1726,4 +1726,325 @@ async fn watcher_enqueues_only_when_inbox_changes_or_items_need_attention() {
     wait_count(6).await;
     lib.shutdown.cancel();
     handle.await.unwrap();
+}
+
+// ---------------------------------------------------------------- CD の吸い出し（P2-5、D-67 追記）
+
+/// CD の件（3 本 + rip.log + サイドカーの `rip`）を Inbox に置く。CTDB は 2 本目だけ不一致
+async fn add_cd_item(lib: &Lib) -> Option<inbox::Item> {
+    use spindle::import::sidecar::Sidecar;
+    lib.add("CD/01.flac", 1, "", "", 1)?;
+    lib.add("CD/02.flac", 2, "", "", 2);
+    lib.add("CD/03.flac", 3, "", "", 3);
+    std::fs::write(lib.inbox_path("CD/rip.log"), "spindle rip log v1\n").unwrap();
+    let mut s = Sidecar::default();
+    s.rip = Some(common::rip_entry(
+        &["01.flac", "02.flac", "03.flac"],
+        &[true, false, true],
+    ));
+    s.write(
+        &lib.inbox,
+        &spindle::domain::relpath::RelPath::parse("CD").unwrap(),
+    )
+    .unwrap();
+    lib.scan(1000).await;
+    lib.item("CD")
+}
+
+/// 承認で番号とタイトルを入れ替えても、検証記録はファイル名で結びついた行に付く。出自は cd_rip、
+/// 記録は source = rip、log_path は移した rip.log の Library 相対、album gain は on で提案される
+#[tokio::test]
+async fn cd_item_is_placed_with_verification_bound_by_file_name() {
+    let lib = Lib::new();
+    let item = require_ffmpeg!(add_cd_item(&lib).await);
+    let files = inbox::files(&lib.conn(), item.id).unwrap();
+    let proposed = spindle::import::inbox::propose(
+        &lib.conn(),
+        &lib.inbox,
+        &lib.env(false).layout,
+        &item,
+        &files,
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(proposed.draft.album_gain, "CD は album gain on で提案する");
+    assert!(
+        !proposed
+            .warnings
+            .iter()
+            .any(|w| w.contains("吸い出しの記録")),
+        "{:?}",
+        proposed.warnings
+    );
+
+    // 01 と 03 の番号を入れ替え、タイトルも付ける
+    let mut draft = draft_for(
+        &[
+            ("CD/01.flac", 3, "Uno"),
+            ("CD/02.flac", 2, "Dos"),
+            ("CD/03.flac", 1, "Tres"),
+        ],
+        None,
+        "Disc",
+    );
+    draft.album_gain = true;
+    lib.approve(item.id, &draft);
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), item.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+
+    let c = lib.conn();
+    let row = |rel: &str| -> (String, String, i64) {
+        c.query_row(
+            "SELECT t.source_type, t.verification, tv.ctdb_crc
+               FROM tracks t JOIN track_verifications tv ON tv.track_id = t.id
+              WHERE t.rel_path = ?1",
+            [rel],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    };
+    // 01.flac（記録の 0 番、CRC 100、一致）は 03 Uno に、03.flac（2 番、102、一致）は 01 Tres に
+    assert_eq!(
+        row("_Unsorted/Artist/Disc/03 Uno.flac"),
+        ("cd_rip".into(), "verified_ctdb".into(), 100)
+    );
+    assert_eq!(
+        row("_Unsorted/Artist/Disc/02 Dos.flac"),
+        ("cd_rip".into(), "mismatch".into(), 101)
+    );
+    assert_eq!(
+        row("_Unsorted/Artist/Disc/01 Tres.flac"),
+        ("cd_rip".into(), "verified_ctdb".into(), 102)
+    );
+    let (source, method, result, disc_no, job_id, log_path): (
+        String,
+        String,
+        String,
+        i64,
+        Option<i64>,
+        Option<String>,
+    ) = c
+        .query_row(
+            "SELECT source, method, result, disc_no, job_id, log_path FROM album_verifications",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            source.as_str(),
+            method.as_str(),
+            result.as_str(),
+            disc_no,
+            job_id
+        ),
+        ("rip", "ctdb", "mismatch", 1, None)
+    );
+    assert_eq!(log_path.as_deref(), Some("_Unsorted/Artist/Disc/rip.log"));
+    assert!(lib.lib_path("_Unsorted/Artist/Disc/rip.log").exists());
+    assert_eq!(
+        lib.count("SELECT album_gain FROM albums WHERE rel_dir = '_Unsorted/Artist/Disc'"),
+        1
+    );
+    // サイドカーは Library へ持っていかず、Inbox の件ごと消える
+    assert!(!lib.inbox_path("CD").exists());
+}
+
+/// 記録が件のファイルと 1 対 1 に対応しなければ配置しない（件は failed、Library は空のまま）
+#[tokio::test]
+async fn cd_item_is_not_placed_when_the_rip_record_does_not_match() {
+    let lib = Lib::new();
+    let item = require_ffmpeg!(add_cd_item(&lib).await);
+    // 件に 4 本目が足された（記録に無いファイル）
+    lib.add("CD/04.flac", 4, "", "", 4);
+    lib.scan(1001).await;
+    let files = inbox::files(&lib.conn(), item.id).unwrap();
+    assert_eq!(files.len(), 4);
+    let item = lib.item("CD").unwrap();
+    let proposed = spindle::import::inbox::propose(
+        &lib.conn(),
+        &lib.inbox,
+        &lib.env(false).layout,
+        &item,
+        &files,
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        proposed
+            .warnings
+            .iter()
+            .any(|w| w.contains("吸い出しの記録と件が合わない")),
+        "{:?}",
+        proposed.warnings
+    );
+    lib.approve(
+        item.id,
+        &draft_for(
+            &[
+                ("CD/01.flac", 1, "A"),
+                ("CD/02.flac", 2, "B"),
+                ("CD/03.flac", 3, "C"),
+                ("CD/04.flac", 4, "D"),
+            ],
+            None,
+            "Disc",
+        ),
+    );
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), item.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Failed);
+    assert!(
+        it.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("吸い出しの記録と件が合わない"),
+        "{:?}",
+        it.error
+    );
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 0);
+    assert_eq!(lib.count("SELECT count(*) FROM album_verifications"), 0);
+    assert!(!lib.lib_path("_Unsorted").exists());
+    assert!(lib.inbox_path("CD/01.flac").exists());
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+    }
+}
+
+/// 登録の commit の後・Inbox を消す前に落ちた状況: Inbox に音声とサイドカーが残り、走査が件を
+/// pending に戻す。再承認で同じファイルと行を採用しても、検証記録は二重にならない
+#[tokio::test]
+async fn replacing_a_cd_item_after_a_crash_does_not_duplicate_verification_records() {
+    let lib = Lib::new();
+    let item = require_ffmpeg!(add_cd_item(&lib).await);
+    let saved = lib.dir.path().join("saved-cd");
+    copy_dir(&lib.inbox_path("CD"), &saved);
+    let draft = draft_for(
+        &[
+            ("CD/01.flac", 1, "Uno"),
+            ("CD/02.flac", 2, "Dos"),
+            ("CD/03.flac", 3, "Tres"),
+        ],
+        None,
+        "Disc",
+    );
+    lib.approve(item.id, &draft);
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    assert_eq!(
+        inbox::get(&lib.conn(), item.id).unwrap().unwrap().state,
+        ItemState::Placed
+    );
+    let before = (
+        lib.count("SELECT count(*) FROM album_verifications"),
+        lib.count("SELECT count(*) FROM track_verifications"),
+    );
+    assert_eq!(before, (1, 3));
+
+    // Inbox を消す前に落ちた（原本とサイドカーが残った）
+    copy_dir(&saved, &lib.inbox_path("CD"));
+    lib.scan(5000).await;
+    let again = lib.item("CD").unwrap();
+    assert_eq!(again.id, item.id);
+    assert_eq!(again.state, ItemState::Pending);
+    lib.approve(again.id, &draft);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), item.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert_eq!(
+        (
+            lib.count("SELECT count(*) FROM album_verifications"),
+            lib.count("SELECT count(*) FROM track_verifications"),
+        ),
+        before
+    );
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 3);
+    assert_eq!(
+        lib.count("SELECT count(*) FROM tracks WHERE source_type = 'cd_rip'"),
+        3
+    );
+}
+
+/// 読んだ後にサイドカーが差し替えられたら、古い記録を登録せず件を pending に戻す。新しいサイドカーは
+/// 消さない（ファイルが正）
+#[tokio::test]
+async fn cd_item_is_not_registered_when_the_sidecar_is_replaced_during_placement() {
+    use spindle::import::sidecar::Sidecar;
+    let lib = Lib::new();
+    let item = require_ffmpeg!(add_cd_item(&lib).await);
+    lib.approve(
+        item.id,
+        &draft_for(
+            &[
+                ("CD/01.flac", 1, "A"),
+                ("CD/02.flac", 2, "B"),
+                ("CD/03.flac", 3, "C"),
+            ],
+            None,
+            "Disc",
+        ),
+    );
+    let inbox_root = lib.inbox.clone();
+    let hook: PlaceHook = Arc::new(move || {
+        let mut s = Sidecar::default();
+        s.rip = Some(common::rip_entry(
+            &["01.flac", "02.flac", "03.flac"],
+            &[true, true, true],
+        ));
+        s.write(
+            &inbox_root,
+            &spindle::domain::relpath::RelPath::parse("CD").unwrap(),
+        )
+        .unwrap();
+    });
+    lib.start_with(lib.env_with(false, Some(hook)));
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), item.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Pending, "{:?}", it.error);
+    assert!(
+        it.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("spindle-inbox.json"),
+        "{:?}",
+        it.error
+    );
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 0);
+    assert_eq!(lib.count("SELECT count(*) FROM album_verifications"), 0);
+    assert!(!lib.lib_path("_Unsorted").exists());
+    // 差し替えた側（全トラック一致）が残っている
+    let s = Sidecar::read(
+        &lib.inbox,
+        &spindle::domain::relpath::RelPath::parse("CD").unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(s
+        .rip
+        .unwrap()
+        .report
+        .ctdb
+        .unwrap()
+        .tracks
+        .iter()
+        .all(|t| t.matched));
 }

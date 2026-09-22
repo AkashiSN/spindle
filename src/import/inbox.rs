@@ -440,7 +440,7 @@ pub struct Proposed {
     /// 追記先の既存 album（D-70）
     pub destination: Option<Destination>,
     /// `files` と同じ順。サイドカーの項（無ければ None）
-    pub sources: Vec<Option<crate::import::ytmusic::sidecar::FileEntry>>,
+    pub sources: Vec<Option<crate::import::sidecar::FileEntry>>,
     /// 下書きのトラックと同じ順。追記先の album にある同名の行（P4-19）
     pub same_titles: Vec<Vec<SameTitle>>,
     pub warnings: Vec<String>,
@@ -501,7 +501,6 @@ pub fn propose(
     categories: &[(i64, String)],
     genre_map: &[(String, i64)],
 ) -> Result<Proposed, InboxError> {
-    use crate::import::ytmusic::sidecar::Sidecar;
     let mut warnings = Vec::new();
     let mut draft = proposal(files, categories, genre_map);
     let sidecar = if item.rel_dir.is_empty() {
@@ -524,6 +523,11 @@ pub fn propose(
             Some((_, n)) => draft.category = Some(n.clone()),
             None => warnings.push(format!("サイドカーの category が語彙に無い: {name}")),
         }
+    }
+    // CD の吸い出しはアルバムとして通して聴く単位なので album gain on で提案する（D-74）。
+    // 保存した下書きがあればそちらが勝つ（merge_saved）
+    if sidecar.as_ref().is_some_and(|s| s.rip.is_some()) {
+        draft.album_gain = true;
     }
     if item.state == ItemState::Pending {
         if let Some(saved) = item
@@ -559,6 +563,14 @@ pub fn propose(
         None => draft.tracks.iter().map(|_| Vec::new()).collect(),
     };
     warnings.extend(self::warnings(files, &draft));
+    // 吸い出しの記録が件と合わなければ配置で止まる（D-67 追記）。承認の前に見せる
+    if let Some(entry) = sidecar.as_ref().and_then(|s| s.rip.as_ref()) {
+        if let Err(r) = bind_rip(entry, &draft) {
+            warnings.push(format!(
+                "吸い出しの記録と件が合わない（このままでは配置できない）: {r}"
+            ));
+        }
+    }
     Ok(Proposed {
         draft,
         destination,
@@ -919,6 +931,7 @@ use crate::import::placement::{
     find_or_create_album, place_one, register_track, remove_placed, PlacedFile, PlacementError,
 };
 use crate::import::scanner::{read_fingerprint, track_content};
+use crate::import::sidecar::{RipEntry, Sidecar};
 use crate::jobs::handlers::rg::{new_album_job, new_track_job};
 use crate::jobs::{Event, Jobs, LibraryEvent};
 
@@ -971,6 +984,56 @@ struct Source {
     ext: Option<String>,
     fp: Fingerprint,
     changes: Vec<TagChange>,
+}
+
+/// 件の吸い出しの記録を下書きのトラックへ名前で結びつけたもの（D-67 追記）
+#[derive(Debug, Clone)]
+pub struct RipBinding {
+    pub entry: RipEntry,
+    /// 下書きの順 → `entry.report` の位置
+    pub index: Vec<usize>,
+    /// 下書きで揃っているディスク番号（検証記録の `disc_no`）
+    pub disc_no: u32,
+}
+
+/// サイドカーの吸い出しの記録を下書きのトラックへ結びつける。対応の鍵はファイルの basename
+/// （承認で番号もタイトルも直せるので、配列の順は信じない）。記録の形が崩れている、件のファイルと
+/// 1 対 1 に対応しない、下書きのディスク番号が 1 つに揃わない（1 件 = 1 枚）なら Err（理由）で、
+/// 呼び出し側は配置しない
+pub fn bind_rip(entry: &RipEntry, draft: &InboxDraft) -> Result<RipBinding, String> {
+    entry.check().map_err(|e| e.to_string())?;
+    if draft.tracks.len() != entry.files.len() {
+        return Err(format!(
+            "件のファイル数（{}）が記録のトラック数（{}）と違う",
+            draft.tracks.len(),
+            entry.files.len()
+        ));
+    }
+    let mut index = Vec::with_capacity(draft.tracks.len());
+    let mut used = HashSet::new();
+    for t in &draft.tracks {
+        let name = t.rel_path.rsplit('/').next().unwrap_or(&t.rel_path);
+        let i = entry
+            .index_of(name)
+            .ok_or_else(|| format!("記録に無いファイル: {}", t.rel_path))?;
+        if !used.insert(i) {
+            return Err(format!(
+                "記録の同じトラックに 2 本が対応する: {}",
+                t.rel_path
+            ));
+        }
+        index.push(i);
+    }
+    let discs: HashSet<u32> = draft.tracks.iter().map(|t| t.disc_no).collect();
+    let disc_no = match discs.into_iter().collect::<Vec<_>>().as_slice() {
+        [d] => *d,
+        _ => return Err("1 枚の吸い出しなのにディスク番号が揃っていない".to_owned()),
+    };
+    Ok(RipBinding {
+        entry: entry.clone(),
+        index,
+        disc_no,
+    })
 }
 
 fn parse_template(name: &str, s: &str) -> Result<Template, InboxError> {
@@ -1554,6 +1617,7 @@ struct RegisteredItem {
 
 /// 登録（1 トランザクション）: album / tracks / track_tags、rg / transcode の投入、WAV / ALAC / AIFF の
 /// normalize バッチ（`normalize` のとき）、件の placed。commit の後に落ちても投入が欠けない
+#[allow(clippy::too_many_arguments)]
 fn register_item(
     conn: &mut rusqlite::Connection,
     item_id: i64,
@@ -1562,6 +1626,8 @@ fn register_item(
     placed: &Placed,
     files: &HashMap<String, FileRow>,
     normalize: bool,
+    rip: Option<&RipBinding>,
+    log_rel: Option<&str>,
 ) -> Result<Result<RegisteredItem, InboxError>, DbError> {
     let tx = conn.transaction()?;
     let now = now_epoch();
@@ -1604,10 +1670,16 @@ fn register_item(
         drop(tx);
         return Ok(Err(InboxError::Conflict(reason)));
     }
+    // CD の吸い出しなら出自は cd_rip（D-67 追記。スキャナの rip.log 判定と同じ値）
+    let source_type = if rip.is_some() { "cd_rip" } else { "download" };
     let mut track_ids = Vec::with_capacity(plan.paths.len());
+    let mut expected = Vec::with_capacity(plan.paths.len());
     for (rel, (ph, content, fp)) in plan.paths.iter().zip(&placed.tracks) {
         let id = match register_track(&tx, rel, ph, content, *fp, now) {
-            Ok(Ok(r)) => r.id,
+            Ok(Ok(r)) => {
+                expected.push((r.id, r.audio_version));
+                r.id
+            }
             Ok(Err(reason)) => {
                 drop(tx);
                 return Ok(Err(InboxError::Conflict(reason)));
@@ -1618,8 +1690,43 @@ fn register_item(
             }
         };
         scans::set_track_album(&tx, id, album_id, album_name.as_deref())?;
-        scans::set_source_type(&tx, id, "download")?;
+        scans::set_source_type(&tx, id, source_type)?;
         track_ids.push(id);
+    }
+    // 吸い出しの検証記録（D-67 追記）。記録の配列は音声トラック順なので、名前で結びつけた位置へ
+    // 行を並べ直して渡す。登録と同じトランザクションなので、配置されたのに記録が無い状態を作らない
+    // ただし全トラックに吸い出しの記録が既にあれば書かない: 登録の commit の後・Inbox を消す前に
+    // 落ちると、残った音声で件が pending に戻り、再承認で同じファイルと行を採用してここへ戻る
+    // （Inbox の記録は job_id を持たないので、行の側で見分ける）
+    let recorded = match rip {
+        Some(_) => crate::db::verify::all_have_rip_records(&tx, &track_ids)?,
+        None => false,
+    };
+    if let Some(rip) = rip.filter(|_| !recorded) {
+        let mut ids = vec![0; track_ids.len()];
+        for (&id, &i) in track_ids.iter().zip(&rip.index) {
+            ids[i] = id;
+        }
+        let disc = rip.entry.report.disc_record(i64::from(rip.disc_no), &ids);
+        match crate::db::verify::record_album(
+            &tx,
+            album_id,
+            None,
+            crate::db::verify::VerifySource::Rip,
+            &expected,
+            &[disc],
+            log_rel,
+            now,
+        )? {
+            crate::db::verify::RecordOutcome::Recorded(_)
+            | crate::db::verify::RecordOutcome::AlreadyRecorded => {}
+            crate::db::verify::RecordOutcome::Changed { track_id } => {
+                drop(tx);
+                return Ok(Err(InboxError::Conflict(format!(
+                    "track {track_id} の音声版が登録の途中で進んだ"
+                ))));
+            }
+        }
     }
     // album gain の属性（D-74）。新規は下書きの値、追記先は下書きの値で上書き（承認画面の初期値は
     // 追記先の現在値）。off にしたときの album 値の片付けは set_album_gain、Derived の追随はここ。
@@ -1765,6 +1872,7 @@ fn consume_inbox(
     files: &HashMap<String, FileRow>,
     sources: &[Source],
     companions: &[RelPath],
+    sidecar_key: SidecarKey,
 ) {
     for src in sources {
         let unchanged = files
@@ -1786,11 +1894,18 @@ fn consume_inbox(
     }
     if !item.rel_dir.is_empty() {
         if let Ok(dir) = RelPath::parse(&item.rel_dir) {
-            // サイドカー（D-70）は Library に持っていかず、配置の成功で役目を終える
-            if let Ok(sidecar) = dir.join(crate::import::ytmusic::sidecar::SIDECAR_NAME) {
-                match inbox.unlink(&sidecar) {
-                    Ok(()) | Err(FsError::NotFound) => {}
-                    Err(e) => tracing::warn!(path = %sidecar, error = %e, "サイドカーを消せない"),
+            // サイドカー（D-70）は Library に持っていかず、配置の成功で役目を終える。登録の後に
+            // 差し替えられたものは読んでいないので消さない
+            if let Ok(sidecar) = dir.join(crate::import::sidecar::SIDECAR_NAME) {
+                if current_sidecar_key(inbox, &item.rel_dir) != sidecar_key {
+                    tracing::warn!(path = %sidecar, "サイドカーが配置の間に変わったので残す");
+                } else {
+                    match inbox.unlink(&sidecar) {
+                        Ok(()) | Err(FsError::NotFound) => {}
+                        Err(e) => {
+                            tracing::warn!(path = %sidecar, error = %e, "サイドカーを消せない")
+                        }
+                    }
                 }
             }
             match inbox.remove_dir(&dir) {
@@ -1834,12 +1949,20 @@ pub async fn place_item(
                 })??,
         )
     };
-    // 購読由来か（サイドカーは配置の成功で消えるので、消す前に読む。P4-16）
-    let subscription_ids: Vec<i64> = {
+    // サイドカー（配置の成功で消えるので、消す前に読む）: 購読由来か（P4-16）と、CD の吸い出しの
+    // 記録（D-67 追記。名前でトラックへ結びつけ、合わなければ配置しない）
+    let (sidecar, sidecar_key): (Option<Sidecar>, SidecarKey) = {
         let (inbox, rel_dir) = (Arc::clone(&env.inbox), item.rel_dir.clone());
-        tokio::task::spawn_blocking(move || sidecar_subscription_ids(&inbox, &rel_dir))
+        tokio::task::spawn_blocking(move || read_sidecar(&inbox, &rel_dir))
             .await
             .unwrap_or_default()
+    };
+    let subscription_ids = subscription_ids(sidecar.as_ref());
+    let rip: Option<Arc<RipBinding>> = match sidecar.as_ref().and_then(|s| s.rip.as_ref()) {
+        Some(entry) => Some(Arc::new(bind_rip(entry, &draft).map_err(|r| {
+            InboxError::Conflict(format!("吸い出しの記録と件が合わない: {r}"))
+        })?)),
+        None => None,
     };
     // 2. 計画
     let plan = {
@@ -1882,14 +2005,50 @@ pub async fn place_item(
     let placed_new = placed.placed_new.clone();
     let created_top = placed.created_top.clone();
     let companions = placed.companions.clone();
+    // 読んだサイドカーが今も同じこと（差し替えられていれば古い記録を登録しない。件は pending に戻る）
+    let sidecar_now = {
+        let (inbox, rel_dir) = (Arc::clone(&env.inbox), item.rel_dir.clone());
+        tokio::task::spawn_blocking(move || current_sidecar_key(&inbox, &rel_dir))
+            .await
+            .unwrap_or(None)
+    };
+    if sidecar_now != sidecar_key {
+        let library = Arc::clone(&env.library);
+        let dir = plan.rel_dir.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            cleanup(&library, &dir, &placed_new, created_top.as_ref())
+        })
+        .await;
+        return Err(InboxError::Changed(format!(
+            "{}/{}",
+            item.rel_dir,
+            crate::import::sidecar::SIDECAR_NAME
+        )));
+    }
+    // 検証記録の log_path は移した rip.log の Library 相対（宛先に別の内容があって移せなければ無し）
+    let log_rel: Option<String> = rip.as_ref().and_then(|r| {
+        companions
+            .iter()
+            .any(|c| canonical_key(c.file_name()) == canonical_key(&r.entry.log))
+            .then(|| format!("{}/{}", plan.rel_dir, r.entry.log))
+    });
     // 4. 登録（normalize の投入と件の placed も同じトランザクション）
     let normalize = env.wav_to_flac && env.editor.as_ref().is_some_and(|e| e.can_normalize());
     let registered = {
-        let (plan_tx, draft_tx, files_tx) = (plan.clone(), draft.clone(), Arc::clone(&files));
+        let (plan_tx, draft_tx, files_tx, rip_tx) =
+            (plan.clone(), draft.clone(), Arc::clone(&files), rip.clone());
         env.db
             .write(move |c| {
                 register_item(
-                    c, item_id, &plan_tx, &draft_tx, &placed, &files_tx, normalize,
+                    c,
+                    item_id,
+                    &plan_tx,
+                    &draft_tx,
+                    &placed,
+                    &files_tx,
+                    normalize,
+                    rip_tx.as_deref(),
+                    log_rel.as_deref(),
                 )
             })
             .await
@@ -1919,7 +2078,7 @@ pub async fn place_item(
             Arc::clone(&sources),
         );
         let _ = tokio::task::spawn_blocking(move || {
-            consume_inbox(&inbox, &item, &files, &sources, &companions)
+            consume_inbox(&inbox, &item, &files, &sources, &companions, sidecar_key)
         })
         .await;
     }
@@ -1949,23 +2108,66 @@ pub async fn place_item(
     })
 }
 
-/// 件のサイドカーの項にある購読 id（昇順・重複なし）。サイドカーが無い・読めないなら空
-fn sidecar_subscription_ids(inbox: &RootDir, rel_dir: &str) -> Vec<i64> {
-    use crate::import::ytmusic::sidecar::Sidecar;
+/// サイドカーの同一性（inode / size / mtime / ctime）。無ければ None。読んだものが登録まで同じかを
+/// 確かめるのに使う（外から tmp + rename で差し替えられたら、古い記録を登録しない。ファイルが正）
+type SidecarKey = Option<(u64, u64, i64, i64)>;
+
+fn sidecar_key(st: &crate::fsroot::Stat) -> SidecarKey {
+    Some((st.inode, st.size, st.mtime_ns, st.ctime_ns))
+}
+
+fn sidecar_rel(rel_dir: &str) -> Option<RelPath> {
     if rel_dir.is_empty() {
-        return Vec::new();
+        return None;
     }
-    let Ok(dir) = RelPath::parse(rel_dir) else {
-        return Vec::new();
+    RelPath::parse(rel_dir)
+        .ok()?
+        .join(crate::import::sidecar::SIDECAR_NAME)
+        .ok()
+}
+
+/// 件のサイドカーと、読んだ FD の同一性。無い・読めない（壊れている）なら内容は None（読めないものは
+/// 提案の警告に出ている）で、同一性はパスの stat（無ければ None）
+fn read_sidecar(inbox: &RootDir, rel_dir: &str) -> (Option<Sidecar>, SidecarKey) {
+    let Some(rel) = sidecar_rel(rel_dir) else {
+        return (None, None);
     };
-    let Ok(Some(sidecar)) = Sidecar::read(inbox, &dir) else {
-        return Vec::new();
+    let mut file = match inbox.open_file(&rel) {
+        Ok(f) => f,
+        Err(FsError::NotFound) => return (None, None),
+        Err(e) => {
+            tracing::warn!(path = %rel, error = %e, "サイドカーを開けないので無いものとして配置する");
+            return (None, current_sidecar_key(inbox, rel_dir));
+        }
     };
+    let key = crate::fsroot::fstat(&file)
+        .ok()
+        .and_then(|st| sidecar_key(&st));
+    let mut bytes = Vec::new();
+    let parsed = file
+        .read_to_end(&mut bytes)
+        .map_err(crate::import::sidecar::SidecarError::from)
+        .and_then(|_| Sidecar::parse(&bytes));
+    match parsed {
+        Ok(s) => (Some(s), key),
+        Err(e) => {
+            tracing::warn!(path = %rel, error = %e, "サイドカーを読めないので無いものとして配置する");
+            (None, key)
+        }
+    }
+}
+
+/// いまのサイドカーの同一性（パスの stat）
+fn current_sidecar_key(inbox: &RootDir, rel_dir: &str) -> SidecarKey {
+    let rel = sidecar_rel(rel_dir)?;
+    inbox.stat(&rel).ok().and_then(|st| sidecar_key(&st))
+}
+
+/// サイドカーの項にある購読 id（昇順・重複なし）
+fn subscription_ids(sidecar: Option<&Sidecar>) -> Vec<i64> {
     let mut ids: Vec<i64> = sidecar
-        .files
-        .values()
-        .filter_map(|e| e.subscription_id)
-        .collect();
+        .map(|s| s.files.values().filter_map(|e| e.subscription_id).collect())
+        .unwrap_or_default();
     ids.sort_unstable();
     ids.dedup();
     ids

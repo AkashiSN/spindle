@@ -175,3 +175,82 @@ pub fn enable_variants(
     };
     spindle::db::derived::sync_variants(&c, &cfg, 0).unwrap();
 }
+
+/// CD の吸い出しの記録（サイドカーの `rip`）。`files` は音声トラック順のファイル名、`ctdb_matched` は
+/// トラックごとの CTDB の一致。CRC はトラック `i` で `ar_v1 = 1 + i`、`ar_v2 = 11 + i`、`ctdb = 100 + i`
+/// （どのファイルに結びついたかをテストが見分けられるように）。TOC は 10 秒 × ファイル数
+pub fn rip_entry(files: &[&str], ctdb_matched: &[bool]) -> spindle::import::sidecar::RipEntry {
+    use spindle::cd::metadata::{DiscMetadata, DiscTrackMetadata, MetadataSource};
+    use spindle::cd::riplog::{OffsetSource, RipReport, TrackCrcs, TrackRead};
+    use spindle::cd::toc::Toc;
+    use spindle::cd::verify::{MethodResult, Outcome, TrackVerdict};
+    let n = files.len();
+    let toc = Toc::from_audio_sample_counts(vec![750 * 588; n]).unwrap();
+    let all = ctdb_matched.iter().all(|&m| m);
+    spindle::import::sidecar::RipEntry {
+        toc: toc.ctdb_toc(),
+        metadata: DiscMetadata {
+            source: MetadataSource::Manual,
+            release_id: None,
+            release_group_id: None,
+            album: String::new(),
+            album_artist: String::new(),
+            date: None,
+            label: None,
+            catalog_number: None,
+            barcode: None,
+            disc_no: 1,
+            disc_count: 1,
+            category: None,
+            tracks: (1..=n as u8)
+                .map(|number| DiscTrackMetadata {
+                    number,
+                    title: String::new(),
+                    artist: String::new(),
+                    mb: None,
+                })
+                .collect(),
+        },
+        files: files.iter().map(|f| f.to_string()).collect(),
+        log: "rip.log".into(),
+        report: RipReport {
+            drive: Some("TEST DRIVE".into()),
+            device: "/dev/sr0".into(),
+            read_offset: 6,
+            offset_source: OffsetSource::Table,
+            started_at: 1_789_000_000,
+            finished_at: 1_789_000_600,
+            attempts: 1,
+            encoder: "flac -8 --verify".into(),
+            reads: vec![TrackRead::default(); n],
+            crcs: (0..n as u32)
+                .map(|i| TrackCrcs {
+                    ar_v1: 1 + i,
+                    ar_v2: 11 + i,
+                    ctdb: 100 + i,
+                })
+                .collect(),
+            ctdb: Some(MethodResult {
+                outcome: if all {
+                    Outcome::Verified
+                } else {
+                    Outcome::Mismatch
+                },
+                offset: 0,
+                confidence: if all { 3 } else { 0 },
+                tracks: ctdb_matched
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &matched)| TrackVerdict {
+                        matched,
+                        confidence: if matched { 3 } else { 0 },
+                        crc: 100 + i as u32,
+                        crc_v2: None,
+                    })
+                    .collect(),
+            }),
+            accuraterip: None,
+            repaired_words: None,
+        },
+    }
+}

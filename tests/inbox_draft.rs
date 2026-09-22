@@ -2,7 +2,7 @@
 
 use spindle::db::inbox::FileRow;
 use spindle::import::inbox::{
-    merge_saved, number_missing, proposal, warnings, DraftError, DraftTrack, InboxDraft,
+    bind_rip, merge_saved, number_missing, proposal, warnings, DraftError, DraftTrack, InboxDraft,
 };
 
 fn file(rel: &str, tags: &[(&str, &str)]) -> FileRow {
@@ -314,4 +314,75 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
     assert_eq!(merged.tracks[0].track_no, 7);
     assert_eq!(merged.tracks[1].title, "Two");
     assert_eq!(merged.tracks[2].track_no, 0);
+}
+
+// ---------------------------------------------------------------- CD の吸い出しの記録（P2-5、D-67 追記）
+
+mod common;
+
+fn cd_draft(tracks: &[(&str, u32, u32)]) -> InboxDraft {
+    InboxDraft {
+        category: None,
+        albumartist: "A".into(),
+        album: "X".into(),
+        date: None,
+        tracks: tracks
+            .iter()
+            .map(|(rel, disc_no, track_no)| DraftTrack {
+                rel_path: rel.to_string(),
+                disc_no: *disc_no,
+                track_no: *track_no,
+                title: "t".into(),
+                artist: String::new(),
+                keep_artists: None,
+            })
+            .collect(),
+        album_gain: true,
+    }
+}
+
+/// 対応はファイル名で決まり、下書きの並びや番号の付け替えに左右されない
+#[test]
+fn bind_rip_maps_tracks_by_file_name_not_by_order_or_number() {
+    let entry = common::rip_entry(&["01.flac", "02.flac", "03.flac"], &[true, true, true]);
+    // 並びも番号も入れ替えた下書き（承認画面で直した）
+    let d = cd_draft(&[
+        ("CD/03.flac", 2, 1),
+        ("CD/01.FLAC", 2, 3),
+        ("CD/02.flac", 2, 2),
+    ]);
+    let b = bind_rip(&entry, &d).unwrap();
+    assert_eq!(b.index, [2, 0, 1]);
+    assert_eq!(b.disc_no, 2); // 下書きの値（直したディスク番号）
+}
+
+#[test]
+fn bind_rip_rejects_records_that_do_not_match_the_item() {
+    let entry = common::rip_entry(&["01.flac", "02.flac"], &[true, true]);
+    // 記録に無いファイル（件に後から足された）
+    let e = bind_rip(
+        &entry,
+        &cd_draft(&[("CD/01.flac", 1, 1), ("CD/09.flac", 1, 2)]),
+    )
+    .unwrap_err();
+    assert!(e.contains("記録に無いファイル"), "{e}");
+    // ファイル数が違う
+    let e = bind_rip(&entry, &cd_draft(&[("CD/01.flac", 1, 1)])).unwrap_err();
+    assert!(e.contains("ファイル数"), "{e}");
+    // 1 枚の吸い出しなのにディスク番号が割れた
+    let e = bind_rip(
+        &entry,
+        &cd_draft(&[("CD/01.flac", 1, 1), ("CD/02.flac", 2, 1)]),
+    )
+    .unwrap_err();
+    assert!(e.contains("ディスク番号"), "{e}");
+    // 記録の CRC の件数がトラック数と合わない
+    let mut broken = entry.clone();
+    broken.report.crcs.pop();
+    let e = bind_rip(
+        &broken,
+        &cd_draft(&[("CD/01.flac", 1, 1), ("CD/02.flac", 1, 2)]),
+    )
+    .unwrap_err();
+    assert!(e.contains("crcs"), "{e}");
 }

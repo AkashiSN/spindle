@@ -430,7 +430,7 @@ async fn seed_album(app: &App) -> i64 {
 
 /// TRACKNUMBER の無い 1 曲の件と、サイドカー（category と判定）
 async fn youtube_item(app: &App, rel_dir: &str, category: Option<&str>, verdict: &str) -> i64 {
-    use spindle::import::ytmusic::sidecar::{FileEntry, Sidecar};
+    use spindle::import::sidecar::{FileEntry, Sidecar};
     let dir = spindle::domain::relpath::RelPath::parse(rel_dir).unwrap();
     let root = RootDir::open(&app.dir.path().join("Inbox")).unwrap();
     root.create_dir_all(&dir).unwrap();

@@ -240,14 +240,14 @@ export function draftFrom(item: InboxItem): InboxDraft {
   const saved = item.draft
   const fileByKey = new Map(item.tracks.map((f) => [pathKey(f.rel_path), f]))
   if (saved == null) {
-    // album gain の初期値は追記先の現在値（無ければ off。D-74）
+    // album gain の初期値は追記先の現在値、無ければ提案（CD の吸い出しは on、それ以外は off。D-74）
     return {
       ...p,
       tracks: p.tracks.map((t) => ({
         ...cloneTrack(t),
         keep_artists: keepArtistsFor(fileByKey.get(pathKey(t.rel_path)), null, p.albumartist),
       })),
-      album_gain: item.destination?.album_gain ?? false,
+      album_gain: item.destination?.album_gain ?? p.album_gain,
     }
   }
   const byKey = new Map(saved.tracks.map((t) => [pathKey(t.rel_path), t]))

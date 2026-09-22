@@ -224,7 +224,7 @@ impl VerifyHandler {
                 let out = dbv::record_album(
                     c,
                     album_id,
-                    job_id,
+                    Some(job_id),
                     VerifySource::Retro,
                     &expected,
                     &discs,

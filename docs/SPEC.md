@@ -1150,7 +1150,19 @@ Inbox/ に配置（ポーリング検出）
 - **サイドカー `spindle-inbox.json`**（§7.7、D-70）: 件のディレクトリにあれば `GET /api/inbox` が読み、
   `category` を提案の category（語彙に同じ canonical key があるときだけ）に、`files` の `verdict` / `message` /
   `url` / `channel` を各トラックに付ける。走査は音声でないので無視し、配置の成功時に消す（Library へ
-  持っていかない）。壊れていれば無いものとして扱い、件の `warnings` に載せる
+  持っていかない）。壊れていれば無いものとして扱い、件の `warnings` に載せる。モジュールは `import/sidecar.rs`
+  （ダウンローダと CD の吸い出しが共有する）
+- **CD の吸い出しの件**（D-67 追記、P2-5）: サイドカーの `rip`（`RipEntry`: CTDB 形式の `toc`、吸い出し開始時の
+  `metadata`（`DiscMetadata`。名前は空でもよい）、音声トラック順のファイル名 `files`、rip.log の名前 `log`、
+  `report`（`RipReport`））を持つ。提案は `album_gain = true`（D-74。保存した下書きがあればそちら）。配置は
+  下書きの各トラックを **basename で `files` の位置へ結びつけ**（`bind_rip`。大小文字・正規化の違いは同じ名前）、
+  記録の形（件数が音声トラック数と揃う、名前の重複なし）・件のファイルとの 1 対 1・下書きの `disc_no` が 1 つに
+  揃うこと（1 件 = 1 枚）を確かめ、外れたら配置せず `failed`（提案の `warnings` にも出す）。登録は
+  `register_item` と同じトランザクションで `source_type = 'cd_rip'`、`album_verifications`（`source = 'rip'`、
+  `disc_no` は下書きの値、`job_id` は NULL、`log_path` は移した rip.log の Library 相対。移せなければ NULL）/
+  `track_verifications` / `tracks.verification`（写像は §7.3 と同じ）。全トラックに `rip` の記録が既にあれば
+  書かない（commit の後に落ちて再配置したとき）。サイドカーは読んだ FD の inode / size / mtime / ctime を
+  登録の直前と消す前に照合し、変わっていれば登録せず `pending`（登録後なら消さずに残す）
 - **承認後にファイルが増えた件**（同じ album への追加ダウンロード）は既存の規則で `pending` に戻る。そのとき
   提案は「保存した下書き（既知のファイルの分）+ 新しいファイルの提案」を merge して返す（補正をやり直させない）
 

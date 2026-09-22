@@ -2677,6 +2677,29 @@ ISRC / pre-emphasis / CD-TEXT を `Toc` に持たせて disc.toc に書く（P2-
 - サイドカー v1 は `category` / `files` しか持たず、`RipReport` も serde 型ではない。**形を足すのは
   P2-5 の明示タスク**（テストも）
 
+**追記 2**（2026-09-23。P2-5 の Inbox 側の実装で決めたこと）:
+
+- サイドカーは v1 のまま `rip`（`RipEntry`）を足す。無い件ではキーを出さず、旧い読み手は未知のキーを無視する
+  ので版を上げない。`RipReport` / `MethodResult` はそのまま serde 型にした（列挙は snake_case）。Inbox に
+  置かれたまま版をまたぎ得るので、キーの綴りはテストで固定する。モジュールは `import/ytmusic/sidecar.rs`
+  から `import/sidecar.rs` へ移した（CD と共有するため）
+- **検証記録の `disc_no` は下書きの値**（承認でディスク番号を直せば、記録もそのディスク番号に付く）。1 件 = 1 枚
+  なので、下書きのディスク番号が揃っていなければ配置しない
+- **Inbox 経由の記録は `job_id` を NULL にする**（`record_album` の `job_id` を `Option` に）。1 回の inbox ジョブが
+  複数の件を置くので、ジョブ id は `(job_id, disc_no, method)` の一意性の鍵にならない（2 枚の CD を同じ回に
+  置くと 2 件目が「記録済み」で落ちる）。代わりに**全トラックに `source = 'rip'` の記録が既にあれば書かない**
+  （`all_have_rip_records`）。登録の commit の後・Inbox を消す前に落ちると、残った音声で走査が件を `pending`
+  に戻し、再承認で同じファイルと行を採用して登録へ戻ってくるため（codex 指摘）。同じ音声の盤を吸い出し直して
+  同じ行に置いた場合も書かない（Library は変わらず、最初の記録が残る。照合し直すなら遡及照合）
+- **サイドカーは読んだ FD の同一性（inode / size / mtime / ctime）を登録の直前と Inbox を消す前に照合する**
+  （codex 指摘）。登録前に変わっていれば置いたファイルを片付けて `Changed`（件は `pending`）、登録後に変わって
+  いれば消さずに残す。外から差し替えられた記録を古いまま登録しない・新しいものを消さない（ファイルが正）
+- rip.log が宛先の別内容と衝突して移せなかったときは `log_path` を NULL にする（存在しないパスを指さない）
+- **Inbox 経由で置いた CD の album に `albums.discid` は入れない**（ユーザ判断）。入れると追記先の判定
+  （`destination` は DiscID を持つ album を除く）から外れ、MusicBrainz に無い複数枚組の 2 枚目が 1 枚目に
+  合流できなくなる。既存曲が大量にあり、album の同一性の規則を今は動かさない。**未決**: スキャナは
+  `MUSICBRAINZ_DISCID` から `discid` を復元するので、DB を作り直した後だけ値が付く食い違いが残る
+
 ---
 
 ## D-68 Inbox は 1 ディレクトリ = 1 件の承認キューにし、配置は CD と同じ経路で登録する

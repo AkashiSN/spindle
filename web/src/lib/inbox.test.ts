@@ -106,11 +106,15 @@ describe('draftFrom', () => {
     ])
   })
 
-  it('album_gain は保存済みが無ければ追記先の現在値、追記先も無ければ false（D-74）', () => {
+  it('album_gain は保存済みが無ければ追記先の現在値、追記先も無ければ提案の値（D-74）', () => {
     expect(draftFrom(item()).album_gain).toBe(false)
     const dest = { album_id: 1, album: 'x', track_count: 2, max_track_no: 2, album_gain: true }
     expect(draftFrom(item({ destination: dest })).album_gain).toBe(true)
     expect(draftFrom(item({ destination: dest, draft: { ...proposal, album_gain: false } })).album_gain).toBe(false)
+    // CD の吸い出しはサーバが on で提案する
+    const cd = item({ proposal: { ...proposal, album_gain: true } })
+    expect(draftFrom(cd).album_gain).toBe(true)
+    expect(draftFrom({ ...cd, destination: { ...dest, album_gain: false } }).album_gain).toBe(false)
   })
 })
 

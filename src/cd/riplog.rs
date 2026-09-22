@@ -14,9 +14,12 @@
 
 use std::fmt::Write as _;
 
+use serde::{Deserialize, Serialize};
+
 use super::metadata::DiscMetadata;
 use super::toc::Toc;
-use super::verify::{MethodResult, Outcome};
+use super::verify::{track_state, MethodResult, Outcome};
+use crate::db::verify::{DiscRecord, DiscResult, Method, MethodRecord, TrackRecord};
 use crate::jobs::handlers::backup::format_utc;
 use crate::media::artwork::cover_rank;
 
@@ -24,7 +27,8 @@ use crate::media::artwork::cover_rank;
 pub const RIP_LOG_SIGNATURE: &str = "spindle rip log v1";
 
 /// 読み取りオフセットの出所
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OffsetSource {
     /// 同梱のオフセット表（ドライブ型番から）
     Table,
@@ -44,14 +48,14 @@ impl OffsetSource {
 }
 
 /// 音声トラック 1 本の読み取り統計
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackRead {
     pub rereads: u32,
     pub c2_errors: u32,
 }
 
 /// 音声トラック 1 本の CRC（オフセット 0）
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackCrcs {
     pub ar_v1: u32,
     pub ar_v2: u32,
@@ -59,8 +63,8 @@ pub struct TrackCrcs {
 }
 
 /// 吸い出しの記録。`reads` / `crcs` は音声トラック順で TOC と同じ長さ、`ctdb` / `accuraterip` の
-/// `tracks` も同じ順
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `tracks` も同じ順。Inbox のサイドカー（`import::sidecar::RipEntry`）に JSON で載る
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RipReport {
     /// ドライブの型番（INQUIRY）。分からなければ None
     pub drive: Option<String>,
@@ -81,6 +85,71 @@ pub struct RipReport {
     pub accuraterip: Option<MethodResult>,
     /// CTDB の修復で直した語数（None = 修復なし）
     pub repaired_words: Option<u64>,
+}
+
+impl RipReport {
+    /// 検証の記録（手法ごと。照会していない手法は行を作らない）。`track_ids` は音声トラック順
+    /// （`crcs` と同じ順）の登録済みの行。`tracks.verification` の写像は verify ジョブと同じ
+    /// （[`track_state`]）
+    pub fn disc_record(&self, disc_no: i64, track_ids: &[i64]) -> DiscRecord {
+        let disc_result = |m: &MethodResult| match m.outcome {
+            Outcome::Verified => DiscResult::Verified,
+            Outcome::Mismatch => DiscResult::Mismatch,
+            Outcome::NotFound => DiscResult::NotFound,
+        };
+        let crc = |i: usize| self.crcs.get(i).copied().unwrap_or_default();
+        let mut methods = Vec::new();
+        if let Some(m) = &self.ctdb {
+            methods.push(MethodRecord {
+                method: Method::Ctdb,
+                result: disc_result(m),
+                detected_offset: Some(m.offset),
+                confidence: Some(m.confidence),
+                tracks: track_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| TrackRecord {
+                        track_id: id,
+                        crc_v1: None,
+                        crc_v2: None,
+                        ctdb_crc: Some(crc(i).ctdb),
+                        matched: m.tracks.get(i).is_some_and(|v| v.matched),
+                    })
+                    .collect(),
+            });
+        }
+        if let Some(m) = &self.accuraterip {
+            methods.push(MethodRecord {
+                method: Method::AccurateRip,
+                result: disc_result(m),
+                detected_offset: Some(m.offset),
+                confidence: Some(m.confidence),
+                tracks: track_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| TrackRecord {
+                        track_id: id,
+                        crc_v1: Some(crc(i).ar_v1),
+                        crc_v2: Some(crc(i).ar_v2),
+                        ctdb_crc: None,
+                        matched: m.tracks.get(i).is_some_and(|v| v.matched),
+                    })
+                    .collect(),
+            });
+        }
+        let states = track_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &id)| {
+                track_state(self.ctdb.as_ref(), self.accuraterip.as_ref(), i).map(|s| (id, s))
+            })
+            .collect();
+        DiscRecord {
+            disc_no,
+            methods,
+            states,
+        }
+    }
 }
 
 /// 同梱ファイルの名前
