@@ -1,9 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { driveStateLabel, newDiscToc, type DriveStatus } from './cdDrive'
+import { driveIdsFor, driveStateLabel, newDiscToc, type DriveStatus } from './cdDrive'
 
 function st(state: DriveStatus['state'], toc: string | null = null, error: string | null = null): DriveStatus {
   return { state, toc, isrcs: [], mcn: null, error, checked_at: 1_700_000_000 }
 }
+
+describe('driveIdsFor', () => {
+  const five: DriveStatus = { ...st('disc_ok', '0:20144:40290'), isrcs: ['JPQ402600330', null], mcn: '4582515778491' }
+  it('欄の TOC がドライブの盤と同じときだけ ISRC / MCN を添える', () => {
+    expect(driveIdsFor('0:20144:40290', five)).toEqual({ isrcs: ['JPQ402600330', null], mcn: '4582515778491' })
+    // 正規化してから比べる（前後の空白、cdrecord -toc の出力）
+    expect(driveIdsFor('  0:20144:40290\n', five)).toEqual({ isrcs: ['JPQ402600330', null], mcn: '4582515778491' })
+  })
+  it('別の盤の TOC（貼り付け・編集後）やドライブ無しでは空（codex 指摘: 盤 A の ISRC を盤 B に混ぜない）', () => {
+    expect(driveIdsFor('0:20000:40000', five)).toEqual({ isrcs: [], mcn: null })
+    expect(driveIdsFor('0:20144:40290', st('no_disc'))).toEqual({ isrcs: [], mcn: null })
+    expect(driveIdsFor('0:20144:40290', null)).toEqual({ isrcs: [], mcn: null })
+    expect(driveIdsFor('', five)).toEqual({ isrcs: [], mcn: null })
+  })
+})
 
 describe('driveStateLabel', () => {
   it('状態ごとの日本語', () => {

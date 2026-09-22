@@ -227,6 +227,52 @@ async fn lookup_uses_isrcs_and_a_pasted_release() {
     assert_eq!(body["notes"].as_array().unwrap().len(), 1, "{body}");
 }
 
+/// 入力の ISRC / MCN は検証してから MB のクエリに載せる（codex 指摘: API は任意の JSON を受ける）
+#[tokio::test]
+async fn bad_isrcs_and_mcn_are_400() {
+    let app = App::new(Some(serve_mb().await)).await;
+    let c = app.cookie().await;
+    for (body, what) in [
+        (
+            json!({ "toc": "0:20144:40290", "isrcs": ["JPQ40"] }),
+            "短い ISRC",
+        ),
+        (
+            json!({ "toc": "0:20144:40290", "isrcs": ["JPQ4026003 0"] }),
+            "空白入り",
+        ),
+        (
+            json!({ "toc": "0:20144:40290", "isrcs": ["JPQ402600330\" OR *"] }),
+            "クエリ文字",
+        ),
+        (
+            json!({ "toc": "0:20144:40290", "isrcs": ["JPQ402600330", "JPQ402600340", "JPQ402600350"] }),
+            "トラック数超え",
+        ),
+        (
+            json!({ "toc": "0:20144:40290", "mcn": "45825157784" }),
+            "短い MCN",
+        ),
+        (
+            json!({ "toc": "0:20144:40290", "mcn": "458251577849A" }),
+            "数字でない MCN",
+        ),
+    ] {
+        let (st, res) = app.post(&c, body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{what}: {res}");
+        assert_eq!(res["error"], "bad_request", "{what}");
+    }
+    // 小文字・前後の空白は正規化して通す。空文字と null は「無い」扱い
+    let (st, res) = app
+        .post(
+            &c,
+            json!({ "toc": "0:20144:40290", "isrcs": [" jpq402600330 ", "", null], "mcn": "  " }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    assert_eq!(res["candidates"].as_array().unwrap().len(), 1, "{res}");
+}
+
 #[tokio::test]
 async fn unknown_disc_yields_no_candidates() {
     let app = App::new(Some(serve_mb().await)).await;

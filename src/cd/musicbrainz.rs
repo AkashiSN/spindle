@@ -590,10 +590,15 @@ impl MusicBrainzClient {
         }
 
         if !exact {
-            // ISRC: 検索を 1 回（複数 ISRC を OR）→ 一致数の多いリリースから上限まで取得
-            if !q.isrcs.is_empty() {
-                let query = q
-                    .isrcs
+            // ISRC: 検索を 1 回（複数 ISRC を OR）→ 一致数の多いリリースから上限まで取得。
+            // クエリに載せる値は英数字だけ（API が検証済みだが、ここでも Lucene の記号を通さない）
+            let isrcs: Vec<&String> = q
+                .isrcs
+                .iter()
+                .filter(|i| i.len() == 12 && i.chars().all(|c| c.is_ascii_alphanumeric()))
+                .collect();
+            if !isrcs.is_empty() {
+                let query = isrcs
                     .iter()
                     .map(|i| format!("isrc:{i}"))
                     .collect::<Vec<_>>()
@@ -615,8 +620,11 @@ impl MusicBrainzClient {
                 }
                 groups.push((MatchedBy::Isrc, c));
             }
-            // バーコード
-            if let Some(mcn) = q.mcn {
+            // バーコード（数字だけ）
+            if let Some(mcn) = q
+                .mcn
+                .filter(|m| !m.is_empty() && m.chars().all(|c| c.is_ascii_digit()))
+            {
                 let query = format!("barcode:{mcn}");
                 let (status, body) = self
                     .get("release", &[("query", query.as_str()), ("fmt", "json")])

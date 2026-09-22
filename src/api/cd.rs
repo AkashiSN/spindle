@@ -160,11 +160,51 @@ pub async fn lookup(
             "musicbrainz_unavailable",
         ));
     };
-    let isrcs: Vec<String> = body.isrcs.iter().flatten().cloned().collect();
+    // ISRC / MCN は MB の Lucene クエリに載せるので、形を検証してから通す（英数字 12 / 数字 13。
+    // 空と null は「無い」）。件数は TOC の音声トラック数まで
+    let audio_tracks = toc.audio_tracks().count();
+    let mut isrcs: Vec<String> = Vec::new();
+    for raw in body.isrcs.iter().flatten() {
+        let v = raw.trim().to_ascii_uppercase();
+        if v.is_empty() {
+            continue;
+        }
+        if v.len() != 12 || !v.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                format!("ISRC の形が不正: {raw:?}（英数字 12 文字）"),
+            ));
+        }
+        if !isrcs.contains(&v) {
+            isrcs.push(v);
+        }
+    }
+    if isrcs.len() > audio_tracks {
+        return Ok(error_response_with_message(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            format!(
+                "ISRC が {} 件で音声トラック数 {audio_tracks} を超えている",
+                isrcs.len()
+            ),
+        ));
+    }
+    let mcn = match body.mcn.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        None => None,
+        Some(m) if m.len() == 13 && m.chars().all(|c| c.is_ascii_digit()) => Some(m.to_owned()),
+        Some(m) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                format!("MCN の形が不正: {m:?}（数字 13 桁）"),
+            ))
+        }
+    };
     let query = crate::cd::musicbrainz::DiscQuery {
         toc: &toc,
         isrcs: &isrcs,
-        mcn: body.mcn.as_deref().filter(|m| !m.trim().is_empty()),
+        mcn: mcn.as_deref(),
         release: body.release.as_deref().filter(|r| !r.trim().is_empty()),
     };
     let result = match client.lookup(&query).await {

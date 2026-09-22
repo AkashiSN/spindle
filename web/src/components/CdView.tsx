@@ -7,7 +7,7 @@ import { Fragment, useState } from 'react'
 import { useCategories } from '../hooks/useCategories'
 import type { CdDriveState } from '../hooks/useCdDrive'
 import type { CdLookupState } from '../hooks/useCdLookup'
-import { driveStateLabel } from '../lib/cdDrive'
+import { driveIdsFor, driveStateLabel } from '../lib/cdDrive'
 import {
   albumTags,
   candidateLengthMs,
@@ -16,6 +16,7 @@ import {
   discidSubmissionUrl,
   lookupHeadline,
   matchedByLabel,
+  offersDiscidSubmission,
   trackTags,
   type CopyScope,
   type DiscMetadata,
@@ -25,8 +26,9 @@ import { formatDuration } from '../lib/format'
 export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }) {
   const { result, draft, confirmed } = cd
   const driveLabel = drive.unavailable ? null : driveStateLabel(drive.status)
-  // ドライブから読めた ISRC / MCN は照会に添える（貼り付けの TOC でもドライブの盤と同じなら効く）
-  const ids = { isrcs: drive.status?.isrcs ?? [], mcn: drive.status?.mcn ?? null }
+  // ドライブから読めた ISRC / MCN は、欄の TOC がその盤のものであるときだけ照会に添える
+  // （別の盤の TOC を貼ったときに混ぜない。lib/cdDrive.ts の driveIdsFor）
+  const ids = driveIdsFor(cd.toc, drive.status)
   const [releaseRef, setReleaseRef] = useState('')
   const canEject =
     drive.status != null && drive.status.state !== 'no_drive' && drive.status.state !== 'unknown' && !drive.ejecting
@@ -109,7 +111,7 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
               {n}
             </p>
           ))}
-          {!result.exact && (
+          {offersDiscidSubmission(result) && (
             <p className="muted small">
               この DiscID は MusicBrainz に未登録。候補を選んだら{' '}
               <a href={discidSubmissionUrl(result.discid, result.mb_toc)} target="_blank" rel="noopener noreferrer">

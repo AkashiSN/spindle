@@ -72,6 +72,14 @@ export function matchedByLabel(c: ReleaseCandidate): string {
 }
 
 /**
+ * DiscID の登録を案内するか: 照会が DiscID で当たっておらず、fuzzy に混ざった DiscID 持ちの候補も無い
+ * （= 本当に未登録）ときだけ。exact 候補があるのに案内すると二重登録を促す
+ */
+export function offersDiscidSubmission(r: LookupResponse): boolean {
+  return !r.exact && !r.candidates.some((c) => c.exact)
+}
+
+/**
  * MusicBrainz に DiscID を登録するページ（libdiscid の submission URL と同じ形。登録はブラウザで本人が行う）。
  * `mbToc` は MB 形式 `先頭 末尾 リードアウト+150 各オフセット+150…`（空白は + に）
  */

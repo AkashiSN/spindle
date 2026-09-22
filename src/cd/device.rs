@@ -175,14 +175,15 @@ pub struct DiscIds {
     pub mcn: Option<String>,
 }
 
-/// READ SUB-CHANNEL の応答の本体（byte 8 の bit 7 が有効ビット、9 から文字列）
+/// READ SUB-CHANNEL の応答の本体（byte 8 の bit 7 が有効ビット、9 から文字列）。正規化後に
+/// ちょうど `len` 文字でなければ無し（途中で切れた応答を短い ISRC / MCN として受けない）
 fn subchannel_text(resp: &[u8; SUBCHANNEL_LEN], format: u8, len: usize) -> Option<String> {
     if resp[4] != format || resp[8] & 0x80 == 0 {
         return None;
     }
-    let raw = &resp[9..9 + len];
+    let raw = &resp[9..9 + len + 1];
     let text = std::str::from_utf8(raw).ok()?.trim_end_matches('\0').trim();
-    if text.is_empty()
+    if text.len() != len
         || !text.is_ascii()
         || text.chars().all(|c| c == '0')
         || text.chars().any(|c| !c.is_ascii_alphanumeric())
@@ -298,6 +299,13 @@ impl LinuxDrive {
                     hdr.driver_status,
                     &sense[..usize::from(hdr.sb_len_wr).min(sense.len())]
                 )),
+            });
+        }
+        // 応答が短い（resid > 0）ときは文字列の位置まで届いていないかもしれないので使わない
+        if hdr.resid != 0 {
+            return Err(DriveError::Io {
+                what: "READ SUB-CHANNEL",
+                source: std::io::Error::other(format!("応答が {} バイト足りない", hdr.resid)),
             });
         }
         Ok(resp)

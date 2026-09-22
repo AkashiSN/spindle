@@ -11,6 +11,7 @@ import {
   initialSelection,
   discidSubmissionUrl,
   lookupHeadline,
+  offersDiscidSubmission,
   matchedByLabel,
   normalizeTocInput,
   outcomeAfterTocEdit,
@@ -89,6 +90,14 @@ describe('matchedByLabel / discidSubmissionUrl', () => {
     expect(matchedByLabel({ ...base, matched_by: ['release'] })).toBe('指定')
     expect(matchedByLabel({ ...base, matched_by: ['barcode'] })).toBe('バーコード')
     expect(matchedByLabel({ ...base, matched_by: [] })).toBe('')
+  })
+  it('登録の案内は DiscID が本当に未登録のときだけ（fuzzy に混ざった一致候補があれば出さない）', () => {
+    const r = { discid: 'd', mb_toc: '', accuraterip_id: '', ctdb_toc_id: '', exact: false, candidates: [] as ReleaseCandidate[], notes: [], tracks: [] }
+    const toc: ReleaseCandidate = { ...base, exact: false, matched_by: ['toc'] }
+    expect(offersDiscidSubmission({ ...r, candidates: [toc] })).toBe(true)
+    expect(offersDiscidSubmission({ ...r, candidates: [] })).toBe(true)
+    expect(offersDiscidSubmission({ ...r, candidates: [toc, base] })).toBe(false)
+    expect(offersDiscidSubmission({ ...r, exact: true, candidates: [base] })).toBe(false)
   })
   it('DiscID の登録 URL は libdiscid と同じ形（id・トラック数・TOC は + 区切り）', () => {
     expect(discidSubmissionUrl('Pmj4hPdkGckCxpSFFMoexmR6r1s-', '1 2 40440 150 20294')).toBe(

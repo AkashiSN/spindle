@@ -1,5 +1,7 @@
 // CD ドライブの状態（`GET /api/cd/status`、P2-1）の型と表示。ポーリングは hooks/useCdDrive.ts
 
+import { normalizeTocInput } from './cd'
+
 export type DriveState = 'unknown' | 'no_drive' | 'no_disc' | 'tray_open' | 'not_ready' | 'disc_ok'
 
 export type DriveStatus = {
@@ -37,6 +39,21 @@ export function driveStateLabel(s: DriveStatus | null): string | null {
       if (s.toc != null) return `ディスクあり（${trackCount(s.toc)} トラック）`
       return s.error != null ? `ディスクあり（TOC を読めない: ${s.error}）` : 'ディスクあり（TOC を読み取り中…）'
   }
+}
+
+/** 照会に添える識別子（`useCdLookup` の `LookupExtra` と同じ形） */
+export type DriveIds = { isrcs: Array<string | null>; mcn: string | null }
+
+/**
+ * 欄の TOC がいまドライブに入っている盤の TOC と同じときだけ、その盤の ISRC / MCN を返す。
+ * 別の盤の TOC（貼り付け・編集後）に混ぜると、強い経路として誤同定するので空にする
+ */
+export function driveIdsFor(toc: string, s: DriveStatus | null): DriveIds {
+  const empty: DriveIds = { isrcs: [], mcn: null }
+  if (s == null || s.toc == null) return empty
+  const normalized = normalizeTocInput(toc)
+  if (normalized === '' || normalized !== s.toc) return empty
+  return { isrcs: s.isrcs, mcn: s.mcn }
 }
 
 /**

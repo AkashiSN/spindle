@@ -124,6 +124,27 @@ fn isrc_is_absent_when_tcval_is_clear_or_blank() {
 }
 
 #[test]
+fn isrc_and_mcn_must_have_the_full_length() {
+    // 有効ビットが立っていても NUL 埋めで短い文字列は受けない（codex 指摘: 途中で切れた応答）
+    assert_eq!(
+        parse_subchannel_isrc(&subchannel(0x03, true, b"JPQ40")),
+        None
+    );
+    assert_eq!(
+        parse_subchannel_isrc(&subchannel(0x03, true, b"JPQ402600330X")),
+        None
+    );
+    assert_eq!(
+        parse_subchannel_mcn(&subchannel(0x02, true, b"12345")),
+        None
+    );
+    assert_eq!(
+        parse_subchannel_mcn(&subchannel(0x02, true, b"45825157784910")),
+        None
+    );
+}
+
+#[test]
 fn isrc_is_trimmed_and_uppercased() {
     assert_eq!(
         parse_subchannel_isrc(&subchannel(0x03, true, b"jpq402600330")).as_deref(),
