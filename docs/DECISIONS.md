@@ -3347,5 +3347,19 @@ SSE や再取得で選択を書き換えない規則を守るため別に持つ�
 `coverartarchive.org` と `archive.org` 系だけを許可し、自前ミラーは設定した origin に限る形にする
 （今回は採らない）。
 
+**追記**（2026-09-23。実機確認で判明）: **接続に使う IP の族は `[musicbrainz].address_family` を
+引き継がない**（`Auto` を渡す）。当初は UA と一緒に共用する設計だったが、実機（`address_family =
+"ipv6"`）でジャケットが取れなかった。
+
+この経路は **coverartarchive.org（MetaBrainz）→ archive.org（Internet Archive）** の二段構えで、
+`archive.org` には AAAA が無い（`getent ahostsv6 archive.org` は IPv4 射影しか返さない）。ipv6 に
+固定すると CAA の 307 は受け取れても飛び先へ届かず、リダイレクトを追えないまま終わる。実機での
+確認: `curl -6 -L` は 307 で止まり、`curl -4 -L` は 200。族はホストごとに解決させるのが正しい。
+
+`[musicbrainz].address_family` が要るのは musicbrainz.org のエッジがこの回線の IPv4 を落とすため
+（D-64 追記 2）で、それは相手ごとの事情。CAA 用の設定項目は足さない（archive.org に AAAA が無いのは
+この回線の事情ではなく Internet Archive 側の性質なので、どの環境でも `Auto` が正しい）。
+
 **却下**: ブラウザから直接 coverartarchive.org を引く（上の 2 つの理由で不利）。原寸の取得
-（数 MB あり、画面には要らない）。
+（数 MB あり、画面には要らない）。CAA 専用の `address_family` 設定（上の理由で `Auto` 以外に
+意味のある値が無い）。

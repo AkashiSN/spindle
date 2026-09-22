@@ -318,11 +318,15 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("MusicBrainz クライアントの初期化に失敗")?;
     state = state.with_musicbrainz(Arc::new(mb));
-    // 候補のジャケット（D-82）。MB 本体とは別の相手なので間隔制御は持たない
+    // 候補のジャケット（D-82）。MB 本体とは別の相手なので間隔制御は持たない。
+    // **接続に使う IP の族は `[musicbrainz].address_family` を引き継がない**（D-82 追記）。
+    // CAA は coverartarchive.org（MetaBrainz）から archive.org（Internet Archive）へ 307 で飛ばすが、
+    // archive.org に AAAA が無いので、ipv6 に固定すると飛び先へ届かない。族はホストごとに
+    // 解決させる（`Auto`）
     let caa = spindle::cd::coverart::CoverArtClient::new(
         &state.config.musicbrainz.cover_art_url,
         &state.config.musicbrainz.user_agent,
-        state.config.musicbrainz.address_family,
+        spindle::config::AddressFamily::Auto,
     )
     .context("Cover Art Archive クライアントの初期化に失敗")?;
     state = state.with_coverart(Arc::new(caa));
