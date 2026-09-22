@@ -187,8 +187,8 @@ export function CdCandidates({ cd }: { cd: CdLookupState }) {
               <span className="muted small">
                 既定の「全部写す」はトラック名・アーティスト・レーベル・カタログ番号・JAN/UPC まで写す。
                 「最小限」にすると盤を見分けるのに要るものだけ（アルバム名・アルバムアーティスト・
-                日付・ディスク番号 / 枚数・MusicBrainz のリリース id）になり、トラック名は貼り付けか
-                手入力で埋める。切り替えると選択中の候補を写し直す（編集中の内容は消える）
+                日付・ディスク番号 / 枚数・MusicBrainz のリリース id）になり、トラック名は空のまま
+                取り込まれる（Inbox の承認画面で入れる）
               </span>
             </fieldset>
           )}

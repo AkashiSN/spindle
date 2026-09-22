@@ -321,7 +321,7 @@ export type DiscTrackDraft = {
   mb: TrackMbIds | null
 }
 
-/** 編集中のフォーム。候補を写したものも空のものも同じ形で、確定すると DiscMetadata になる */
+/** 取り込む内容。候補を写したものも空のものも同じ形（CD 画面からは直せない。直すのは Inbox） */
 export type DiscDraft = {
   source: 'musicbrainz' | 'manual'
   release_id: string | null
@@ -423,7 +423,7 @@ export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[], sco
     disc_no: c.medium_position,
     disc_count: c.medium_count,
     category: null,
-    // minimal はトラック行を番号と長さだけの空行にする（貼り付けか手入力で埋める）
+    // minimal はトラック行を番号と長さだけの空行にする（名前は Inbox の承認画面で入れる）
     tracks: blankRows(toc).map((row, i) => {
       const t = c.tracks[i]
       if (!full || t == null) return row
@@ -438,7 +438,11 @@ export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[], sco
 }
 
 /**
- * 貼り付けの解析結果を行に写す（番号で対応付け）。アーティストの無い行は既存の値を保つ。
+ * 貼り付けの解析結果を行に写す（番号で対応付け）。
+ *
+ * **P4-20 追記で CD 画面からは使わなくなった**（編集は Inbox の承認画面に一本化した）。
+ * Inbox へ移すまでの置き場としてここに残してある（TASKS P2-10 の未完了項目）。
+ *アーティストの無い行は既存の値を保つ。
  * TOC に無い番号は捨て、行数の違い・未設定の行とともに警告にする。元の draft は変えない
  */
 export function applyTracklist(

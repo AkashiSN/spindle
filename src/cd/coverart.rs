@@ -5,7 +5,8 @@
 //! ものを共用するが、**接続に使う IP の族は共用しない**（D-82 追記）: この経路は
 //! coverartarchive.org（MetaBrainz）から archive.org（Internet Archive）へ飛ぶ二段構えで、
 //! archive.org に AAAA が無い。`address_family = "ipv6"` を引き継ぐと飛び先へ届かず、
-//! リダイレクトを追えないまま終わる。族はホストごとに解決させる（呼び出し側が `Auto` を渡す）。
+//! リダイレクトを追えないまま終わる。族はホストごとに解決させる（[`CoverArtClient::new`] は族を
+//! 引数で受けず `Auto` に固定する。引数があると呼び出し側が間違えられる）。
 //!
 //! 中継の境界（D-82）: ベース URL は http(s) + ホスト付きだけを通し、パスは [`reqwest::Url::join`] で
 //! 組み立てる。リダイレクトは [`MAX_REDIRECTS`] 回まででかつ HTTPS → HTTP のダウングレードは追わない
@@ -29,11 +30,10 @@ pub struct CoverArtClient {
 }
 
 impl CoverArtClient {
-    pub fn new(
-        base: impl AsRef<str>,
-        user_agent: &str,
-        family: AddressFamily,
-    ) -> Result<Self, LookupError> {
+    /// 接続に使う IP の族は引数で受けない（`Auto` に固定する）。`[musicbrainz].address_family` を
+    /// 引き継げてしまうと、飛び先の archive.org に AAAA が無いぶん壊れる。引数を持たせなければ
+    /// 呼び出し側が間違えようがない（この事故は実際に main の配線で起きた）
+    pub fn new(base: impl AsRef<str>, user_agent: &str) -> Result<Self, LookupError> {
         let mut raw = base.as_ref().to_owned();
         if !raw.ends_with('/') {
             raw.push('/');
@@ -49,7 +49,11 @@ impl CoverArtClient {
         }
         Ok(Self {
             base,
-            http: super::http_client_with_redirects(user_agent, family, MAX_REDIRECTS)?,
+            http: super::http_client_with_redirects(
+                user_agent,
+                AddressFamily::Auto,
+                MAX_REDIRECTS,
+            )?,
         })
     }
 

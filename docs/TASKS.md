@@ -938,7 +938,21 @@ TOC 編集 / reset で下の段が消える、照会中もフォームが消え�
 - [ ] `place_disc` を Inbox 経由に作り直す（D-67 追記）: FLAC と rip.log / disc.cue / disc.toc を件の
       ディレクトリへ、MusicBrainz から写した内容と `RipReport` をサイドカーへ、`inbox_items` に 1 件
 - [ ] Inbox の承認と配置が、サイドカーの `RipReport` から `album_verifications`（`source = 'rip'`）/
-      `track_verifications` / `tracks.verification` と `source_type = 'cd_rip'` を入れる
+      `track_verifications` / `tracks.verification` と `source_type = 'cd_rip'` を入れる。
+      **対応付けはファイルの basename**（配列順を信じない。Inbox では番号もタイトルも直せる）。
+      登録は `register_item` と同じトランザクション、`log_path` は移動後の Library 相対
+- [ ] サイドカー v1 に `RipReport` を入れる形を足す（いまは `category` / `files` だけ。`RipReport` も
+      serde 型でない）。CD の件は `album_gain = true` で提案する（D-74）
+- [ ] **リップの開始は空の名前を許す**（D-67 追記）。`DiscMetadata::validate` の
+      `EmptyAlbum` / `EmptyAlbumArtist` は Library へ置くときの検証なので、開始の契約には使わない。
+      web の `lib/cd.ts` の `validateDraft` は CD 画面から使われなくなったので、ここで消すか直す
+
+受け入れ（P2-5 で必ず見る）: **候補ゼロ件・アルバム名もアーティストも空のまま Inbox まで完走する**、
+サイドカーの basename 対応が 1 対 1 でないとき / CRC の件数や `disc_no` が合わないときは配置しない、
+承認で番号やタイトルを直しても検証記録が正しいトラックに付く
+
+- [ ] 実装後に **SPEC §7.2 の「Library へ直接置いていたときの記述」を現在形に置き換える**（いまは
+      「Inbox 経由にしたあとも使う部分」の注記付きで旧経路の説明を残してある）
 - [ ] 吸い出し中、トラック単位の進捗を SSE の `job` イベントで流す
       （`{ phase: read|verify|encode|place, disc_no, track_no, done, total }`）。CD 画面のトラック表の
       右端に出る（器は P4-20 の `CdTrackTable` の `RipProgress`）。**相ごとの `track_no` の進み方と、
@@ -1058,6 +1072,10 @@ unverifiable / 不完全 / 複数ディスク / 照会失敗 / 再照合の履�
 ## P3 — ytmusic 統合
 
 完了条件: **ytmusic CLI を廃止できる。**
+
+- [ ] トラックリスト貼り付けを承認画面へ移す（P4-20 追記で CD 画面から外した。パーサ
+      `web/src/lib/tracklist.ts` と `lib/cd.ts` の `applyTracklist` は残してあり、いまはテストからしか
+      呼ばれない）。受け入れ: 番号で行に写す・行数の違いと未設定の行を警告する、を Inbox の下書きで固定する
 
 ### P3-1 タイトルパーサ → メタデータプラグインのプロトコル v1
 
@@ -1590,8 +1608,7 @@ Shift+↑、Esc → Shift+↓）
 `web/src/lib/views.test.ts`（並びと左カラム）
 
 残り: トラックごとの進捗は P2-5（表の列と `RipProgress` の型だけ用意した）。Inbox 経由の取り込みも
-P2-5（D-67 追記）。トラックリスト貼り付け（`lib/tracklist.ts` / `applyTracklist`）を Inbox の承認画面へ
-移すのは別タスク（パーサとテストは残してある）
+P2-5（D-67 追記）
 
 ## 着手前に確認が必要な残課題
 

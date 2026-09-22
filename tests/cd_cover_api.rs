@@ -19,7 +19,7 @@ use tower::ServiceExt;
 
 use spindle::api::{self, auth, AppState};
 use spindle::cd::coverart::CoverArtClient;
-use spindle::config::{AddressFamily, Config};
+use spindle::config::Config;
 use spindle::db::Db;
 
 const EXAMPLE: &str = include_str!("../deploy/config.example.toml");
@@ -124,8 +124,7 @@ impl App {
             .expect("bootstrap");
         let mut state = AppState::new(config, db, mode);
         if let Some(base) = caa_base {
-            let client =
-                CoverArtClient::new(base, "spindle-test/0.1", AddressFamily::Auto).expect("client");
+            let client = CoverArtClient::new(base, "spindle-test/0.1").expect("client");
             state = state.with_coverart(Arc::new(client));
         }
         Self {
@@ -264,16 +263,11 @@ fn the_base_url_must_be_http_with_a_host() {
         "https:///",
     ] {
         assert!(
-            CoverArtClient::new(bad, "spindle-test/0.1", AddressFamily::Auto).is_err(),
+            CoverArtClient::new(bad, "spindle-test/0.1").is_err(),
             "{bad}"
         );
     }
-    assert!(CoverArtClient::new(
-        "https://coverartarchive.org/",
-        "spindle-test/0.1",
-        AddressFamily::Auto
-    )
-    .is_ok());
+    assert!(CoverArtClient::new("https://coverartarchive.org/", "spindle-test/0.1").is_ok());
 }
 
 /// リダイレクトの判定（TLS を立てずに URL の列で固定する）

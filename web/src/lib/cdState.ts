@@ -4,10 +4,14 @@
 // フォーム（draft）は **TOC が読めた時点で必ず存在する**。表は照会の前から出ていて、候補を選ぶと
 // 名前が入る。だから draft が消えてよいのは「別のディスクに替わったとき」（set_disc / set_toc /
 // reset）だけで、**照会の開始（lookup_start）と失敗（lookup_error）では消さない**。
-// 消すと、照会が返るまで表が出ない／失敗で編集中の内容が飛ぶ。
+// 消すと、照会が返るまで表が出ない／失敗で写した内容が飛ぶ。
+//
+// **CD 画面からは編集しない**（P4-20 追記）。draft を動かすのは「候補を選ぶ / 写す範囲を変える /
+// どれも違う」だけで、値を直すのは Inbox の承認画面（D-67 追記）。だから update_draft のような
+// 編集アクションも貼り付けも持たない。
 //
 // 照会をやり直すと消えるのは result と selected だけ（beforeLookup）。別のディスクに替わったときは
-// 貼り付け欄の本文と busy も落とす（進行中の照会は hook 側が Latest で捨てるので、busy を残すと戻らない）
+// busy も落とす（進行中の照会は hook 側が Latest で捨てるので、busy を残すと戻らない）
 
 import {
   draftFromCandidate,
@@ -28,9 +32,9 @@ export type CdState = {
   result: LookupResponse | null
   /** 選んだ候補（result.candidates の添字）。手入力なら null */
   selected: number | null
-  /** 候補から写す範囲（D-72、P4-2）。既定は識別用の最小限 */
+  /** 候補から写す範囲（D-72 追記 2、P4-2）。既定は「全部写す」 */
   copyScope: CopyScope
-  /** 編集中のフォーム。TOC が読めた時点で必ずある（表は照会の前から出る） */
+  /** 取り込む内容。TOC が読めた時点で必ずある（表は照会の前から出る）。画面からは直せない */
   draft: DiscDraft | null
 }
 
@@ -58,22 +62,22 @@ export const initialCdState: CdState = {
 }
 
 /**
- * 照会をやり直すときに消すもの: 古い結果と選択だけ。**フォームと貼り付け欄は残す**
- * （表は照会の前から出ていて、失敗しても編集中の内容を飛ばさない）
+ * 照会をやり直すときに消すもの: 古い結果と選択だけ。**フォームは残す**
+ * （表は照会の前から出ていて、失敗しても写した内容を飛ばさない）
  */
 function beforeLookup(s: CdState): CdState {
   return { ...s, result: null, selected: null }
 }
 
 /**
- * 別のディスクに替わったときに消すもの（フォームも貼り付けの本文も）。
+ * 別のディスクに替わったときに消すもの（フォームも）。
  * busy も落とす: 進行中の照会は hook が Latest で捨てるので、残すと戻らなくなる
  */
 function belowToc(s: CdState): CdState {
   return { ...beforeLookup(s), draft: null, error: null, busy: false }
 }
 
-/** フォームを差し替える（貼り付けの警告は消える） */
+/** フォームを差し替える */
 function withDraft(s: CdState, selected: number | null, draft: DiscDraft): CdState {
   return { ...s, selected, draft }
 }
@@ -88,7 +92,7 @@ export function cdReducer(s: CdState, a: CdAction): CdState {
       return { ...belowToc(s), toc: a.toc }
     }
     case 'set_disc': {
-      // 同じディスクなら何もしない（2 秒ごとのポーリングで編集中の内容を消さない）
+      // 同じディスクなら何もしない（2 秒ごとのポーリングで選んだ候補を消さない）
       if (s.toc === a.toc && s.draft != null) return s
       return { ...belowToc(s), toc: a.toc, draft: emptyDraft(a.tracks) }
     }
@@ -110,15 +114,14 @@ export function cdReducer(s: CdState, a: CdAction): CdState {
     case 'reset':
       return belowToc(s)
     case 'select': {
-      // 候補を選ぶとフォームを写し直す（編集中の内容は捨てる。画面で断っている）
+      // 候補を選ぶとフォームを写し直す
       if (s.result == null) return s
       const c = s.result.candidates[a.index]
       if (c == null) return s
       return withDraft(s, a.index, draftFromCandidate(c, s.result.tracks, s.copyScope))
     }
     case 'set_copy_scope': {
-      // 範囲を変えると、候補を選択中ならその候補を写し直す（編集中の内容は捨てる。画面で断っている）。
-      // 手入力中は範囲だけ変わる
+      // 範囲を変えると、候補を選択中ならその候補を写し直す。「どれも違う」のときは範囲だけ変わる
       if (a.scope === s.copyScope) return s
       const next = { ...s, copyScope: a.scope }
       if (s.result == null || s.selected == null) return next
