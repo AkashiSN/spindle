@@ -46,7 +46,7 @@ pub struct AppState {
     pub transcode_grace: std::time::Duration,
     /// MusicBrainz の照会（P2-3）。無いと `/api/cd/lookup` は 503
     pub musicbrainz: Option<Arc<crate::cd::musicbrainz::MusicBrainzClient>>,
-    /// 候補のジャケット（D-82、P4-20）。無いと `/api/cd/cover/:id` は 503
+    /// 候補のジャケット（D-83、P4-20）。無いと `/api/cd/cover/:id` は 503
     pub coverart: Option<Arc<crate::cd::coverart::CoverArtClient>>,
     /// CD ドライブ（P2-1）。ポーラが `DriveMonitor` を更新し、`/api/cd/status` が読む。
     /// eject はドライブを直接叩く。無いと `/api/cd/status` / `eject` は 503

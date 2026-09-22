@@ -217,7 +217,7 @@ pub fn rip_entry(files: &[&str], ctdb_matched: &[bool]) -> spindle::import::side
             drive: Some("TEST DRIVE".into()),
             device: "/dev/sr0".into(),
             read_offset: 6,
-            offset_source: OffsetSource::Table,
+            offset_source: OffsetSource::Learned,
             started_at: 1_789_000_000,
             finished_at: 1_789_000_600,
             attempts: 1,

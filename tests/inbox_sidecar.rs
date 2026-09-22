@@ -118,7 +118,7 @@ fn rip_entry_round_trips_with_stable_json_keys() {
     let rip = &v["rip"];
     assert_eq!(rip["files"], serde_json::json!(["01.flac", "02.flac"]));
     assert_eq!(rip["log"], "rip.log");
-    assert_eq!(rip["report"]["offset_source"], "table");
+    assert_eq!(rip["report"]["offset_source"], "learned");
     assert_eq!(rip["report"]["read_offset"], 6);
     assert_eq!(rip["report"]["ctdb"]["outcome"], "mismatch");
     assert_eq!(rip["report"]["ctdb"]["tracks"][1]["matched"], false);

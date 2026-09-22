@@ -26,22 +26,26 @@ use crate::media::artwork::cover_rank;
 /// rip.log の先頭行（スキャナの判定キー。変えたら `is_spindle_rip_log` も見直す）
 pub const RIP_LOG_SIGNATURE: &str = "spindle rip log v1";
 
-/// 読み取りオフセットの出所
+/// 読み取りオフセットの出所（D-83）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OffsetSource {
-    /// 同梱のオフセット表（ドライブ型番から）
-    Table,
-    /// 設定 / UI で手動指定
+    /// 設定（`[rip].drive_offset` の整数）
     Manual,
+    /// 前に照合が通った盤で覚えた値（`drive_offsets`）
+    Learned,
+    /// この盤の照合で見つけた値（PCM に当ててから配置した）
+    Detected,
+    /// 分からない（0 のまま。照合の候補が無い盤）
     Unknown,
 }
 
 impl OffsetSource {
     fn label(self) -> &'static str {
         match self {
-            OffsetSource::Table => "オフセット表",
             OffsetSource::Manual => "手動",
+            OffsetSource::Learned => "学習済み",
+            OffsetSource::Detected => "この盤の照合で検出",
             OffsetSource::Unknown => "不明",
         }
     }

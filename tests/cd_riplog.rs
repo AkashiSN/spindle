@@ -56,7 +56,7 @@ fn report(n: usize) -> RipReport {
         drive: Some("ASUS BW-16D1HT 3.10".into()),
         device: "/dev/sr0".into(),
         read_offset: 6,
-        offset_source: OffsetSource::Table,
+        offset_source: OffsetSource::Learned,
         started_at: 1_789_000_000,
         finished_at: 1_789_000_600,
         attempts: 1,
@@ -224,7 +224,7 @@ fn log_has_signature_ids_table_and_results() {
         log.contains("ドライブ: ASUS BW-16D1HT 3.10 (/dev/sr0)\n"),
         "{log}"
     );
-    assert!(log.contains("読み取りオフセット: +6 サンプル（オフセット表）\n"));
+    assert!(log.contains("読み取りオフセット: +6 サンプル（学習済み）\n"));
     assert!(log.contains("試行: 1 回\n"));
     assert!(log.contains("エンコーダ: flac 1.5.0 -8 --verify\n"));
     assert!(log.contains("MusicBrainz DiscID: y6Br7t4P.bldLe_6Im2d9Z42IU4-\n"));

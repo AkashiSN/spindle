@@ -14,6 +14,7 @@ pub mod metadata;
 pub mod musicbrainz;
 pub mod place;
 pub mod repair;
+pub mod rip;
 pub mod riplog;
 pub mod toc;
 pub mod verify;
@@ -115,7 +116,7 @@ pub fn http_client_with(
     client_builder(user_agent, family).build()
 }
 
-/// リダイレクトの方針を明示した版（画像の中継用。D-82）。既定任せにせず、上限を切り、
+/// リダイレクトの方針を明示した版（画像の中継用。D-83）。既定任せにせず、上限を切り、
 /// HTTPS から HTTP へのダウングレードは追わない
 pub fn http_client_with_redirects(
     user_agent: &str,

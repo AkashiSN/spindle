@@ -98,7 +98,7 @@ fn report() -> RipReport {
         drive: Some("TEST DRIVE".into()),
         device: "/dev/sr0".into(),
         read_offset: 6,
-        offset_source: OffsetSource::Table,
+        offset_source: OffsetSource::Learned,
         started_at: 1_789_000_000,
         finished_at: 1_789_000_100,
         attempts: 1,

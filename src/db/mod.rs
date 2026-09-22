@@ -9,6 +9,7 @@ pub mod archive;
 pub mod artwork;
 pub mod categories;
 pub mod derived;
+pub mod drive_offsets;
 pub mod flaccheck;
 pub mod gc;
 pub mod hires;

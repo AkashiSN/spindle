@@ -1,14 +1,14 @@
-//! Cover Art Archive（D-82、P4-20）。MusicBrainz のリリース MBID からジャケットを 1 枚取る。
+//! Cover Art Archive（D-83、P4-20）。MusicBrainz のリリース MBID からジャケットを 1 枚取る。
 //!
 //! MB 本体の 1 req/s とは別の相手（CAA は archive.org へ 307 で飛ばす）なので、間隔制御は持たない。
 //! 画像の取得で照会のスロットを食うと本末転倒なため、クライアントも分ける。UA は `[musicbrainz]` の
-//! ものを共用するが、**接続に使う IP の族は共用しない**（D-82 追記）: この経路は
+//! ものを共用するが、**接続に使う IP の族は共用しない**（D-83 追記）: この経路は
 //! coverartarchive.org（MetaBrainz）から archive.org（Internet Archive）へ飛ぶ二段構えで、
 //! archive.org に AAAA が無い。`address_family = "ipv6"` を引き継ぐと飛び先へ届かず、
 //! リダイレクトを追えないまま終わる。族はホストごとに解決させる（[`CoverArtClient::new`] は族を
 //! 引数で受けず `Auto` に固定する。引数があると呼び出し側が間違えられる）。
 //!
-//! 中継の境界（D-82）: ベース URL は http(s) + ホスト付きだけを通し、パスは [`reqwest::Url::join`] で
+//! 中継の境界（D-83）: ベース URL は http(s) + ホスト付きだけを通し、パスは [`reqwest::Url::join`] で
 //! 組み立てる。リダイレクトは [`MAX_REDIRECTS`] 回まででかつ HTTPS → HTTP のダウングレードは追わない
 //! （[`super::may_follow`]）。本文は [`MAX_BYTES`] まで逐次読みし、超えたら打ち切る。
 //! 「画像が無い」（`Ok(None)`）と「上流がおかしい」（`Err`）は混ぜない。

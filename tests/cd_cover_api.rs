@@ -1,4 +1,4 @@
-//! `GET /api/cd/cover/{release_id}`（SPEC §9、D-82、P4-20）。Cover Art Archive の front 画像を
+//! `GET /api/cd/cover/{release_id}`（SPEC §9、D-83、P4-20）。Cover Art Archive の front 画像を
 //! 中継する。CAA はローカルの axum で模す。
 //!
 //! 見るもの: 200 の中継（Content-Type をそのまま、nosniff 付き）、画像が無い盤は 404、MBID でない

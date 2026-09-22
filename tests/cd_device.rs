@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use spindle::cd::device::{
-    parse_subchannel_isrc, parse_subchannel_mcn, toc_from_entries, DiscIds, Drive, DriveError,
-    DriveMonitor, DriveState, LinuxDrive, TocEntry, CONTROL_DATA,
+    parse_inquiry, parse_subchannel_isrc, parse_subchannel_mcn, toc_from_entries, DiscIds, Drive,
+    DriveError, DriveMonitor, DriveState, LinuxDrive, TocEntry, CONTROL_DATA,
 };
 use spindle::cd::toc::{Toc, TocError};
 
@@ -524,6 +524,30 @@ fn real_drive_reports_disc_and_toc() {
         eprintln!("ids = {ids:?}");
         assert_eq!(ids.isrcs.len(), toc.audio_tracks().count());
     }
+    // 型番はディスクが無くても読める
+    let model = drive.model().unwrap();
+    eprintln!("model = {model:?}");
+    assert!(model.is_some());
+}
+
+// ------------------------------------------------------------ INQUIRY（型番）
+
+#[test]
+fn inquiry_model_is_vendor_and_product_without_revision() {
+    let mut resp = [0u8; 96];
+    resp[8..16].copy_from_slice(b"PIONEER ");
+    resp[16..32].copy_from_slice(b"BD-RW   BDR-209M");
+    resp[32..36].copy_from_slice(b"1.10");
+    assert_eq!(
+        parse_inquiry(&resp).as_deref(),
+        Some("PIONEER BD-RW   BDR-209M")
+    );
+    // 短い応答・空の欄
+    assert_eq!(parse_inquiry(&resp[..35]), None);
+    assert_eq!(parse_inquiry(&[0u8; 36]), None);
+    let mut only_product = [b' '; 36];
+    only_product[16..20].copy_from_slice(b"X123");
+    assert_eq!(parse_inquiry(&only_product).as_deref(), Some("X123"));
 }
 
 /// 実ドライブでトレイを開ける（開いたままにする）。ディスクの有無は問わない

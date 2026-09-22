@@ -56,6 +56,10 @@ const SUBCHANNEL_MCN: u8 = 0x02;
 const SUBCHANNEL_ISRC: u8 = 0x03;
 /// READ SUB-CHANNEL の応答の長さ（ヘッダ 4 + データ 20）
 const SUBCHANNEL_LEN: usize = 24;
+/// INQUIRY（SPC）: 標準応答の必須部分は 36 バイト（vendor 8..16、product 16..32、revision 32..36）
+const INQUIRY: u8 = 0x12;
+const INQUIRY_LEN: usize = 96;
+const INQUIRY_MIN_LEN: usize = 36;
 /// SG_IO のタイムアウト（ms）。サブチャネルの読みは一瞬で、これは万一の保険
 const SG_TIMEOUT_MS: u32 = 10_000;
 
@@ -142,6 +146,33 @@ pub trait Drive: Send + Sync {
     /// TOC の音声トラックごとの ISRC と、ディスクの MCN。補助なので失敗しても TOC は成立する
     fn read_ids(&self, toc: &Toc) -> Result<DiscIds, DriveError>;
     fn eject(&self) -> Result<(), DriveError>;
+    /// ドライブの型番（INQUIRY の vendor + product。ファームウェアの版は含めない）。学習した読み取り
+    /// オフセットの鍵（D-83）。分からなければ None
+    fn model(&self) -> Result<Option<String>, DriveError> {
+        Ok(None)
+    }
+}
+
+/// INQUIRY の標準応答から型番（vendor と product を空白 1 つで結合。前後の空白を落とす）。
+/// 36 バイトに満たない・空なら None
+pub fn parse_inquiry(resp: &[u8]) -> Option<String> {
+    if resp.len() < INQUIRY_MIN_LEN {
+        return None;
+    }
+    let field = |r: std::ops::Range<usize>| {
+        String::from_utf8_lossy(&resp[r])
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    };
+    let model = [field(8..16), field(16..32)]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!model.is_empty()).then_some(model)
 }
 
 /// READ TOC の 1 エントリ（LBA 形式）。[`toc_from_entries`] の入力
@@ -262,6 +293,36 @@ impl LinuxDrive {
         cdb[7] = (SUBCHANNEL_LEN >> 8) as u8;
         cdb[8] = SUBCHANNEL_LEN as u8;
         let mut resp = [0u8; SUBCHANNEL_LEN];
+        let got = Self::sg_read(file, "READ SUB-CHANNEL", &mut cdb, &mut resp)?;
+        // 応答が短いときは文字列の位置まで届いていないかもしれないので使わない
+        if got != SUBCHANNEL_LEN {
+            return Err(DriveError::Io {
+                what: "READ SUB-CHANNEL",
+                source: std::io::Error::other(format!(
+                    "応答が {} バイト足りない",
+                    SUBCHANNEL_LEN - got
+                )),
+            });
+        }
+        Ok(resp)
+    }
+
+    /// 標準 INQUIRY を SG_IO で 1 回。返すのは型番（[`parse_inquiry`]）
+    fn inquiry(file: &std::fs::File) -> Result<Option<String>, DriveError> {
+        let mut cdb = [INQUIRY, 0, 0, 0, INQUIRY_LEN as u8, 0];
+        let mut resp = [0u8; INQUIRY_LEN];
+        let got = Self::sg_read(file, "INQUIRY", &mut cdb, &mut resp)?;
+        Ok(parse_inquiry(&resp[..got]))
+    }
+
+    /// デバイスから読む SCSI コマンドを SG_IO で 1 回。返り値は受け取ったバイト数（`resp` の長さ −
+    /// resid）。SCSI / host / driver のどれかが失敗なら Err（sense を添える）
+    fn sg_read(
+        file: &std::fs::File,
+        what: &'static str,
+        cdb: &mut [u8],
+        resp: &mut [u8],
+    ) -> Result<usize, DriveError> {
         let mut sense = [0u8; 32];
         let mut hdr = SgIoHdr {
             interface_id: SG_INTERFACE_ID_ORIG,
@@ -269,7 +330,7 @@ impl LinuxDrive {
             cmd_len: cdb.len() as u8,
             mx_sb_len: sense.len() as u8,
             iovec_count: 0,
-            dxfer_len: SUBCHANNEL_LEN as u32,
+            dxfer_len: resp.len() as u32,
             dxferp: resp.as_mut_ptr().cast(),
             cmdp: cdb.as_mut_ptr(),
             sbp: sense.as_mut_ptr(),
@@ -288,10 +349,10 @@ impl LinuxDrive {
             info: 0,
         };
         // hdr が指す cdb / resp / sense は呼び出しの間生きている（このスコープ）
-        Self::ioctl(file, "READ SUB-CHANNEL", SG_IO, &mut hdr as *mut _)?;
+        Self::ioctl(file, what, SG_IO, &mut hdr as *mut _)?;
         if hdr.status != 0 || hdr.host_status != 0 || hdr.driver_status != 0 {
             return Err(DriveError::Io {
-                what: "READ SUB-CHANNEL",
+                what,
                 source: std::io::Error::other(format!(
                     "SCSI status {} host {} driver {} sense {:02x?}",
                     hdr.status,
@@ -301,14 +362,8 @@ impl LinuxDrive {
                 )),
             });
         }
-        // 応答が短い（resid > 0）ときは文字列の位置まで届いていないかもしれないので使わない
-        if hdr.resid != 0 {
-            return Err(DriveError::Io {
-                what: "READ SUB-CHANNEL",
-                source: std::io::Error::other(format!("応答が {} バイト足りない", hdr.resid)),
-            });
-        }
-        Ok(resp)
+        let resid = usize::try_from(hdr.resid).unwrap_or(0).min(resp.len());
+        Ok(resp.len() - resid)
     }
 
     fn toc_entry(file: &std::fs::File, track: u8) -> Result<CdromTocEntry, DriveError> {
@@ -380,6 +435,11 @@ impl Drive for LinuxDrive {
             }
         };
         Ok(DiscIds { isrcs, mcn })
+    }
+
+    fn model(&self) -> Result<Option<String>, DriveError> {
+        let file = self.open()?;
+        Self::inquiry(&file)
     }
 
     /// トレイを開ける。先に `CDROM_LOCKDOOR 0` で扉のロックを外す: kernel の CDROMEJECT も内部で
