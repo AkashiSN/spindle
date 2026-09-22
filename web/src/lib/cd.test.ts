@@ -458,6 +458,11 @@ describe('候補の見分け（P2-3 の UI 改修）', () => {
       'CD+G',
       'Hybrid SACD (CD layer)',
       'DualDisc (CD side)',
+      // 注記の無い複合ディスクは CD 面を持つ形式（MusicBrainz の Release/Format）
+      'Hybrid SACD',
+      'DualDisc',
+      'DVDplus (CD side)',
+      'Mixed Mode CD',
     ]) {
       expect(isCdMedium({ ...five, format: f }), f).toBe(true)
     }
@@ -473,8 +478,13 @@ describe('候補の見分け（P2-3 の UI 改修）', () => {
       'VCD',
       'SVCD',
       'DualDisc (DVD-Video side)',
+      'DualDisc (DVD-Audio side)',
+      // 音声 CD として吸い出せない
+      'Data CD',
       '12" Vinyl',
       'Cassette',
+      'MiniDisc',
+      'Reel-to-reel',
     ]) {
       expect(isCdMedium({ ...five, format: f }), f).toBe(false)
     }

@@ -143,23 +143,67 @@ export function releaseUrl(c: ReleaseCandidate): string {
   return `https://musicbrainz.org/release/${c.release_id}`
 }
 
-/** CD 系でない形式（先に見る。SACD / VCD / DVD / Blu-ray など） */
-const NOT_CD = /DVD|Blu-?ray|HD-?DVD|S?VCD|SACD|Digital Media|Vinyl|Cassette|Reel|MiniDisc|Shellac/i
-/** CD 系の層・面を持つ複合ディスク（`Hybrid SACD (CD layer)` / `DualDisc (CD side)`） */
+/**
+ * CD として吸い出せる形式（MusicBrainz の Release/Format の名前。括弧の注記を外した基本形で見る）。
+ * `Hybrid SACD` と `DualDisc` は CD 面を持つ形式なので含める
+ */
+const CD_READABLE = new Set([
+  'cd',
+  'cd-r',
+  '8cm cd',
+  'enhanced cd',
+  'mixed mode cd',
+  'hdcd',
+  'copy control cd',
+  'shm-cd',
+  'blu-spec cd',
+  'hqcd',
+  'uhqcd',
+  'dts cd',
+  'cd+g',
+  '8cm cd+g',
+  'minimax cd',
+  'hybrid sacd',
+  'dualdisc',
+  'dvdplus',
+])
+
+/** 名前に CD が入っていても音声 CD として吸い出せない形式 */
+const NOT_CD_NAMES = new Set(['data cd', 'cd-rom', 'vcd', 'svcd', 'cdv'])
+
+/** CD 系でない系統（形式名の族。`12" Vinyl` のような派生も拾う） */
+const NOT_CD_FAMILY = /DVD|Blu-?ray|HD-?DVD|SACD|Digital Media|Vinyl|Cassette|Shellac|Reel|MiniDisc|\bDAT\b|Wax/i
+
+/** 複合ディスクの注記: CD の層・面ならそこを吸える、他の層・面なら吸えない */
 const CD_LAYER = /\bCD (layer|side)\b/i
 
+/** 括弧の注記（`Hybrid SACD (CD layer)` の `(CD layer)`）を外した基本形 */
+function baseFormat(format: string): string {
+  return format
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .trim()
+    .toLowerCase()
+}
+
 /**
- * 吸い出せる medium か（CD 系）。`Enhanced CD` / `HDCD` / `SHM-CD` / `CD+G` などは CD、
- * `Hybrid SACD (CD layer)` / `DualDisc (CD side)` も CD 面を持つので CD 扱い。
- * SACD / VCD / SVCD / DVD / Blu-ray / デジタル配信は除く。形式が分からないものは隠さない
- * （MB の登録漏れで CD のことがある）
+ * 吸い出せる medium か（CD 系）。MusicBrainz の管理された形式名で判定する。
+ * `Hybrid SACD` / `DualDisc` / `DVDplus` は CD 面を持つので CD 扱い（`(SACD layer)` や
+ * `(DVD-Video side)` の注記が付いていればその面なので除く）。`Data CD` のような音声でない CD は除く。
+ * 形式が分からないものは隠さない（MB の登録漏れで CD のことがある）
  */
 export function isCdMedium(c: ReleaseCandidate): boolean {
   const f = c.format
   if (f == null) return true
+  // 注記が「CD の層 / 面」なら、基本形が何であれ吸える
   if (CD_LAYER.test(f)) return true
-  if (NOT_CD.test(f)) return false
-  return /CD/i.test(f)
+  const base = baseFormat(f)
+  const qualified = base !== f.trim().toLowerCase()
+  // 注記付きで CD 面でないもの（`Hybrid SACD (SACD layer)` / `DualDisc (DVD-Video side)`）は除く
+  if (qualified && CD_READABLE.has(base)) return false
+  if (CD_READABLE.has(base)) return true
+  if (NOT_CD_NAMES.has(base)) return false
+  if (NOT_CD_FAMILY.test(base)) return false
+  return /CD/i.test(base)
 }
 
 /** CD 系の候補とそれ以外に分ける（それぞれ元の順序を保つ） */
