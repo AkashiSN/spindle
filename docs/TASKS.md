@@ -898,7 +898,7 @@ TOC は成立。実機は `#[ignore]`）、`tests/cd_toc.rs`（文字列の往�
 通る、キャッシュの再利用 / 入力違い / refresh / 期限切れ / 失敗は覚えない）、`tests/cd_lookup_api.rs`
 （2 回目は上流を引かない、refresh は引く）
 
-- [ ] 照会の段階化（D-64 追記 4。2026-09-23。P4-20）: TOC 近似は DiscID / ISRC / バーコードで 1 件も
+- [x] 照会の段階化（D-64 追記 4。2026-09-23。P4-20）: TOC 近似は DiscID / ISRC / バーコードで 1 件も
       候補が残らなかったときだけ引く。`widen` で明示的に広げられる
 
 残り: なし（検出は P2-1 で差し替え済み）
@@ -1552,14 +1552,14 @@ Shift+↑、Esc → Shift+↓）
 
 2026-09-23。ユーザ要望。SPEC §7.2 / §12.1 / §12.6、D-64 追記 4、D-82。
 
-- [ ] MusicBrainz の照会を 3 段の打ち切りに（`discid` → `ids` → `toc`）。`POST /api/cd/lookup` に
+- [x] MusicBrainz の照会を 3 段の打ち切りに（`discid` → `ids` → `toc`）。`POST /api/cd/lookup` に
       `widen`、応答に `stage` / `can_widen`
-- [ ] `GET /api/cd/status` に TOC の音声トラック（照会の前から表を出す）
-- [ ] `GET /api/cd/cover/{release_id}`（Cover Art Archive の中継。D-82）
-- [ ] `GET /api/inbox/summary`（上部バーのバッジ用。一覧を読まない固定 SQL の集計）
-- [ ] CD 画面: トラック表を主役に（タイトルは `Track NN` のプレースホルダ）、候補は左にジャケットを
+- [x] `GET /api/cd/status` に TOC の音声トラック（照会の前から表を出す）
+- [x] `GET /api/cd/cover/{release_id}`（Cover Art Archive の中継。D-82）
+- [x] `GET /api/inbox/summary`（上部バーのバッジ用。一覧を読まない固定 SQL の集計）
+- [x] CD 画面: トラック表を主役に（タイトルは `Track NN` のプレースホルダ）、候補は左にジャケットを
       付けて下へ、「確定」段を廃止（`CdView` を 4 ファイルに分割）
-- [ ] 上部バー: `ライブラリ / アルバム / CD / YouTube / Inbox`、☰ に `ジョブ / 履歴 / 設定`。
+- [x] 上部バー: `ライブラリ / アルバム / CD / YouTube / Inbox`、☰ に `ジョブ / 履歴 / 設定`。
       Inbox に承認待ちの赤バッジ。左カラムはツリーが効く画面（ライブラリ / アルバム）だけ
 
 受け入れ: `tests/cd_musicbrainz.rs`（段の打ち切り・落ち方・`widen`・キャッシュの鍵）、
