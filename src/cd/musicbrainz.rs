@@ -8,11 +8,15 @@
 //! 音声トラック数が同じもの（fuzzy）を候補にする。同人・VTuber・インディーズの国内盤は未登録が
 //! 常態なので、0 件は普通の結果（手入力経路は P2-4）。
 //!
-//! DiscID 以外の経路（D-64 追記）: トラック長が未登録のリリースは TOC の fuzzy では出ないので、
-//! ディスクから読んだ ISRC（`ws/2/recording?query=isrc:…` の検索 → 一致数の多いリリースから取得）、
-//! MCN = バーコード（`ws/2/release?query=barcode:…`）、ユーザが貼ったリリース URL / MBID
-//! （`ws/2/release/<id>`）でも引き、同じリリース × medium は 1 件に束ねて経路（[`MatchedBy`]）を
-//! 付ける。DiscID で当たったときは ISRC / バーコードは引かない（指定リリースだけ足す）
+//! DiscID 以外の経路（D-64 追記、追記 4）: 段は 3 つで、上の段で候補が残れば下は引かない。
+//! `discid`（`ws/2/discid/<id>`）→ `ids`（ディスクが持つ ISRC の検索 `ws/2/recording?query=isrc:…` と
+//! MCN = バーコードの検索 `ws/2/release?query=barcode:…`）→ `toc`（`ws/2/discid/<id>?toc=` の近似）。
+//! TOC 近似はトラック長の近い別の盤を大量に返すので最後の手段にする。ユーザが貼ったリリース
+//! URL / MBID（`ws/2/release/<id>`）は段に関係なく常に足す。同じリリース × medium は 1 件に束ねて
+//! 経路（[`MatchedBy`]）を付ける。[`DiscQuery::widen`] を立てると段を打ち切らずに全部引く。
+//!
+//! DiscID が 200 でも medium のトラック数が合わず候補が 0 件のときは次の段へ落とす（そこで止めると
+//! 行き止まりになる）。ただし `exact` は真のままにする（DiscID は登録済みなので登録を勧めない）
 //!
 //! MB の規約: UA 必須（`[musicbrainz].user_agent`）、1 req/s（`[musicbrainz].rate_limit_per_sec`）。
 //! 連続する照会はクライアント内で間隔を空け、503（負荷制限）は 1 度だけ待って再試行する
@@ -103,11 +107,35 @@ pub struct MediumInfo {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DiscLookup {
     pub discid: String,
-    /// DiscID そのもので引けた（false なら TOC の fuzzy 照会）
+    /// DiscID そのもので引けた（false なら ISRC / バーコード / TOC 近似）。候補が 0 件でも、
+    /// DiscID が登録されていれば真（登録を勧めないため）
     pub exact: bool,
+    /// どの段で止まったか
+    pub stage: LookupStage,
     pub candidates: Vec<ReleaseCandidate>,
     /// 候補に入れられなかった理由（指定リリースにトラック数の合う medium が無い、など）
     pub notes: Vec<String>,
+}
+
+impl DiscLookup {
+    /// まだ引いていない段があるか（画面の「さらに広げて探す」を出すか）。
+    /// `exact` は見ない: DiscID で当たっても候補が 0 件なら [`LookupStage::Ids`] まで落ちていて、
+    /// そこからは広げられる
+    pub fn can_widen(&self) -> bool {
+        self.stage == LookupStage::Ids
+    }
+}
+
+/// 照会が止まった段（強い順）。上の段で候補が残れば下は引かない（D-64 追記 4）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LookupStage {
+    /// DiscID そのもので当たって、候補も残った
+    Discid,
+    /// ISRC / バーコード（と指定リリース）で当たった。TOC 近似は引いていない
+    Ids,
+    /// TOC 近似まで引いた（最後の段）
+    Toc,
 }
 
 /// 照会の入力。`isrcs` はディスクから読めたものだけ（None は除く）
@@ -120,6 +148,8 @@ pub struct DiscQuery<'a> {
     pub release: Option<&'a str>,
     /// 覚えている結果を捨てて引き直す（画面の「MusicBrainz に照会」。自動の照会は false）
     pub refresh: bool,
+    /// 段を打ち切らずに全部引く（画面の「さらに広げて探す」）
+    pub widen: bool,
 }
 
 /// 覚えるときの鍵。入力が同じなら同じ結果になる。`DiscQuery` を全フィールド分解して作るので、
@@ -130,6 +160,8 @@ struct CacheKey {
     isrcs: Vec<String>,
     mcn: Option<String>,
     release: Option<ReleaseKey>,
+    /// 広げて引いた結果は別物（普通の照会に返してはいけない）
+    widen: bool,
 }
 
 /// リリースの指定。「無し」「読めない文字列」「MBID」は結果が違う（読めない指定は note を返す）ので
@@ -149,6 +181,7 @@ impl DiscQuery<'_> {
             release,
             // 覚えるかどうかの指示で、結果そのものは変わらない
             refresh: _,
+            widen,
         } = *self;
         CacheKey {
             toc: toc.ctdb_toc(),
@@ -158,6 +191,7 @@ impl DiscQuery<'_> {
                 Some(id) => ReleaseKey::Id(id),
                 None => ReleaseKey::Unparsable(r.to_owned()),
             }),
+            widen,
         }
     }
 }
@@ -640,12 +674,14 @@ impl MusicBrainzClient {
             mcn: None,
             release: None,
             refresh: false,
+            widen: false,
         })
         .await
     }
 
     /// ディスクの識別子から候補を集める。DiscID で当たれば exact（ISRC / バーコードは引かない）、
-    /// 無ければ TOC の fuzzy + ISRC + バーコードを束ねる。指定リリースはどちらでも足す。
+    /// 無ければ ISRC / バーコード、それでも出なければ TOC の近似（段階照会。D-64 追記 4）。
+    /// 指定リリースはどの段でも足す。
     /// 個々の経路の「見つからない」は候補ゼロ（指定リリースだけ notes に理由）で、照会自体の失敗
     /// （届かない・壊れている・503）だけ Err
     pub async fn lookup(&self, q: &DiscQuery<'_>) -> Result<DiscLookup, LookupError> {
@@ -666,44 +702,34 @@ impl MusicBrainzClient {
         // 取得済みのリリース（経路をまたいで 1 回しか取らない。中身は経路ごとに使い回す）
         let mut cache: std::collections::HashMap<String, Vec<ReleaseCandidate>> =
             std::collections::HashMap::new();
+        // 残った候補の数。段を進めるかの判定に使う（「残った」はトラック数で絞ったあとで数える）。
+        // `discid_hits` は段 1 の分だけ。指定リリースは段に関係なく足すので `hits` にしか入れない
+        // （指定があっても ISRC / バーコードは引く。D-64 の「複数経路を束ねる」を壊さないため）
+        let mut hits = 0usize;
+        let mut discid_hits = 0usize;
 
         let path = format!("discid/{discid}");
         // cdstubs=no: 未登録 DiscID に CD stub（品質の低い匿名投稿）があると 200 で別の形が返り、
-        // 404 → TOC の fuzzy に進めない。候補にも入れない（D-64）
+        // 404 → 次の段に進めない。候補にも入れない（D-64）
         let (status, body) = self
             .get(&path, &[("inc", INC), ("fmt", "json"), ("cdstubs", "no")])
             .await?;
         let exact = if status.is_success() {
             let c = parse_lookup(&body, &discid, audio_tracks)
                 .map_err(|e| LookupError::Parse(e.to_string()))?;
+            discid_hits = c.len();
+            hits += c.len();
             groups.push((MatchedBy::Discid, c));
+            // DiscID は登録されている。候補が 0 件でもここは真のままにする
+            // （`offersDiscidSubmission` が登録を勧めてしまう）
             true
         } else if status == reqwest::StatusCode::NOT_FOUND {
-            let mb_toc = q.toc.musicbrainz_toc();
-            let (status, body) = self
-                .get(
-                    &path,
-                    &[
-                        ("toc", mb_toc.as_str()),
-                        ("inc", INC),
-                        ("fmt", "json"),
-                        ("cdstubs", "no"),
-                    ],
-                )
-                .await?;
-            if status.is_success() {
-                let c = parse_lookup(&body, &discid, audio_tracks)
-                    .map_err(|e| LookupError::Parse(e.to_string()))?;
-                groups.push((MatchedBy::Toc, c));
-            } else if status != reqwest::StatusCode::NOT_FOUND {
-                return Err(LookupError::Status(status.as_u16()));
-            }
             false
         } else {
             return Err(LookupError::Status(status.as_u16()));
         };
 
-        // 指定リリース
+        // 指定リリースは段に関係なく常に足す（ユーザが名指ししたものなので最優先）
         if let Some(r) = q.release {
             match parse_release_ref(r) {
                 None => notes.push(format!(
@@ -718,6 +744,7 @@ impl MusicBrainzClient {
                     }
                     Ok(c) => {
                         cache.insert(id.clone(), c.clone());
+                        hits += c.len();
                         groups.push((MatchedBy::Release, c));
                     }
                     Err(status) => {
@@ -728,7 +755,13 @@ impl MusicBrainzClient {
             }
         }
 
-        if !exact {
+        let mut stage = LookupStage::Discid;
+        // DiscID で当たって候補も残ったときだけ打ち切る。200 でも候補 0 件なら次の段へ落とす
+        // （登録済みの DiscID でも medium のトラック数が合わなければ候補にならない。そこで止めると
+        //  行き止まりになる）
+        if discid_hits == 0 {
+            // 段 2: ディスクが持っている識別子（ISRC / バーコード）。DiscID が未登録でもここで当たる
+            stage = LookupStage::Ids;
             // ISRC: 検索を 1 回（複数 ISRC を OR）→ 一致数の多いリリースから上限まで取得。
             // クエリに載せる値は英数字だけ（API が検証済みだが、ここでも Lucene の記号を通さない）
             let isrcs: Vec<&String> = q
@@ -757,6 +790,7 @@ impl MusicBrainzClient {
                             .await?,
                     );
                 }
+                hits += c.len();
                 groups.push((MatchedBy::Isrc, c));
             }
             // バーコード（数字だけ）
@@ -780,13 +814,39 @@ impl MusicBrainzClient {
                             .await?,
                     );
                 }
+                hits += c.len();
                 groups.push((MatchedBy::Barcode, c));
+            }
+            // 段 3: TOC 近似は最後の手段。上の段で 1 件も残らなかったとき（か `widen`）だけ引く。
+            // トラック長の違う別の盤が大量に出て、当たっている候補を埋めてしまうため（D-64 追記 4）
+            if hits == 0 || q.widen {
+                stage = LookupStage::Toc;
+                let mb_toc = q.toc.musicbrainz_toc();
+                let (status, body) = self
+                    .get(
+                        &path,
+                        &[
+                            ("toc", mb_toc.as_str()),
+                            ("inc", INC),
+                            ("fmt", "json"),
+                            ("cdstubs", "no"),
+                        ],
+                    )
+                    .await?;
+                if status.is_success() {
+                    let c = parse_lookup(&body, &discid, audio_tracks)
+                        .map_err(|e| LookupError::Parse(e.to_string()))?;
+                    groups.push((MatchedBy::Toc, c));
+                } else if status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(LookupError::Status(status.as_u16()));
+                }
             }
         }
 
         let result = DiscLookup {
             discid,
             exact,
+            stage,
             candidates: merge_candidates(groups),
             notes,
         };

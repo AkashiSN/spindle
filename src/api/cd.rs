@@ -209,6 +209,7 @@ pub async fn lookup(
         mcn: mcn.as_deref(),
         release: body.release.as_deref().filter(|r| !r.trim().is_empty()),
         refresh: body.refresh,
+        widen: false,
     };
     let result = match client.lookup(&query).await {
         Ok(r) => r,

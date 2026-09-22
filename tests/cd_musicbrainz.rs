@@ -25,7 +25,7 @@ use tokio::sync::Mutex;
 
 use spindle::cd::musicbrainz::{
     merge_candidates, parse_lookup, parse_recording_search, parse_release, parse_release_ref,
-    parse_release_search, DiscQuery, MatchedBy, MusicBrainzClient, ReleaseCandidate,
+    parse_release_search, DiscQuery, LookupStage, MatchedBy, MusicBrainzClient, ReleaseCandidate,
 };
 use spindle::cd::toc::{Toc, TocTrack};
 
@@ -362,6 +362,8 @@ struct Seen {
     /// 503 を返す回数
     fail_503: usize,
     started: Vec<Instant>,
+    /// この DiscID も 200 で Nevermind を返す（登録済みなのに候補が 0 件になる盤を作るため）
+    extra_ok: Option<String>,
 }
 
 type Shared = Arc<Mutex<Seen>>;
@@ -386,7 +388,10 @@ async fn discid_handler(
     }
     let has_toc = q.iter().any(|(k, _)| k == "toc");
     let no_stubs = q.iter().any(|(k, v)| k == "cdstubs" && v == "no");
-    if discid == NEVERMIND_ID {
+    if !has_toc && s.extra_ok.as_deref() == Some(discid.as_str()) {
+        // 登録済みの DiscID だが、リリースの medium のトラック数が TOC と合わない
+        (StatusCode::OK, NEVERMIND.to_owned())
+    } else if discid == NEVERMIND_ID {
         (StatusCode::OK, NEVERMIND.to_owned())
     } else if !no_stubs && !has_toc {
         // cdstubs=no が無いと未登録 DiscID でも CD stub が 200 で返る（releases が無い別の形）
@@ -504,6 +509,7 @@ async fn lookup_fresh(
             mcn: None,
             release: None,
             refresh: true,
+            widen: false,
         })
         .await
 }
@@ -672,6 +678,7 @@ async fn client_combines_isrc_barcode_and_release_routes() {
             mcn: Some("4582515778491"),
             release: Some(&release),
             refresh: false,
+            widen: false,
         })
         .await
         .expect("lookup");
@@ -703,17 +710,25 @@ async fn client_combines_isrc_barcode_and_release_routes() {
 
     let s = seen.lock().await;
     let paths: Vec<&str> = s.requests.iter().map(|(p, _, _)| p.as_str()).collect();
-    // discid → toc の fuzzy → 指定リリース → ISRC 検索 → その上位（Five は取得済みなので省く）→
-    // バーコード検索（Five は取得済み）
+    // discid（404）→ 指定リリース → ISRC 検索 → その上位（Five は取得済みなので省く）→
+    // バーコード検索（Five は取得済み）。指定リリースと ISRC で候補が残るので
+    // TOC 近似は引かない（D-64 追記 4）
     assert_eq!(paths[0], toc.musicbrainz_disc_id());
-    assert_eq!(paths[1], toc.musicbrainz_disc_id());
-    assert_eq!(paths[2], format!("release/{FIVE_RELEASE}"));
-    assert_eq!(paths[3], "recording");
+    assert_eq!(paths[1], format!("release/{FIVE_RELEASE}"));
+    assert_eq!(paths[2], "recording");
+    assert_eq!(
+        s.requests
+            .iter()
+            .filter(|(_, q, _)| q.iter().any(|(k, _)| k == "toc"))
+            .count(),
+        0,
+        "TOC 近似は引かない: {paths:?}"
+    );
     let get = |q: &Vec<(String, String)>, k: &str| {
         q.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone())
     };
     assert_eq!(
-        get(&s.requests[3].1, "query").as_deref(),
+        get(&s.requests[2].1, "query").as_deref(),
         Some("isrc:JPQ402600330 OR isrc:JPQ402600340")
     );
     let fetched: Vec<&str> = paths
@@ -761,6 +776,7 @@ async fn client_notes_a_release_without_a_matching_medium() {
             mcn: None,
             release: Some(FIVE_RELEASE),
             refresh: false,
+            widen: false,
         })
         .await
         .expect("lookup");
@@ -775,6 +791,7 @@ async fn client_notes_a_release_without_a_matching_medium() {
             mcn: None,
             release: Some("not-an-id"),
             refresh: false,
+            widen: false,
         })
         .await
         .expect("lookup");
@@ -786,6 +803,7 @@ async fn client_notes_a_release_without_a_matching_medium() {
             mcn: None,
             release: Some("00000000-0000-0000-0000-000000000000"),
             refresh: false,
+            widen: false,
         })
         .await
         .expect("lookup");
@@ -807,6 +825,7 @@ async fn client_skips_routes_without_inputs_and_after_an_exact_hit() {
             mcn: None,
             release: None,
             refresh: false,
+            widen: false,
         })
         .await
         .expect("lookup");
@@ -826,6 +845,7 @@ async fn client_skips_routes_without_inputs_and_after_an_exact_hit() {
             mcn: Some("4582515778491"),
             release: None,
             refresh: false,
+            widen: false,
         })
         .await
         .expect("lookup");
@@ -836,6 +856,235 @@ async fn client_skips_routes_without_inputs_and_after_an_exact_hit() {
         .iter()
         .all(|c| c.exact && c.matched_by == vec![MatchedBy::Discid]));
     assert_eq!(seen.lock().await.requests.len(), 3);
+}
+
+// ---------------------------------------------------------------- 段階照会（D-64 追記 4）
+
+/// ISRC で候補が残れば TOC 近似は引かない
+#[tokio::test]
+async fn client_stops_at_the_ids_stage_when_it_yields_candidates() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = five_toc();
+    let isrcs = ["JPQ402600330".to_owned()];
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &isrcs,
+            mcn: None,
+            release: None,
+            refresh: true,
+            widen: false,
+        })
+        .await
+        .expect("lookup");
+    assert_eq!(r.stage, LookupStage::Ids);
+    assert!(!r.exact);
+    assert!(r.can_widen(), "まだ TOC 近似を引いていないので広げられる");
+    assert!(!r.candidates.is_empty());
+    assert!(r
+        .candidates
+        .iter()
+        .all(|c| !c.matched_by.contains(&MatchedBy::Toc)));
+    assert_eq!(toc_queries(&seen).await, 0, "TOC 近似は引かない");
+}
+
+/// ISRC / バーコードで 1 件も残らなければ TOC 近似まで落ちる
+#[tokio::test]
+async fn client_falls_through_to_toc_when_the_ids_stage_is_empty() {
+    let (base, _seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    // 当たらない ISRC（recording 検索は 0 件を返す）
+    let toc = other_toc();
+    let isrcs = ["JPZZ00000000".to_owned()];
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &isrcs,
+            mcn: None,
+            release: None,
+            refresh: true,
+            widen: false,
+        })
+        .await
+        .expect("lookup");
+    assert_eq!(r.stage, LookupStage::Toc);
+    assert!(!r.can_widen(), "全部引いたので広げる先が無い");
+    assert!(r
+        .candidates
+        .iter()
+        .all(|c| c.matched_by == vec![MatchedBy::Toc]));
+}
+
+/// `widen` は段を打ち切らず全部引く
+#[tokio::test]
+async fn widen_pulls_every_stage() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = five_toc();
+    let isrcs = ["JPQ402600330".to_owned()];
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &isrcs,
+            mcn: None,
+            release: None,
+            refresh: true,
+            widen: true,
+        })
+        .await
+        .expect("lookup");
+    assert_eq!(r.stage, LookupStage::Toc);
+    assert!(!r.can_widen());
+    assert_eq!(toc_queries(&seen).await, 1, "広げたら TOC 近似も引く");
+}
+
+/// DiscID で当たったら段は `discid` で、広げる先も無い
+#[tokio::test]
+async fn an_exact_hit_stays_at_the_discid_stage() {
+    let (base, _seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = nevermind_toc();
+    let r = lookup_fresh(&client, &toc).await.expect("lookup");
+    assert!(r.exact);
+    assert_eq!(r.stage, LookupStage::Discid);
+    assert!(!r.can_widen());
+}
+
+/// 指定リリースだけで候補が残れば TOC 近似は引かない。ただし ISRC / バーコードは引く
+/// （D-64 の「複数経路を束ねる」を壊さない）
+#[tokio::test]
+async fn a_named_release_stops_the_toc_stage_but_not_the_ids_stage() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = five_toc();
+    let release = format!("https://musicbrainz.org/release/{FIVE_RELEASE}");
+    let isrcs = ["JPQ402600330".to_owned()];
+    let r = client
+        .lookup(&DiscQuery {
+            toc: &toc,
+            isrcs: &isrcs,
+            mcn: None,
+            release: Some(&release),
+            refresh: true,
+            widen: false,
+        })
+        .await
+        .expect("lookup");
+    assert_eq!(r.stage, LookupStage::Ids);
+    assert!(r.can_widen(), "TOC 近似はまだ引いていない");
+    let s = seen.lock().await;
+    let paths: Vec<&str> = s.requests.iter().map(|(p, _, _)| p.as_str()).collect();
+    assert!(paths.contains(&"recording"), "ISRC は引く: {paths:?}");
+    assert_eq!(
+        s.requests
+            .iter()
+            .filter(|(_, q, _)| q.iter().any(|(k, _)| k == "toc"))
+            .count(),
+        0,
+        "TOC 近似は引かない: {paths:?}"
+    );
+}
+
+/// DiscID が 200 でも、トラック数の合う候補が無ければ次の段へ落とす。`exact` は真のまま
+/// （DiscID は登録済みなので、登録の案内を出してはいけない）
+#[tokio::test]
+async fn a_registered_discid_without_matching_media_falls_through() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    // 5 曲の TOC に、12 曲の Nevermind を返す（登録済みだが medium のトラック数が合わない）
+    let toc = short_toc();
+    seen.lock().await.extra_ok = Some(toc.musicbrainz_disc_id());
+    let r = lookup_fresh(&client, &toc).await.expect("lookup");
+    assert!(r.exact, "DiscID は登録済み");
+    assert!(r.candidates.is_empty(), "曲数が合わないので候補は無い");
+    // 識別子を渡していないので段 2 は空振りし、TOC 近似まで落ちる
+    assert_eq!(r.stage, LookupStage::Toc);
+    assert!(!r.can_widen(), "全部引いたので広げる先は無い");
+    let s = seen.lock().await;
+    assert_eq!(
+        s.requests.len(),
+        2,
+        "discid と toc を 1 回ずつ: {:?}",
+        s.requests
+    );
+}
+
+/// 識別子が何も無ければ段 2 は空振りして TOC 近似へ直行する（いままでと同じ結果）
+#[tokio::test]
+async fn without_any_identifier_it_goes_straight_to_toc() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = other_toc();
+    let r = lookup_fresh(&client, &toc).await.expect("lookup");
+    assert_eq!(r.stage, LookupStage::Toc);
+    // discid → toc の 2 本だけ（検索は入力が無いので飛ばす）
+    assert_eq!(seen.lock().await.requests.len(), 2);
+}
+
+/// `widen` は別の鍵（広げた結果が普通の照会に返らない）。逆順でも漏れない
+#[tokio::test]
+async fn widen_is_a_different_cache_key() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = five_toc();
+    let isrcs = ["JPQ402600330".to_owned()];
+    let q = |widen: bool| DiscQuery {
+        toc: &toc,
+        isrcs: &isrcs,
+        mcn: None,
+        release: None,
+        refresh: false,
+        widen,
+    };
+    let narrow = client.lookup(&q(false)).await.expect("lookup");
+    let n = seen.lock().await.requests.len();
+    let wide = client.lookup(&q(true)).await.expect("lookup");
+    assert!(
+        seen.lock().await.requests.len() > n,
+        "widen は覚えている結果を使い回さない"
+    );
+    assert_eq!(narrow.stage, LookupStage::Ids);
+    assert_eq!(wide.stage, LookupStage::Toc);
+    // 逆向き: 広げた結果を覚えたあとの普通の照会に、広げた分が漏れない
+    let again = client.lookup(&q(false)).await.expect("lookup");
+    assert_eq!(again.stage, LookupStage::Ids);
+    assert!(again
+        .candidates
+        .iter()
+        .all(|c| !c.matched_by.contains(&MatchedBy::Toc)));
+}
+
+/// TOC 近似（`?toc=`）を引いた回数
+async fn toc_queries(seen: &Shared) -> usize {
+    seen.lock()
+        .await
+        .requests
+        .iter()
+        .filter(|(_, q, _)| q.iter().any(|(k, _)| k == "toc"))
+        .count()
+}
+
+/// 5 曲の TOC（12 曲の Nevermind とはトラック数が合わない）
+fn short_toc() -> Toc {
+    let tracks = [0u32, 20000, 40000, 60000, 80000]
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| TocTrack {
+            number: i as u8 + 1,
+            start_lba: s,
+            is_audio: true,
+        })
+        .collect();
+    Toc::new(tracks, 100_000).expect("TOC")
 }
 
 // ---------------------------------------------------------------- 接続の失敗（診断と再試行）
@@ -952,6 +1201,7 @@ async fn lookup_is_cached_per_disc() {
         mcn: None,
         release: None,
         refresh: false,
+        widen: false,
     };
     let first = client.lookup(&q).await.expect("lookup");
     let n = seen.lock().await.requests.len();
@@ -998,6 +1248,7 @@ async fn refresh_bypasses_the_cache() {
         mcn: None,
         release: None,
         refresh: false,
+        widen: false,
     };
     client.lookup(&q).await.expect("lookup");
     let n = seen.lock().await.requests.len();
@@ -1026,6 +1277,7 @@ async fn cache_expires() {
         mcn: None,
         release: None,
         refresh: false,
+        widen: false,
     };
     client.lookup(&q).await.expect("lookup");
     let n = seen.lock().await.requests.len();
@@ -1056,6 +1308,7 @@ async fn failures_are_not_cached() {
         mcn: None,
         release: None,
         refresh: false,
+        widen: false,
     };
     assert!(client.lookup(&q).await.is_err());
     assert!(client.lookup(&q).await.is_err(), "失敗は覚えない");
@@ -1076,6 +1329,7 @@ async fn a_failed_refresh_drops_the_remembered_result() {
         mcn: None,
         release: None,
         refresh: false,
+        widen: false,
     };
     client.lookup(&q).await.expect("lookup");
     // 引き直しが失敗する（503 が続く）
@@ -1109,6 +1363,7 @@ async fn an_unparsable_release_is_a_different_key() {
         mcn: None,
         release: None,
         refresh: false,
+        widen: false,
     };
     let bad = DiscQuery {
         release: Some("nonsense"),
@@ -1125,6 +1380,7 @@ async fn an_unparsable_release_is_a_different_key() {
         client2
             .lookup(&DiscQuery {
                 refresh: true,
+                widen: false,
                 ..bad
             })
             .await
