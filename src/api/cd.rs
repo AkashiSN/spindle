@@ -1,7 +1,10 @@
 //! CD 取り込みの API（SPEC §9 `/api/cd/*`、§7.2）。P2-3 は照会だけ:
-//! `POST /api/cd/lookup { toc, isrcs?, mcn?, release? }` — TOC 文字列（CTDB 形式 `0:13915:…:leadout` か
+//! `POST /api/cd/lookup { toc, isrcs?, mcn?, release?, refresh?, widen? }` — TOC 文字列（CTDB 形式 `0:13915:…:leadout` か
 //! MusicBrainz 形式 `1 12 leadout+150 offset+150 …`）から各種 DiscID を出し、MusicBrainz に照会して
 //! 候補を返す。ISRC / MCN（status が読んだもの）と貼り付けたリリース URL でも引く（D-64 追記）。
+//! 経路は 3 段（`discid` → `ids` → `toc`）で、上の段で候補が残れば下は引かない（D-64 追記 4）。
+//! 応答の `stage` がどこで止まったか、`can_widen` がまだ引いていない段があるかを示し、要求の
+//! `widen` で段を打ち切らずに全部引く。
 //! `GET /api/cd/status`（P2-1 / P2-2）はポーラ（`cd::device`）が持つドライブの状態と TOC
 //! （lookup に渡すのと同じ CTDB 形式の文字列）を返し、`POST /api/cd/eject` はトレイを開けて
 //! 状態を見直す。ドライブが配線されていなければどちらも 503 `cd_unavailable`。
@@ -16,7 +19,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::cd::device::DriveState;
-use crate::cd::musicbrainz::ReleaseCandidate;
+use crate::cd::musicbrainz::{LookupStage, ReleaseCandidate};
 use crate::cd::toc::Toc;
 use crate::cd::LookupError;
 use crate::db::now_epoch;
@@ -97,6 +100,9 @@ pub struct LookupBody {
     /// 覚えている結果を捨てて引き直す（画面の「MusicBrainz に照会」。ディスク検出の自動照会は省略）
     #[serde(default)]
     pub refresh: bool,
+    /// 段を打ち切らずに全部引く（画面の「さらに広げて探す」。D-64 追記 4）
+    #[serde(default)]
+    pub widen: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +120,10 @@ pub struct LookupResponse {
     pub notes: Vec<String>,
     /// TOC の音声トラック（番号と長さ）。候補が無くても手入力フォーム（P2-4）の行数と長さの元になる
     pub tracks: Vec<TocTrackInfo>,
+    /// どの段で止まったか（discid / ids / toc。D-64 追記 4）
+    pub stage: LookupStage,
+    /// まだ引いていない段がある（画面に「さらに広げて探す」を出す）
+    pub can_widen: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -209,7 +219,7 @@ pub async fn lookup(
         mcn: mcn.as_deref(),
         release: body.release.as_deref().filter(|r| !r.trim().is_empty()),
         refresh: body.refresh,
-        widen: false,
+        widen: body.widen,
     };
     let result = match client.lookup(&query).await {
         Ok(r) => r,
@@ -234,6 +244,8 @@ pub async fn lookup(
             ));
         }
     };
+    // candidates を move する前に見る
+    let can_widen = result.can_widen();
     Ok(Json(LookupResponse {
         discid: result.discid,
         mb_toc: toc.musicbrainz_toc(),
@@ -243,6 +255,8 @@ pub async fn lookup(
         candidates: result.candidates,
         notes: result.notes,
         tracks: toc_tracks(&toc),
+        stage: result.stage,
+        can_widen,
     })
     .into_response())
 }

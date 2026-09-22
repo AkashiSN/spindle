@@ -377,3 +377,56 @@ async fn overloaded_musicbrainz_is_503() {
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["error"], "musicbrainz_unavailable");
 }
+
+/// 段（`stage`）と「広げられるか」（`can_widen`）が応答に出る（D-64 追記 4、P4-20）
+#[tokio::test]
+async fn lookup_reports_the_stage() {
+    let app = App::new(Some(serve_mb().await)).await;
+    let c = app.cookie().await;
+    // Nevermind は DiscID で当たる → 段は discid、広げる先は無い
+    let (st, body) = app.post(&c, json!({ "toc": NEVERMIND_TOC })).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["stage"], "discid");
+    assert_eq!(body["can_widen"], false);
+    assert_eq!(body["exact"], true);
+    // 識別子の無い未登録の盤は TOC 近似まで落ちる
+    let (st, body) = app.post(&c, json!({ "toc": "0:20000:40000:60000" })).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["stage"], "toc");
+    assert_eq!(body["can_widen"], false);
+}
+
+/// `widen` を立てると段が 1 つ増える。ISRC で当たる盤で見る
+/// （ISRC の無い TOC だと narrow も wide も `toc` になり、段が増えたことを検証できない）
+#[tokio::test]
+async fn lookup_accepts_widen() {
+    let (base, seen) = serve_mb_counting().await;
+    let app = App::new(Some(base)).await;
+    let c = app.cookie().await;
+    // Five（DiscID は未登録、ISRC で当たる）
+    let body = json!({ "toc": "0:20144:40290", "isrcs": ["JPQ402600330"] });
+    let (st, narrow) = app.post(&c, body.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{narrow}");
+    assert_eq!(
+        narrow["stage"], "ids",
+        "ISRC で当たったら TOC 近似は引かない"
+    );
+    assert_eq!(narrow["can_widen"], true);
+
+    let before = seen.load(std::sync::atomic::Ordering::SeqCst);
+    let mut wide_body = body.clone();
+    wide_body["widen"] = json!(true);
+    let (st, wide) = app.post(&c, wide_body).await;
+    assert_eq!(st, StatusCode::OK, "{wide}");
+    assert!(
+        seen.load(std::sync::atomic::Ordering::SeqCst) > before,
+        "widen は覚えている結果を使わない"
+    );
+    assert_eq!(wide["stage"], "toc");
+    assert_eq!(wide["can_widen"], false);
+
+    // 広げたあとの普通の照会に、広げた分が漏れない
+    let (st, again) = app.post(&c, body).await;
+    assert_eq!(st, StatusCode::OK, "{again}");
+    assert_eq!(again["stage"], "ids");
+}
