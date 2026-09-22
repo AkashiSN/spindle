@@ -17,8 +17,11 @@ pub mod riplog;
 pub mod toc;
 pub mod verify;
 
+use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
+
+use crate::config::AddressFamily;
 
 /// 照会（AccurateRip / CTDB）の失敗。応答が無い・壊れている・サーバが拒んだ
 #[derive(Debug, thiserror::Error)]
@@ -33,20 +36,85 @@ pub enum LookupError {
     NoParity,
 }
 
+/// エラーを原因の末端まで繋いだ 1 行。reqwest の `Display` は「error sending request」までで、
+/// TLS の失敗かタイムアウトか接続断かが消えるので、ログと API のメッセージはこれを使う
+pub fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut src = e.source();
+    while let Some(s) = src {
+        let text = s.to_string();
+        // 上位が原因の文言をそのまま含んでいることがある（二重に出さない）
+        if !parts.last().is_some_and(|p| p.contains(&text)) {
+            parts.push(text);
+        }
+        src = s.source();
+    }
+    parts.join(": ")
+}
+
+/// 解決したアドレスから接続に使うものを選ぶ。`Auto` は解決順のまま、`V6` / `V4` はその族だけ。
+/// 指定した族が 1 つも無ければ、繋がらないよりはと全部残す
+pub fn select_addrs(addrs: Vec<SocketAddr>, family: AddressFamily) -> Vec<SocketAddr> {
+    let want_v6 = match family {
+        AddressFamily::Auto => return addrs,
+        AddressFamily::V6 => true,
+        AddressFamily::V4 => false,
+    };
+    let picked: Vec<SocketAddr> = addrs
+        .iter()
+        .copied()
+        .filter(|a| a.is_ipv6() == want_v6)
+        .collect();
+    if picked.is_empty() {
+        addrs
+    } else {
+        picked
+    }
+}
+
+/// `[musicbrainz].address_family` を反映する DNS 解決。reqwest には族を選ぶ設定が無いので、
+/// 解決結果を絞って渡す
+#[derive(Debug, Clone, Copy)]
+struct FamilyResolver(AddressFamily);
+
+impl reqwest::dns::Resolve for FamilyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let family = self.0;
+        Box::pin(async move {
+            // ポートは接続時に差し替えられるので何でもよい
+            let host = format!("{}:0", name.as_str());
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host(host).await?.collect();
+            let picked = select_addrs(addrs, family);
+            Ok(Box::new(picked.into_iter()) as Box<dyn Iterator<Item = SocketAddr> + Send>)
+        })
+    }
+}
+
 /// 照会用の HTTP クライアント。UA を必ず付け、接続 10 秒 / 全体 60 秒で諦める。
 /// TLS の暗号プロバイダ（ring）はプロセスで 1 度だけ登録する（reqwest は `rustls-no-provider`。
 /// aws-lc を避けるため。ビルドに cmake が要らない）
 pub fn http_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
+    http_client_with(user_agent, AddressFamily::Auto)
+}
+
+/// 族を選べる版。`Auto` 以外なら解決結果をその族に絞る
+pub fn http_client_with(
+    user_agent: &str,
+    family: AddressFamily,
+) -> Result<reqwest::Client, reqwest::Error> {
     static PROVIDER: OnceLock<()> = OnceLock::new();
     PROVIDER.get_or_init(|| {
         // 既に別の場所で登録済みなら Err が返るが、それで構わない
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
-    reqwest::Client::builder()
+    let mut b = reqwest::Client::builder()
         .user_agent(user_agent)
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60))
-        .build()
+        .timeout(Duration::from_secs(60));
+    if family != AddressFamily::Auto {
+        b = b.dns_resolver(std::sync::Arc::new(FamilyResolver(family)));
+    }
+    b.build()
 }
 
 /// 1 セクタ（CD フレーム）のサンプル数。1 サンプル = 2ch × 16 bit

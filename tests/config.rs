@@ -3,7 +3,7 @@
 
 use std::net::SocketAddr;
 
-use spindle::config::{Config, ConfigError, DriveOffset};
+use spindle::config::{AddressFamily, Config, ConfigError, DriveOffset};
 
 const EXAMPLE: &str = include_str!("../deploy/config.example.toml");
 
@@ -340,6 +340,26 @@ fn musicbrainz_rate_limit_must_be_exactly_one() {
             "{bad}: {err}"
         );
     }
+}
+
+#[test]
+fn musicbrainz_address_family_defaults_to_auto_and_rejects_unknown() {
+    let c = spindle::config::Config::parse(EXAMPLE).unwrap();
+    assert_eq!(c.musicbrainz.address_family, AddressFamily::Auto);
+    for (v, want) in [("ipv6", AddressFamily::V6), ("ipv4", AddressFamily::V4)] {
+        let toml = with_override("musicbrainz", &format!("address_family = \"{v}\""));
+        assert_eq!(
+            spindle::config::Config::parse(&toml)
+                .unwrap()
+                .musicbrainz
+                .address_family,
+            want
+        );
+    }
+    let err =
+        spindle::config::Config::parse(&with_override("musicbrainz", "address_family = \"v6\""))
+            .unwrap_err();
+    assert!(format!("{err}").contains("address_family"), "{err}");
 }
 
 #[test]

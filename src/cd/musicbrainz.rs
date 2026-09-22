@@ -24,6 +24,7 @@ use serde::Deserialize;
 
 use super::toc::Toc;
 use super::LookupError;
+use crate::config::AddressFamily;
 
 /// 照会で要求する付帯情報。トラック（recordings）、アーティスト表記、レーベル / カタログ番号、
 /// リリースグループ、ISRC
@@ -460,19 +461,30 @@ impl MusicBrainzClient {
         user_agent: &str,
         min_interval: Duration,
     ) -> Result<Self, LookupError> {
+        Self::with_address_family(base, user_agent, min_interval, AddressFamily::Auto)
+    }
+
+    /// 接続に使う IP のバージョンを選べる版（`[musicbrainz].address_family`）
+    pub fn with_address_family(
+        base: impl Into<String>,
+        user_agent: &str,
+        min_interval: Duration,
+        family: AddressFamily,
+    ) -> Result<Self, LookupError> {
         let mut base = base.into();
         if !base.ends_with('/') {
             base.push('/');
         }
         Ok(Self {
             base,
-            http: super::http_client(user_agent)?,
+            http: super::http_client_with(user_agent, family)?,
             last_request: Arc::new(tokio::sync::Mutex::new(None)),
             min_interval,
         })
     }
 
-    /// 間隔を空けて GET。503 は 1 度だけ間隔ぶん待って再試行する
+    /// 間隔を空けて GET。503（負荷制限）と接続の失敗（TLS の失敗・idle なコネクションの再利用・
+    /// 一過性の切断）は 1 度だけ張り直す。状態のある要求ではないので、同じ GET をもう一度出してよい
     async fn get(
         &self,
         path: &str,
@@ -480,7 +492,7 @@ impl MusicBrainzClient {
     ) -> Result<(reqwest::StatusCode, String), LookupError> {
         let url = format!("{}{}", self.base, path);
         for attempt in 0..2 {
-            let resp = {
+            let sent = {
                 let mut last = self.last_request.lock().await;
                 if let Some(t) = *last {
                     let wait = self.min_interval.saturating_sub(t.elapsed());
@@ -491,7 +503,21 @@ impl MusicBrainzClient {
                 let sent = self.http.get(&url).query(query).send().await;
                 // 失敗（接続不能等）でも要求は出しているので、次の間隔はここから数える
                 *last = Some(Instant::now());
-                sent?
+                sent
+            };
+            let resp = match sent {
+                Ok(r) => r,
+                // 応答が返る前に落ちた（TLS の失敗・idle なコネクションの再利用・一過性の切断）。
+                // 同じ GET をもう一度出す（状態は持たない）
+                Err(e) if attempt == 0 && !e.is_timeout() => {
+                    tracing::warn!(
+                        url,
+                        error = super::error_chain(&e),
+                        "MusicBrainz への接続に失敗。張り直して再試行"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
             };
             let status = resp.status();
             if status == reqwest::StatusCode::SERVICE_UNAVAILABLE && attempt == 0 {

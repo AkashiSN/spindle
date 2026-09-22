@@ -218,11 +218,14 @@ pub async fn lookup(
             ));
         }
         Err(e) => {
-            tracing::warn!(error = %e, "MusicBrainz の照会に失敗");
+            // 原因の末端まで出す（reqwest の Display は「error sending request」で止まり、
+            // TLS の失敗・タイムアウト・接続断の区別が消える）
+            let detail = crate::cd::error_chain(&e);
+            tracing::warn!(error = %detail, "MusicBrainz の照会に失敗");
             return Ok(error_response_with_message(
                 StatusCode::BAD_GATEWAY,
                 "lookup_failed",
-                e.to_string(),
+                detail,
             ));
         }
     };

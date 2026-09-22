@@ -310,10 +310,11 @@ async fn main() -> anyhow::Result<()> {
     });
     state = state.with_gc(Arc::clone(&gc_roots));
     // MusicBrainz の照会（P2-3）。UA 必須・1 req/s
-    let mb = MusicBrainzClient::new(
+    let mb = MusicBrainzClient::with_address_family(
         &state.config.musicbrainz.url,
         &state.config.musicbrainz.user_agent,
         std::time::Duration::from_secs(1) / state.config.musicbrainz.rate_limit_per_sec.max(1),
+        state.config.musicbrainz.address_family,
     )
     .context("MusicBrainz クライアントの初期化に失敗")?;
     state = state.with_musicbrainz(Arc::new(mb));

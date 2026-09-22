@@ -800,3 +800,98 @@ async fn client_skips_routes_without_inputs_and_after_an_exact_hit() {
         .all(|c| c.exact && c.matched_by == vec![MatchedBy::Discid]));
     assert_eq!(seen.lock().await.requests.len(), 3);
 }
+
+// ---------------------------------------------------------------- 接続の失敗（診断と再試行）
+
+/// `error_chain` はエラーの原因を末端まで繋ぐ（reqwest の Display は「error sending request」までで、
+/// TLS の失敗かタイムアウトか接続断かが消える）
+#[test]
+fn error_chain_joins_the_sources() {
+    #[derive(Debug, thiserror::Error)]
+    #[error("上")]
+    struct Outer(#[source] Inner);
+    #[derive(Debug, thiserror::Error)]
+    #[error("中: {0}")]
+    struct Inner(String);
+    assert_eq!(
+        spindle::cd::error_chain(&Outer(Inner("下".into()))),
+        "上: 中: 下"
+    );
+    // 同じ文言が続くときは繰り返さない
+    assert_eq!(spindle::cd::error_chain(&Inner("x".into())), "中: x");
+}
+
+/// 接続が落ちる（TLS の失敗・idle なコネクションの再利用・一過性の切断）ときは 1 度だけ張り直す。
+/// 最初の接続を受理してすぐ閉じ、2 本目から応答する生の HTTP サーバで模す
+#[tokio::test]
+async fn client_retries_once_when_the_connection_drops() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // 1 本目: 要求を読まずに閉じる（相手からは「送ったのに切られた」に見える）
+                drop(stream);
+                continue;
+            }
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = NEVERMIND;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(body.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    let client = MusicBrainzClient::new(
+        format!("http://{addr}/ws/2/"),
+        "spindle-test/0.1",
+        Duration::from_millis(0),
+    )
+    .expect("client");
+    let r = client
+        .lookup_disc(&nevermind_toc())
+        .await
+        .expect("接続断は張り直して通る");
+    assert_eq!(r.discid, NEVERMIND_ID);
+    assert!(r.exact);
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+// ---------------------------------------------------------------- アドレスファミリの選択
+
+/// `[musicbrainz].address_family` は解決したアドレスの並べ替え / 絞り込みに落ちる（D-64 追記 2）。
+/// IPv4 が塞がれている環境（MetaBrainz のエッジが我々の v4 を落とす）で v6 を選べるようにする
+#[test]
+fn address_family_orders_resolved_addresses() {
+    use spindle::cd::select_addrs;
+    use spindle::config::AddressFamily;
+    use std::net::SocketAddr;
+
+    let v4: SocketAddr = "142.132.241.153:443".parse().unwrap();
+    let v6: SocketAddr = "[2a01:4f8:c011:f68::1]:443".parse().unwrap();
+    let all = vec![v4, v6];
+    // auto は解決順のまま
+    assert_eq!(select_addrs(all.clone(), AddressFamily::Auto), vec![v4, v6]);
+    // ipv6 / ipv4 はその族だけにする
+    assert_eq!(select_addrs(all.clone(), AddressFamily::V6), vec![v6]);
+    assert_eq!(select_addrs(all.clone(), AddressFamily::V4), vec![v4]);
+    // 指定した族が 1 つも無ければ、通らないより残っているものを使う
+    assert_eq!(select_addrs(vec![v4], AddressFamily::V6), vec![v4]);
+    assert_eq!(select_addrs(vec![], AddressFamily::V6), vec![]);
+}

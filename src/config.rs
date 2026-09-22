@@ -398,6 +398,23 @@ pub struct MusicBrainzConfig {
     /// `ws/2/` のベース URL（末尾 `/`）。テストと自前ミラー用に差し替え可
     #[serde(default = "default_musicbrainz_url")]
     pub url: String,
+    /// 接続に使う IP のバージョン。片方の経路が塞がれている環境で選ぶ（D-64 追記 2。
+    /// MetaBrainz のエッジがこの回線の IPv4 を落とすため実機は `ipv6`）
+    #[serde(default)]
+    pub address_family: AddressFamily,
+}
+
+/// 接続に使う IP のバージョン
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressFamily {
+    /// 解決した順（OS まかせ）
+    #[default]
+    Auto,
+    #[serde(rename = "ipv6")]
+    V6,
+    #[serde(rename = "ipv4")]
+    V4,
 }
 
 fn default_musicbrainz_url() -> String {

@@ -2377,6 +2377,23 @@ barcode > toc）で持って、その順に並べる。fuzzy の応答に混ざ�
 UI に出し、登録は本人がブラウザで行う。上の「未決」の並べ方はこれで閉じる（経路の強さ、同じ経路の中は
 MB の順）。
 
+**追記 2（2026-09-22。接続の経路と診断）**: この回線の **IPv4 から MetaBrainz のインフラ全体
+（musicbrainz.org / beta.musicbrainz.org / coverartarchive.org、443 と 80）へ繋がらない**ことが分かった。
+TCP は受理されるが TLS ハンドシェイクの途中で切られる（`unexpected eof`。TLS 1.2 を強制しても、鍵交換の
+曲線を絞っても同じ）。同じ回線から github.com の IPv4 は通り、MetaBrainz の **IPv6 は通る**（TrueNAS ホスト・
+開発コンテナ・spindle のコンテナすべてで確認。Docker の bridge は ULA + NAT66 で外へ出られる）。レート制限
+（503 + JSON）とは別物で、先方のエッジがこの公開 IPv4 を落としている。対処:
+- `[musicbrainz].address_family = "auto" | "ipv6" | "ipv4"`（既定 auto）。`Auto` 以外なら reqwest の DNS 解決を
+  その族に絞る（`cd::select_addrs` / `FamilyResolver`）。reqwest に族を選ぶ設定は無いのでリゾルバを差し替える。
+  指定した族のアドレスが 1 つも無ければ全部残す（繋がらないより良い）
+- 応答が返る前に落ちた要求（TLS の失敗・idle なコネクションの再利用・一過性の切断）は **1 度だけ張り直す**。
+  タイムアウトは対象外（待ち直しても同じで、時間が倍になるだけ）
+- ログと API の本文は `cd::error_chain` で原因の末端まで出す。reqwest の `Display` は
+  「error sending request for url (…)」で止まり、TLS の失敗・タイムアウト・接続断の区別が消えていた
+- MusicBrainz の `ws/2` は読み取りに認証が不要で、**OAuth トークンを取ってもレート上限も IP 遮断も変わらない**
+  （トークンは投稿・ユーザデータ用）。MetaBrainz アカウントが効くのはローカルミラー（Live Data Feed の
+  レプリケーショントークン）を立てる場合で、そのときは `[musicbrainz].url` を差し替える
+
 ---
 
 ## D-65 手入力は「候補を土台に編集する 1 つのフォーム」、貼り付けの行解析は決め打ち

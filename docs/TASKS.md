@@ -881,6 +881,15 @@ ISRC は捨てる）、`tests/cd_device.rs`（READ SUB-CHANNEL の解釈、TOC �
 TOC は成立。実機は `#[ignore]`）、`tests/cd_toc.rs`（文字列の往復）、`web/src/lib/cd.test.ts`（バッジ・
 見出し・登録 URL）。実機（嵐「Five」。DiscID・トラック長とも未登録）で ISRC 経路から 2 盤が候補に出るのを確認
 
+- [x] 接続の経路と診断（D-64 追記 2。2026-09-22）: `[musicbrainz].address_family`（auto / ipv6 / ipv4。
+      `cd::select_addrs` + reqwest の DNS リゾルバ差し替え）、応答前に落ちた要求の 1 回の張り直し、
+      `cd::error_chain` で原因の末端までログと API 本文に出す。**この回線は MetaBrainz の IPv4 が塞がれて
+      いる**（TCP は通るが TLS で切られる。IPv6 は通る）ので実機の config.toml は `address_family = "ipv6"`
+
+受け入れ（接続）: `tests/config.rs`（既定 auto、ipv6 / ipv4、未知の値は拒否）、`tests/cd_musicbrainz.rs`
+（`error_chain` の連結、`select_addrs` の絞り込みと空のときの扱い、最初の接続を閉じるサーバで 1 回張り直して
+通る）
+
 残り: なし（検出は P2-1 で差し替え済み）
 
 ### P2-4 照会ゼロ件でも完走できる手入力経路とトラックリスト貼り付け
