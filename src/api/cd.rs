@@ -266,3 +266,71 @@ pub async fn lookup(
     })
     .into_response())
 }
+
+/// MBID（8-4-4-4-12 の 16 進）か。上流に投げる前に形を確かめる
+/// （利用者の文字列をそのまま URL に継ぎ足さない。D-82）
+fn is_mbid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && [8, 4, 4, 4, 12]
+            == [
+                parts[0].len(),
+                parts[1].len(),
+                parts[2].len(),
+                parts[3].len(),
+                parts[4].len(),
+            ]
+        && parts
+            .iter()
+            .all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// 候補のジャケット（D-82、P4-20）。Cover Art Archive の front 画像を中継する。
+/// 画像が無い盤は 404、上流が壊れているときは 502（混ぜると診断できない）
+pub async fn cover(
+    State(state): State<AppState>,
+    axum::extract::Path(release_id): axum::extract::Path<String>,
+) -> Result<Response, ApiError> {
+    if !is_mbid(&release_id) {
+        return Ok(error_response_with_message(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "リリース id は MusicBrainz の MBID（8-4-4-4-12）".to_owned(),
+        ));
+    }
+    let Some(client) = state.coverart.as_ref() else {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coverart_unavailable",
+        ));
+    };
+    match client.front(&release_id).await {
+        Ok(None) => Ok(error_response(StatusCode::NOT_FOUND, "not_found")),
+        Ok(Some((content_type, bytes))) => Ok((
+            [
+                (axum::http::header::CONTENT_TYPE, content_type),
+                // 同じ盤を選び直すたびに取りに行かない。長くは持たない（差し替えがある）
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "private, max-age=600".to_owned(),
+                ),
+                // 上流が名乗った型で描かせる（中身の推測で別の型として扱わせない）
+                (
+                    axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                    "nosniff".to_owned(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response()),
+        Err(e) => {
+            let detail = crate::cd::error_chain(&e);
+            tracing::warn!(error = %detail, release_id, "ジャケットの取得に失敗");
+            Ok(error_response_with_message(
+                StatusCode::BAD_GATEWAY,
+                "lookup_failed",
+                detail,
+            ))
+        }
+    }
+}

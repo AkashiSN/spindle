@@ -318,6 +318,14 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("MusicBrainz クライアントの初期化に失敗")?;
     state = state.with_musicbrainz(Arc::new(mb));
+    // 候補のジャケット（D-82）。MB 本体とは別の相手なので間隔制御は持たない
+    let caa = spindle::cd::coverart::CoverArtClient::new(
+        &state.config.musicbrainz.cover_art_url,
+        &state.config.musicbrainz.user_agent,
+        state.config.musicbrainz.address_family,
+    )
+    .context("Cover Art Archive クライアントの初期化に失敗")?;
+    state = state.with_coverart(Arc::new(caa));
     // CD ドライブ（P2-1）。`[rip].device` を 2 秒間隔で見る。デバイスが無くても起動は止めない
     // （状態 no_drive として UI に出す。compose の devices が無い環境でも動く）
     let cd_drive: Arc<dyn cd_device::Drive> =

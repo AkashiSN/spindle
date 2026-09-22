@@ -6,6 +6,7 @@
 //! ディスク全体（最大 80 分 ≒ 850 MB）をメモリに置かない
 
 pub mod accuraterip;
+pub mod coverart;
 pub mod crctable;
 pub mod ctdb;
 pub mod device;
@@ -111,6 +112,39 @@ pub fn http_client_with(
     user_agent: &str,
     family: AddressFamily,
 ) -> Result<reqwest::Client, reqwest::Error> {
+    client_builder(user_agent, family).build()
+}
+
+/// リダイレクトの方針を明示した版（画像の中継用。D-82）。既定任せにせず、上限を切り、
+/// HTTPS から HTTP へのダウングレードは追わない
+pub fn http_client_with_redirects(
+    user_agent: &str,
+    family: AddressFamily,
+    max: usize,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+        let hops = attempt.previous().len();
+        match attempt.previous().last() {
+            Some(from) if !may_follow(from, attempt.url(), hops, max) => {
+                attempt.error("リダイレクトを追えない（上限またはダウングレード）")
+            }
+            _ => attempt.follow(),
+        }
+    });
+    client_builder(user_agent, family).redirect(policy).build()
+}
+
+/// このリダイレクトを追ってよいか。`from` は直前の URL、`to` は飛び先、`hops` はここまでの回数
+pub fn may_follow(from: &reqwest::Url, to: &reqwest::Url, hops: usize, max: usize) -> bool {
+    if hops >= max {
+        return false;
+    }
+    // HTTPS から HTTP へは落とさない（逆は構わない。自前ミラーやテストは http 起点）
+    !(from.scheme() == "https" && to.scheme() != "https")
+}
+
+/// UA・タイムアウト・DNS の族・TLS プロバイダまで済ませた builder（上の 2 つが共用する）
+fn client_builder(user_agent: &str, family: AddressFamily) -> reqwest::ClientBuilder {
     static PROVIDER: OnceLock<()> = OnceLock::new();
     PROVIDER.get_or_init(|| {
         // 既に別の場所で登録済みなら Err が返るが、それで構わない
@@ -123,7 +157,7 @@ pub fn http_client_with(
     if family != AddressFamily::Auto {
         b = b.dns_resolver(std::sync::Arc::new(FamilyResolver(family)));
     }
-    b.build()
+    b
 }
 
 /// 1 セクタ（CD フレーム）のサンプル数。1 サンプル = 2ch × 16 bit

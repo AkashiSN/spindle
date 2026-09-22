@@ -73,6 +73,7 @@ user_agent = "spindle/0.1 (contact@example.com)"
 rate_limit_per_sec = 1
 url = "https://musicbrainz.org/ws/2/"   # 省略可。テストと自前ミラー用
 address_family = "auto"                 # auto | ipv6 | ipv4。片方の経路が塞がれている環境で選ぶ
+cover_art_url = "https://coverartarchive.org/"   # 省略可。候補のジャケット（D-82）
 
 [verify]                       # 遡及照合 / リップ検証の照会先。UA は musicbrainz.user_agent を共用
 accuraterip_url = "http://www.accuraterip.com/accuraterip/"

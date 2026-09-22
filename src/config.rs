@@ -402,6 +402,9 @@ pub struct MusicBrainzConfig {
     /// MetaBrainz のエッジがこの回線の IPv4 を落とすため実機は `ipv6`）
     #[serde(default)]
     pub address_family: AddressFamily,
+    /// Cover Art Archive のベース URL（末尾 `/`）。テストと自前ミラー用に差し替え可（D-82）
+    #[serde(default = "default_cover_art_url")]
+    pub cover_art_url: String,
 }
 
 /// 接続に使う IP のバージョン
@@ -419,6 +422,10 @@ pub enum AddressFamily {
 
 fn default_musicbrainz_url() -> String {
     "https://musicbrainz.org/ws/2/".to_owned()
+}
+
+fn default_cover_art_url() -> String {
+    "https://coverartarchive.org/".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]

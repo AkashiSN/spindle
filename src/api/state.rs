@@ -46,6 +46,8 @@ pub struct AppState {
     pub transcode_grace: std::time::Duration,
     /// MusicBrainz の照会（P2-3）。無いと `/api/cd/lookup` は 503
     pub musicbrainz: Option<Arc<crate::cd::musicbrainz::MusicBrainzClient>>,
+    /// 候補のジャケット（D-82、P4-20）。無いと `/api/cd/cover/:id` は 503
+    pub coverart: Option<Arc<crate::cd::coverart::CoverArtClient>>,
     /// CD ドライブ（P2-1）。ポーラが `DriveMonitor` を更新し、`/api/cd/status` が読む。
     /// eject はドライブを直接叩く。無いと `/api/cd/status` / `eject` は 503
     pub cd: Option<CdDrive>,
@@ -79,6 +81,7 @@ impl AppState {
             inbox_watch: None,
             transcode_grace: super::stream::TRANSCODE_GRACE,
             musicbrainz: None,
+            coverart: None,
             cd: None,
         }
     }
@@ -97,6 +100,11 @@ impl AppState {
         client: Arc<crate::cd::musicbrainz::MusicBrainzClient>,
     ) -> Self {
         self.musicbrainz = Some(client);
+        self
+    }
+
+    pub fn with_coverart(mut self, client: Arc<crate::cd::coverart::CoverArtClient>) -> Self {
+        self.coverart = Some(client);
         self
     }
 
