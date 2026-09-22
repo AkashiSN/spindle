@@ -1157,9 +1157,11 @@ D-73。2026-09-20。
 
 D-72。2026-09-21。
 
-- [x] 既定は識別用の最小限（ALBUM / ALBUMARTIST / DATE / DISCNUMBER / DISCTOTAL / TRACKTOTAL / MB id）、
-      「全部写す」で LABEL / CATALOGNUMBER / BARCODE / トラックのタイトル・アーティスト・ISRC も。
+- [x] 「識別用の最小限」（ALBUM / ALBUMARTIST / DATE / DISCNUMBER / DISCTOTAL / TRACKTOTAL / MB id）と
+      「全部写す」（+ LABEL / CATALOGNUMBER / BARCODE / トラックのタイトル・アーティスト・ISRC）。
       `web/src/lib/cdState.ts` の reducer に 1 アクション
+- [x] **既定は P4-20 で「全部写す」に変えた**（D-72 追記 2）。表が主役になり、候補を選んだら
+      トラック名が入るのが期待される動きになったため
 
 受け入れ: `web/src/lib/cdState.test.ts`
 

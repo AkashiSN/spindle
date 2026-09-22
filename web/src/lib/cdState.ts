@@ -62,7 +62,8 @@ export const initialCdState: CdState = {
   error: null,
   result: null,
   selected: null,
-  copyScope: 'minimal',
+  // CD 画面の既定は「全部写す」（D-72 追記 2、P4-20）。表が主役なので、候補を選んだら名前が入る
+  copyScope: 'full',
   draft: null,
   paste: '',
   pasteArtistFirst: false,

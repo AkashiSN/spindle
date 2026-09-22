@@ -394,13 +394,16 @@ export function emptyDraft(toc: TocTrackInfo[]): DiscDraft {
 /**
  * 候補から写す範囲（D-72、P4-2）。`minimal` は盤を見分けるのに要る最小限（アルバム / アルバムアーティスト /
  * 日付 / ディスク番号・枚数 / MUSICBRAINZ_ALBUMID。DISCID と TRACKTOTAL は吸い出し時に TOC から付く）。レーベル・カタログ番号・JAN と各トラックの
- * タイトル・アーティスト・MB id・ISRC は `full` のときだけ写る（値は公式表記を手で入れる運用）
+ * タイトル・アーティスト・MB id・ISRC は `full` のときだけ写る。
+ *
+ * **CD 画面の既定は `full`**（D-72 追記 2、P4-20）。トラック表が主役になり、候補を選んだら名前が
+ * 入るのが期待される画面になったため。値を手で入れたいときは `minimal` に切り替える
  */
 export type CopyScope = 'minimal' | 'full'
 
 export const COPY_SCOPE_LABELS: Record<CopyScope, string> = {
-  minimal: '識別用の最小限（既定）',
-  full: '全部写す',
+  minimal: '識別用の最小限',
+  full: '全部写す（既定）',
 }
 
 export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[], scope: CopyScope): DiscDraft {
