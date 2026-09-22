@@ -1,3 +1,5 @@
+import { formatDuration } from './format'
+
 // Inbox の承認キュー（SPEC §7.8、D-68）の純粋ロジック。件 = 音声ファイルのあるディレクトリ。
 // 下書き（InboxDraft）はアルバム単位 + トラック単位の補正で、承認時にサーバへ送り、配置時にタグへ書く。
 // 検証はサーバ（import::inbox::InboxDraft::problems）と同じ規則・同じ文言
@@ -47,6 +49,34 @@ export type InboxFile = {
   tags: Array<[string, string]>
   /** サイドカー spindle-inbox.json の項（ダウンローダが置いた件。D-70）。手で置いた件は null */
   source: InboxSource | null
+  /** 追記先の album にある同名の行（P4-19。警告のみ。旧サーバでは無い） */
+  same_title?: SameTitle[]
+}
+
+/** 追記先の album にある同名のトラック（P4-19） */
+export type SameTitle = {
+  track_id: number
+  rel_path: string
+  duration_ms: number | null
+}
+
+/**
+ * トラック行の「Library に同名」警告（P4-19）。無ければ null。
+ * 長さを添えるのは、同じタイトルの別テイク（Cover / Live）と本当の二重取り込みを人が見分けるため
+ */
+export function sameTitleLabel(f: Pick<InboxFile, 'same_title'>): string | null {
+  const rows = f.same_title ?? []
+  if (rows.length === 0) return null
+  const parts = rows.map((r) => {
+    const name = r.rel_path.split('/').pop() ?? r.rel_path
+    return r.duration_ms == null ? name : `${name}（${formatDuration(r.duration_ms)}）`
+  })
+  return `Library に同名: ${parts.join('、')}`
+}
+
+/** 件の中で同名の警告が付いたトラックの数（見出しに出す） */
+export function sameTitleCount(item: Pick<InboxItem, 'tracks'>): number {
+  return (item.tracks ?? []).filter((f) => (f.same_title ?? []).length > 0).length
 }
 
 /** ダウンローダの判定（spindle-inbox.json の 1 項） */

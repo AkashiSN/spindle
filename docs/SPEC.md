@@ -1049,6 +1049,12 @@ Inbox/ に配置（ポーリング検出）
   stat（inode / size / mtime / ctime）が変わったファイルだけタグを読み直す。**正は Inbox のファイル**で、
   行はキャッシュ: ディレクトリが消えれば行も消す（`placed` は 24 時間残して結果を見せる）。`approved` の件で
   ファイルが変わっていたら `pending` に戻す（再承認）
+- **同名の警告**（P4-19、D-70 追記）: 追記先の album に**同じタイトル**の active な行があれば、そのトラックに
+  `same_title: [{ track_id, rel_path, duration_ms }]` を付ける（承認は止めない。画面は「⚠ Library に同名:
+  <ファイル名>（長さ）」と、件の見出しに「同名 N」）。鍵は NFKD + casefold + 空白の畳み込み（全角・半角の
+  揺れは同じ、`(Cover)` / `【… Live ver.】` の注記は**落とさない** = 別曲扱い）。狙いは `SOURCE_URL` の
+  補填漏れや別 URL の再アップロードによる二重取り込みで、判断は人が行う（同じ曲名の別テイクは正当なので、
+  長さを添えて見分けられるようにする）
 - **承認キュー**は `GET /api/inbox`（`items` と監視の状態 `watch: { checked_at, poll_interval_secs }`）。件ごとにタグから作った下書き（`proposal`: albumartist / album / date の
   最頻値、category は GENRE → `genre_category_map`、トラックは TRACKNUMBER / DISCNUMBER / TITLE / ARTIST）と
   不足の警告を返し、UI の Inbox タブで category / albumartist / album / date と各トラックの
@@ -1406,7 +1412,9 @@ POST   /api/scan                                  {"kind": "incremental" | "deep
 GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件、`jobs: { done, failed }` は掃除するジョブ行の数。何も消さない。D-56）
 GET    /api/inbox                                 承認キュー { "items": [{ id, rel_dir, state, detected_at, error, placed_album_id,
                                                   proposal, draft, warnings, destination, tracks: [{ rel_path, codec, lossless,
-                                                  sample_rate, bit_depth, channels, duration_ms, tags, source }] }] }
+                                                  sample_rate, bit_depth, channels, duration_ms, tags, source,
+                                                  same_title: [{ track_id, rel_path, duration_ms }] }] }],
+                                                  watch: { checked_at, poll_interval_secs } }   # P4-18 / P4-19
                                                   （§7.8、D-68。destination と source は D-70: source は spindle-inbox.json の
                                                   項 { source, url, channel, verdict, message } | null）
 GET    /api/inbox/:id/artwork/:hash               件のファイルの埋め込み画像（PICTURE の sha256 で実体を照合してから ETag / 304。
@@ -1908,7 +1916,9 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   同じ規則（`lib/inbox.ts` の `validateDraft`）で、問題が無いときだけ「承認して配置」が押せる。
   「却下」はファイルを残したまま一覧から外し、「下書きに戻す」で pending に戻る。placed の件は 24 時間
   残り、「アルバムを開く」で表を `album_id` に絞る。inbox ジョブの完了で一覧を取り直す。
-  `destination` があれば「宛先: 既存の『…』（N 曲）に追加」と出す。`source` のあるトラック行は判定バッジ
+  `destination` があれば「宛先: 既存の『…』（N 曲）に追加」と出す。**同名の警告**（P4-19）はタイトル欄の下に
+  「⚠ Library に同名: <ファイル名>（長さ）」、件の一覧に「同名 N」のバッジ（承認は止めない。長さで別テイクと
+  見分ける）。ツールバーに周期監視の「最後に確認: HH:MM:SS（N 秒ごと）」（P4-18）。`source` のあるトラック行は判定バッジ
   （ok / 未判定）を出し、行を開くと `message`（参照実装ならルールの足し方）と URL が読める（D-70）。
   「album gain を計算する」のチェックボックス（既定 off。`destination` があればその現在値が初期値。D-74）。
   **忠実表示**（P4-4、D-70）: ARTIST が多値のファイルの行は元の値をチップで見せ、「ファイルの多値をそのまま

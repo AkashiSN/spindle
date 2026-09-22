@@ -906,3 +906,118 @@ async fn artwork_returns_the_embedded_picture_after_verifying_the_file() {
 fn is_root() -> bool {
     rustix::process::geteuid().is_root()
 }
+
+// ---------------------------------------------------------------- 同名の警告（P4-19）
+
+/// 追記先の album に同名（正規化した TITLE が一致）の active なトラックがあれば、そのトラック行に
+/// 警告を出す。承認は止めない（Cover / Live ver. は正当な別曲。D-70 追記）
+#[tokio::test]
+async fn list_warns_when_the_destination_album_already_has_the_same_title() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    seed_album(&app).await;
+    // album 7 に「New」（全角スペースと大文字小文字だけ違う）を足す
+    app.db
+        .write(|c| {
+            c.execute(
+                "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec,
+                                     lossless, title, artist_display, album, albumartist, seen_at,
+                                     album_id, disc_no, track_no, duration_ms)
+                 VALUES (3, '_Unsorted/Artist/Album/13 new.flac', '_unsorted/artist/album/13 new.flac',
+                         0, 0, 0, 'flac', 1, 'ｎｅｗ', 'a', 'Album', 'Artist', 0, 7, 1, 13, 61000)",
+                [],
+            )?;
+            c.execute(
+                "INSERT INTO track_tags (track_id, key, idx, value) VALUES (3, 'TITLE', 0, 'ｎｅｗ')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let id = youtube_item(&app, "youtube/Artist/Album", None, "ok").await;
+    let (st, body) = app.get(&c, "/api/inbox").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    let same = &it["tracks"][0]["same_title"];
+    assert_eq!(same.as_array().map(Vec::len), Some(1), "{it}");
+    assert_eq!(same[0]["track_id"], 3);
+    assert_eq!(same[0]["rel_path"], "_Unsorted/Artist/Album/13 new.flac");
+    assert_eq!(same[0]["duration_ms"], 61000);
+
+    // 別のタイトルなら出ない（(Cover) の注記は別曲として扱う）
+    app.db
+        .write(|c| {
+            c.execute(
+                "UPDATE track_tags SET value = 'New (Cover)' WHERE track_id = 3",
+                [],
+            )?;
+            c.execute("UPDATE tracks SET title = 'New (Cover)' WHERE id = 3", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    assert_eq!(
+        it["tracks"][0]["same_title"].as_array().map(Vec::len),
+        Some(0),
+        "{it}"
+    );
+
+    // missing な行は数えない
+    app.db
+        .write(|c| {
+            c.execute("UPDATE track_tags SET value = 'New' WHERE track_id = 3", [])?;
+            c.execute(
+                "UPDATE tracks SET title = 'New', missing_since = 1 WHERE id = 3",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    assert_eq!(
+        it["tracks"][0]["same_title"].as_array().map(Vec::len),
+        Some(0),
+        "{it}"
+    );
+}
+
+/// 追記先の album が無ければ（新しいアルバム）警告は出ない
+#[tokio::test]
+async fn list_has_no_same_title_warning_without_a_destination_album() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = youtube_item(&app, "youtube/Artist/Album", None, "ok").await;
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    assert!(it["destination"].is_null(), "{it}");
+    assert_eq!(
+        it["tracks"][0]["same_title"].as_array().map(Vec::len),
+        Some(0),
+        "{it}"
+    );
+}

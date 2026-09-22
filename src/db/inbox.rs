@@ -314,6 +314,43 @@ pub fn stale_items(conn: &Connection, seen_before: i64) -> Result<Vec<Item>> {
     Ok(rows)
 }
 
+/// 追記先の album にある、同じタイトル鍵の active なトラック（P4-19。承認画面の警告）。
+/// 鍵の計算は `import::inbox::title_key`（DB 側で正規化はできないので、album の行を引いて Rust で畳む。
+/// album 単位なので行数は多くない）
+pub fn same_title_in_album(
+    conn: &Connection,
+    album_id: i64,
+    title_key: &str,
+) -> Result<Vec<crate::import::inbox::SameTitle>> {
+    let mut st = conn.prepare(
+        "SELECT t.id, t.rel_path, t.duration_ms, ti.value
+           FROM tracks t
+           JOIN track_tags ti ON ti.track_id = t.id AND ti.key = 'TITLE' AND ti.idx = 0
+          WHERE t.album_id = ?1 AND t.missing_since IS NULL
+          ORDER BY t.disc_no, t.track_no, t.id",
+    )?;
+    let rows = st.query_map([album_id], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<i64>>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, rel_path, duration_ms, title) = row?;
+        if crate::import::inbox::title_key(&title) == title_key {
+            out.push(crate::import::inbox::SameTitle {
+                track_id: id,
+                rel_path,
+                duration_ms,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// 走査の他に inbox ジョブがやることが残っているか: 配置待ち（`approved`。承認 API の投入が Requeue や
 /// 再起動で消えた後の保険）と、期限切れの `placed`（片付け）。周期の監視が Inbox に変化が無くても投入する
 /// 理由（P4-18）

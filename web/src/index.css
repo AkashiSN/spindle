@@ -19,6 +19,7 @@
   --pending-bg: #eceef1;
   --pending-selected-bg: #cfdcf7;
   --error: #b91c1c;
+  --warn: #b45309;
   --ok: #16a34a;
   --row-border: #eef0f3;
   --missing-fg: #9ca3af;
@@ -75,6 +76,7 @@
   --pending-bg: #2a2d33;
   --pending-selected-bg: #1c3358;
   --error: #f87171;
+  --warn: #fbbf24;
   --ok: #4ade80;
   --row-border: #23262d;
   --missing-fg: #c4c9d1;
@@ -2097,6 +2099,14 @@ table.inbox-tracks td.inbox-thumb-cell {
 }
 table.inbox-tracks tr.inbox-unmatched td {
   background: var(--pending-bg);
+}
+/* 同名の警告（P4-19）。承認は止めないので、行は塗らず注記だけ出す */
+.inbox-same-title {
+  margin-top: 2px;
+  color: var(--warn);
+}
+.inbox-same-title-badge {
+  color: var(--warn);
 }
 .inbox-verdict-details summary {
   cursor: pointer;

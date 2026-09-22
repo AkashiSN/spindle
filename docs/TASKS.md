@@ -1216,6 +1216,16 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       `tests/gc.rs`（保持期間で消す、0 は消さない、gc 自身は残る）、`tests/gc_api.rs`（preview の `jobs`）、
       `tests/config.rs`（既定と 0）、web の `canRemove` / `watchLabel`
 
+- [x] **P4-19** Inbox の同名の警告（2026-09-22。D-70 追記、SPEC §7.8 / §9 / §12.6）。追記先の album に同じ
+      タイトル鍵（`import::inbox::title_key` = NFKD + casefold + 空白の畳み込み。注記は落とさない）の active な
+      行があれば `GET /api/inbox` の `tracks[].same_title` に返し、承認画面がタイトル欄の下に「⚠ Library に同名:
+      <ファイル名>（長さ）」、件の一覧に「同名 N」を出す（**承認は止めない**）。`SOURCE_URL` の補填漏れ・別 URL の
+      再アップロードによる二重取り込みを人が気づけるようにするもので、リリース後の再移行（MIGRATION §5-3）の
+      取りこぼし対策。受け入れ: `src/import/inbox.rs` の `title_key` の単体テスト（全角・半角と空白は同じ、
+      `(Cover)` / `【Live ver.】` は別）、`tests/inbox_api.rs`（同名あり / `(Cover)` は出ない / missing は数えない /
+      追記先が無ければ空）、`web/src/lib/inbox.test.ts`（`sameTitleLabel` / `sameTitleCount`）、実機のデータで
+      誤警告の量を測る（同一 album 内 27 グループ / 119 行。YouTube 由来 6 グループ）
+
 ## 着手前に確認が必要な残課題
 
 - ~~Discogs / VGMdb 連携の要否~~（2026-09-20。作らない。D-72）
@@ -1224,7 +1234,6 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
 - ~~一括リネーム後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）と
   空ディレクトリの扱い~~（P2-8 で決めた。D-67）
 - ~~Library の ALAC（m4a）に任意キーを書けない~~（2026-09-21 に P4-3 の実機確認で観測 → P4-11 に昇格）
-- Inbox の承認画面で「Library に同名の曲がある」警告（`albumartist` + 正規化した `title` の一致）を出すか。
-  P4-14 で `SOURCE_URL` を補填すれば大半は URL で弾けるので、残るのは再生リストに無い動画だけ。要るなら
-  D-70 の「判断は Inbox で人が行う」の延長として警告のみ（自動で弾かない。Cover / Reloaded は正当な別曲）
+- ~~Inbox の承認画面で「Library に同名の曲がある」警告~~（2026-09-22 に P4-19 で実装。判定は
+  「追記先の album の中で同じタイトル鍵」に絞った。albumartist 単位だと 720 行が該当して無視されるため）
 

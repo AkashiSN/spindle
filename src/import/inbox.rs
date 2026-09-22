@@ -441,7 +441,52 @@ pub struct Proposed {
     pub destination: Option<Destination>,
     /// `files` と同じ順。サイドカーの項（無ければ None）
     pub sources: Vec<Option<crate::import::ytmusic::sidecar::FileEntry>>,
+    /// 下書きのトラックと同じ順。追記先の album にある同名の行（P4-19）
+    pub same_titles: Vec<Vec<SameTitle>>,
     pub warnings: Vec<String>,
+}
+
+/// タイトルの照合鍵（P4-19）。**NFKD + casefold**（パスの `canonical_key` は NFD だが、タイトルは
+/// ファイル名と違って全角・半角の揺れ（`ＭＡＤ` と `MAD`）を同じものとして扱いたい）に加えて、空白
+/// （全角空白を含む）を 1 つに畳み前後を落とす。**注記は落とさない**（`(Cover)` / `【… Live ver.】` は
+/// 正当な別曲。同名とみなすと毎回警告が出て意味がなくなる）
+pub fn title_key(title: &str) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+    let folded = caseless::default_case_fold_str(&title.nfkd().collect::<String>());
+    let mut out = String::with_capacity(folded.len());
+    for part in folded.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(part);
+    }
+    out.nfkd().collect()
+}
+
+#[cfg(test)]
+mod title_key_tests {
+    use super::title_key;
+
+    #[test]
+    fn folds_case_width_and_whitespace_but_keeps_annotations() {
+        assert_eq!(title_key("New"), title_key("ｎｅｗ"));
+        assert_eq!(title_key(" New\u{3000}Song "), title_key("new song"));
+        assert_eq!(
+            title_key("ハロー"),
+            title_key("﻿ﾊﾛｰ".trim_start_matches('\u{feff}'))
+        );
+        assert_ne!(title_key("New"), title_key("New (Cover)"));
+        assert_ne!(title_key("New"), title_key("New 【Live ver.】"));
+        assert_ne!(title_key("New"), title_key("News"));
+    }
+}
+
+/// 追記先の album に同じ [`title_key`] を持つ active なトラックがあるか（P4-19。承認画面の警告）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SameTitle {
+    pub track_id: i64,
+    pub rel_path: String,
+    pub duration_ms: Option<i64>,
 }
 
 /// 件の提案（D-68 / D-70）: タグからの下書き → サイドカーの category（語彙にあるとき）→ `pending` で
@@ -503,11 +548,22 @@ pub fn propose(
             sidecar.as_ref().and_then(|s| s.files.get(name).cloned())
         })
         .collect();
+    // 同名の警告（P4-19）: 追記先の album に同じタイトルの active な行があれば、そのトラックに出す。
+    // 追記先が無い（新しいアルバム）なら衝突しようがないので空
+    let same_titles = match destination.as_ref() {
+        Some(d) => draft
+            .tracks
+            .iter()
+            .map(|t| dbinbox::same_title_in_album(conn, d.album_id, &title_key(&t.title)))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => draft.tracks.iter().map(|_| Vec::new()).collect(),
+    };
     warnings.extend(self::warnings(files, &draft));
     Ok(Proposed {
         draft,
         destination,
         sources,
+        same_titles,
         warnings,
     })
 }

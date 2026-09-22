@@ -11,7 +11,9 @@ use serde::Serialize;
 use crate::db::inbox::{self as dbinbox, FileRow, Item, ItemState};
 use crate::db::now_epoch;
 use crate::db::scans;
-use crate::import::inbox::{destination, embedded_picture, propose, Destination, InboxDraft};
+use crate::import::inbox::{
+    destination, embedded_picture, propose, Destination, InboxDraft, SameTitle,
+};
 use crate::import::ytmusic::sidecar::FileEntry;
 use crate::jobs::handlers::inbox::new_inbox_job;
 use crate::jobs::EnqueueResult;
@@ -25,6 +27,8 @@ pub struct TrackView {
     pub file: FileRow,
     /// サイドカーの項（ダウンローダが置いた件。D-70）
     pub source: Option<FileEntry>,
+    /// 追記先の album にある同名の行（P4-19。警告のみで承認は止めない）
+    pub same_title: Vec<SameTitle>,
 }
 
 #[derive(Serialize)]
@@ -92,10 +96,15 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
                     Ok(p) => p,
                     Err(e) => return Ok(Err(e.to_string())),
                 };
+                let mut same = p.same_titles.into_iter();
                 let tracks = files
                     .into_iter()
                     .zip(p.sources)
-                    .map(|(file, source)| TrackView { file, source })
+                    .map(|(file, source)| TrackView {
+                        file,
+                        source,
+                        same_title: same.next().unwrap_or_default(),
+                    })
                     .collect();
                 out.push(ItemView {
                     item,

@@ -13,6 +13,8 @@ import {
   stateLabel,
   validateDraft,
   verdictLabel,
+  sameTitleCount,
+  sameTitleLabel,
   watchLabel,
   type DraftTrack,
   type InboxDraft,
@@ -359,5 +361,33 @@ describe('watchLabel', () => {
     expect(watchLabel({ checked_at: 5, poll_interval_secs: 0 }, t)).toBe('')
     expect(watchLabel({ checked_at: null, poll_interval_secs: 60 }, t)).toBe('確認: 60 秒ごと（まだ）')
     expect(watchLabel({ checked_at: 5, poll_interval_secs: 60 }, t)).toBe('最後に確認: T5（60 秒ごと）')
+  })
+})
+
+describe('sameTitleLabel / sameTitleCount', () => {
+  const f = (same: InboxFile['same_title']): InboxFile =>
+    ({ rel_path: 'a.opus', inode: 1, size: 1, mtime_ns: 0, ctime_ns: 0, codec: 'opus', lossless: false,
+       sample_rate: null, bit_depth: null, channels: null, duration_ms: null, tags: [], source: null,
+       same_title: same }) as InboxFile
+
+  it('同名が無ければ null、あればパスと長さを並べる（P4-19）', () => {
+    expect(sameTitleLabel(f([]))).toBeNull()
+    expect(sameTitleLabel(f(undefined as unknown as InboxFile['same_title']))).toBeNull()
+    expect(sameTitleLabel(f([{ track_id: 3, rel_path: 'A/B/13 new.flac', duration_ms: 61000 }]))).toBe(
+      'Library に同名: 13 new.flac（1:01）',
+    )
+    expect(
+      sameTitleLabel(
+        f([
+          { track_id: 3, rel_path: 'A/B/13 new.flac', duration_ms: null },
+          { track_id: 4, rel_path: 'A/B/14 new.flac', duration_ms: 1000 },
+        ]),
+      ),
+    ).toBe('Library に同名: 13 new.flac、14 new.flac（0:01）')
+  })
+
+  it('件ごとの同名の数を数える', () => {
+    expect(sameTitleCount({ tracks: [f([]), f([{ track_id: 1, rel_path: 'x', duration_ms: null }])] } as InboxItem)).toBe(1)
+    expect(sameTitleCount({ tracks: [] } as unknown as InboxItem)).toBe(0)
   })
 })

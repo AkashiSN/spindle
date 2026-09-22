@@ -20,6 +20,8 @@ import {
   pictureOf,
   stateLabel,
   validateDraft,
+  sameTitleCount,
+  sameTitleLabel,
   verdictLabel,
   watchLabel,
   type DraftTrack,
@@ -74,6 +76,9 @@ export function InboxView({ inbox, onOpenAlbum }: { inbox: InboxState; onOpenAlb
                   </span>
                   {unmatchedCount(it) > 0 && (
                     <span className="badge inbox-verdict-ng">未判定 {unmatchedCount(it)}</span>
+                  )}
+                  {sameTitleCount(it) > 0 && (
+                    <span className="badge inbox-same-title-badge">同名 {sameTitleCount(it)}</span>
                   )}
                   {it.error != null && <span className="error small">{it.error}</span>}
                 </button>
@@ -261,6 +266,11 @@ function ItemForm({
                     disabled={!editable}
                     onChange={(e) => updateTrack(i, { title: e.target.value })}
                   />
+                  {f != null && sameTitleLabel(f) != null && (
+                    <div className="inbox-same-title small" title="同じ曲を二重に取り込もうとしている可能性がある（Cover / Live ver. は別曲。承認は止めない）">
+                      ⚠ {sameTitleLabel(f)}
+                    </div>
+                  )}
                 </td>
                 <td>
                   <ArtistCell
