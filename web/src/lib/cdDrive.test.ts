@@ -29,7 +29,10 @@ describe('driveStateLabel', () => {
     expect(driveStateLabel(st('no_disc'))).toBe('ディスクなし')
     expect(driveStateLabel(st('tray_open'))).toBe('トレイが開いている')
     expect(driveStateLabel(st('not_ready'))).toBe('ドライブの準備中…')
-    expect(driveStateLabel(st('disc_ok', '0:20144:40290'))).toBe('ディスクあり（2 トラック）')
+    // 総時間も出す（40290 − 0 セクタ = 8:57）
+    expect(driveStateLabel(st('disc_ok', '0:20144:40290'))).toBe('ディスクあり（2 トラック・8:57）')
+    // 読めない TOC はトラック数だけ
+    expect(driveStateLabel(st('disc_ok', 'x:y'))).toBe('ディスクあり（1 トラック）')
   })
   it('ディスクはあるが TOC を読めていない', () => {
     expect(driveStateLabel(st('disc_ok', null))).toBe('ディスクあり（TOC を読み取り中…）')

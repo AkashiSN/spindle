@@ -25,6 +25,14 @@ export const MATCHED_BY_LABELS: Record<MatchedBy, string> = {
   toc: 'TOC 近似',
 }
 
+/** リリースに入っている 1 枚（候補の medium かどうかに関わらず並ぶ） */
+export type MediumInfo = {
+  position: number
+  /** `CD` / `Blu-ray` / `Digital Media` など。MB に無ければ null */
+  format: string | null
+  track_count: number
+}
+
 export type ReleaseCandidate = {
   release_id: string
   release_group_id: string | null
@@ -39,6 +47,8 @@ export type ReleaseCandidate = {
   exact: boolean
   /** どの経路で出てきたか（強い順） */
   matched_by: MatchedBy[]
+  /** リリース全体の収録構成（DVD 付き / BD 付き / デジタルの区別に使う） */
+  media: MediumInfo[]
   medium_position: number
   medium_count: number
   medium_title: string | null
@@ -122,11 +132,68 @@ export function candidateSummary(c: ReleaseCandidate): string {
   if (c.country) parts.push(c.country)
   for (const [label, catalog] of c.labels) parts.push(catalog ? `${label} ${catalog}` : label)
   if (c.barcode) parts.push(`JAN/UPC ${c.barcode}`)
-  const fmt = c.format ?? 'medium'
-  parts.push(c.medium_count > 1 ? `${fmt} ${c.medium_position}/${c.medium_count}` : fmt)
+  // 形式と何枚目かは mediaSummary が出す（リリース全体の構成も含めて見せる）
   if (c.status && c.status !== 'Official') parts.push(c.status)
   if (c.disambiguation) parts.push(c.disambiguation)
   return parts.join(' · ')
+}
+
+/** MusicBrainz のリリースのページ（候補の出どころ） */
+export function releaseUrl(c: ReleaseCandidate): string {
+  return `https://musicbrainz.org/release/${c.release_id}`
+}
+
+/**
+ * 吸い出せる medium か（CD 系）。`Enhanced CD` / `HDCD` / `Copy Control CD` なども CD。
+ * 形式が分からないものは隠さない（MB の登録漏れで CD のことがある）
+ */
+export function isCdMedium(c: ReleaseCandidate): boolean {
+  if (c.format == null) return true
+  return /(^|\s|-)CD($|\s|-)|CD$|^CD/i.test(c.format) && !/DVD|Blu-?ray|HD-?DVD/i.test(c.format)
+}
+
+/** CD 系の候補とそれ以外に分ける（それぞれ元の順序を保つ） */
+export function splitByMedium(candidates: ReleaseCandidate[]): {
+  cd: ReleaseCandidate[]
+  other: ReleaseCandidate[]
+} {
+  return {
+    cd: candidates.filter(isCdMedium),
+    other: candidates.filter((c) => !isCdMedium(c)),
+  }
+}
+
+/**
+ * リリースの収録構成と、いま見ている枚。`CD + Blu-ray の 1 枚目`、`CD 2 枚組の 1 枚目`、`CD`。
+ * 同じ曲でも DVD 付き / BD 付き / デジタルで別リリースになるので、これが選別の決め手になる
+ */
+export function mediaSummary(c: ReleaseCandidate): string {
+  const formats = c.media.length > 0 ? c.media.map((m) => m.format ?? '形式不明') : [c.format ?? '形式不明']
+  const uniq = [...new Set(formats)]
+  // 同じ形式が続くなら「CD 2 枚組」、違えば「CD + Blu-ray」
+  const all = uniq.length === 1 ? (formats.length === 1 ? uniq[0]! : `${uniq[0]} ${formats.length} 枚組`) : uniq.join(' + ')
+  if (c.medium_count <= 1) return all
+  // 「CD 2 枚組の 1 枚目」「CD + Blu-ray の 1 枚目」
+  const joiner = uniq.length === 1 ? 'の' : ' の'
+  return `${all}${joiner} ${c.medium_position} 枚目`
+}
+
+/** ディスク（TOC）と候補の長さの差（ms。候補に長さ不明があるか TOC が空なら null） */
+export function lengthDiffMs(c: ReleaseCandidate, tocTracks: TocTrackInfo[]): number | null {
+  if (tocTracks.length === 0) return null
+  const total = candidateLengthMs(c)
+  if (total == null) return null
+  const disc = tocTracks.reduce((a, t) => a + t.length_ms, 0)
+  return total - disc
+}
+
+/** 長さ差の表示。1 秒未満は 0.1 秒まで */
+export function formatLengthDiff(ms: number): string {
+  if (ms === 0) return '長さ一致'
+  const sec = Math.abs(ms) / 1000
+  const sign = ms > 0 ? '+' : '−'
+  const value = sec < 10 ? sec.toFixed(1) : Math.round(sec).toString()
+  return `長さ差 ${sign}${value} 秒`
 }
 
 /** 候補全体の長さ（ms 不明のトラックがあれば null） */

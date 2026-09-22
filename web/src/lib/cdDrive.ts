@@ -1,6 +1,7 @@
 // CD ドライブの状態（`GET /api/cd/status`、P2-1）の型と表示。ポーリングは hooks/useCdDrive.ts
 
 import { normalizeTocInput } from './cd'
+import { formatDuration } from './format'
 
 export type DriveState = 'unknown' | 'no_drive' | 'no_disc' | 'tray_open' | 'not_ready' | 'disc_ok'
 
@@ -21,6 +22,17 @@ function trackCount(toc: string): number {
   return toc.split(':').length - 1
 }
 
+/** TOC 文字列（CTDB 形式の LBA 列）から音声の総時間（ms）。読めなければ null */
+export function tocDurationMs(toc: string): number | null {
+  const parts = toc.split(':').map((p) => Number(p.replace('-', '')))
+  if (parts.length < 2 || parts.some((n) => !Number.isFinite(n))) return null
+  const first = parts[0]!
+  const leadout = parts[parts.length - 1]!
+  if (leadout <= first) return null
+  // 1 秒 = 75 セクタ
+  return ((leadout - first) * 1000) / 75
+}
+
 /** 状態の一行。まだ取れていなければ null */
 export function driveStateLabel(s: DriveStatus | null): string | null {
   if (s == null) return null
@@ -36,7 +48,11 @@ export function driveStateLabel(s: DriveStatus | null): string | null {
     case 'not_ready':
       return 'ドライブの準備中…'
     case 'disc_ok':
-      if (s.toc != null) return `ディスクあり（${trackCount(s.toc)} トラック）`
+      if (s.toc != null) {
+        const ms = tocDurationMs(s.toc)
+        const time = ms == null ? '' : `・${formatDuration(ms)}`
+        return `ディスクあり（${trackCount(s.toc)} トラック${time}）`
+      }
       return s.error != null ? `ディスクあり（TOC を読めない: ${s.error}）` : 'ディスクあり（TOC を読み取り中…）'
   }
 }

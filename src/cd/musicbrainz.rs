@@ -67,6 +67,8 @@ pub struct ReleaseCandidate {
     pub matched_by: Vec<MatchedBy>,
     pub medium_position: u32,
     pub medium_count: usize,
+    /// リリース全体の収録構成（この medium を含む。DVD 付き / BD 付き / デジタルの区別に使う）
+    pub media: Vec<MediumInfo>,
     pub medium_title: Option<String>,
     pub format: Option<String>,
     pub tracks: Vec<TrackCandidate>,
@@ -86,6 +88,15 @@ pub enum MatchedBy {
     Barcode,
     /// TOC の fuzzy 照会
     Toc,
+}
+
+/// リリースに入っている 1 枚（候補の medium かどうかに関わらず並べる）
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MediumInfo {
+    pub position: u32,
+    /// 形式（`CD` / `Blu-ray` / `Digital Media` など。MB に無ければ null）
+    pub format: Option<String>,
+    pub track_count: usize,
 }
 
 /// 照会の結果
@@ -475,6 +486,15 @@ fn candidates_from(
                     .collect(),
                 exact,
                 matched_by: Vec::new(),
+                media: r
+                    .media
+                    .iter()
+                    .map(|m| MediumInfo {
+                        position: m.position,
+                        format: non_empty(m.format.clone()),
+                        track_count: m.track_count,
+                    })
+                    .collect(),
                 medium_position: m.position,
                 medium_count: r.media.len(),
                 medium_title: non_empty(m.title.clone()),

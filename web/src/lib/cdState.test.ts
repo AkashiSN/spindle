@@ -15,6 +15,7 @@ const cand = (exact: boolean, title = 'T'): ReleaseCandidate => ({
   labels: [],
   exact,
   matched_by: exact ? ['discid'] : ['toc'],
+  media: [{ position: 1, format: 'CD', track_count: 2 }],
   medium_position: 1,
   medium_count: 1,
   medium_title: null,

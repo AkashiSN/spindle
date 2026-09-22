@@ -1780,6 +1780,27 @@ table.gc-table td.sample {
   font-family: var(--mono, monospace);
   font-size: 12px;
 }
+.cd .cd-other {
+  margin: 8px 0;
+}
+.cd .cd-other > label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted);
+}
+.cd details.cd-details {
+  margin: 12px 0;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.cd details.cd-details summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.cd .cd-candidates a {
+  margin-left: 6px;
+}
 .cd .cd-release-ref {
   flex: 1;
   min-width: 240px;

@@ -1408,7 +1408,8 @@ POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?,
                                                   MusicBrainz に照会（P2-3、D-21 / D-64）。isrcs / mcn は status が読んだもの
                                                   （null は捨てる）、release は貼ったリリース URL か MBID。→ 200 { discid,
                                                   mb_toc, accuraterip_id, ctdb_toc_id, exact, candidates: [リリース × medium。
-                                                  matched_by: [discid | release | isrc | barcode | toc] を強い順に持ち、その順に並ぶ],
+                                                  matched_by: [discid | release | isrc | barcode | toc] を強い順に持ち、その順に並ぶ。
+                                                  media: [{ position, format, track_count }]（リリース全体の収録構成）],
                                                   notes: [候補に入れられなかった理由], tracks: [{ number, length_ms }]（TOC の
                                                   音声トラック。手入力フォームの行。D-65）}。同じ入力の照会結果は
                                                   10 分覚えていて MusicBrainz を引き直さない（D-64 追記 3）。
@@ -1913,10 +1914,15 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
 - **CD**（P2）: ウィザード。検出 → 候補選択 / 手入力 / トラックリスト貼り付け →
   オフセット確認 → 進捗。照会ゼロ件でも完走できる。検出（P2-1）は画面を開いている間
   `GET /api/cd/status` を 2 秒間隔で取り（`useCdDrive`）、状態の一行（ディスクなし / トレイが開いている /
-  ディスクあり（N トラック）/ ドライブが無い（理由））と「取り出す」を出す。新しいディスクの TOC が出たとき
+  ディスクあり（N トラック・総時間）/ ドライブが無い（理由））と「照会し直す」「取り出す」を出す。新しいディスクの TOC が出たとき
   だけ（同じディスクの間は 1 回。`lib/cdDrive.ts` の `newDiscToc`）TOC 欄に入れて照会を自動で始める。
   TOC の貼り付け（CTDB 形式 / MusicBrainz 形式 / `cdrecord -toc` の出力）はドライブの無い環境とデバッグ用に
   残す（P2-3、D-64）。自動の照会はサーバが覚えている結果を使い、ボタンからの照会は `refresh` で引き直す。
+  **ドライブに CD が入っている前提の画面**にし、TOC 文字列・各種 ID・リリース URL 指定・用語の凡例は
+  「詳細」（`<details>`）に畳む。候補は MusicBrainz のリリースへのリンク、収録構成（`mediaSummary`。
+  `CD + Blu-ray の 1 枚目` / `CD 2 枚組の 1 枚目`。DVD 付き / BD 付き / デジタルの別が分かる）、
+  ディスクとの長さ差（`lengthDiffMs`）で見分ける。CD 以外の medium に当たった候補（デジタル配信・DVD・
+  Blu-ray）は既定で畳み、「CD 以外の媒体に当たった候補も表示」で出す（`isCdMedium` / `splitByMedium`）。
   照会にはドライブが読んだ ISRC / MCN を添え（貼り付けの TOC でも同じ）、「MusicBrainz の
   リリース URL か MBID」の欄 + 「このリリースで照会」で指定リリースも引ける。候補のバッジは経路（DiscID 一致 /
   指定 / ISRC / バーコード / TOC 近似。複数可）、見出しは経路の一覧、`notes` は赤字。DiscID 未登録なら

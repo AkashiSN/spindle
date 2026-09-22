@@ -240,6 +240,19 @@ fn release_fetch_keeps_media_with_the_audio_track_count() {
     assert!(parse_release(RELEASE_NOTFOUND, "x", 2).is_err());
 }
 
+/// 候補はリリース全体の収録構成も持つ（DVD 付き / BD 付き / デジタルの区別に要る）
+#[test]
+fn release_candidates_carry_the_whole_media_layout() {
+    let c = parse_release(RELEASE_FIVE, "x", 2).unwrap();
+    let media = &c[0].media;
+    assert_eq!(media.len(), 2);
+    assert_eq!(media[0].position, 1);
+    assert_eq!(media[0].format.as_deref(), Some("CD"));
+    assert_eq!(media[0].track_count, 2);
+    assert_eq!(media[1].format.as_deref(), Some("Blu-ray"));
+    assert_eq!(media[1].track_count, 1);
+}
+
 #[test]
 fn release_ref_accepts_urls_and_bare_ids() {
     let id = FIVE_RELEASE;

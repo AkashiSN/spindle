@@ -10,9 +10,15 @@ import {
   finalizeDraft,
   initialSelection,
   discidSubmissionUrl,
+  formatLengthDiff,
+  isCdMedium,
+  lengthDiffMs,
   lookupHeadline,
+  mediaSummary,
   offersDiscidSubmission,
   matchedByLabel,
+  releaseUrl,
+  splitByMedium,
   normalizeTocInput,
   outcomeAfterTocEdit,
   trackTags,
@@ -34,6 +40,7 @@ const base: ReleaseCandidate = {
   labels: [['DGC Records', 'DGCD-24425']],
   exact: true,
   matched_by: ['discid'],
+  media: [{ position: 1, format: 'CD', track_count: 2 }],
   medium_position: 1,
   medium_count: 1,
   medium_title: null,
@@ -63,10 +70,10 @@ track:lout lba:    188333 (   753332) 41:53:08 adr: 1 control: 6 mode: -1`
 })
 
 describe('candidateSummary', () => {
-  it('日付・国・レーベル・バーコード・形式を並べる', () => {
-    expect(candidateSummary(base)).toBe('1991-09-24 · US · DGC Records DGCD-24425 · JAN/UPC 720642442524 · CD')
+  it('日付・国・レーベル・バーコードを並べる（形式と枚数は mediaSummary が出す）', () => {
+    expect(candidateSummary(base)).toBe('1991-09-24 · US · DGC Records DGCD-24425 · JAN/UPC 720642442524')
   })
-  it('複数枚組は n/m、非公式と注記も出す', () => {
+  it('非公式と注記も出す（形式・枚数は入れない）', () => {
     expect(
       candidateSummary({
         ...base,
@@ -79,7 +86,7 @@ describe('candidateSummary', () => {
         status: 'Bootleg',
         disambiguation: 'first press',
       }),
-    ).toBe('Sub Pop · CD 2/3 · Bootleg · first press')
+    ).toBe('Sub Pop · Bootleg · first press')
   })
 })
 
@@ -387,5 +394,76 @@ describe('category（配置先。D-67）', () => {
     // 無ければ null（_Unsorted に置かれる）。空文字も null
     expect(finalizeDraft({ ...d, category: null }).category).toBeNull()
     expect(finalizeDraft({ ...d, category: '' }).category).toBeNull()
+  })
+})
+
+describe('候補の見分け（P2-3 の UI 改修）', () => {
+  const five: ReleaseCandidate = {
+    ...base,
+    release_id: 'f1223d63-f359-457d-b935-fc27eb24a6de',
+    exact: false,
+    matched_by: ['isrc'],
+    media: [
+      { position: 1, format: 'CD', track_count: 2 },
+      { position: 2, format: 'Blu-ray', track_count: 1 },
+    ],
+    medium_position: 1,
+    medium_count: 2,
+  }
+
+  it('収録構成は全媒体を並べ、いま見ている枚を示す', () => {
+    expect(mediaSummary(five)).toBe('CD + Blu-ray の 1 枚目')
+    expect(
+      mediaSummary({
+        ...five,
+        media: [
+          { position: 1, format: 'CD', track_count: 12 },
+          { position: 2, format: 'CD', track_count: 10 },
+        ],
+      }),
+    ).toBe('CD 2 枚組の 1 枚目')
+    expect(mediaSummary({ ...five, media: [{ position: 1, format: 'CD', track_count: 2 }], medium_count: 1 })).toBe('CD')
+    // 形式が無い medium は「不明」
+    expect(mediaSummary({ ...five, media: [{ position: 1, format: null, track_count: 2 }], medium_count: 1 })).toBe(
+      '形式不明',
+    )
+    // media が空（DiscID 照会の応答など）は今まで通り medium の形式だけ
+    expect(mediaSummary({ ...five, media: [], medium_count: 1, format: 'CD' })).toBe('CD')
+  })
+
+  it('吸い出せるのは CD 系の medium だけ', () => {
+    expect(isCdMedium(five)).toBe(true)
+    expect(isCdMedium({ ...five, format: 'Enhanced CD' })).toBe(true)
+    expect(isCdMedium({ ...five, format: 'HDCD' })).toBe(true)
+    expect(isCdMedium({ ...five, format: 'Digital Media' })).toBe(false)
+    expect(isCdMedium({ ...five, format: 'Blu-ray' })).toBe(false)
+    expect(isCdMedium({ ...five, format: 'DVD-Video' })).toBe(false)
+    // 形式が分からないものは隠さない
+    expect(isCdMedium({ ...five, format: null })).toBe(true)
+  })
+
+  it('CD 系とそれ以外に分ける（順序は保つ）', () => {
+    const digital: ReleaseCandidate = { ...five, release_id: 'd', format: 'Digital Media' }
+    const split = splitByMedium([five, digital, { ...five, release_id: 'c2' }])
+    expect(split.cd.map((c) => c.release_id)).toEqual([five.release_id, 'c2'])
+    expect(split.other.map((c) => c.release_id)).toEqual(['d'])
+  })
+
+  it('MusicBrainz のリリースへのリンク', () => {
+    expect(releaseUrl(five)).toBe('https://musicbrainz.org/release/f1223d63-f359-457d-b935-fc27eb24a6de')
+  })
+
+  it('ディスクとの長さ差（候補に不明があれば null）', () => {
+    const toc = [
+      { number: 1, length_ms: 1000 },
+      { number: 2, length_ms: 2000 },
+    ]
+    // base の 2 曲は 1000 + 2500 = 3500 ms
+    expect(lengthDiffMs(base, toc)).toBe(500)
+    expect(formatLengthDiff(500)).toBe('長さ差 +0.5 秒')
+    expect(formatLengthDiff(-1400)).toBe('長さ差 −1.4 秒')
+    expect(formatLengthDiff(0)).toBe('長さ一致')
+    expect(lengthDiffMs({ ...base, tracks: [{ ...base.tracks[0]!, length_ms: null }] }, toc)).toBeNull()
+    expect(lengthDiffMs(base, [])).toBeNull()
   })
 })

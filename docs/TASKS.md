@@ -886,6 +886,10 @@ TOC は成立。実機は `#[ignore]`）、`tests/cd_toc.rs`（文字列の往�
       `cd::error_chain` で原因の末端までログと API 本文に出す。**この回線は MetaBrainz の IPv4 が塞がれて
       いる**（TCP は通るが TLS で切られる。IPv6 は通る）ので実機の config.toml は `address_family = "ipv6"`
 
+- [x] 画面をドライブ前提に（2026-09-22。ユーザ要望）: 状態の一行（トラック数・総時間）と「照会し直す」
+      「取り出す」を主役にし、TOC の貼り付け・各種 ID・リリース URL 指定・用語の凡例は「詳細」へ。候補に
+      MusicBrainz へのリンク・収録構成（`mediaSummary`。候補に `media` を追加）・ディスクとの長さ差を出し、
+      CD 以外の medium（デジタル配信 / DVD / Blu-ray）は既定で畳む
 - [x] 照会結果のキャッシュ（D-64 追記 3。2026-09-22）: 入力ごとに 10 分・8 件（`DiscQuery::cache_key`。
       失敗は覚えない）、`POST /api/cd/lookup` の `refresh` で引き直す。UI はボタンからの照会だけ refresh
 
