@@ -1802,6 +1802,7 @@ dependencies = [
  "http-body-util",
  "imagesize",
  "ipnet",
+ "libc",
  "lofty",
  "md-5",
  "mime_guess",

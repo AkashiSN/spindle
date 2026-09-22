@@ -379,7 +379,8 @@ DB にしか存在しないもの（編集履歴 / プレイリスト / 検証�
   出す。既定のログフィルタで `symphonia=error` に落とす
 - ホストに `/dev/sr0` が無いと `deploy/compose.yaml` の `devices` で起動に失敗する。CD ドライブは
   P2 まで無いので、移行時は devices を外した compose（`/root/spindle-migration/compose.yaml`）で
-  起動した。P2 で `devices` を optional にするか、compose を 2 段にする
+  起動した。P2-1 でアプリ側は「デバイスが無くても起動して no_drive を出す」にし、compose は
+  ドライブの無い機体で 3 行を消す運用（OPERATIONS.md）にした。compose で optional にする手段は無い
 
 依存: P0-12, P0-13
 
@@ -820,13 +821,29 @@ foobar2000 のレイアウトに寄せる（D-58）。P1 の完了条件「fooba
 
 ### P2-1 ドライブ制御
 
-- [ ] デバイス割当、`CDROM_DRIVE_STATUS` ポーリング、eject
+- [x] デバイス割当、`CDROM_DRIVE_STATUS` ポーリング、eject（`src/cd/device.rs`。`Drive` トレイト +
+      `LinuxDrive`（ioctl）+ `DriveMonitor`（ポーラの状態）+ `spawn_poller`（2 秒。main で `[rip].device` から
+      配線。デバイスが無くても起動は止めず no_drive）。`GET /api/cd/status` / `POST /api/cd/eject`。
+      UI は `useCdDrive`（CD 画面を開いている間 2 秒間隔）→ 新しいディスクの TOC が出たら `lookupToc` で
+      自動照会、状態の一行と「取り出す」（`CdView`）
+- 実機（Pioneer BDR-209M、kernel 6.12）で分かったこと: CDROMEJECT は先に `CDROM_LOCKDOOR 0` を叩かないと
+  ドライブが CHECK CONDITION で拒み、しかも戻り値が 2（SCSI status。負でない）なので成功に見える。
+  unlock を前置し、戻り値 0 以外を失敗にした。`cdrdao read-toc` はサブチャネル解析込みで 9 分の
+  ディスクに 1 分近くかかるので状態表示には使わない（ioctl の READ TOC は 40 ms）。SG_IO は `/dev/sr0`
+  に直接通る（cdrdao が `/dev/sg` 無しで動いた）ので compose から `/dev/sg0` と `c 21:*` を外した
+
+受け入れ: `tests/cd_device.rs`（READ TOC エントリ → `Toc`、ポーラの遷移: DiscOk で 1 回だけ読む・抜かれたら
+捨てて次のディスクで読み直す・読めなければ理由を持って次周回に再試行・開けなければ no_drive。実ドライブは
+`#[ignore]`: `sudo -u ubuntu -g cdrom target/debug/deps/cd_device-* --ignored`）、`tests/cd_status_api.rs`
+（フェイクのドライブで status / eject / 503 / CSRF）、`web/src/lib/cdDrive.test.ts`（状態の一行、新しい
+ディスクの判定）。実機で ディスクあり → `/api/cd/status` → lookup（MB の fuzzy 候補）→ eject を確認
 
 ### P2-2 TOC 取得と各種 DiscID 算出
 
 MusicBrainz / AccurateRip / FreeDB。
 
-- [ ] TOC 取得（`cdrdao read-toc` / SG_IO READ TOC → `Toc`）。ドライブが要る
+- [x] TOC 取得（`CDROMREADTOCHDR` / `CDROMREADTOCENTRY` ioctl → `toc_from_entries` → `Toc`。P2-1 と同じ
+      `src/cd/device.rs`。cdrdao / SG_IO は使わない）
 - [x] ID 算出（`src/cd/toc.rs`。ドライブ不要）: `Toc`（LBA、データトラックのフラグ、リードアウト）から
       MusicBrainz DiscID と `?toc=` 文字列、FreeDB ID、AccurateRip id1 / id2、CTDB の TOC 文字列と TOCID、
       CRC 用の `TrackLayout`。§7.3 の `from_audio_sample_counts`（588 の倍数でなければ拒否）。

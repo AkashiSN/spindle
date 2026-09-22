@@ -1,6 +1,7 @@
 // CD 画面（SPEC §12.6、P2-3 / P2-4）の状態: 遷移は lib/cdState.ts の reducer（vitest で固定）。
-// ここは非同期の照会（POST /api/cd/lookup）と dispatch の束ね。TOC の取得元はドライブ（P2-1 の
-// GET /api/cd/status）に差し替える前提で、今は貼り付け。確定したメタデータは吸い出し（P2-5）に渡す
+// ここは非同期の照会（POST /api/cd/lookup）と dispatch の束ね。TOC はドライブ（P2-1 の
+// GET /api/cd/status → useCdDrive → lookupToc）から来るのが本線で、貼り付け欄はドライブ無しの環境用。
+// 確定したメタデータは吸い出し（P2-5）に渡す
 
 import { useCallback, useReducer } from 'react'
 import { ApiError, apiPost } from '../api/client'
@@ -13,6 +14,8 @@ export type CdLookupState = CdState & {
   setCopyScope: (scope: CopyScope) => void
   chosen: ReleaseCandidate | null
   lookup: () => Promise<void>
+  /** TOC を欄に入れて照会する（ドライブの検出から） */
+  lookupToc: (toc: string) => Promise<void>
   reset: () => void
   startManual: () => void
   updateDraft: (patch: Partial<DiscDraft>) => void
@@ -40,12 +43,13 @@ function describe(e: unknown): string {
 export function useCdLookup(): CdLookupState {
   const [s, dispatch] = useReducer(cdReducer, initialCdState)
 
-  const lookup = useCallback(async () => {
-    const normalized = normalizeTocInput(s.toc)
+  const lookupToc = useCallback(async (toc: string) => {
+    const normalized = normalizeTocInput(toc)
     if (normalized === '') {
       dispatch({ type: 'lookup_error', error: 'TOC を貼り付けてください' })
       return
     }
+    dispatch({ type: 'set_toc', toc })
     dispatch({ type: 'lookup_start' })
     try {
       const r = await apiPost<LookupResponse>('/api/cd/lookup', { toc: normalized })
@@ -53,13 +57,15 @@ export function useCdLookup(): CdLookupState {
     } catch (e) {
       dispatch({ type: 'lookup_error', error: describe(e) })
     }
-  }, [s.toc])
+  }, [])
+  const lookup = useCallback(() => lookupToc(s.toc), [lookupToc, s.toc])
 
   const chosen = s.result != null && s.selected != null ? (s.result.candidates[s.selected] ?? null) : null
   return {
     ...s,
     chosen,
     lookup,
+    lookupToc,
     setToc: useCallback((toc: string) => dispatch({ type: 'set_toc', toc }), []),
     select: useCallback((index: number) => dispatch({ type: 'select', index }), []),
     setCopyScope: useCallback((scope: CopyScope) => dispatch({ type: 'set_copy_scope', scope }), []),

@@ -1,7 +1,9 @@
 //! CD 取り込みの API（SPEC §9 `/api/cd/*`、§7.2）。P2-3 は照会だけ:
 //! `POST /api/cd/lookup { toc }` — TOC 文字列（CTDB 形式 `0:13915:…:leadout` か MusicBrainz 形式
 //! `1 12 leadout+150 offset+150 …`）から各種 DiscID を出し、MusicBrainz に照会して候補を返す。
-//! ドライブからの TOC 取得（`GET /api/cd/status`）は P2-1 / P2-2 で、同じ文字列をここへ渡す。
+//! `GET /api/cd/status`（P2-1 / P2-2）はポーラ（`cd::device`）が持つドライブの状態と TOC
+//! （lookup に渡すのと同じ CTDB 形式の文字列）を返し、`POST /api/cd/eject` はトレイを開けて
+//! 状態を見直す。ドライブが配線されていなければどちらも 503 `cd_unavailable`。
 //! 照会に失敗したら 502 `lookup_failed`、MusicBrainz が負荷制限（503）で通らない・クライアント
 //! 未構成なら 503 `musicbrainz_unavailable`（不一致や 0 件は 200 で候補が空）
 
@@ -12,12 +14,68 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::cd::device::DriveState;
 use crate::cd::musicbrainz::ReleaseCandidate;
 use crate::cd::toc::Toc;
 use crate::cd::LookupError;
+use crate::db::now_epoch;
 
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
+
+#[derive(Debug, Serialize)]
+pub struct StatusResponse {
+    pub state: DriveState,
+    /// ディスクがあって TOC を読めたら CTDB 形式の文字列（`POST /api/cd/lookup` にそのまま渡せる）
+    pub toc: Option<String>,
+    /// 直近の失敗（開けない・TOC を読めない）
+    pub error: Option<String>,
+    /// 最後にドライブを見た時刻（epoch 秒）。まだなら 0
+    pub checked_at: i64,
+}
+
+fn cd_unavailable() -> Response {
+    error_response(StatusCode::SERVICE_UNAVAILABLE, "cd_unavailable")
+}
+
+pub async fn status(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let Some(cd) = state.cd.as_ref() else {
+        return Ok(cd_unavailable());
+    };
+    let s = cd.monitor.snapshot();
+    Ok(Json(StatusResponse {
+        state: s.state,
+        toc: s.toc.as_ref().map(Toc::ctdb_toc),
+        error: s.error,
+        checked_at: s.checked_at,
+    })
+    .into_response())
+}
+
+/// トレイを開ける。開けた直後にポーラの 1 周回を回して、次の周期を待たずに状態を反映する
+pub async fn eject(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let Some(cd) = state.cd.clone() else {
+        return Ok(cd_unavailable());
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let r = cd.drive.eject();
+        cd.monitor.poll(cd.drive.as_ref(), now_epoch());
+        r
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("eject のタスクが異常終了: {e}")))?;
+    match result {
+        Ok(()) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Err(e) => {
+            tracing::warn!(error = %e, "CD の eject に失敗");
+            Ok(error_response_with_message(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "eject_failed",
+                e.to_string(),
+            ))
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct LookupBody {

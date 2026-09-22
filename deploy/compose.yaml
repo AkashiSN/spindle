@@ -2,13 +2,11 @@ services:
   spindle:
     image: ghcr.io/akashisn/spindle:latest
     devices:
-      - /dev/sr0:/dev/sr0
-      - /dev/sg0:/dev/sg0          # SG_IO に必要
+      - /dev/sr0:/dev/sr0          # CD ドライブ。ioctl / SG_IO とも sr0 に直接通る（/dev/sg* は不要）
     group_add:
       - "24"                       # host の cdrom グループ GID
     device_cgroup_rules:
       - 'b 11:* rmw'               # sr (block)
-      - 'c 21:* rmw'               # sg (char)
     user: "1000:1000"              # 既存ライブラリの所有者に合わせること
     volumes:
       - /mnt/ssd/media/Library:/library

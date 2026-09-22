@@ -1,10 +1,13 @@
 // CD 画面（SPEC §12.6 のウィザード。P2-3 の「候補選択」と P2-4 の「手入力 / トラックリスト貼り付け」まで）。
-// 検出（P2-1）が入るまでは TOC を貼り付けて照会する。候補を選ぶとフォームに写り、そこから直せる。
+// ドライブの検出（P2-1）で TOC が出たら自動で照会し、貼り付け欄はドライブ無しの環境用に残す。
+// 候補を選ぶとフォームに写り、そこから直せる。
 // 候補ゼロ件でも空のフォームで完走できる（D-21）。吸い出し（P2-5）は後続
 
 import { Fragment, useState } from 'react'
 import { useCategories } from '../hooks/useCategories'
+import type { CdDriveState } from '../hooks/useCdDrive'
 import type { CdLookupState } from '../hooks/useCdLookup'
+import { driveStateLabel } from '../lib/cdDrive'
 import {
   albumTags,
   candidateLengthMs,
@@ -17,8 +20,11 @@ import {
 } from '../lib/cd'
 import { formatDuration } from '../lib/format'
 
-export function CdView({ cd }: { cd: CdLookupState }) {
+export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }) {
   const { result, draft, confirmed } = cd
+  const driveLabel = drive.unavailable ? null : driveStateLabel(drive.status)
+  const canEject =
+    drive.status != null && drive.status.state !== 'no_drive' && drive.status.state !== 'unknown' && !drive.ejecting
   return (
     <section className="cd">
       <div className="table-toolbar">
@@ -31,11 +37,24 @@ export function CdView({ cd }: { cd: CdLookupState }) {
         )}
       </div>
 
+      <h2>ドライブ</h2>
+      <div className="op-row">
+        <span className="cd-drive-state" aria-live="polite">
+          {drive.unavailable ? 'CD ドライブは配線されていない' : (driveLabel ?? '…')}
+        </span>
+        {!drive.unavailable && (
+          <button type="button" className="ghost" disabled={!canEject} onClick={() => void drive.eject()}>
+            {drive.ejecting ? '取り出し中…' : '取り出す'}
+          </button>
+        )}
+      </div>
+      {drive.error != null && <p className="error">{drive.error}</p>}
+
       <h2>TOC</h2>
       <p className="muted small">
-        ドライブの検出は未実装（P2-1）。TOC を貼り付けて照会する: CTDB 形式 <code>0:13915:25592:…:リードアウト</code>
-        （データトラックは <code>-</code> 前置）、MusicBrainz 形式 <code>1 12 リードアウト+150 各オフセット+150…</code>、
-        または <code>cdrecord -toc</code> の出力
+        ディスクを入れると TOC が入り、照会が自動で始まる。ドライブが無い環境では貼り付けて照会する:
+        CTDB 形式 <code>0:13915:25592:…:リードアウト</code>（データトラックは <code>-</code> 前置）、
+        MusicBrainz 形式 <code>1 12 リードアウト+150 各オフセット+150…</code>、または <code>cdrecord -toc</code> の出力
       </p>
       <div className="op-row">
         <textarea

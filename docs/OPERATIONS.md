@@ -14,8 +14,9 @@
 TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deploy/compose.yaml` を写す。
 そのまま使えない箇所:
 
-- `devices` / `device_cgroup_rules` / `group_add`: CD ドライブ（`/dev/sr0` と `/dev/sg0`、cdrom グループの
-  GID）。ドライブが無い機体では 3 つとも消す
+- `devices` / `device_cgroup_rules` / `group_add`: CD ドライブ（`/dev/sr0` と cdrom グループの GID。
+  `/dev/sg*` は要らない）。ドライブが無い機体では 3 つとも消す（残すと compose が起動に失敗する。
+  アプリ側はデバイスを開けなくても起動し、CD 画面に「ドライブが無い」と出す）
 - `user`: 既存ライブラリの所有者の UID:GID に合わせる（違うとタグ書き込みが全滅する）
 - `volumes`: Library / Derived / Archive / Inbox / Playlists / data の実パスと、メタデータプラグイン
   （`spindle-ytmusic-meta`。イメージには入っていない）のマウント

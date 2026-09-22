@@ -61,6 +61,8 @@ pub fn router(state: AppState) -> Router {
         .route("/md5fill", post(md5fill::start))
         .route("/verify", post(verify::start))
         .route("/cd/lookup", post(cd::lookup))
+        .route("/cd/status", get(cd::status))
+        .route("/cd/eject", post(cd::eject))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route(

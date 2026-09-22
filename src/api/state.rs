@@ -46,6 +46,16 @@ pub struct AppState {
     pub transcode_grace: std::time::Duration,
     /// MusicBrainz の照会（P2-3）。無いと `/api/cd/lookup` は 503
     pub musicbrainz: Option<Arc<crate::cd::musicbrainz::MusicBrainzClient>>,
+    /// CD ドライブ（P2-1）。ポーラが `DriveMonitor` を更新し、`/api/cd/status` が読む。
+    /// eject はドライブを直接叩く。無いと `/api/cd/status` / `eject` は 503
+    pub cd: Option<CdDrive>,
+}
+
+/// ドライブとその監視状態の組
+#[derive(Clone)]
+pub struct CdDrive {
+    pub drive: Arc<dyn crate::cd::device::Drive>,
+    pub monitor: Arc<crate::cd::device::DriveMonitor>,
 }
 
 impl AppState {
@@ -69,7 +79,17 @@ impl AppState {
             inbox_watch: None,
             transcode_grace: super::stream::TRANSCODE_GRACE,
             musicbrainz: None,
+            cd: None,
         }
+    }
+
+    pub fn with_cd(
+        mut self,
+        drive: Arc<dyn crate::cd::device::Drive>,
+        monitor: Arc<crate::cd::device::DriveMonitor>,
+    ) -> Self {
+        self.cd = Some(CdDrive { drive, monitor });
+        self
     }
 
     pub fn with_musicbrainz(

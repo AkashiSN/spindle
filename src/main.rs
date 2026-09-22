@@ -8,6 +8,7 @@ use tracing::info;
 use spindle::api::{self, auth, AppState};
 use spindle::cd::accuraterip::AccurateRipClient;
 use spindle::cd::ctdb::CtdbClient;
+use spindle::cd::device as cd_device;
 use spindle::cd::musicbrainz::MusicBrainzClient;
 use spindle::db::{migrations, Db};
 use spindle::edit::{Editor, NormalizeEnv};
@@ -316,6 +317,21 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("MusicBrainz クライアントの初期化に失敗")?;
     state = state.with_musicbrainz(Arc::new(mb));
+    // CD ドライブ（P2-1）。`[rip].device` を 2 秒間隔で見る。デバイスが無くても起動は止めない
+    // （状態 no_drive として UI に出す。compose の devices が無い環境でも動く）
+    let cd_drive: Arc<dyn cd_device::Drive> =
+        Arc::new(cd_device::LinuxDrive::new(state.config.rip.device.clone()));
+    let cd_monitor = Arc::new(cd_device::DriveMonitor::default());
+    state = state.with_cd(Arc::clone(&cd_drive), Arc::clone(&cd_monitor));
+    if !state.config.rip.device.exists() {
+        tracing::warn!(device = %state.config.rip.device.display(), "CD ドライブのデバイスが無い。CD 取り込みは使えない");
+    }
+    let cd_poller = cd_device::spawn_poller(
+        cd_drive,
+        cd_monitor,
+        cd_device::POLL_INTERVAL,
+        shutdown.clone(),
+    );
     registry.register(
         JobType::Gc,
         Arc::new(
@@ -475,6 +491,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = backup_scheduler.await;
     let _ = gc_scheduler.await;
     let _ = inbox_scheduler.await;
+    let _ = cd_poller.await;
     if let Some(h) = subscription_dispatcher {
         let _ = h.await;
     }

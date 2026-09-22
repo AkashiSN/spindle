@@ -34,6 +34,7 @@ import { usePlayer } from './hooks/usePlayer'
 import { usePlaylists } from './hooks/usePlaylists'
 import { useSettings } from './hooks/useSettings'
 import { useTheme } from './hooks/useTheme'
+import { useCdDrive } from './hooks/useCdDrive'
 import { useCdLookup } from './hooks/useCdLookup'
 import { useInbox } from './hooks/useInbox'
 import { useTrackDetails } from './hooks/useTrackDetails'
@@ -135,6 +136,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const settings = useSettings(sseOpen && view === 'settings')
   const theme = useTheme()
   const cd = useCdLookup()
+  // CD 画面を開いている間ドライブを見て、新しいディスクの TOC が出たら照会を自動で始める（P2-1）
+  const drive = useCdDrive(sseOpen && view === 'cd', cd.lookupToc)
   // Inbox は画面を開いたときに取り、開いている間は inbox ジョブの job イベントで取り直す
   const inbox = useInbox(sseOpen && view === 'inbox')
   const visibleEnd = useRef(0)
@@ -563,7 +566,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         ) : view === 'inbox' ? (
           <InboxView inbox={inbox} onOpenAlbum={(id) => handleScope({ album_id: id })} />
         ) : view === 'cd' ? (
-          <CdView cd={cd} />
+          <CdView cd={cd} drive={drive} />
         ) : view === 'youtube' ? (
           <YoutubeView youtube={youtube} subs={subs} jobs={jobs} onOpenInbox={() => setView('inbox')} />
         ) : view === 'jobs' ? (

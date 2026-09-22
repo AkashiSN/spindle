@@ -468,9 +468,12 @@ Phase 4  commit:     1 トランザクションで
 ### 7.2 CD 取り込み
 
 ```
-[ディスク検出]  CDROM_DRIVE_STATUS ioctl を 2 秒間隔ポーリング
-   ↓            （udev がコンテナに届かないため）
-[TOC 取得]      cdrdao read-toc / SG_IO READ TOC
+[ディスク検出]  CDROM_DRIVE_STATUS ioctl を 2 秒間隔ポーリング（`cd/device.rs`）
+   ↓            （udev がコンテナに届かないため）。デバイスを開けなければ no_drive として起動は続ける
+[TOC 取得]      CDROMREADTOCHDR / CDROMREADTOCENTRY ioctl（LBA 形式。中身は READ TOC コマンドで、
+   ↓            /dev/sg* も外部プロセスも要らない）。DiscOk になってから読めるまで毎周回試し、
+   ↓            読めたらディスクが抜かれるまで読み直さない。`GET /api/cd/status` が CTDB 形式の
+   ↓            文字列で返し、UI は新しいディスクの TOC が出たら照会を自動で始める
    ↓
 [ID 算出]       MusicBrainz DiscID / AccurateRip id1,id2 / FreeDB ID
    ↓            すべて TOC からの整数演算。libdiscid FFI 不要
@@ -1392,7 +1395,10 @@ GET    /api/playlists/:id/fb2k_query              foobar Autoplaylist 用の { q
 POST   /api/auth/login, POST /api/auth/logout
 GET    /api/auth/session
 
-GET    /api/cd/status                             ディスク有無・TOC（P2-1。TOC は下の lookup に渡す文字列と同じ形）
+GET    /api/cd/status                             { state: unknown | no_drive | no_disc | tray_open | not_ready | disc_ok,
+                                                  toc: CTDB 形式の文字列 | null, error: 直近の失敗 | null, checked_at }
+                                                  （P2-1。ポーラの状態で、ドライブは叩かない。TOC は下の lookup に渡す
+                                                  文字列と同じ形。ドライブ未配線なら 503 cd_unavailable）
 POST   /api/cd/lookup                             { toc }。TOC 文字列（CTDB 形式 0:13915:…:leadout か MusicBrainz 形式
                                                   1 12 leadout+150 offset+150…）から各種 DiscID を出し、MusicBrainz に
                                                   照会（P2-3、D-21 / D-64）。→ 200 { discid, mb_toc, accuraterip_id,
@@ -1401,7 +1407,9 @@ POST   /api/cd/lookup                             { toc }。TOC 文字列（CTDB
                                                   400 bad_request（TOC）、502 lookup_failed（届かない・応答が壊れている）、
                                                   503 musicbrainz_unavailable（再試行しても 503 の負荷制限、または未構成）
 POST   /api/cd/rip                                リップ開始
-POST   /api/cd/eject
+POST   /api/cd/eject                              トレイを開けて状態を見直す → 204。失敗は 500 eject_failed（理由付き）。
+                                                  先に CDROM_LOCKDOOR 0 で扉のロックを外す（外さないとドライブが
+                                                  CHECK CONDITION で拒む機種がある）。rip 中の 409 は P2-5
 
 GET    /api/jobs, POST /api/jobs/:id/cancel, POST /api/jobs/:id/retry
 DELETE /api/jobs/:id                              終端（failed / done / cancelled）のジョブ行を消す（P4-18。queued / running は 409 not_terminal）
@@ -1894,8 +1902,12 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   256px のプレビュー（形式・寸法）→ 「選択 N 件の埋め込み画像を差し替え」（`POST /api/artwork/embed`。
   反映待ちの 409 は他の操作と同じ「除外して適用」）。履歴画面の `PICTURE` 値はサムネイルで出す
 - **CD**（P2）: ウィザード。検出 → 候補選択 / 手入力 / トラックリスト貼り付け →
-  オフセット確認 → 進捗。照会ゼロ件でも完走できる。検出（P2-1）が入るまでは TOC の貼り付け
-  （CTDB 形式 / MusicBrainz 形式 / `cdrecord -toc` の出力）を入力源にする（P2-3、D-64。デバッグ用に残す）。
+  オフセット確認 → 進捗。照会ゼロ件でも完走できる。検出（P2-1）は画面を開いている間
+  `GET /api/cd/status` を 2 秒間隔で取り（`useCdDrive`）、状態の一行（ディスクなし / トレイが開いている /
+  ディスクあり（N トラック）/ ドライブが無い（理由））と「取り出す」を出す。新しいディスクの TOC が出たとき
+  だけ（同じディスクの間は 1 回。`lib/cdDrive.ts` の `newDiscToc`）TOC 欄に入れて照会を自動で始める。
+  TOC の貼り付け（CTDB 形式 / MusicBrainz 形式 / `cdrecord -toc` の出力）はドライブの無い環境とデバッグ用に
+  残す（P2-3、D-64）。
   候補は DiscID 一致を先に出し、exact が 1 件なら選んでおく。選ぶとフォームに写り、そこから直せる。
   **写す範囲**（D-72、P4-2）は既定で識別用の最小限（アルバム・アルバムアーティスト・日付・ディスク番号 /
   枚数・`MUSICBRAINZ_ALBUMID`。`MUSICBRAINZ_DISCID` / `TRACKTOTAL` は吸い出し時に TOC から付く。トラック行は
@@ -2098,13 +2110,11 @@ services:
   spindle:
     image: ghcr.io/akashisn/spindle:latest
     devices:
-      - /dev/sr0:/dev/sr0
-      - /dev/sg0:/dev/sg0        # SG_IO に必要
+      - /dev/sr0:/dev/sr0        # CD ドライブ。ioctl / SG_IO とも sr0 に直接通る（/dev/sg* は不要）
     group_add:
       - "24"                     # host の cdrom グループ GID
     device_cgroup_rules:
       - 'b 11:* rmw'             # sr (block)
-      - 'c 21:* rmw'             # sg (char)
     user: "1000:1000"            # 既存ライブラリの所有者に合わせる
     volumes:
       - /mnt/ssd/media/Library:/library
@@ -2125,6 +2135,9 @@ services:
   `/dev/disk/by-id/...` を指すか、SATA 接続を推奨
 - UID/GID が既存ライブラリの所有者と一致しないとタグ書き込みが全滅する
 - udev はコンテナに届かないため、ディスク挿入検知はポーリング
+- ホストにドライブが無いと `devices` の行で compose が起動に失敗する。ドライブの無い機体では
+  `devices` / `group_add` / `device_cgroup_rules` を消す。アプリ側は `[rip].device` を開けなくても
+  起動し、CD 画面に「ドライブが無い」と出す
 
 ### ZFS データセット
 
@@ -2245,7 +2258,7 @@ src/
 │   └── artwork.rs       同梱 / 埋め込み画像の選択、判別、ハッシュアドレスのキャッシュ（P1-3）
 ├── cd/
 │   ├── mod.rs           TrackLayout（サンプル単位のトラック列）、照会用 HTTP クライアント
-│   ├── device.rs        ioctl / SG_IO / ポーリング
+│   ├── device.rs        ioctl（CDROM_DRIVE_STATUS / READ TOC / LOCKDOOR + EJECT）、Drive トレイト、DriveMonitor とポーラ
 │   ├── toc.rs           TOC の検証、各種 DiscID 算出、サンプル数からの再構成（§7.3）
 │   ├── rip.rs           cd-paranoia、オフセット、分割
 │   ├── accuraterip.rs   ARv1/v2 CRC、DB の照会（dBAR-*.bin）、オフセット表
