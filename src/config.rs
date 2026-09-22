@@ -323,6 +323,20 @@ impl Default for HiresConfig {
 #[serde(deny_unknown_fields)]
 pub struct GcConfig {
     pub retention_days: u32,
+    /// 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない（P4-18）
+    #[serde(default = "default_gc_jobs_done_days")]
+    pub jobs_done_days: u32,
+    /// failed のジョブ行を消すまでの日数。0 で消さない
+    #[serde(default = "default_gc_jobs_failed_days")]
+    pub jobs_failed_days: u32,
+}
+
+fn default_gc_jobs_done_days() -> u32 {
+    7
+}
+
+fn default_gc_jobs_failed_days() -> u32 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize)]

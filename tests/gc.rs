@@ -1079,3 +1079,78 @@ async fn artwork_referenced_by_a_track_is_kept() {
     assert!(env.path(&format!("thumbs/{own}/orig.png")).exists());
     assert_eq!(env.count("SELECT artwork_id FROM tracks WHERE id = 1"), 1);
 }
+
+// ---------------------------------------------------------------- ジョブ行の掃除（P4-18）
+
+/// 終端のジョブ行は保持期間を過ぎたら消す: done / cancelled は `jobs_done_days`、failed は
+/// `jobs_failed_days`。queued / running と期間内の行は残る。0 は消さない
+#[tokio::test]
+async fn gc_prunes_old_terminal_job_rows() {
+    use spindle::gc::{prunable_jobs, prune_jobs, JobsRetention};
+    let env = Env::new();
+    let now = env.now;
+    let ins = |id: i64, state: &str, finished: Option<i64>| {
+        env.conn()
+            .execute(
+                "INSERT INTO jobs (id, type, payload, state, created_at, finished_at) VALUES (?1, 'rg', '{}', ?2, 1, ?3)",
+                params![id, state, finished],
+            )
+            .unwrap();
+    };
+    ins(1, "done", Some(now - 8 * DAY));
+    ins(2, "done", Some(now - 6 * DAY));
+    ins(3, "cancelled", Some(now - 8 * DAY));
+    ins(4, "failed", Some(now - 31 * DAY));
+    ins(5, "failed", Some(now - 29 * DAY));
+    ins(6, "queued", None);
+    ins(7, "running", None);
+    let r = JobsRetention::from_days(7, 30);
+    assert_eq!(prunable_jobs(&env.db, &r, now).await.unwrap(), (2, 1));
+    assert_eq!(prune_jobs(&env.db, &r, now).await.unwrap(), (2, 1));
+    let left: Vec<i64> = {
+        let c = env.conn();
+        let mut st = c.prepare("SELECT id FROM jobs ORDER BY id").unwrap();
+        st.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(left, [2, 5, 6, 7, GC_JOB]);
+    // 0 = 消さない
+    let off = JobsRetention::from_days(0, 0);
+    assert_eq!(prunable_jobs(&env.db, &off, now).await.unwrap(), (0, 0));
+    assert_eq!(prune_jobs(&env.db, &off, now).await.unwrap(), (0, 0));
+}
+
+/// gc ジョブ本体も掃除を行う（自分は running なので消えない）
+#[tokio::test]
+async fn gc_job_prunes_job_rows_and_keeps_itself() {
+    use spindle::gc::JobsRetention;
+    let env = Env::new();
+    env.retire_fake_gc_job();
+    env.conn()
+        .execute(
+            "INSERT INTO jobs (id, type, payload, state, created_at, finished_at) VALUES (1, 'rg', '{}', 'done', 1, ?1)",
+            [env.now - 8 * DAY],
+        )
+        .unwrap();
+    let mut reg = Registry::new();
+    reg.register(
+        JobType::Gc,
+        Arc::new(
+            GcHandler::new(env.db.clone(), env.roots.clone(), RETENTION)
+                .with_jobs_retention(JobsRetention::from_days(7, 30)),
+        ),
+    );
+    let gc_id = match env.jobs.enqueue(new_gc_job()).await.unwrap() {
+        EnqueueResult::Inserted(id) | EnqueueResult::Duplicate(id) => id,
+    };
+    env.jobs.start(reg, env.shutdown.clone());
+    assert_eq!(env.wait_job(gc_id).await, JobState::Done);
+    assert_eq!(env.count("SELECT count(*) FROM jobs WHERE id = 1"), 0);
+    assert_eq!(
+        env.count(&format!("SELECT count(*) FROM jobs WHERE id = {gc_id}")),
+        1,
+        "自分（終端直後の done）は消えない"
+    );
+}

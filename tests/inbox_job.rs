@@ -1597,3 +1597,131 @@ async fn placing_a_subscription_item_binds_the_album_and_requests_a_sync() {
         1
     );
 }
+
+// ---------------------------------------------------------------- 変化の検知（P4-18）
+
+/// Inbox の指紋は音声ファイルの集合（パス・inode・size・mtime・ctime）で決まる。非音声・空ディレクトリは
+/// 無視。消せば元に戻る
+#[tokio::test]
+async fn fingerprint_changes_only_with_audio_files() {
+    let lib = Lib::new();
+    let f0 = spindle::import::inbox::fingerprint(&lib.inbox).unwrap();
+    std::fs::write(lib.inbox_path("cover.jpg"), b"jpg").unwrap();
+    std::fs::create_dir(lib.inbox_path("Empty")).unwrap();
+    assert_eq!(spindle::import::inbox::fingerprint(&lib.inbox).unwrap(), f0);
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    let f1 = spindle::import::inbox::fingerprint(&lib.inbox).unwrap();
+    assert_ne!(f1, f0);
+    // 内容を書き直せば変わる（size / mtime / inode のどれか）
+    lib.add(
+        "AlbumA/01.flac",
+        1,
+        "One (long title to change size)",
+        "A",
+        1,
+    );
+    let f2 = spindle::import::inbox::fingerprint(&lib.inbox).unwrap();
+    assert_ne!(f2, f1);
+    std::fs::remove_file(lib.inbox_path("AlbumA/01.flac")).unwrap();
+    assert_eq!(spindle::import::inbox::fingerprint(&lib.inbox).unwrap(), f0);
+}
+
+/// 監視は「起動直後」「指紋が変わった」「配置待ち・期限切れの placed がある」ときだけ inbox ジョブを
+/// 投入する。変化が無ければ毎分ジョブ行を作らない（一覧を汚さない）
+#[tokio::test]
+async fn watcher_enqueues_only_when_inbox_changes_or_items_need_attention() {
+    use spindle::jobs::handlers::inbox::{spawn_watcher_with, WatchStatus};
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    let status = Arc::new(WatchStatus::default());
+    let tick = Duration::from_millis(30);
+    let handle = spawn_watcher_with(
+        lib.jobs.clone(),
+        lib.inbox.clone(),
+        tick,
+        status.clone(),
+        lib.shutdown.clone(),
+    );
+    let count = || -> i64 {
+        lib.conn()
+            .query_row("SELECT count(*) FROM jobs WHERE type = 'inbox'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let finish_all = || {
+        lib.conn()
+            .execute(
+                "UPDATE jobs SET state = 'done', finished_at = 1 WHERE type = 'inbox'",
+                [],
+            )
+            .unwrap();
+    };
+    let wait_count = |n: i64| async move {
+        for _ in 0..100 {
+            if count() == n {
+                return;
+            }
+            tokio::time::sleep(tick).await;
+        }
+        panic!("inbox ジョブが {n} 件にならない（{}）", count());
+    };
+    // 起動直後に 1 回
+    wait_count(1).await;
+    finish_all();
+    tokio::time::sleep(tick * 10).await;
+    assert_eq!(count(), 1, "変化が無ければ投入しない");
+    assert!(status.checked_at() > 0, "確認した時刻を記録する");
+    // 音声を置いたら 1 回だけ
+    lib.add("AlbumB/01.flac", 2, "Two", "B", 1);
+    wait_count(2).await;
+    finish_all();
+    tokio::time::sleep(tick * 10).await;
+    assert_eq!(count(), 2);
+    // 非音声だけなら投入しない
+    std::fs::write(lib.inbox_path("AlbumB/cover.jpg"), b"jpg").unwrap();
+    tokio::time::sleep(tick * 10).await;
+    assert_eq!(count(), 2);
+    // 配置待ち（承認済み）が残っていれば投入する（承認 API の投入が Requeue で戻った後の保険）
+    lib.conn()
+        .execute(
+            "INSERT INTO inbox_items (id, rel_dir, rel_dir_key, state, detected_at, seen_at)
+             VALUES (900, 'x', 'x', 'approved', 1, 1)",
+            [],
+        )
+        .unwrap();
+    wait_count(3).await;
+    lib.conn()
+        .execute(
+            "UPDATE inbox_items SET state = 'pending' WHERE id = 900",
+            [],
+        )
+        .unwrap();
+    finish_all();
+    tokio::time::sleep(tick * 10).await;
+    assert_eq!(count(), 3);
+    // 期限切れの placed（片付けが要る）も投入の理由になる
+    lib.conn()
+        .execute(
+            "UPDATE inbox_items SET state = 'placed', placed_at = 1 WHERE id = 900",
+            [],
+        )
+        .unwrap();
+    wait_count(4).await;
+    lib.conn()
+        .execute("DELETE FROM inbox_items WHERE id = 900", [])
+        .unwrap();
+    finish_all();
+    tokio::time::sleep(tick * 10).await;
+    assert_eq!(count(), 4);
+    // 前のジョブがまだ走っていて Duplicate なら、次の周回で投入し直す（変化を取りこぼさない）
+    lib.add("AlbumC/01.flac", 3, "Three", "C", 1);
+    wait_count(5).await;
+    lib.add("AlbumC/02.flac", 4, "Four", "C", 2);
+    tokio::time::sleep(tick * 10).await;
+    assert_eq!(count(), 5, "queued のままなら重複投入しない");
+    finish_all();
+    wait_count(6).await;
+    lib.shutdown.cancel();
+    handle.await.unwrap();
+}

@@ -1,4 +1,5 @@
-//! `GET /api/jobs`、`POST /api/jobs/:id/cancel` / `retry`（SPEC §9、§12.5）
+//! `GET /api/jobs`、`POST /api/jobs/:id/cancel` / `retry`、`DELETE /api/jobs/:id`（終端の片付け）、
+//! `DELETE /api/jobs?state=failed`（失敗をまとめて。P4-18）（SPEC §9、§12.5）
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -9,7 +10,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::jobs::ListLimits;
-use crate::jobs::{CancelOutcome, Job, JobType, RetryOutcome, Summary, TypeCounts, LIST_LIMITS};
+use crate::jobs::{
+    CancelOutcome, DeleteOutcome, Job, JobType, RetryOutcome, Summary, TypeCounts, LIST_LIMITS,
+};
 
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
@@ -90,4 +93,42 @@ pub async fn retry(
         RetryOutcome::NotRetryable => error_response(StatusCode::CONFLICT, "not_retryable"),
         RetryOutcome::Duplicate => error_response(StatusCode::CONFLICT, "duplicate"),
     })
+}
+
+pub async fn remove(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    Ok(match state.jobs.remove(id).await? {
+        DeleteOutcome::Deleted => StatusCode::NO_CONTENT.into_response(),
+        DeleteOutcome::NotFound => error_response(StatusCode::NOT_FOUND, "not_found"),
+        DeleteOutcome::NotTerminal => error_response(StatusCode::CONFLICT, "not_terminal"),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct RemoveManyQuery {
+    pub state: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct Removed {
+    pub deleted: usize,
+}
+
+/// `DELETE /api/jobs?state=failed`。まとめて消せるのは failed だけ（done は数が多く、一覧の上限で
+/// 切れるので画面から 1 件ずつ、古いものは GC が消す）
+pub async fn remove_many(
+    State(state): State<AppState>,
+    Query(q): Query<RemoveManyQuery>,
+) -> Result<Response, ApiError> {
+    if q.state.as_deref() != Some("failed") {
+        return Ok(error_response_with_message(
+            StatusCode::BAD_REQUEST,
+            "invalid_state",
+            "state=failed だけ受け付ける",
+        ));
+    }
+    let deleted = state.jobs.remove_failed().await?;
+    Ok(Json(Removed { deleted }).into_response())
 }

@@ -126,6 +126,16 @@ impl Jobs {
         Ok(outcome)
     }
 
+    /// 終端のジョブ行を 1 件消す（P4-18）。イベントは流さない（行が無くなるので）。画面は取り直す
+    pub async fn remove(&self, id: i64) -> Result<dbjobs::DeleteOutcome> {
+        self.db.write(move |c| dbjobs::delete_terminal(c, id)).await
+    }
+
+    /// `failed` をすべて消す。返り値は消した数
+    pub async fn remove_failed(&self) -> Result<usize> {
+        self.db.write(|c| dbjobs::delete_failed(c)).await
+    }
+
     /// 別のトランザクションで直接 `jobs` に投入した後に呼ぶ（編集バッチの prepare 等）。
     /// イベントを流してワーカーを起こす
     pub async fn notify_enqueued(&self, ids: &[i64]) {

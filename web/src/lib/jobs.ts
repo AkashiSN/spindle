@@ -108,6 +108,11 @@ export function canRetry(j: Job): boolean {
   return j.state === 'failed' || j.state === 'cancelled'
 }
 
+/** 終端（done / failed / cancelled）は一覧から消せる（確認済みの失敗の片付け。P4-18） */
+export function canRemove(j: Job): boolean {
+  return j.state === 'done' || j.state === 'failed' || j.state === 'cancelled'
+}
+
 /** CPU 系（rg / transcode / flaccheck / hirescheck）の種別か（共通予算の対象。D-73） */
 export const CPU_BOUND_TYPES: ReadonlySet<string> = new Set(['rg', 'transcode', 'flaccheck', 'hirescheck'])
 

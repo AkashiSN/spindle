@@ -43,6 +43,9 @@ impl Handler for YtdlHandler {
                 Ok(Downloaded::Skipped { message }) => {
                     Ok(Outcome::DoneWith(format!("プラグインが skip: {message}")))
                 }
+                Ok(Downloaded::AlreadyImported { location, path }) => Ok(Outcome::DoneWith(
+                    format!("取り込み済み（{location}）: {path}"),
+                )),
                 Ok(Downloaded::Playlist { enqueued, skipped }) => Ok(Outcome::DoneWith(format!(
                     "再生リストを展開した: {enqueued} 件を投入、{skipped} 件は取り込み済み"
                 ))),

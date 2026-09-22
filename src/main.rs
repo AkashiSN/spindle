@@ -318,11 +318,14 @@ async fn main() -> anyhow::Result<()> {
     state = state.with_musicbrainz(Arc::new(mb));
     registry.register(
         JobType::Gc,
-        Arc::new(GcHandler::new(
-            Arc::clone(&state.db),
-            gc_roots,
-            i64::from(state.config.gc.retention_days) * 86_400,
-        )),
+        Arc::new(
+            GcHandler::new(
+                Arc::clone(&state.db),
+                gc_roots,
+                i64::from(state.config.gc.retention_days) * 86_400,
+            )
+            .with_jobs_retention(spindle::api::gc::jobs_retention(&state)),
+        ),
     );
     registry.register(
         JobType::Transcode,
@@ -353,7 +356,10 @@ async fn main() -> anyhow::Result<()> {
         )),
     );
     // Inbox 取り込み（P2-10、D-68）。走査と承認済みの配置を 1 本のジョブで
-    state = state.with_inbox(Arc::clone(&inbox_root));
+    let inbox_watch = Arc::new(inbox_job::WatchStatus::default());
+    state = state
+        .with_inbox(Arc::clone(&inbox_root))
+        .with_inbox_watch(Arc::clone(&inbox_watch));
     registry.register(
         JobType::Inbox,
         Arc::new(InboxHandler::new(PlaceItemEnv {
@@ -422,10 +428,12 @@ async fn main() -> anyhow::Result<()> {
             shutdown.clone(),
         )
     });
-    // Inbox の周期検出（0 で無し）
-    let inbox_scheduler = inbox_job::spawn_scheduler(
+    // Inbox の周期監視（0 で無し）。変化があったときだけ検出を投入する（P4-18）
+    let inbox_scheduler = inbox_job::spawn_watcher(
         Arc::clone(&state.jobs),
+        Arc::clone(&inbox_root),
         i64::from(state.config.inbox.poll_interval_secs),
+        inbox_watch,
         shutdown.clone(),
     );
     // 定期バックアップ（SPEC §14）。最後の終端 backup から interval_hours 経っていれば投入する

@@ -14,7 +14,8 @@
 //! ```
 //!
 //! 再実行（Inbox に置いた後・サイドカーや投入の前に落ちた）は、置いたファイルの `SOURCE_URL` で自分の
-//! 成果物と見分けて続きから済ませる（冪等）。失敗の区分: 再試行しても変わらないもの（取り込み済み・
+//! 成果物と見分けて続きから済ませる（冪等）。取り込み済み（同じ `SOURCE_URL` が Library / Inbox にある）は
+//! 失敗でなく [`Downloaded::AlreadyImported`]（P4-18）。失敗の区分: 再試行しても変わらないもの（
 //! webm の音声なし・プラグインの故障・対応していない URL・宛先の同名で別の内容）は
 //! [`DownloadError::Fatal`]、それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O）は [`DownloadError::Failed`] で
 //! 指数バックオフ
@@ -200,6 +201,12 @@ pub enum Downloaded {
     Skipped { message: String },
     /// Inbox に置いた（Inbox 相対）
     Staged { rel_path: RelPath, verdict: String },
+    /// Library / Inbox に同じ `SOURCE_URL` がある。やることが無い（失敗ではない。P4-18）。
+    /// `location` は "Library" / "Inbox"、`path` は所在
+    AlreadyImported {
+        location: &'static str,
+        path: String,
+    },
 }
 
 // ---------------------------------------------------------------- dump の解釈
@@ -568,9 +575,10 @@ pub async fn download_one(
     let canonical = video.webpage_url.clone();
     match env.db.read(move |c| find_source_url(c, &canonical)).await? {
         Some(SourceLocated::Library(p)) => {
-            return Err(DownloadError::Fatal(format!(
-                "取り込み済み（Library）: {p}"
-            )));
+            return Ok(Downloaded::AlreadyImported {
+                location: "Library",
+                path: p,
+            });
         }
         Some(SourceLocated::Inbox(p)) if canonical_key(&p) == target.key() => {
             if is_own_product(&env.inbox, &target, &video.webpage_url) {
@@ -592,7 +600,10 @@ pub async fn download_one(
             }
         }
         Some(SourceLocated::Inbox(p)) => {
-            return Err(DownloadError::Fatal(format!("取り込み済み（Inbox）: {p}")));
+            return Ok(Downloaded::AlreadyImported {
+                location: "Inbox",
+                path: p,
+            });
         }
         None => {}
     }

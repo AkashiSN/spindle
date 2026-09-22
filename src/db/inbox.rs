@@ -314,6 +314,20 @@ pub fn stale_items(conn: &Connection, seen_before: i64) -> Result<Vec<Item>> {
     Ok(rows)
 }
 
+/// 走査の他に inbox ジョブがやることが残っているか: 配置待ち（`approved`。承認 API の投入が Requeue や
+/// 再起動で消えた後の保険）と、期限切れの `placed`（片付け）。周期の監視が Inbox に変化が無くても投入する
+/// 理由（P4-18）
+pub fn needs_attention(conn: &Connection, placed_before: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM inbox_items
+         WHERE state = 'approved'
+            OR (state = 'placed' AND placed_at IS NOT NULL AND placed_at < ?1)",
+        [placed_before],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `placed` で `placed_at < placed_before` の件を消す。返り値は消した数
 pub fn expire_placed(conn: &Connection, placed_before: i64) -> Result<usize> {
     Ok(conn.execute(

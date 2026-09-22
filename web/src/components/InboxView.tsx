@@ -21,6 +21,7 @@ import {
   stateLabel,
   validateDraft,
   verdictLabel,
+  watchLabel,
   type DraftTrack,
   type InboxDraft,
   type InboxItem,
@@ -39,6 +40,7 @@ export function InboxView({ inbox, onOpenAlbum }: { inbox: InboxState; onOpenAlb
       <div className="table-toolbar">
         <h1>Inbox</h1>
         <span className="spacer" />
+        <span className="muted small">{watchLabel(inbox.watch, formatDateTime)}</span>
         <button type="button" disabled={inbox.busy || inbox.unavailable} onClick={() => void inbox.scan()}>
           今すぐ確認
         </button>
@@ -57,7 +59,7 @@ export function InboxView({ inbox, onOpenAlbum }: { inbox: InboxState; onOpenAlb
       )}
       {inbox.error != null && <p className="error">{inbox.error}</p>}
       {inbox.items != null && items.length === 0 && !inbox.unavailable && (
-        <p className="muted">件はない。ファイルを置くと定期の走査（設定 [inbox].poll_interval_secs）か「今すぐ確認」で現れる</p>
+        <p className="muted">件はない。ファイルを置くと定期の確認（設定 [inbox].poll_interval_secs。変化があったときだけ走査する）か「今すぐ確認」で現れる</p>
       )}
       {items.length > 0 && (
         <div className="inbox-body">

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Job } from '../api/types'
 import {
   canCancel,
+  canRemove,
   canRetry,
   cpuBudgetLabel,
   filterJobs,
@@ -113,6 +114,16 @@ describe('jobProgress', () => {
     expect(jobProgress(job({ done: 3, total: 10 }))).toBe('3 / 10')
     expect(jobProgress(job({ progress: 0.456 }))).toBe('46%')
     expect(jobProgress(job({}))).toBe('')
+  })
+})
+
+describe('canRemove', () => {
+  it('終端（done / failed / cancelled）だけ消せる（P4-18）', () => {
+    expect(canRemove(job({ state: 'done' }))).toBe(true)
+    expect(canRemove(job({ state: 'failed' }))).toBe(true)
+    expect(canRemove(job({ state: 'cancelled' }))).toBe(true)
+    expect(canRemove(job({ state: 'queued' }))).toBe(false)
+    expect(canRemove(job({ state: 'running' }))).toBe(false)
   })
 })
 

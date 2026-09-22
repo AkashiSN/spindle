@@ -40,6 +40,8 @@ pub struct AppState {
     pub gc: Option<Arc<GcRoots>>,
     /// Inbox の root（P2-10）。無いと `/api/inbox` は 503
     pub inbox: Option<Arc<RootDir>>,
+    /// Inbox の周期監視の状態（最後に確認した時刻。P4-18）。監視が無ければ None
+    pub inbox_watch: Option<Arc<crate::jobs::handlers::inbox::WatchStatus>>,
     /// オンザフライ変換の上限に足す猶予（トラック長 + これ。P1-9）
     pub transcode_grace: std::time::Duration,
     /// MusicBrainz の照会（P2-3）。無いと `/api/cd/lookup` は 503
@@ -64,6 +66,7 @@ impl AppState {
             playlists: None,
             gc: None,
             inbox: None,
+            inbox_watch: None,
             transcode_grace: super::stream::TRANSCODE_GRACE,
             musicbrainz: None,
         }
@@ -101,6 +104,14 @@ impl AppState {
 
     pub fn with_inbox(mut self, inbox: Arc<RootDir>) -> Self {
         self.inbox = Some(inbox);
+        self
+    }
+
+    pub fn with_inbox_watch(
+        mut self,
+        watch: Arc<crate::jobs::handlers::inbox::WatchStatus>,
+    ) -> Self {
+        self.inbox_watch = Some(watch);
         self
     }
 

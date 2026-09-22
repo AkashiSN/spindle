@@ -558,8 +558,10 @@ async fn adoption_of_a_scanned_file_uses_the_path_key_and_rereads_the_file() {
     assert!(lib.inbox_path(rel).exists());
 }
 
+/// 取り込み済み（Library / Inbox に同じ SOURCE_URL）は「やることが無い」であって失敗ではない。
+/// done（note に所在）にして、上部バーの赤丸を本当の失敗だけにする（P4-18）
 #[tokio::test]
-async fn already_imported_url_is_fatal() {
+async fn already_imported_url_is_done_with_a_note() {
     let lib = lib!();
     lib.video(U1, "v1", "KnownCh", "One", true);
     // Library に SOURCE_URL を持つ active なトラック
@@ -574,13 +576,13 @@ async fn already_imported_url_is_fatal() {
         .unwrap();
     lib.start();
     let (id, st) = lib.run(U1).await;
-    assert_eq!(st, JobState::Failed);
-    let (attempts, err) = lib.job(id);
-    assert_eq!(attempts, 1);
+    assert_eq!(st, JobState::Done);
+    let note = lib.note(id).unwrap_or_default();
     assert!(
-        err.as_deref().unwrap_or("").contains("Pop/A/B/01 One.opus"),
-        "{err:?}"
+        note.starts_with("取り込み済み（Library）") && note.contains("Pop/A/B/01 One.opus"),
+        "{note:?}"
     );
+    assert_eq!(lib.job(id).1, None, "失敗ではないので last_error は無い");
     assert_eq!(lib.calls().len(), 1, "download を呼ばない");
 
     // Inbox にある（承認待ち）ものも同じ
@@ -599,15 +601,11 @@ async fn already_imported_url_is_fatal() {
         .execute("UPDATE jobs SET dedup_key = NULL", [])
         .unwrap();
     let (id, st) = lib.run(U1).await;
-    assert_eq!(st, JobState::Failed);
+    assert_eq!(st, JobState::Done);
+    let note = lib.note(id).unwrap_or_default();
     assert!(
-        lib.job(id)
-            .1
-            .as_deref()
-            .unwrap_or("")
-            .contains("youtube/x/a.opus"),
-        "{:?}",
-        lib.job(id)
+        note.starts_with("取り込み済み（Inbox）") && note.contains("youtube/x/a.opus"),
+        "{note:?}"
     );
 }
 

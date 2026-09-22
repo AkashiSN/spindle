@@ -41,6 +41,16 @@ pub struct ItemView {
 #[derive(Serialize)]
 pub struct ItemList {
     pub items: Vec<ItemView>,
+    /// 周期監視の状態（P4-18）
+    pub watch: WatchView,
+}
+
+/// 周期監視（`[inbox].poll_interval_secs`）の状態。画面が「最後に確認: HH:MM:SS」を出す
+#[derive(Serialize)]
+pub struct WatchView {
+    /// 最後に Inbox を確認した時刻。監視が無い / まだ一度も確認していなければ null
+    pub checked_at: Option<i64>,
+    pub poll_interval_secs: u32,
 }
 
 #[derive(Serialize)]
@@ -99,7 +109,19 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
         })
         .await?
         .map_err(ApiError::Internal)?;
-    Ok(Json(ItemList { items }).into_response())
+    let checked_at = state
+        .inbox_watch
+        .as_ref()
+        .map(|w| w.checked_at())
+        .filter(|t| *t > 0);
+    Ok(Json(ItemList {
+        items,
+        watch: WatchView {
+            checked_at,
+            poll_interval_secs: state.config.inbox.poll_interval_secs,
+        },
+    })
+    .into_response())
 }
 
 pub async fn scan(State(state): State<AppState>) -> Result<Response, ApiError> {

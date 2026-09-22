@@ -13,6 +13,7 @@ import {
   stateLabel,
   validateDraft,
   verdictLabel,
+  watchLabel,
   type DraftTrack,
   type InboxDraft,
   type InboxFile,
@@ -350,3 +351,14 @@ describe('埋め込み画像', () => {
     expect(artworkUrl(7, h1)).toBe(`/api/inbox/7/artwork/${h1}`)
   })
 })
+
+describe('watchLabel', () => {
+  const t = (e: number) => `T${e}`
+  it('監視が無い / 間隔 0 は空、未確認は「まだ」、確認済みは時刻と間隔', () => {
+    expect(watchLabel(null, t)).toBe('')
+    expect(watchLabel({ checked_at: 5, poll_interval_secs: 0 }, t)).toBe('')
+    expect(watchLabel({ checked_at: null, poll_interval_secs: 60 }, t)).toBe('確認: 60 秒ごと（まだ）')
+    expect(watchLabel({ checked_at: 5, poll_interval_secs: 60 }, t)).toBe('最後に確認: T5（60 秒ごと）')
+  })
+})
+

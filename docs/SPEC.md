@@ -342,7 +342,9 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
 `missing_since` による論理削除。SMB 一時切断やスキャン中のマウント欠落で行を物理削除すると、
 プレイリストと編集履歴が巻き添えになる。既定 30 日経過後に GC（`gc` ジョブ。missing トラック・
 アルバムの行、`Archive/` の退避ファイル、Derived の孤児、アートワークの孤児を回収する。
-1 日 1 回自動、`POST /api/gc` で手動、`GET /api/gc/preview` が dry-run。D-56）。
+1 日 1 回自動、`POST /api/gc` で手動、`GET /api/gc/preview` が dry-run。D-56）。GC は保持期間を過ぎた
+終端の**ジョブ行**も消す（done / cancelled は `[gc].jobs_done_days`、failed は `jobs_failed_days`。0 で
+消さない。P4-18、D-81）。
 
 ### ReplayGain の内部表現
 
@@ -895,12 +897,12 @@ multi_value_separator = " & "   # 多値フィールドの結合
      `done`（ログに message）。それ以外の reason（`unmatched` / `unknown_channel` / 未知）→ 宛先
      `Inbox/youtube/_unmatched/<channel>/`（受け皿）。プラグインの故障（`ProviderError`）→ `Fatal`。
      ここで Inbox のファイル名（8.）まで決まる
-  3. 取り込み済みチェック: `SOURCE_URL = webpage_url` が Library（`track_tags`）にあれば `Fatal`（再試行
-     なし。`last_error` にそのパス）。Inbox（`inbox_files.tags`）にあり、それが自分の宛先そのもの
+  3. 取り込み済みチェック: `SOURCE_URL = webpage_url` が Library（`track_tags`）にあれば**やることが無い**ので
+     `done`（note に「取り込み済み（Library）: <パス>」。失敗ではない。P4-18、D-81）。Inbox（`inbox_files.tags`）にあり、それが自分の宛先そのもの
      （`rel_path_key` で比べる）なら「置いた後に落ちて走査が先に拾った」再実行の可能性があるので、
      **実ファイルの `SOURCE_URL` を読み直して**同じならダウンロードせずに 8. の仕上げ（サイドカーと投入）
      だけ済ませて `done`。違えば `Fatal`（同名で別の内容）、ファイルが消えていれば普通に置き直す
-     （行はキャッシュ、ファイルが正）。Inbox の別の場所なら `Fatal`
+     （行はキャッシュ、ファイルが正）。Inbox の別の場所なら `done`（「取り込み済み（Inbox）: <パス>」）
   4. `yt-dlp -f "ba[ext=webm]" --no-playlist --write-thumbnail --convert-thumbnails jpg -o <tmp>/%(id)s.%(ext)s -- <url>`
      （`[ytmusic].download_timeout_secs`、既定 900）。webm の音声が無ければ `Fatal`。ネットワーク等の失敗は
      `Failed`（再試行）
@@ -923,8 +925,8 @@ multi_value_separator = " & "   # 多値フィールドの結合
                                  "message": "…" | null,
                                  "subscription_id": 3, "position": 17 } } }   // 購読由来のときだけ（P4-16）
   ```
-- **失敗の区分**: `Fatal`（再試行なし）は取り込み済み・webm の音声なし・プラグインの故障・対応していない
-  URL・宛先の同名で別の内容。それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O、仕上げ）は `Failed` で指数
+- **失敗の区分**: `Fatal`（再試行なし）は webm の音声なし・プラグインの故障・対応していない URL・宛先の
+  同名で別の内容（取り込み済みは失敗でなく `done` + note）。それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O、仕上げ）は `Failed` で指数
   バックオフ。作業領域はどの終わり方でも消す。**再実行は冪等**: Archive は同じ id なら採用、Inbox は
   `SOURCE_URL` で自分の成果物を見分けて続きから
 - `POST /api/ytmusic/download` の URL は http / https でホストがあり空白・制御文字を含まないものだけ受ける
@@ -1036,13 +1038,18 @@ Inbox/ に配置（ポーリング検出）
 
 実装（`src/import/inbox.rs`、`inbox` ジョブ、D-68）:
 
-- **検出**は `inbox` ジョブ（並列 1・固定キー）が `[inbox].poll_interval_secs`（既定 60、0 で自動なし）で
-  周期投入されるほか、`POST /api/inbox/scan` で手動。Inbox を歩き、音声ファイルのあるディレクトリを
+- **検出**は `inbox` ジョブ（並列 1・固定キー）。周期の**監視**が `[inbox].poll_interval_secs`（既定 60、0 で
+  自動なし）ごとに Inbox の指紋（音声ファイルの集合: パス・inode・size・mtime・ctime。非音声と空ディレクトリは
+  効かない）を取り、**前回投入時と違うとき**と、配置待ち（`approved`）・期限切れの `placed` があるときだけ
+  投入する（変化の無い毎分のジョブ行で一覧を埋めない。投入が Duplicate なら次の周回で投入し直す。起動直後は
+  必ず 1 回。P4-18、D-81。inotify は使わない: D-68 追記）。`POST /api/inbox/scan` は常に投入。
+  `GET /api/inbox` の `watch` に最後に確認した時刻と間隔（Inbox 画面が「最後に確認: HH:MM:SS」を出す）。
+  ジョブは Inbox を歩き、音声ファイルのあるディレクトリを
   1 件（アルバム候補。root 直下の音声は `""` の 1 件）として `inbox_items` / `inbox_files` に写す。
   stat（inode / size / mtime / ctime）が変わったファイルだけタグを読み直す。**正は Inbox のファイル**で、
   行はキャッシュ: ディレクトリが消えれば行も消す（`placed` は 24 時間残して結果を見せる）。`approved` の件で
   ファイルが変わっていたら `pending` に戻す（再承認）
-- **承認キュー**は `GET /api/inbox`。件ごとにタグから作った下書き（`proposal`: albumartist / album / date の
+- **承認キュー**は `GET /api/inbox`（`items` と監視の状態 `watch: { checked_at, poll_interval_secs }`）。件ごとにタグから作った下書き（`proposal`: albumartist / album / date の
   最頻値、category は GENRE → `genre_category_map`、トラックは TRACKNUMBER / DISCNUMBER / TITLE / ARTIST）と
   不足の警告を返し、UI の Inbox タブで category / albumartist / album / date と各トラックの
   disc_no / track_no / title / artist を補正して `POST /api/inbox/:id/approve { draft }`。検証（album /
@@ -1274,7 +1281,11 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
   （`tagwrite:<track_id>:<tag_version>` 等）
 - 失敗は `attempts` をインクリメントし、`run_after` に次回時刻を書いて指数バックオフ
   （再起動を跨いでも待ち時間が保たれる）。`attempts >= max_attempts` で `failed`。再試行しても変わらない
-  失敗（`JobError::Fatal`。取り込み済み等）はバックオフせず直ちに `failed`（D-70）
+  失敗（`JobError::Fatal`。対応していない URL 等）はバックオフせず直ちに `failed`（D-70）
+- 終端の行の片付け（P4-18、D-81）: `DELETE /api/jobs/:id`（failed / done / cancelled だけ。queued / running は
+  409）、`DELETE /api/jobs?state=failed`（失敗をまとめて）。上部バーの赤丸は `summary.failed > 0` なので、
+  確認済みの失敗を消せば消える。保持期間を過ぎた終端の行は GC が消す（`[gc].jobs_done_days` /
+  `jobs_failed_days`）
 - キャンセルは `cancel_requested_at` を立てる協調方式。ハンドラは進捗更新のたびに
   確認して自発的に止め、`cancelled` へ遷移する。外部プロセス（ffmpeg 等）は
   子プロセスグループごと kill し、tmp の成果物を消す
@@ -1387,10 +1398,12 @@ POST   /api/cd/rip                                リップ開始
 POST   /api/cd/eject
 
 GET    /api/jobs, POST /api/jobs/:id/cancel, POST /api/jobs/:id/retry
+DELETE /api/jobs/:id                              終端（failed / done / cancelled）のジョブ行を消す（P4-18。queued / running は 409 not_terminal）
+DELETE /api/jobs?state=failed                     失敗をまとめて消す → { "deleted": N }（state=failed 以外は 400）
 GET    /api/config                                読み込んだ config.toml の原文 { "path", "text" }（設定画面 §12.6。秘密は config に無い）
 GET    /api/archive                                退避台帳 { "items": [ archived_files の行 + "batch_id" ] }（新しい順。復元は batch の巻き戻し）
 POST   /api/scan                                  {"kind": "incremental" | "deep"}。scan ジョブを投入
-GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件。何も消さない。D-56）
+GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件、`jobs: { done, failed }` は掃除するジョブ行の数。何も消さない。D-56）
 GET    /api/inbox                                 承認キュー { "items": [{ id, rel_dir, state, detected_at, error, placed_album_id,
                                                   proposal, draft, warnings, destination, tracks: [{ rel_path, codec, lossless,
                                                   sample_rate, bit_depth, channels, duration_ms, tags, source }] }] }
@@ -1540,7 +1553,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 { "items": [ { "id", "type", "state", "progress", "done", "total", "attempts", "last_error",
                "run_after", "edit_batch_id", "created_at", "started_at", "finished_at",
                "note",          // 完了時の結果 1 行（ハンドラが返す。ytdl: "Inbox に置いた: <path>" /
-                                //   "プラグインが skip: <理由>" / "再生リストを展開した: N 件を投入、M 件は取り込み済み"。
+                                //   "プラグインが skip: <理由>" / "取り込み済み（Library|Inbox）: <パス>" /
+                                //   "再生リストを展開した: N 件を投入、M 件は取り込み済み"。
                                 //   playlist_sync: 同期の要約。無ければ null）
                "subject" } ],   // subject = 対象の表示用文字列（track_id → Library のパス、album_id → ディレクトリ、
                                 //   batch_id → 説明、transcode は " [<variant>]" 付き、scan は kind、ytdl は url、
@@ -1558,6 +1572,9 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //                            → 404 | 409 { "error": "not_cancellable" }   // 既に終端
 // POST /api/jobs/:id/retry   → 202（failed / cancelled を attempts=0 で queued に戻す）
 //                            → 404 | 409 { "error": "not_retryable" | "duplicate" }   // D-36
+// DELETE /api/jobs/:id       → 204（failed / done / cancelled の行を消す。P4-18）
+//                            → 404 | 409 { "error": "not_terminal" }
+// DELETE /api/jobs?state=failed → 200 { "deleted": N }。state=failed 以外は 400 { "error": "invalid_state" }
 
 // SSE /api/events   event 種別: job | batch | library | resync
 //   job:     { "id", "state", "progress", "done", "total" }
@@ -1852,7 +1869,8 @@ foobar2000 の Properties と同じく、行末の × か右クリックのメ�
 
 種別ごとの並列度と待ち行列（待ち / 実行中 / 完了 / 失敗。件数は `by_type` の全件集計。一覧は上限付きなので
 画面で数えない）、一覧の各行に**対象**（`subject`。どのファイル / アルバム / バッチかが id だけでは分からない）、
-実行中の進捗（`done / total`）、失敗の `last_error` と [再試行] / [キャンセル]。一覧のタブは
+実行中の進捗（`done / total`）、失敗の `last_error` と [再試行] / [キャンセル]、終端の行の [消す]（確認済みの
+片付け。失敗・取り消しタブには [失敗をすべて消す]。P4-18）。一覧のタブは
 **実行中・待ち / 完了 / 失敗・取り消し / すべて**で、各タブに `summary` の件数を添える（待ち → 実行中 → 完了と
 数が移っていくのが分かる）。一覧は状態ごとに切り出す（実行中・待ちはキューの順で 1,000 件、完了と失敗・取り消しは新しい順で
 各 300 件。`limits`）。表示中のタブが上限に達していれば「表示は最新 N 件まで」と添える。種別表の下に CPU 系の実行中の合計と共通予算（`cpu_budget`。D-73）。編集バッチ由来のジョブは `edit_batch_id` で履歴画面へリンク。
@@ -1975,10 +1993,12 @@ flac_recompress_all = false   # 圧縮レベル統一のための一括再エン
 deep_interval_days = 30        # deep scan（tag_hash / audio_md5 全再計算）の間隔。0 で自動実行なし
 
 [inbox]
-poll_interval_secs = 60        # Inbox の検出間隔（inotify はコンテナ越しに不安定なのでポーリング）。0 で自動なし
+poll_interval_secs = 60        # Inbox の確認間隔（変化があったときだけ走査を投入。inotify は使わない: D-68 追記）。0 で自動なし
 
 [gc]
 retention_days = 30            # 物理削除までの猶予（missing_since / 退避 WAV / Derived 孤児）
+jobs_done_days = 7             # 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない（P4-18）
+jobs_failed_days = 30          # failed のジョブ行を消すまでの日数。0 で消さない
 
 [auth]                         # 認証は常に有効。無効化する設定は置かない。
                                # パスワードハッシュは DB の auth 表に持つ。

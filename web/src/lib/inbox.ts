@@ -71,6 +71,20 @@ export type InboxDestination = {
 }
 
 /** GET /api/inbox の 1 件 */
+/** 周期監視の状態（`GET /api/inbox` の `watch`。P4-18） */
+export type InboxWatch = {
+  /** 最後に Inbox を確認した時刻。監視が無い / まだなら null */
+  checked_at: number | null
+  poll_interval_secs: number
+}
+
+/** ツールバーの「最後に確認: HH:MM:SS（N 秒ごと）」。監視が無ければ空 */
+export function watchLabel(w: InboxWatch | null, formatTime: (epoch: number) => string): string {
+  if (!w || w.poll_interval_secs <= 0) return ''
+  const every = `${w.poll_interval_secs} 秒ごと`
+  return w.checked_at == null ? `確認: ${every}（まだ）` : `最後に確認: ${formatTime(w.checked_at)}（${every}）`
+}
+
 export type InboxItem = {
   id: number
   rel_dir: string

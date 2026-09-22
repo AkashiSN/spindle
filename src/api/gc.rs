@@ -28,10 +28,14 @@ pub async fn preview(State(state): State<AppState>) -> Result<Response, ApiError
         ));
     };
     let retention = i64::from(state.config.gc.retention_days) * 86_400;
-    let plan = gc::plan(&state.db, roots, retention, now_epoch())
+    let now = now_epoch();
+    let plan = gc::plan(&state.db, roots, retention, now)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(Preview::of(&plan)).into_response())
+    let jobs = gc::prunable_jobs(&state.db, &jobs_retention(&state), now)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(Preview::of(&plan).with_jobs(jobs)).into_response())
 }
 
 pub async fn start(State(state): State<AppState>) -> Result<Response, ApiError> {
@@ -41,4 +45,12 @@ pub async fn start(State(state): State<AppState>) -> Result<Response, ApiError> 
         }
         EnqueueResult::Duplicate(_) => error_response(StatusCode::CONFLICT, "duplicate"),
     })
+}
+
+/// `[gc].jobs_done_days` / `jobs_failed_days` を秒に
+pub fn jobs_retention(state: &AppState) -> gc::JobsRetention {
+    gc::JobsRetention::from_days(
+        state.config.gc.jobs_done_days,
+        state.config.gc.jobs_failed_days,
+    )
 }

@@ -674,3 +674,20 @@ fn ytmusic_sync_interval_hours_defaults_to_zero() {
     .unwrap();
     assert_eq!(cfg.ytmusic.sync_interval_hours, 24);
 }
+
+/// `[gc].jobs_done_days` / `jobs_failed_days`（P4-18）は省略可（既定 7 / 30）で、0 は「消さない」
+#[test]
+fn gc_job_retention_defaults_and_zero() {
+    let mut root: toml::Table = toml::from_str(EXAMPLE).unwrap();
+    let gc = root["gc"].as_table_mut().unwrap();
+    gc.remove("jobs_done_days");
+    gc.remove("jobs_failed_days");
+    let c = Config::parse(&toml::to_string(&root).unwrap()).unwrap();
+    assert_eq!((c.gc.jobs_done_days, c.gc.jobs_failed_days), (7, 30));
+    let c = Config::parse(&with_override(
+        "gc",
+        "jobs_done_days = 0\njobs_failed_days = 1",
+    ))
+    .unwrap();
+    assert_eq!((c.gc.jobs_done_days, c.gc.jobs_failed_days), (0, 1));
+}

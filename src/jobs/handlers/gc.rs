@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::{now_epoch, Db};
-use crate::gc::{self, GcError, GcRoots};
+use crate::gc::{self, GcError, GcRoots, JobsRetention};
 use crate::jobs::{
     BoxFuture, Handler, HandlerResult, JobContext, JobError, JobType, Jobs, NewJob, Outcome,
     LIBRARY_MUTEX,
@@ -42,6 +42,8 @@ pub struct GcHandler {
     db: Arc<Db>,
     roots: Arc<GcRoots>,
     retention_secs: i64,
+    /// 終端のジョブ行の掃除（P4-18）。既定は消さない
+    jobs_retention: JobsRetention,
 }
 
 impl GcHandler {
@@ -50,7 +52,13 @@ impl GcHandler {
             db,
             roots,
             retention_secs,
+            jobs_retention: JobsRetention::default(),
         }
+    }
+
+    pub fn with_jobs_retention(mut self, retention: JobsRetention) -> Self {
+        self.jobs_retention = retention;
+        self
     }
 
     async fn run_inner(&self, ctx: &JobContext) -> HandlerResult {
@@ -103,6 +111,18 @@ impl GcHandler {
             .map_err(map_err)?;
         ctx.progress(total, total).await?;
         gc::log_summary(&summary);
+        // 終端のジョブ行の掃除（自分は running なので残る）
+        let (jobs_done, jobs_failed) = gc::prune_jobs(&self.db, &self.jobs_retention, now_epoch())
+            .await
+            .map_err(map_err)?;
+        if jobs_done + jobs_failed > 0 {
+            tracing::info!(
+                job_id = ctx.job.id,
+                done = jobs_done,
+                failed = jobs_failed,
+                "保持期間を過ぎたジョブ行を消した"
+            );
+        }
         Ok(Outcome::Done)
     }
 }
@@ -120,6 +140,7 @@ impl Handler for GcHandler {
             db: Arc::clone(&self.db),
             roots: Arc::clone(&self.roots),
             retention_secs: self.retention_secs,
+            jobs_retention: self.jobs_retention,
         };
         Box::pin(async move { this.run_inner(&ctx).await })
     }

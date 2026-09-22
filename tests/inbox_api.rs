@@ -264,6 +264,9 @@ async fn list_returns_items_with_proposal_tracks_and_warnings() {
     let id = app.item("AlbumA").await;
     let (st, body) = app.get(&c, "/api/inbox").await;
     assert_eq!(st, StatusCode::OK, "{body}");
+    // 周期監視の状態（P4-18）。テストの AppState には監視が無いので checked_at は null、間隔は設定値
+    assert!(body["watch"]["checked_at"].is_null(), "{body}");
+    assert_eq!(body["watch"]["poll_interval_secs"], 60);
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     let it = &items[0];

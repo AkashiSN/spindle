@@ -1613,6 +1613,8 @@ async fn jobs_api_requires_session() {
         (Method::GET, "/api/jobs"),
         (Method::POST, "/api/jobs/1/cancel"),
         (Method::POST, "/api/jobs/1/retry"),
+        (Method::DELETE, "/api/jobs/1"),
+        (Method::DELETE, "/api/jobs?state=failed"),
         (Method::GET, "/api/events"),
     ] {
         let res = send(
@@ -2171,4 +2173,80 @@ async fn done_with_note_persists_the_note() {
         got.note.as_deref(),
         Some("Inbox に置いた: youtube/x/y.opus")
     );
+}
+
+/// 終端（failed / done / cancelled）のジョブは 1 件ずつ、失敗はまとめて消せる（P4-18。確認済みの
+/// 失敗を片付けて上部バーの赤丸を消す）。queued / running は消せない
+#[tokio::test]
+async fn terminal_jobs_can_be_deleted_one_by_one_or_all_failed() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    let del = |uri: String| {
+        req(Method::DELETE, &uri)
+            .header(header::COOKIE, &c)
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let get = |uri: &str| {
+        req(Method::GET, uri)
+            .header(header::COOKIE, &c)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let mut ids = Vec::new();
+    for n in 0..4 {
+        let job = NewJob::new(JobType::Gc, serde_json::json!({})).dedup_key(format!("gc:{n}"));
+        let EnqueueResult::Inserted(id) = app.jobs.enqueue(job).await.unwrap() else {
+            panic!()
+        };
+        ids.push(id);
+    }
+    let [queued, failed1, failed2, done] = ids[..] else {
+        panic!()
+    };
+    app.jobs
+        .db()
+        .write(move |c| {
+            c.execute(
+                "UPDATE jobs SET state = 'failed', last_error = 'x', finished_at = 1 WHERE id IN (?1, ?2)",
+                [failed1, failed2],
+            )?;
+            c.execute(
+                "UPDATE jobs SET state = 'done', finished_at = 2 WHERE id = ?1",
+                [done],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    // queued は消せない
+    let res = send(&app, del(format!("/api/jobs/{queued}"))).await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(json(res).await["error"], "not_terminal");
+    // failed を 1 件
+    let res = send(&app, del(format!("/api/jobs/{failed1}"))).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let res = send(&app, del(format!("/api/jobs/{failed1}"))).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let body = json(send(&app, get("/api/jobs")).await).await;
+    assert_eq!(body["summary"]["failed"], 1);
+    assert_eq!(body["summary"]["done"], 1);
+    // 失敗をまとめて。done と queued は残る
+    let res = send(&app, del("/api/jobs?state=failed".into())).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json(res).await["deleted"], 1);
+    let body = json(send(&app, get("/api/jobs")).await).await;
+    assert_eq!(body["summary"]["failed"], 0);
+    assert_eq!(body["summary"]["done"], 1);
+    assert_eq!(body["summary"]["queued"], 1);
+    // まとめて消せるのは failed だけ
+    let res = send(&app, del("/api/jobs?state=done".into())).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let res = send(&app, del("/api/jobs".into())).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    // done は 1 件ずつなら消せる
+    let res = send(&app, del(format!("/api/jobs/{done}"))).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
 }

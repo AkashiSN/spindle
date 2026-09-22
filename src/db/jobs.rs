@@ -1019,6 +1019,98 @@ pub enum RetryOutcome {
     Duplicate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    NotFound,
+    Deleted,
+    /// `queued` / `running` は消せない（取り消してから）
+    NotTerminal,
+}
+
+/// 終端（failed / done / cancelled）のジョブ行を 1 件消す（P4-18。確認済みの失敗の片付け）。
+/// ロック表は CASCADE、`edit_ops` / `album_verifications` の `job_id` は SET NULL（履歴は残る）
+pub fn delete_terminal(conn: &Connection, id: i64) -> Result<DeleteOutcome> {
+    let state: Option<JobState> = conn
+        .query_row("SELECT state FROM jobs WHERE id = ?1", [id], |r| {
+            parse_col(r, 0)
+        })
+        .optional()?;
+    let Some(state) = state else {
+        return Ok(DeleteOutcome::NotFound);
+    };
+    if !matches!(
+        state,
+        JobState::Failed | JobState::Done | JobState::Cancelled
+    ) {
+        return Ok(DeleteOutcome::NotTerminal);
+    }
+    let n = conn.execute(
+        "DELETE FROM jobs WHERE id = ?1 AND state IN ('failed','done','cancelled')",
+        [id],
+    )?;
+    Ok(if n == 1 {
+        DeleteOutcome::Deleted
+    } else {
+        DeleteOutcome::NotFound
+    })
+}
+
+/// 保持期間を過ぎた終端の行を消す（GC。P4-18）: done / cancelled は `finished_at < done_before`、failed は
+/// `finished_at < failed_before`。None は消さない。返り値は (done + cancelled, failed) の消した数
+pub fn prune_terminal(
+    conn: &Connection,
+    done_before: Option<i64>,
+    failed_before: Option<i64>,
+) -> Result<(usize, usize)> {
+    let done = match done_before {
+        Some(t) => conn.execute(
+            "DELETE FROM jobs WHERE state IN ('done','cancelled') AND finished_at IS NOT NULL AND finished_at < ?1",
+            [t],
+        )?,
+        None => 0,
+    };
+    let failed = match failed_before {
+        Some(t) => conn.execute(
+            "DELETE FROM jobs WHERE state = 'failed' AND finished_at IS NOT NULL AND finished_at < ?1",
+            [t],
+        )?,
+        None => 0,
+    };
+    Ok((done, failed))
+}
+
+/// [`prune_terminal`] が消す数（dry-run）
+pub fn count_prunable(
+    conn: &Connection,
+    done_before: Option<i64>,
+    failed_before: Option<i64>,
+) -> Result<(usize, usize)> {
+    let count = |sql: &str, t: i64| -> Result<usize> {
+        let n: i64 = conn.query_row(sql, [t], |r| r.get(0))?;
+        Ok(n.max(0) as usize)
+    };
+    let done = match done_before {
+        Some(t) => count(
+            "SELECT count(*) FROM jobs WHERE state IN ('done','cancelled') AND finished_at IS NOT NULL AND finished_at < ?1",
+            t,
+        )?,
+        None => 0,
+    };
+    let failed = match failed_before {
+        Some(t) => count(
+            "SELECT count(*) FROM jobs WHERE state = 'failed' AND finished_at IS NOT NULL AND finished_at < ?1",
+            t,
+        )?,
+        None => 0,
+    };
+    Ok((done, failed))
+}
+
+/// `failed` をすべて消す。返り値は消した数
+pub fn delete_failed(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM jobs WHERE state = 'failed'", [])?)
+}
+
 /// 手動再試行。`failed` / `cancelled` を試行回数 0 で `queued` に戻す。
 /// `last_error` は前回の理由として残す
 pub fn retry(conn: &Connection, id: i64) -> Result<RetryOutcome> {

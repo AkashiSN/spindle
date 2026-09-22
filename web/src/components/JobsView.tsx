@@ -9,6 +9,7 @@ import { formatCount } from '../lib/format'
 import { formatDateTime } from '../lib/history'
 import {
   canCancel,
+  canRemove,
   canRetry,
   cpuBudgetLabel,
   filterJobs,
@@ -114,6 +115,18 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
           </button>
         )}
         <span className="spacer" />
+        {state === 'failed' && (summary?.failed ?? 0) > 0 && (
+          <button
+            type="button"
+            className="ghost small"
+            title="確認済みの失敗をすべて一覧から消す（上部バーの赤丸も消える）"
+            onClick={() => {
+              if (window.confirm(`失敗 ${formatCount(summary?.failed ?? 0)} 件をすべて消しますか？`)) void jobs.removeFailed()
+            }}
+          >
+            失敗をすべて消す
+          </button>
+        )}
         <span className="muted small">
           {items ? `${formatCount(shown.length)} 件${limit != null ? `（表示は最新 ${formatCount(limit)} 件まで）` : ''}` : ''}
         </span>
@@ -198,6 +211,11 @@ function JobRow({ j, jobs, onOpenBatch }: { j: Job; jobs: JobsState; onOpenBatch
         {canRetry(j) && (
           <button type="button" className="ghost" onClick={() => void jobs.retry(j.id)}>
             再試行
+          </button>
+        )}
+        {canRemove(j) && (
+          <button type="button" className="ghost" title="一覧から消す（確認済み）" onClick={() => void jobs.remove(j.id)}>
+            消す
           </button>
         )}
       </td>

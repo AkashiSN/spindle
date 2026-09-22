@@ -20,6 +20,10 @@ export type JobsState = {
   refresh: () => void
   cancel: (id: number) => Promise<void>
   retry: (id: number) => Promise<void>
+  /** 終端のジョブを 1 件消す（P4-18） */
+  remove: (id: number) => Promise<void>
+  /** 失敗をすべて消す */
+  removeFailed: () => Promise<void>
 }
 
 /** ジョブの要約と一覧。SSE job / batch のたびに取り直す（250ms で間引く）。リロードしても DB の値で復元 */
@@ -59,10 +63,17 @@ export function useJobSummary(enabled: boolean): JobsState {
   }, [enabled, fetchNow])
 
   const act = useCallback(
-    async (id: number, what: 'cancel' | 'retry') => {
+    async (id: number, what: 'cancel' | 'retry' | 'remove') => {
       try {
-        await apiFetch(`/api/jobs/${id}/${what}`, { method: 'POST' })
-        setNotice(what === 'cancel' ? `#${id} の取り消しを要求した` : `#${id} を再試行に戻した`)
+        if (what === 'remove') await apiFetch(`/api/jobs/${id}`, { method: 'DELETE' })
+        else await apiFetch(`/api/jobs/${id}/${what}`, { method: 'POST' })
+        setNotice(
+          what === 'cancel'
+            ? `#${id} の取り消しを要求した`
+            : what === 'retry'
+              ? `#${id} を再試行に戻した`
+              : `#${id} を消した`,
+        )
         fetchNow()
       } catch (e) {
         if (e instanceof ApiError) {
@@ -71,11 +82,13 @@ export function useJobSummary(enabled: boolean): JobsState {
               ? '既に終わっている'
               : e.code === 'not_retryable'
                 ? '失敗 / 取り消し以外は再試行できない'
-                : e.code === 'duplicate'
-                  ? '同じジョブが既に待ち行列にある'
-                  : e.code === 'not_found'
-                    ? '見つからない'
-                    : e.message
+                : e.code === 'not_terminal'
+                  ? '実行中・待ちのジョブは消せない（先に取り消す）'
+                  : e.code === 'duplicate'
+                    ? '同じジョブが既に待ち行列にある'
+                    : e.code === 'not_found'
+                      ? '見つからない'
+                      : e.message
           setNotice(`#${id}: ${why}`)
           fetchNow()
           return
@@ -85,6 +98,16 @@ export function useJobSummary(enabled: boolean): JobsState {
     },
     [fetchNow],
   )
+
+  const removeFailed = useCallback(async () => {
+    try {
+      const r = await apiFetch<{ deleted: number }>('/api/jobs?state=failed', { method: 'DELETE' })
+      setNotice(`失敗 ${r.deleted} 件を消した`)
+      fetchNow()
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e))
+    }
+  }, [fetchNow])
 
   return {
     summary,
@@ -98,5 +121,7 @@ export function useJobSummary(enabled: boolean): JobsState {
     refresh,
     cancel: useCallback((id: number) => act(id, 'cancel'), [act]),
     retry: useCallback((id: number) => act(id, 'retry'), [act]),
+    remove: useCallback((id: number) => act(id, 'remove'), [act]),
+    removeFailed,
   }
 }

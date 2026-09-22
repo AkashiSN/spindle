@@ -1202,6 +1202,17 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       出ない）、`web/src/lib/selection.test.ts`（`rangeSelect`: 縮む、飛び地が消える、filter 形は ids 形へ、anchor
       が無ければ移動前のカーソル行）、dev サーバ + 実機 API でブラウザ確認（ヘッダ直下 / 下端に揃う、Ctrl+A →
       Shift+↑、Esc → Shift+↓）
+- [x] **P4-18** ジョブ一覧の衛生（2026-09-22。D-81、D-68 追記）。(1) Inbox の周期監視をジョブの外へ: 指紋
+      （`import::inbox::fingerprint`）が前回投入時と違うとき・配置待ち・期限切れの placed・起動直後だけ投入
+      （`jobs::handlers::inbox::spawn_watcher`。Duplicate なら次の周回で投入し直す）。`GET /api/inbox` の `watch`
+      を Inbox 画面が「最後に確認」で出す。(2) ytdl の「取り込み済み」は `done` + note。(3) `DELETE /api/jobs/:id`
+      （終端だけ）と `DELETE /api/jobs?state=failed`、ジョブ画面の [消す] / [失敗をすべて消す]。(4) GC が
+      `[gc].jobs_done_days`（7）/ `jobs_failed_days`（30）を過ぎた終端の行を消す（preview に `jobs`）。
+      受け入れ: `tests/inbox_job.rs`（指紋は音声だけで決まる、監視は変化・配置待ち・期限切れ・起動直後だけ
+      投入し Duplicate を取りこぼさない）、`tests/inbox_api.rs`（`watch`）、`tests/ytmusic_download.rs`
+      （取り込み済み → done + note）、`tests/jobs.rs`（終端の削除、queued は 409、failed の一括、done は 400）、
+      `tests/gc.rs`（保持期間で消す、0 は消さない、gc 自身は残る）、`tests/gc_api.rs`（preview の `jobs`）、
+      `tests/config.rs`（既定と 0）、web の `canRemove` / `watchLabel`
 
 ## 着手前に確認が必要な残課題
 

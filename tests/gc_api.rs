@@ -128,6 +128,12 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
             params![now - 40 * 86_400, now - 86_400],
         )
         .unwrap();
+    app.conn()
+        .execute(
+            "INSERT INTO jobs (type, payload, state, created_at, finished_at) VALUES ('rg', '{}', 'done', 1, ?1)",
+            [now - 8 * 86_400],
+        )
+        .unwrap();
     std::fs::create_dir_all(app.dir.path().join("Archive/A")).unwrap();
     std::fs::write(app.dir.path().join("Archive/A/1.m4a"), b"12345").unwrap();
 
@@ -139,6 +145,9 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
     assert_eq!(body["archived"]["bytes"], 5);
     assert_eq!(body["derived"]["count"], 0);
     assert_eq!(body["artwork_dirs"]["count"], 0);
+    // ジョブ行の掃除の対象（P4-18）。設定は例の既定（done 7 日 / failed 30 日）
+    assert_eq!(body["jobs"]["done"], 1, "{body}");
+    assert_eq!(body["jobs"]["failed"], 0);
     // cutoff はサーバが受信時刻から数える。テストの now より後なので、秒が進んだぶんだけ大きくなり得る
     let cutoff = body["cutoff"].as_i64().unwrap();
     assert!(

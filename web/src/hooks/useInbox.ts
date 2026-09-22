@@ -3,10 +3,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPost } from '../api/client'
-import type { InboxDraft, InboxItem } from '../lib/inbox'
+import type { InboxDraft, InboxItem, InboxWatch } from '../lib/inbox'
 
 export type InboxState = {
   items: InboxItem[] | null
+  /** 周期監視の状態（最後に確認した時刻）。まだ取れていなければ null */
+  watch: InboxWatch | null
   /** 一覧取得のエラー。`unavailable` は [paths].inbox が無い（503） */
   error: string | null
   unavailable: boolean
@@ -37,15 +39,17 @@ function describe(e: unknown): string {
 export function useInbox(enabled: boolean): InboxState {
   const [items, setItems] = useState<InboxItem[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [watch, setWatch] = useState<InboxWatch | null>(null)
   const [unavailable, setUnavailable] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const timer = useRef<number | null>(null)
 
   const fetchNow = useCallback(() => {
-    apiFetch<{ items: InboxItem[] }>('/api/inbox')
+    apiFetch<{ items: InboxItem[]; watch?: InboxWatch }>('/api/inbox')
       .then((r) => {
         setItems(r.items)
+        setWatch(r.watch ?? null)
         setError(null)
         setUnavailable(false)
       })
@@ -137,5 +141,5 @@ export function useInbox(enabled: boolean): InboxState {
     [run],
   )
 
-  return { items, error, unavailable, notice, busy, refresh, scan, approve, reject, reopen, setNotice }
+  return { items, watch, error, unavailable, notice, busy, refresh, scan, approve, reject, reopen, setNotice }
 }

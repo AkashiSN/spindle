@@ -1,7 +1,9 @@
 //! `inbox` ジョブ（SPEC §7.8 / §8、D-68、P2-10）。並列 1・固定キー。走査（`scan_inbox`）と、
 //! `approved` の件の配置（`place_item`）を 1 本で行う（配置中の件を走査が触る競合を作らない）。
 //!
-//! - 周期投入は `[inbox].poll_interval_secs`（0 で無し）。手動は `POST /api/inbox/scan`
+//! - 周期の監視は `[inbox].poll_interval_secs`（0 で無し）ごとに Inbox の指紋を取り、**前回投入時と違う**
+//!   ときと、配置待ち・期限切れの placed があるときだけ投入する（P4-18。変化の無い毎分のジョブ行で
+//!   一覧を埋めない）。手動は `POST /api/inbox/scan`（常に投入）
 //! - 件ごとに `library` の排他を取る（scan / gc / CD の配置と同じ）。取れなければ件を `approved` に
 //!   戻して `Requeue`（次の実行で続きから）
 //! - 失敗の扱い: Inbox 側が変わった → `pending`（再承認）、衝突・下書き不正・その他 → `failed`
@@ -16,7 +18,10 @@ use crate::db::inbox::{self as dbinbox, ItemState};
 use crate::db::jobs as dbjobs;
 use crate::db::now_epoch;
 use crate::db::subscriptions;
-use crate::import::inbox::{place_item, scan_inbox, InboxError, PlaceItemEnv};
+use crate::fsroot::RootDir;
+use crate::import::inbox::{
+    fingerprint, place_item, scan_inbox, InboxError, PlaceItemEnv, PLACED_RETENTION_SECS,
+};
 use crate::import::scanner::resolve_album_artwork_now;
 use crate::jobs::handlers::playlist_sync::new_sync_job;
 use crate::jobs::EnqueueResult;
@@ -25,30 +30,107 @@ use crate::jobs::{
 };
 
 pub const DEDUP_KEY: &str = "inbox";
-const SCHEDULER_TICK: Duration = Duration::from_secs(30);
 
 pub fn new_inbox_job() -> NewJob {
     NewJob::new(JobType::Inbox, serde_json::json!({})).dedup_key(DEDUP_KEY)
 }
 
-/// 周期投入。`interval_secs <= 0` なら何もしない
-pub fn spawn_scheduler(
+/// 周期の監視の状態（Inbox 画面が「最後に確認した時刻」を出す）
+#[derive(Debug, Default)]
+pub struct WatchStatus {
+    checked_at: std::sync::atomic::AtomicI64,
+}
+
+impl WatchStatus {
+    /// 最後に Inbox を確認した時刻（epoch 秒）。まだなら 0
+    pub fn checked_at(&self) -> i64 {
+        self.checked_at.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// 周期の監視。`interval_secs <= 0` なら何もしない
+pub fn spawn_watcher(
     jobs: Arc<crate::jobs::Jobs>,
+    inbox: Arc<RootDir>,
     interval_secs: i64,
+    status: Arc<WatchStatus>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     if interval_secs <= 0 {
         return tokio::spawn(async {});
     }
-    crate::jobs::scheduler::spawn_periodic(
+    spawn_watcher_with(
         jobs,
-        JobType::Inbox,
-        new_inbox_job,
-        interval_secs,
-        SCHEDULER_TICK.min(Duration::from_secs(interval_secs as u64)),
-        "Inbox の検出",
+        inbox,
+        Duration::from_secs(interval_secs as u64),
+        status,
         shutdown,
     )
+}
+
+/// 投入するか。`last` は前回投入したときの指紋（起動直後は None = 必ず 1 回投入する）
+pub fn should_enqueue(last: Option<u64>, current: u64, needs_attention: bool) -> bool {
+    needs_attention || last != Some(current)
+}
+
+/// 監視本体。`interval` ごとに指紋（blocking）と DB の配置待ちを見て、要るときだけ投入する。
+/// 投入が Duplicate（前のジョブがまだ queued / running）なら「前回投入時の指紋」を更新せず、
+/// 次の周回で投入し直す（走査を終えたジョブの後に置かれた変化を取りこぼさない）
+pub fn spawn_watcher_with(
+    jobs: Arc<crate::jobs::Jobs>,
+    inbox: Arc<RootDir>,
+    interval: Duration,
+    status: Arc<WatchStatus>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last: Option<u64> = None;
+        loop {
+            let root = Arc::clone(&inbox);
+            let current = match tokio::task::spawn_blocking(move || fingerprint(&root)).await {
+                Ok(Ok(fp)) => Some(fp),
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "Inbox の指紋を取れない");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Inbox の指紋のタスクが異常終了");
+                    None
+                }
+            };
+            let now = now_epoch();
+            let needs = match jobs
+                .db()
+                .read(move |c| dbinbox::needs_attention(c, now - PLACED_RETENTION_SECS))
+                .await
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Inbox の配置待ちを数えられない");
+                    false
+                }
+            };
+            status
+                .checked_at
+                .store(now, std::sync::atomic::Ordering::Relaxed);
+            if let Some(current) = current {
+                if should_enqueue(last, current, needs) {
+                    match jobs.enqueue(new_inbox_job()).await {
+                        Ok(EnqueueResult::Inserted(id)) => {
+                            tracing::info!(job_id = id, "Inbox の検出を投入した");
+                            last = Some(current);
+                        }
+                        Ok(EnqueueResult::Duplicate(_)) => {}
+                        Err(e) => tracing::warn!(error = %e, "Inbox の検出を投入できない"),
+                    }
+                }
+            }
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(interval) => {}
+            }
+        }
+    })
 }
 
 pub struct InboxHandler {

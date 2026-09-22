@@ -20,7 +20,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{gc as dbgc, now_epoch, Db, DbError};
+use crate::db::{gc as dbgc, jobs as dbjobs, now_epoch, Db, DbError};
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::fsroot::{FileKind, FsError, RootDir, Stat, TMP_PREFIX};
 use crate::media::artwork::ArtworkStore;
@@ -685,6 +685,58 @@ pub fn log_summary(s: &Summary) {
     );
 }
 
+// ---------------------------------------------------------------- ジョブ行の掃除（P4-18）
+
+/// 終端のジョブ行の保持期間（`[gc].jobs_done_days` / `jobs_failed_days`）。None は消さない
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobsRetention {
+    pub done_secs: Option<i64>,
+    pub failed_secs: Option<i64>,
+}
+
+impl JobsRetention {
+    /// 日数から。0 は「消さない」
+    pub fn from_days(done_days: u32, failed_days: u32) -> Self {
+        let secs = |d: u32| (d > 0).then(|| i64::from(d) * 86_400);
+        Self {
+            done_secs: secs(done_days),
+            failed_secs: secs(failed_days),
+        }
+    }
+
+    fn cutoffs(&self, now: i64) -> (Option<i64>, Option<i64>) {
+        (
+            self.done_secs.map(|s| now.saturating_sub(s)),
+            self.failed_secs.map(|s| now.saturating_sub(s)),
+        )
+    }
+}
+
+/// 保持期間を過ぎた終端のジョブ行を消す。返り値は (done + cancelled, failed)。
+/// 実行中の gc ジョブ自身は running なので対象にならない
+pub async fn prune_jobs(
+    db: &Db,
+    retention: &JobsRetention,
+    now: i64,
+) -> Result<(usize, usize), GcError> {
+    let (done_before, failed_before) = retention.cutoffs(now);
+    Ok(db
+        .write(move |c| dbjobs::prune_terminal(c, done_before, failed_before))
+        .await?)
+}
+
+/// [`prune_jobs`] が消す数（dry-run。`GET /api/gc/preview`）
+pub async fn prunable_jobs(
+    db: &Db,
+    retention: &JobsRetention,
+    now: i64,
+) -> Result<(usize, usize), GcError> {
+    let (done_before, failed_before) = retention.cutoffs(now);
+    Ok(db
+        .read(move |c| dbjobs::count_prunable(c, done_before, failed_before))
+        .await?)
+}
+
 /// `GET /api/gc/preview` の応答（件数・バイト数と先頭 [`PREVIEW_SAMPLE`] 件）
 pub const PREVIEW_SAMPLE: usize = 50;
 
@@ -705,9 +757,22 @@ pub struct Preview {
     pub derived: PreviewSection,
     pub artwork_rows: PreviewSection,
     pub artwork_dirs: PreviewSection,
+    /// 掃除するジョブ行の数（P4-18）
+    pub jobs: PreviewJobs,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct PreviewJobs {
+    pub done: usize,
+    pub failed: usize,
 }
 
 impl Preview {
+    pub fn with_jobs(mut self, (done, failed): (usize, usize)) -> Self {
+        self.jobs = PreviewJobs { done, failed };
+        self
+    }
+
     pub fn of(plan: &Plan) -> Self {
         fn section<T>(items: &[T], bytes: u64, name: impl Fn(&T) -> String) -> PreviewSection {
             PreviewSection {
@@ -733,6 +798,7 @@ impl Preview {
             ),
             artwork_rows: section(&plan.artwork_rows, 0, |a| a.hex.clone()),
             artwork_dirs: section(&plan.artwork_dirs, 0, Clone::clone),
+            jobs: PreviewJobs::default(),
         }
     }
 }

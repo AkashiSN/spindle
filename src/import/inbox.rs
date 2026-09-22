@@ -565,6 +565,33 @@ struct Seen {
     st: crate::fsroot::Stat,
 }
 
+/// Inbox の指紋（P4-18）。音声ファイルの集合（パス・inode・size・mtime・ctime）から決まり、非音声と
+/// 空ディレクトリは効かない（走査が拾う物と同じ = [`walk`] の結果）。周期の監視はこれが前回投入時と
+/// 違うときだけ inbox ジョブを投入する（変化が無い毎分のジョブ行で一覧を埋めない）。プロセス内でだけ
+/// 比較する値で、永続化しない
+pub fn fingerprint(root: &RootDir) -> Result<u64, FsError> {
+    use std::hash::{Hash as _, Hasher as _};
+    let groups = walk(root)?;
+    let mut entries: Vec<(String, u64, u64, i64, i64)> = groups
+        .values()
+        .flat_map(|(_, seen)| {
+            seen.iter().map(|s| {
+                (
+                    s.rel.key(),
+                    s.st.inode,
+                    s.st.size,
+                    s.st.mtime_ns,
+                    s.st.ctime_ns,
+                )
+            })
+        })
+        .collect();
+    entries.sort();
+    let mut h = std::hash::DefaultHasher::new();
+    entries.hash(&mut h);
+    Ok(h.finish())
+}
+
 /// Inbox を歩いて音声ファイルを dir_key ごとにまとめる
 fn walk(root: &RootDir) -> Result<HashMap<String, (String, Vec<Seen>)>, FsError> {
     let mut groups: HashMap<String, (String, Vec<Seen>)> = HashMap::new();

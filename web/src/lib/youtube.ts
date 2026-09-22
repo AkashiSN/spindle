@@ -38,7 +38,7 @@ export function isPlaylistUrl(url: string | null): boolean {
 }
 
 /** 状態と結果を 1 行に。完了はサーバの `note`（Inbox に置いた / プラグインが skip / 再生リストを展開した）を
- *  そのまま出し、無ければ（0020 より前の行）「詳細なし」で断定しない。失敗の理由（取り込み済み・URL 不正 等。D-70）は
+ *  そのまま出し、無ければ（0020 より前の行）「詳細なし」で断定しない。失敗の理由（URL 不正 等。D-70。取り込み済みは失敗でなく完了の note。P4-18）は
  *  `last_error` をそのまま見せる */
 export function ytdlResultLabel(j: Job): string {
   const playlist = isPlaylistUrl(j.subject)
