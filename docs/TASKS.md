@@ -1114,8 +1114,10 @@ P1-9 / P1-3 → P1-6 / P1-7（`Playlists/m3u8` の 28 本を取り込む）→ P
       画面が開いて URL が入る → ダウンロード → 一覧に出て Inbox へ飛べる
 
 - [x] **P4-14** 既存の webm 由来トラックへの `SOURCE_URL` 補填（一度きり。2026-09-21 に実機で適用済み: 9 バッチ
-      #10〜#18、1,508 件 applied / conflict 0、Derived の aac 1,508 本がタグ追随。残り 6 件は再生リストに無い
-      曲（手で付ける）。`set_rows` op は D-42 追記、スクリプトは `scripts/backfill_source_url.py` +
+      #10〜#18、1,508 件 applied / conflict 0、Derived の aac 1,508 本がタグ追随。残り 6 件のうち 5 件は
+      ユーザが再生リストに追加 → 再実行のバッチ #19〜#23 で付いた。再生リストが無い `柊マグネタイトの曲` の
+      1 曲だけリポジトリ外の `singles.tsv` に URL を保管し、リリース時の再移行で手で付ける（MIGRATION §5-3-2）。
+      `set_rows` op は D-42 追記、スクリプトは `scripts/backfill_source_url.py` +
       `scripts/test_backfill_source_url.py`。実機で分かったこと: 開発機の古い yt-dlp（2026.06）は再生リストの
       continuation を黙って取りこぼす（`entries < playlist_count` で中止する検出を入れた。`--ytdlp "ssh …
       docker exec … yt-dlp"` で実機の版を使える）、再生リストから消えた動画の後ろは位置が 1 ずれる、
