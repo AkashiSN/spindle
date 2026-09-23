@@ -167,21 +167,16 @@ fn paranoia_lines_and_span() {
     assert!(paranoia_span(&enhanced).unwrap().starts_with("1-2["));
 }
 
-/// 偽の cd-paranoia（引数を記録し、`bytes` バイトの PCM と進捗行を書いて `code` で終わる）
+/// 偽の cd-paranoia（`tests/fixtures/fake-paranoia.sh`）の振る舞いを `dir`（出力先と同じディレクトリ）に
+/// 書く: `bytes` バイトの PCM を書き、`stderr` を出して `code` で終わる。引数は `dir/args` に残る
 fn fake_paranoia(dir: &std::path::Path, bytes: u64, stderr: &str, code: i32) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
-    let p = dir.join("fake-paranoia");
-    let args = dir.join("args");
     std::fs::write(
-        &p,
-        format!(
-            "#!/bin/bash\nprintf '%s\\n' \"$@\" > '{}'\nout=\"${{@: -1}}\"\nhead -c {bytes} /dev/zero > \"$out\"\ncat >&2 <<'EOS'\n{stderr}\nEOS\nexit {code}\n",
-            args.display()
-        ),
+        dir.join("fake.conf"),
+        format!("BYTES={bytes}\nCODE={code}\n"),
     )
     .unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-    p
+    std::fs::write(dir.join("fake.stderr"), stderr).unwrap();
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-paranoia.sh")
 }
 
 #[tokio::test]
