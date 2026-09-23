@@ -43,7 +43,8 @@ export type CdLookupState = CdState & {
   startManual: () => void
 }
 
-function describe(e: unknown): string {
+/** 照会のエラーを画面の一行に（CD 画面と Inbox の引き直しで共有） */
+export function describeLookupError(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.code === 'bad_request') return `TOC を読めない: ${e.message}`
     if (e.code === 'lookup_failed') return `MusicBrainz に届かない: ${e.message}`
@@ -85,7 +86,7 @@ export function useCdLookup(): CdLookupState {
       })
       if (gen.current.isCurrent(id)) dispatch({ type: 'lookup_ok', result: r })
     } catch (e) {
-      if (gen.current.isCurrent(id)) dispatch({ type: 'lookup_error', error: describe(e) })
+      if (gen.current.isCurrent(id)) dispatch({ type: 'lookup_error', error: describeLookupError(e) })
     }
   }, [])
   const lookup = useCallback(() => lookupToc(s.toc), [lookupToc, s.toc])

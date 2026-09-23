@@ -178,7 +178,7 @@ pub async fn rip(
             "ドライブに入っている盤がこの TOC と違う（入れ替えた / 取り出した）".to_owned(),
         ));
     }
-    let job = crate::jobs::handlers::rip::new_rip_job(&toc, &body.metadata);
+    let job = crate::jobs::handlers::rip::new_rip_job(&toc, &body.metadata, &s.ids);
     Ok(match state.jobs.enqueue(job).await? {
         crate::jobs::EnqueueResult::Inserted(job_id) => {
             (StatusCode::ACCEPTED, Json(RipAccepted { job_id })).into_response()

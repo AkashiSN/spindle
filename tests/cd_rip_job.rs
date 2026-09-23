@@ -309,6 +309,18 @@ fn meta() -> DiscMetadata {
     }
 }
 
+/// ドライブが読んだ ISRC / MCN（サイドカーにそのまま残る。P4-21）
+fn ids() -> DiscIds {
+    DiscIds {
+        isrcs: vec![
+            Some("JPAA00000001".into()),
+            None,
+            Some("JPAA00000003".into()),
+        ],
+        mcn: Some("4988000000000".into()),
+    }
+}
+
 type Seen = Arc<Mutex<Vec<RipProgress>>>;
 
 async fn run(env: &RipEnv) -> (Result<spindle::cd::place::Placed, RipJobError>, Seen) {
@@ -325,6 +337,7 @@ async fn run_with(
         env,
         &toc(),
         &meta(),
+        &ids(),
         Arc::new(move |p| s.lock().unwrap().push(p)),
         token,
     )
@@ -367,6 +380,10 @@ async fn unknown_offset_is_detected_applied_and_learned() {
     let (placed, seen) = run(&env).await;
     let placed = placed.unwrap();
     let rip = lib.sidecar(&placed.rel_dir).rip.unwrap();
+    assert_eq!(
+        (rip.isrcs.clone(), rip.mcn.clone()),
+        (ids().isrcs, ids().mcn)
+    );
     assert_eq!(rip.report.read_offset, 667);
     assert_eq!(rip.report.offset_source, OffsetSource::Detected);
     assert_eq!(rip.report.attempts, 1);

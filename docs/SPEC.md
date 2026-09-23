@@ -1168,8 +1168,8 @@ Inbox/ に配置（ポーリング検出）
   持っていかない）。壊れていれば無いものとして扱い、件の `warnings` に載せる。モジュールは `import/sidecar.rs`
   （ダウンローダと CD の吸い出しが共有する）
 - **CD の吸い出しの件**（D-67 追記、P2-5）: サイドカーの `rip`（`RipEntry`: CTDB 形式の `toc`、吸い出し開始時の
-  `metadata`（`DiscMetadata`。名前は空でもよい）、音声トラック順のファイル名 `files`、rip.log の名前 `log`、
-  `report`（`RipReport`））を持つ。提案は `album_gain = true`（D-74。保存した下書きがあればそちら）。配置は
+  `metadata`（`DiscMetadata`。名前は空でもよい）、音声トラック順のファイル名 `files`、ドライブが読んだ `isrcs` /
+  `mcn`（P4-21。旧サイドカーには無い）、rip.log の名前 `log`、`report`（`RipReport`））を持つ。提案は `album_gain = true`（D-74。保存した下書きがあればそちら）。配置は
   下書きの各トラックを **basename で `files` の位置へ結びつけ**（`bind_rip`。大小文字・正規化の違いは同じ名前）、
   記録の形（件数が音声トラック数と揃う、名前の重複なし）・件のファイルとの 1 対 1・下書きの `disc_no` が 1 つに
   揃うこと（1 件 = 1 枚）を確かめ、外れたら配置せず `failed`（提案の `warnings` にも出す）。登録は
@@ -2034,6 +2034,10 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   保つ」のチェック（提案は on。on の間は欄が `"; "` 結合の表示で編集不可、外すと欄が編集できて 1 値で書く
   旨を示す）。見出しの横に件の代表画像（各ファイルの代表 = `PICTURE` の先頭、の最頻）、トラック表に
   小さなサムネイル列（`GET /api/inbox/:id/artwork/:hash`。無ければ空）。
+  **MusicBrainz の引き直し**（P4-21、D-84）: CD の件（`GET /api/inbox` の `rip` がある件）だけ、アルバムの欄の
+  下に節を出す。ボタンで `POST /api/cd/lookup { toc, isrcs, mcn, release?, refresh?, widen? }`（CD 画面と同じ）を
+  引いて候補を並べ、選ぶと下書きの `release_id` / `release_group_id` を写し、ディスク番号を候補の medium の位置に
+  し、空欄の名前（と `Track NN`）だけ埋める（`lib/inbox.ts` の `applyCandidate`）。結果は保存しない。
   **トラックリスト貼り付け**（P2-10、D-65 / D-65 追記 2）: トラック表の下の畳んだ節。テキストを
   `lib/tracklist.ts` で行解析し、`lib/inbox.ts` の `applyTracklist` で**選んだディスクの行へトラック番号で**
   写す（複数枚組のときだけ「写す先」のディスクを選ぶ）。アーティストの無い行は既存の値を保ち、

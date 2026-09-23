@@ -212,6 +212,8 @@ pub fn rip_entry(files: &[&str], ctdb_matched: &[bool]) -> spindle::import::side
                 .collect(),
         },
         files: files.iter().map(|f| f.to_string()).collect(),
+        isrcs: vec![None; n],
+        mcn: None,
         log: "rip.log".into(),
         report: RipReport {
             drive: Some("TEST DRIVE".into()),

@@ -32,6 +32,8 @@ fn draft() -> InboxDraft {
         album: "Album".into(),
         date: Some("2024".into()),
         album_gain: false,
+        release_id: None,
+        release_group_id: None,
         tracks: vec![
             DraftTrack {
                 rel_path: "A/01.flac".into(),
@@ -221,6 +223,8 @@ fn number_missing_assigns_from_start_in_file_order_skipping_used_numbers() {
         album: "B".into(),
         date: None,
         album_gain: false,
+        release_id: None,
+        release_group_id: None,
         tracks: vec![
             DraftTrack {
                 rel_path: "x/20260902 b.opus".into(),
@@ -272,6 +276,8 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
         album: "Fixed Album".into(),
         date: Some("2020".into()),
         album_gain: true,
+        release_id: None,
+        release_group_id: None,
         tracks: vec![
             DraftTrack {
                 rel_path: "A/01.flac".into(),
@@ -338,6 +344,8 @@ fn cd_draft(tracks: &[(&str, u32, u32)]) -> InboxDraft {
             })
             .collect(),
         album_gain: true,
+        release_id: None,
+        release_group_id: None,
     }
 }
 
@@ -385,4 +393,76 @@ fn bind_rip_rejects_records_that_do_not_match_the_item() {
     )
     .unwrap_err();
     assert!(e.contains("crcs"), "{e}");
+}
+
+// ---------------------------------------------------------------- MusicBrainz のリリース（P4-21）
+
+/// 下書きのリリース ID は UUID の形でなければ承認できない（タグにそのまま書くので）
+#[test]
+fn release_ids_must_be_uuids() {
+    let mut d = draft();
+    d.release_id = Some("f1223d63-f359-457d-b935-fc27eb24a6de".into());
+    d.release_group_id = Some("0b3a4c5d-1111-2222-3333-444455556666".into());
+    assert!(
+        d.problems(&files()).is_empty(),
+        "{:?}",
+        d.problems(&files())
+    );
+    d.release_id =
+        Some("https://musicbrainz.org/release/f1223d63-f359-457d-b935-fc27eb24a6de".into());
+    d.release_group_id = Some("x".into());
+    let p: Vec<String> = d.problems(&files()).iter().map(|e| e.to_string()).collect();
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert!(p.iter().all(|m| m.contains("MusicBrainz")), "{p:?}");
+}
+
+/// 提案はファイルの MUSICBRAINZ_ALBUMID / RELEASEGROUPID の最頻値を持つ。保存した下書きに値があれば
+/// それが勝ち、無ければ（旧下書き）提案の値
+#[test]
+fn proposal_and_merge_carry_release_ids() {
+    let rows = vec![
+        file(
+            "A/01.flac",
+            &[
+                ("TITLE", "One"),
+                (
+                    "MUSICBRAINZ_ALBUMID",
+                    "f1223d63-f359-457d-b935-fc27eb24a6de",
+                ),
+                (
+                    "MUSICBRAINZ_RELEASEGROUPID",
+                    "0b3a4c5d-1111-2222-3333-444455556666",
+                ),
+            ],
+        ),
+        file(
+            "A/02.flac",
+            &[
+                ("TITLE", "Two"),
+                (
+                    "MUSICBRAINZ_ALBUMID",
+                    "f1223d63-f359-457d-b935-fc27eb24a6de",
+                ),
+            ],
+        ),
+    ];
+    let p = proposal(&rows, &[], &[]);
+    assert_eq!(
+        p.release_id.as_deref(),
+        Some("f1223d63-f359-457d-b935-fc27eb24a6de")
+    );
+    assert_eq!(
+        p.release_group_id.as_deref(),
+        Some("0b3a4c5d-1111-2222-3333-444455556666")
+    );
+    let mut saved = draft();
+    assert_eq!(
+        merge_saved(&saved, &p).release_id.as_deref(),
+        Some("f1223d63-f359-457d-b935-fc27eb24a6de")
+    );
+    saved.release_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+    assert_eq!(
+        merge_saved(&saved, &p).release_id.as_deref(),
+        Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    );
 }

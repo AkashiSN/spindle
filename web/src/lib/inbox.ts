@@ -1,3 +1,4 @@
+import type { ReleaseCandidate } from './cd'
 import { formatDuration } from './format'
 
 // Inbox の承認キュー（SPEC §7.8、D-68）の純粋ロジック。件 = 音声ファイルのあるディレクトリ。
@@ -31,6 +32,21 @@ export type InboxDraft = {
   tracks: DraftTrack[]
   /** album gain を計算する album にする（D-74）。既定 false。追記先があればその現在値を上書きする */
   album_gain: boolean
+  /**
+   * MusicBrainz のリリース（MUSICBRAINZ_ALBUMID）。提案はファイルのタグ、承認画面で候補を選ぶと入る（P4-21）。
+   * null / 無しなら配置でタグに触れない
+   */
+  release_id?: string | null
+  /** 同じくリリースグループ（MUSICBRAINZ_RELEASEGROUPID） */
+  release_group_id?: string | null
+}
+
+/** CD の件の照会の材料（`GET /api/inbox` の `rip`。P4-21）。`POST /api/cd/lookup` にそのまま渡す */
+export type RipLookup = {
+  toc: string
+  /** ドライブが読んだ ISRC（音声トラック順。旧サイドカーは空） */
+  isrcs: Array<string | null>
+  mcn: string | null
 }
 
 export type InboxFile = {
@@ -133,6 +149,8 @@ export type InboxItem = {
   warnings: string[]
   /** 下書きの category / albumartist / album から引いた追記先。無ければ null */
   destination: InboxDestination | null
+  /** CD の件の照会の材料（P4-21）。CD でない件は null（旧サーバでは無い） */
+  rip?: RipLookup | null
 }
 
 export const STATE_LABELS: Record<InboxState, string> = {
@@ -267,6 +285,9 @@ export function draftFrom(item: InboxItem): InboxDraft {
       return { ...cloneTrack(s), rel_path: t.rel_path, artist, keep_artists: keep }
     }),
     album_gain: saved.album_gain,
+    // 旧下書き（欄が無い）は提案（ファイルのタグ）の値。サーバの merge_saved と同じ
+    release_id: saved.release_id ?? p.release_id ?? null,
+    release_group_id: saved.release_group_id ?? p.release_group_id ?? null,
   }
 }
 
@@ -319,7 +340,18 @@ export function validateDraft(d: InboxDraft, files: string[]): string[] {
   for (const f of files) {
     if (!seen.has(pathKey(f))) out.push(`下書きに無いファイル: ${f}`)
   }
+  if (d.release_id != null && d.release_id.trim() !== '' && !isMbid(d.release_id.trim())) {
+    out.push(`MusicBrainz のリリース ID の形が不正: ${d.release_id}`)
+  }
+  if (d.release_group_id != null && d.release_group_id.trim() !== '' && !isMbid(d.release_group_id.trim())) {
+    out.push(`MusicBrainz のリリースグループ ID の形が不正: ${d.release_group_id}`)
+  }
   return out
+}
+
+/** MusicBrainz の MBID（小文字の UUID。サーバの is_mbid と同じ） */
+export function isMbid(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)
 }
 
 /** 下書きにあるディスク番号（昇順。貼り付けの写し先を選ぶ） */
@@ -398,6 +430,40 @@ export function draftForSubmit(d: InboxDraft): InboxDraft {
       keep_artists: t.keep_artists === true,
     })),
     album_gain: d.album_gain,
+    release_id: opt(d.release_id ?? null),
+    release_group_id: opt(d.release_group_id ?? null),
+  }
+}
+
+/** 吸い出しが空のタイトルに付ける名前（`Track 01`）。候補を写すときは空欄と同じに扱う */
+const PLACEHOLDER_TITLE = /^Track \d{2,}$/
+
+/**
+ * MusicBrainz の候補を下書きに写す（P4-21。ユーザ判断: ID に加えて空欄の名前も）。
+ * - リリース / リリースグループの ID は常に写す（盤の識別。D-72）
+ * - ディスク番号は候補の medium の位置にする（2 枚組の 2 枚目を 2 枚目として置く）
+ * - アルバム名・アルバムアーティスト・日付・曲名・曲のアーティストは、下書きで**空のところだけ**埋める
+ *   （曲名は吸い出しが付けた `Track NN` も空とみなす）。手で入れた値は上書きしない
+ * - 曲は**トラック番号**で候補の曲に対応させる（件のファイルの並びではない）。曲のアーティストが
+ *   アルバムアーティストと同じなら空のまま（配置でアルバムアーティストになる）
+ */
+export function applyCandidate(d: InboxDraft, c: ReleaseCandidate): InboxDraft {
+  const albumartist = d.albumartist.trim() === '' ? c.artist : d.albumartist
+  return {
+    ...d,
+    release_id: c.release_id,
+    release_group_id: c.release_group_id,
+    albumartist,
+    album: d.album.trim() === '' ? c.title : d.album,
+    date: d.date == null || d.date.trim() === '' ? c.date : d.date,
+    tracks: d.tracks.map((t) => {
+      const ct = c.tracks[t.track_no - 1]
+      const out = { ...cloneTrack(t), disc_no: c.medium_position }
+      if (ct == null) return out
+      if (t.title.trim() === '' || PLACEHOLDER_TITLE.test(t.title.trim())) out.title = ct.title
+      if (t.artist.trim() === '' && t.keep_artists !== true && ct.artist !== albumartist) out.artist = ct.artist
+      return out
+    }),
   }
 }
 

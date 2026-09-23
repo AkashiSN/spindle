@@ -57,6 +57,14 @@ pub struct InboxDraft {
     /// album gain を計算する album にする（D-74）。既定 off。追記先の album ならその属性を上書きする
     #[serde(default)]
     pub album_gain: bool,
+    /// MusicBrainz のリリース（`MUSICBRAINZ_ALBUMID`）。提案はファイルのタグの最頻値、承認画面で候補を
+    /// 選ぶと入る（P4-21）。配置でタグに書き、album の `mb_release_id` とリリースキー `mb:` になる。
+    /// None なら触らない（ファイルのタグのまま）
+    #[serde(default)]
+    pub release_id: Option<String>,
+    /// 同じくリリースグループ（`MUSICBRAINZ_RELEASEGROUPID`）
+    #[serde(default)]
+    pub release_group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -81,6 +89,20 @@ pub enum DraftError {
     BadDate(String),
     #[error("category が空")]
     EmptyCategory,
+    #[error("MusicBrainz のリリース ID の形が不正: {0}")]
+    BadReleaseId(String),
+    #[error("MusicBrainz のリリースグループ ID の形が不正: {0}")]
+    BadReleaseGroupId(String),
+}
+
+/// MusicBrainz の MBID（小文字の UUID `8-4-4-4-12`）か
+fn is_mbid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// `YYYY[-MM[-DD]]` か
@@ -158,6 +180,12 @@ impl InboxDraft {
             if !seen_files.contains(&canonical_key(f)) {
                 out.push(DraftError::MissingFile(f.clone()));
             }
+        }
+        if let Some(id) = self.release_id.as_deref().filter(|id| !is_mbid(id)) {
+            out.push(DraftError::BadReleaseId(id.to_owned()));
+        }
+        if let Some(id) = self.release_group_id.as_deref().filter(|id| !is_mbid(id)) {
+            out.push(DraftError::BadReleaseGroupId(id.to_owned()));
         }
         out
     }
@@ -377,6 +405,12 @@ pub fn proposal(
         date,
         tracks,
         album_gain: false,
+        release_id: mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID"))),
+        release_group_id: mode(
+            files
+                .iter()
+                .filter_map(|f| tag(f, "MUSICBRAINZ_RELEASEGROUPID")),
+        ),
     }
 }
 
@@ -430,6 +464,15 @@ pub fn merge_saved(saved: &InboxDraft, proposed: &InboxDraft) -> InboxDraft {
         date: saved.date.clone(),
         tracks,
         album_gain: saved.album_gain,
+        // 旧下書き（欄が無い）は提案（ファイルのタグ）の値
+        release_id: saved
+            .release_id
+            .clone()
+            .or_else(|| proposed.release_id.clone()),
+        release_group_id: saved
+            .release_group_id
+            .clone()
+            .or_else(|| proposed.release_group_id.clone()),
     }
 }
 
@@ -444,6 +487,18 @@ pub struct Proposed {
     /// 下書きのトラックと同じ順。追記先の album にある同名の行（P4-19）
     pub same_titles: Vec<Vec<SameTitle>>,
     pub warnings: Vec<String>,
+    /// CD の件（サイドカーに `rip`）の照会の材料。承認画面が MusicBrainz を引き直すのに使う（P4-21）
+    pub lookup: Option<RipLookup>,
+}
+
+/// 承認画面から `POST /api/cd/lookup` を引き直す材料（P4-21）。CD 画面の照会と同じ入力
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RipLookup {
+    /// CTDB 形式の TOC
+    pub toc: String,
+    /// ドライブが読んだ ISRC（音声トラック順。読めなかったトラックは null。旧サイドカーは空）
+    pub isrcs: Vec<Option<String>>,
+    pub mcn: Option<String>,
 }
 
 /// タイトルの照合鍵（P4-19）。**NFKD + casefold**（パスの `canonical_key` は NFD だが、タイトルは
@@ -577,12 +632,21 @@ pub fn propose(
             ));
         }
     }
+    let lookup = sidecar
+        .as_ref()
+        .and_then(|s| s.rip.as_ref())
+        .map(|r| RipLookup {
+            toc: r.toc.clone(),
+            isrcs: r.isrcs.clone(),
+            mcn: r.mcn.clone(),
+        });
     Ok(Proposed {
         draft,
         destination,
         sources,
         same_titles,
         warnings,
+        lookup,
     })
 }
 
@@ -1068,6 +1132,15 @@ fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -
     if draft.disc_count() > 1 {
         desired.push(("DISCTOTAL", draft.disc_count().to_string()));
     }
+    // 承認画面で選んだ MusicBrainz のリリース（P4-21）。None なら触らない
+    for (k, v) in [
+        ("MUSICBRAINZ_ALBUMID", &draft.release_id),
+        ("MUSICBRAINZ_RELEASEGROUPID", &draft.release_group_id),
+    ] {
+        if let Some(v) = v.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            desired.push((k, v.to_owned()));
+        }
+    }
     desired
         .into_iter()
         .filter(|(k, v)| {
@@ -1380,9 +1453,16 @@ fn fits_plain_album(rows: &[AlbumRow], incoming_cd: bool, discs: &[u32]) -> Resu
     Ok(())
 }
 
-/// 件のファイルの MUSICBRAINZ_ALBUMID の最頻値（配置のリリースキー `mb:` の元）
-fn incoming_release_id(files: &[FileRow]) -> Option<String> {
-    mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")))
+/// 件のリリース（配置のリリースキー `mb:` の元）: 下書きで選んだもの（P4-21）→ 件のファイルの
+/// MUSICBRAINZ_ALBUMID の最頻値
+fn incoming_release_id(draft: &InboxDraft, files: &[FileRow]) -> Option<String> {
+    draft
+        .release_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .or_else(|| mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID"))))
 }
 
 /// albumartist / album / category から追記先の album を引く（購読の追記先。P4-16）。下書きの規則
@@ -1408,6 +1488,8 @@ pub fn destination_of(
             keep_artists: None,
         }],
         album_gain: false,
+        release_id: None,
+        release_group_id: None,
     };
     destination(conn, layout, &draft, &[])
 }
@@ -1426,7 +1508,7 @@ pub fn destination(
     draft: &InboxDraft,
     files: &[FileRow],
 ) -> Result<Option<Destination>, InboxError> {
-    if draft.tracks.is_empty() || incoming_release_id(files).is_some() {
+    if draft.tracks.is_empty() || incoming_release_id(draft, files).is_some() {
         return Ok(None);
     }
     let (category, template) = resolve_template(conn, layout, draft)?;
@@ -1497,7 +1579,7 @@ fn plan_item(
     let (category, template) = resolve_template(conn, layout, draft)?;
     // 自分の成果物（同じ音声の行）は占有から外し、その album のリリースキーに揃える（再実行）。
     // 同じ音声の行が他の album にあっても、件を入れられない album は自分とみなさない（D-29 / D-67 追記 3）
-    let incoming_mb = incoming_release_id(files);
+    let incoming_mb = incoming_release_id(draft, files);
     let discs: Vec<u32> = draft.tracks.iter().map(|t| t.disc_no).collect();
     let own = pick_self_album(
         conn,
@@ -1773,7 +1855,10 @@ fn register_item(
 ) -> Result<Result<RegisteredItem, InboxError>, DbError> {
     let tx = conn.transaction()?;
     let now = now_epoch();
-    let mb = mode(files.values().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")));
+    let mb = {
+        let list: Vec<FileRow> = files.values().cloned().collect();
+        incoming_release_id(draft, &list)
+    };
     let meta = AlbumMeta {
         category_id: plan.category_id,
         albumartist: Some(draft.albumartist.trim().to_owned()),

@@ -66,6 +66,14 @@ pub struct RipEntry {
     pub metadata: DiscMetadata,
     /// 音声トラック順のファイル名（件のディレクトリ内の basename）。`report` の配列と同じ順
     pub files: Vec<String>,
+    /// ドライブが TOC と一緒に読んだ ISRC（音声トラック順。読めなかったトラックは null）。承認画面から
+    /// MusicBrainz を引き直すときに使う（P4-21。DiscID も TOC 近似も当たらず ISRC でだけ見つかる盤がある）。
+    /// これより前のサイドカーには無い（空）
+    #[serde(default)]
+    pub isrcs: Vec<Option<String>>,
+    /// 同じくメディアカタログ番号（JAN / UPC）
+    #[serde(default)]
+    pub mcn: Option<String>,
     /// 件のディレクトリに置いた rip.log の名前（`rip.log` / `rip<N>.log`）
     pub log: String,
     pub report: RipReport,

@@ -491,6 +491,79 @@ async fn youtube_item(app: &App, rel_dir: &str, category: Option<&str>, verdict:
         .unwrap()
 }
 
+/// CD の件（サイドカーに `rip`）は、承認画面から MusicBrainz を引き直す材料（TOC・ISRC・MCN）を返す（P4-21）。
+/// CD でない件は null
+#[tokio::test]
+async fn list_exposes_lookup_inputs_of_a_cd_item() {
+    use spindle::import::sidecar::Sidecar;
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let yt = youtube_item(&app, "youtube/Artist/Album", None, "ok").await;
+    let dir = spindle::domain::relpath::RelPath::parse("CD/X").unwrap();
+    let root = RootDir::open(&app.dir.path().join("Inbox")).unwrap();
+    root.create_dir_all(&dir).unwrap();
+    let mut entry = common::rip_entry(&["01.flac"], &[false]);
+    entry.isrcs = vec![Some("JPQ402600330".into())];
+    entry.mcn = Some("4582515778491".into());
+    let toc = entry.toc.clone();
+    let mut sc = Sidecar::default();
+    sc.rip = Some(entry);
+    sc.write(&root, &dir).unwrap();
+    let cd = app
+        .db
+        .write(|c| {
+            let id = inbox::insert_item(
+                c,
+                "CD/X",
+                &spindle::domain::relpath::canonical_key("CD/X"),
+                1000,
+            )?;
+            inbox::replace_files(
+                c,
+                id,
+                &[FileRow {
+                    rel_path: "CD/X/01.flac".into(),
+                    inode: 2,
+                    size: 1,
+                    mtime_ns: 0,
+                    ctime_ns: 0,
+                    codec: "flac".into(),
+                    lossless: true,
+                    sample_rate: Some(44100),
+                    bit_depth: Some(16),
+                    channels: Some(2),
+                    duration_ms: Some(10000),
+                    tags: vec![
+                        ("TITLE".into(), "Track 01".into()),
+                        ("MUSICBRAINZ_DISCID".into(), "d".into()),
+                    ],
+                }],
+            )?;
+            Ok(id)
+        })
+        .await
+        .unwrap();
+    let (st, body) = app.get(&c, "/api/inbox").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let item = |id: i64| {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let it = item(cd);
+    assert_eq!(
+        it["rip"],
+        serde_json::json!({ "toc": toc, "isrcs": ["JPQ402600330"], "mcn": "4582515778491" }),
+        "{it}"
+    );
+    assert!(it["proposal"]["release_id"].is_null(), "{it}");
+    assert!(item(yt)["rip"].is_null());
+}
+
 #[tokio::test]
 async fn list_reports_destination_source_and_numbers_after_the_existing_album() {
     let app = App::new().await;

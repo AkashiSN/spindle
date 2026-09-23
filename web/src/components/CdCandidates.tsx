@@ -8,32 +8,17 @@
 import { useState } from 'react'
 import type { CdLookupState } from '../hooks/useCdLookup'
 import {
-  candidateLengthMs,
-  candidateSummary,
+  candidateDetail,
   COPY_SCOPE_LABELS,
   discidSubmissionUrl,
-  formatLengthDiff,
-  lengthDiffMs,
   lookupHeadline,
   matchedByLabel,
-  mediaSummary,
   offersDiscidSubmission,
   releaseUrl,
   splitByMedium,
   type CopyScope,
   type ReleaseCandidate,
 } from '../lib/cd'
-import { formatDuration } from '../lib/format'
-
-/** 候補の 2 行目: 収録構成・日付・国・レーベル・JAN/UPC・曲数・長さ・ディスクとの長さ差 */
-function candidateDetail(c: ReleaseCandidate, tocTracks: { number: number; length_ms: number }[]): string {
-  const parts = [mediaSummary(c), candidateSummary(c), `${c.tracks.length} 曲`]
-  const len = candidateLengthMs(c)
-  if (len != null) parts.push(formatDuration(len))
-  const diff = lengthDiffMs(c, tocTracks)
-  if (diff != null) parts.push(formatLengthDiff(diff))
-  return parts.filter((p) => p !== '').join(' · ')
-}
 
 /** 選択中の候補のジャケット。無い盤・取れない盤は同じ寸法の空枠 */
 function Cover({ releaseId }: { releaseId: string | null }) {

@@ -62,7 +62,6 @@ struct App {
     router: Router,
     drive: Option<Arc<dyn Drive>>,
     monitor: Arc<DriveMonitor>,
-    #[allow(dead_code)]
     dir: tempfile::TempDir,
 }
 
@@ -332,6 +331,18 @@ async fn rip_enqueues_a_job_for_the_disc_in_the_drive() {
         .await;
     assert_eq!(st, StatusCode::ACCEPTED, "{body}");
     let job = body["job_id"].as_i64().unwrap();
+    // ドライブが TOC と一緒に読んだ ISRC / MCN を payload に載せる（サイドカーに残して引き直しに使う。P4-21）
+    let payload: String = rusqlite::Connection::open(app.dir.path().join("spindle.db"))
+        .unwrap()
+        .query_row("SELECT payload FROM jobs WHERE id = ?1", [job], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(
+        payload["ids"],
+        serde_json::json!({ "isrcs": ["JPQ402600330", null], "mcn": "4582515778491" })
+    );
     // 進行中の吸い出しは status に出る（画面を開き直しても追える）
     let (_, status) = app.call(Method::GET, "/api/cd/status", &c).await;
     assert_eq!(status["rip_job"], job);

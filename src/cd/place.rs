@@ -32,6 +32,7 @@ use std::time::Duration;
 use md5::{Digest as _, Md5};
 use tokio_util::sync::CancellationToken;
 
+use super::device::DiscIds;
 use super::metadata::{DiscMetadata, MetadataError};
 use super::riplog::{companion_names, render_cue, render_log, render_toc, RipReport};
 use super::toc::Toc;
@@ -80,6 +81,8 @@ pub struct PlaceInput<'a> {
     /// オフセット適用済みの s16le / 2ch / 44.1 kHz の raw PCM（TOC の音声部分ぴったり）
     pub pcm: &'a Path,
     pub report: &'a RipReport,
+    /// ドライブが読んだ ISRC / MCN（サイドカーに残す。P4-21）
+    pub ids: &'a DiscIds,
     /// エンコードの進捗（`(トラック番号, 済んだ数, 全数)`。トラックを 1 本エンコードするたび）
     pub on_encoded: Option<&'a (dyn Fn(u8, u64, u64) + Send + Sync)>,
 }
@@ -526,6 +529,8 @@ pub async fn place_disc(
             toc: toc.ctdb_toc(),
             metadata: original.clone(),
             files: files.clone(),
+            isrcs: input.ids.isrcs.clone(),
+            mcn: input.ids.mcn.clone(),
             log: names.log.clone(),
             report: input.report.clone(),
         });

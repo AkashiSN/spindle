@@ -209,7 +209,7 @@ use serde::Serialize;
 use super::accuraterip::ArDiscEntry;
 use super::crctable::{CrcSampler, CrcTable};
 use super::ctdb::CtdbEntry;
-use super::device::{Drive, DriveError};
+use super::device::{DiscIds, Drive, DriveError};
 use super::driveoffsets::DriveEntry;
 use super::metadata::{DiscMetadata, MetadataError};
 use super::place::{place_disc, PlaceEnv, PlaceError, PlaceInput, Placed};
@@ -667,6 +667,7 @@ pub async fn rip_disc(
     env: &RipEnv,
     toc: &Toc,
     meta: &DiscMetadata,
+    ids: &DiscIds,
     progress: ProgressFn,
     token: &CancellationToken,
 ) -> Result<Placed, RipJobError> {
@@ -958,6 +959,7 @@ pub async fn rip_disc(
             metadata: meta,
             pcm: &final_pcm,
             report: &report,
+            ids,
             on_encoded: Some(&on_encoded),
         },
         token,

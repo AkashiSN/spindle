@@ -12,7 +12,7 @@ use crate::db::inbox::{self as dbinbox, FileRow, Item, ItemState};
 use crate::db::now_epoch;
 use crate::db::scans;
 use crate::import::inbox::{
-    destination, embedded_picture, propose, Destination, InboxDraft, SameTitle,
+    destination, embedded_picture, propose, Destination, InboxDraft, RipLookup, SameTitle,
 };
 use crate::import::sidecar::FileEntry;
 use crate::jobs::handlers::inbox::new_inbox_job;
@@ -40,6 +40,8 @@ pub struct ItemView {
     pub warnings: Vec<String>,
     /// 追記先の既存 album（D-70）
     pub destination: Option<Destination>,
+    /// CD の件の照会の材料（P4-21）。CD でない件は null
+    pub rip: Option<RipLookup>,
 }
 
 #[derive(Serialize)]
@@ -141,6 +143,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
                     proposal: p.draft,
                     warnings: p.warnings,
                     destination: p.destination,
+                    rip: p.lookup,
                 });
             }
             Ok(Ok(out))

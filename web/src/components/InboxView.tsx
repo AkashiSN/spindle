@@ -8,6 +8,7 @@ import { formatDuration } from '../lib/format'
 import { formatDateTime } from '../lib/history'
 import {
   ARTIST_JOIN,
+  applyCandidate,
   applyTracklist,
   artistValues,
   artworkUrl,
@@ -30,7 +31,18 @@ import {
   type InboxDraft,
   type InboxItem,
   type InboxSource,
+  type RipLookup,
 } from '../lib/inbox'
+import { apiPost } from '../api/client'
+import { describeLookupError } from '../hooks/useCdLookup'
+import {
+  candidateDetail,
+  lookupHeadline,
+  matchedByLabel,
+  releaseUrl,
+  type LookupResponse,
+  type ReleaseCandidate,
+} from '../lib/cd'
 import { parseTracklist } from '../lib/tracklist'
 import { CategoryField } from './CategoryField'
 
@@ -232,6 +244,8 @@ function ItemForm({
         </label>
       </div>
 
+      {editable && item.rip != null && <MbLookup rip={item.rip} draft={draft} onApply={setDraft} />}
+
       <h2>トラック（ファイル名・コーデック・長さはファイルから）</h2>
       <table className="cd-tracks cd-tracks-edit inbox-tracks">
         <thead>
@@ -324,6 +338,115 @@ function ItemForm({
         )}
       </div>
     </div>
+  )
+}
+
+/**
+ * CD の件の MusicBrainz 引き直し（P4-21）。候補が無いまま / 「どれも違う」で取り込んだ盤を、後から
+ * （DiscID を登録した・リリースを見つけた）承認画面で引き直す。照会は CD 画面と同じ `POST /api/cd/lookup`
+ * （サイドカーの TOC / ISRC / MCN。10 分のキャッシュと 1 req/s はサーバ側）。選んだ候補は ID を写し、
+ * 空欄の名前だけ埋める（`applyCandidate`）。結果は保存しない（件を替えると消える）
+ */
+function MbLookup({ rip, draft, onApply }: { rip: RipLookup; draft: InboxDraft; onApply: (d: InboxDraft) => void }) {
+  const [release, setRelease] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<LookupResponse | null>(null)
+  const run = async (opts: { refresh?: boolean; widen?: boolean } = {}) => {
+    setBusy(true)
+    setError(null)
+    try {
+      setResult(
+        await apiPost<LookupResponse>('/api/cd/lookup', {
+          toc: rip.toc,
+          isrcs: rip.isrcs,
+          mcn: rip.mcn,
+          release: release.trim() === '' ? null : release.trim(),
+          refresh: opts.refresh ?? false,
+          widen: opts.widen ?? false,
+        }),
+      )
+    } catch (e) {
+      setError(describeLookupError(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const chosen = draft.release_id ?? null
+  const pick = (c: ReleaseCandidate) => onApply(applyCandidate(draft, c))
+  // 最初だけ「未選択なら開く」。以後の開閉は利用者に任せる（選んだ直後に畳まない）
+  const [initiallyOpen] = useState(chosen == null)
+  return (
+    <details className="inbox-mb" open={initiallyOpen}>
+      <summary className="small">
+        MusicBrainz{' '}
+        {chosen == null ? (
+          <span className="muted">（リリース未選択）</span>
+        ) : (
+          <a href={`https://musicbrainz.org/release/${chosen}`} target="_blank" rel="noopener noreferrer">
+            {chosen}
+          </a>
+        )}
+      </summary>
+      <p className="muted small">
+        CD 画面で候補が無かった盤を引き直す（DiscID を登録した後など）。選ぶとリリースの ID を写し、空欄の
+        名前（と Track NN）だけ埋める。手で入れた値は変えない
+      </p>
+      <div className="op-row">
+        <button type="button" disabled={busy} onClick={() => void run({ refresh: result != null })}>
+          {busy ? '照会中…' : 'MusicBrainz で引き直す'}
+        </button>
+        <input
+          type="text"
+          className="small"
+          aria-label="リリース URL / MBID（任意）"
+          placeholder="リリース URL / MBID（任意）"
+          value={release}
+          onChange={(e) => setRelease(e.target.value)}
+        />
+        {chosen != null && (
+          <button type="button" onClick={() => onApply({ ...draft, release_id: null, release_group_id: null })}>
+            リリースを外す
+          </button>
+        )}
+      </div>
+      {error != null && <p className="error small">{error}</p>}
+      {result != null && (
+        <>
+          <p className="small">{lookupHeadline(result)}</p>
+          {result.notes.map((n) => (
+            <p key={n} className="error small">
+              {n}
+            </p>
+          ))}
+          <ul className="inbox-mb-candidates">
+            {result.candidates.map((c) => (
+              <li key={`${c.release_id}-${c.medium_position}`}>
+                <label>
+                  <input
+                    type="radio"
+                    name="inbox-mb-candidate"
+                    checked={chosen === c.release_id && draft.tracks[0]?.disc_no === c.medium_position}
+                    onChange={() => pick(c)}
+                  />{' '}
+                  <strong>{c.artist}</strong> — {c.title}{' '}
+                  <span className={c.exact ? 'badge' : 'badge muted'}>{matchedByLabel(c)}</span>{' '}
+                  <a href={releaseUrl(c)} target="_blank" rel="noopener noreferrer" className="small">
+                    MusicBrainz で見る
+                  </a>
+                  <div className="muted small">{candidateDetail(c, result.tracks)}</div>
+                </label>
+              </li>
+            ))}
+          </ul>
+          {result.can_widen && (
+            <button type="button" disabled={busy} onClick={() => void run({ widen: true })}>
+              さらに広げて探す
+            </button>
+          )}
+        </>
+      )}
+    </details>
   )
 }
 

@@ -330,6 +330,8 @@ fn draft_for(files: &[(&str, u32, &str)], category: Option<&str>, album: &str) -
             })
             .collect(),
         album_gain: false,
+        release_id: None,
+        release_group_id: None,
     }
 }
 
@@ -1404,6 +1406,70 @@ async fn cd_item_is_not_registered_when_the_album_stops_being_a_cd_after_plannin
         )),
         1
     );
+}
+
+// ---------------------------------------------------------------- 承認画面で選んだ MusicBrainz のリリース（P4-21）
+
+/// 下書きのリリース ID はタグ（MUSICBRAINZ_ALBUMID / RELEASEGROUPID）に書かれ、album の mb_release_id になる
+#[tokio::test]
+async fn release_ids_in_draft_are_written_to_tags_and_the_album() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    let mut d = draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album");
+    d.release_id = Some("f1223d63-f359-457d-b935-fc27eb24a6de".into());
+    d.release_group_id = Some("0b3a4c5d-1111-2222-3333-444455556666".into());
+    lib.approve(a.id, &d);
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    let p = lib.lib_path("_Unsorted/Artist/Album/01 One.flac");
+    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
+        .unwrap();
+    assert_eq!(
+        af.tags.first("MUSICBRAINZ_ALBUMID"),
+        Some("f1223d63-f359-457d-b935-fc27eb24a6de")
+    );
+    assert_eq!(
+        af.tags.first("MUSICBRAINZ_RELEASEGROUPID"),
+        Some("0b3a4c5d-1111-2222-3333-444455556666")
+    );
+    let mb: Option<String> = lib
+        .conn()
+        .query_row("SELECT mb_release_id FROM albums", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mb.as_deref(), Some("f1223d63-f359-457d-b935-fc27eb24a6de"));
+}
+
+/// 同じリリースの 2 枚目は、承認画面で同じ MBID を選べば 1 枚目の album に合流する（`mb:` のキー）
+#[tokio::test]
+async fn second_disc_with_the_same_release_id_joins_the_first() {
+    let lib = Lib::new();
+    lib.start(true);
+    let place =
+        |dir: &'static str, seed: u32, title: &'static str, disc: u32, discid: &'static str| {
+            let lib = &lib;
+            async move {
+                let rel = format!("{dir}/01.flac");
+                let p = lib.add(&rel, seed, title, "Album", 1)?;
+                set_tags(&p, "flac", &[("MUSICBRAINZ_DISCID", &[discid])]);
+                lib.scan(i64::from(seed) * 1000).await;
+                let it = lib.item(dir).unwrap();
+                let mut d = draft_disc(&[(&rel, 1, title)], disc, "Album");
+                d.release_id = Some("f1223d63-f359-457d-b935-fc27eb24a6de".into());
+                lib.approve(it.id, &d);
+                assert_eq!(lib.run_job().await, JobState::Done);
+                inbox::get(&lib.conn(), it.id).unwrap()
+            }
+        };
+    let a = require_ffmpeg!(place("Disc1", 1, "One", 1, "disc-1").await);
+    let b = place("Disc2", 2, "Two", 2, "disc-2").await.unwrap();
+    assert_eq!(a.state, ItemState::Placed, "{:?}", a.error);
+    assert_eq!(b.state, ItemState::Placed, "{:?}", b.error);
+    assert_eq!(a.placed_album_id, b.placed_album_id);
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 1);
 }
 
 /// ARTIST が多値のファイルは、下書きの `keep_artists` が true なら（現在の個数に関係なく）触れず、

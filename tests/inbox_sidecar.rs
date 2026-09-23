@@ -129,6 +129,19 @@ fn rip_entry_round_trips_with_stable_json_keys() {
     assert_eq!((&back.category, &back.rip), (&s.category, &s.rip));
     assert!(back.rip.unwrap().check().is_ok());
 
+    // ドライブから読んだ ISRC / MCN（P4-21。引き直しの照会に使う）
+    assert_eq!(rip["isrcs"], serde_json::json!([null, null]));
+    assert!(rip["mcn"].is_null());
+    // それより前のサイドカー（isrcs / mcn が無い）も読める
+    let mut old_v = v.clone();
+    old_v["rip"].as_object_mut().unwrap().remove("isrcs");
+    old_v["rip"].as_object_mut().unwrap().remove("mcn");
+    let old_rip = Sidecar::parse(old_v.to_string().as_bytes())
+        .unwrap()
+        .rip
+        .unwrap();
+    assert_eq!((old_rip.isrcs.len(), old_rip.mcn), (0, None));
+
     // rip の無いサイドカー（ダウンローダ）はキーを出さず、読んでも None
     let text = String::from_utf8(Sidecar::default().to_json()).unwrap();
     assert!(!text.contains("rip"), "{text}");

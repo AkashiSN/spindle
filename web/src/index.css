@@ -2026,6 +2026,18 @@ table.cd-tracks .num {
 .inbox-paste {
   margin: 8px 0;
 }
+.inbox-mb {
+  margin: 8px 0;
+}
+.inbox-mb-candidates {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+}
+.inbox-mb-candidates li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
 .inbox-paste textarea {
   box-sizing: border-box;
   width: 100%;

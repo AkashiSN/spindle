@@ -198,7 +198,7 @@ pub fn toc_from_entries(entries: &[TocEntry], leadout_lba: u32) -> Result<Toc, T
 }
 
 /// TOC 以外のディスクの識別子（Q サブチャネル）。MusicBrainz の ISRC 照会 / バーコード照会に使う
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct DiscIds {
     /// 音声トラックごとの ISRC（TOC の音声トラックと同じ順。無いトラックは None）
     pub isrcs: Vec<Option<String>>,

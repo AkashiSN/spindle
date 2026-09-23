@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyCandidate,
   applyTracklist,
   artistValues,
   discNumbers,
@@ -23,6 +24,7 @@ import {
   type InboxFile,
   type InboxItem,
 } from './inbox'
+import type { ReleaseCandidate } from './cd'
 
 function file(rel_path: string, codec = 'flac', tags: Array<[string, string]> = []): InboxFile {
   return {
@@ -198,6 +200,8 @@ describe('draftForSubmit', () => {
       date: null,
       tracks: [{ rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 't', artist: '', keep_artists: false }],
       album_gain: true,
+      release_id: null,
+      release_group_id: null,
     })
   })
 })
@@ -473,5 +477,84 @@ describe('applyTracklist（トラックリスト貼り付け。P2-10、D-65）',
       ['Z', false],
       ['P; Q', true],
     ])
+  })
+})
+
+describe('MusicBrainz の候補を写す（P4-21）', () => {
+  const MBID = 'f1223d63-f359-457d-b935-fc27eb24a6de'
+  const cand: ReleaseCandidate = {
+    release_id: MBID,
+    release_group_id: '0b3a4c5d-1111-2222-3333-444455556666',
+    title: 'Five',
+    artist: '嵐',
+    date: '2011-06-22',
+    country: 'JP',
+    status: 'Official',
+    barcode: null,
+    disambiguation: null,
+    labels: [],
+    exact: false,
+    matched_by: ['isrc'],
+    media: [
+      { position: 1, format: 'CD', track_count: 2 },
+      { position: 2, format: 'CD', track_count: 2 },
+    ],
+    medium_position: 2,
+    medium_count: 2,
+    medium_title: null,
+    format: 'CD',
+    tracks: [
+      { number: '1', position: 1, title: 'Song A', artist: '嵐', length_ms: 1000, recording_id: 'r1', track_id: 't1', isrcs: [] },
+      { number: '2', position: 2, title: 'Song B', artist: 'Guest', length_ms: 1000, recording_id: 'r2', track_id: 't2', isrcs: [] },
+    ],
+  }
+  const t = (rel_path: string, track_no: number, title: string, artist = ''): DraftTrack => ({
+    rel_path,
+    disc_no: 1,
+    track_no,
+    title,
+    artist,
+    keep_artists: false,
+  })
+
+  it('ID は常に写し、名前は空欄（と Track NN）だけ埋める。手で入れた値は上書きしない', () => {
+    const d: InboxDraft = {
+      ...proposal,
+      albumartist: '',
+      album: '手入力',
+      date: null,
+      release_id: null,
+      release_group_id: null,
+      tracks: [t('CD/01.flac', 1, 'Track 01'), t('CD/02.flac', 2, '直した', '')],
+    }
+    const r = applyCandidate(d, cand)
+    expect(r.release_id).toBe(MBID)
+    expect(r.release_group_id).toBe('0b3a4c5d-1111-2222-3333-444455556666')
+    expect([r.albumartist, r.album, r.date]).toEqual(['嵐', '手入力', '2011-06-22'])
+    // トラック番号で候補の曲に対応。アルバムアーティストと同じアーティストは空のまま（プレースホルダで見える）
+    expect(r.tracks.map((x) => [x.title, x.artist])).toEqual([
+      ['Song A', ''],
+      ['直した', 'Guest'],
+    ])
+    // ディスク番号は候補の medium の位置（2 枚目の盤を 2 枚目として置く）
+    expect(r.tracks.map((x) => x.disc_no)).toEqual([2, 2])
+    // 元は変えない
+    expect(d.release_id).toBeNull()
+  })
+
+  it('draftFrom はリリース ID を保存した下書き → 提案の順で取り、送信では空を null にする', () => {
+    const it0 = item({ proposal: { ...proposal, release_id: MBID, release_group_id: null } })
+    expect(draftFrom(it0).release_id).toBe(MBID)
+    const saved = { ...proposal, release_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
+    expect(draftFrom(item({ proposal: { ...proposal, release_id: MBID }, draft: saved })).release_id).toBe(
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    )
+    expect(draftForSubmit({ ...proposal, release_id: '  ', release_group_id: undefined }).release_id).toBeNull()
+  })
+
+  it('validateDraft はリリース ID の形を見る（サーバと同じ文言）', () => {
+    const files = proposal.tracks.map((x) => x.rel_path)
+    expect(validateDraft({ ...proposal, release_id: MBID }, files)).toEqual([])
+    expect(validateDraft({ ...proposal, release_id: 'x' }, files)).toEqual(['MusicBrainz のリリース ID の形が不正: x'])
   })
 })

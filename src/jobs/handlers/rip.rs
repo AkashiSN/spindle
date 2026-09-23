@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::cd::device::DiscIds;
 use crate::cd::metadata::DiscMetadata;
 use crate::cd::place::PlaceError;
 use crate::cd::rip::{rip_disc, RipEnv, RipJobError, RipPhase, RipProgress};
@@ -25,12 +26,15 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 struct Payload {
     toc: String,
     metadata: DiscMetadata,
+    /// ドライブが読んだ ISRC / MCN（サイドカーに残す。P4-21）。これより前の payload には無い
+    #[serde(default)]
+    ids: DiscIds,
 }
 
-pub fn new_rip_job(toc: &Toc, metadata: &DiscMetadata) -> NewJob {
+pub fn new_rip_job(toc: &Toc, metadata: &DiscMetadata, ids: &DiscIds) -> NewJob {
     NewJob::new(
         JobType::Rip,
-        serde_json::json!({ "toc": toc.ctdb_toc(), "metadata": metadata }),
+        serde_json::json!({ "toc": toc.ctdb_toc(), "metadata": metadata, "ids": ids }),
     )
     .dedup_key(DEDUP_KEY)
 }
@@ -55,7 +59,14 @@ impl RipHandler {
         let progress = Arc::new(move |p: RipProgress| {
             let _ = tx.send(p);
         });
-        let rip = rip_disc(&self.env, &toc, &payload.metadata, progress, &token);
+        let rip = rip_disc(
+            &self.env,
+            &toc,
+            &payload.metadata,
+            &payload.ids,
+            progress,
+            &token,
+        );
         let report = async {
             let mut last: Option<(RipPhase, u32, Instant)> = None;
             while let Some(p) = rx.recv().await {

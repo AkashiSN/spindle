@@ -5,6 +5,7 @@
 // 補正とトラックリスト貼り付けは Inbox の承認画面（取り込んだものは Inbox を通る。D-67 追記）。
 // P2-5 に渡す契約は**名前が空でもよい**（空名の盤は Inbox で名前を入れる。D-67 追記）。
 
+import { formatDuration } from './format'
 export type TrackCandidate = {
   number: string
   position: number
@@ -276,6 +277,16 @@ export function candidateLengthMs(c: ReleaseCandidate): number | null {
     total += t.length_ms
   }
   return total
+}
+
+/** 候補の 2 行目: 収録構成・日付・国・レーベル・JAN/UPC・曲数・長さ・ディスクとの長さ差（CD 画面と Inbox の引き直し） */
+export function candidateDetail(c: ReleaseCandidate, tocTracks: TocTrackInfo[]): string {
+  const parts = [mediaSummary(c), candidateSummary(c), `${c.tracks.length} 曲`]
+  const len = candidateLengthMs(c)
+  if (len != null) parts.push(formatDuration(len))
+  const diff = lengthDiffMs(c, tocTracks)
+  if (diff != null) parts.push(formatLengthDiff(diff))
+  return parts.filter((p) => p !== '').join(' · ')
 }
 
 /**

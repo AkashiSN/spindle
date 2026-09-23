@@ -1698,17 +1698,30 @@ archive.org へ飛ぶ二段構えで、飛び先に AAAA が無い）。`CoverAr
 残り: なし（トラックごとの進捗・Inbox 経由の取り込み・「取り込む」ボタンは P2-5 で入れた。実機で
 「取り込む」→ Inbox に件が出るまでを確認済み（P2-5 の受け入れ））
 
-### P4-21 候補の無いまま取り込んだ CD の MusicBrainz 引き直し（予定）
+### P4-21 候補の無いまま取り込んだ CD の MusicBrainz 引き直し
 
 候補ゼロや「どれも違う」で Inbox に置いた CD は MBID を持たない。後から MusicBrainz に DiscID を登録した・
 リリースを見つけたときに、Inbox の承認画面から引き直して候補を選べるようにする（2026-09-23 のユーザ要望。
-D-67 追記 3 の「関連」）。YouTube の件は対象外（曲の身元は `SOURCE_URL`。D-70）
+D-84）。YouTube の件は対象外（曲の身元は `SOURCE_URL`。D-70）
 
-- [ ] 照会はジョブにし、MusicBrainz への要求は 1 つのクライアント（`MusicBrainzClient` の間隔待ち）を共有して
-      1 req/s を超えない。入力はサイドカーの TOC / DiscID / ISRC（CD 画面の `POST /api/cd/lookup` と同じ段階化）
-- [ ] 結果は件ごとに覚え、承認画面に候補を並べる。選んだら写す範囲は D-72 の「識別用の最小限」
-      （`MUSICBRAINZ_ALBUMID` など。値は公式表記を手で入れる）
-- 着手前に決めること: 引き直しの起点（件を開いたときに自動か、ボタンか）、結果の置き場所（サイドカーか DB か）
+- [x] 吸い出しでドライブの ISRC / MCN をサイドカーに残す（`POST /api/cd/rip` がドライブの状態から payload の
+      `ids` に載せ、`rip_disc` → `PlaceInput.ids` → `RipEntry.isrcs` / `mcn`。旧サイドカー・旧 payload は空で読める）
+- [x] `GET /api/inbox` の件に `rip: { toc, isrcs, mcn }`（CD の件の照会の材料。`import::inbox::RipLookup`）
+- [x] 下書き（`InboxDraft`）に `release_id` / `release_group_id`。提案はファイルのタグの最頻値、保存した下書きが
+      勝つ（旧下書きは提案）。形は MBID（小文字 UUID）でなければ承認できない。配置でタグ（`MUSICBRAINZ_ALBUMID` /
+      `MUSICBRAINZ_RELEASEGROUPID`）に書き、リリースキー `mb:` と album の `mb_release_id` になる（同じリリースの
+      2 枚目は 1 枚目に合流）
+- [x] 承認画面の「MusicBrainz」節（`InboxView` の `MbLookup`）: ボタンで CD 画面と同じ `POST /api/cd/lookup` を
+      引き（10 分のキャッシュと 1 req/s はサーバ側。ジョブにも保存にもしない）、候補を選ぶと `applyCandidate`
+      （ID は常に、ディスク番号は候補の medium、名前は空欄と `Track NN` だけ埋める）。リリース URL / MBID の指定、
+      「さらに広げて探す」、「リリースを外す」
+
+受け入れ: `tests/inbox_sidecar.rs`（`isrcs` / `mcn` のキーと旧サイドカー）、`tests/cd_status_api.rs`（payload の
+`ids`）、`tests/cd_rip_job.rs`（サイドカーに残る）、`tests/inbox_api.rs`（`rip` と提案の `release_id`）、
+`tests/inbox_draft.rs`（MBID の形、提案と merge）、`tests/inbox_job.rs`（タグと `mb_release_id`、同じ MBID の
+2 枚目の合流）、`web/src/lib/inbox.test.ts`（`applyCandidate`・`draftFrom`・`validateDraft`）。ローカルのサーバで
+実機の盤（嵐「Five」、DiscID 未登録）の件を ISRC の経路で引き直し → 候補 2 件 → 選んで承認 → タグと
+`mb_release_id` が `f1223d63-…` になるのを確認
 
 ---
 
