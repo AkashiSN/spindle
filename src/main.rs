@@ -357,12 +357,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .context("AccurateRip のドライブ表の初期化に失敗")?,
     );
-    {
-        let table = Arc::clone(&drive_offsets);
-        tokio::spawn(async move {
-            table.entries().await;
-        });
-    }
+    // 起動時に読み、常駐中も期限（30 日）を 1 時間ごとに見て取り直す
+    let _drive_offsets_refresher = spindle::cd::driveoffsets::spawn_refresher(
+        Arc::clone(&drive_offsets),
+        spindle::cd::driveoffsets::REFRESH_INTERVAL,
+        shutdown.clone(),
+    );
     state = state.with_drive_offsets(Arc::clone(&drive_offsets));
     // 吸い出し（P2-5、D-67 追記 / D-83）。Inbox に置くところまで。照会先は遡及照合と同じ
     registry.register(

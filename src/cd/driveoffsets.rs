@@ -100,22 +100,27 @@ pub fn lookup<'a>(entries: &'a [DriveEntry], model: &str) -> Option<&'a DriveEnt
 
 /// 取り直しに失敗してから次に試すまで（古い表で動き続ける。吸い出しのたびに叩かない）
 pub const RETRY_AFTER: Duration = Duration::from_secs(3600);
+/// 常駐中に期限を見る間隔（[`spawn_refresher`]）
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(3600);
 
-/// メモリの表と、その取得時刻（保存から読んだならファイルの更新時刻）
-struct Loaded {
-    entries: Arc<Vec<DriveEntry>>,
-    fetched_at: SystemTime,
-    /// 最後に取り直しに失敗した時刻
+/// メモリの状態
+#[derive(Default)]
+struct State {
+    /// 表とその取得時刻（保存から読んだならファイルの更新時刻）
+    loaded: Option<(Arc<Vec<DriveEntry>>, SystemTime)>,
+    /// 保存を読んだか（プロセスで 1 回）
+    cache_read: bool,
+    /// 最後に取得に失敗した時刻（表が無いままの失敗も持つ。`RETRY_AFTER` の間は叩き直さない）
     failed_at: Option<SystemTime>,
 }
 
-/// 表の取得と保存。読み込んだ表はメモリにも持ち、`MAX_AGE` を過ぎたら次に使うときに取り直す
-/// （常駐し続けても新しいドライブの登録を拾う）
+/// 表の取得と保存。読み込んだ表はメモリにも持ち、`MAX_AGE` を過ぎたら取り直す（[`spawn_refresher`] が
+/// 常駐中も周期的に見る。吸い出しの `lookup` も見る）
 pub struct DriveOffsetTable {
     url: String,
     cache: PathBuf,
     http: reqwest::Client,
-    mem: tokio::sync::Mutex<Option<Loaded>>,
+    mem: tokio::sync::Mutex<State>,
     /// 同期で覗く用（`GET /api/cd/status` はネットワークを待たない）
     snapshot: std::sync::RwLock<Option<Arc<Vec<DriveEntry>>>>,
 }
@@ -133,7 +138,7 @@ impl DriveOffsetTable {
             url: format!("{base}{TABLE_NAME}"),
             cache,
             http: super::http_client(user_agent)?,
-            mem: tokio::sync::Mutex::new(None),
+            mem: tokio::sync::Mutex::new(State::default()),
             snapshot: std::sync::RwLock::new(None),
         })
     }
@@ -154,66 +159,55 @@ impl DriveOffsetTable {
         lookup(&snap, model).cloned()
     }
 
-    /// 表を用意する（起動時に 1 回呼んでおくと、status が最初から出せる）
+    /// 表を用意する。新しい表があればそれ、期限切れなら取り直す（失敗したら前の表。表が無ければ
+    /// None）。失敗の後 `RETRY_AFTER` の間は取りに行かない（表が無いままでも）
     pub async fn entries(&self) -> Option<Arc<Vec<DriveEntry>>> {
-        let mut mem = self.mem.lock().await;
+        let mut st = self.mem.lock().await;
         let now = SystemTime::now();
         let age = |t: SystemTime| now.duration_since(t).unwrap_or_default();
-        // メモリの表が新しい、または取り直しに失敗したばかりならそれを使う
-        if let Some(l) = mem.as_ref() {
-            let fresh = age(l.fetched_at) < MAX_AGE;
-            let backing_off = l.failed_at.is_some_and(|t| age(t) < RETRY_AFTER);
-            if fresh || backing_off {
-                return Some(Arc::clone(&l.entries));
-            }
-        } else if let Some((entries, modified)) = self.read_cache().await {
-            // 起動して最初: 保存が新しければそれ（壊れた保存は None で取り直しへ）
-            if age(modified) < MAX_AGE {
+        if !st.cache_read {
+            st.cache_read = true;
+            if let Some((entries, modified)) = self.read_cache().await {
+                // 古くても先に公開する（取り直しが終わるまで status に出す。stale-while-revalidate）
                 let entries = Arc::new(entries);
-                self.install(&mut mem, Arc::clone(&entries), modified);
-                return Some(entries);
+                st.loaded = Some((Arc::clone(&entries), modified));
+                self.publish(entries);
             }
-            // 古い保存は取り直しに失敗したときの予備としてメモリに置く
-            *mem = Some(Loaded {
-                entries: Arc::new(entries),
-                fetched_at: modified,
-                failed_at: None,
-            });
+        }
+        let current = st.loaded.as_ref().map(|(e, _)| Arc::clone(e));
+        let fresh = st.loaded.as_ref().is_some_and(|(_, at)| age(*at) < MAX_AGE);
+        let backing_off = st.failed_at.is_some_and(|t| age(t) < RETRY_AFTER);
+        if fresh || backing_off {
+            return current;
         }
         match self.fetch().await {
             Ok(e) => {
                 let entries = Arc::new(e);
-                self.install(&mut mem, Arc::clone(&entries), now);
+                st.loaded = Some((Arc::clone(&entries), now));
+                st.failed_at = None;
+                self.publish(Arc::clone(&entries));
                 Some(entries)
             }
             Err(err) => {
                 tracing::warn!(error = %err, url = %self.url, "AccurateRip のドライブ表を取れない（前の表を使う）");
-                let l = mem.as_mut()?;
-                l.failed_at = Some(now);
-                let entries = Arc::clone(&l.entries);
-                *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) =
-                    Some(Arc::clone(&entries));
-                Some(entries)
+                st.failed_at = Some(now);
+                current
             }
         }
     }
 
-    /// テスト用: メモリの表を期限切れにする（常駐が `MAX_AGE` を越えた状況を作る）
-    #[doc(hidden)]
-    pub async fn expire_for_test(&self) {
-        if let Some(l) = self.mem.lock().await.as_mut() {
-            l.fetched_at = SystemTime::UNIX_EPOCH;
-            l.failed_at = None;
-        }
+    fn publish(&self, entries: Arc<Vec<DriveEntry>>) {
+        *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = Some(entries);
     }
 
-    fn install(&self, mem: &mut Option<Loaded>, entries: Arc<Vec<DriveEntry>>, at: SystemTime) {
-        *mem = Some(Loaded {
-            entries: Arc::clone(&entries),
-            fetched_at: at,
-            failed_at: None,
-        });
-        *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = Some(entries);
+    /// テスト用: メモリの表を期限切れにし、失敗の記録も消す（常駐が `MAX_AGE` を越えた状況を作る）
+    #[doc(hidden)]
+    pub async fn expire_for_test(&self) {
+        let mut st = self.mem.lock().await;
+        if let Some((_, at)) = st.loaded.as_mut() {
+            *at = SystemTime::UNIX_EPOCH;
+        }
+        st.failed_at = None;
     }
 
     /// 保存した表と、その更新時刻（無い・壊れていれば None）
@@ -266,4 +260,23 @@ impl DriveOffsetTable {
         tracing::info!(drives = entries.len(), "AccurateRip のドライブ表を取った");
         Ok(entries)
     }
+}
+
+/// 常駐中に表の期限を見て取り直す（`interval` ごとに [`DriveOffsetTable::entries`]。期限内・失敗直後なら
+/// 何もしない）。起動直後にも 1 回読む。`GET /api/cd/status` は `peek` しか呼ばないので、これが無いと
+/// 吸い出しをしない限り新しいドライブの登録を拾えない
+pub fn spawn_refresher(
+    table: Arc<DriveOffsetTable>,
+    interval: Duration,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            table.entries().await;
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(interval) => {}
+            }
+        }
+    })
 }

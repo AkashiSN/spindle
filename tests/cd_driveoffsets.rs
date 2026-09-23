@@ -261,3 +261,118 @@ async fn broken_cache_or_response_never_replaces_a_good_table() {
     assert_eq!(t.peek("NEWVEND NEW DRIVE").unwrap().offset, 12);
     assert_eq!(hits.load(Ordering::SeqCst), 3);
 }
+
+/// 数えるだけのサーバ（`body` を返す。`delay` だけ待ってから）
+async fn counting_server(
+    body: Arc<std::sync::Mutex<Vec<u8>>>,
+    status: axum::http::StatusCode,
+    delay: std::time::Duration,
+) -> (String, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h = Arc::clone(&hits);
+    let app = Router::new().route(
+        "/accuraterip/DriveOffsets.bin",
+        get(move || {
+            let (b, h) = (Arc::clone(&body), Arc::clone(&h));
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(delay).await;
+                (status, b.lock().unwrap().clone())
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}/accuraterip/"), hits)
+}
+
+/// 表が一度も無いまま取得に失敗しても、直後の吸い出しは取りに行かずすぐ表なしで進む（codex 指摘）
+#[tokio::test]
+async fn failure_without_any_table_is_remembered() {
+    let body = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (base, hits) = counting_server(
+        body,
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = DriveOffsetTable::new(&base, "spindle-test/0", dir.path().join("t.bin")).unwrap();
+    assert!(t.lookup("PIONEER BD-RW   BDR-209M").await.is_none());
+    assert!(t.lookup("PIONEER BD-RW   BDR-209M").await.is_none());
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+/// 常駐タスクだけで（吸い出しが無くても）期限切れの表を取り直し、status の peek に新しい登録が出る
+#[tokio::test]
+async fn refresher_updates_the_table_while_resident() {
+    use spindle::cd::driveoffsets::spawn_refresher;
+    let body = Arc::new(std::sync::Mutex::new(table_bytes()));
+    let (base, _hits) = counting_server(
+        Arc::clone(&body),
+        axum::http::StatusCode::OK,
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let t =
+        Arc::new(DriveOffsetTable::new(&base, "spindle-test/0", dir.path().join("t.bin")).unwrap());
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let task = spawn_refresher(
+        Arc::clone(&t),
+        std::time::Duration::from_millis(20),
+        shutdown.clone(),
+    );
+    let wait = |model: &'static str, t: Arc<DriveOffsetTable>| async move {
+        for _ in 0..200 {
+            if let Some(e) = t.peek(model) {
+                return Some(e.offset);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        None
+    };
+    assert_eq!(
+        wait("PIONEER BD-RW   BDR-209M", Arc::clone(&t)).await,
+        Some(667)
+    );
+    let mut next = table_bytes();
+    next.extend(record(12, "NEWVEND  - NEW DRIVE", 9));
+    *body.lock().unwrap() = next;
+    t.expire_for_test().await;
+    assert_eq!(wait("NEWVEND NEW DRIVE", Arc::clone(&t)).await, Some(12));
+    shutdown.cancel();
+    task.await.unwrap();
+}
+
+/// 古い保存は、取り直しが終わる前から status に出る（stale-while-revalidate。codex 指摘）
+#[tokio::test]
+async fn stale_cache_is_visible_while_refreshing() {
+    let body = Arc::new(std::sync::Mutex::new(table_bytes()));
+    let (base, _hits) = counting_server(
+        body,
+        axum::http::StatusCode::OK,
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("t.bin");
+    std::fs::write(&cache, table_bytes()).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&cache)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let t = Arc::new(DriveOffsetTable::new(&base, "spindle-test/0", cache).unwrap());
+    let bg = {
+        let t = Arc::clone(&t);
+        tokio::spawn(async move { t.entries().await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(t.peek("PIONEER BD-RW   BDR-209M").unwrap().offset, 667);
+    assert!(!bg.is_finished(), "取り直しはまだ終わっていないはず");
+    bg.await.unwrap();
+}
