@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyTracklist,
   artistValues,
+  discNumbers,
   artworkUrl,
   codecSummary,
   itemCover,
@@ -393,5 +395,83 @@ describe('sameTitleLabel / sameTitleCount', () => {
   it('件ごとの同名の数を数える', () => {
     expect(sameTitleCount({ tracks: [f([]), f([{ track_id: 1, rel_path: 'x', duration_ms: null }])] } as InboxItem)).toBe(1)
     expect(sameTitleCount({ tracks: [] } as unknown as InboxItem)).toBe(0)
+  })
+})
+
+describe('applyTracklist（トラックリスト貼り付け。P2-10、D-65）', () => {
+  const t = (rel_path: string, disc_no: number, track_no: number, over: Partial<DraftTrack> = {}): DraftTrack => ({
+    rel_path,
+    disc_no,
+    track_no,
+    title: '',
+    artist: '',
+    keep_artists: false,
+    ...over,
+  })
+  const base = (tracks: DraftTrack[]): InboxDraft => ({ ...proposal, tracks })
+
+  it('トラック番号で行に写す（並び順ではない）。アーティストの無い行は既存を保つ', () => {
+    const d = base([t('d/b.flac', 1, 2, { artist: 'keep' }), t('d/a.flac', 1, 1), t('d/c.flac', 1, 3)])
+    const r = applyTracklist(d, 1, [
+      { no: 1, title: 'one', artist: 'X' },
+      { no: 2, title: 'two', artist: null },
+    ])
+    expect(r.draft.tracks.map((x) => [x.rel_path, x.title, x.artist])).toEqual([
+      ['d/b.flac', 'two', 'keep'],
+      ['d/a.flac', 'one', 'X'],
+      ['d/c.flac', '', ''],
+    ])
+    expect(r.warnings).toEqual(['貼り付けの行数 2 がディスク 1 の 3 曲と違う', '未設定の行: 3'])
+    // 元は変えない
+    expect(d.tracks[1]!.title).toBe('')
+  })
+
+  it('件に無い番号は捨てて警告。全部そろえば警告なし', () => {
+    const d = base([t('d/a.flac', 1, 1), t('d/b.flac', 1, 2)])
+    const r = applyTracklist(d, 1, [
+      { no: 1, title: 'one', artist: null },
+      { no: 2, title: 'two', artist: null },
+      { no: 3, title: 'three', artist: null },
+    ])
+    expect(r.draft.tracks.map((x) => x.title)).toEqual(['one', 'two'])
+    expect(r.warnings).toEqual(['貼り付けの行数 3 がディスク 1 の 2 曲と違う', 'ディスク 1 に無い番号: 3'])
+    const ok = applyTracklist(d, 1, [
+      { no: 1, title: 'one', artist: null },
+      { no: 2, title: 'two', artist: null },
+    ])
+    expect(ok.warnings).toEqual([])
+  })
+
+  it('複数枚組は選んだディスクの行にだけ写す', () => {
+    const d = base([t('d/1-1.flac', 1, 1), t('d/2-1.flac', 2, 1), t('d/2-2.flac', 2, 2)])
+    expect(discNumbers(d)).toEqual([1, 2])
+    const r = applyTracklist(d, 2, [
+      { no: 1, title: 'a', artist: null },
+      { no: 2, title: 'b', artist: null },
+    ])
+    expect(r.draft.tracks.map((x) => x.title)).toEqual(['', 'a', 'b'])
+    expect(r.warnings).toEqual([])
+  })
+
+  it('同じ番号の行が複数あれば写さずに警告', () => {
+    const d = base([t('d/a.flac', 1, 1), t('d/b.flac', 1, 1), t('d/c.flac', 1, 2)])
+    const r = applyTracklist(d, 1, [
+      { no: 1, title: 'one', artist: null },
+      { no: 2, title: 'two', artist: null },
+    ])
+    expect(r.draft.tracks.map((x) => x.title)).toEqual(['', '', 'two'])
+    expect(r.warnings).toEqual(['貼り付けの行数 2 がディスク 1 の 3 曲と違う', '番号が重複する行には写さない: 1'])
+  })
+
+  it('アーティストを貼ると多値の「そのまま保つ」を外す（貼った値で 1 値にする）', () => {
+    const d = base([t('d/a.flac', 1, 1, { artist: 'P; Q', keep_artists: true }), t('d/b.flac', 1, 2, { artist: 'P; Q', keep_artists: true })])
+    const r = applyTracklist(d, 1, [
+      { no: 1, title: 'one', artist: 'Z' },
+      { no: 2, title: 'two', artist: null },
+    ])
+    expect(r.draft.tracks.map((x) => [x.artist, x.keep_artists])).toEqual([
+      ['Z', false],
+      ['P; Q', true],
+    ])
   })
 })

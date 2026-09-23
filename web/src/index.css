@@ -2023,6 +2023,14 @@ table.cd-tracks .num {
 .inbox-form h2:first-child {
   margin-top: 0;
 }
+.inbox-paste {
+  margin: 8px 0;
+}
+.inbox-paste textarea {
+  box-sizing: border-box;
+  width: 100%;
+  font-family: inherit;
+}
 .inbox-state-placed {
   color: var(--accent);
 }

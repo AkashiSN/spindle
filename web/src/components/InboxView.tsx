@@ -8,10 +8,12 @@ import { formatDuration } from '../lib/format'
 import { formatDateTime } from '../lib/history'
 import {
   ARTIST_JOIN,
+  applyTracklist,
   artistValues,
   artworkUrl,
   codecSummary,
   destinationLabel,
+  discNumbers,
   draftForSubmit,
   draftFrom,
   isEditable,
@@ -29,6 +31,7 @@ import {
   type InboxItem,
   type InboxSource,
 } from '../lib/inbox'
+import { parseTracklist } from '../lib/tracklist'
 import { CategoryField } from './CategoryField'
 
 export function InboxView({ inbox, onOpenAlbum }: { inbox: InboxState; onOpenAlbum: (albumId: number) => void }) {
@@ -292,6 +295,7 @@ function ItemForm({
           })}
         </tbody>
       </table>
+      {editable && <TracklistPaste draft={draft} onApply={setDraft} />}
       {editable && problems.length > 0 && (
         <ul className="cd-errors small">
           {problems.map((p) => (
@@ -320,6 +324,71 @@ function ItemForm({
         )}
       </div>
     </div>
+  )
+}
+
+/**
+ * トラックリスト貼り付け（P2-10、D-65。CD 画面から移した）。通販ページ等のテキストを行解析して
+ * 選んだディスクの行へトラック番号で写す。写した後もフォームで直せる。本文は件を替えると消える
+ */
+function TracklistPaste({ draft, onApply }: { draft: InboxDraft; onApply: (d: InboxDraft) => void }) {
+  const [text, setText] = useState('')
+  const [artistFirst, setArtistFirst] = useState(false)
+  const [warnings, setWarnings] = useState<string[]>([])
+  const discs = discNumbers(draft)
+  const [picked, setPicked] = useState<number | null>(null)
+  // 選んでいたディスクが下書きから消えたら先頭へ
+  const disc = picked != null && discs.includes(picked) ? picked : (discs[0] ?? 1)
+  const apply = () => {
+    const parsed = parseTracklist(text, { artistFirst })
+    const r = applyTracklist(draft, disc, parsed.tracks)
+    onApply(r.draft)
+    setWarnings([...parsed.warnings, ...r.warnings])
+  }
+  return (
+    <details className="inbox-paste">
+      <summary className="small">トラックリスト貼り付け</summary>
+      <p className="muted small">
+        通販ページ等のテキストを 1 行 1 曲で貼る。行頭の番号（<code>1.</code> <code>01</code> <code>M-1</code>）と
+        行末の時間は外し、<code>タイトル / アーティスト</code>（<code>／</code> <code>|</code> <code>-</code> も）で
+        分ける。表（タブ区切り）も可。トラック番号で行に写すので、番号が無ければ上から 1, 2, …
+      </p>
+      <textarea
+        aria-label="トラックリスト"
+        rows={6}
+        value={text}
+        placeholder={'1. タイトル / アーティスト 4:32\n2. …'}
+        onChange={(e) => setText(e.target.value)}
+      />
+      <div className="op-row">
+        <button type="button" disabled={text.trim() === ''} onClick={apply}>
+          行に写す
+        </button>
+        {discs.length > 1 && (
+          <label className="small">
+            写す先{' '}
+            <select value={disc} onChange={(e) => setPicked(Number(e.target.value))}>
+              {discs.map((n) => (
+                <option key={n} value={n}>
+                  ディスク {n}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className="small">
+          <input type="checkbox" checked={artistFirst} onChange={(e) => setArtistFirst(e.target.checked)} />{' '}
+          アーティスト / タイトル の順で書かれている
+        </label>
+      </div>
+      {warnings.length > 0 && (
+        <ul className="cd-warnings small">
+          {warnings.map((w) => (
+            <li key={w}>{w}</li>
+          ))}
+        </ul>
+      )}
+    </details>
   )
 }
 

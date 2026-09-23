@@ -322,6 +322,62 @@ export function validateDraft(d: InboxDraft, files: string[]): string[] {
   return out
 }
 
+/** 下書きにあるディスク番号（昇順。貼り付けの写し先を選ぶ） */
+export function discNumbers(d: Pick<InboxDraft, 'tracks'>): number[] {
+  return [...new Set(d.tracks.map((t) => t.disc_no))].sort((a, b) => a - b)
+}
+
+/**
+ * トラックリスト貼り付け（`lib/tracklist.ts` の解析結果）を下書きに写す（P2-10、D-65。CD 画面から移した）。
+ * 写し先は `disc` のディスクの行で、**トラック番号で対応付ける**（ファイルの並びではない）。
+ * アーティストの無い行は既存の値を保つ。アーティストを貼った行は多値の「そのまま保つ」を外す
+ * （貼った値で 1 値にする。保ったままだと貼った値が書かれない）。
+ * 件に無い番号・同じ番号の行が複数あるもの（どれに写すか決められない）は写さず、行数の違い・
+ * 未設定の行とともに警告にする。元の draft は変えない
+ */
+export function applyTracklist(
+  draft: InboxDraft,
+  disc: number,
+  parsed: Array<{ no: number; title: string; artist: string | null }>,
+): { draft: InboxDraft; warnings: string[] } {
+  const warnings: string[] = []
+  const rows = new Map<number, number[]>()
+  draft.tracks.forEach((t, i) => {
+    if (t.disc_no === disc) rows.set(t.track_no, [...(rows.get(t.track_no) ?? []), i])
+  })
+  const count = [...rows.values()].reduce((n, v) => n + v.length, 0)
+  if (parsed.length !== count) warnings.push(`貼り付けの行数 ${parsed.length} がディスク ${disc} の ${count} 曲と違う`)
+  const tracks = draft.tracks.map((t) => ({ ...t }))
+  const unknown: number[] = []
+  const ambiguous: number[] = []
+  const covered = new Set<number>()
+  for (const p of parsed) {
+    const at = rows.get(p.no)
+    if (at == null) {
+      unknown.push(p.no)
+      continue
+    }
+    if (at.length > 1) {
+      if (!ambiguous.includes(p.no)) ambiguous.push(p.no)
+      continue
+    }
+    covered.add(p.no)
+    const t = tracks[at[0]!]!
+    t.title = p.title
+    if (p.artist != null) {
+      t.artist = p.artist
+      t.keep_artists = false
+    }
+  }
+  if (unknown.length > 0) warnings.push(`ディスク ${disc} に無い番号: ${unknown.join(', ')}`)
+  if (ambiguous.length > 0) warnings.push(`番号が重複する行には写さない: ${ambiguous.join(', ')}`)
+  const missing = [...rows.keys()]
+    .filter((n) => !covered.has(n) && !ambiguous.includes(n))
+    .sort((a, b) => a - b)
+  if (missing.length > 0) warnings.push(`未設定の行: ${missing.join(', ')}`)
+  return { draft: { ...draft, tracks }, warnings }
+}
+
 /** 送信用に整える: 前後の空白を落とし、空の date / category は null */
 export function draftForSubmit(d: InboxDraft): InboxDraft {
   const opt = (s: string | null) => {

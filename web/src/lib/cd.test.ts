@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   albumTags,
-  applyTracklist,
   candidateLengthMs,
   candidateSummary,
   draftFromCandidate,
@@ -255,44 +254,6 @@ describe('draftFromCandidate / emptyDraft', () => {
       [2, '', '', 2500, null],
       [3, '', '', 4000, null],
     ])
-  })
-})
-
-describe('applyTracklist', () => {
-  it('番号で行に写す。アーティストが無い行は既存を保つ', () => {
-    const d: DiscDraft = { ...emptyDraft(toc), album_artist: 'AA' }
-    d.tracks[1]!.artist = 'keep'
-    const r = applyTracklist(d, [
-      { no: 1, title: 'one', artist: 'X' },
-      { no: 2, title: 'two', artist: null },
-    ])
-    expect(r.draft.tracks.map((t) => [t.title, t.artist])).toEqual([
-      ['one', 'X'],
-      ['two', 'keep'],
-      ['', ''],
-    ])
-    expect(r.draft.album_artist).toBe('AA')
-    expect(r.warnings).toEqual(['貼り付けの行数 2 が TOC の 3 と違う', '未設定の行: 3'])
-    // 元は変えない
-    expect(d.tracks[0]!.title).toBe('')
-  })
-  it('TOC に無い番号は捨てて警告', () => {
-    const r = applyTracklist(emptyDraft(toc), [
-      { no: 1, title: 'one', artist: null },
-      { no: 2, title: 'two', artist: null },
-      { no: 3, title: 'three', artist: null },
-      { no: 4, title: 'four', artist: null },
-    ])
-    expect(r.draft.tracks.map((t) => t.title)).toEqual(['one', 'two', 'three'])
-    expect(r.warnings).toEqual(['貼り付けの行数 4 が TOC の 3 と違う', 'TOC に無い番号: 4'])
-  })
-  it('全部そろえば警告なし', () => {
-    const r = applyTracklist(emptyDraft(toc), [
-      { no: 1, title: 'one', artist: null },
-      { no: 2, title: 'two', artist: null },
-      { no: 3, title: 'three', artist: null },
-    ])
-    expect(r.warnings).toEqual([])
   })
 })
 

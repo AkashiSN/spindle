@@ -444,40 +444,6 @@ export function draftFromCandidate(c: ReleaseCandidate, toc: TocTrackInfo[], sco
   }
 }
 
-/**
- * 貼り付けの解析結果を行に写す（番号で対応付け）。
- *
- * **P4-20 追記で CD 画面からは使わなくなった**（編集は Inbox の承認画面に一本化した）。
- * Inbox へ移すまでの置き場としてここに残してある（TASKS P2-10 の未完了項目）。
- * アーティストの無い行は既存の値を保つ。
- * TOC に無い番号は捨て、行数の違い・未設定の行とともに警告にする。元の draft は変えない
- */
-export function applyTracklist(
-  draft: DiscDraft,
-  parsed: Array<{ no: number; title: string; artist: string | null }>,
-): { draft: DiscDraft; warnings: string[] } {
-  const warnings: string[] = []
-  if (parsed.length !== draft.tracks.length) warnings.push(`貼り付けの行数 ${parsed.length} が TOC の ${draft.tracks.length} と違う`)
-  const byNo = new Map(draft.tracks.map((t, i) => [t.number, i]))
-  const tracks = draft.tracks.map((t) => ({ ...t }))
-  const unknown: number[] = []
-  const covered = new Set<number>()
-  for (const p of parsed) {
-    const i = byNo.get(p.no)
-    if (i == null) {
-      unknown.push(p.no)
-      continue
-    }
-    covered.add(p.no)
-    tracks[i]!.title = p.title
-    if (p.artist != null) tracks[i]!.artist = p.artist
-  }
-  if (unknown.length > 0) warnings.push(`TOC に無い番号: ${unknown.join(', ')}`)
-  const missing = draft.tracks.filter((t) => !covered.has(t.number)).map((t) => t.number)
-  if (missing.length > 0) warnings.push(`未設定の行: ${missing.join(', ')}`)
-  return { draft: { ...draft, tracks }, warnings }
-}
-
 const DATE = /^\d{4}(?:-\d{2}(?:-\d{2})?)?$/
 
 /**

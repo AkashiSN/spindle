@@ -918,7 +918,7 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 - [x] 行は TOC の音声トラックと 1:1（`POST /api/cd/lookup` の応答に `tracks: [{ number, length_ms }]`。
       `Toc::audio_track_sectors`）
 - [x] 貼り付けの行解析は `web/src/lib/tracklist.ts`（番号・時間・アーティストの区切り・表・見出し）で、
-      番号で行に写す（`applyTracklist`。行数の違い・TOC に無い番号・未設定の行を警告）
+      番号で行に写す（`applyTracklist`。行数の違い・TOC に無い番号・未設定の行を警告。P2-10 で Inbox 版に移した）
 - [x] UI は CD 画面（候補ゼロ件でも、「どれも違う（候補を使わない）」でも取り込める。遷移は
       `lib/cdState.ts` の reducer）。P4-20 で表が主役になり、P4-20 追記で読み取り専用の
       `CdAlbumSummary` / `CdTrackTable` になった
@@ -969,7 +969,6 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       （`pkill -f` はシェル自身に当たるので使わない。PID を控える）
 - [ ] 通しで確認したら、Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
       `album_verifications`（`source = rip`、`log_path`）/ `tracks.verification` を見る
-- 続きの候補: P2-10 の「トラックリスト貼り付けを承認画面へ移す」（これで P2 が全部埋まる）
 - 残課題（判断待ち）: 「着手前に確認が必要な残課題」の DiscID の食い違い（Inbox 経由の CD の album は
   `discid` が NULL、DB 再構築後はタグから復元される）
 
@@ -1135,9 +1134,15 @@ unverifiable / 不完全 / 複数ディスク / 照会失敗 / 再照合の履�
 落ちた件の回復、コピー前の差し替えの検出、登録前 / 登録後に落ちた後の完了、placed のディレクトリに残った音声、normalize の投入と登録の原子性）、
 `tests/inbox_draft.rs`、`tests/inbox_db.rs`、`tests/inbox_api.rs`、`web/src/lib/inbox.test.ts`
 
-- [ ] トラックリスト貼り付けを承認画面へ移す（P4-20 追記で CD 画面から外した。パーサ
-      `web/src/lib/tracklist.ts` と `lib/cd.ts` の `applyTracklist` は残してあり、いまはテストからしか
-      呼ばれない）。受け入れ: 番号で行に写す・行数の違いと未設定の行を警告する、を Inbox の下書きで固定する
+- [x] トラックリスト貼り付けを承認画面へ移す（P4-20 追記で CD 画面から外したもの。2026-09-23。D-65 追記 2）:
+      トラック表の下の畳んだ節。`lib/tracklist.ts` で解析し、`lib/inbox.ts` の `applyTracklist` で選んだディスクの
+      行へ `track_no` で写す（複数枚組のときだけ写す先を選ぶ。アーティストを貼った行は「そのまま保つ」を外す）。
+      CD 側の `lib/cd.ts` の `applyTracklist` は消した
+
+受け入れ（貼り付け）: `web/src/lib/inbox.test.ts` の `applyTracklist`（番号で写す・並び順に依らない・
+アーティストの無い行は保つ・件に無い番号と行数の違いと未設定の行の警告・複数枚組は選んだディスクだけ・
+番号の重複する行には写さない・多値の「そのまま保つ」を外す）。ローカルのサーバで 3 曲の件に貼り付け →
+警告の表示 → 承認で貼ったタイトルの名前で配置されるのを確認
 
 ---
 
