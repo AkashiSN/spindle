@@ -556,5 +556,7 @@ describe('MusicBrainz の候補を写す（P4-21）', () => {
     const files = proposal.tracks.map((x) => x.rel_path)
     expect(validateDraft({ ...proposal, release_id: MBID }, files)).toEqual([])
     expect(validateDraft({ ...proposal, release_id: 'x' }, files)).toEqual(['MusicBrainz のリリース ID の形が不正: x'])
+    // 大文字の UUID も通す（既存のタグ。サーバと同じ）
+    expect(validateDraft({ ...proposal, release_id: MBID.toUpperCase() }, files)).toEqual([])
   })
 })

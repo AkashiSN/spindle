@@ -1708,13 +1708,14 @@ D-84）。YouTube の件は対象外（曲の身元は `SOURCE_URL`。D-70）
       `ids` に載せ、`rip_disc` → `PlaceInput.ids` → `RipEntry.isrcs` / `mcn`。旧サイドカー・旧 payload は空で読める）
 - [x] `GET /api/inbox` の件に `rip: { toc, isrcs, mcn }`（CD の件の照会の材料。`import::inbox::RipLookup`）
 - [x] 下書き（`InboxDraft`）に `release_id` / `release_group_id`。提案はファイルのタグの最頻値、保存した下書きが
-      勝つ（旧下書きは提案）。形は MBID（小文字 UUID）でなければ承認できない。配置でタグ（`MUSICBRAINZ_ALBUMID` /
+      勝つ（旧下書きは提案）。形は MBID（UUID。大文字も通す。値はスキャナと揃えるため正規化しない）でなければ
+      承認できない。配置でタグ（`MUSICBRAINZ_ALBUMID` /
       `MUSICBRAINZ_RELEASEGROUPID`）に書き、リリースキー `mb:` と album の `mb_release_id` になる（同じリリースの
       2 枚目は 1 枚目に合流）
 - [x] 承認画面の「MusicBrainz」節（`InboxView` の `MbLookup`）: ボタンで CD 画面と同じ `POST /api/cd/lookup` を
       引き（10 分のキャッシュと 1 req/s はサーバ側。ジョブにも保存にもしない）、候補を選ぶと `applyCandidate`
       （ID は常に、ディスク番号は候補の medium、名前は空欄と `Track NN` だけ埋める）。リリース URL / MBID の指定、
-      「さらに広げて探す」、「リリースを外す」
+      「さらに広げて探す」。選択の解除は置かない（null はファイルのタグにフォールバックするので外れない）
 
 受け入れ: `tests/inbox_sidecar.rs`（`isrcs` / `mcn` のキーと旧サイドカー）、`tests/cd_status_api.rs`（payload の
 `ids`）、`tests/cd_rip_job.rs`（サイドカーに残る）、`tests/inbox_api.rs`（`rip` と提案の `release_id`）、

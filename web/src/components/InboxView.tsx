@@ -374,10 +374,10 @@ function MbLookup({ rip, draft, onApply }: { rip: RipLookup; draft: InboxDraft; 
   }
   const chosen = draft.release_id ?? null
   const pick = (c: ReleaseCandidate) => onApply(applyCandidate(draft, c))
-  // 最初だけ「未選択なら開く」。以後の開閉は利用者に任せる（選んだ直後に畳まない）
-  const [initiallyOpen] = useState(chosen == null)
+  // 最初は「未選択なら開く」。以後の開閉は利用者の操作を state に持つ（再描画で閉じ直さない）
+  const [open, setOpen] = useState(chosen == null)
   return (
-    <details className="inbox-mb" open={initiallyOpen}>
+    <details className="inbox-mb" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary className="small">
         MusicBrainz{' '}
         {chosen == null ? (
@@ -404,11 +404,6 @@ function MbLookup({ rip, draft, onApply }: { rip: RipLookup; draft: InboxDraft; 
           value={release}
           onChange={(e) => setRelease(e.target.value)}
         />
-        {chosen != null && (
-          <button type="button" onClick={() => onApply({ ...draft, release_id: null, release_group_id: null })}>
-            リリースを外す
-          </button>
-        )}
       </div>
       {error != null && <p className="error small">{error}</p>}
       {result != null && (

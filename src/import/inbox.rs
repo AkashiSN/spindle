@@ -95,14 +95,15 @@ pub enum DraftError {
     BadReleaseGroupId(String),
 }
 
-/// MusicBrainz の MBID（小文字の UUID `8-4-4-4-12`）か
+/// MusicBrainz の MBID（UUID `8-4-4-4-12`）か。大文字も通す（foobar2000 などが書いた既存のタグ。値は
+/// スキャナが album の `mb_release_id` に入れる値と揃えるため正規化しない。`/api/cd/lookup` の検証と同じ）
 fn is_mbid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
         && parts
             .iter()
             .zip([8, 4, 4, 4, 12])
-            .all(|(p, n)| p.len() == n && p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// `YYYY[-MM[-DD]]` か

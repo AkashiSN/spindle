@@ -408,6 +408,9 @@ fn release_ids_must_be_uuids() {
         "{:?}",
         d.problems(&files())
     );
+    // 大文字の UUID も通す（foobar2000 などが書いた既存のタグ。値はスキャナと揃えるため正規化しない）
+    d.release_id = Some("F1223D63-F359-457D-B935-FC27EB24A6DE".into());
+    assert!(d.problems(&files()).is_empty(), "{:?}", d.problems(&files()));
     d.release_id =
         Some("https://musicbrainz.org/release/f1223d63-f359-457d-b935-fc27eb24a6de".into());
     d.release_group_id = Some("x".into());

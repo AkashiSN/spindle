@@ -349,9 +349,9 @@ export function validateDraft(d: InboxDraft, files: string[]): string[] {
   return out
 }
 
-/** MusicBrainz の MBID（小文字の UUID。サーバの is_mbid と同じ） */
+/** MusicBrainz の MBID（UUID。大文字も通す。サーバの is_mbid と同じ） */
 export function isMbid(s: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
 }
 
 /** 下書きにあるディスク番号（昇順。貼り付けの写し先を選ぶ） */
