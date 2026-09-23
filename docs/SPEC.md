@@ -551,7 +551,10 @@ Inbox への配置（`src/cd/place.rs` の `place_disc`、D-67 追記、P2-5）:
 `disc.toc` / `rip.log`、複数枚組は `disc<N>.cue` / `disc<N>.toc` / `rip<N>.log`。`disc.cue` は
 EAC 流の複数ファイル cue（ギャップは前トラック末尾。INDEX 00 は書かない）、`disc.toc` は `Toc` から
 cdrdao 構文で生成、`rip.log` は先頭行 `spindle rip log v1` の自前形式でドライブ・オフセット・
-トラックごとの CRC と照合結果を持つ。スキャナはこの rip.log のあるディレクトリで新規に登録する行を
+トラックごとの CRC と照合結果を持つ。トラック表の「ずれ」は、cd-paranoia が読み取り位置のずれ（ドライブの
+ジッター）を直しきれなかった回数（drift / dropped / duped。`TrackRead.slips`）。1 回でもあれば表の下に合計と
+意味を、試行ごとの合計（`RipReport.attempt_slips`）を「試行ごとのずれ」に出す。照合が通らずずれがある件は、
+Inbox の承認画面の警告にも出る（P2-5 の調査。TASKS）。スキャナはこの rip.log のあるディレクトリで新規に登録する行を
 `cd_rip` にする（DB を消しても出自が戻る。検証は §7.3 で付け直す）。
 
 同梱ファイル（cover / disc.cue / disc.toc / rip.log）は album 全体の一括リネームに追随する: rename

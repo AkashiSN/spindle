@@ -159,7 +159,10 @@ impl DiscReader for FakeReader {
             let total = toc.track_layout().unwrap().total_samples() / SECTOR;
             progress(total / 2, total);
             progress(total, total);
-            Ok(vec![TrackRead::default(); 3])
+            // 試行ごとに違うずれの回数を返す（i 回目はトラック 2 に i 回）
+            let mut reads = vec![TrackRead::default(); 3];
+            reads[1].slips = i as u32;
+            Ok(reads)
         })
     }
 }
@@ -562,6 +565,9 @@ async fn persistent_mismatch_is_placed_after_all_attempts() {
     let placed = run(&env).await.0.unwrap();
     let rip = lib.sidecar(&placed.rel_dir).rip.unwrap();
     assert_eq!(rip.report.attempts, 3);
+    // 試行ごとのずれの合計が残る（どの回で何回起きたかを後から見られる）。トラック表は最後の回
+    assert_eq!(rip.report.attempt_slips, [0, 1, 2]);
+    assert_eq!(rip.report.reads[1].slips, 2);
     let ctdb = rip.report.ctdb.unwrap();
     assert_eq!(ctdb.outcome, Outcome::Mismatch);
     // 傷の無いトラックは一致している（1000 セクタ目はトラック 2）

@@ -102,6 +102,7 @@ fn report() -> RipReport {
         started_at: 1_789_000_000,
         finished_at: 1_789_000_100,
         attempts: 1,
+        attempt_slips: Vec::new(),
         encoder: "flac".into(),
         reads: vec![TrackRead::default(); 3],
         crcs: (0..3u32)

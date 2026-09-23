@@ -545,6 +545,29 @@ pub struct SameTitle {
     pub duration_ms: Option<i64>,
 }
 
+/// 照合が通らず、読み取りでずれ（paranoia が直しきれなかったジッター）が起きた吸い出しの警告。照合が
+/// 通っていれば（どちらかの手法で verified）結果は DB と一致したので出さない
+fn slip_warning(report: &crate::cd::riplog::RipReport) -> Option<String> {
+    use crate::cd::verify::Outcome;
+    let verified = [&report.ctdb, &report.accuraterip]
+        .into_iter()
+        .flatten()
+        .any(|m| m.outcome == Outcome::Verified);
+    let parts: Vec<String> = report
+        .reads
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.slips > 0)
+        .map(|(i, r)| format!("トラック {}: {} 回", i + 1, r.slips))
+        .collect();
+    (!verified && !parts.is_empty()).then(|| {
+        format!(
+            "吸い出しで読み取り位置のずれを直しきれなかった箇所がある（{}）。音がビット単位で正しくない可能性。照合が通らないのはドライブのジッターのためかもしれない",
+            parts.join("、")
+        )
+    })
+}
+
 /// 件の提案（D-68 / D-70）: タグからの下書き → サイドカーの category（語彙にあるとき）→ `pending` で
 /// 保存した下書きがあれば merge → 追記先の album を引き（配置済みの件は引かない）→ TRACKNUMBER の無いトラックを採番。
 /// サイドカーが壊れていれば無いものとして扱い、警告に載せる
@@ -631,6 +654,9 @@ pub fn propose(
             warnings.push(format!(
                 "吸い出しの記録と件が合わない（このままでは配置できない）: {r}"
             ));
+        }
+        if let Some(w) = slip_warning(&entry.report) {
+            warnings.push(w);
         }
     }
     let lookup = sidecar

@@ -59,6 +59,10 @@ impl OffsetSource {
 pub struct TrackRead {
     pub rereads: u32,
     pub c2_errors: u32,
+    /// 読み取り位置のずれを cd-paranoia が直しきれなかった回数（drift / dropped / duped）。ドライブの
+    /// ジッターが大きいと増え、照合が通らない原因になる（P2-5 の調査）。これより前の記録には無い（0）
+    #[serde(default)]
+    pub slips: u32,
 }
 
 /// 音声トラック 1 本の CRC（オフセット 0）
@@ -83,6 +87,10 @@ pub struct RipReport {
     pub finished_at: i64,
     /// 吸い出しの試行回数（1 = 再リップなし）
     pub attempts: u32,
+    /// 試行ごとの読み取り位置のずれの合計（[`TrackRead::slips`] の和。`reads` は最後の回だけなので、どの回で
+    /// 何回起きたかはここで見る）。これより前の記録には無い（空）
+    #[serde(default)]
+    pub attempt_slips: Vec<u32>,
     /// エンコーダとオプション（`flac 1.5.0 -8 --verify` 等）
     pub encoder: String,
     pub reads: Vec<TrackRead>,
@@ -439,6 +447,10 @@ pub fn render_log(
         report.offset_source.label()
     );
     let _ = writeln!(s, "試行: {} 回", report.attempts);
+    if report.attempt_slips.iter().any(|&n| n > 0) {
+        let per: Vec<String> = report.attempt_slips.iter().map(u32::to_string).collect();
+        let _ = writeln!(s, "試行ごとのずれ: {}", per.join(" / "));
+    }
     let _ = writeln!(s, "エンコーダ: {}", report.encoder);
     s.push('\n');
     let _ = writeln!(s, "MusicBrainz DiscID: {}", toc.musicbrainz_disc_id());
@@ -480,7 +492,7 @@ pub fn render_log(
     }
     s.push('\n');
     s.push_str(
-        " No    LBA 長さ     再読 C2  ARv1     ARv2     CTDB     AR      CTDB    ファイル\n",
+        " No    LBA 長さ     再読 ずれ C2  ARv1     ARv2     CTDB     AR      CTDB    ファイル\n",
     );
     for e in entries(toc) {
         match e {
@@ -494,11 +506,12 @@ pub fn render_log(
                 let crc = report.crcs.get(index).copied().unwrap_or_default();
                 let _ = writeln!(
                     s,
-                    "{:>2} {:>6} {} {:>3} {:>3} {:08x} {:08x} {:08x} {:<7} {:<7} {}",
+                    "{:>2} {:>6} {} {:>3} {:>3} {:>3} {:08x} {:08x} {:08x} {:<7} {:<7} {}",
                     number,
                     start,
                     msf(sectors),
                     read.rereads,
+                    read.slips,
                     read.c2_errors,
                     crc.ar_v1,
                     crc.ar_v2,
@@ -512,6 +525,14 @@ pub fn render_log(
                 let _ = writeln!(s, "{number:>2} {start:>6} データトラック（吸い出さない）");
             }
         }
+    }
+    let slips: u32 = report.reads.iter().map(|r| r.slips).sum();
+    if slips > 0 {
+        let _ = writeln!(
+            s,
+            "ずれ: {slips} 回（cd-paranoia が読み取り位置のずれ = ドライブのジッターを直しきれなかった回数。\
+             照合が通らなければドライブを疑う）"
+        );
     }
     s.push('\n');
     match &report.ctdb {

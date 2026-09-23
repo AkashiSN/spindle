@@ -2112,6 +2112,54 @@ async fn add_cd_item(lib: &Lib) -> Option<inbox::Item> {
     lib.item("CD")
 }
 
+/// 照合が通らず、読み取りでずれ（paranoia が直しきれなかったジッター）が起きた CD の件は、承認画面の
+/// 警告に出す（音がビット単位で正しくない可能性。ドライブを疑える）。照合が通っていれば出さない
+#[tokio::test]
+async fn cd_item_with_read_slips_warns_on_the_approval_screen() {
+    use spindle::import::sidecar::Sidecar;
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("CD/01.flac", 1, "", "", 1));
+    lib.add("CD/02.flac", 2, "", "", 2);
+    let write = |matched: &[bool], slips: u32| {
+        let mut e = common::rip_entry(&["01.flac", "02.flac"], matched);
+        e.report.reads[1].slips = slips;
+        let mut sc = Sidecar::default();
+        sc.rip = Some(e);
+        sc.write(
+            &lib.inbox,
+            &spindle::domain::relpath::RelPath::parse("CD").unwrap(),
+        )
+        .unwrap();
+    };
+    let warnings = |lib: &Lib| {
+        let item = lib.item("CD").unwrap();
+        let files = inbox::files(&lib.conn(), item.id).unwrap();
+        spindle::import::inbox::propose(
+            &lib.conn(),
+            &lib.inbox,
+            &lib.env(false).layout,
+            &item,
+            &files,
+            &[],
+            &[],
+        )
+        .unwrap()
+        .warnings
+    };
+    write(&[true, false], 7);
+    lib.scan(1000).await;
+    let w = warnings(&lib);
+    assert!(
+        w.iter()
+            .any(|m| m.contains("ずれ") && m.contains("トラック 2: 7 回")),
+        "{w:?}"
+    );
+    // 照合が通っていれば（ずれがあっても結果は DB と一致した）出さない
+    write(&[true, true], 7);
+    let w = warnings(&lib);
+    assert!(!w.iter().any(|m| m.contains("ずれ")), "{w:?}");
+}
+
 /// 承認で番号とタイトルを入れ替えても、検証記録はファイル名で結びついた行に付く。出自は cd_rip、
 /// 記録は source = rip、log_path は移した rip.log の Library 相対、album gain は on で提案される
 #[tokio::test]

@@ -34,6 +34,11 @@ const SECTOR_FRAMES: u64 = 588;
 const CB_SCRATCH: i32 = 4;
 const CB_REPAIR: i32 = 5;
 const CB_SKIP: i32 = 6;
+/// 読み取り位置のずれ（ドライブのジッター）を paranoia が直しきれなかった: 位置を見失った / 補正で
+/// データを捨てた / 補正で重複を消した
+const CB_DRIFT: i32 = 7;
+const CB_DROPPED: i32 = 10;
+const CB_DUPED: i32 = 11;
 const CB_READERR: i32 = 12;
 const CB_WROTE: i32 = 14;
 
@@ -96,7 +101,8 @@ pub fn paranoia_span(toc: &Toc) -> Result<String, RipError> {
 
 /// 音声トラック全体を `out` に raw PCM で読む。`progress(書けたセクタ数, 全セクタ数)` は書けるたびに
 /// 呼ぶ（間引きは呼び出し側）。返り値は音声トラック順の読み取りの問題の数（`rereads` に scratch /
-/// repair / skip / read error の回数。cd-paranoia は C2 を使わないので `c2_errors` は 0）
+/// repair / skip / read error の回数、`slips` に drift / dropped / duped の回数。cd-paranoia は C2 を
+/// 使わないので `c2_errors` は 0）
 pub async fn read_disc(
     program: &Path,
     device: &Path,
@@ -146,6 +152,12 @@ pub async fn read_disc(
                     let idx = starts.partition_point(|&s| s <= sector).saturating_sub(1);
                     if let Some(r) = reads.get_mut(idx) {
                         r.rereads += 1;
+                    }
+                }
+                CB_DRIFT | CB_DROPPED | CB_DUPED => {
+                    let idx = starts.partition_point(|&s| s <= sector).saturating_sub(1);
+                    if let Some(r) = reads.get_mut(idx) {
+                        r.slips += 1;
                     }
                 }
                 _ => {}
@@ -750,6 +762,7 @@ pub async fn rip_disc(
         .collect();
     let max_attempts = env.retries.saturating_add(1);
     let mut attempt = 0;
+    let mut attempt_slips: Vec<u32> = Vec::new();
     let (final_pcm, reads, checked, offset, source, repaired_words) = loop {
         attempt += 1;
         if token.is_cancelled() {
@@ -777,6 +790,15 @@ pub async fn rip_disc(
             Err(RipError::Cancelled) => return Err(RipJobError::Cancelled),
             Err(e) => return Err(e.into()),
         };
+        let slips: u32 = reads.iter().map(|r| r.slips).sum();
+        attempt_slips.push(slips);
+        if slips > 0 {
+            tracing::warn!(
+                attempt,
+                slips,
+                "読み取り位置のずれを cd-paranoia が直しきれなかった"
+            );
+        }
         // 照合（まず吸ったときのオフセットで）
         let (toc_c, ctdb_c, ar_c) = (toc.clone(), ctdb_entries.clone(), ar_entries.clone());
         let p = Arc::clone(&progress);
@@ -926,6 +948,7 @@ pub async fn rip_disc(
         started_at,
         finished_at: now_epoch(),
         attempts: attempt,
+        attempt_slips,
         encoder: format!("flac -{} --verify", env.place.compression.min(8)),
         reads,
         crcs,

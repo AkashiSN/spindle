@@ -192,8 +192,12 @@ async fn read_disc_reports_progress_and_per_track_trouble() {
         "##: 6 [skip] @ 900000",      // セクタ 765 → トラック 2
         "##: 4 [scratch] @ 1500000",  // セクタ 1275 → トラック 2
         "##: 5 [repair] @ 2000000",   // セクタ 1700 → トラック 3
-        "##: 2 [jitter] @ 2000000",   // 数えない
-        "##: 14 [wrote] @ 2645999",   // 2250 セクタ目の終わり
+        "##: 2 [jitter] @ 2000000",   // 数えない（ずれを直せたもの）
+        "##: 7 [drift] @ 1000",       // 位置を見失った → トラック 1 のずれ
+        "##: 10 [dropped] @ 900000",  // 補正でデータを捨てた → トラック 2
+        "##: 11 [duped] @ 2000000",   // 補正で重複を消した → トラック 3
+        "##: 7 [drift] @ 2000000",
+        "##: 14 [wrote] @ 2645999", // 2250 セクタ目の終わり
         "##: 15 [finished] @ 2645999",
     ]
     .join("\n");
@@ -214,6 +218,8 @@ async fn read_disc_reports_progress_and_per_track_trouble() {
         reads.iter().map(|r| r.rereads).collect::<Vec<_>>(),
         [1, 2, 1]
     );
+    // ドライブのジッターを paranoia が直しきれなかった回数（drift / dropped / duped）は別に数える
+    assert_eq!(reads.iter().map(|r| r.slips).collect::<Vec<_>>(), [1, 1, 2]);
     assert_eq!(seen, [(1, 2250), (2250, 2250)]);
     let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
     assert_eq!(

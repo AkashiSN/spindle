@@ -223,6 +223,7 @@ pub fn rip_entry(files: &[&str], ctdb_matched: &[bool]) -> spindle::import::side
             started_at: 1_789_000_000,
             finished_at: 1_789_000_600,
             attempts: 1,
+            attempt_slips: Vec::new(),
             encoder: "flac -8 --verify".into(),
             reads: vec![TrackRead::default(); n],
             crcs: (0..n as u32)

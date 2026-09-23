@@ -60,6 +60,7 @@ fn report(n: usize) -> RipReport {
         started_at: 1_789_000_000,
         finished_at: 1_789_000_600,
         attempts: 1,
+        attempt_slips: Vec::new(),
         encoder: "flac 1.5.0 -8 --verify".into(),
         reads: vec![TrackRead::default(); n],
         crcs: (0..n)
@@ -236,16 +237,16 @@ fn log_has_signature_ids_table_and_results() {
     assert!(log.contains("アルバム: Nirvana / Nevermind (1991-09-24)\n"));
     assert!(log.contains("ディスク: 1 / 1\n"));
     assert!(log.contains("レーベル / カタログ番号 / バーコード: DGC / DGCD-24425 / 720642442524\n"));
-    // トラック表: 番号 開始LBA 長さ 再読み C2 ARv1 ARv2 CTDB AR CTDB ファイル名
+    // トラック表: 番号 開始LBA 長さ 再読み ずれ C2 ARv1 ARv2 CTDB AR CTDB ファイル名
     assert!(
         log.contains(
-            " 1      0 05:01:18   0   0 00001000 00002000 00003000 OK(12)  OK(5)   01 T1.flac\n"
+            " 1      0 05:01:18   0   0   0 00001000 00002000 00003000 OK(12)  OK(5)   01 T1.flac\n"
         ),
         "{log}"
     );
     assert!(
         log.contains(
-            " 4  58133 03:03:62   0   0 00001003 00002003 00003003 NG      OK(5)   04 T4.flac\n"
+            " 4  58133 03:03:62   0   0   0 00001003 00002003 00003003 NG      OK(5)   04 T4.flac\n"
         ),
         "{log}"
     );
@@ -255,6 +256,19 @@ fn log_has_signature_ids_table_and_results() {
     );
     assert!(log.contains("AccurateRip: mismatch（オフセット 0、信頼度 0）\n"));
     assert!(log.contains("結果: verified_ctdb ×12\n"));
+    // ずれが無ければ凡例は出さない
+    assert!(!log.contains("ずれ:"), "{log}");
+    // ずれがあれば列に出し、表の下に意味を書く（照合が通らないときにジッターを疑えるように）
+    let mut r = report(12);
+    r.reads[1].slips = 5;
+    let log = render_log(&toc(), &meta(), &names(12), &r, &["verified_ctdb"; 12]);
+    assert!(log.contains(" 2  22593 "), "{log}");
+    assert!(log.contains("   0   5   0 00001001"), "{log}");
+    assert!(log.contains("ずれ: 5 回"), "{log}");
+    assert!(!log.contains("試行ごとのずれ"), "{log}");
+    r.attempt_slips = vec![3, 0, 5];
+    let log = render_log(&toc(), &meta(), &names(12), &r, &["verified_ctdb"; 12]);
+    assert!(log.contains("試行ごとのずれ: 3 / 0 / 5\n"), "{log}");
     // 照会しなかった手法は「照会せず」、状態が混ざれば件数を並べる。空欄は -
     let mut r = report(12);
     r.ctdb = None;
