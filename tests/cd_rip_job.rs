@@ -754,3 +754,42 @@ async fn table_offset_is_used_before_learning() {
     assert_eq!((ctdb.outcome, ctdb.offset), (Outcome::Verified, 0));
     assert_eq!(lib.learned(), Some(667));
 }
+
+/// 学習済みの値が範囲外（壊れた DB）なら、表の値で吸う（codex 指摘）
+#[tokio::test]
+async fn out_of_range_learned_offset_falls_back_to_the_table() {
+    require_flac!();
+    let lib = Lib::new();
+    {
+        let c = rusqlite::Connection::open(&lib.db_path).unwrap();
+        spindle::db::drive_offsets::set(
+            &c,
+            DRIVE,
+            5000,
+            spindle::db::drive_offsets::OffsetMethod::Ctdb,
+            1,
+            1,
+        )
+        .unwrap();
+    }
+    let t = truth();
+    let env = lib.env(
+        vec![bytes(&delayed(&t, 667))],
+        FakeLookup {
+            ctdb: Some(vec![ctdb_entry(&t)]),
+            ar: Some(Vec::new()),
+            syndromes: None,
+            cancel_on_syndromes: None,
+            table: Some(667),
+        },
+        DriveOffset::Auto,
+    );
+    let placed = run(&env).await.0.unwrap();
+    let rip = lib.sidecar(&placed.rel_dir).rip.unwrap();
+    assert_eq!(
+        (rip.report.read_offset, rip.report.offset_source),
+        (667, OffsetSource::Table)
+    );
+    // 照合が通ったので正しい値で上書きされる
+    assert_eq!(lib.learned(), Some(667));
+}

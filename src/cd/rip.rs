@@ -694,13 +694,19 @@ pub async fn rip_disc(
     let (learned, table) = match (env.drive_offset, model.clone()) {
         (DriveOffset::Auto, Some(m)) => {
             let key = m.clone();
-            let learned = env.db.read(move |c| drive_offsets::get(c, &key)).await?;
+            // 範囲外の学習値（壊れた DB）は無いものとして表を引く（choose_offset と同じ規則）
+            let learned = env
+                .db
+                .read(move |c| drive_offsets::get(c, &key))
+                .await?
+                .map(|l| l.offset)
+                .filter(|v| v.unsigned_abs() <= MAX_OFFSET.unsigned_abs());
             let table = if learned.is_none() {
                 env.lookup.table_offset(&m).await
             } else {
                 None
             };
-            (learned.map(|l| l.offset), table.map(|t| t.offset))
+            (learned, table.map(|t| t.offset))
         }
         _ => (None, None),
     };

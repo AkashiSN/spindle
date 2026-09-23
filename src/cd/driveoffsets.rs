@@ -33,31 +33,48 @@ pub struct DriveEntry {
 pub enum DriveTableError {
     #[error("長さが 69 バイトの倍数でない: {0}")]
     Length(usize),
+    #[error("表が空")]
+    Empty,
+    #[error("{index} 番目のレコードが壊れている: {reason}")]
+    Record { index: usize, reason: &'static str },
 }
 
-/// 表を読む
+/// 表を読む。実物の全レコードで成り立つ形（名前は空でなく 33 バイト内で NUL 終端、予約は 0）から
+/// 1 件でも外れれば表ごと拒む（途中で切れた・別物を掴んだ応答で、正しい保存を上書きしない）
 pub fn parse(bytes: &[u8]) -> Result<Vec<DriveEntry>, DriveTableError> {
     if !bytes.len().is_multiple_of(RECORD) {
         return Err(DriveTableError::Length(bytes.len()));
     }
-    Ok(bytes
+    if bytes.is_empty() {
+        return Err(DriveTableError::Empty);
+    }
+    let at = 2 + NAME_LEN;
+    bytes
         .as_chunks::<RECORD>()
         .0
         .iter()
-        .filter_map(|r| {
-            let offset = i32::from(i16::from_le_bytes([r[0], r[1]]));
-            let raw = &r[2..2 + NAME_LEN];
-            let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        .enumerate()
+        .map(|(index, r)| {
+            let bad = |reason| DriveTableError::Record { index, reason };
+            let raw = &r[2..at];
+            let end = raw
+                .iter()
+                .position(|&b| b == 0)
+                .ok_or(bad("名前が NUL で終わっていない"))?;
             let name = String::from_utf8_lossy(&raw[..end]).trim().to_owned();
-            let at = 2 + NAME_LEN;
-            let submissions = u32::from_le_bytes([r[at], r[at + 1], r[at + 2], r[at + 3]]);
-            (!name.is_empty()).then_some(DriveEntry {
+            if name.is_empty() {
+                return Err(bad("名前が空"));
+            }
+            if r[at + 4..].iter().any(|&b| b != 0) {
+                return Err(bad("予約領域が 0 でない"));
+            }
+            Ok(DriveEntry {
                 name,
-                offset,
-                submissions,
+                offset: i32::from(i16::from_le_bytes([r[0], r[1]])),
+                submissions: u32::from_le_bytes([r[at], r[at + 1], r[at + 2], r[at + 3]]),
             })
         })
-        .collect())
+        .collect()
 }
 
 /// 照合の鍵: vendor と product の区切り（`" - "`、vendor が空なら先頭の `"- "`）を空白にし、空白の
@@ -81,12 +98,24 @@ pub fn lookup<'a>(entries: &'a [DriveEntry], model: &str) -> Option<&'a DriveEnt
         .max_by_key(|e| e.submissions)
 }
 
-/// 表の取得と保存。読み込んだ表はメモリにも持つ
+/// 取り直しに失敗してから次に試すまで（古い表で動き続ける。吸い出しのたびに叩かない）
+pub const RETRY_AFTER: Duration = Duration::from_secs(3600);
+
+/// メモリの表と、その取得時刻（保存から読んだならファイルの更新時刻）
+struct Loaded {
+    entries: Arc<Vec<DriveEntry>>,
+    fetched_at: SystemTime,
+    /// 最後に取り直しに失敗した時刻
+    failed_at: Option<SystemTime>,
+}
+
+/// 表の取得と保存。読み込んだ表はメモリにも持ち、`MAX_AGE` を過ぎたら次に使うときに取り直す
+/// （常駐し続けても新しいドライブの登録を拾う）
 pub struct DriveOffsetTable {
     url: String,
     cache: PathBuf,
     http: reqwest::Client,
-    mem: tokio::sync::Mutex<Option<Arc<Vec<DriveEntry>>>>,
+    mem: tokio::sync::Mutex<Option<Loaded>>,
     /// 同期で覗く用（`GET /api/cd/status` はネットワークを待たない）
     snapshot: std::sync::RwLock<Option<Arc<Vec<DriveEntry>>>>,
 }
@@ -128,38 +157,74 @@ impl DriveOffsetTable {
     /// 表を用意する（起動時に 1 回呼んでおくと、status が最初から出せる）
     pub async fn entries(&self) -> Option<Arc<Vec<DriveEntry>>> {
         let mut mem = self.mem.lock().await;
-        if let Some(e) = mem.as_ref() {
-            return Some(Arc::clone(e));
-        }
-        let cached = self.read_cache().await;
-        let fresh = cached.as_ref().is_some_and(|(_, age)| *age < MAX_AGE);
-        let entries = if fresh {
-            cached.map(|(e, _)| e)
-        } else {
-            match self.fetch().await {
-                Ok(e) => Some(e),
-                Err(err) => {
-                    tracing::warn!(error = %err, url = %self.url, "AccurateRip のドライブ表を取れない（保存済みを使う）");
-                    cached.map(|(e, _)| e)
-                }
+        let now = SystemTime::now();
+        let age = |t: SystemTime| now.duration_since(t).unwrap_or_default();
+        // メモリの表が新しい、または取り直しに失敗したばかりならそれを使う
+        if let Some(l) = mem.as_ref() {
+            let fresh = age(l.fetched_at) < MAX_AGE;
+            let backing_off = l.failed_at.is_some_and(|t| age(t) < RETRY_AFTER);
+            if fresh || backing_off {
+                return Some(Arc::clone(&l.entries));
             }
-        }?;
-        let entries = Arc::new(entries);
-        *mem = Some(Arc::clone(&entries));
-        *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&entries));
-        Some(entries)
+        } else if let Some((entries, modified)) = self.read_cache().await {
+            // 起動して最初: 保存が新しければそれ（壊れた保存は None で取り直しへ）
+            if age(modified) < MAX_AGE {
+                let entries = Arc::new(entries);
+                self.install(&mut mem, Arc::clone(&entries), modified);
+                return Some(entries);
+            }
+            // 古い保存は取り直しに失敗したときの予備としてメモリに置く
+            *mem = Some(Loaded {
+                entries: Arc::new(entries),
+                fetched_at: modified,
+                failed_at: None,
+            });
+        }
+        match self.fetch().await {
+            Ok(e) => {
+                let entries = Arc::new(e);
+                self.install(&mut mem, Arc::clone(&entries), now);
+                Some(entries)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, url = %self.url, "AccurateRip のドライブ表を取れない（前の表を使う）");
+                let l = mem.as_mut()?;
+                l.failed_at = Some(now);
+                let entries = Arc::clone(&l.entries);
+                *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Arc::clone(&entries));
+                Some(entries)
+            }
+        }
     }
 
-    async fn read_cache(&self) -> Option<(Vec<DriveEntry>, Duration)> {
+    /// テスト用: メモリの表を期限切れにする（常駐が `MAX_AGE` を越えた状況を作る）
+    #[doc(hidden)]
+    pub async fn expire_for_test(&self) {
+        if let Some(l) = self.mem.lock().await.as_mut() {
+            l.fetched_at = SystemTime::UNIX_EPOCH;
+            l.failed_at = None;
+        }
+    }
+
+    fn install(&self, mem: &mut Option<Loaded>, entries: Arc<Vec<DriveEntry>>, at: SystemTime) {
+        *mem = Some(Loaded {
+            entries: Arc::clone(&entries),
+            fetched_at: at,
+            failed_at: None,
+        });
+        *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = Some(entries);
+    }
+
+    /// 保存した表と、その更新時刻（無い・壊れていれば None）
+    async fn read_cache(&self) -> Option<(Vec<DriveEntry>, SystemTime)> {
         let path = self.cache.clone();
         tokio::task::spawn_blocking(move || {
             let meta = std::fs::metadata(&path).ok()?;
-            let age = SystemTime::now()
-                .duration_since(meta.modified().ok()?)
-                .unwrap_or_default();
+            let modified = meta.modified().ok()?;
             let bytes = std::fs::read(&path).ok()?;
             match parse(&bytes) {
-                Ok(e) => Some((e, age)),
+                Ok(e) => Some((e, modified)),
                 Err(err) => {
                     tracing::warn!(error = %err, path = %path.display(), "保存したドライブ表が壊れている");
                     None

@@ -43,6 +43,23 @@ fn parse_reads_records_and_rejects_bad_length() {
     assert_eq!((entries[1].offset, entries[1].submissions), (667, 255));
     assert_eq!(entries[4].offset, -30);
     assert_eq!(parse(&[0u8; 70]), Err(DriveTableError::Length(70)));
+    // 空（HTTP 200 + 空 body、空の保存）は表ではない
+    assert_eq!(parse(&[]), Err(DriveTableError::Empty));
+    // 69 バイト境界でも中身が違う: 名前が空・NUL で終わらない・予約が 0 でない
+    assert!(matches!(
+        parse(&[0u8; 69]),
+        Err(DriveTableError::Record { index: 0, .. })
+    ));
+    let mut long = record(1, "A", 1);
+    long[2..35].fill(b'A');
+    assert!(matches!(parse(&long), Err(DriveTableError::Record { .. })));
+    let mut junk = table_bytes();
+    let last = junk.len() - 1;
+    junk[last] = 1;
+    assert!(matches!(
+        parse(&junk),
+        Err(DriveTableError::Record { index: 4, .. })
+    ));
 }
 
 /// INQUIRY の型番（vendor と product を空白 1 つで結合）と表の名前（`"vendor  - product"`）を同じ鍵にする
@@ -178,4 +195,69 @@ async fn real_table_resolves_the_drive_in_hand() {
     let e = t.lookup("PIONEER BD-RW   BDR-209M").await.unwrap();
     eprintln!("{e:?}");
     assert_eq!(e.offset, 667);
+}
+
+/// 壊れた保存は取り直し、壊れた応答（空）は前の正しい保存を上書きしない。メモリの表も期限が来たら
+/// 取り直す（常駐し続けても）。取り直しに失敗したら前の表で動く（codex 指摘）
+#[tokio::test]
+async fn broken_cache_or_response_never_replaces_a_good_table() {
+    let body = Arc::new(std::sync::Mutex::new(table_bytes()));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (b, h) = (Arc::clone(&body), Arc::clone(&hits));
+    let app = Router::new().route(
+        "/accuraterip/DriveOffsets.bin",
+        get(move || {
+            let (b, h) = (Arc::clone(&b), Arc::clone(&h));
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                b.lock().unwrap().clone()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = format!("http://{addr}/accuraterip/");
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("DriveOffsets.bin");
+
+    // 新しいが壊れた保存 → 取り直して正しい表を保存
+    std::fs::write(&cache, [0u8; 69]).unwrap();
+    let t = DriveOffsetTable::new(&base, "spindle-test/0", cache.clone()).unwrap();
+    assert_eq!(
+        t.lookup("PIONEER BD-RW   BDR-209M").await.unwrap().offset,
+        667
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(std::fs::read(&cache).unwrap(), table_bytes());
+
+    // 古い保存 + 空の応答 → 古い保存で引き、保存は上書きしない
+    *body.lock().unwrap() = Vec::new();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&cache)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let t = DriveOffsetTable::new(&base, "spindle-test/0", cache.clone()).unwrap();
+    assert_eq!(
+        t.lookup("PIONEER BD-RW   BDR-209M").await.unwrap().offset,
+        667
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(std::fs::read(&cache).unwrap(), table_bytes());
+    // 失敗の直後は叩き直さない（RETRY_AFTER）
+    t.lookup("PIONEER BD-RW   BDR-209M").await.unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+    // 常駐のまま期限が来た: 取り直して新しい登録を拾う（プロセスを再起動しなくても）
+    let mut next = table_bytes();
+    next.extend(record(12, "NEWVEND  - NEW DRIVE", 9));
+    *body.lock().unwrap() = next;
+    assert!(t.lookup("NEWVEND NEW DRIVE").await.is_none());
+    t.expire_for_test().await;
+    assert_eq!(t.lookup("NEWVEND NEW DRIVE").await.unwrap().offset, 12);
+    assert_eq!(t.peek("NEWVEND NEW DRIVE").unwrap().offset, 12);
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
 }
