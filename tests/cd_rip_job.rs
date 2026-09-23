@@ -644,3 +644,59 @@ async fn cancel_during_repair_stops() {
     assert!(!phases.contains(&RipPhase::Encode), "{phases:?}");
     assert!(lib.leftover_pcm().is_empty(), "{:?}", lib.leftover_pcm());
 }
+
+/// CTDB は別のオフセット（+100）で 1 曲だけ一致、AccurateRip は +667 で全曲一致: 全曲一致の方を当て、
+/// 通った手法（AccurateRip）の値として覚える（codex 指摘）
+#[tokio::test]
+async fn full_match_wins_over_partial_match_at_another_offset() {
+    use spindle::cd::accuraterip::ArTrackEntry;
+    require_flac!();
+    let lib = Lib::new();
+    let t = truth();
+    let ours = delayed(&t, 667);
+    // ours を 100 ずらすと 1 曲目が合う CTDB エントリ（2・3 曲目とディスク CRC は別物）
+    let mut partial = ctdb_entry(&delayed(&t, 567));
+    partial.crc32 ^= 1;
+    partial.track_crcs[1] ^= 1;
+    partial.track_crcs[2] ^= 1;
+    let want = table(&t);
+    let ar = ArDiscEntry {
+        id: toc().accuraterip_id(),
+        tracks: (0..3)
+            .map(|i| ArTrackEntry {
+                confidence: 5,
+                crc: want.ar_v1(i, 0).unwrap(),
+                crc450: 0,
+            })
+            .collect(),
+    };
+    let env = lib.env(
+        vec![bytes(&ours)],
+        FakeLookup {
+            ctdb: Some(vec![partial]),
+            ar: Some(vec![ar]),
+            syndromes: None,
+            cancel_on_syndromes: None,
+        },
+        DriveOffset::Auto,
+    );
+    let placed = run(&env).await.0.unwrap();
+    let rip = lib.sidecar(&placed.rel_dir).rip.unwrap();
+    assert_eq!(
+        (
+            rip.report.read_offset,
+            rip.report.offset_source,
+            rip.report.attempts
+        ),
+        (667, OffsetSource::Detected, 1)
+    );
+    let ar = rip.report.accuraterip.unwrap();
+    assert_eq!((ar.outcome, ar.offset), (Outcome::Verified, 0));
+    assert_eq!(rip.report.ctdb.unwrap().outcome, Outcome::Mismatch);
+    let c = rusqlite::Connection::open(&lib.db_path).unwrap();
+    let learned = spindle::db::drive_offsets::get(&c, DRIVE).unwrap().unwrap();
+    assert_eq!(
+        (learned.offset, learned.method.as_str()),
+        (667, "accuraterip")
+    );
+}

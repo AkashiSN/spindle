@@ -176,7 +176,7 @@ pub fn shift_pcm(src: &Path, dst: &Path, r: i32) -> std::io::Result<()> {
     let mut input = File::open(src)?;
     let len = input.metadata()?.len();
     let shift = u64::from(r.unsigned_abs()) * FRAME_BYTES;
-    if r.abs() > MAX_OFFSET || shift > len || len % FRAME_BYTES != 0 {
+    if r.unsigned_abs() > MAX_OFFSET.unsigned_abs() || shift > len || len % FRAME_BYTES != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("PCM をずらせない: r = {r}、長さ {len} バイト"),
@@ -449,16 +449,34 @@ impl Checked {
             .any(|m| m.outcome != Outcome::NotFound)
     }
 
-    /// 一致したトラックがある手法のオフセット（CTDB を優先。D-13）
-    fn residual(&self) -> Option<(i32, OffsetMethod, u32)> {
-        let matched = |m: &MethodResult| m.tracks.iter().any(|t| t.matched);
-        if let Some(m) = self.ctdb.as_ref().filter(|m| matched(m)) {
-            return Some((m.offset, OffsetMethod::Ctdb, m.confidence));
+    /// 当てるずれ: まず全トラックが一致した手法（両方なら CTDB。D-13）、無ければ一部でも一致した
+    /// 手法（同じく CTDB を優先）のオフセット。部分一致を全曲一致より優先すると、傷のある盤で別の
+    /// オフセットに引きずられる（codex 指摘）
+    fn residual(&self) -> Option<i32> {
+        let methods = [&self.ctdb, &self.ar];
+        let full = methods
+            .iter()
+            .filter_map(|m| m.as_ref())
+            .find(|m| m.outcome == Outcome::Verified);
+        let partial = || {
+            methods
+                .iter()
+                .filter_map(|m| m.as_ref())
+                .find(|m| m.tracks.iter().any(|t| t.matched))
+        };
+        full.or_else(partial).map(|m| m.offset)
+    }
+
+    /// オフセット 0 で全トラックが一致した手法と信頼度（学習の記録。両方なら CTDB）
+    fn verified_by(&self) -> Option<(OffsetMethod, u32)> {
+        let ok = |m: &&MethodResult| m.outcome == Outcome::Verified && m.offset == 0;
+        if let Some(m) = self.ctdb.as_ref().filter(ok) {
+            return Some((OffsetMethod::Ctdb, m.confidence));
         }
         self.ar
             .as_ref()
-            .filter(|m| matched(m))
-            .map(|m| (m.offset, OffsetMethod::AccurateRip, m.confidence))
+            .filter(ok)
+            .map(|m| (OffsetMethod::AccurateRip, m.confidence))
     }
 }
 
@@ -766,7 +784,7 @@ pub async fn rip_disc(
         let mut checked =
             verify(aligned.path().to_path_buf(), raw.path().to_path_buf(), base).await?;
         let (mut offset, mut source) = (base, base_source);
-        if let Some((r, method, conf)) = checked.residual() {
+        if let Some(r) = checked.residual() {
             if let Some(total) = base
                 .checked_add(r)
                 .filter(|t| r != 0 && t.unsigned_abs() <= MAX_OFFSET.unsigned_abs())
@@ -780,8 +798,8 @@ pub async fn rip_disc(
                 .await?;
                 source = OffsetSource::Detected;
             }
-            // 照合が通った盤で覚える（D-83。手動指定のときは覚えない）
-            if checked.verified() {
+            // 照合が通った盤で覚える（D-83。手動指定のときは覚えない）。記録は当てた後に通った手法
+            if let Some((method, conf)) = checked.verified_by() {
                 learn(env, model.clone(), offset, method, conf).await?;
             }
         }
@@ -842,7 +860,7 @@ pub async fn rip_disc(
                         if rep.offset != 0 {
                             source = OffsetSource::Detected;
                         }
-                        if let Some((_, method, conf)) = fixed.residual() {
+                        if let Some((method, conf)) = fixed.verified_by() {
                             learn(env, model.clone(), total, method, conf).await?;
                         }
                         break (path, reads, fixed, total, source, Some(rep.words));

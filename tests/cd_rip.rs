@@ -99,6 +99,9 @@ fn shift_pcm_rejects_out_of_range() {
     std::fs::write(&src, vec![1u8; 400]).unwrap();
     assert!(shift_pcm(&src, &dst, 101).is_err()); // 長さより大きい
     assert!(shift_pcm(&src, &dst, MAX_OFFSET + 1).is_err());
+    // i32::MIN も溢れずに InvalidInput
+    let e = shift_pcm(&src, &dst, i32::MIN).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
     shift_pcm(&src, &dst, 0).unwrap();
     assert_eq!(std::fs::read(&dst).unwrap(), vec![1u8; 400]);
     shift_pcm(&src, &dst, 2).unwrap();
