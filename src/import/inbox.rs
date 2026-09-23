@@ -545,10 +545,15 @@ pub struct SameTitle {
     pub duration_ms: Option<i64>,
 }
 
-/// 照合が通らず、読み取りでずれ（paranoia が直しきれなかったジッター）が起きた吸い出しの警告。照合が
-/// 通っていれば（どちらかの手法で verified）結果は DB と一致したので出さない
-fn slip_warning(report: &crate::cd::riplog::RipReport) -> Option<String> {
+/// 照合が通らず、読み取りでずれ（paranoia が検出・補正したジッター）が起きた吸い出しの警告。照合が
+/// 通っていれば（どちらかの手法で verified）結果は DB と一致したので出さない。トラック番号は TOC の
+/// 音声トラックの番号（先頭がデータトラックの盤でも実番号）
+fn slip_warning(entry: &crate::import::sidecar::RipEntry) -> Option<String> {
     use crate::cd::verify::Outcome;
+    let report = &entry.report;
+    let numbers: Vec<u8> = crate::cd::toc::Toc::parse(&entry.toc)
+        .map(|t| t.audio_tracks().map(|a| a.number).collect())
+        .unwrap_or_default();
     let verified = [&report.ctdb, &report.accuraterip]
         .into_iter()
         .flatten()
@@ -558,11 +563,14 @@ fn slip_warning(report: &crate::cd::riplog::RipReport) -> Option<String> {
         .iter()
         .enumerate()
         .filter(|(_, r)| r.slips > 0)
-        .map(|(i, r)| format!("トラック {}: {} 回", i + 1, r.slips))
+        .map(|(i, r)| {
+            let n = numbers.get(i).map_or(i + 1, |&n| usize::from(n));
+            format!("トラック {n}: {} 回", r.slips)
+        })
         .collect();
     (!verified && !parts.is_empty()).then(|| {
         format!(
-            "吸い出しで読み取り位置のずれを直しきれなかった箇所がある（{}）。音がビット単位で正しくない可能性。照合が通らないのはドライブのジッターのためかもしれない",
+            "吸い出しで読み取り位置のずれ（ドライブのジッター）を補正した箇所が多い（{}）。照合が通らないのはこのためかもしれない（別のドライブで吸い直すと確かめられる）",
             parts.join("、")
         )
     })
@@ -655,7 +663,7 @@ pub fn propose(
                 "吸い出しの記録と件が合わない（このままでは配置できない）: {r}"
             ));
         }
-        if let Some(w) = slip_warning(&entry.report) {
+        if let Some(w) = slip_warning(entry) {
             warnings.push(w);
         }
     }

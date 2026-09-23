@@ -218,7 +218,7 @@ async fn read_disc_reports_progress_and_per_track_trouble() {
         reads.iter().map(|r| r.rereads).collect::<Vec<_>>(),
         [1, 2, 1]
     );
-    // ドライブのジッターを paranoia が直しきれなかった回数（drift / dropped / duped）は別に数える
+    // ドライブのジッターを paranoia が検出・補正した回数（drift / dropped / duped）は別に数える
     assert_eq!(reads.iter().map(|r| r.slips).collect::<Vec<_>>(), [1, 1, 2]);
     assert_eq!(seen, [(1, 2250), (2250, 2250)]);
     let args = std::fs::read_to_string(dir.path().join("args")).unwrap();

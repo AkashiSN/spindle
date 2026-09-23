@@ -2112,8 +2112,8 @@ async fn add_cd_item(lib: &Lib) -> Option<inbox::Item> {
     lib.item("CD")
 }
 
-/// 照合が通らず、読み取りでずれ（paranoia が直しきれなかったジッター）が起きた CD の件は、承認画面の
-/// 警告に出す（音がビット単位で正しくない可能性。ドライブを疑える）。照合が通っていれば出さない
+/// 照合が通らず、読み取りでずれ（paranoia が検出・補正したジッター）が多い CD の件は、承認画面の
+/// 警告に出す（ドライブを疑える）。照合が通っていれば出さない
 #[tokio::test]
 async fn cd_item_with_read_slips_warns_on_the_approval_screen() {
     use spindle::import::sidecar::Sidecar;

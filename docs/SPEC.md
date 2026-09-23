@@ -552,7 +552,8 @@ Inbox への配置（`src/cd/place.rs` の `place_disc`、D-67 追記、P2-5）:
 EAC 流の複数ファイル cue（ギャップは前トラック末尾。INDEX 00 は書かない）、`disc.toc` は `Toc` から
 cdrdao 構文で生成、`rip.log` は先頭行 `spindle rip log v1` の自前形式でドライブ・オフセット・
 トラックごとの CRC と照合結果を持つ。トラック表の「ずれ」は、cd-paranoia が読み取り位置のずれ（ドライブの
-ジッター）を直しきれなかった回数（drift / dropped / duped。`TrackRead.slips`）。1 回でもあれば表の下に合計と
+ジッター）を検出・補正した回数（drift / dropped / duped。`TrackRead.slips`。補正の通知なので回数だけでは誤りを
+意味しないが、多発と照合の不一致が併発した）。1 回でもあれば表の下に合計と
 意味を、試行ごとの合計（`RipReport.attempt_slips`）を「試行ごとのずれ」に出す。照合が通らずずれがある件は、
 Inbox の承認画面の警告にも出る（P2-5 の調査。TASKS）。スキャナはこの rip.log のあるディレクトリで新規に登録する行を
 `cd_rip` にする（DB を消しても出自が戻る。検証は §7.3 で付け直す）。

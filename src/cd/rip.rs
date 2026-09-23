@@ -34,8 +34,9 @@ const SECTOR_FRAMES: u64 = 588;
 const CB_SCRATCH: i32 = 4;
 const CB_REPAIR: i32 = 5;
 const CB_SKIP: i32 = 6;
-/// 読み取り位置のずれ（ドライブのジッター）を paranoia が直しきれなかった: 位置を見失った / 補正で
-/// データを捨てた / 補正で重複を消した
+/// 読み取り位置のずれ（ドライブのジッター）を paranoia が検出して補正した通知: drift（読み取り位置の
+/// ずれを検出して合わせ直した）/ dropped（欠けたサンプルを補った）/ duped（重複したサンプルを除いた）。
+/// 補正は成功したという通知だが、多発する回と照合の不一致が併発するので観測値として数える（P2-5 の調査）
 const CB_DRIFT: i32 = 7;
 const CB_DROPPED: i32 = 10;
 const CB_DUPED: i32 = 11;
@@ -796,7 +797,7 @@ pub async fn rip_disc(
             tracing::warn!(
                 attempt,
                 slips,
-                "読み取り位置のずれを cd-paranoia が直しきれなかった"
+                "cd-paranoia が読み取り位置のずれを検出・補正した（ドライブのジッター）"
             );
         }
         // 照合（まず吸ったときのオフセットで）

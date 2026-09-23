@@ -59,8 +59,9 @@ impl OffsetSource {
 pub struct TrackRead {
     pub rereads: u32,
     pub c2_errors: u32,
-    /// 読み取り位置のずれを cd-paranoia が直しきれなかった回数（drift / dropped / duped）。ドライブの
-    /// ジッターが大きいと増え、照合が通らない原因になる（P2-5 の調査）。これより前の記録には無い（0）
+    /// cd-paranoia が読み取り位置のずれを検出・補正した回数（drift / dropped / duped）。ドライブの
+    /// ジッターが大きいと増える。補正の通知なので回数だけでは誤りを意味しないが、多発と照合の不一致が
+    /// 併発した（P2-5 の調査）。これより前の記録には無い（0）
     #[serde(default)]
     pub slips: u32,
 }
@@ -530,8 +531,8 @@ pub fn render_log(
     if slips > 0 {
         let _ = writeln!(
             s,
-            "ずれ: {slips} 回（cd-paranoia が読み取り位置のずれ = ドライブのジッターを直しきれなかった回数。\
-             照合が通らなければドライブを疑う）"
+            "ずれ: {slips} 回（cd-paranoia が読み取り位置のずれ = ドライブのジッターを検出・補正した回数。\
+             多いうえに照合が通らなければドライブを疑う）"
         );
     }
     s.push('\n');
