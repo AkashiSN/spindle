@@ -304,7 +304,8 @@ impl Lib {
         let conn = self.conn();
         let mut st = conn
             .prepare(
-                "SELECT id, disc_no, method, result, source, detected_offset, confidence, log_path
+                "SELECT id, disc_no, method, result, source, detected_offset, confidence, log_path,
+                        drive_offset
                  FROM album_verifications WHERE album_id = ?1 ORDER BY disc_no, method",
             )
             .unwrap();
@@ -318,6 +319,7 @@ impl Lib {
                 detected_offset: r.get(5)?,
                 confidence: r.get(6)?,
                 log_path: r.get(7)?,
+                drive_offset: r.get(8)?,
             })
         })
         .unwrap()
@@ -383,6 +385,7 @@ struct Verification {
     detected_offset: Option<i64>,
     confidence: Option<i64>,
     log_path: Option<String>,
+    drive_offset: Option<i64>,
 }
 
 fn lcg_pcm(seed: u32, frames: usize) -> Vec<i16> {
@@ -454,6 +457,8 @@ async fn verified_album_records_both_methods_and_promotes_tracks() {
     assert_eq!(ar.source, "retro");
     assert_eq!(ar.detected_offset, Some(0));
     assert_eq!(ctdb.detected_offset, Some(0));
+    // 遡及照合ではどのドライブで吸われたか分からないので書かない
+    assert_eq!((ar.drive_offset, ctdb.drive_offset), (None, None));
     assert_eq!(ar.confidence, Some(12));
     assert_eq!(ctdb.confidence, Some(34));
     assert_eq!(ar.disc_no, Some(1));
@@ -816,6 +821,7 @@ async fn recording_is_atomic_across_discs() {
         .unwrap();
     let ok_disc = DiscRecord {
         disc_no: 1,
+        drive_offset: None,
         methods: vec![MethodRecord {
             method: Method::Ctdb,
             result: DiscResult::Verified,
@@ -960,6 +966,7 @@ async fn record_album_is_idempotent_per_job() {
         .unwrap();
     let disc = DiscRecord {
         disc_no: 1,
+        drive_offset: None,
         methods: vec![MethodRecord {
             method: Method::AccurateRip,
             result: DiscResult::NotFound,

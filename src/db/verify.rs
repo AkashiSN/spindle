@@ -191,6 +191,9 @@ pub struct MethodRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscRecord {
     pub disc_no: i64,
+    /// PCM に当てた読み取りオフセット（`album_verifications.drive_offset`）。自前の吸い出しだけが持ち、
+    /// 遡及照合はどのドライブで吸われたか分からないので None。`detected_offset` はここからの残りのずれ
+    pub drive_offset: Option<i32>,
     pub methods: Vec<MethodRecord>,
     /// 更新するトラックの状態（据え置くトラックは含めない）
     pub states: Vec<(i64, TrackState)>,
@@ -277,6 +280,7 @@ pub fn record_album(
                 job_id,
                 source,
                 d.disc_no,
+                d.drive_offset,
                 m.method,
                 m.result,
                 m.detected_offset,
@@ -304,6 +308,7 @@ fn record_disc(
     job_id: Option<i64>,
     source: VerifySource,
     disc_no: i64,
+    drive_offset: Option<i32>,
     method: Method,
     result: DiscResult,
     detected_offset: Option<i32>,
@@ -316,7 +321,7 @@ fn record_disc(
         "INSERT INTO album_verifications
            (album_id, method, result, source, drive_offset, detected_offset, confidence,
             verified_at, log_path, disc_no, job_id)
-         VALUES (?1, ?2, ?3, ?10, NULL, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?10, ?11, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             album_id,
             method.as_str(),
@@ -327,7 +332,8 @@ fn record_disc(
             log_path,
             disc_no,
             job_id,
-            source.as_str()
+            source.as_str(),
+            drive_offset
         ],
     )?;
     let id = conn.last_insert_rowid();

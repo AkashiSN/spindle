@@ -1853,6 +1853,16 @@ async fn cd_item_is_placed_with_verification_bound_by_file_name() {
         ("rip", "ctdb", "mismatch", 1, None)
     );
     assert_eq!(log_path.as_deref(), Some("_Unsorted/Artist/Disc/rip.log"));
+    // drive_offset は PCM に当てた読み取りオフセット（レポートの read_offset）、detected_offset は
+    // そこからの残りのずれ
+    let (drive_offset, detected_offset): (Option<i64>, Option<i64>) = c
+        .query_row(
+            "SELECT drive_offset, detected_offset FROM album_verifications",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((drive_offset, detected_offset), (Some(6), Some(0)));
     assert!(lib.lib_path("_Unsorted/Artist/Disc/rip.log").exists());
     assert_eq!(
         lib.count("SELECT album_gain FROM albums WHERE rel_dir = '_Unsorted/Artist/Disc'"),

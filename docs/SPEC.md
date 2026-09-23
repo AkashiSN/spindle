@@ -1169,7 +1169,8 @@ Inbox/ に配置（ポーリング検出）
   記録の形（件数が音声トラック数と揃う、名前の重複なし）・件のファイルとの 1 対 1・下書きの `disc_no` が 1 つに
   揃うこと（1 件 = 1 枚）を確かめ、外れたら配置せず `failed`（提案の `warnings` にも出す）。登録は
   `register_item` と同じトランザクションで `source_type = 'cd_rip'`、`album_verifications`（`source = 'rip'`、
-  `disc_no` は下書きの値、`job_id` は NULL、`log_path` は移した rip.log の Library 相対。移せなければ NULL）/
+  `disc_no` は下書きの値、`job_id` は NULL、`drive_offset` はレポートの `read_offset`（PCM に当てた
+  読み取りオフセット。遡及照合の行は NULL。D-83 追記 3）、`log_path` は移した rip.log の Library 相対。移せなければ NULL）/
   `track_verifications` / `tracks.verification`（写像は §7.3 と同じ）。全トラックに `rip` の記録が既にあれば
   書かない（commit の後に落ちて再配置したとき）。サイドカーは読んだ FD の inode / size / mtime / ctime を
   登録の直前と消す前に照合し、変わっていれば登録せず `pending`（登録後なら消さずに残す）

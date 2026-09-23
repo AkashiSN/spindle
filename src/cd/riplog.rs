@@ -153,6 +153,7 @@ impl RipReport {
             .collect();
         DiscRecord {
             disc_no,
+            drive_offset: Some(self.read_offset),
             methods,
             states,
         }

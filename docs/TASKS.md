@@ -972,7 +972,7 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       （済: 2026-09-23 に同じ 2 トラックの盤で。吸い出しは表の +667・試行 3 回・CTDB mismatch / AR not_found →
       承認 → `tracks` 2 行が `cd_rip` / `mismatch`、`album_verifications` が ctdb / accuraterip の 2 行で
       `source = rip`・`log_path` は移動後の Library 相対、`track_verifications` 4 行に CRC。
-      `album_verifications.drive_offset` は吸い出しでも NULL（書く処理が無い。値は rip.log とサイドカーにある）。
+      このとき `album_verifications.drive_offset` が NULL だったので、`read_offset` を書くよう直した（D-83 追記 3）。
       **照合が通る盤での確認（上の項目）は、この盤しか無いため残り**）
 - 残課題（判断待ち）: 「着手前に確認が必要な残課題」の DiscID の食い違い（Inbox 経由の CD の album は
   `discid` が NULL、DB 再構築後はタグから復元される）

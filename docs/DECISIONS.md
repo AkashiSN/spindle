@@ -3546,3 +3546,10 @@ CTDB / AccurateRip に載っている盤を 1 枚吸えば正しい値が分か�
 - 常駐中の取り直しは `spawn_refresher`（1 時間ごとに期限を見る。status は `peek` しか呼ばないので、これが
   無いと吸い出しをしない限り更新されない）。表が一度も無いままの失敗も時刻を覚え、`RETRY_AFTER` の間は
   取りに行かない（吸い出しのたびに 30 秒待たない）。古い保存は取り直しの前に公開する（stale-while-revalidate）
+
+**追記 3**（2026-09-23。実機の確認で見つけた欠け）:
+
+- `album_verifications.drive_offset` は `source = 'rip'` の行だけに書く。値は **PCM に当てた読み取り
+  オフセット**（`RipReport.read_offset`。照合で見つけたずれを当てた後の値）で、`detected_offset` はそこからの
+  残りのずれ。`source = 'retro'`（遡及照合）はどのドライブで吸われたか分からないので NULL。列は 0001 から
+  あったが書く処理が無く、吸い出しでも NULL だった。既存の行は埋め直さない（値は rip.log に残っている）

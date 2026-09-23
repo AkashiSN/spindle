@@ -504,6 +504,7 @@ fn disc_record(r: &DiscReport) -> Option<DiscRecord> {
                 .collect();
             Some(DiscRecord {
                 disc_no: r.disc_no,
+                drive_offset: None,
                 methods: [Method::Ctdb, Method::AccurateRip]
                     .into_iter()
                     .map(|method| MethodRecord {
@@ -566,6 +567,7 @@ fn disc_record(r: &DiscReport) -> Option<DiscRecord> {
                 .collect();
             Some(DiscRecord {
                 disc_no: r.disc_no,
+                drive_offset: None,
                 methods: vec![ctdb_records, ar_records],
                 states,
             })
