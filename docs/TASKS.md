@@ -967,8 +967,13 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       `GET /api/jobs?type=rip` の note と Inbox のサイドカー（`spindle-inbox.json` の `rip.report`）を見る。
       rip.log の「読み取りオフセット」と照合欄も確認。終わったら**自分で起動したプロセスだけ**止める
       （`pkill -f` はシェル自身に当たるので使わない。PID を控える）
-- [ ] 通しで確認したら、Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
+- [x] Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
       `album_verifications`（`source = rip`、`log_path`）/ `tracks.verification` を見る
+      （済: 2026-09-23 に同じ 2 トラックの盤で。吸い出しは表の +667・試行 3 回・CTDB mismatch / AR not_found →
+      承認 → `tracks` 2 行が `cd_rip` / `mismatch`、`album_verifications` が ctdb / accuraterip の 2 行で
+      `source = rip`・`log_path` は移動後の Library 相対、`track_verifications` 4 行に CRC。
+      `album_verifications.drive_offset` は吸い出しでも NULL（書く処理が無い。値は rip.log とサイドカーにある）。
+      **照合が通る盤での確認（上の項目）は、この盤しか無いため残り**）
 - 残課題（判断待ち）: 「着手前に確認が必要な残課題」の DiscID の食い違い（Inbox 経由の CD の album は
   `discid` が NULL、DB 再構築後はタグから復元される）
 
