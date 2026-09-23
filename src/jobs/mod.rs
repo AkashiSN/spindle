@@ -169,6 +169,9 @@ pub struct JobEvent {
     pub progress: Option<f64>,
     pub done: Option<i64>,
     pub total: Option<i64>,
+    /// 種別ごとの進捗の詳細（rip の相とトラック等。SSE にだけ流し、DB には書かない）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
 }
 
 impl JobEvent {
@@ -179,6 +182,7 @@ impl JobEvent {
             progress: job.progress,
             done: job.done,
             total: job.total,
+            detail: None,
         }
     }
 }

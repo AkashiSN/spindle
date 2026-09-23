@@ -952,9 +952,13 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 
 #### やること
 
-- [ ] 全ディスクを 1 本の PCM として取得（`cd-paranoia '1-' -`）→ オフセット適用 → 分割
+- [x] 全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割（`cd::rip::read_disc`: `cd-paranoia -e -r`、
+      範囲は TOC から `first-last[mm:ss.ff]`。常にオフセット 0 で読み、`shift_pcm` で当てる。D-83）
 - [ ] `POST /api/cd/rip` と rip ジョブ。CD 画面の「取り込む」を有効にする
-- [ ] 2 回の走査に CTDB の修復を配線する（P2-7 の残り。直せなければ再リップ / `mismatch`）
+      （rip ジョブは済: `jobs/handlers/rip.rs`、payload `{ toc, metadata }`、dedup `rip`。API と画面は残り）
+- [x] 2 回の走査に CTDB の修復を配線する（P2-7 の残り。直せなければ再リップ / `mismatch`）
+      （`cd::rip::rip_disc`: 照合 → ずれを当てる → CTDB のパリティで修復 → 吸い直し（比べる相手が
+      あるときだけ、`retry_on_mismatch` 回）→ それでも駄目なら mismatch のまま Inbox へ）
 - [x] `place_disc` を **Inbox 経由**に作り直す（D-67 追記）: FLAC と rip.log / disc.cue / disc.toc を件の
       ディレクトリへ、MusicBrainz から写した内容と `RipReport` をサイドカーへ、`inbox_items` に 1 件。
       PCM の切り方・エンコード（`flac -N --verify`）・タグの写像・同梱ファイルは既存のものをそのまま使う
@@ -970,7 +974,9 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 - [x] **リップの開始は空の名前を許す**（D-67 追記）。`DiscMetadata::validate` から名前の必須を外した
       （`EmptyAlbum` / `EmptyAlbumArtist` / `EmptyTitle` を削除。空のタイトルは `with_placeholder_titles` で
       `Track NN`）。web の `validateDraft` も同じ規則に直した（`POST /api/cd/rip` の前に使う）
-- [ ] 吸い出し中、トラック単位の進捗を SSE の `job` イベントで流す
+- [ ] 吸い出し中、トラック単位の進捗を SSE の `job` イベントで流す（サーバ側は済: `JobEvent.detail` に
+      `RipProgress { phase: read|verify|repair|encode|place, attempt, disc_no, track_no, done, total }`。
+      read はセクタ、verify / repair はバイト、encode はトラック。画面は残り）
       （`{ phase: read|verify|encode|place, disc_no, track_no, done, total }`）。CD 画面のトラック表の
       右端に出る（器は P4-20 の `CdTrackTable` の `RipProgress`）。**相ごとの `track_no` の進み方と、
       表の「完了」の表現はここで確定する**（read は 1 本の PCM なのでトラック単位に分かれない）

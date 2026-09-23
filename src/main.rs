@@ -337,10 +337,47 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(device = %state.config.rip.device.display(), "CD ドライブのデバイスが無い。CD 取り込みは使えない");
     }
     let cd_poller = cd_device::spawn_poller(
-        cd_drive,
+        Arc::clone(&cd_drive),
         cd_monitor,
         cd_device::POLL_INTERVAL,
         shutdown.clone(),
+    );
+    // 吸い出し（P2-5、D-67 追記 / D-83）。Inbox に置くところまで。照会先は遡及照合と同じ
+    registry.register(
+        JobType::Rip,
+        Arc::new(spindle::jobs::handlers::rip::RipHandler::new(
+            spindle::cd::rip::RipEnv {
+                reader: Arc::new(spindle::cd::rip::ParanoiaReader {
+                    program: state.config.bin.cdparanoia.clone().into(),
+                    device: state.config.rip.device.clone(),
+                }),
+                lookup: Arc::new(spindle::cd::rip::HttpLookup {
+                    ctdb: CtdbClient::new(
+                        &state.config.verify.ctdb_url,
+                        &state.config.musicbrainz.user_agent,
+                    )
+                    .context("CTDB クライアントの初期化に失敗")?,
+                    accuraterip: AccurateRipClient::new(
+                        &state.config.verify.accuraterip_url,
+                        &state.config.musicbrainz.user_agent,
+                    )
+                    .context("AccurateRip クライアントの初期化に失敗")?,
+                }),
+                drive: cd_drive,
+                db: Arc::clone(&state.db),
+                place: spindle::cd::place::PlaceEnv {
+                    inbox: Arc::clone(&inbox_root),
+                    jobs: Arc::clone(&state.jobs),
+                    flac: state.config.bin.flac.clone().into(),
+                    compression: state.config.encode.flac_compression,
+                    tmp_dir: state.config.paths.data.join(TMP_DIR_NAME),
+                    before_publish: None,
+                },
+                drive_offset: state.config.rip.drive_offset,
+                retries: state.config.rip.retry_on_mismatch,
+                device: state.config.rip.device.display().to_string(),
+            },
+        )),
     );
     registry.register(
         JobType::Gc,

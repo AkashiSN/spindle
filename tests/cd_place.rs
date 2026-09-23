@@ -204,6 +204,7 @@ impl Lib {
                 metadata: m,
                 pcm,
                 report: &report(),
+                on_encoded: None,
             },
             &CancellationToken::new(),
         )

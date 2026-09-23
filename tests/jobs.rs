@@ -2069,6 +2069,7 @@ async fn events_stream_signals_resync_when_lagged() {
             progress: None,
             done: None,
             total: None,
+            detail: None,
         }));
     }
     let mut body = res.into_body();

@@ -76,6 +76,16 @@ impl JobContext {
     /// 進捗を報告する。SSE には毎回流し、DB へは間引いて書く。
     /// キャンセル要求があれば `Err(Cancelled)` を返すので、ハンドラは `?` で抜ければよい
     pub async fn progress(&self, done: i64, total: i64) -> std::result::Result<(), JobError> {
+        self.progress_with(done, total, None).await
+    }
+
+    /// [`Self::progress`] に種別ごとの詳細を添える（SSE の `job` イベントの `detail`。DB には書かない）
+    pub async fn progress_with(
+        &self,
+        done: i64,
+        total: i64,
+        detail: Option<serde_json::Value>,
+    ) -> std::result::Result<(), JobError> {
         if self.token.is_cancelled() {
             return Err(JobError::Cancelled);
         }
@@ -104,6 +114,7 @@ impl JobContext {
             progress,
             done: Some(done),
             total: Some(total),
+            detail,
         }));
         if should_persist {
             let id = self.job.id;

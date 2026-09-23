@@ -10,6 +10,7 @@ pub mod normalize;
 pub mod playlist_sync;
 pub mod rename;
 pub mod rg;
+pub mod rip;
 pub mod scan;
 pub mod tagwrite;
 pub mod thumbnail;

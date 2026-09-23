@@ -507,7 +507,8 @@ Phase 4  commit:     1 トランザクションで
    ↓
 [オフセット決定] INQUIRY でドライブ型番取得 → 学習済みの値（drive_offsets）、無ければ 0（D-83）
    ↓            `[rip].drive_offset` の整数で上書き可。照合で見つかったずれは PCM に当てて学習する
-[吸い出し]      cd-paranoia '1-' - で全ディスクを1本の PCM として取得
+[吸い出し]      cd-paranoia -e -r -d <dev> -- <first>-<last>[mm:ss.ff] で音声トラック全体を 1 本の PCM に
+   ↓            （オフセット 0 で読み、範囲は TOC の長さで明示。`cd::rip::read_disc`。D-83）
    ↓            ※トラック単位で吸うとオフセット補正が境界をまたげない
 [オフセット適用 → トラック分割]
    ↓

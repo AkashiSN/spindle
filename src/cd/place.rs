@@ -80,6 +80,8 @@ pub struct PlaceInput<'a> {
     /// オフセット適用済みの s16le / 2ch / 44.1 kHz の raw PCM（TOC の音声部分ぴったり）
     pub pcm: &'a Path,
     pub report: &'a RipReport,
+    /// エンコードの進捗（`(トラック番号, 済んだ数, 全数)`。トラックを 1 本エンコードするたび）
+    pub on_encoded: Option<&'a (dyn Fn(u8, u64, u64) + Send + Sync)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +223,7 @@ fn tmp_path(dir: &Path, ext: &str) -> Result<PathBuf, PlaceError> {
 
 /// トラックごとに raw PCM の該当区間を `flac` でエンコードし、STREAMINFO の MD5 を PCM の MD5 と
 /// 照合してタグを書く。結果は tmp（`TempGuard`。drop で消える）
+#[allow(clippy::too_many_arguments)]
 pub async fn encode_tracks(
     env: &PlaceEnv,
     pcm: &Path,
@@ -228,6 +231,7 @@ pub async fn encode_tracks(
     toc: &Toc,
     meta: &DiscMetadata,
     md5s: &[[u8; 16]],
+    on_encoded: Option<&(dyn Fn(u8, u64, u64) + Send + Sync)>,
     token: &CancellationToken,
 ) -> Result<Vec<TempGuard>, PlaceError> {
     std::fs::create_dir_all(&env.tmp_dir)?;
@@ -287,6 +291,9 @@ pub async fn encode_tracks(
         .await
         .map_err(|e| std::io::Error::other(format!("エンコード後処理のタスクが異常終了: {e}")))??;
         out.push(guard);
+        if let Some(f) = on_encoded {
+            f(number, out.len() as u64, layout.track_count() as u64);
+        }
     }
     Ok(out)
 }
@@ -459,7 +466,17 @@ pub async fn place_disc(
     };
 
     if !reused {
-        let encoded = encode_tracks(env, input.pcm, &layout, &toc, &meta, &md5s, token).await?;
+        let encoded = encode_tracks(
+            env,
+            input.pcm,
+            &layout,
+            &toc,
+            &meta,
+            &md5s,
+            input.on_encoded,
+            token,
+        )
+        .await?;
         if token.is_cancelled() {
             return Err(PlaceError::Cancelled);
         }

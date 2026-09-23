@@ -214,14 +214,21 @@ fn ctdb_toc_audio_shape(toc: &str) -> Option<(usize, u32)> {
     Some((count, end.checked_sub(tracks[first].1)?))
 }
 
+/// CTDB の候補: 音声トラック数と音声部分の長さが自分の TOC と同じエントリ（`fuzzy=1` で別リリースも
+/// 返るので絞る）。修復（P2-5）も同じ候補から選ぶ
+pub fn ctdb_candidates<'a>(toc: &Toc, entries: &'a [CtdbEntry]) -> Vec<&'a CtdbEntry> {
+    let n = toc.audio_tracks().count();
+    let own_shape = ctdb_toc_audio_shape(&toc.ctdb_toc());
+    entries
+        .iter()
+        .filter(|e| e.track_crcs.len() == n && ctdb_toc_audio_shape(&e.toc) == own_shape)
+        .collect()
+}
+
 /// CTDB の判定。`toc` は自分の TOC（候補の絞り込みに使う）
 pub fn match_ctdb(table: &CrcTable, toc: &Toc, entries: &[CtdbEntry]) -> MethodResult {
     let n = table.track_count();
-    let own_shape = ctdb_toc_audio_shape(&toc.ctdb_toc());
-    let candidates: Vec<&CtdbEntry> = entries
-        .iter()
-        .filter(|e| e.track_crcs.len() == n && ctdb_toc_audio_shape(&e.toc) == own_shape)
-        .collect();
+    let candidates = ctdb_candidates(toc, entries);
     let track: Vec<Vec<Option<u32>>> = (0..n)
         .map(|i| {
             (-MAX_OFFSET..=MAX_OFFSET)

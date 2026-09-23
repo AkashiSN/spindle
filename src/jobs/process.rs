@@ -100,6 +100,7 @@ pub struct ExternalCommand {
     stdin_bytes: Option<Vec<u8>>,
     stdout_file: Option<File>,
     stdout_channel: Option<mpsc::Sender<Vec<u8>>>,
+    stderr_lines: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl ExternalCommand {
@@ -115,6 +116,7 @@ impl ExternalCommand {
             stdin_bytes: None,
             stdout_file: None,
             stdout_channel: None,
+            stderr_lines: None,
         }
     }
 
@@ -203,6 +205,13 @@ impl ExternalCommand {
         self
     }
 
+    /// stderr を 1 行ずつ（改行・CR で区切り、区切りは落とす）チャネルへも流す（進捗を出すツール用。
+    /// 例: `cd-paranoia -e`）。末尾の保持とログはそのまま。受け手が消えても子は止めない
+    pub fn stderr_lines(mut self, tx: mpsc::UnboundedSender<String>) -> Self {
+        self.stderr_lines = Some(tx);
+        self
+    }
+
     /// 組み立てた引数（テストと診断用）
     pub fn arg_list(&self) -> Vec<String> {
         self.args
@@ -272,7 +281,7 @@ impl ExternalCommand {
                 local.cancel();
             })
         };
-        let stderr_task = read_tail(&mut stderr_pipe, STDERR_KEEP);
+        let stderr_task = read_tail(&mut stderr_pipe, STDERR_KEEP, self.stderr_lines);
         let stdout_channel = self.stdout_channel;
         // 受け手が消えて子を止めたか（タイムアウトの cancel と区別する）
         let abandoned = std::sync::atomic::AtomicBool::new(false);
@@ -371,17 +380,37 @@ impl ExternalCommand {
 }
 
 /// 読みながら末尾 `keep` バイトだけを保持する（全量を溜めない。長時間の ffmpeg が大量の
-/// stderr を出してもメモリは有界）。EOF まで読む
+/// stderr を出してもメモリは有界）。EOF まで読む。`lines` があれば行ごとにも流す
 async fn read_tail<R: tokio::io::AsyncRead + Unpin>(
     pipe: &mut R,
     keep: usize,
+    lines: Option<mpsc::UnboundedSender<String>>,
 ) -> std::io::Result<Vec<u8>> {
     let mut tail: Vec<u8> = Vec::with_capacity(keep.min(64 * 1024));
     let mut chunk = vec![0u8; 8 * 1024];
+    let mut partial: Vec<u8> = Vec::new();
     loop {
         let n = pipe.read(&mut chunk).await?;
         if n == 0 {
+            if let Some(tx) = &lines {
+                if !partial.is_empty() {
+                    let _ = tx.send(String::from_utf8_lossy(&partial).into_owned());
+                }
+            }
             return Ok(tail);
+        }
+        if let Some(tx) = &lines {
+            for &b in &chunk[..n] {
+                if b == b'\n' || b == b'\r' {
+                    if !partial.is_empty() {
+                        let _ = tx.send(String::from_utf8_lossy(&partial).into_owned());
+                        partial.clear();
+                    }
+                } else if partial.len() < STDERR_KEEP {
+                    // 改行の無い長大な出力でもメモリは有界（超えた分は捨てる）
+                    partial.push(b);
+                }
+            }
         }
         tail.extend_from_slice(&chunk[..n]);
         if tail.len() > keep {

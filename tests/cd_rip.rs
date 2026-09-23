@@ -134,3 +134,228 @@ fn learned_offsets_are_per_drive_and_replaced() {
         -30
     );
 }
+
+// ---------------------------------------------------------------- cd-paranoia
+
+use spindle::cd::rip::{paranoia_span, parse_paranoia_line, read_disc, ParanoiaEvent, RipError};
+use tokio_util::sync::CancellationToken;
+
+#[test]
+fn paranoia_lines_and_span() {
+    assert_eq!(
+        parse_paranoia_line("##: 14 [wrote] @ 1175"),
+        Some(ParanoiaEvent {
+            code: 14,
+            pos: Some(1175)
+        })
+    );
+    assert_eq!(
+        parse_paranoia_line("##: 0 [read]"),
+        Some(ParanoiaEvent { code: 0, pos: None })
+    );
+    assert_eq!(parse_paranoia_line("Ripping from sector 0"), None);
+    assert_eq!(parse_paranoia_line("##: x [y] @ 1"), None);
+    // 最後のトラックは TOC の長さの最後のセクタまで（含む）。900 セクタ = 12 秒 → 11.74
+    assert_eq!(paranoia_span(&toc()).unwrap(), "1-3[0:11.74]");
+    // Enhanced CD: データトラックは読まず、音声の終端は データ開始 − 11400
+    let enhanced = Toc::parse("0:20000:-60000:80000").unwrap();
+    let last = enhanced.audio_track_sectors().last().unwrap().1;
+    assert_eq!(last, 60000 - 11400 - 20000);
+    assert!(paranoia_span(&enhanced).unwrap().starts_with("1-2["));
+}
+
+/// 偽の cd-paranoia（引数を記録し、`bytes` バイトの PCM と進捗行を書いて `code` で終わる）
+fn fake_paranoia(dir: &std::path::Path, bytes: u64, stderr: &str, code: i32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let p = dir.join("fake-paranoia");
+    let args = dir.join("args");
+    std::fs::write(
+        &p,
+        format!(
+            "#!/bin/bash\nprintf '%s\\n' \"$@\" > '{}'\nout=\"${{@: -1}}\"\nhead -c {bytes} /dev/zero > \"$out\"\ncat >&2 <<'EOS'\n{stderr}\nEOS\nexit {code}\n",
+            args.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[tokio::test]
+async fn read_disc_reports_progress_and_per_track_trouble() {
+    let t = toc(); // 750 / 600 / 900 セクタ
+    let total_bytes = t.track_layout().unwrap().total_samples() * 4;
+    let dir = tempfile::tempdir().unwrap();
+    let stderr = [
+        "Ripping from sector 0",
+        "##: 0 [read] @ 19992",
+        "##: 14 [wrote] @ 1175",
+        "##: 12 [read_error] @ 1000", // セクタ 0 → トラック 1
+        "##: 6 [skip] @ 900000",      // セクタ 765 → トラック 2
+        "##: 4 [scratch] @ 1500000",  // セクタ 1275 → トラック 2
+        "##: 5 [repair] @ 2000000",   // セクタ 1700 → トラック 3
+        "##: 2 [jitter] @ 2000000",   // 数えない
+        "##: 14 [wrote] @ 2645999",   // 2250 セクタ目の終わり
+        "##: 15 [finished] @ 2645999",
+    ]
+    .join("\n");
+    let prog = fake_paranoia(dir.path(), total_bytes, &stderr, 0);
+    let out = dir.path().join("disc.pcm");
+    let mut seen = Vec::new();
+    let reads = read_disc(
+        &prog,
+        std::path::Path::new("/dev/sr0"),
+        &t,
+        &out,
+        |d, n| seen.push((d, n)),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reads.iter().map(|r| r.rereads).collect::<Vec<_>>(),
+        [1, 2, 1]
+    );
+    assert_eq!(seen, [(1, 2250), (2250, 2250)]);
+    let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "-e",
+            "-r",
+            "-d",
+            "/dev/sr0",
+            "--",
+            "1-3[0:11.74]",
+            out.to_str().unwrap()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn read_disc_fails_on_short_output_and_exit_status() {
+    let t = toc();
+    let total_bytes = t.track_layout().unwrap().total_samples() * 4;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("disc.pcm");
+    let short = fake_paranoia(dir.path(), total_bytes - 4, "", 0);
+    assert!(matches!(
+        read_disc(
+            &short,
+            std::path::Path::new("/dev/sr0"),
+            &t,
+            &out,
+            |_, _| {},
+            &CancellationToken::new()
+        )
+        .await,
+        Err(RipError::Length { .. })
+    ));
+    let failing = fake_paranoia(dir.path(), total_bytes, "scsi read error", 1);
+    let e = read_disc(
+        &failing,
+        std::path::Path::new("/dev/sr0"),
+        &t,
+        &out,
+        |_, _| {},
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(e, RipError::Process(_)), "{e}");
+    assert!(e.to_string().contains("scsi read error"), "{e}");
+}
+
+/// 実ドライブ: 入っている盤を丸ごと吸い、CTDB / AccurateRip と照合して見つかったオフセットを出す。
+/// `sudo -u ubuntu -g cdrom target/debug/deps/cd_rip-* --ignored --exact real_drive_reads_and_detects_offset --nocapture`
+#[tokio::test]
+#[ignore]
+async fn real_drive_reads_and_detects_offset() {
+    use spindle::cd::accuraterip::AccurateRipClient;
+    use spindle::cd::ctdb::CtdbClient;
+    use spindle::cd::device::{Drive, LinuxDrive};
+    use spindle::cd::verify::{match_accuraterip, match_ctdb};
+    let dev = std::env::var("SPINDLE_TEST_CD_DEVICE").unwrap_or_else(|_| "/dev/sr0".into());
+    let drive = LinuxDrive::new(dev.clone().into());
+    let t = drive.read_toc().unwrap();
+    eprintln!("model = {:?}", drive.model().unwrap());
+    eprintln!("toc = {}", t.ctdb_toc());
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("disc.pcm");
+    let started = std::time::Instant::now();
+    let mut last = 0;
+    let reads = read_disc(
+        std::path::Path::new("cd-paranoia"),
+        std::path::Path::new(&dev),
+        &t,
+        &out,
+        |d, n| {
+            if d * 10 / n != last {
+                last = d * 10 / n;
+                eprintln!("progress {d}/{n} ({:?})", started.elapsed());
+            }
+        },
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    eprintln!("reads = {reads:?} in {:?}", started.elapsed());
+    if let Ok(keep) = std::env::var("SPINDLE_TEST_KEEP_PCM") {
+        std::fs::copy(&out, &keep).unwrap();
+        eprintln!("kept pcm at {keep}");
+    }
+    let pcm = from_bytes(&std::fs::read(&out).unwrap());
+    let mine = table(&t, &pcm);
+    let ua = "spindle-test/0 ( https://github.com/AkashiSN/spindle )";
+    let ctdb = CtdbClient::new("http://db.cuetools.net/lookup2.php", ua).unwrap();
+    let ar = AccurateRipClient::new("http://www.accuraterip.com/accuraterip/", ua).unwrap();
+    match ctdb.lookup(&t).await {
+        Ok(entries) => {
+            let m = match_ctdb(&mine, &t, &entries);
+            eprintln!(
+                "ctdb: {} entries → {:?} offset {} conf {}",
+                entries.len(),
+                m.outcome,
+                m.offset,
+                m.confidence
+            );
+            for e in &entries {
+                eprintln!(
+                    "  entry id {} conf {} toc {} npar {} parity {:?} syndrome {}",
+                    e.id,
+                    e.confidence,
+                    e.toc,
+                    e.npar,
+                    e.has_parity.is_some(),
+                    e.syndrome.is_some()
+                );
+                // シンドロームの列 0 でオフセットを探す（誤りがあっても見つかる）
+                use spindle::cd::repair::{decode_entry_syndrome, SyndromeSampler};
+                if let Ok(Some(col0)) = decode_entry_syndrome(e) {
+                    let npar = col0.len();
+                    let frames = pcm.len() as u64 / 2;
+                    let mut s = SyndromeSampler::new(frames, npar).unwrap();
+                    for chunk in pcm.chunks(1 << 16) {
+                        s.push(chunk).unwrap();
+                    }
+                    let syn = s.finish().unwrap();
+                    eprintln!("  find_offset = {:?}", syn.find_offset(&col0, MAX_OFFSET));
+                }
+            }
+        }
+        Err(e) => eprintln!("ctdb lookup failed: {e}"),
+    }
+    match ar.lookup(&t.accuraterip_id()).await {
+        Ok(entries) => {
+            let m = match_accuraterip(&mine, &entries);
+            eprintln!(
+                "ar: {} entries → {:?} offset {} conf {}",
+                entries.len(),
+                m.outcome,
+                m.offset,
+                m.confidence
+            );
+        }
+        Err(e) => eprintln!("ar lookup failed: {e}"),
+    }
+}
