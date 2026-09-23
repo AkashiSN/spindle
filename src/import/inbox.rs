@@ -570,7 +570,7 @@ fn slip_warning(entry: &crate::import::sidecar::RipEntry) -> Option<String> {
         .collect();
     (!verified && !parts.is_empty()).then(|| {
         format!(
-            "吸い出しで読み取り位置のずれ（ドライブのジッター）を補正した箇所が多い（{}）。照合が通らないのはこのためかもしれない（別のドライブで吸い直すと確かめられる）",
+            "吸い出しで読み取り位置のずれ（ドライブのジッター）を補正した箇所がある（{}）。照合が通らないのはこのためかもしれない（別のドライブで吸い直すと確かめられる）",
             parts.join("、")
         )
     })

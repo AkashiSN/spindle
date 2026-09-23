@@ -2154,6 +2154,21 @@ async fn cd_item_with_read_slips_warns_on_the_approval_screen() {
             .any(|m| m.contains("ずれ") && m.contains("トラック 2: 7 回")),
         "{w:?}"
     );
+    // 先頭がデータトラックの盤（mixed mode）でも、番号は TOC の音声トラックの実番号（2 本目の音声 = 3）
+    {
+        let mut e = common::rip_entry(&["01.flac", "02.flac"], &[true, false]);
+        e.toc = "-0:750:1500:2250".into();
+        e.report.reads[1].slips = 7;
+        let mut sc = Sidecar::default();
+        sc.rip = Some(e);
+        sc.write(
+            &lib.inbox,
+            &spindle::domain::relpath::RelPath::parse("CD").unwrap(),
+        )
+        .unwrap();
+    }
+    let w = warnings(&lib);
+    assert!(w.iter().any(|m| m.contains("トラック 3: 7 回")), "{w:?}");
     // 照合が通っていれば（ずれがあっても結果は DB と一致した）出さない
     write(&[true, true], 7);
     let w = warnings(&lib);
