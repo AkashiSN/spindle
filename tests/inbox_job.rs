@@ -1472,6 +1472,51 @@ async fn second_disc_with_the_same_release_id_joins_the_first() {
     assert_eq!(lib.count("SELECT count(*) FROM albums"), 1);
 }
 
+/// MBID の大文字小文字は同一性に効かない: 1 枚目が大文字の MBID（外部のタグ）で置かれていても、承認画面で
+/// 小文字の同じ MBID を選んだ 2 枚目は合流する（値はそれぞれのまま。codex 指摘）
+#[tokio::test]
+async fn release_id_case_does_not_split_the_album() {
+    let lib = Lib::new();
+    lib.start(true);
+    let mut placed = Vec::new();
+    for (dir, seed, title, disc, discid, mbid) in [
+        (
+            "Disc1",
+            1,
+            "One",
+            1,
+            "disc-1",
+            "F1223D63-F359-457D-B935-FC27EB24A6DE",
+        ),
+        (
+            "Disc2",
+            2,
+            "Two",
+            2,
+            "disc-2",
+            "f1223d63-f359-457d-b935-fc27eb24a6de",
+        ),
+    ] {
+        let rel = format!("{dir}/01.flac");
+        let Some(p) = lib.add(&rel, seed, title, "Album", 1) else {
+            eprintln!("ffmpeg が無いので skip");
+            return;
+        };
+        set_tags(&p, "flac", &[("MUSICBRAINZ_DISCID", &[discid])]);
+        lib.scan(i64::from(seed) * 1000).await;
+        let it = lib.item(dir).unwrap();
+        let mut d = draft_disc(&[(&rel, 1, title)], disc, "Album");
+        d.release_id = Some(mbid.into());
+        lib.approve(it.id, &d);
+        assert_eq!(lib.run_job().await, JobState::Done);
+        let it = inbox::get(&lib.conn(), it.id).unwrap().unwrap();
+        assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+        placed.push(it.placed_album_id);
+    }
+    assert_eq!(placed[0], placed[1]);
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 1);
+}
+
 /// ARTIST が多値のファイルは、下書きの `keep_artists` が true なら（現在の個数に関係なく）触れず、
 /// false なら `artist` の 1 値で上書きする。`keep_artists` の無い旧下書きは先頭の値のままなら保つ
 /// （プラグインの artists の写像を Library まで運ぶ。SPEC §7.7 / §7.8、D-70、P4-4）

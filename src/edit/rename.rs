@@ -146,7 +146,7 @@ fn year_of(date: Option<&str>) -> Option<String> {
 /// 値なので鍵にしない（D-67 追記 3）
 fn release_of(id: i64, mb: Option<String>, album_id: Option<i64>) -> String {
     match (mb, album_id) {
-        (Some(m), _) if !m.is_empty() => format!("mb:{m}"),
+        (Some(m), _) if !m.is_empty() => crate::import::placement::mb_key(&m),
         (_, Some(a)) => format!("album:{a}"),
         _ => format!("track:{id}"),
     }

@@ -1866,8 +1866,11 @@ impl Commit {
                 .filter(|a| {
                     !claimed.contains(&a.id)
                         && (a.rel_dir_key == **dir_key || available(a))
-                        && meta.mb_release_id.is_some()
-                        && a.mb_release_id == meta.mb_release_id
+                        && match (&meta.mb_release_id, &a.mb_release_id) {
+                            // 大文字小文字は同じ MBID（D-84）
+                            (Some(m), Some(x)) => m.eq_ignore_ascii_case(x),
+                            _ => false,
+                        }
                 })
                 .collect();
             if let [a] = by_ids.as_slice() {

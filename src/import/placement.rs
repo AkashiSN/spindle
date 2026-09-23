@@ -96,9 +96,15 @@ pub fn remove_placed(root: &RootDir, dir: &RelPath, placed_new: &[RelPath]) {
 /// 1 枚ごとの値なので鍵にしない（D-67 追記 3）
 pub fn release_key(id: i64, mb: Option<&str>) -> String {
     match mb {
-        Some(m) if !m.is_empty() => format!("mb:{m}"),
+        Some(m) if !m.is_empty() => mb_key(m),
         _ => format!("album:{id}"),
     }
+}
+
+/// MBID のリリースキー `mb:<id>`。**比較用に ASCII 小文字へ揃える**（外部のツールが大文字の UUID を書く。
+/// タグと `mb_release_id` の値はそのまま保つ。D-84）
+pub fn mb_key(mbid: &str) -> String {
+    format!("mb:{}", mbid.trim().to_ascii_lowercase())
 }
 
 /// 宛先ディレクトリの album を計画のリリースキー `release` で再検証して返す。active で同じキー →

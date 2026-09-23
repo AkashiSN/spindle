@@ -1266,7 +1266,7 @@ fn pick_self_album(
     let mut fit = Vec::new();
     for c in candidates {
         let ok = match incoming_mb {
-            Some(m) => c.release == format!("mb:{m}"),
+            Some(m) => c.release == crate::import::placement::mb_key(m),
             None => {
                 c.release.starts_with("album:")
                     && fits_plain_album(&album_rows(conn, c.album_id, &c.keys)?, incoming_cd, discs)
@@ -1594,7 +1594,7 @@ fn plan_item(
     // リリースキー: MUSICBRAINZ_ALBUMID の最頻値があれば mb:、自分の成果物の album があればそれ、
     // 宛先に追記できる album があればそれ（D-70）、無ければ件ごとの新規
     let release = match incoming_mb
-        .map(|m| format!("mb:{m}"))
+        .map(|m| crate::import::placement::mb_key(&m))
         .or_else(|| self_album.map(|(_, k)| k))
     {
         Some(k) => k,
