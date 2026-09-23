@@ -285,7 +285,7 @@ tagwrite の途中で kill → 再起動で残りが反映され、二重に版�
       最終名を「作業中」として扱う）
 - [x] album の追随（album 全体の移動は id を維持して `rel_dir` を書き換え、部分移動は新規 album。
       overlay と overlay 解消の両方。D-43）
-- [x] `POST /api/rename/preview` / `POST /api/rename/apply`（SPEC §9。UI は未着手）
+- [x] `POST /api/rename/preview` / `POST /api/rename/apply`（SPEC §9。UI は P1-12 の操作タブ）
 
 受け入れ: 単体テストで置換テーブル・切り詰め・衝突降格を網羅。
 既存の ytmusic 出力と同じパスが再現できる。
@@ -293,8 +293,8 @@ tagwrite の途中で kill → 再起動で残りが反映され、二重に版�
 A↔B の swap と 3 件の循環リネームが完了し、phase 1 直後に kill しても再起動で完了する。
 （`tests/pathgen.rs` / `tests/rename.rs` / `tests/rename_api.rs`）
 
-未決: album 全体を動かした後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）の
-追随。rename op はトラックのパスだけを所有する（D-43）。Library に同梱ファイルを置き始める P2-8 で決める
+~~未決: album 全体を動かした後の旧ディレクトリに残る同梱ファイルの追随~~（P2-8 で決めた。
+`edit::rename::follow_companions`、D-67）
 
 依存: P0-6, P0-9
 
@@ -929,8 +929,8 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 タグ名の写像）、`web/src/lib/cdState.test.ts`（ディスク検出 → 照会 → 選択 /「どれも違う」、TOC 編集 / reset で
 下の段が消える、照会中もフォームが消えない）、`tests/cd_toc.rs` / `tests/cd_lookup_api.rs`（`tracks`）
 
-残り: 吸い出し（P2-5）が**空名を許す契約**でこの下書きを受ける（D-67 追記）。検出は P2-1 / P4-20 で
-差し替え済み。トラックリスト貼り付けの Inbox への移管は P2-10
+残り: なし（空名を許す契約は P2-5 で実装済み（D-67 追記）、トラックリスト貼り付けは P2-10 で Inbox の
+承認画面へ移した（D-65 追記 2）。検出は P2-1 / P4-20 で差し替え済み）
 
 ### P2-5 吸い出し
 
@@ -1062,7 +1062,8 @@ AccurateRip は補助。照会は P2-9 で済み。
 付き修復、能力超え、CRC 不一致、範囲外の誤り、乱数ストレス、本番 stride で 1 セクタ丸ごと）、
 `tests/cd_lookup.rs`（Range の 206 / 200、列 0 の検証、npar 超え、404。実サーバは `#[ignore]`）
 
-残り: 吸い出し（P2-5）で 2 回の走査に配線し、直せなければ再リップ / `mismatch`
+残り: なし（P2-5 の `cd::rip::rip_disc` で 2 回の走査に配線した。直せなければ吸い直し、それでも駄目なら
+`mismatch` のまま Inbox へ）
 
 ### P2-8 エンコードと配置
 
@@ -1089,8 +1090,8 @@ not_attempted、複数枚組の合流、別リリースの `({year})` 降格、�
 `tests/cd_metadata.rs`、`tests/cd_riplog.rs`、`tests/scanner.rs`（rip.log → cd_rip）、`tests/rename.rs`
 （同梱ファイルの追随・衝突・巻き戻し）、`tests/categories_api.rs`、`web/src/lib/cd.test.ts`
 
-残り: P2-5 で `PlaceEnv` を `AppState` から組み立てて `place_disc` を配線する（`Busy` は Requeue、
-`Conflict` は最終失敗で tmp の PCM を残す）。`POST /api/cd/rip` も P2-5
+残り: なし（P2-5 で `place_disc` を **Inbox 経由**に作り直して rip ジョブから配線した。Library への配置・
+DB 行・後続ジョブは Inbox の承認と配置（P2-10）が行う。`POST /api/cd/rip` も P2-5。D-67 追記 2）
 
 ### P2-9 遡及照合
 
@@ -1695,9 +1696,8 @@ Shift+↑、Esc → Shift+↓）
 archive.org へ飛ぶ二段構えで、飛び先に AAAA が無い）。`CoverArtClient` は族を引数で受けず `Auto`
 固定にした（D-82 追記）。ユニットテストはローカルの HTTP サーバを模していたので素通りしていた。
 
-残り: トラックごとの進捗は P2-5（表の列と `RipProgress` の型だけ用意した）。Inbox 経由の取り込みも
-P2-5（D-67 追記）。**「取り込む」ボタンは `disabled` のまま**なので、CD 取り込みの通し確認と
-Inbox バッジが実際に増える様子は未確認
+残り: なし（トラックごとの進捗・Inbox 経由の取り込み・「取り込む」ボタンは P2-5 で入れた。実機で
+「取り込む」→ Inbox に件が出るまでを確認済み（P2-5 の受け入れ））
 
 ## 着手前に確認が必要な残課題
 
