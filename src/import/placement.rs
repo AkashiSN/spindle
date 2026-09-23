@@ -92,11 +92,11 @@ pub fn remove_placed(root: &RootDir, dir: &RelPath, placed_new: &[RelPath]) {
     let _ = root.remove_dir(dir);
 }
 
-/// 既存 album のリリースキー（`edit::rename::load_occupancy` と同じ規則: mb → disc → album）
-pub fn release_key(id: i64, mb: Option<&str>, discid: Option<&str>) -> String {
-    match (mb, discid) {
-        (Some(m), _) if !m.is_empty() => format!("mb:{m}"),
-        (_, Some(d)) if !d.is_empty() => format!("disc:{d}"),
+/// 既存 album のリリースキー（`edit::rename::load_occupancy` と同じ規則: mb → album）。DiscID は
+/// 1 枚ごとの値なので鍵にしない（D-67 追記 3）
+pub fn release_key(id: i64, mb: Option<&str>) -> String {
+    match mb {
+        Some(m) if !m.is_empty() => format!("mb:{m}"),
         _ => format!("album:{id}"),
     }
 }
@@ -114,19 +114,17 @@ pub fn find_or_create_album(
         id: i64,
         missing: bool,
         mb: Option<String>,
-        discid: Option<String>,
     }
     let key = rel_dir.key();
     let existing: Option<Existing> = tx
         .query_row(
-            "SELECT id, missing_since, mb_release_id, discid FROM albums WHERE rel_dir_key = ?1",
+            "SELECT id, missing_since, mb_release_id FROM albums WHERE rel_dir_key = ?1",
             [&key],
             |r| {
                 Ok(Existing {
                     id: r.get(0)?,
                     missing: r.get::<_, Option<i64>>(1)?.is_some(),
                     mb: r.get(2)?,
-                    discid: r.get(3)?,
                 })
             },
         )
@@ -134,7 +132,7 @@ pub fn find_or_create_album(
     let Some(e) = existing else {
         return Ok(Ok(scans::insert_album(tx, rel_dir.as_str(), &key, meta)?));
     };
-    let same = release_key(e.id, e.mb.as_deref(), e.discid.as_deref()) == release;
+    let same = release_key(e.id, e.mb.as_deref()) == release;
     Ok(match (e.missing, same) {
         (false, true) => Ok(e.id),
         (false, false) => Err(format!(

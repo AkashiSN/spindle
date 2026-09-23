@@ -824,3 +824,47 @@ fn upgrade_to_0022_makes_subscription_ids_non_reusable() {
         .unwrap();
     assert_eq!(album_id, None);
 }
+
+/// D-67 追記 3: `albums.discid` を落とす（DiscID は 1 枚ごとの値で、album の列には収まらない）。
+/// 既存の album 行と他の列は保つ
+#[test]
+fn upgrade_to_0024_drops_albums_discid() {
+    use rusqlite::Connection;
+
+    let list = migrations::embedded().unwrap();
+    let upto23: Vec<_> = list.iter().take(23).cloned().collect();
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    migrations::apply_list(&mut conn, &upto23).unwrap();
+    conn.execute_batch(
+        "INSERT INTO albums (id, rel_dir, rel_dir_key, album, mb_release_id, discid, disc_count)
+           VALUES (5, 'a/b', 'a/b', 'B', 'mbid-1', 'disc-1', 2);",
+    )
+    .unwrap();
+    migrations::apply_list(&mut conn, &list).unwrap();
+    assert!(migrations::current_version(&conn).unwrap().unwrap() >= 24);
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('albums')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!cols.iter().any(|c| c == "discid"), "{cols:?}");
+    let idx: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'idx_albums_discid'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(idx, 0);
+    let row: (String, Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT album, mb_release_id, disc_count FROM albums WHERE id = 5",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("B".into(), Some("mbid-1".into()), Some(2)));
+}

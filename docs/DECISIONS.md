@@ -86,7 +86,8 @@ ZFS では rename とタグ書き換えで inode が不変。FLAC の STREAMINFO
 **決定**: `{album}` のみ。衝突時のみ `{album} ({year})` へ降格。
 
 **注意**: DATE / ORIGINALDATE タグは必ず保持する（パスに出さないだけ）。
-配置前に MusicBrainz Release ID または DiscID で同一リリース判定を行う。
+配置前に MusicBrainz Release ID または DiscID で同一リリース判定を行う（→ D-67 追記 3 で DiscID を外した。
+DiscID は 1 枚ごとの値で、複数枚組のリリースの鍵にならない）。
 **同名 ≠ 同一リリース**であり、パス衝突をマージ扱いにしてはならない。
 
 ---
@@ -466,6 +467,7 @@ RESOLVE_NO_SYMLINKS)` で開き、symlink は辿らない。一時ファイル�
 ## D-32 album の同一性は構成トラックと MBID / DiscID で引く
 
 **決定**: ディレクトリ rename 後の album は、`mb_release_id` / `discid` が**ちょうど 1 件**
+（→ D-67 追記 3 で `discid` の列ごと外し、`mb_release_id` だけになった）
 一致し旧 rel_dir が消えているもの → 構成トラックの過半数が属していた album（旧 rel_dir が
 消えているもの）の順で既存行を引き当て、`rel_dir` を書き換えて id を維持する。候補が
 複数なら自動では寄せない。分割は移った側が新規、統合は最多の album が id を維持し、
@@ -709,9 +711,9 @@ Derived の再エンコードと重複検出の両方が空回りするため。
 - **`category_id` の推定**（album 単位）: 先頭ディレクトリ名が `categories.name` と canonical key で
   一致すればそれ → 構成トラックの GENRE を `genre_category_map` で引く → どちらも無ければ NULL
   （`_Unsorted` への配置はパス生成側 P0-11 の判断）。album のメタデータ（albumartist / album /
-  date / original_date / mb_release_id / discid / disc_count）は構成トラックの**最頻値**
+  date / original_date / mb_release_id / disc_count）は構成トラックの**最頻値**（`discid` は D-67 追記 3 で外した）
   （同数なら文字列順で先）。`edition` は P0-6 では設定しない
-- **album 照合の候補順**は MBID / DiscID が 1 件一致 → 構成トラックの過半数が直前まで属していた
+- **album 照合の候補順**は MBID が 1 件一致（DiscID は D-67 追記 3 で外した）→ 構成トラックの過半数が直前まで属していた
   album → そのディレクトリに既にある album → 新規。既存 album を別のディレクトリへ寄せてよいのは
   「旧 rel_dir が inventory に無い」か「**旧 rel_dir の現在の構成の過半数が別の album に属して
   いる**」ときで、後者が 2 ディレクトリの swap を id 維持で解く鍵になる（仕様の「旧 rel_dir が
@@ -1081,7 +1083,7 @@ preview と apply の一致を保証できない）。preview の全行差分を
   ドットは削る。切り詰めた結果に元の文字が 1 つも残らない（ディレクトリだけで上限を超える、拡張子が
   長すぎる、先頭が多バイト / サロゲートで予算に入らない）ときは生成エラー（計画では conflict）に
   する。上限を満たさないパスは返さない
-- **衝突降格の単位はリリース**: `mb:<MUSICBRAINZ_ALBUMID>` → `disc:<DISCID>` → `album:<album_id>` の
+- **衝突降格の単位はリリース**: `mb:<MUSICBRAINZ_ALBUMID>` → `album:<album_id>`（`disc:<DISCID>` は D-67 追記 3 で外した）の
   順で決めるキーが同じなら同一リリース。同じ宛先ディレクトリに 2 つ以上のリリースが来たら、
   そのディレクトリに**既にいる**リリース（選択外の占有者、または選択内で現在そこにいるもの）が
   1 つだけでそれと同じなら合流（降格なし）、それ以外は `{album} ({year})` → `{album} ({edition})` に
@@ -2569,7 +2571,8 @@ CTDB への提出（自分のシンドロームを面順にした `DbSyndromes::
   `multi_disc`。降格と衝突は D-43 の規則のまま）。リリースキーは `mb:<release_id>` → 無ければ、宛先
   ディレクトリに albumartist と album が一致する複数枚組（`disc_count > 1` か構成トラックの `disc_no` の
   最大が 2 以上）の album があり、入力も複数枚組で、その `disc_no` のトラックがまだ無ければ**その album に
-  合流**（複数枚組の手入力で 2 枚目が `({year})` に降格しない）→ それ以外は `disc:<DiscID>` の新規リリース。
+  合流**（複数枚組の手入力で 2 枚目が `({year})` に降格しない）→ それ以外は `disc:<DiscID>` の新規リリース
+  （Library へ直接置いていたときの規則。D-67 追記 2 で Inbox 経由になり、追記 3 で `disc:` のキーは無くなった）。
   `release_id` があるときは合流を探さない（別リリースなら降格し、降格先が album になる。合流先を持ったまま
   降格すると「ディレクトリ = album」が壊れる）。計画はエンコードの前に一度（衝突を早く知る）と、
   `library` の排他を取った後にもう一度行い、後者を確定にする（エンコードの間に scan / rename が album を
@@ -2717,8 +2720,37 @@ ISRC / pre-emphasis / CD-TEXT を `Toc` に持たせて disc.toc に書く（P2-
   出させる
 - **Inbox 経由で置いた CD の album に `albums.discid` は入れない**（ユーザ判断）。入れると追記先の判定
   （`destination` は DiscID を持つ album を除く）から外れ、MusicBrainz に無い複数枚組の 2 枚目が 1 枚目に
-  合流できなくなる。既存曲が大量にあり、album の同一性の規則を今は動かさない。**未決**: スキャナは
-  `MUSICBRAINZ_DISCID` から `discid` を復元するので、DB を作り直した後だけ値が付く食い違いが残る
+  合流できなくなる。既存曲が大量にあり、album の同一性の規則を今は動かさない。~~**未決**: スキャナは
+  `MUSICBRAINZ_DISCID` から `discid` を復元するので、DB を作り直した後だけ値が付く食い違いが残る~~
+  → 下の追記 3 で `albums.discid` ごと外して解消
+
+**追記 3**（2026-09-23。ユーザ判断。上の未決を閉じる）: **`albums.discid` を落とし、DiscID を album の
+同一性に使わない。** リリースの同一性は `mb_release_id`（`MUSICBRAINZ_ALBUMID`）→ album 行の 2 段にする。
+
+- **DiscID は 1 枚ごとの値で、album の列には収まらない。** 複数枚組では album に DiscID が複数あり、スキャナは
+  最頻値（どの 1 枚かは決まらない）を入れていた。しかも Inbox 経由の CD は NULL で、DB を作り直すと値が付き、
+  追記先の判定・リリースキー（`disc:`）・album の照合（D-32）が作り直しの前後で変わっていた。リリースの MBID は
+  全ディスクで 1 つなので、MusicBrainz にある複数枚組は MBID で自然に合流する
+- マイグレーション `0024` で索引 `idx_albums_discid` と列を落とす。リリースキーは `mb:` → `album:<id>`
+  （`placement::release_key` / `edit::rename` の `release_of`）、album の照合は MBID が 1 件一致 → 構成
+  トラックの過半数。稼働 DB（721 album）は `discid` も `mb_release_id` も 0 件なので、失われる値は無い
+- **DiscID の置き場所**: トラックのタグ `MUSICBRAINZ_DISCID`（1 枚の識別。吸い出しで付く）、
+  `album_verifications`（ディスク単位の行）、rip.log / disc.cue。アルバム単位で DiscID を引く機能が要るように
+  なったら、そのときに 1 枚ごとの表（`album_discs(album_id, disc_no, discid)`）を足す
+- **CD とそれ以外は混ぜない。** `discid` を落とすと、MBID の無い CD の album と YouTube などの album が
+  どちらも「MB キーの無い album」になり、Inbox の追記先（D-70）で互いに混ざる（D-7 の「同名 ≠ 同一
+  リリース」に反する）。トラックのタグ `MUSICBRAINZ_DISCID` を **CD から来た印**にし（ファイルにあるので
+  作り直しでも同じ判定）、`import::inbox::destination` は CD の件を CD の album にだけ、しかも album に
+  まだ無い `disc_no` のときだけ採用する（MBID の無い複数枚組の 2 枚目を 1 枚目に合流させる。同じ番号は
+  同名の別の盤なので降格）。CD でない件は CD でない album にだけ採用する。MBID のある件は従来どおり
+  追記先を持たず、配置の `mb:` キーで合流 / 降格が決まる
+
+**却下**: 両方の経路で `discid` を書き、合流は別の規則で救う（1 枚目だけの時点では 1 枚ものに見えるので、
+2 枚目が来たときに `discid` を NULL に戻す更新が要り、規則が 3 か所に増える）。1 枚ごとの表を今作る（読む
+機能が無い。遡及照合は STREAMINFO から TOC を作り直すので DiscID を使わない）。
+
+**関連**: Inbox 経由の件への MusicBrainz 照会は、YouTube の件には行わない（曲の身元は `SOURCE_URL`、
+D-70）。候補ゼロ・「どれも違う」で取り込んだ CD の引き直しだけを TASKS P4-21 に積む
 
 ---
 
@@ -3016,7 +3048,8 @@ rel_path / duration_ms）を返し、画面が「⚠ Library に同名: <ファ�
   「非対応」で確定）
 - **候補から写すのは既定で「盤を見分けるのに要る最小限」**: `ALBUM` / `ALBUMARTIST` / `DATE` /
   `DISCNUMBER` / `DISCTOTAL` / `TRACKTOTAL` と MusicBrainz の id（`MUSICBRAINZ_ALBUMID` /
-  `MUSICBRAINZ_DISCID`。同一性と遡及照合の鍵。要らなければプロパティタブで消せる）。`LABEL` /
+  `MUSICBRAINZ_DISCID`。同一性と遡及照合の鍵（DiscID は D-67 追記 3 で album の同一性からは外し、CD の印と
+  1 枚の識別に使う）。要らなければプロパティタブで消せる）。`LABEL` /
   `CATALOGNUMBER` / `BARCODE`、トラックのタイトル / アーティスト / ISRC は既定では写さず、
   「全部写す」を選んだときだけ写る。トラック行は番号と長さだけの空行になり、公式サイトの貼り付け解析
   （D-65）で埋める。空のフィールドはタグに書かない（`tagRows` が落とす。従来どおり）

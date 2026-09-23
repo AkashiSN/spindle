@@ -155,22 +155,19 @@ pub struct AlbumSnap {
     pub rel_dir: String,
     pub rel_dir_key: String,
     pub mb_release_id: Option<String>,
-    pub discid: Option<String>,
     pub missing: bool,
 }
 
 pub fn load_album_snapshot(conn: &Connection) -> Result<Vec<AlbumSnap>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, rel_dir, rel_dir_key, mb_release_id, discid, missing_since FROM albums",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, rel_dir, rel_dir_key, mb_release_id, missing_since FROM albums")?;
     let rows = stmt.query_map([], |r| {
         Ok(AlbumSnap {
             id: r.get(0)?,
             rel_dir: r.get(1)?,
             rel_dir_key: r.get(2)?,
             mb_release_id: r.get(3)?,
-            discid: r.get(4)?,
-            missing: r.get::<_, Option<i64>>(5)?.is_some(),
+            missing: r.get::<_, Option<i64>>(4)?.is_some(),
         })
     })?;
     rows.map(|r| r.map_err(Into::into)).collect()
@@ -519,7 +516,6 @@ pub struct AlbumMeta {
     pub date: Option<String>,
     pub original_date: Option<String>,
     pub mb_release_id: Option<String>,
-    pub discid: Option<String>,
     pub disc_count: Option<i64>,
 }
 
@@ -531,8 +527,8 @@ pub fn insert_album(
 ) -> Result<i64> {
     conn.execute(
         "INSERT INTO albums (rel_dir, rel_dir_key, category_id, albumartist, album, date,
-                             original_date, mb_release_id, discid, disc_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                             original_date, mb_release_id, disc_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             rel_dir,
             rel_dir_key,
@@ -542,7 +538,6 @@ pub fn insert_album(
             m.date,
             m.original_date,
             m.mb_release_id,
-            m.discid,
             m.disc_count
         ],
     )?;
@@ -554,7 +549,7 @@ pub fn insert_album(
 pub fn update_album_meta(conn: &Connection, id: i64, m: &AlbumMeta) -> Result<()> {
     conn.execute(
         "UPDATE albums SET category_id = ?2, albumartist = ?3, album = ?4, date = ?5,
-                original_date = ?6, mb_release_id = ?7, discid = ?8, disc_count = ?9,
+                original_date = ?6, mb_release_id = ?7, disc_count = ?8,
                 missing_since = NULL
          WHERE id = ?1",
         params![
@@ -565,7 +560,6 @@ pub fn update_album_meta(conn: &Connection, id: i64, m: &AlbumMeta) -> Result<()
             m.date,
             m.original_date,
             m.mb_release_id,
-            m.discid,
             m.disc_count
         ],
     )?;

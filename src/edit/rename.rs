@@ -142,12 +142,22 @@ fn year_of(date: Option<&str>) -> Option<String> {
     (y.len() == 4 && y.chars().all(|c| c.is_ascii_digit())).then_some(y)
 }
 
+/// トラックのリリースキー（D-43）: MUSICBRAINZ_ALBUMID → album 行 → トラック単独。DiscID は 1 枚ごとの
+/// 値なので鍵にしない（D-67 追記 3）
+fn release_of(id: i64, mb: Option<String>, album_id: Option<i64>) -> String {
+    match (mb, album_id) {
+        (Some(m), _) if !m.is_empty() => format!("mb:{m}"),
+        (_, Some(a)) => format!("album:{a}"),
+        _ => format!("track:{id}"),
+    }
+}
+
 fn load_track_for_plan(conn: &Connection, id: i64) -> crate::db::Result<Option<TrackForPlan>> {
     let row = conn
         .query_row(
             "SELECT t.rel_path, t.title, t.albumartist, t.artist_display, t.album, t.track_no,
                     t.disc_no, t.date, t.album_id, c.name, a.date, a.edition, a.mb_release_id,
-                    a.discid, a.disc_count,
+                    a.disc_count,
                     (SELECT max(x.disc_no) FROM tracks x
                       WHERE x.album_id = t.album_id AND x.missing_since IS NULL)
              FROM tracks t
@@ -161,9 +171,8 @@ fn load_track_for_plan(conn: &Connection, id: i64) -> crate::db::Result<Option<T
                 let album_date: Option<String> = r.get(10)?;
                 let track_date: Option<String> = r.get(7)?;
                 let mb: Option<String> = r.get(12)?;
-                let discid: Option<String> = r.get(13)?;
-                let disc_count: Option<i64> = r.get(14)?;
-                let max_disc: Option<i64> = r.get(15)?;
+                let disc_count: Option<i64> = r.get(13)?;
+                let max_disc: Option<i64> = r.get(14)?;
                 let (stem, ext) = match rel_path
                     .rsplit('/')
                     .next()
@@ -173,12 +182,7 @@ fn load_track_for_plan(conn: &Connection, id: i64) -> crate::db::Result<Option<T
                     Some((s, e)) => (s.to_owned(), e.to_owned()),
                     None => (rel_path.clone(), String::new()),
                 };
-                let release = match (mb, discid, album_id) {
-                    (Some(m), _, _) if !m.is_empty() => format!("mb:{m}"),
-                    (_, Some(d), _) if !d.is_empty() => format!("disc:{d}"),
-                    (_, _, Some(a)) => format!("album:{a}"),
-                    _ => format!("track:{id}"),
-                };
+                let release = release_of(id, mb, album_id);
                 Ok(TrackForPlan {
                     id,
                     rel_path,
@@ -212,7 +216,7 @@ pub(crate) fn load_occupancy(
     selected: &HashSet<i64>,
 ) -> crate::db::Result<Occupancy> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.rel_path_key, t.album_id, a.mb_release_id, a.discid, a.rel_dir_key
+        "SELECT t.id, t.rel_path_key, t.album_id, a.mb_release_id, a.rel_dir_key
          FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
          WHERE t.missing_since IS NULL",
     )?;
@@ -224,20 +228,14 @@ pub(crate) fn load_occupancy(
             r.get::<_, Option<i64>>(2)?,
             r.get::<_, Option<String>>(3)?,
             r.get::<_, Option<String>>(4)?,
-            r.get::<_, Option<String>>(5)?,
         ))
     })?;
     for row in rows {
-        let (id, key, album_id, mb, discid, dir_key) = row?;
+        let (id, key, album_id, mb, dir_key) = row?;
         if selected.contains(&id) {
             continue;
         }
-        let release = match (mb, discid, album_id) {
-            (Some(m), _, _) if !m.is_empty() => format!("mb:{m}"),
-            (_, Some(d), _) if !d.is_empty() => format!("disc:{d}"),
-            (_, _, Some(a)) => format!("album:{a}"),
-            _ => format!("track:{id}"),
-        };
+        let release = release_of(id, mb, album_id);
         if let Some(dir_key) = dir_key {
             occ.dir_releases.entry(dir_key).or_default().insert(release);
         }

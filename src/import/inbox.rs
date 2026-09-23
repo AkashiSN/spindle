@@ -1139,7 +1139,7 @@ fn self_album(conn: &rusqlite::Connection, sources: &[Source]) -> Result<SelfRow
     let mut keys = HashSet::new();
     let mut album: Option<(i64, String)> = None;
     let mut st = conn.prepare_cached(
-        "SELECT t.rel_path_key, t.album_id, a.mb_release_id, a.discid
+        "SELECT t.rel_path_key, t.album_id, a.mb_release_id
            FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
           WHERE t.missing_since IS NULL AND ((?1 IS NOT NULL AND t.audio_md5 = ?1)
                                            OR (?2 IS NOT NULL AND t.audio_fp = ?2))",
@@ -1156,18 +1156,14 @@ fn self_album(conn: &rusqlite::Connection, sources: &[Source]) -> Result<SelfRow
                     r.get::<_, String>(0)?,
                     r.get::<_, Option<i64>>(1)?,
                     r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (key, album_id, mb, discid) in rows {
+        for (key, album_id, mb) in rows {
             keys.insert(key);
             if album.is_none() {
                 if let Some(id) = album_id {
-                    album = Some((
-                        id,
-                        crate::import::placement::release_key(id, mb.as_deref(), discid.as_deref()),
-                    ));
+                    album = Some((id, crate::import::placement::release_key(id, mb.as_deref())));
                 }
             }
         }
@@ -1175,8 +1171,8 @@ fn self_album(conn: &rusqlite::Connection, sources: &[Source]) -> Result<SelfRow
     Ok(SelfRows { album, keys })
 }
 
-/// 下書きの宛先ディレクトリに既にある album（追記先。D-70）。MB リリース / DiscID の album は
-/// 別リリースなので対象にしない（従来どおり降格か衝突）
+/// 下書きの宛先ディレクトリに既にある album（追記先。D-70）。MB リリースの album は別リリースなので
+/// 対象にしない（従来どおり降格か衝突）。CD とそれ以外は混ぜない（D-67 追記 3）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Destination {
     pub album_id: i64,
@@ -1266,6 +1262,9 @@ fn resolve_template(
     Ok((category, template))
 }
 
+/// CD から来たことを示すタグ（D-67 追記 3。値は 1 枚ごとの DiscID）
+const DISCID_KEY: &str = "MUSICBRAINZ_DISCID";
+
 /// 件のファイルの MUSICBRAINZ_ALBUMID の最頻値（配置のリリースキー `mb:` の元）
 fn incoming_release_id(files: &[FileRow]) -> Option<String> {
     mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")))
@@ -1298,9 +1297,14 @@ pub fn destination_of(
     destination(conn, layout, &draft, &[])
 }
 
-/// 下書きの宛先ディレクトリ（降格前の素のパス）に active な album があり、それが MB リリースでも
-/// DiscID でもなければ返す（追記先）。件のファイルに MUSICBRAINZ_ALBUMID があれば別リリースなので
-/// 追記先は無い（配置は `mb:` のキーで降格か衝突になる）。トラックが無い下書きも None
+/// 下書きの宛先ディレクトリ（降格前の素のパス）に active な album があり、それが MB リリースでなければ
+/// 返す（追記先）。件のファイルに MUSICBRAINZ_ALBUMID があれば別リリースなので追記先は無い（配置は
+/// `mb:` のキーで降格か衝突になる）。トラックが無い下書きも None。
+///
+/// **CD とそれ以外は混ぜない**（D-67 追記 3）: 「CD」はトラックのタグに `MUSICBRAINZ_DISCID` があること
+/// （ファイルにあるので DB を作り直しても同じ判定）。CD の件は CD の album にだけ、しかも**まだ無い
+/// ディスク番号**のときだけ追記する（MBID の無い複数枚組の 2 枚目を 1 枚目に合流させる。同じ番号なら
+/// 同名の別の盤）。CD でない件（YouTube・手で置いたもの）は CD でない album にだけ追記する
 pub fn destination(
     conn: &rusqlite::Connection,
     layout: &LayoutConfig,
@@ -1322,8 +1326,7 @@ pub fn destination(
         .query_row(
             "SELECT id, album, album_gain FROM albums
               WHERE rel_dir_key = ?1 AND missing_since IS NULL
-                AND (mb_release_id IS NULL OR mb_release_id = '')
-                AND (discid IS NULL OR discid = '')",
+                AND (mb_release_id IS NULL OR mb_release_id = '')",
             [rel_dir.key()],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -1331,6 +1334,17 @@ pub fn destination(
     let Some((album_id, album, album_gain)) = found else {
         return Ok(None);
     };
+    let incoming_cd = files.iter().any(|f| tag(f, DISCID_KEY).is_some());
+    let album_cd: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM tracks t
+                          JOIN track_tags g ON g.track_id = t.id AND g.key = ?2
+                         WHERE t.album_id = ?1 AND t.missing_since IS NULL)",
+        rusqlite::params![album_id, DISCID_KEY],
+        |r| r.get(0),
+    )?;
+    if incoming_cd != album_cd {
+        return Ok(None);
+    }
     let mut st = conn.prepare_cached(
         "SELECT disc_no, track_no FROM tracks WHERE album_id = ?1 AND missing_since IS NULL",
     )?;
@@ -1347,6 +1361,15 @@ pub fn destination(
         if let (Ok(d), Ok(t)) = (u32::try_from(disc_no.unwrap_or(1)), u32::try_from(track_no)) {
             numbers.insert((d, t));
         }
+    }
+    // CD の件は、既にあるディスク番号には追記しない（同じ番号は同名の別の盤）
+    if incoming_cd
+        && draft
+            .tracks
+            .iter()
+            .any(|t| numbers.iter().any(|&(d, _)| d == t.disc_no))
+    {
+        return Ok(None);
     }
     Ok(Some(Destination {
         album_id,
@@ -1650,7 +1673,6 @@ fn register_item(
             .map(str::to_owned),
         original_date: None,
         mb_release_id: mb,
-        discid: None,
         disc_count: Some(i64::from(draft.disc_count())),
     };
     let album_id = match find_or_create_album(&tx, &plan.rel_dir, &plan.release, &meta) {

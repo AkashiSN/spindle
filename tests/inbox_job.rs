@@ -1156,6 +1156,121 @@ async fn incoming_release_id_is_not_appended_to_a_plain_album() {
     assert_eq!(lib.count("SELECT count(*) FROM albums"), 2);
 }
 
+// ---------------------------------------------------------------- CD と CD 以外の区別（D-67 追記 3）
+
+/// `disc_no` を指定した下書き（複数枚組の CD 用）
+fn draft_disc(files: &[(&str, u32, &str)], disc_no: u32, album: &str) -> InboxDraft {
+    let mut d = draft_for(files, None, album);
+    for t in &mut d.tracks {
+        t.disc_no = disc_no;
+    }
+    d
+}
+
+/// Inbox に 1 件置いて承認し、配置まで流す。`discid` があれば CD の件（`MUSICBRAINZ_DISCID` 付き）にする。
+/// 走査の時刻は `seed` から作る（件ごとに進める）
+async fn place_one(
+    lib: &Lib,
+    dir: &str,
+    seed: u32,
+    title: &str,
+    track: u32,
+    disc_no: u32,
+    discid: Option<&str>,
+) -> Option<inbox::Item> {
+    let rel = format!("{dir}/{track:02}.flac");
+    let p = lib.add(&rel, seed, title, "Album", track)?;
+    if let Some(d) = discid {
+        set_tags(&p, "flac", &[("MUSICBRAINZ_DISCID", &[d])]);
+    }
+    lib.scan(i64::from(seed) * 1000).await;
+    let it = lib.item(dir).unwrap();
+    lib.approve(
+        it.id,
+        &draft_disc(&[(&rel, track, title)], disc_no, "Album"),
+    );
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), it.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    Some(it)
+}
+
+/// MBID の無い CD の件は、同じ名前の CD でない album（YouTube・既存曲）には追記しない（別リリース。
+/// 番号が重ならなくても年で降格する）
+#[tokio::test]
+async fn cd_item_is_not_appended_to_a_non_cd_album() {
+    let lib = Lib::new();
+    lib.start(true);
+    let a = require_ffmpeg!(place_one(&lib, "AlbumA", 1, "One", 1, 1, None).await);
+    let b = place_one(&lib, "AlbumB", 2, "Two", 2, 1, Some("disc-b"))
+        .await
+        .unwrap();
+    assert_ne!(a.placed_album_id, b.placed_album_id);
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 2);
+    assert!(lib
+        .lib_path("_Unsorted/Artist/Album (2024)/02 Two.flac")
+        .exists());
+}
+
+/// 逆に、CD でない件は MBID の無い CD の album には追記しない
+#[tokio::test]
+async fn non_cd_item_is_not_appended_to_a_cd_album() {
+    let lib = Lib::new();
+    lib.start(true);
+    let a = require_ffmpeg!(place_one(&lib, "AlbumA", 1, "One", 1, 1, Some("disc-a")).await);
+    // 提案の段階で宛先が無い
+    lib.add("AlbumB/02.flac", 2, "Two", "Album", 2).unwrap();
+    lib.scan(2000).await;
+    let item = lib.item("AlbumB").unwrap();
+    let files = inbox::files(&lib.conn(), item.id).unwrap();
+    let draft = draft_for(&[("AlbumB/02.flac", 2, "Two")], None, "Album");
+    let dest =
+        spindle::import::inbox::destination(&lib.conn(), &lib.env(false).layout, &draft, &files)
+            .unwrap();
+    assert!(dest.is_none(), "{dest:?}");
+    lib.approve(item.id, &draft);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let b = inbox::get(&lib.conn(), item.id).unwrap().unwrap();
+    assert_eq!(b.state, ItemState::Placed, "{:?}", b.error);
+    assert_ne!(a.placed_album_id, b.placed_album_id);
+    assert!(lib
+        .lib_path("_Unsorted/Artist/Album (2024)/02 Two.flac")
+        .exists());
+}
+
+/// MBID の無い複数枚組の CD は、2 枚目（まだ無い disc_no）が 1 枚目の album に合流する
+/// （DiscID は 1 枚ごとに違うので、album の鍵にはしない）
+#[tokio::test]
+async fn next_disc_of_a_cd_without_release_id_joins_the_first_disc() {
+    let lib = Lib::new();
+    lib.start(true);
+    let a = require_ffmpeg!(place_one(&lib, "Disc1", 1, "One", 1, 1, Some("disc-1")).await);
+    let b = place_one(&lib, "Disc2", 2, "Two", 1, 2, Some("disc-2"))
+        .await
+        .unwrap();
+    assert_eq!(a.placed_album_id, b.placed_album_id);
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 1);
+    assert_eq!(
+        lib.count("SELECT count(*) FROM tracks WHERE missing_since IS NULL AND disc_no = 2"),
+        1
+    );
+}
+
+/// 同じ disc_no の CD（同名の別の盤）は合流しない（年で降格）
+#[tokio::test]
+async fn cd_with_the_same_disc_number_is_not_joined() {
+    let lib = Lib::new();
+    lib.start(true);
+    let a = require_ffmpeg!(place_one(&lib, "Disc1", 1, "One", 1, 1, Some("disc-1")).await);
+    let b = place_one(&lib, "Other", 2, "Two", 2, 1, Some("disc-x"))
+        .await
+        .unwrap();
+    assert_ne!(a.placed_album_id, b.placed_album_id);
+    assert!(lib
+        .lib_path("_Unsorted/Artist/Album (2024)/02 Two.flac")
+        .exists());
+}
+
 /// ARTIST が多値のファイルは、下書きの `keep_artists` が true なら（現在の個数に関係なく）触れず、
 /// false なら `artist` の 1 値で上書きする。`keep_artists` の無い旧下書きは先頭の値のままなら保つ
 /// （プラグインの artists の写像を Library まで運ぶ。SPEC §7.7 / §7.8、D-70、P4-4）

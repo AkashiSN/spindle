@@ -1859,15 +1859,15 @@ impl Commit {
                     Target::Rename(a.id)
                 }
             };
-            // 1. MBID / DiscID がちょうど 1 件一致
+            // 1. MBID がちょうど 1 件一致（DiscID は 1 枚ごとの値なので album の鍵にしない。D-67 追記 3）
             let by_ids: Vec<&AlbumSnap> = self
                 .albums
                 .iter()
                 .filter(|a| {
                     !claimed.contains(&a.id)
                         && (a.rel_dir_key == **dir_key || available(a))
-                        && ((meta.mb_release_id.is_some() && a.mb_release_id == meta.mb_release_id)
-                            || (meta.discid.is_some() && a.discid == meta.discid))
+                        && meta.mb_release_id.is_some()
+                        && a.mb_release_id == meta.mb_release_id
                 })
                 .collect();
             if let [a] = by_ids.as_slice() {
@@ -1977,7 +1977,6 @@ impl Commit {
             date: mode("DATE"),
             original_date: mode("ORIGINALDATE"),
             mb_release_id: mode("MUSICBRAINZ_ALBUMID"),
-            discid: mode("MUSICBRAINZ_DISCID"),
             disc_count: mode("DISCTOTAL").and_then(|s| leading_int(&s)),
         })
     }

@@ -152,8 +152,9 @@ unsorted    = "_Unsorted/{albumartist}/{album}/{track:02} {title}"
 - マルチディスクはサブフォルダを作らず `1-01` 前置き（アルバム = 1ディレクトリを維持）
 - 発売年はパスに含めない。DATE / ORIGINALDATE タグは必ず保持する
 - パス衝突時のみ自動降格: `{album}` → `{album} ({year})` → `{album} ({edition})`
-- **衝突 = マージではない。** 配置前に MusicBrainz Release ID または DiscID で
-  同一リリース判定を行い、異なる場合は必ず別ディレクトリにする
+- **衝突 = マージではない。** 配置前に MusicBrainz Release ID（無ければ album 行）で
+  同一リリース判定を行い、異なる場合は必ず別ディレクトリにする。DiscID は 1 枚ごとの値なので
+  リリースの鍵にしない（D-67 追記 3）
 
 ### ファイル名正規化
 
@@ -416,7 +417,7 @@ Phase 4  commit:     1 トランザクションで
 ```
 ディレクトリ D に今回見つかったトラック集合 T(D) について
   1. T(D) の行が直前まで属していた album を数える
-  2. mb_release_id / discid が一致する既存 album が**ちょうど 1 つ**で、その旧 rel_dir が
+  2. mb_release_id が一致する既存 album が**ちょうど 1 つ**で、その旧 rel_dir が
      inventory に無ければそれ（複数一致なら自動では寄せない → 3 へ）
   3. なければ、T(D) の過半数が属していた album A で、A の旧 rel_dir が inventory に無いもの
      → A.rel_dir を D に書き換える（id 維持。verifications / artwork が残る）
@@ -1124,9 +1125,11 @@ Inbox/ に配置（ポーリング検出）
   `artwork_resolved_at = NULL` で予約するので、決められなくても（同梱カバーの探索や読み取りの I/O 失敗を
   含む）次のスキャンが拾う。P3-4）
 - **既存の album への追記**（D-70）: リリースキーは MUSICBRAINZ_ALBUMID の最頻値があれば `mb:`、自分の成果物の
-  album があればそれ、**無ければ宛先ディレクトリに active な album があり、その album にも MB キー / DiscID が
+  album があればそれ、**無ければ宛先ディレクトリに active な album があり、その album にも MB キーが
   無ければその album を採用**（`album:<id>`）、それも無ければ件ごとの新規。MB キー同士が違えば従来どおり
-  降格か衝突。採用する album は `GET /api/inbox` の `destination`（`{ album_id, album, track_count,
+  降格か衝突。**CD とそれ以外は混ぜない**（D-67 追記 3）: トラックのタグに `MUSICBRAINZ_DISCID` があるものを
+  CD とし、CD の件は CD の album にだけ、しかも album にまだ無い `disc_no` のときだけ採用する（MBID の無い
+  複数枚組の 2 枚目が 1 枚目に合流する。同じ番号は同名の別の盤）。CD でない件は CD でない album にだけ採用する。採用する album は `GET /api/inbox` の `destination`（`{ album_id, album, track_count,
   max_track_no, album_gain }` | null。下書きの category / albumartist / album と件のファイルから引く。件に
   MUSICBRAINZ_ALBUMID があれば別リリースなので null）で見せる
 - **album gain**（D-74）: 下書きの `album_gain`（既定 false。承認画面のチェックボックス。追記先があればその

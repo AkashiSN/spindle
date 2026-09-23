@@ -974,8 +974,7 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       `source = rip`・`log_path` は移動後の Library 相対、`track_verifications` 4 行に CRC。
       このとき `album_verifications.drive_offset` が NULL だったので、`read_offset` を書くよう直した（D-83 追記 3）。
       **照合が通る盤での確認（上の項目）は、この盤しか無いため残り**）
-- 残課題（判断待ち）: 「着手前に確認が必要な残課題」の DiscID の食い違い（Inbox 経由の CD の album は
-  `discid` が NULL、DB 再構築後はタグから復元される）
+- ~~残課題（判断待ち）: DiscID の食い違い~~（D-67 追記 3 で解消）
 
 #### やること
 
@@ -1699,10 +1698,25 @@ archive.org へ飛ぶ二段構えで、飛び先に AAAA が無い）。`CoverAr
 残り: なし（トラックごとの進捗・Inbox 経由の取り込み・「取り込む」ボタンは P2-5 で入れた。実機で
 「取り込む」→ Inbox に件が出るまでを確認済み（P2-5 の受け入れ））
 
+### P4-21 候補の無いまま取り込んだ CD の MusicBrainz 引き直し（予定）
+
+候補ゼロや「どれも違う」で Inbox に置いた CD は MBID を持たない。後から MusicBrainz に DiscID を登録した・
+リリースを見つけたときに、Inbox の承認画面から引き直して候補を選べるようにする（2026-09-23 のユーザ要望。
+D-67 追記 3 の「関連」）。YouTube の件は対象外（曲の身元は `SOURCE_URL`。D-70）
+
+- [ ] 照会はジョブにし、MusicBrainz への要求は 1 つのクライアント（`MusicBrainzClient` の間隔待ち）を共有して
+      1 req/s を超えない。入力はサイドカーの TOC / DiscID / ISRC（CD 画面の `POST /api/cd/lookup` と同じ段階化）
+- [ ] 結果は件ごとに覚え、承認画面に候補を並べる。選んだら写す範囲は D-72 の「識別用の最小限」
+      （`MUSICBRAINZ_ALBUMID` など。値は公式表記を手で入れる）
+- 着手前に決めること: 引き直しの起点（件を開いたときに自動か、ボタンか）、結果の置き場所（サイドカーか DB か）
+
+---
+
 ## 着手前に確認が必要な残課題
 
-- Inbox 経由で置いた CD の album は `albums.discid` が NULL だが、DB 再構築後はスキャナがタグの
-  `MUSICBRAINZ_DISCID` から復元する（D-67 追記 2）。複数枚組の合流規則と一緒に揃え方を決める
+- ~~Inbox 経由で置いた CD の album は `albums.discid` が NULL だが、DB 再構築後はスキャナがタグの
+  `MUSICBRAINZ_DISCID` から復元する~~（2026-09-23。`albums.discid` を落とし、リリースの同一性を
+  MBID → album 行にした。CD とそれ以外は Inbox の追記先で混ぜない。D-67 追記 3、マイグレーション 0024）
 
 - ~~Discogs / VGMdb 連携の要否~~（2026-09-20。作らない。D-72）
 - ~~`.fpl` 書き出しの要否~~（2026-09-20。作らない。D-72）
