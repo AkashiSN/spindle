@@ -184,6 +184,18 @@ fn drive_offset_accepts_auto_and_integer() {
 }
 
 #[test]
+fn drive_offset_rejects_values_outside_the_search_range() {
+    // 照合の探索範囲（±2939）の外は当てられない（D-83）
+    Config::parse(&with_override("rip", "drive_offset = 2939")).unwrap();
+    Config::parse(&with_override("rip", "drive_offset = -2939")).unwrap();
+    for bad in ["2940", "-2940", "-2147483648"] {
+        let err =
+            Config::parse(&with_override("rip", &format!("drive_offset = {bad}"))).unwrap_err();
+        assert!(err.to_string().contains("drive_offset"), "{bad}: {err}");
+    }
+}
+
+#[test]
 fn drive_offset_rejects_other_strings() {
     let err = Config::parse(&with_override("rip", r#"drive_offset = "fast""#)).unwrap_err();
     assert!(matches!(err, ConfigError::Parse(_)), "{err}");

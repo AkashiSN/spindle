@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { ripCellLabel, ripErrorMessage, ripProgressFrom, ripStatusLabel, type RipProgress } from './cdRip'
+import {
+  ripCellLabel,
+  ripErrorMessage,
+  ripOutcome,
+  ripProgressFrom,
+  ripStatusLabel,
+  type RipProgress,
+} from './cdRip'
 
 const p = (over: Partial<RipProgress>): RipProgress => ({
   phase: 'read',
@@ -69,5 +76,19 @@ describe('ripErrorMessage', () => {
     expect(ripErrorMessage('disc_mismatch', '')).toContain('盤が変わった')
     expect(ripErrorMessage('bad_metadata', 'トラック数が違う')).toBe('取り込めない: トラック数が違う')
     expect(ripErrorMessage('other', 'x')).toBe('x')
+  })
+})
+
+describe('ripOutcome', () => {
+  it('終わっていれば結果の一行、走っていればまだ（SSE を取りこぼしても status から収束させる）', () => {
+    expect(ripOutcome({ state: 'running', last_error: null })).toEqual({ kind: 'running' })
+    expect(ripOutcome({ state: 'queued', last_error: null })).toEqual({ kind: 'running' })
+    expect(ripOutcome({ state: 'done', note: 'Inbox に置いた: CD/x', last_error: null })).toEqual({
+      kind: 'done',
+      result: 'Inbox に置いた: CD/x',
+    })
+    expect(ripOutcome({ state: 'failed', last_error: '盤が違う' })).toEqual({ kind: 'failed', error: '盤が違う' })
+    expect(ripOutcome({ state: 'cancelled', last_error: null })).toEqual({ kind: 'failed', error: '取り消した' })
+    expect(ripOutcome(undefined).kind).toBe('failed')
   })
 })

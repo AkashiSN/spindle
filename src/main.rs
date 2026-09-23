@@ -318,8 +318,8 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("MusicBrainz クライアントの初期化に失敗")?;
     state = state.with_musicbrainz(Arc::new(mb));
-    // 候補のジャケット（D-83）。MB 本体とは別の相手なので間隔制御は持たない。
-    // 接続に使う IP の族は `CoverArtClient` が `Auto` に固定する（D-83 追記。
+    // 候補のジャケット（D-82）。MB 本体とは別の相手なので間隔制御は持たない。
+    // 接続に使う IP の族は `CoverArtClient` が `Auto` に固定する（D-82 追記。
     // `[musicbrainz].address_family` を引き継ぐと archive.org へ届かない）
     let caa = spindle::cd::coverart::CoverArtClient::new(
         &state.config.musicbrainz.cover_art_url,

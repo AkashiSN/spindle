@@ -553,3 +553,28 @@ async fn rejects_pcm_of_wrong_length_and_bad_metadata() {
     ));
     assert!(lib.inbox_entries().is_empty());
 }
+
+/// 公開の前に取り消されたら、組み立て用の隠しディレクトリを残さない
+#[tokio::test]
+async fn cancel_before_publish_leaves_no_staging() {
+    require_flac!();
+    let lib = Lib::new();
+    let token = CancellationToken::new();
+    let t2 = token.clone();
+    let hook: PlaceHook = Arc::new(move || t2.cancel());
+    let pcm = lib.write_pcm(&pcm_bytes(&toc()));
+    let r = place_disc(
+        &lib.env_with(Some(hook)),
+        PlaceInput {
+            toc: &toc(),
+            metadata: &meta(None),
+            pcm: &pcm,
+            report: &report(),
+            on_encoded: None,
+        },
+        &token,
+    )
+    .await;
+    assert!(matches!(r, Err(PlaceError::Cancelled)), "{r:?}");
+    assert!(lib.inbox_entries().is_empty(), "{:?}", lib.inbox_entries());
+}

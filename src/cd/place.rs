@@ -407,6 +407,15 @@ fn is_own_result(
     })
 }
 
+/// 組み立て用のディレクトリを消す（失敗はログだけ。次の実行も作り直す前に消す）
+async fn discard_staging(env: &PlaceEnv, staging: &RelPath) {
+    let (inbox, dir) = (Arc::clone(&env.inbox), staging.clone());
+    let res = tokio::task::spawn_blocking(move || remove_staging(&inbox, &dir)).await;
+    if !matches!(res, Ok(Ok(()))) {
+        tracing::warn!(dir = %staging, "組み立て用のディレクトリを消せない");
+    }
+}
+
 /// 吸い出した PCM を Inbox に 1 件として置き、inbox ジョブを投入する（モジュールの説明を見よ）
 pub async fn place_disc(
     env: &PlaceEnv,
@@ -520,20 +529,32 @@ pub async fn place_disc(
             log: names.log.clone(),
             report: input.report.clone(),
         });
-        {
+        let built = {
             let (inbox, staging, files) = (Arc::clone(&env.inbox), staging.clone(), files.clone());
             let paths: Vec<PathBuf> = encoded.iter().map(|g| g.path().to_path_buf()).collect();
             tokio::task::spawn_blocking(move || {
                 build_staging(&inbox, &staging, &files, &paths, &companions, &sidecar)
             })
             .await
-            .map_err(|e| std::io::Error::other(format!("組み立てタスクが異常終了: {e}")))??;
-        }
+            .map_err(|e| {
+                PlaceError::Io(std::io::Error::other(format!(
+                    "組み立てタスクが異常終了: {e}"
+                )))
+            })
+            .and_then(|r| r)
+        };
         drop(encoded);
+        // 組み立てに失敗した・公開の前に取り消された: 組み立てたものは自分のものなので残さない
+        // （隠しディレクトリは走査に見えないので、残すと同じ盤を吸い直すまで誰も片付けない）
+        if let Err(e) = built {
+            discard_staging(env, &staging).await;
+            return Err(e);
+        }
         if let Some(hook) = &env.before_publish {
             hook();
         }
         if token.is_cancelled() {
+            discard_staging(env, &staging).await;
             return Err(PlaceError::Cancelled);
         }
         let (inbox, from, to) = (Arc::clone(&env.inbox), staging.clone(), rel_dir.clone());

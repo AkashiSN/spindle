@@ -366,7 +366,7 @@ pub async fn lookup(
 }
 
 /// MBID（8-4-4-4-12 の 16 進）か。上流に投げる前に形を確かめる
-/// （利用者の文字列をそのまま URL に継ぎ足さない。D-83）
+/// （利用者の文字列をそのまま URL に継ぎ足さない。D-82）
 fn is_mbid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
@@ -383,7 +383,7 @@ fn is_mbid(s: &str) -> bool {
             .all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// 候補のジャケット（D-83、P4-20）。Cover Art Archive の front 画像を中継する。
+/// 候補のジャケット（D-82、P4-20）。Cover Art Archive の front 画像を中継する。
 /// 画像が無い盤は 404、上流が壊れているときは 502（混ぜると診断できない）
 pub async fn cover(
     State(state): State<AppState>,

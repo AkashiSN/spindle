@@ -168,6 +168,8 @@ struct FakeLookup {
     ctdb: Option<Vec<CtdbEntry>>,
     ar: Option<Vec<ArDiscEntry>>,
     syndromes: Option<DbSyndromes>,
+    /// パリティを渡すときに取り消す（修復の途中で取り消された状況）
+    cancel_on_syndromes: Option<CancellationToken>,
 }
 
 impl RipLookup for FakeLookup {
@@ -185,7 +187,12 @@ impl RipLookup for FakeLookup {
         _entry: &'a CtdbEntry,
         _npar: usize,
     ) -> BoxFuture<'a, Result<DbSyndromes, LookupError>> {
-        Box::pin(async move { self.syndromes.clone().ok_or(LookupError::NoParity) })
+        Box::pin(async move {
+            if let Some(t) = &self.cancel_on_syndromes {
+                t.cancel();
+            }
+            self.syndromes.clone().ok_or(LookupError::NoParity)
+        })
     }
 }
 
@@ -290,6 +297,13 @@ fn meta() -> DiscMetadata {
 type Seen = Arc<Mutex<Vec<RipProgress>>>;
 
 async fn run(env: &RipEnv) -> (Result<spindle::cd::place::Placed, RipJobError>, Seen) {
+    run_with(env, &CancellationToken::new()).await
+}
+
+async fn run_with(
+    env: &RipEnv,
+    token: &CancellationToken,
+) -> (Result<spindle::cd::place::Placed, RipJobError>, Seen) {
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let s = Arc::clone(&seen);
     let r = rip_disc(
@@ -297,7 +311,7 @@ async fn run(env: &RipEnv) -> (Result<spindle::cd::place::Placed, RipJobError>, 
         &toc(),
         &meta(),
         Arc::new(move |p| s.lock().unwrap().push(p)),
-        &CancellationToken::new(),
+        token,
     )
     .await;
     (r, seen)
@@ -330,6 +344,7 @@ async fn unknown_offset_is_detected_applied_and_learned() {
             ctdb: Some(vec![ctdb_entry(&t)]),
             ar: Some(Vec::new()),
             syndromes: None,
+            cancel_on_syndromes: None,
         },
         DriveOffset::Auto,
     );
@@ -388,6 +403,7 @@ async fn learned_offset_is_used() {
             ctdb: Some(vec![ctdb_entry(&t)]),
             ar: Some(Vec::new()),
             syndromes: None,
+            cancel_on_syndromes: None,
         },
         DriveOffset::Auto,
     );
@@ -412,6 +428,7 @@ async fn manual_offset_is_applied_and_not_learned() {
             ctdb: Some(vec![ctdb_entry(&t)]),
             ar: Some(Vec::new()),
             syndromes: None,
+            cancel_on_syndromes: None,
         },
         DriveOffset::Samples(667),
     );
@@ -437,6 +454,7 @@ async fn scratched_sector_is_repaired_with_ctdb_parity() {
             ctdb: Some(vec![ctdb_entry(&t)]),
             ar: Some(Vec::new()),
             syndromes: Some(db_syndromes(&t)),
+            cancel_on_syndromes: None,
         },
         DriveOffset::Samples(0),
     );
@@ -464,6 +482,7 @@ async fn unrepairable_read_is_ripped_again() {
             ctdb: Some(vec![ctdb_entry(&t)]),
             ar: Some(Vec::new()),
             syndromes: None, // パリティを取れない
+            cancel_on_syndromes: None,
         },
         DriveOffset::Samples(0),
     );
@@ -498,6 +517,7 @@ async fn persistent_mismatch_is_placed_after_all_attempts() {
             ctdb: Some(vec![ctdb_entry(&t)]),
             ar: Some(Vec::new()),
             syndromes: None,
+            cancel_on_syndromes: None,
         },
         DriveOffset::Samples(0),
     );
@@ -526,6 +546,7 @@ async fn lookup_failure_still_places_without_verification() {
             ctdb: None,
             ar: None,
             syndromes: None,
+            cancel_on_syndromes: None,
         },
         DriveOffset::Auto,
     );
@@ -547,6 +568,7 @@ async fn different_disc_in_the_drive_is_rejected() {
             ctdb: Some(Vec::new()),
             ar: Some(Vec::new()),
             syndromes: None,
+            cancel_on_syndromes: None,
         },
         DriveOffset::Auto,
     );
@@ -557,4 +579,68 @@ async fn different_disc_in_the_drive_is_rejected() {
         run(&env).await.0,
         Err(RipJobError::DiscChanged { .. })
     ));
+}
+
+/// 3 トラックそれぞれに傷（別の列に 1 語ずつ）がある
+fn scratched_everywhere(pcm: &[i16]) -> Vec<i16> {
+    scratched(&scratched(&scratched(pcm, 101), 902), 1703)
+}
+
+/// 未学習のドライブで、傷のために CRC ではどのオフセットでも一致しない盤: パリティがずれを見つけて
+/// 直し、そのずれを当ててからオフセット 0 で照合し、覚える（codex 指摘）
+#[tokio::test]
+async fn parity_repair_finds_and_applies_the_offset_and_learns_it() {
+    require_flac!();
+    let lib = Lib::new();
+    let t = truth();
+    let ours = delayed(&scratched_everywhere(&t), 667);
+    let env = lib.env(
+        vec![bytes(&ours)],
+        FakeLookup {
+            ctdb: Some(vec![ctdb_entry(&t)]),
+            ar: Some(Vec::new()),
+            syndromes: Some(db_syndromes(&t)),
+            cancel_on_syndromes: None,
+        },
+        DriveOffset::Auto,
+    );
+    let placed = run(&env).await.0.unwrap();
+    let rip = lib.sidecar(&placed.rel_dir).rip.unwrap();
+    assert_eq!(rip.report.attempts, 1);
+    assert_eq!(rip.report.repaired_words, Some(3 * 1176));
+    assert_eq!(
+        (rip.report.read_offset, rip.report.offset_source),
+        (667, OffsetSource::Detected)
+    );
+    let ctdb = rip.report.ctdb.unwrap();
+    assert_eq!((ctdb.outcome, ctdb.offset), (Outcome::Verified, 0));
+    let want = table(&t);
+    for (i, c) in rip.report.crcs.iter().enumerate() {
+        assert_eq!(c.ctdb, want.ctdb_track(i, 0).unwrap(), "track {i}");
+    }
+    assert_eq!(lib.learned(), Some(667));
+}
+
+/// 修復の途中で取り消されたら、そこで止まる（数秒かかる走査を最後まで回さない）
+#[tokio::test]
+async fn cancel_during_repair_stops() {
+    let lib = Lib::new();
+    let t = truth();
+    let token = CancellationToken::new();
+    let env = lib.env(
+        vec![bytes(&scratched(&t, 1000))],
+        FakeLookup {
+            ctdb: Some(vec![ctdb_entry(&t)]),
+            ar: Some(Vec::new()),
+            syndromes: Some(db_syndromes(&t)),
+            cancel_on_syndromes: Some(token.clone()),
+        },
+        DriveOffset::Samples(0),
+    );
+    let (r, seen) = run_with(&env, &token).await;
+    assert!(matches!(r, Err(RipJobError::Cancelled)), "{r:?}");
+    // 修復の走査は進捗を出す前に止まり、エンコード・配置には進まない
+    let phases: Vec<RipPhase> = seen.lock().unwrap().iter().map(|p| p.phase).collect();
+    assert!(!phases.contains(&RipPhase::Encode), "{phases:?}");
+    assert!(lib.leftover_pcm().is_empty(), "{:?}", lib.leftover_pcm());
 }

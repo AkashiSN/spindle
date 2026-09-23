@@ -131,7 +131,16 @@ impl<'de> Deserialize<'de> for DriveOffset {
             Str(String),
         }
         match Raw::deserialize(deserializer) {
-            Ok(Raw::Int(n)) => Ok(DriveOffset::Samples(n)),
+            // 照合の探索範囲（`cd::crctable::MAX_OFFSET`）の外は当てられない（D-83）
+            Ok(Raw::Int(n))
+                if n.unsigned_abs() <= crate::cd::crctable::MAX_OFFSET.unsigned_abs() =>
+            {
+                Ok(DriveOffset::Samples(n))
+            }
+            Ok(Raw::Int(n)) => Err(serde::de::Error::custom(format!(
+                "drive_offset は ±{} サンプルの範囲: {n}",
+                crate::cd::crctable::MAX_OFFSET
+            ))),
             Ok(Raw::Str(s)) if s == "auto" => Ok(DriveOffset::Auto),
             Ok(Raw::Str(s)) => Err(serde::de::Error::custom(format!(
                 "drive_offset は \"auto\" または整数（サンプル数）: {s:?}"
@@ -402,7 +411,7 @@ pub struct MusicBrainzConfig {
     /// MetaBrainz のエッジがこの回線の IPv4 を落とすため実機は `ipv6`）
     #[serde(default)]
     pub address_family: AddressFamily,
-    /// Cover Art Archive のベース URL（末尾 `/`）。テストと自前ミラー用に差し替え可（D-83）
+    /// Cover Art Archive のベース URL（末尾 `/`）。テストと自前ミラー用に差し替え可（D-82）
     #[serde(default = "default_cover_art_url")]
     pub cover_art_url: String,
 }

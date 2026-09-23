@@ -367,11 +367,13 @@ impl From<std::io::Error> for RipJobError {
     }
 }
 
-/// 読みながら i16 に直して `f` に渡す（`on_bytes(読んだバイト, 全体)` で進捗）
+/// 読みながら i16 に直して `f` に渡す（`on_bytes(読んだバイト, 全体)` で進捗）。同期 I/O と計算なので
+/// `spawn_blocking` の中で呼ぶ。チャンク（1 MB）ごとに取り消しを見る
 fn stream_pcm(
     path: &Path,
     mut f: impl FnMut(&[i16]) -> Result<(), String>,
     mut on_bytes: impl FnMut(u64, u64),
+    token: &CancellationToken,
 ) -> Result<(), RipJobError> {
     let mut file = File::open(path)?;
     let total = file.metadata()?.len();
@@ -380,6 +382,9 @@ fn stream_pcm(
     let mut done = 0u64;
     let mut carry: Option<u8> = None;
     loop {
+        if token.is_cancelled() {
+            return Err(RipJobError::Cancelled);
+        }
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
@@ -405,12 +410,14 @@ fn crc_table_of(
     path: &Path,
     toc: &Toc,
     on_bytes: impl FnMut(u64, u64),
+    token: &CancellationToken,
 ) -> Result<CrcTable, RipJobError> {
     let mut sampler = CrcSampler::new(&toc.track_layout().map_err(RipError::from)?);
     stream_pcm(
         path,
         |s| sampler.push(s).map_err(|e| e.to_string()),
         on_bytes,
+        token,
     )?;
     sampler
         .finish()
@@ -425,11 +432,13 @@ struct Checked {
 }
 
 impl Checked {
+    /// どちらかの手法で全トラックが**オフセット 0 で**一致した（ずれたまま一致したものは、ずれを当てて
+    /// からでないと配置しない）
     fn verified(&self) -> bool {
         [&self.ctdb, &self.ar]
             .into_iter()
             .flatten()
-            .any(|m| m.outcome == Outcome::Verified)
+            .any(|m| m.outcome == Outcome::Verified && m.offset == 0)
     }
 
     /// 比べる相手（どちらかの手法の候補）があるか。無ければ吸い直しても結果は変わらない
@@ -466,92 +475,136 @@ fn check(
     }
 }
 
-/// CTDB のパリティで直した PCM を `out` に書く。直せなければ None（理由はログ）。
-/// 返り値は直した語数
+/// 修復の結果
+struct Repaired {
+    /// 直した語数
+    words: u64,
+    /// パリティで見つかったずれ（直した PCM はまだずれている。呼び出し側が `shift_pcm` で当てる）
+    offset: i32,
+}
+
+/// CTDB のパリティで直した PCM を `out` に書く。直せなければ None（理由はログ）
 #[allow(clippy::too_many_arguments)]
 async fn try_repair(
     env: &RipEnv,
     toc: &Toc,
     entries: &[CtdbEntry],
-    table: &CrcTable,
+    table: CrcTable,
     pcm: &Path,
     out: &Path,
-    report: &(dyn Fn(RipPhase, u64, u64) + Send + Sync),
-) -> Result<Option<u64>, RipJobError> {
+    report: Arc<dyn Fn(RipPhase, u64, u64) + Send + Sync>,
+    token: &CancellationToken,
+) -> Result<(Option<Repaired>, CrcTable), RipJobError> {
     let mut candidates: Vec<&CtdbEntry> = ctdb_candidates(toc, entries)
         .into_iter()
         .filter(|e| e.has_parity.is_some() && e.npar > 0)
         .collect();
     candidates.sort_by_key(|e| std::cmp::Reverse(e.confidence));
     let Some(entry) = candidates.first().copied() else {
-        return Ok(None);
+        return Ok((None, table));
     };
     let npar = (entry.npar as usize).min(MAX_NPAR);
     let db = match env.lookup.syndromes(entry, npar).await {
         Ok(db) => db,
         Err(e) => {
             tracing::warn!(error = %super::error_chain(&e), "CTDB のパリティを取れないので修復しない");
-            return Ok(None);
+            return Ok((None, table));
         }
     };
     let frames = toc.track_layout().map_err(RipError::from)?.total_samples();
-    let (pcm_s, out_s) = (pcm.to_path_buf(), out.to_path_buf());
-    // 1 回目の走査: シンドローム表 → オフセット → 計画
-    let mut sampler =
-        SyndromeSampler::new(frames, npar).map_err(|e| RipJobError::Crc(e.to_string()))?;
-    stream_pcm(
-        &pcm_s,
-        |s| sampler.push(s).map_err(|e| e.to_string()),
-        |d, n| report(RipPhase::Repair, d, n * 2),
-    )?;
-    let syn = sampler
-        .finish()
-        .map_err(|e| RipJobError::Crc(e.to_string()))?;
-    let Some(found) = syn.find_offset(db.column(0), MAX_OFFSET) else {
-        tracing::warn!("CTDB のパリティとオフセットが合わないので修復しない");
-        return Ok(None);
-    };
-    let Some(our_crc) = table.ctdb_disc(found.offset) else {
-        return Ok(None);
-    };
-    let plan = match syn.plan(&db, found.offset, entry.crc32, our_crc) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "CTDB のパリティで直せない（能力超え / CRC 不一致）");
-            return Ok(None);
-        }
-    };
-    // 2 回目の走査: 直しながら書く
-    let mut applier = RepairApplier::new(&plan);
-    let mut w = BufWriter::with_capacity(1 << 20, File::create(&out_s)?);
-    let mut write_err: Option<std::io::Error> = None;
-    stream_pcm(
-        &pcm_s,
-        |s| {
-            let mut s = s.to_vec();
-            applier.apply(&mut s);
-            let bytes: Vec<u8> = s.iter().flat_map(|v| v.to_le_bytes()).collect();
-            if let Err(e) = w.write_all(&bytes) {
-                write_err = Some(e);
-                return Err("書けない".to_owned());
+    let (pcm, out, token, expected_crc) = (
+        pcm.to_path_buf(),
+        out.to_path_buf(),
+        token.clone(),
+        entry.crc32,
+    );
+    // 2 回の走査（数秒ずつ、最大 800 MB を 2 回読む）は blocking に置く
+    tokio::task::spawn_blocking(move || -> Result<(Option<Repaired>, CrcTable), RipJobError> {
+        // 1 回目の走査: シンドローム表 → オフセット → 計画
+        let mut sampler =
+            SyndromeSampler::new(frames, npar).map_err(|e| RipJobError::Crc(e.to_string()))?;
+        stream_pcm(
+            &pcm,
+            |s| sampler.push(s).map_err(|e| e.to_string()),
+            |d, n| report(RipPhase::Repair, d, n * 2),
+            &token,
+        )?;
+        let syn = sampler
+            .finish()
+            .map_err(|e| RipJobError::Crc(e.to_string()))?;
+        let Some(found) = syn.find_offset(db.column(0), MAX_OFFSET) else {
+            tracing::warn!("CTDB のパリティとオフセットが合わないので修復しない");
+            return Ok((None, table));
+        };
+        let Some(our_crc) = table.ctdb_disc(found.offset) else {
+            return Ok((None, table));
+        };
+        let plan = match syn.plan(&db, found.offset, expected_crc, our_crc) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "CTDB のパリティで直せない（能力超え / CRC 不一致）");
+                return Ok((None, table));
             }
-            Ok(())
-        },
-        |d, n| report(RipPhase::Repair, n + d, n * 2),
-    )
-    .map_err(|e| match write_err.take() {
-        Some(io) => RipJobError::from(io),
-        None => e,
-    })?;
-    w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-    let crc = applier
-        .finish()
-        .map_err(|e| RipJobError::Crc(e.to_string()))?;
-    if crc != plan.crc {
-        tracing::warn!("修復後の CRC が計画と違うので使わない");
-        return Ok(None);
-    }
-    Ok(Some(plan.fixes.len() as u64))
+        };
+        // 2 回目の走査: 直しながら書く
+        let mut applier = RepairApplier::new(&plan);
+        let mut w = BufWriter::with_capacity(1 << 20, File::create(&out)?);
+        let mut write_err: Option<std::io::Error> = None;
+        stream_pcm(
+            &pcm,
+            |s| {
+                let mut s = s.to_vec();
+                applier.apply(&mut s);
+                let bytes: Vec<u8> = s.iter().flat_map(|v| v.to_le_bytes()).collect();
+                if let Err(e) = w.write_all(&bytes) {
+                    write_err = Some(e);
+                    return Err("書けない".to_owned());
+                }
+                Ok(())
+            },
+            |d, n| report(RipPhase::Repair, n + d, n * 2),
+            &token,
+        )
+        .map_err(|e| match write_err.take() {
+            Some(io) => RipJobError::from(io),
+            None => e,
+        })?;
+        w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        let crc = applier
+            .finish()
+            .map_err(|e| RipJobError::Crc(e.to_string()))?;
+        if crc != plan.crc {
+            tracing::warn!("修復後の CRC が計画と違うので使わない");
+            return Ok((None, table));
+        }
+        Ok((
+            Some(Repaired {
+                words: plan.fixes.len() as u64,
+                offset: found.offset,
+            }),
+            table,
+        ))
+    })
+    .await
+    .map_err(|e| std::io::Error::other(format!("修復タスクが異常終了: {e}")))?
+}
+
+/// 照合が通ったオフセットをドライブの型番ごとに覚える（D-83。手動指定・型番が分からないときは覚えない）
+async fn learn(
+    env: &RipEnv,
+    model: Option<String>,
+    offset: i32,
+    method: OffsetMethod,
+    confidence: u32,
+) -> Result<(), RipJobError> {
+    let (DriveOffset::Auto, Some(m)) = (env.drive_offset, model) else {
+        return Ok(());
+    };
+    let now = now_epoch();
+    env.db
+        .write(move |c| drive_offsets::set(c, &m, offset, method, confidence, now))
+        .await?;
+    Ok(())
 }
 
 fn tmp_pcm(dir: &Path, what: &str) -> Result<crate::jobs::TempGuard, RipJobError> {
@@ -597,8 +650,11 @@ pub async fn rip_disc(
         (DriveOffset::Samples(n), _) => (n, OffsetSource::Manual),
         (DriveOffset::Auto, Some(m)) => {
             match env.db.read(move |c| drive_offsets::get(c, &m)).await? {
-                Some(l) => (l.offset, OffsetSource::Learned),
-                None => (0, OffsetSource::Unknown),
+                // 探索範囲の外（DB が壊れている）は使わない
+                Some(l) if l.offset.unsigned_abs() <= MAX_OFFSET.unsigned_abs() => {
+                    (l.offset, OffsetSource::Learned)
+                }
+                _ => (0, OffsetSource::Unknown),
             }
         }
         (DriveOffset::Auto, None) => (0, OffsetSource::Unknown),
@@ -624,6 +680,7 @@ pub async fn rip_disc(
     let raw = tmp_pcm(&tmp_dir, "raw")?;
     let aligned = tmp_pcm(&tmp_dir, "aligned")?;
     let repaired = tmp_pcm(&tmp_dir, "repaired")?;
+    let repaired_aligned = tmp_pcm(&tmp_dir, "repaired-aligned")?;
     let disc_no = meta.disc_no;
     let starts: Vec<(u8, u64)> = toc
         .audio_tracks()
@@ -670,24 +727,36 @@ pub async fn rip_disc(
         // 照合（まず吸ったときのオフセットで）
         let (toc_c, ctdb_c, ar_c) = (toc.clone(), ctdb_entries.clone(), ar_entries.clone());
         let p = Arc::clone(&progress);
+        let tok = token.clone();
         let verify = move |pcm: std::path::PathBuf, raw: std::path::PathBuf, shift: i32| {
-            let (toc, ctdb, ar, p) = (toc_c.clone(), ctdb_c.clone(), ar_c.clone(), Arc::clone(&p));
+            let (toc, ctdb, ar, p, tok) = (
+                toc_c.clone(),
+                ctdb_c.clone(),
+                ar_c.clone(),
+                Arc::clone(&p),
+                tok.clone(),
+            );
             async move {
                 tokio::task::spawn_blocking(move || -> Result<Checked, RipJobError> {
                     if shift != 0 {
                         shift_pcm(&raw, &pcm, shift)?;
                     }
                     let src = if shift != 0 { &pcm } else { &raw };
-                    let table = crc_table_of(src, &toc, |d, n| {
-                        p(RipProgress {
-                            phase: RipPhase::Verify,
-                            attempt,
-                            disc_no,
-                            track_no: None,
-                            done: d,
-                            total: n,
-                        })
-                    })?;
+                    let table = crc_table_of(
+                        src,
+                        &toc,
+                        |d, n| {
+                            p(RipProgress {
+                                phase: RipPhase::Verify,
+                                attempt,
+                                disc_no,
+                                track_no: None,
+                                done: d,
+                                total: n,
+                            })
+                        },
+                        &tok,
+                    )?;
                     Ok(check(table, &toc, ctdb.as_deref(), ar.as_deref()))
                 })
                 .await
@@ -698,8 +767,11 @@ pub async fn rip_disc(
             verify(aligned.path().to_path_buf(), raw.path().to_path_buf(), base).await?;
         let (mut offset, mut source) = (base, base_source);
         if let Some((r, method, conf)) = checked.residual() {
-            if r != 0 && (base + r).abs() <= MAX_OFFSET {
-                offset = base + r;
+            if let Some(total) = base
+                .checked_add(r)
+                .filter(|t| r != 0 && t.unsigned_abs() <= MAX_OFFSET.unsigned_abs())
+            {
+                offset = total;
                 checked = verify(
                     aligned.path().to_path_buf(),
                     raw.path().to_path_buf(),
@@ -709,13 +781,8 @@ pub async fn rip_disc(
                 source = OffsetSource::Detected;
             }
             // 照合が通った盤で覚える（D-83。手動指定のときは覚えない）
-            if checked.verified() && matches!(env.drive_offset, DriveOffset::Auto) {
-                if let Some(m) = model.clone() {
-                    let now = now_epoch();
-                    env.db
-                        .write(move |c| drive_offsets::set(c, &m, offset, method, conf, now))
-                        .await?;
-                }
+            if checked.verified() {
+                learn(env, model.clone(), offset, method, conf).await?;
             }
         }
         let current: std::path::PathBuf = if offset != 0 {
@@ -727,45 +794,59 @@ pub async fn rip_disc(
         if checked.verified() || !checked.comparable() {
             break (current, reads, checked, offset, source, None);
         }
-        // CTDB のパリティで直す（D-66）
+        // CTDB のパリティで直す（D-66）。パリティが見つけたずれ（未学習のドライブで、傷のために CRC では
+        // 見つからなかったもの）は、直した PCM に当ててからオフセット 0 で照合し直す
         if let Some(entries) = ctdb_entries.as_deref() {
             let p = Arc::clone(&progress);
-            let report = move |phase: RipPhase, d: u64, n: u64| {
-                p(RipProgress {
-                    phase,
-                    attempt,
-                    disc_no,
-                    track_no: None,
-                    done: d,
-                    total: n,
-                })
-            };
-            if let Some(words) = try_repair(
+            let report: Arc<dyn Fn(RipPhase, u64, u64) + Send + Sync> =
+                Arc::new(move |phase: RipPhase, d: u64, n: u64| {
+                    p(RipProgress {
+                        phase,
+                        attempt,
+                        disc_no,
+                        track_no: None,
+                        done: d,
+                        total: n,
+                    })
+                });
+            let Checked { table, ctdb, ar } = checked;
+            let (repair, table) = try_repair(
                 env,
                 toc,
                 entries,
-                &checked.table,
+                table,
                 &current,
                 repaired.path(),
-                &report,
+                report,
+                token,
             )
-            .await?
-            {
-                let fixed = verify(
-                    repaired.path().to_path_buf(),
-                    repaired.path().to_path_buf(),
-                    0,
-                )
-                .await?;
-                if fixed.verified() {
-                    break (
+            .await?;
+            checked = Checked { table, ctdb, ar };
+            if let Some(rep) = repair {
+                let total = offset
+                    .checked_add(rep.offset)
+                    .filter(|t| t.unsigned_abs() <= MAX_OFFSET.unsigned_abs());
+                if let Some(total) = total {
+                    let fixed = verify(
+                        repaired_aligned.path().to_path_buf(),
                         repaired.path().to_path_buf(),
-                        reads,
-                        fixed,
-                        offset,
-                        source,
-                        Some(words),
-                    );
+                        rep.offset,
+                    )
+                    .await?;
+                    if fixed.verified() {
+                        let path = if rep.offset != 0 {
+                            repaired_aligned.path().to_path_buf()
+                        } else {
+                            repaired.path().to_path_buf()
+                        };
+                        if rep.offset != 0 {
+                            source = OffsetSource::Detected;
+                        }
+                        if let Some((_, method, conf)) = fixed.residual() {
+                            learn(env, model.clone(), total, method, conf).await?;
+                        }
+                        break (path, reads, fixed, total, source, Some(rep.words));
+                    }
                 }
             }
         }
@@ -842,6 +923,6 @@ pub async fn rip_disc(
         done: 1,
         total: 1,
     });
-    drop((raw, aligned, repaired));
+    drop((raw, aligned, repaired, repaired_aligned));
     Ok(placed)
 }

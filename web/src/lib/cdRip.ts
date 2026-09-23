@@ -84,6 +84,19 @@ export function ripStatusLabel(p: RipProgress): string {
   return `${PHASE_LABELS[p.phase]} ${pct}${unit}${again}`.replace(/\s+/g, ' ').trim()
 }
 
+/** 追っている rip ジョブの今の状態から、結果の一行を決める（`running` ならまだ終わっていない） */
+export type RipOutcome = { kind: 'running' } | { kind: 'done'; result: string } | { kind: 'failed'; error: string }
+
+export function ripOutcome(
+  job: { state: string; note?: string | null; last_error: string | null } | undefined,
+): RipOutcome {
+  if (job?.state === 'queued' || job?.state === 'running') return { kind: 'running' }
+  if (job?.state === 'done') return { kind: 'done', result: job.note ?? '取り込んだ（Inbox を見る）' }
+  if (job?.state === 'cancelled') return { kind: 'failed', error: '取り消した' }
+  // failed、または一覧から消えた（古いジョブの掃除）
+  return { kind: 'failed', error: job?.last_error ?? '吸い出しに失敗した（ジョブ一覧を見る）' }
+}
+
 /** `POST /api/cd/rip` の失敗を人向けに */
 export function ripErrorMessage(code: string, message: string): string {
   switch (code) {
