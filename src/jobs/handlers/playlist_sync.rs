@@ -509,7 +509,13 @@ async fn resolve_target(env: &SyncEnv, sub: &Subscription) -> Result<Option<Targ
                     [album_id],
                     |r| r.get(0),
                 )?;
-                return Ok(if active > 0 {
+                // Inbox は CD の album へダウンロードを追記しない（D-67 追記 3）。束ねた後に CD の album に
+                // なった（タグ編集）なら、揃えだけが進んで配置先と食い違うので止める
+                return Ok(if active > 0 && crate::import::inbox::album_is_cd(c, album_id)? {
+                    Err(format!(
+                        "追記先の album #{album_id} が CD の album になっている（CD の album にはダウンロードを追記しない）。購読の追記先を解いて束ね直す"
+                    ))
+                } else if active > 0 {
                     Ok(Some(album_id))
                 } else {
                     Err(format!(

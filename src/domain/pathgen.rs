@@ -440,7 +440,7 @@ pub struct PlanItem {
     pub track_id: i64,
     pub template: Template,
     pub fields: TrackFields,
-    /// リリースの同一性キー（`mb:<id>` / `disc:<id>` / `album:<album_id>` など）。
+    /// リリースの同一性キー（`mb:<id>` / `album:<album_id>` / `inbox:<item_id>` など）。
     /// 同じキー = 同一リリース。同名でもキーが違えば別リリース（D-7）
     pub release: String,
     /// 現在の rel_path

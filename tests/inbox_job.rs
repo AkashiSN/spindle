@@ -1271,6 +1271,68 @@ async fn cd_with_the_same_disc_number_is_not_joined() {
         .exists());
 }
 
+/// 同じ音声が CD でない album にあっても、それを「自分の成果物」とみなして CD の件をそこへ合流させない
+/// （再実行の判定が CD と CD 以外の区別を素通りしない。codex 指摘）
+#[tokio::test]
+async fn same_audio_in_a_non_cd_album_does_not_pull_in_a_cd_item() {
+    let lib = Lib::new();
+    lib.start(true);
+    let a = require_ffmpeg!(place_one(&lib, "AlbumA", 1, "One", 1, 1, None).await);
+    // 同じ音声（seed 1）の CD の件。disc 2 なので番号は重ならない
+    let rel = "Disc2/01.flac";
+    let p = lib.add(rel, 1, "One", "Album", 1).unwrap();
+    set_tags(&p, "flac", &[("MUSICBRAINZ_DISCID", &["disc-2"])]);
+    lib.scan(5000).await;
+    let it = lib.item("Disc2").unwrap();
+    lib.approve(it.id, &draft_disc(&[(rel, 1, "One")], 2, "Album"));
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let b = inbox::get(&lib.conn(), it.id).unwrap().unwrap();
+    assert_eq!(b.state, ItemState::Placed, "{:?}", b.error);
+    assert_ne!(a.placed_album_id, b.placed_album_id);
+}
+
+/// 計画の後・登録の前に追記先が CD でなくなった（タグから DiscID が消えた）ら、CD の件は登録しない
+/// （登録のトランザクションで CD と CD 以外の区別を再検証する。codex 指摘）
+#[tokio::test]
+async fn cd_item_is_not_registered_when_the_album_stops_being_a_cd_after_planning() {
+    let lib = Lib::new();
+    lib.start(true);
+    let a = require_ffmpeg!(place_one(&lib, "Disc1", 1, "One", 1, 1, Some("disc-1")).await);
+    let rel = "Disc2/01.flac";
+    let p = lib.add(rel, 2, "Two", "Album", 1).unwrap();
+    set_tags(&p, "flac", &[("MUSICBRAINZ_DISCID", &["disc-2"])]);
+    lib.scan(5000).await;
+    let it = lib.item("Disc2").unwrap();
+    lib.approve(it.id, &draft_disc(&[(rel, 1, "Two")], 2, "Album"));
+    let db_path = lib.db_path.clone();
+    let album_id = a.placed_album_id.unwrap();
+    let hook: PlaceHook = Arc::new(move || {
+        Connection::open(&db_path)
+            .unwrap()
+            .execute(
+                "DELETE FROM track_tags WHERE key = 'MUSICBRAINZ_DISCID'
+                   AND track_id IN (SELECT id FROM tracks WHERE album_id = ?1)",
+                [album_id],
+            )
+            .unwrap();
+    });
+    let env = lib.env_with(false, Some(hook));
+    let item = inbox::get(&lib.conn(), it.id).unwrap().unwrap();
+    let err = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, spindle::import::inbox::InboxError::Conflict(_)),
+        "{err}"
+    );
+    assert_eq!(
+        lib.count(&format!(
+            "SELECT count(*) FROM tracks WHERE album_id = {album_id} AND missing_since IS NULL"
+        )),
+        1
+    );
+}
+
 /// ARTIST が多値のファイルは、下書きの `keep_artists` が true なら（現在の個数に関係なく）触れず、
 /// false なら `artist` の 1 値で上書きする。`keep_artists` の無い旧下書きは先頭の値のままなら保つ
 /// （プラグインの artists の写像を Library まで運ぶ。SPEC §7.7 / §7.8、D-70、P4-4）

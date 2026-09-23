@@ -1129,7 +1129,9 @@ Inbox/ に配置（ポーリング検出）
   無ければその album を採用**（`album:<id>`）、それも無ければ件ごとの新規。MB キー同士が違えば従来どおり
   降格か衝突。**CD とそれ以外は混ぜない**（D-67 追記 3）: トラックのタグに `MUSICBRAINZ_DISCID` があるものを
   CD とし、CD の件は CD の album にだけ、しかも album にまだ無い `disc_no` のときだけ採用する（MBID の無い
-  複数枚組の 2 枚目が 1 枚目に合流する。同じ番号は同名の別の盤）。CD でない件は CD でない album にだけ採用する。採用する album は `GET /api/inbox` の `destination`（`{ album_id, album, track_count,
+  複数枚組の 2 枚目が 1 枚目に合流する。同じ番号は同名の別の盤）。CD でない件は CD でない album にだけ採用する。
+  同じ判定を再実行の「自分の成果物」と登録のトランザクションでも通し、外れたら `failed`。購読（§7.7）の
+  束ね先が CD の album になっていたら同期は失敗する。採用する album は `GET /api/inbox` の `destination`（`{ album_id, album, track_count,
   max_track_no, album_gain }` | null。下書きの category / albumartist / album と件のファイルから引く。件に
   MUSICBRAINZ_ALBUMID があれば別リリースなので null）で見せる
 - **album gain**（D-74）: 下書きの `album_gain`（既定 false。承認画面のチェックボックス。追記先があればその

@@ -1010,3 +1010,35 @@ async fn dispatcher_enqueues_requested_and_due_subscriptions() {
         .unwrap()
         .unwrap();
 }
+
+/// 束ねてある追記先が CD の album（トラックに MUSICBRAINZ_DISCID がある）なら同期しない。Inbox は CD の
+/// album へダウンロードを追記しない（D-67 追記 3）ので、同期だけがその album を揃えると食い違う
+#[tokio::test]
+async fn bound_album_that_is_a_cd_is_not_synced() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add(1, "aa", Some("a")));
+    lib.scan().await;
+    lib.playlist("PL1", &["a", "b"], Some(2));
+    let sub = lib.subscribe("PL1").await;
+    let c = lib.conn();
+    c.execute(
+        "UPDATE playlist_subscriptions SET album_id = (SELECT id FROM albums) WHERE id = ?1",
+        [sub],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO track_tags (track_id, key, idx, value)
+           SELECT id, 'MUSICBRAINZ_DISCID', 0, 'disc-1' FROM tracks",
+        [],
+    )
+    .unwrap();
+    lib.start();
+    let (job, st) = lib.sync(sub).await;
+    assert_eq!(st, JobState::Failed);
+    assert!(
+        lib.last_error(job).unwrap().contains("CD"),
+        "{:?}",
+        lib.last_error(job)
+    );
+    assert!(lib.ytdl_payloads().is_empty());
+}

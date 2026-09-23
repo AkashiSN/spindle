@@ -1265,6 +1265,86 @@ fn resolve_template(
 /// CD から来たことを示すタグ（D-67 追記 3。値は 1 枚ごとの DiscID）
 const DISCID_KEY: &str = "MUSICBRAINZ_DISCID";
 
+/// album が CD の album か（active なトラックのどれかに `MUSICBRAINZ_DISCID` がある。D-67 追記 3）。
+/// 購読の束ね先の再検証に使う
+pub fn album_is_cd(conn: &rusqlite::Connection, album_id: i64) -> Result<bool, DbError> {
+    Ok(album_rows(conn, album_id, &HashSet::new())?
+        .iter()
+        .any(|r| r.cd))
+}
+
+/// 件が CD から来たか（どれかのファイルに `MUSICBRAINZ_DISCID` がある）
+fn incoming_is_cd(files: &[FileRow]) -> bool {
+    files.iter().any(|f| tag(f, DISCID_KEY).is_some())
+}
+
+/// album の active なトラックの `(disc_no, CD か, 自分の成果物か)`。CD かはトラックのタグに
+/// `MUSICBRAINZ_DISCID` があること、自分の成果物かは `own` の `rel_path_key` にあること（D-67 追記 3）
+fn album_rows(
+    conn: &rusqlite::Connection,
+    album_id: i64,
+    own: &HashSet<String>,
+) -> Result<Vec<AlbumRow>, DbError> {
+    let mut st = conn.prepare_cached(
+        "SELECT t.rel_path_key, t.disc_no,
+                EXISTS (SELECT 1 FROM track_tags g WHERE g.track_id = t.id AND g.key = ?2)
+           FROM tracks t
+          WHERE t.album_id = ?1 AND t.missing_since IS NULL",
+    )?;
+    let rows = st
+        .query_map(rusqlite::params![album_id, DISCID_KEY], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?.unwrap_or(1),
+                r.get::<_, bool>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(key, disc_no, cd)| AlbumRow {
+            disc_no,
+            cd,
+            own: own.contains(&key),
+        })
+        .collect())
+}
+
+/// [`album_rows`] の 1 行
+#[derive(Debug, Clone, Copy)]
+struct AlbumRow {
+    disc_no: i64,
+    cd: bool,
+    own: bool,
+}
+
+/// MB キーの無い album に件を入れてよいか（D-67 追記 3）。空の album には何でも入る。CD とそれ以外は
+/// 混ぜない（**全行で**判定する。同じ音声の行を自分の成果物と見て除くと、他の album の行まで除いてしまう）。
+/// CD 同士はディスク番号が重ならないときだけ（同じ番号は同名の別の盤。自分の成果物の行は除く = 再実行）。
+/// 入れられなければ Err(理由)
+fn fits_plain_album(rows: &[AlbumRow], incoming_cd: bool, discs: &[u32]) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let album_cd = rows.iter().any(|r| r.cd);
+    if incoming_cd != album_cd {
+        return Err(if incoming_cd {
+            "CD の件を CD でない album に入れない".into()
+        } else {
+            "CD でない件を CD の album に入れない".into()
+        });
+    }
+    if incoming_cd {
+        if let Some(d) = discs
+            .iter()
+            .find(|&&d| rows.iter().any(|r| !r.own && r.disc_no == i64::from(d)))
+        {
+            return Err(format!("album に同じディスク番号 {d} の盤が既にある"));
+        }
+    }
+    Ok(())
+}
+
 /// 件のファイルの MUSICBRAINZ_ALBUMID の最頻値（配置のリリースキー `mb:` の元）
 fn incoming_release_id(files: &[FileRow]) -> Option<String> {
     mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID")))
@@ -1334,15 +1414,14 @@ pub fn destination(
     let Some((album_id, album, album_gain)) = found else {
         return Ok(None);
     };
-    let incoming_cd = files.iter().any(|f| tag(f, DISCID_KEY).is_some());
-    let album_cd: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM tracks t
-                          JOIN track_tags g ON g.track_id = t.id AND g.key = ?2
-                         WHERE t.album_id = ?1 AND t.missing_since IS NULL)",
-        rusqlite::params![album_id, DISCID_KEY],
-        |r| r.get(0),
-    )?;
-    if incoming_cd != album_cd {
+    let discs: Vec<u32> = draft.tracks.iter().map(|t| t.disc_no).collect();
+    if fits_plain_album(
+        &album_rows(conn, album_id, &HashSet::new())?,
+        incoming_is_cd(files),
+        &discs,
+    )
+    .is_err()
+    {
         return Ok(None);
     }
     let mut st = conn.prepare_cached(
@@ -1361,15 +1440,6 @@ pub fn destination(
         if let (Ok(d), Ok(t)) = (u32::try_from(disc_no.unwrap_or(1)), u32::try_from(track_no)) {
             numbers.insert((d, t));
         }
-    }
-    // CD の件は、既にあるディスク番号には追記しない（同じ番号は同名の別の盤）
-    if incoming_cd
-        && draft
-            .tracks
-            .iter()
-            .any(|t| numbers.iter().any(|&(d, _)| d == t.disc_no))
-    {
-        return Ok(None);
     }
     Ok(Some(Destination {
         album_id,
@@ -1395,6 +1465,18 @@ fn plan_item(
         album: self_album,
         keys: self_keys,
     } = self_album(conn, sources)?;
+    // 自分の成果物とみなすのは、件がその album に入れられるときだけ（同じ音声が CD でない album に
+    // あっても CD の件をそこへ合流させない。D-67 追記 3）。再実行なら自分の行は除いて見る
+    let self_album = match self_album {
+        Some((id, key)) if key.starts_with("album:") => {
+            let rows = album_rows(conn, id, &self_keys)?;
+            let discs: Vec<u32> = draft.tracks.iter().map(|t| t.disc_no).collect();
+            fits_plain_album(&rows, incoming_is_cd(files), &discs)
+                .is_ok()
+                .then_some((id, key))
+        }
+        other => other,
+    };
     // リリースキー: MUSICBRAINZ_ALBUMID の最頻値があれば mb:、自分の成果物の album があればそれ、
     // 宛先に追記できる album があればそれ（D-70）、無ければ件ごとの新規
     let release = match incoming_release_id(files)
@@ -1697,6 +1779,26 @@ fn register_item(
     if let Err(reason) = check_numbers_free(&tx, album_id, plan, draft)? {
         drop(tx);
         return Ok(Err(InboxError::Conflict(reason)));
+    }
+    // CD と CD 以外を混ぜない（D-67 追記 3）。計画の後にタグ編集や別の配置で album が変わり得るので、
+    // 登録のトランザクションで引き直す。MB キーの album は同じリリースなので対象外
+    let album_mb: Option<String> = tx.query_row(
+        "SELECT mb_release_id FROM albums WHERE id = ?1",
+        [album_id],
+        |r| r.get(0),
+    )?;
+    if album_mb.as_deref().is_none_or(str::is_empty) {
+        let own: HashSet<String> = plan.paths.iter().map(RelPath::key).collect();
+        let list: Vec<FileRow> = files.values().cloned().collect();
+        let discs: Vec<u32> = draft.tracks.iter().map(|t| t.disc_no).collect();
+        if let Err(reason) = fits_plain_album(
+            &album_rows(&tx, album_id, &own)?,
+            incoming_is_cd(&list),
+            &discs,
+        ) {
+            drop(tx);
+            return Ok(Err(InboxError::Conflict(reason)));
+        }
     }
     // CD の吸い出しなら出自は cd_rip（D-67 追記。スキャナの rip.log 判定と同じ値）
     let source_type = if rip.is_some() { "cd_rip" } else { "download" };
