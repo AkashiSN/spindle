@@ -9,16 +9,33 @@
 // 確かめる場所。TOC の貼り付けとリリース URL の指定は編集ではなく照会の入力なので「詳細」に残す
 // （ドライブ無しの環境とデバッグ用）。
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { CdDriveState } from '../hooks/useCdDrive'
 import type { CdLookupState } from '../hooks/useCdLookup'
+import type { CdRipState } from '../hooks/useCdRip'
+import { validateDraft } from '../lib/cd'
 import { driveIdsFor, driveStateLabel } from '../lib/cdDrive'
+import { ripStatusLabel } from '../lib/cdRip'
 import { CdAlbumSummary } from './CdAlbumSummary'
 import { CdCandidates } from './CdCandidates'
 import { CdTrackTable } from './CdTrackTable'
 
-export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }) {
+export function CdView({
+  cd,
+  drive,
+  rip,
+  onOpenInbox,
+}: {
+  cd: CdLookupState
+  drive: CdDriveState
+  rip: CdRipState
+  onOpenInbox: () => void
+}) {
   const { draft } = cd
+  // 画面を開き直したとき、進行中の吸い出しを追い直す
+  const ripJob = drive.status?.rip_job
+  const adopt = rip.adopt
+  useEffect(() => adopt(ripJob), [adopt, ripJob])
   const driveLabel = drive.unavailable ? null : driveStateLabel(drive.status)
   // ドライブから読めた ISRC / MCN は、欄の TOC がその盤のものであるときだけ照会に添える
   // （別の盤の TOC を貼ったときに混ぜない。lib/cdDrive.ts の driveIdsFor）
@@ -27,6 +44,11 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
   const canEject =
     drive.status != null && drive.status.state !== 'no_drive' && drive.status.state !== 'unknown' && !drive.ejecting
   const hasDisc = drive.status?.state === 'disc_ok'
+  // 取り込めるのは、表の TOC がいまドライブに入っている盤のものであるとき（貼り付けた TOC は吸えない）
+  const discToc = hasDisc ? (drive.status?.toc ?? null) : null
+  const ripProblems = draft != null ? validateDraft(draft) : []
+  const canRip =
+    draft != null && discToc != null && discToc === cd.toc && ripProblems.length === 0 && !rip.running && !rip.starting
   return (
     <section className="cd">
       <div className="table-toolbar">
@@ -83,13 +105,39 @@ export function CdView({ cd, drive }: { cd: CdLookupState; drive: CdDriveState }
       {draft != null && (
         <>
           <CdAlbumSummary draft={draft} />
-          <CdTrackTable draft={draft} progress={null} />
+          <CdTrackTable draft={draft} progress={rip.running ? rip.progress : null} />
           <div className="op-row">
-            <button type="button" className="primary" disabled title="吸い出しは P2-5 で実装する">
-              取り込む
+            <button
+              type="button"
+              className="primary"
+              disabled={!canRip}
+              onClick={() => discToc != null && void rip.start(discToc, draft)}
+            >
+              {rip.starting ? '開始中…' : rip.running ? '取り込み中…' : '取り込む'}
             </button>
-            <span className="muted small">吸い出しは P2-5。取り込んだものは Inbox に入る</span>
+            <span className="muted small" aria-live="polite">
+              {rip.running
+                ? rip.progress != null
+                  ? ripStatusLabel(rip.progress)
+                  : '待っている（ほかのジョブの後に始まる）'
+                : discToc == null
+                  ? 'ドライブに盤が入っていると取り込める'
+                  : discToc !== cd.toc
+                    ? '表の TOC がドライブの盤と違う（照会し直す）'
+                    : ripProblems.length > 0
+                      ? ripProblems.join('、')
+                      : '吸い出して照合し、Inbox に置く。名前は Inbox の承認画面で直す'}
+            </span>
           </div>
+          {rip.result != null && (
+            <p className="small">
+              {rip.result}{' '}
+              <button type="button" className="ghost" onClick={onOpenInbox}>
+                Inbox を開く
+              </button>
+            </p>
+          )}
+          {rip.error != null && <p className="error">{rip.error}</p>}
         </>
       )}
 

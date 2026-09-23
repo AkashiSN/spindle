@@ -175,6 +175,8 @@ export type JobEvent = {
   progress: number | null
   done: number | null
   total: number | null
+  /** 種別ごとの進捗の詳細（rip の相とトラック。lib/cdRip.ts の ripProgressFrom で読む）。無いことが多い */
+  detail?: unknown
 }
 export type BatchEvent = {
   id: number

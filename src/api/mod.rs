@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/cd/status", get(cd::status))
         .route("/cd/cover/{release_id}", get(cd::cover))
         .route("/cd/eject", post(cd::eject))
+        .route("/cd/rip", post(cd::rip))
         .route("/search", get(tracks::search))
         .route("/albums", get(albums::list))
         .route(

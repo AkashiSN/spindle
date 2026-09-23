@@ -954,8 +954,10 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 
 - [x] 全ディスクを 1 本の PCM として取得 → オフセット適用 → 分割（`cd::rip::read_disc`: `cd-paranoia -e -r`、
       範囲は TOC から `first-last[mm:ss.ff]`。常にオフセット 0 で読み、`shift_pcm` で当てる。D-83）
-- [ ] `POST /api/cd/rip` と rip ジョブ。CD 画面の「取り込む」を有効にする
-      （rip ジョブは済: `jobs/handlers/rip.rs`、payload `{ toc, metadata }`、dedup `rip`。API と画面は残り）
+- [x] `POST /api/cd/rip` と rip ジョブ。CD 画面の「取り込む」を有効にする
+      （`jobs/handlers/rip.rs`、payload `{ toc, metadata }`、dedup `rip`。API は盤がドライブにあり TOC が一致する
+      ときだけ 202、進行中なら 409 `duplicate`。`GET /api/cd/status` の `rip_job` で開き直しても追う。
+      完了の一行は `jobs.note`（「Inbox に置いた: …」）。画面は `useCdRip`）
 - [x] 2 回の走査に CTDB の修復を配線する（P2-7 の残り。直せなければ再リップ / `mismatch`）
       （`cd::rip::rip_disc`: 照合 → ずれを当てる → CTDB のパリティで修復 → 吸い直し（比べる相手が
       あるときだけ、`retry_on_mismatch` 回）→ それでも駄目なら mismatch のまま Inbox へ）
@@ -974,9 +976,11 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 - [x] **リップの開始は空の名前を許す**（D-67 追記）。`DiscMetadata::validate` から名前の必須を外した
       （`EmptyAlbum` / `EmptyAlbumArtist` / `EmptyTitle` を削除。空のタイトルは `with_placeholder_titles` で
       `Track NN`）。web の `validateDraft` も同じ規則に直した（`POST /api/cd/rip` の前に使う）
-- [ ] 吸い出し中、トラック単位の進捗を SSE の `job` イベントで流す（サーバ側は済: `JobEvent.detail` に
+- [x] 吸い出し中、トラック単位の進捗を SSE の `job` イベントで流す（`JobEvent.detail` に
       `RipProgress { phase: read|verify|repair|encode|place, attempt, disc_no, track_no, done, total }`。
-      read はセクタ、verify / repair はバイト、encode はトラック。画面は残り）
+      read はセクタ、verify / repair はバイト、encode はトラック。表の欄と状態の一行は `lib/cdRip.ts`:
+      読み取りは読み終えた行「読んだ」・読んでいる行「読み取り中」、照合 / 修復は全行、エンコードは終えた行
+      「FLAC 済」・次の行「エンコード中」、配置は全行「Inbox へ」）
       （`{ phase: read|verify|encode|place, disc_no, track_no, done, total }`）。CD 画面のトラック表の
       右端に出る（器は P4-20 の `CdTrackTable` の `RipProgress`）。**相ごとの `track_no` の進み方と、
       表の「完了」の表現はここで確定する**（read は 1 本の PCM なのでトラック単位に分かれない）

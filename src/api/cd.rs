@@ -44,6 +44,8 @@ pub struct StatusResponse {
     pub error: Option<String>,
     /// 最後にドライブを見た時刻（epoch 秒）。まだなら 0
     pub checked_at: i64,
+    /// 進行中（queued / running）の吸い出しジョブ（P2-5。画面を開き直しても進捗を追えるように）
+    pub rip_job: Option<i64>,
 }
 
 fn cd_unavailable() -> Response {
@@ -56,6 +58,7 @@ pub async fn status(State(state): State<AppState>) -> Result<Response, ApiError>
     };
     let s = cd.monitor.snapshot();
     let tracks = s.toc.as_ref().map(toc_tracks).unwrap_or_default();
+    let rip_job = state.db.read(active_rip_job).await?;
     Ok(Json(StatusResponse {
         state: s.state,
         toc: s.toc.as_ref().map(Toc::ctdb_toc),
@@ -64,15 +67,110 @@ pub async fn status(State(state): State<AppState>) -> Result<Response, ApiError>
         mcn: s.ids.mcn,
         error: s.error,
         checked_at: s.checked_at,
+        rip_job,
     })
     .into_response())
 }
 
-/// トレイを開ける。開けた直後にポーラの 1 周回を回して、次の周期を待たずに状態を反映する
+fn active_rip_job(c: &rusqlite::Connection) -> crate::db::Result<Option<i64>> {
+    use rusqlite::OptionalExtension as _;
+    Ok(c.query_row(
+        "SELECT id FROM jobs WHERE type = 'rip' AND state IN ('queued', 'running')
+          ORDER BY id DESC LIMIT 1",
+        [],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RipBody {
+    /// CTDB 形式の TOC（`GET /api/cd/status` の `toc`）。ドライブの盤と同じであること
+    pub toc: String,
+    /// CD 画面の下書き（`lib/cd.ts` の `finalizeDraft`）。名前は空でもよい（D-67 追記）
+    pub metadata: crate::cd::metadata::DiscMetadata,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RipAccepted {
+    pub job_id: i64,
+}
+
+/// 吸い出しを投入する（P2-5）。盤がドライブに入っていて TOC が一致すること。ドライブは 1 台なので
+/// 進行中の吸い出しがあれば 409 `duplicate`
+pub async fn rip(
+    State(state): State<AppState>,
+    body: Result<Json<RipBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Some(cd) = state.cd.as_ref() else {
+        return Ok(cd_unavailable());
+    };
+    let Json(body) = match body {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                e.body_text(),
+            ))
+        }
+    };
+    let toc = match Toc::parse(&body.toc) {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_toc",
+                e.to_string(),
+            ))
+        }
+    };
+    if let Err(e) = body.metadata.validate(&toc) {
+        return Ok(error_response_with_message(
+            StatusCode::BAD_REQUEST,
+            "bad_metadata",
+            e.to_string(),
+        ));
+    }
+    let s = cd.monitor.snapshot();
+    let in_drive = s.toc.as_ref().map(Toc::ctdb_toc);
+    if s.state != DriveState::DiscOk || in_drive.as_deref() != Some(toc.ctdb_toc().as_str()) {
+        return Ok(error_response_with_message(
+            StatusCode::CONFLICT,
+            "disc_mismatch",
+            "ドライブに入っている盤がこの TOC と違う（入れ替えた / 取り出した）".to_owned(),
+        ));
+    }
+    let job = crate::jobs::handlers::rip::new_rip_job(&toc, &body.metadata);
+    Ok(match state.jobs.enqueue(job).await? {
+        crate::jobs::EnqueueResult::Inserted(job_id) => {
+            (StatusCode::ACCEPTED, Json(RipAccepted { job_id })).into_response()
+        }
+        crate::jobs::EnqueueResult::Duplicate(_) => {
+            error_response(StatusCode::CONFLICT, "duplicate")
+        }
+    })
+}
+
+/// トレイを開ける。開けた直後にポーラの 1 周回を回して、次の周期を待たずに状態を反映する。
+/// 吸い出し中（rip ジョブが running）は 409 `ripping`
 pub async fn eject(State(state): State<AppState>) -> Result<Response, ApiError> {
     let Some(cd) = state.cd.clone() else {
         return Ok(cd_unavailable());
     };
+    let ripping: bool = state
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM jobs WHERE type = 'rip' AND state = 'running')",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await?;
+    if ripping {
+        return Ok(error_response(StatusCode::CONFLICT, "ripping"));
+    }
     let result = tokio::task::spawn_blocking(move || {
         cd.monitor.eject_and_poll(cd.drive.as_ref(), now_epoch())
     })

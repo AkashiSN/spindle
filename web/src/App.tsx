@@ -37,6 +37,7 @@ import { useTheme } from './hooks/useTheme'
 import { useCdDrive } from './hooks/useCdDrive'
 import type { DriveStatus } from './lib/cdDrive'
 import { useCdLookup } from './hooks/useCdLookup'
+import { useCdRip } from './hooks/useCdRip'
 import { useInbox } from './hooks/useInbox'
 import { useInboxSummary } from './hooks/useInboxSummary'
 import { useTrackDetails } from './hooks/useTrackDetails'
@@ -138,6 +139,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const settings = useSettings(sseOpen && view === 'settings')
   const theme = useTheme()
   const cd = useCdLookup()
+  const rip = useCdRip()
   // CD 画面を開いている間ドライブを見て、新しいディスクが出たら表を出してから照会を始める
   // （P2-1、P4-20。setDisc が先: 照会を待たずにトラック表を出す）
   const { lookupToc, setDisc } = cd
@@ -246,6 +248,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     },
     onJob: (e) => {
       jobs.refresh()
+      rip.onJob(e)
       youtube.refresh()
       subs.refresh()
       if (e.state === 'done' || e.state === 'failed') scheduleRowRefresh()
@@ -596,7 +599,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         ) : view === 'inbox' ? (
           <InboxView inbox={inbox} onOpenAlbum={(id) => handleScope({ album_id: id })} />
         ) : view === 'cd' ? (
-          <CdView cd={cd} drive={drive} />
+          <CdView cd={cd} drive={drive} rip={rip} onOpenInbox={() => setView('inbox')} />
         ) : view === 'youtube' ? (
           <YoutubeView youtube={youtube} subs={subs} jobs={jobs} onOpenInbox={() => setView('inbox')} />
         ) : view === 'jobs' ? (

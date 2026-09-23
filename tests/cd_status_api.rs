@@ -280,3 +280,162 @@ async fn eject_requires_same_origin_post() {
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
     assert_eq!(fake.ejects.load(Ordering::SeqCst), 0);
 }
+
+// ---------------------------------------------------------------- POST /api/cd/rip（P2-5）
+
+impl App {
+    async fn post_json(&self, uri: &str, c: &str, body: Value) -> (StatusCode, Value) {
+        let r = req(Method::POST, uri)
+            .header(header::COOKIE, c)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = self.router.clone().oneshot(r).await.unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+}
+
+/// 名前の無い盤の下書き（候補ゼロ件でも投入できる。D-67 追記）
+fn nameless(tracks: u8) -> Value {
+    serde_json::json!({
+        "source": "manual",
+        "album": "",
+        "album_artist": "",
+        "disc_no": 1,
+        "disc_count": 1,
+        "tracks": (1..=tracks)
+            .map(|n| serde_json::json!({ "number": n, "title": "" }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[tokio::test]
+async fn rip_enqueues_a_job_for_the_disc_in_the_drive() {
+    let app = App::new(dyn_drive(&drive(DriveState::DiscOk))).await;
+    app.poll(1_700_000_000);
+    let c = app.cookie().await;
+    let (st, body) = app
+        .post_json(
+            "/api/cd/rip",
+            &c,
+            serde_json::json!({ "toc": TOC, "metadata": nameless(2) }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    let job = body["job_id"].as_i64().unwrap();
+    // 進行中の吸い出しは status に出る（画面を開き直しても追える）
+    let (_, status) = app.call(Method::GET, "/api/cd/status", &c).await;
+    assert_eq!(status["rip_job"], job);
+    // ドライブは 1 台。進行中なら 2 本目は受けない
+    let (st, body) = app
+        .post_json(
+            "/api/cd/rip",
+            &c,
+            serde_json::json!({ "toc": TOC, "metadata": nameless(2) }),
+        )
+        .await;
+    assert_eq!(
+        (st, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("duplicate"))
+    );
+}
+
+#[tokio::test]
+async fn rip_rejects_other_disc_bad_metadata_and_missing_drive() {
+    let app = App::new(dyn_drive(&drive(DriveState::DiscOk))).await;
+    app.poll(1_700_000_000);
+    let c = app.cookie().await;
+    // ドライブの盤と違う TOC
+    let (st, body) = app
+        .post_json(
+            "/api/cd/rip",
+            &c,
+            serde_json::json!({ "toc": "0:10000:20000:30000", "metadata": nameless(3) }),
+        )
+        .await;
+    assert_eq!(
+        (st, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("disc_mismatch"))
+    );
+    // トラック数が TOC と合わない
+    let (st, body) = app
+        .post_json(
+            "/api/cd/rip",
+            &c,
+            serde_json::json!({ "toc": TOC, "metadata": nameless(3) }),
+        )
+        .await;
+    assert_eq!(
+        (st, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("bad_metadata"))
+    );
+    let (st, body) = app
+        .post_json(
+            "/api/cd/rip",
+            &c,
+            serde_json::json!({ "toc": "garbage", "metadata": nameless(2) }),
+        )
+        .await;
+    assert_eq!(
+        (st, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("bad_toc"))
+    );
+    // トレイが開いている
+    let d = drive(DriveState::TrayOpen);
+    let app = App::new(dyn_drive(&d)).await;
+    app.poll(1_700_000_000);
+    let c = app.cookie().await;
+    let (st, _) = app
+        .post_json(
+            "/api/cd/rip",
+            &c,
+            serde_json::json!({ "toc": TOC, "metadata": nameless(2) }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    // ドライブが配線されていない
+    let app = App::new(None).await;
+    let c = app.cookie().await;
+    let (st, _) = app
+        .post_json(
+            "/api/cd/rip",
+            &c,
+            serde_json::json!({ "toc": TOC, "metadata": nameless(2) }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn eject_is_refused_while_ripping() {
+    let d = drive(DriveState::DiscOk);
+    let app = App::new(dyn_drive(&d)).await;
+    app.poll(1_700_000_000);
+    let c = app.cookie().await;
+    let (st, body) = app
+        .post_json(
+            "/api/cd/rip",
+            &c,
+            serde_json::json!({ "toc": TOC, "metadata": nameless(2) }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    // queued のうちは取り出せる（まだ読んでいない）。running になったら 409
+    let (st, _) = app.call(Method::POST, "/api/cd/eject", &c).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let db = rusqlite::Connection::open(app.dir.path().join("spindle.db")).unwrap();
+    db.execute("UPDATE jobs SET state = 'running' WHERE type = 'rip'", [])
+        .unwrap();
+    let (st, body) = app.call(Method::POST, "/api/cd/eject", &c).await;
+    assert_eq!(
+        (st, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("ripping"))
+    );
+    assert_eq!(d.ejects.load(Ordering::SeqCst), 1);
+}

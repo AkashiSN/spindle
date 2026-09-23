@@ -1439,7 +1439,8 @@ GET    /api/auth/session
 
 GET    /api/cd/status                             { state: unknown | no_drive | no_disc | tray_open | not_ready | disc_ok,
                                                   toc: CTDB 形式の文字列 | null, isrcs: [音声トラック順。無ければ null],
-                                                  mcn: JAN/UPC | null, error: 直近の失敗 | null, checked_at }
+                                                  mcn: JAN/UPC | null, error: 直近の失敗 | null, checked_at,
+                                                  tracks: [{ number, length_ms }], rip_job: 進行中の rip ジョブ | null }
                                                   （P2-1。ポーラの状態で、ドライブは叩かない。TOC は下の lookup に渡す
                                                   文字列と同じ形。ドライブ未配線なら 503 cd_unavailable）
 POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?, refresh? }。TOC 文字列（CTDB 形式 0:13915:…:leadout か
@@ -1455,10 +1456,14 @@ POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?,
                                                   refresh: true で捨てて引き直す（画面の「MusicBrainz に照会」）。
                                                   400 bad_request（TOC）、502 lookup_failed（届かない・応答が壊れている）、
                                                   503 musicbrainz_unavailable（再試行しても 503 の負荷制限、または未構成）
-POST   /api/cd/rip                                リップ開始
+POST   /api/cd/rip                                { toc, metadata }（P2-5）。metadata は CD 画面の下書き（DiscMetadata。名前は空でもよい）。
+                                                  盤がドライブにあり TOC が一致するときだけ rip ジョブを投入 → 202 { job_id }。
+                                                  400 bad_toc / bad_metadata、409 disc_mismatch（盤が違う・無い）/ duplicate
+                                                  （進行中の吸い出しがある。ドライブは 1 台）、503 cd_unavailable。進捗は SSE の
+                                                  job イベントの detail（RipProgress。§7.2）、結果の一行はジョブの note
 POST   /api/cd/eject                              トレイを開けて状態を見直す → 204。失敗は 500 eject_failed（理由付き）。
                                                   先に CDROM_LOCKDOOR 0 で扉のロックを外す（外さないとドライブが
-                                                  CHECK CONDITION で拒む機種がある）。rip 中の 409 は P2-5
+                                                  CHECK CONDITION で拒む機種がある）。吸い出し中（rip が running）は 409 ripping
 
 GET    /api/jobs, POST /api/jobs/:id/cancel, POST /api/jobs/:id/retry
 DELETE /api/jobs/:id                              終端（failed / done / cancelled）のジョブ行を消す（P4-18。queued / running は 409 not_terminal）

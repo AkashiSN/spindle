@@ -25,6 +25,7 @@ function describe(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.code === 'cd_unavailable') return 'CD ドライブが使えない（配線されていない）'
     if (e.code === 'eject_failed') return `取り出せない: ${e.message}`
+    if (e.code === 'ripping') return '吸い出し中は取り出せない'
     return e.message
   }
   return e instanceof Error ? e.message : String(e)

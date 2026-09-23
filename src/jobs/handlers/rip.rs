@@ -91,7 +91,11 @@ impl RipHandler {
                     reused = placed.reused,
                     "CD を吸い出して Inbox に置いた"
                 );
-                Ok(Outcome::Done)
+                // 結果 1 行を note に残す（CD 画面が「Inbox に置いた」を出す）
+                Ok(Outcome::DoneWith(format!(
+                    "Inbox に置いた: {}",
+                    placed.rel_dir
+                )))
             }
             Err(RipJobError::Cancelled) => Err(JobError::Cancelled),
             // 吸い直しても変わらない失敗（別の盤・入力の不正・置き場所の衝突）は再試行しない

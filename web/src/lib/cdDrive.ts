@@ -18,6 +18,8 @@ export type DriveStatus = {
   mcn: string | null
   error: string | null
   checked_at: number
+  /** 進行中（queued / running）の吸い出しジョブ（P2-5）。画面を開き直しても進捗を追う。旧サーバでは無い */
+  rip_job?: number | null
 }
 
 /** セッション間隙（セクタ）。音声セッションの終端はデータトラック開始 − これ（SPEC §7.2、`cd/toc.rs`） */
