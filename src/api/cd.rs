@@ -46,6 +46,18 @@ pub struct StatusResponse {
     pub checked_at: i64,
     /// 進行中（queued / running）の吸い出しジョブ（P2-5。画面を開き直しても進捗を追えるように）
     pub rip_job: Option<i64>,
+    /// ドライブの型番と、次に吸うときの読み取りオフセット（ディスクが無くても出る。D-83 追記）。
+    /// 型番が読めていなければ null
+    pub drive: Option<DriveInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DriveInfo {
+    pub model: String,
+    /// 次の吸い出しで当てるオフセット（サンプル）
+    pub offset: i32,
+    /// manual / learned / table / unknown（`OffsetSource`）
+    pub offset_source: crate::cd::riplog::OffsetSource,
 }
 
 fn cd_unavailable() -> Response {
@@ -59,6 +71,30 @@ pub async fn status(State(state): State<AppState>) -> Result<Response, ApiError>
     let s = cd.monitor.snapshot();
     let tracks = s.toc.as_ref().map(toc_tracks).unwrap_or_default();
     let rip_job = state.db.read(active_rip_job).await?;
+    let drive = match s.model.clone() {
+        Some(model) => {
+            let key = model.clone();
+            let learned = state
+                .db
+                .read(move |c| crate::db::drive_offsets::get(c, &key))
+                .await?
+                .map(|l| l.offset);
+            // 表は読み込み済みのものだけを見る（status でネットワークを待たない。起動時に読む）
+            let table = state
+                .drive_offsets
+                .as_ref()
+                .and_then(|t| t.peek(&model))
+                .map(|e| e.offset);
+            let (offset, offset_source) =
+                crate::cd::rip::choose_offset(state.config.rip.drive_offset, learned, table);
+            Some(DriveInfo {
+                model,
+                offset,
+                offset_source,
+            })
+        }
+        None => None,
+    };
     Ok(Json(StatusResponse {
         state: s.state,
         toc: s.toc.as_ref().map(Toc::ctdb_toc),
@@ -68,6 +104,7 @@ pub async fn status(State(state): State<AppState>) -> Result<Response, ApiError>
         error: s.error,
         checked_at: s.checked_at,
         rip_job,
+        drive,
     })
     .into_response())
 }

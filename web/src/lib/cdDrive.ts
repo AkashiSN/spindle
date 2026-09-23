@@ -20,6 +20,31 @@ export type DriveStatus = {
   checked_at: number
   /** 進行中（queued / running）の吸い出しジョブ（P2-5）。画面を開き直しても進捗を追う。旧サーバでは無い */
   rip_job?: number | null
+  /** ドライブの型番と次に吸うときの読み取りオフセット（ディスクが無くても出る。D-83 追記）。旧サーバでは無い */
+  drive?: DriveInfo | null
+}
+
+export type OffsetSource = 'manual' | 'learned' | 'table' | 'detected' | 'unknown'
+
+export type DriveInfo = {
+  model: string
+  offset: number
+  offset_source: OffsetSource
+}
+
+const OFFSET_SOURCE_LABELS: Record<OffsetSource, string> = {
+  manual: '設定で指定',
+  learned: '照合で学習済み',
+  table: 'AccurateRip のドライブ表',
+  detected: 'この盤の照合で検出',
+  unknown: '不明。照合が通る盤を吸うと覚える',
+}
+
+/** 「PIONEER BD-RW BDR-209M、読み取りオフセット +667（AccurateRip のドライブ表）」 */
+export function driveInfoLabel(d: DriveInfo): string {
+  const model = d.model.split(/\s+/).join(' ')
+  const sign = d.offset > 0 ? '+' : ''
+  return `${model}、読み取りオフセット ${sign}${d.offset}（${OFFSET_SOURCE_LABELS[d.offset_source]}）`
 }
 
 /** セッション間隙（セクタ）。音声セッションの終端はデータトラック開始 − これ（SPEC §7.2、`cd/toc.rs`） */

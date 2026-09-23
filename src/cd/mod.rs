@@ -10,6 +10,7 @@ pub mod coverart;
 pub mod crctable;
 pub mod ctdb;
 pub mod device;
+pub mod driveoffsets;
 pub mod metadata;
 pub mod musicbrainz;
 pub mod place;

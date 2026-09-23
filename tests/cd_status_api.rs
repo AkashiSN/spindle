@@ -53,6 +53,9 @@ impl Drive for FakeDrive {
         *self.state.lock().unwrap() = DriveState::TrayOpen;
         Ok(())
     }
+    fn model(&self) -> Result<Option<String>, DriveError> {
+        Ok(Some("PIONEER BD-RW   BDR-209M".into()))
+    }
 }
 
 struct App {
@@ -438,4 +441,32 @@ async fn eject_is_refused_while_ripping() {
         (StatusCode::CONFLICT, Some("ripping"))
     );
     assert_eq!(d.ejects.load(Ordering::SeqCst), 1);
+}
+
+/// ディスクが無くても型番と次に当てるオフセットが出る（D-83 追記）。学習済みがあればそれ
+#[tokio::test]
+async fn status_reports_drive_model_and_offset_without_a_disc() {
+    let app = App::new(dyn_drive(&drive(DriveState::NoDisc))).await;
+    app.poll(1_700_000_000);
+    let c = app.cookie().await;
+    let (st, body) = app.call(Method::GET, "/api/cd/status", &c).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "no_disc");
+    assert_eq!(body["drive"]["model"], "PIONEER BD-RW   BDR-209M");
+    // 表も学習も無ければ 0 / unknown
+    assert_eq!(body["drive"]["offset"], 0);
+    assert_eq!(body["drive"]["offset_source"], "unknown");
+    let db = rusqlite::Connection::open(app.dir.path().join("spindle.db")).unwrap();
+    spindle::db::drive_offsets::set(
+        &db,
+        "PIONEER BD-RW   BDR-209M",
+        667,
+        spindle::db::drive_offsets::OffsetMethod::Ctdb,
+        3,
+        1,
+    )
+    .unwrap();
+    let (_, body) = app.call(Method::GET, "/api/cd/status", &c).await;
+    assert_eq!(body["drive"]["offset"], 667);
+    assert_eq!(body["drive"]["offset_source"], "learned");
 }

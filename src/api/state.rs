@@ -48,6 +48,8 @@ pub struct AppState {
     pub musicbrainz: Option<Arc<crate::cd::musicbrainz::MusicBrainzClient>>,
     /// 候補のジャケット（D-82、P4-20）。無いと `/api/cd/cover/:id` は 503
     pub coverart: Option<Arc<crate::cd::coverart::CoverArtClient>>,
+    /// AccurateRip のドライブ表（CD 画面がディスクを入れる前からオフセットを出す。D-83 追記）
+    pub drive_offsets: Option<Arc<crate::cd::driveoffsets::DriveOffsetTable>>,
     /// CD ドライブ（P2-1）。ポーラが `DriveMonitor` を更新し、`/api/cd/status` が読む。
     /// eject はドライブを直接叩く。無いと `/api/cd/status` / `eject` は 503
     pub cd: Option<CdDrive>,
@@ -82,6 +84,7 @@ impl AppState {
             transcode_grace: super::stream::TRANSCODE_GRACE,
             musicbrainz: None,
             coverart: None,
+            drive_offsets: None,
             cd: None,
         }
     }
@@ -100,6 +103,14 @@ impl AppState {
         client: Arc<crate::cd::musicbrainz::MusicBrainzClient>,
     ) -> Self {
         self.musicbrainz = Some(client);
+        self
+    }
+
+    pub fn with_drive_offsets(
+        mut self,
+        table: Arc<crate::cd::driveoffsets::DriveOffsetTable>,
+    ) -> Self {
+        self.drive_offsets = Some(table);
         self
     }
 

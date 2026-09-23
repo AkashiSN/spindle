@@ -482,6 +482,8 @@ pub struct DriveStatus {
     pub error: Option<String>,
     /// 最後にドライブを見た時刻（epoch 秒）。まだなら 0
     pub checked_at: i64,
+    /// ドライブの型番（INQUIRY。ディスクが無くても読める。開けている間に 1 回読んで使い回す）
+    pub model: Option<String>,
 }
 
 impl Default for DriveStatus {
@@ -492,6 +494,7 @@ impl Default for DriveStatus {
             ids: DiscIds::default(),
             error: None,
             checked_at: 0,
+            model: None,
         }
     }
 }
@@ -530,13 +533,24 @@ impl DriveMonitor {
     fn poll_locked(&self, drive: &dyn Drive, now: i64) {
         let prev = self.snapshot();
         let had_toc = prev.toc.is_some();
-        let next = match drive.status() {
+        let status = drive.status();
+        // 型番はデバイスを開けている間に 1 回だけ読む（読めなければ次の周回で読み直す）。開けなければ捨てる
+        let model = match (&status, prev.model.clone()) {
+            (Err(_), _) => None,
+            (Ok(_), Some(m)) => Some(m),
+            (Ok(_), None) => drive.model().unwrap_or_else(|e| {
+                tracing::debug!(error = %e, "ドライブの型番を読めない");
+                None
+            }),
+        };
+        let next = match status {
             Err(e) => DriveStatus {
                 state: DriveState::NoDrive,
                 toc: None,
                 ids: DiscIds::default(),
                 error: Some(e.to_string()),
                 checked_at: now,
+                model,
             },
             Ok(DriveState::DiscOk) => {
                 // TOC は 1 回読めたら抜かれるまで使い回す。ISRC / MCN も同じ回に読む（補助なので
@@ -560,6 +574,7 @@ impl DriveMonitor {
                     ids,
                     error,
                     checked_at: now,
+                    model,
                 }
             }
             Ok(state) => DriveStatus {
@@ -568,6 +583,7 @@ impl DriveMonitor {
                 ids: DiscIds::default(),
                 error: None,
                 checked_at: now,
+                model,
             },
         };
         if next.state != prev.state || next.toc.is_some() != had_toc {

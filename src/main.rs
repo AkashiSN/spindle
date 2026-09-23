@@ -342,6 +342,28 @@ async fn main() -> anyhow::Result<()> {
         cd_device::POLL_INTERVAL,
         shutdown.clone(),
     );
+    // AccurateRip のドライブ表（D-83 追記）。data/cd/ に保存して使い回す。起動時に読み込んでおき、
+    // CD 画面がディスクを入れる前からオフセットを出せるようにする（取れなくても起動は止めない）
+    let drive_offsets = Arc::new(
+        spindle::cd::driveoffsets::DriveOffsetTable::new(
+            &state.config.verify.accuraterip_url,
+            &state.config.musicbrainz.user_agent,
+            state
+                .config
+                .paths
+                .data
+                .join("cd")
+                .join(spindle::cd::driveoffsets::TABLE_NAME),
+        )
+        .context("AccurateRip のドライブ表の初期化に失敗")?,
+    );
+    {
+        let table = Arc::clone(&drive_offsets);
+        tokio::spawn(async move {
+            table.entries().await;
+        });
+    }
+    state = state.with_drive_offsets(Arc::clone(&drive_offsets));
     // 吸い出し（P2-5、D-67 追記 / D-83）。Inbox に置くところまで。照会先は遡及照合と同じ
     registry.register(
         JobType::Rip,
@@ -362,6 +384,7 @@ async fn main() -> anyhow::Result<()> {
                         &state.config.musicbrainz.user_agent,
                     )
                     .context("AccurateRip クライアントの初期化に失敗")?,
+                    drives: Arc::clone(&drive_offsets),
                 }),
                 drive: cd_drive,
                 db: Arc::clone(&state.db),

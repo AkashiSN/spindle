@@ -210,6 +210,7 @@ use super::accuraterip::ArDiscEntry;
 use super::crctable::{CrcSampler, CrcTable};
 use super::ctdb::CtdbEntry;
 use super::device::{Drive, DriveError};
+use super::driveoffsets::DriveEntry;
 use super::metadata::{DiscMetadata, MetadataError};
 use super::place::{place_disc, PlaceEnv, PlaceError, PlaceInput, Placed};
 use super::repair::{DbSyndromes, RepairApplier, SyndromeSampler, MAX_NPAR};
@@ -269,12 +270,15 @@ pub trait RipLookup: Send + Sync {
         entry: &'a CtdbEntry,
         npar: usize,
     ) -> BoxFuture<'a, Result<DbSyndromes, LookupError>>;
+    /// AccurateRip のドライブ表の型番の項（表が取れなければ None。D-83 追記）
+    fn table_offset<'a>(&'a self, model: &'a str) -> BoxFuture<'a, Option<DriveEntry>>;
 }
 
 /// 本番の照会
 pub struct HttpLookup {
     pub ctdb: super::ctdb::CtdbClient,
     pub accuraterip: super::accuraterip::AccurateRipClient,
+    pub drives: Arc<super::driveoffsets::DriveOffsetTable>,
 }
 
 impl RipLookup for HttpLookup {
@@ -293,6 +297,9 @@ impl RipLookup for HttpLookup {
         npar: usize,
     ) -> BoxFuture<'a, Result<DbSyndromes, LookupError>> {
         Box::pin(self.ctdb.fetch_syndromes(entry, npar))
+    }
+    fn table_offset<'a>(&'a self, model: &'a str) -> BoxFuture<'a, Option<DriveEntry>> {
+        Box::pin(self.drives.lookup(model))
     }
 }
 
@@ -607,6 +614,26 @@ async fn try_repair(
     .map_err(|e| std::io::Error::other(format!("修復タスクが異常終了: {e}")))?
 }
 
+/// 吸うときのオフセットと出所（D-83）: 設定の整数 → 学習済み → AccurateRip のドライブ表 → 0。
+/// 探索範囲（±2939）の外の値（壊れた DB・表）は使わない
+pub fn choose_offset(
+    config: DriveOffset,
+    learned: Option<i32>,
+    table: Option<i32>,
+) -> (i32, OffsetSource) {
+    let ok = |v: &i32| v.unsigned_abs() <= MAX_OFFSET.unsigned_abs();
+    if let DriveOffset::Samples(n) = config {
+        return (n, OffsetSource::Manual);
+    }
+    if let Some(v) = learned.filter(ok) {
+        return (v, OffsetSource::Learned);
+    }
+    if let Some(v) = table.filter(ok) {
+        return (v, OffsetSource::Table);
+    }
+    (0, OffsetSource::Unknown)
+}
+
 /// 照合が通ったオフセットをドライブの型番ごとに覚える（D-83。手動指定・型番が分からないときは覚えない）
 async fn learn(
     env: &RipEnv,
@@ -663,20 +690,21 @@ pub async fn rip_disc(
             actual,
         });
     }
-    // 吸うときのオフセット（D-83）
-    let (base, base_source) = match (env.drive_offset, model.clone()) {
-        (DriveOffset::Samples(n), _) => (n, OffsetSource::Manual),
+    // 吸うときのオフセット（D-83）: 手動 → 学習済み → AccurateRip のドライブ表 → 0
+    let (learned, table) = match (env.drive_offset, model.clone()) {
         (DriveOffset::Auto, Some(m)) => {
-            match env.db.read(move |c| drive_offsets::get(c, &m)).await? {
-                // 探索範囲の外（DB が壊れている）は使わない
-                Some(l) if l.offset.unsigned_abs() <= MAX_OFFSET.unsigned_abs() => {
-                    (l.offset, OffsetSource::Learned)
-                }
-                _ => (0, OffsetSource::Unknown),
-            }
+            let key = m.clone();
+            let learned = env.db.read(move |c| drive_offsets::get(c, &key)).await?;
+            let table = if learned.is_none() {
+                env.lookup.table_offset(&m).await
+            } else {
+                None
+            };
+            (learned.map(|l| l.offset), table.map(|t| t.offset))
         }
-        (DriveOffset::Auto, None) => (0, OffsetSource::Unknown),
+        _ => (None, None),
     };
+    let (base, base_source) = choose_offset(env.drive_offset, learned, table);
     // 照会（失敗しても吸い出しは続け、その手法は「照会しなかった」にする）
     let ctdb_entries = match env.lookup.ctdb(toc).await {
         Ok(e) => Some(e),

@@ -14,7 +14,7 @@ import type { CdDriveState } from '../hooks/useCdDrive'
 import type { CdLookupState } from '../hooks/useCdLookup'
 import type { CdRipState } from '../hooks/useCdRip'
 import { validateDraft } from '../lib/cd'
-import { driveIdsFor, driveStateLabel } from '../lib/cdDrive'
+import { driveIdsFor, driveInfoLabel, driveStateLabel } from '../lib/cdDrive'
 import { ripStatusLabel } from '../lib/cdRip'
 import { CdAlbumSummary } from './CdAlbumSummary'
 import { CdCandidates } from './CdCandidates'
@@ -81,6 +81,9 @@ export function CdView({
           </>
         )}
       </div>
+      {!drive.unavailable && drive.status?.drive != null && (
+        <p className="muted small">ドライブ: {driveInfoLabel(drive.status.drive)}</p>
+      )}
       {!drive.unavailable && !hasDisc && (
         <p className="muted small">CD を入れると自動で読み取り、MusicBrainz に照会する</p>
       )}

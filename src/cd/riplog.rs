@@ -34,6 +34,8 @@ pub enum OffsetSource {
     Manual,
     /// 前に照合が通った盤で覚えた値（`drive_offsets`）
     Learned,
+    /// AccurateRip のドライブ別オフセット表（`DriveOffsets.bin`。型番から。D-83 追記）
+    Table,
     /// この盤の照合で見つけた値（PCM に当ててから配置した）
     Detected,
     /// 分からない（0 のまま。照合の候補が無い盤）
@@ -45,6 +47,7 @@ impl OffsetSource {
         match self {
             OffsetSource::Manual => "手動",
             OffsetSource::Learned => "学習済み",
+            OffsetSource::Table => "AccurateRip のドライブ表",
             OffsetSource::Detected => "この盤の照合で検出",
             OffsetSource::Unknown => "不明",
         }

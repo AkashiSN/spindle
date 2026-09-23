@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { audioTocSummary, driveIdsFor, driveStateLabel, newDiscToc, type DriveStatus } from './cdDrive'
+import { audioTocSummary, driveIdsFor, driveInfoLabel, driveStateLabel, newDiscToc, type DriveStatus } from './cdDrive'
 
 function st(state: DriveStatus['state'], toc: string | null = null, error: string | null = null): DriveStatus {
   return { state, toc, tracks: [], isrcs: [], mcn: null, error, checked_at: 1_700_000_000 }
@@ -85,5 +85,17 @@ describe('newDiscToc', () => {
     expect(newDiscToc('0:20144:40290', st('no_disc'))).toBe(null)
     expect(newDiscToc(null, st('disc_ok', null))).toBe(null)
     expect(newDiscToc(null, null)).toBe(null)
+  })
+})
+
+describe('driveInfoLabel', () => {
+  it('型番の空白を詰め、オフセットの符号と出所を添える', () => {
+    expect(driveInfoLabel({ model: 'PIONEER BD-RW   BDR-209M', offset: 667, offset_source: 'table' })).toBe(
+      'PIONEER BD-RW BDR-209M、読み取りオフセット +667（AccurateRip のドライブ表）',
+    )
+    expect(driveInfoLabel({ model: 'X', offset: -30, offset_source: 'learned' })).toBe(
+      'X、読み取りオフセット -30（照合で学習済み）',
+    )
+    expect(driveInfoLabel({ model: 'X', offset: 0, offset_source: 'unknown' })).toContain('0（不明')
   })
 })

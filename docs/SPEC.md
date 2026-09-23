@@ -505,7 +505,8 @@ Phase 4  commit:     1 トランザクションで
    ↓              **Inbox の承認画面の**一級の入力経路とする（D-67 追記。CD 画面からは外した）。
    ↓              行は TOC の音声トラックと 1:1 で、番号と長さは TOC から
    ↓
-[オフセット決定] INQUIRY でドライブ型番取得 → 学習済みの値（drive_offsets）、無ければ 0（D-83）
+[オフセット決定] INQUIRY でドライブ型番取得 → 学習済みの値（drive_offsets）→ AccurateRip の
+   ↓            ドライブ表（DriveOffsets.bin を実行時に取得・保存）→ 0（D-83 / 追記 2）
    ↓            `[rip].drive_offset` の整数で上書き可。照合で見つかったずれは PCM に当てて学習する
 [吸い出し]      cd-paranoia -e -r -d <dev> -- <first>-<last>[mm:ss.ff] で音声トラック全体を 1 本の PCM に
    ↓            （オフセット 0 で読み、範囲は TOC の長さで明示。`cd::rip::read_disc`。D-83）
@@ -1440,7 +1441,9 @@ GET    /api/auth/session
 GET    /api/cd/status                             { state: unknown | no_drive | no_disc | tray_open | not_ready | disc_ok,
                                                   toc: CTDB 形式の文字列 | null, isrcs: [音声トラック順。無ければ null],
                                                   mcn: JAN/UPC | null, error: 直近の失敗 | null, checked_at,
-                                                  tracks: [{ number, length_ms }], rip_job: 進行中の rip ジョブ | null }
+                                                  tracks: [{ number, length_ms }], rip_job: 進行中の rip ジョブ | null,
+                                                  drive: { model, offset, offset_source: manual | learned | table | unknown } | null
+                                                  （型番はディスクが無くても読む。D-83 追記 2）}
                                                   （P2-1。ポーラの状態で、ドライブは叩かない。TOC は下の lookup に渡す
                                                   文字列と同じ形。ドライブ未配線なら 503 cd_unavailable）
 POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?, refresh? }。TOC 文字列（CTDB 形式 0:13915:…:leadout か

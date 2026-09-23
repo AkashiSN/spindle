@@ -170,6 +170,8 @@ struct FakeLookup {
     syndromes: Option<DbSyndromes>,
     /// パリティを渡すときに取り消す（修復の途中で取り消された状況）
     cancel_on_syndromes: Option<CancellationToken>,
+    /// AccurateRip のドライブ表の値（無ければ表なし）
+    table: Option<i32>,
 }
 
 impl RipLookup for FakeLookup {
@@ -192,6 +194,19 @@ impl RipLookup for FakeLookup {
                 t.cancel();
             }
             self.syndromes.clone().ok_or(LookupError::NoParity)
+        })
+    }
+    fn table_offset<'a>(
+        &'a self,
+        model: &'a str,
+    ) -> BoxFuture<'a, Option<spindle::cd::driveoffsets::DriveEntry>> {
+        Box::pin(async move {
+            self.table
+                .map(|offset| spindle::cd::driveoffsets::DriveEntry {
+                    name: model.to_owned(),
+                    offset,
+                    submissions: 1,
+                })
         })
     }
 }
@@ -345,6 +360,7 @@ async fn unknown_offset_is_detected_applied_and_learned() {
             ar: Some(Vec::new()),
             syndromes: None,
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Auto,
     );
@@ -404,6 +420,7 @@ async fn learned_offset_is_used() {
             ar: Some(Vec::new()),
             syndromes: None,
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Auto,
     );
@@ -429,6 +446,7 @@ async fn manual_offset_is_applied_and_not_learned() {
             ar: Some(Vec::new()),
             syndromes: None,
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Samples(667),
     );
@@ -455,6 +473,7 @@ async fn scratched_sector_is_repaired_with_ctdb_parity() {
             ar: Some(Vec::new()),
             syndromes: Some(db_syndromes(&t)),
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Samples(0),
     );
@@ -483,6 +502,7 @@ async fn unrepairable_read_is_ripped_again() {
             ar: Some(Vec::new()),
             syndromes: None, // パリティを取れない
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Samples(0),
     );
@@ -518,6 +538,7 @@ async fn persistent_mismatch_is_placed_after_all_attempts() {
             ar: Some(Vec::new()),
             syndromes: None,
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Samples(0),
     );
@@ -547,6 +568,7 @@ async fn lookup_failure_still_places_without_verification() {
             ar: None,
             syndromes: None,
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Auto,
     );
@@ -569,6 +591,7 @@ async fn different_disc_in_the_drive_is_rejected() {
             ar: Some(Vec::new()),
             syndromes: None,
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Auto,
     );
@@ -601,6 +624,7 @@ async fn parity_repair_finds_and_applies_the_offset_and_learns_it() {
             ar: Some(Vec::new()),
             syndromes: Some(db_syndromes(&t)),
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Auto,
     );
@@ -634,6 +658,7 @@ async fn cancel_during_repair_stops() {
             ar: Some(Vec::new()),
             syndromes: Some(db_syndromes(&t)),
             cancel_on_syndromes: Some(token.clone()),
+            table: None,
         },
         DriveOffset::Samples(0),
     );
@@ -677,6 +702,7 @@ async fn full_match_wins_over_partial_match_at_another_offset() {
             ar: Some(vec![ar]),
             syndromes: None,
             cancel_on_syndromes: None,
+            table: None,
         },
         DriveOffset::Auto,
     );
@@ -699,4 +725,32 @@ async fn full_match_wins_over_partial_match_at_another_offset() {
         (learned.offset, learned.method.as_str()),
         (667, "accuraterip")
     );
+}
+
+/// 学習前でも AccurateRip のドライブ表の値で吸い、照合が通れば覚える（D-83 追記）
+#[tokio::test]
+async fn table_offset_is_used_before_learning() {
+    require_flac!();
+    let lib = Lib::new();
+    let t = truth();
+    let env = lib.env(
+        vec![bytes(&delayed(&t, 667))],
+        FakeLookup {
+            ctdb: Some(vec![ctdb_entry(&t)]),
+            ar: Some(Vec::new()),
+            syndromes: None,
+            cancel_on_syndromes: None,
+            table: Some(667),
+        },
+        DriveOffset::Auto,
+    );
+    let placed = run(&env).await.0.unwrap();
+    let rip = lib.sidecar(&placed.rel_dir).rip.unwrap();
+    assert_eq!(
+        (rip.report.read_offset, rip.report.offset_source),
+        (667, OffsetSource::Table)
+    );
+    let ctdb = rip.report.ctdb.unwrap();
+    assert_eq!((ctdb.outcome, ctdb.offset), (Outcome::Verified, 0));
+    assert_eq!(lib.learned(), Some(667));
 }
