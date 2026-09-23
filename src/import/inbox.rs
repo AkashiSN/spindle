@@ -490,7 +490,7 @@ pub struct SameTitle {
 }
 
 /// 件の提案（D-68 / D-70）: タグからの下書き → サイドカーの category（語彙にあるとき）→ `pending` で
-/// 保存した下書きがあれば merge → 追記先の album を引き → TRACKNUMBER の無いトラックを採番。
+/// 保存した下書きがあれば merge → 追記先の album を引き（配置済みの件は引かない）→ TRACKNUMBER の無いトラックを採番。
 /// サイドカーが壊れていれば無いものとして扱い、警告に載せる
 pub fn propose(
     conn: &rusqlite::Connection,
@@ -538,7 +538,13 @@ pub fn propose(
             draft = merge_saved(&saved, &draft);
         }
     }
-    let destination = destination(conn, layout, &draft, files)?;
+    // 配置済みの件は追記先を引かない。引くと自分が置いた album に当たり、自分のトラックを同名と数え、
+    // 「既存の album に追加」と見せてしまう（行く先は placed_album_id が示す）
+    let destination = if item.state == ItemState::Placed {
+        None
+    } else {
+        destination(conn, layout, &draft, files)?
+    };
     let start = destination
         .as_ref()
         .and_then(|d| u32::try_from(d.max_track_no).ok())

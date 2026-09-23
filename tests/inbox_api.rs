@@ -1001,6 +1001,72 @@ async fn list_warns_when_the_destination_album_already_has_the_same_title() {
     );
 }
 
+/// 配置済みの件は宛先も同名の警告も出さない。追記先は自分が置いた album になり、自分のトラックを
+/// 「Library に同名」と数え、「既存の『…』に追加」と出してしまうため
+#[tokio::test]
+async fn placed_item_has_no_destination_nor_same_title_warning() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    seed_album(&app).await;
+    app.db
+        .write(|c| {
+            c.execute(
+                "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec,
+                                     lossless, title, artist_display, album, albumartist, seen_at,
+                                     album_id, disc_no, track_no, duration_ms)
+                 VALUES (3, '_Unsorted/Artist/Album/13 New.flac', '_unsorted/artist/album/13 new.flac',
+                         0, 0, 0, 'flac', 1, 'New', 'a', 'Album', 'Artist', 0, 7, 1, 13, 61000)",
+                [],
+            )?;
+            c.execute(
+                "INSERT INTO track_tags (track_id, key, idx, value) VALUES (3, 'TITLE', 0, 'New')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let id = youtube_item(&app, "youtube/Artist/Album", None, "ok").await;
+    let item = |body: &serde_json::Value| {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = item(&body);
+    assert!(!it["destination"].is_null(), "{it}");
+    assert_eq!(
+        it["tracks"][0]["same_title"].as_array().map(Vec::len),
+        Some(1),
+        "{it}"
+    );
+
+    app.db
+        .write(move |c| {
+            c.execute(
+                "UPDATE inbox_items SET state = 'placed', placed_album_id = 7, placed_at = ?2
+                  WHERE id = ?1",
+                rusqlite::params![id, spindle::db::now_epoch()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let it = item(&body);
+    assert_eq!(it["state"], "placed", "{it}");
+    assert!(it["destination"].is_null(), "{it}");
+    assert_eq!(
+        it["tracks"][0]["same_title"].as_array().map(Vec::len),
+        Some(0),
+        "{it}"
+    );
+}
+
 /// 追記先の album が無ければ（新しいアルバム）警告は出ない
 #[tokio::test]
 async fn list_has_no_same_title_warning_without_a_destination_album() {
