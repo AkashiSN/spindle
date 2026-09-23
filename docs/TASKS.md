@@ -934,21 +934,44 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 
 ### P2-5 吸い出し
 
-**P2 の最後の山。これが入ると CD 取り込みが通しで動く。** 2026-09-23 時点で未着手。
+**実装済み（2026-09-23）。残りは実機での照合成功の確認だけ**（下の「引き継ぎ」）。CD 取り込みは
+CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library まで通しで動く。
 
-#### いまの状態（着手前に読む）
+#### いまの状態（引き継ぎ。別セッションはここから読む）
 
-- **CD 画面（P4-20）は完成していて、`DiscDraft` を作るところまで動く。** ドライブ検出 → 照会
-  （3 段の打ち切り。D-64 追記 4）→ 候補選択 → 読み取り専用の表、まで実機で確認済み。
-  画面の「取り込む」ボタンは **`disabled` のまま置いてある**（`web/src/components/CdView.tsx`）。
-  ここを有効にして `POST /api/cd/rip` を叩くのが入口
-- **`src/cd/place.rs` の `place_disc` はどこからも呼ばれていない**（P2-8 で作ってテストだけ通している）。
-  D-67 追記で宛先が Library → Inbox に変わったので、**このタスクで作り直す**
-- 使える部品はそろっている: CRC（P2-6 `src/cd/`）、CTDB の修復（P2-7 `src/cd/repair.rs`）、
-  照会（P2-9 `CtdbClient` / `AccurateRipClient`）、ドライブ（P2-1 `src/cd/device.rs`）、
-  TOC と各種 ID（P2-2 `src/cd/toc.rs`）
-- 進捗の器も用意済み: `web/src/components/CdTrackTable.tsx` の `RipProgress`（`progress` が `null` なら
-  列ごと出ないので、値を流せばそのまま出る）
+- **コード**: `src/cd/rip.rs`（`read_disc` / `rip_disc` / `choose_offset` / `shift_pcm`）、
+  `src/cd/place.rs`（Inbox の隠しディレクトリで組み立てて公開）、`src/cd/driveoffsets.rs`（AccurateRip の
+  ドライブ表）、`src/jobs/handlers/rip.rs`、`src/api/cd.rs`（`POST /api/cd/rip`、status の `rip_job` /
+  `drive`）、`src/import/sidecar.rs`（`RipEntry`）、`src/import/inbox.rs`（`bind_rip` と検証記録の登録）、
+  web は `hooks/useCdRip.ts` / `lib/cdRip.ts` / `components/CdView.tsx`
+- **判断**: DECISIONS の D-67 追記 2（Inbox 側・サイドカー・DiscID を入れない）、D-83 と追記・追記 2
+  （オフセットは 設定 → 学習済み → AccurateRip のドライブ表 → 0。照合で見つけたずれを当てて学習）
+- **レビュー**: codex レビュー済み（すべて LGTM）。コミットは `5df2dc5`〜`ad70ad3`（main、未 push）
+- **テスト**: `cargo test` 1339 件、web 301 件。実ドライブのテストは `#[ignore]`
+  （`sudo -u ubuntu -g cdrom target/debug/deps/<test>-* --ignored --exact <名前> --nocapture`。
+  **`--exact` を付ける**。付けないと `real_drive_eject_opens_tray` まで走る）
+- **実機で確認済み**（BDR-209M、2 トラックの盤 `0:20144:40290`）: 名前の無い盤を `POST /api/cd/rip` から
+  Inbox まで通した（読み取り 2 回 → 修復は直せず → mismatch のまま `CD/[<DiscID>]` に pending、album gain
+  on、SSE の `detail` が read / verify / repair / encode / place の順）。INQUIRY の型番は
+  `PIONEER BD-RW   BDR-209M`、AccurateRip のドライブ表で **+667**（status が `offset_source: table`）
+- **その盤は CTDB（信頼度 30、同じ TOC）とどのオフセットでも一致せず、2 回の吸い出しで中身が違った**
+  （傷か読みの不安定）。**照合が通るところは実機でまだ見ていない**
+
+#### 引き継ぎ: 残り
+
+- [ ] **実機での照合成功の確認**（ユーザに CTDB / AccurateRip に載っている傷の無い盤を入れてもらう）。
+      期待: 表の +667 で吸い（`offset_source: table`）、照合が 1 回で通り（`verified_ctdb` か
+      `verified_ar`、試行 1）、`drive_offsets` に 667 を学習し、次の盤から `learned` になる。
+      手順: ローカルでサーバを立てる（`SPINDLE_CONFIG` に scratchpad の config、`sudo -u ubuntu -g cdrom` で
+      起動、ポートは空いているもの）→ ログイン → `POST /api/cd/rip { toc, metadata }`（名前は空でよい）→
+      `GET /api/jobs?type=rip` の note と Inbox のサイドカー（`spindle-inbox.json` の `rip.report`）を見る。
+      rip.log の「読み取りオフセット」と照合欄も確認。終わったら**自分で起動したプロセスだけ**止める
+      （`pkill -f` はシェル自身に当たるので使わない。PID を控える）
+- [ ] 通しで確認したら、Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
+      `album_verifications`（`source = rip`、`log_path`）/ `tracks.verification` を見る
+- 続きの候補: P2-10 の「トラックリスト貼り付けを承認画面へ移す」（これで P2 が全部埋まる）
+- 残課題（判断待ち）: 「着手前に確認が必要な残課題」の DiscID の食い違い（Inbox 経由の CD の album は
+  `discid` が NULL、DB 再構築後はタグから復元される）
 
 #### やること
 
