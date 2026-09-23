@@ -1125,22 +1125,24 @@ fn read_sources(
     Ok(out)
 }
 
-/// 自分の成果物（同じ音声の active な行。再実行で見分ける）
-#[derive(Debug, Default)]
-struct SelfRows {
-    /// 行が属する album とそのリリースキー（最初に見つかったもの）
-    album: Option<(i64, String)>,
-    /// 行の rel_path_key
+/// 自分の成果物の候補: 同じ音声の active な行がある album ごとの、そのリリースキーと行の `rel_path_key`
+/// （再実行で見分ける。どれが本当に自分のものかは [`pick_self_album`] が決める）
+#[derive(Debug)]
+struct SelfCandidate {
+    album_id: i64,
+    release: String,
     keys: HashSet<String>,
 }
 
-/// 同じ音声（フィンガープリント一致）の active な行と、その album
-fn self_album(conn: &rusqlite::Connection, sources: &[Source]) -> Result<SelfRows, InboxError> {
-    let mut keys = HashSet::new();
-    let mut album: Option<(i64, String)> = None;
+/// 同じ音声（フィンガープリント一致）の active な行を album ごとに集める（album の無い行は数えない）
+fn self_candidates(
+    conn: &rusqlite::Connection,
+    sources: &[Source],
+) -> Result<Vec<SelfCandidate>, InboxError> {
+    let mut out: Vec<SelfCandidate> = Vec::new();
     let mut st = conn.prepare_cached(
         "SELECT t.rel_path_key, t.album_id, a.mb_release_id
-           FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
+           FROM tracks t JOIN albums a ON a.id = t.album_id
           WHERE t.missing_since IS NULL AND ((?1 IS NOT NULL AND t.audio_md5 = ?1)
                                            OR (?2 IS NOT NULL AND t.audio_fp = ?2))",
     )?;
@@ -1154,21 +1156,54 @@ fn self_album(conn: &rusqlite::Connection, sources: &[Source]) -> Result<SelfRow
             .query_map(rusqlite::params![md5, afp], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, i64>(1)?,
                     r.get::<_, Option<String>>(2)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (key, album_id, mb) in rows {
-            keys.insert(key);
-            if album.is_none() {
-                if let Some(id) = album_id {
-                    album = Some((id, crate::import::placement::release_key(id, mb.as_deref())));
+            match out.iter_mut().find(|c| c.album_id == album_id) {
+                Some(c) => {
+                    c.keys.insert(key);
                 }
+                None => out.push(SelfCandidate {
+                    album_id,
+                    release: crate::import::placement::release_key(album_id, mb.as_deref()),
+                    keys: HashSet::from([key]),
+                }),
             }
         }
     }
-    Ok(SelfRows { album, keys })
+    Ok(out)
+}
+
+/// 候補から自分の成果物の album を決める（D-29: 同じ音声を無条件に自分とはみなさない。D-67 追記 3）。
+/// 件に MBID があればそのリリースの album だけ（配置のキーも `mb:` なので一致する）。無ければ MB キーの
+/// 無い album のうち、件を入れられる（[`fits_plain_album`]。CD とそれ以外を混ぜない・ディスク番号が
+/// 自分の行以外と重ならない）ものが**ちょうど 1 つ**のときだけ。決まらなければ None（新規として計画し、
+/// 衝突なら衝突にする）
+fn pick_self_album(
+    conn: &rusqlite::Connection,
+    candidates: Vec<SelfCandidate>,
+    incoming_mb: Option<&str>,
+    incoming_cd: bool,
+    discs: &[u32],
+) -> Result<Option<SelfCandidate>, InboxError> {
+    let mut fit = Vec::new();
+    for c in candidates {
+        let ok = match incoming_mb {
+            Some(m) => c.release == format!("mb:{m}"),
+            None => {
+                c.release.starts_with("album:")
+                    && fits_plain_album(&album_rows(conn, c.album_id, &c.keys)?, incoming_cd, discs)
+                        .is_ok()
+            }
+        };
+        if ok {
+            fit.push(c);
+        }
+    }
+    Ok(if fit.len() == 1 { fit.pop() } else { None })
 }
 
 /// 下書きの宛先ディレクトリに既にある album（追記先。D-70）。MB リリースの album は別リリースなので
@@ -1460,26 +1495,22 @@ fn plan_item(
     sources: &[Source],
 ) -> Result<ItemPlan, InboxError> {
     let (category, template) = resolve_template(conn, layout, draft)?;
-    // 自分の成果物（同じ音声の行）は占有から外し、その album のリリースキーに揃える（再実行）
-    let SelfRows {
-        album: self_album,
-        keys: self_keys,
-    } = self_album(conn, sources)?;
-    // 自分の成果物とみなすのは、件がその album に入れられるときだけ（同じ音声が CD でない album に
-    // あっても CD の件をそこへ合流させない。D-67 追記 3）。再実行なら自分の行は除いて見る
-    let self_album = match self_album {
-        Some((id, key)) if key.starts_with("album:") => {
-            let rows = album_rows(conn, id, &self_keys)?;
-            let discs: Vec<u32> = draft.tracks.iter().map(|t| t.disc_no).collect();
-            fits_plain_album(&rows, incoming_is_cd(files), &discs)
-                .is_ok()
-                .then_some((id, key))
-        }
-        other => other,
-    };
+    // 自分の成果物（同じ音声の行）は占有から外し、その album のリリースキーに揃える（再実行）。
+    // 同じ音声の行が他の album にあっても、件を入れられない album は自分とみなさない（D-29 / D-67 追記 3）
+    let incoming_mb = incoming_release_id(files);
+    let discs: Vec<u32> = draft.tracks.iter().map(|t| t.disc_no).collect();
+    let own = pick_self_album(
+        conn,
+        self_candidates(conn, sources)?,
+        incoming_mb.as_deref(),
+        incoming_is_cd(files),
+        &discs,
+    )?;
+    let self_keys = own.as_ref().map(|c| c.keys.clone()).unwrap_or_default();
+    let self_album = own.map(|c| (c.album_id, c.release));
     // リリースキー: MUSICBRAINZ_ALBUMID の最頻値があれば mb:、自分の成果物の album があればそれ、
     // 宛先に追記できる album があればそれ（D-70）、無ければ件ごとの新規
-    let release = match incoming_release_id(files)
+    let release = match incoming_mb
         .map(|m| format!("mb:{m}"))
         .or_else(|| self_album.map(|(_, k)| k))
     {

@@ -1291,6 +1291,79 @@ async fn same_audio_in_a_non_cd_album_does_not_pull_in_a_cd_item() {
     assert_ne!(a.placed_album_id, b.placed_album_id);
 }
 
+/// 同じ音声が MBID 付きの CD でない album にあっても、MBID の無い CD の件をそこへ合流させない
+/// （件に MBID が無いのに、音声の一致だけで `mb:` を自分の成果物とみなさない。codex 指摘）
+#[tokio::test]
+async fn same_audio_in_a_release_album_does_not_pull_in_a_cd_item() {
+    let lib = Lib::new();
+    lib.start(true);
+    let a = require_ffmpeg!(place_one(&lib, "AlbumA", 1, "One", 1, 1, None).await);
+    lib.conn()
+        .execute("UPDATE albums SET mb_release_id = 'mbid-1'", [])
+        .unwrap();
+    let rel = "Disc2/01.flac";
+    let p = lib.add(rel, 1, "One", "Album", 1).unwrap();
+    set_tags(&p, "flac", &[("MUSICBRAINZ_DISCID", &["disc-2"])]);
+    lib.scan(5000).await;
+    let it = lib.item("Disc2").unwrap();
+    lib.approve(it.id, &draft_disc(&[(rel, 1, "One")], 2, "Album"));
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let b = inbox::get(&lib.conn(), it.id).unwrap().unwrap();
+    assert_eq!(b.state, ItemState::Placed, "{:?}", b.error);
+    assert_ne!(a.placed_album_id, b.placed_album_id);
+}
+
+/// 同じ音声が 2 つの album（CD でない album と、自分が置いた CD の album）にある状態で置き直しても、
+/// 自分の album を見つけて冪等に終わる（候補を全部見て、入れられるものが 1 つなら採る。codex 指摘）
+#[tokio::test]
+async fn rerun_finds_its_own_cd_album_among_same_audio_candidates() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "Album", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album"),
+    );
+    let env = lib.env(false);
+    let item = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    // 同じ音声（seed 1）の CD の件（disc 2）を置く → 年で降格した別の album
+    let rel = "Disc2/01.flac";
+    let add_cd = |lib: &Lib| {
+        let p = lib.add(rel, 1, "One", "Album", 1).unwrap();
+        set_tags(&p, "flac", &[("MUSICBRAINZ_DISCID", &["disc-2"])]);
+    };
+    add_cd(&lib);
+    lib.scan(2000).await;
+    let b = lib.item("Disc2").unwrap();
+    let draft = draft_disc(&[(rel, 1, "One")], 2, "Album");
+    lib.approve(b.id, &draft);
+    let item = inbox::get(&lib.conn(), b.id).unwrap().unwrap();
+    let first = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 2);
+    // Inbox を消費する前に落ちたことにする（行は残し、原本を戻して placing に）
+    add_cd(&lib);
+    lib.scan(2001).await;
+    let b2 = lib.item("Disc2").unwrap();
+    lib.approve(b2.id, &draft);
+    inbox::set_state(&lib.conn(), b2.id, ItemState::Placing, None, 3).unwrap();
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), b2.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert_eq!(it.placed_album_id, Some(first.album_id));
+    assert_eq!(lib.count("SELECT count(*) FROM albums"), 2);
+    assert_eq!(
+        lib.count("SELECT count(*) FROM tracks WHERE missing_since IS NULL"),
+        2
+    );
+}
+
 /// 計画の後・登録の前に追記先が CD でなくなった（タグから DiscID が消えた）ら、CD の件は登録しない
 /// （登録のトランザクションで CD と CD 以外の区別を再検証する。codex 指摘）
 #[tokio::test]
