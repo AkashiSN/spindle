@@ -275,4 +275,15 @@ fn log_has_signature_ids_table_and_results() {
         log.contains("00003000 -       -       01 T1.flac\n"),
         "{log}"
     );
+    // DB に候補が無い手法は NG でなく「なし」（不一致と区別する）
+    let mut r = report(12);
+    if let Some(ar) = r.accuraterip.as_mut() {
+        ar.outcome = spindle::cd::verify::Outcome::NotFound;
+        for t in &mut ar.tracks {
+            t.matched = false;
+        }
+    }
+    let log = render_log(&toc(), &meta(), &names(12), &r, &["verified_ctdb"; 12]);
+    assert!(log.contains(" なし "), "{log}");
+    assert!(!log.contains(" NG "), "{log}");
 }

@@ -393,8 +393,11 @@ fn outcome_label(o: Outcome) -> &'static str {
     }
 }
 
-/// 表の照合列: `OK(信頼度)` / `NG` / `-`（照会せず）
+/// 表の照合列: `OK(信頼度)` / `NG`（候補はあるが不一致）/ `なし`（DB に候補が無い）/ `-`（照会せず）
 fn verdict_cell(m: Option<&MethodResult>, index: usize) -> String {
+    if m.is_some_and(|m| m.outcome == Outcome::NotFound) {
+        return "なし".to_owned();
+    }
     match m.and_then(|m| m.tracks.get(index)) {
         Some(v) if v.matched => format!("OK({})", v.confidence),
         Some(_) => "NG".to_owned(),

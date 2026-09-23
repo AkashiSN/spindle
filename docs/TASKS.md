@@ -990,7 +990,10 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 #### 受け入れ（必ず見る）
 
 - **候補ゼロ件・アルバム名もアーティストも空のまま Inbox まで完走する**（CD 画面から編集を外したので、
-  この経路が塞がっていると「どれも違う」盤を取り込めない）
+  この経路が塞がっていると「どれも違う」盤を取り込めない）（済: 2026-09-23 に実機（BDR-209M、2 トラックの
+  盤）で `POST /api/cd/rip` → 読み取り 2 回（CTDB 不一致で吸い直し、修復は直せず）→ エンコード → Inbox の
+  `CD/[<DiscID>]` に pending、album gain on、名前の警告付き。SSE の `detail` は read / verify / repair /
+  encode / place の順に届いた。**照合が通る盤でのオフセット学習の実機確認は残り**）
 - サイドカーの basename 対応が 1 対 1 でないとき / CRC の件数や `disc_no` が合わないときは配置しない
   （済: `tests/inbox_draft.rs` の `bind_rip_*`、`tests/inbox_job.rs` の `cd_item_is_not_placed_*`、
   `tests/inbox_sidecar.rs` の `rip_entry_*`）
