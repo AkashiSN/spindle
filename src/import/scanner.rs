@@ -1210,14 +1210,23 @@ fn reclaim_tmp(root: &RootDir, rel: &RelPath, now: i64, inv: &mut Inventory) {
 /// 可逆の `audio_md5`。非可逆・未設定・読めないときは None
 fn lossless_md5(root: &RootDir, rel: &RelPath, ext_codec: Codec) -> Option<[u8; 16]> {
     let ext = rel.file_name().rsplit_once('.').map(|(_, x)| x);
-    let open = || root.open_file(rel).ok();
+    lossless_md5_with(&|| root.open_file(rel).ok(), rel, ext, ext_codec)
+}
+
+/// [`lossless_md5`] の本体。`open` は読むたびに先頭から読める File を返す
+fn lossless_md5_with(
+    open: &dyn Fn() -> Option<std::fs::File>,
+    path: &dyn std::fmt::Display,
+    ext: Option<&str>,
+    ext_codec: Codec,
+) -> Option<[u8; 16]> {
     match ext_codec {
         Codec::Flac => fingerprint::flac_streaminfo_md5(open()?)
-            .map_err(|err| tracing::debug!(path = %rel, error = %err, "STREAMINFO を読めない"))
+            .map_err(|err| tracing::debug!(path = %path, error = %err, "STREAMINFO を読めない"))
             .ok()
             .flatten(),
         Codec::Wav | Codec::Aiff => fingerprint::decoded_pcm_md5(open()?, ext)
-            .map_err(|err| tracing::warn!(path = %rel, error = %err, "PCM の MD5 を計算できない"))
+            .map_err(|err| tracing::warn!(path = %path, error = %err, "PCM の MD5 を計算できない"))
             .ok(),
         Codec::Aac => {
             // m4a は中身が ALAC のときだけ可逆
@@ -1227,11 +1236,32 @@ fn lossless_md5(root: &RootDir, rel: &RelPath, ext_codec: Codec) -> Option<[u8; 
             }
             fingerprint::decoded_pcm_md5(open()?, ext)
                 .map_err(
-                    |err| tracing::warn!(path = %rel, error = %err, "ALAC の MD5 を計算できない"),
+                    |err| tracing::warn!(path = %path, error = %err, "ALAC の MD5 を計算できない"),
                 )
                 .ok()
         }
         _ => None,
+    }
+}
+
+fn fingerprint_with(
+    open: &dyn Fn() -> Option<std::fs::File>,
+    path: &dyn std::fmt::Display,
+    ext: Option<&str>,
+    af: &AudioFile,
+) -> Fingerprint {
+    if af.lossless {
+        let ext_codec = ext.and_then(Codec::from_extension).unwrap_or(af.codec);
+        Fingerprint::Md5(lossless_md5_with(open, path, ext, ext_codec))
+    } else {
+        let f = open().and_then(|f| {
+            fingerprint::packet_fp(f, ext)
+                .map_err(
+                    |err| tracing::warn!(path = %path, error = %err, "audio_fp を計算できない"),
+                )
+                .ok()
+        });
+        Fingerprint::Fp(f)
     }
 }
 
@@ -1240,17 +1270,20 @@ fn lossless_md5(root: &RootDir, rel: &RelPath, ext_codec: Codec) -> Option<[u8; 
 /// 採用するときにもスキャナと同じ計算をするために公開する
 pub fn read_fingerprint(root: &RootDir, rel: &RelPath, af: &AudioFile) -> Fingerprint {
     let ext = rel.file_name().rsplit_once('.').map(|(_, x)| x);
-    if af.lossless {
-        let ext_codec = ext.and_then(Codec::from_extension).unwrap_or(af.codec);
-        Fingerprint::Md5(lossless_md5(root, rel, ext_codec))
-    } else {
-        let f = root.open_file(rel).ok().and_then(|f| {
-            fingerprint::packet_fp(f, ext)
-                .map_err(|err| tracing::warn!(path = %rel, error = %err, "audio_fp を計算できない"))
-                .ok()
-        });
-        Fingerprint::Fp(f)
-    }
+    fingerprint_with(&|| root.open_file(rel).ok(), rel, ext, af)
+}
+
+/// [`read_fingerprint`] を、パスを開き直さずに開いている `file` そのもの（の複製 FD）で計算する。
+/// タグと音声を同じ実体で確かめたいとき（Inbox の再実行の宛先の照合。D-86、codex 指摘）
+pub fn read_fingerprint_fd(file: &std::fs::File, path: &RelPath, af: &AudioFile) -> Fingerprint {
+    use std::io::{Seek, SeekFrom};
+    let ext = path.file_name().rsplit_once('.').map(|(_, x)| x);
+    let open = || {
+        let mut f = file.try_clone().ok()?;
+        f.seek(SeekFrom::Start(0)).ok()?;
+        Some(f)
+    };
+    fingerprint_with(&open, path, ext, af)
 }
 
 /// 音声の変化: 同種のフィンガープリントが違う、または種類が変わった（可逆 ⇔ 非可逆の

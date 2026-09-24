@@ -2745,3 +2745,100 @@ async fn rerun_does_not_overwrite_a_registered_file_changed_outside() {
     );
     assert!(af.tags.values("GENRE").next().is_none());
 }
+
+/// 再実行の宛先の画像の照合は front cover だけを見る: 同じ画像が裏表紙としてだけ入っていれば補正済み
+/// とみなさず失敗、front cover として入っていれば再利用する（D-86、codex 指摘）
+#[tokio::test]
+async fn rerun_picture_check_requires_the_front_cover() {
+    use lofty::picture::{MimeType, Picture, PictureType};
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    let png_path = lib.dir.path().join("front.png");
+    let ok = std::process::Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=8x8",
+            "-frames:v",
+            "1",
+        ])
+        .arg(&png_path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("ffmpeg で画像を作れないので skip");
+        return;
+    }
+    let png = std::fs::read(&png_path).unwrap();
+    let hash = ArtworkStore::hash_of(&png);
+    ArtworkStore::new(lib.dir.path().join("thumbs"))
+        .put_original(&hash, "image/png", &png)
+        .unwrap();
+    spindle::db::artwork::upsert(
+        &lib.conn(),
+        &hash,
+        "image/png",
+        Some(8),
+        Some(8),
+        png.len(),
+        "embedded",
+    )
+    .unwrap();
+    let picture = format!("image/png:{}", ArtworkStore::hex(&hash));
+
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    let draft = draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album");
+    lib.approve(a.id, &draft);
+    let env = lib.env(false);
+    let item = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    let first = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    // 登録前に落ちた孤児にし、Inbox に原本を戻す
+    let c = lib.conn();
+    c.execute("DELETE FROM tracks WHERE id = ?1", [first.track_ids[0]])
+        .unwrap();
+    c.execute("DELETE FROM albums WHERE id = ?1", [first.album_id])
+        .unwrap();
+    drop(c);
+    let p = lib.lib_path("_Unsorted/Artist/Album/01 One.flac");
+    let set_picture = |ty: PictureType| {
+        let pic = Picture::unchecked(png.clone())
+            .pic_type(ty)
+            .mime_type(MimeType::Png)
+            .build();
+        let mut f = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&p)
+            .unwrap();
+        spindle::domain::tags::write_tag_changes(&mut f, Some("flac"), &[], Some(&[pic])).unwrap();
+    };
+    std::fs::create_dir_all(lib.inbox_path("AlbumA")).unwrap();
+    lib.add("AlbumA/01.flac", 1, "One", "A", 1).unwrap();
+    lib.scan(1001).await;
+    let a2 = lib.item("AlbumA").unwrap();
+    let mut with_pic = draft.clone();
+    with_pic.tracks[0].picture = Some(picture);
+    // 裏表紙としてだけある → 失敗
+    set_picture(PictureType::CoverBack);
+    lib.approve(a2.id, &with_pic);
+    let item = inbox::get(&lib.conn(), a2.id).unwrap().unwrap();
+    let err = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("今回の補正"), "{err}");
+    // front cover としてある → 再利用して配置を終える
+    set_picture(PictureType::CoverFront);
+    lib.approve(a2.id, &with_pic);
+    let item = inbox::get(&lib.conn(), a2.id).unwrap().unwrap();
+    spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 1);
+}

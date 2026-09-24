@@ -1977,19 +1977,26 @@ fn place_files(
                     // （ファイルが正。外部の変更を履歴なしに上書きしない）。代わりに、今回の補正
                     // （タグ・画像。D-86）がそのファイルに既に入っていることを確かめ、違えば失敗にして
                     // 件と下書きを残す（補正を黙って捨てて成功にしない。codex 指摘）
+                    // タグ・画像と音声は同じ実体（渡された FD の複製）から読む（パスを開き直すと
+                    // 途中で差し替えられた別の実体を混ぜうる。codex 指摘）
                     let ext = target.file_name().rsplit_once('.').map(|(_, e)| e);
+                    let fp_file = existing.try_clone()?;
                     let (af, pics) =
                         match crate::domain::tags::read_audio_file_with_pictures(existing, ext) {
                             Ok(v) => v,
                             Err(_) => return Ok(false),
                         };
-                    if !same_audio(read_fingerprint(library, target, &af), src_fp) {
+                    let fp = crate::import::scanner::read_fingerprint_fd(&fp_file, target, &af);
+                    if !same_audio(fp, src_fp) {
                         return Ok(false);
                     }
                     let tags_ok = tag_changes(draft, i, af.tags.items()).is_empty();
+                    // 指定した画像は front cover として書く。同じ bytes が front 以外（裏表紙等）として
+                    // あるだけなら補正済みとみなさない（codex 指摘）
                     let picture_ok = want_picture.is_none_or(|want| {
-                        crate::media::artwork::pick_embedded(&pics).is_some_and(|p| {
-                            crate::media::artwork::ArtworkStore::hash_of(p.data()) == want
+                        pics.iter().any(|p| {
+                            p.pic_type() == lofty::picture::PictureType::CoverFront
+                                && crate::media::artwork::ArtworkStore::hash_of(p.data()) == want
                         })
                     });
                     if tags_ok && picture_ok {
