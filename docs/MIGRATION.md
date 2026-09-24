@@ -111,6 +111,8 @@ sudo chown -R 1000:1000 /mnt/ssd/media /mnt/hdd/media /mnt/ssd/apps/spindle
 
 `config.toml` は `deploy/config.example.toml` を元にする。`[encode.derived.aac]` を最初から有効にして
 よい（aac は RG の解析が済んだ行から作られる。§4）。プラグインはイメージに入っていない（D-70）。
+`[ytmusic].ytdlp_args` に `["--extractor-args", "youtube:lang=ja"]` を入れる（無いと翻訳タイトルのある動画は英語の
+タイトルとチャンネル名が返り、日本語の曲名が取れない）。
 
 コピーと検証が済んだら、`docs/OPERATIONS.md`「カスタムアプリの作り方」でアプリを作って起動する。
 起動すると初回スキャン（deep）が走る（2026-09-24 のリハーサルで 9,098 本 9 分）。

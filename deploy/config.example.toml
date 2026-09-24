@@ -84,9 +84,13 @@ enabled = true
 metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
 metadata_timeout_secs = 30
 download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
-# yt-dlp に毎回付ける追加引数（省略時は無し）。YouTube に弾かれるときの口。UA / Referer は付けない
-# ytdlp_args = ["--extractor-args", "youtube:player_client=web_safari"]
-# ytdlp_args = ["--cookies", "/data/cookies.txt"]
+# yt-dlp に毎回付ける追加引数（省略時は無し）。UA / Referer は付けない。
+# youtube:lang=ja: 言語を指定しないと、投稿者が翻訳タイトルを付けた動画は英語のタイトルが返り、日本語の曲名が
+# 取れない（メタデータプラグインのルールにも合わない）。チャンネル名も言語で変わる
+ytdlp_args = ["--extractor-args", "youtube:lang=ja"]
+# YouTube に弾かれるときは extractor-args を足す（同じキーは ; で並べる）か cookies を渡す
+# ytdlp_args = ["--extractor-args", "youtube:lang=ja;player_client=web_safari"]
+# ytdlp_args = ["--extractor-args", "youtube:lang=ja", "--cookies", "/data/cookies.txt"]
 sync_interval_hours = 0        # 再生リストの購読を定期同期する間隔（時間）。0 = 手動と承認の後続だけ（D-78）
 
 [hires]                        # 偽ハイレゾ検出（D-71）

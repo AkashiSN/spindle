@@ -316,8 +316,13 @@ URL を貼る手間を減らすブックマークレット（ブックマーク�
 
 結果に詳細があれば「詳細」で行を開く。同期中は編集・削除できない。
 
+`config.toml` の `[ytmusic].ytdlp_args` には `["--extractor-args", "youtube:lang=ja"]` を入れておく（サンプルの
+既定）。言語を指定しないと、投稿者が翻訳タイトルを付けた動画は英語のタイトル（とチャンネル名）が返り、日本語の
+曲名が取れない。
+
 YouTube に弾かれるようになったら、まず yt-dlp を新しくする（イメージの更新。`OPERATIONS.md`）。それでも
-駄目なら `config.toml` の `[ytmusic].ytdlp_args` に `--extractor-args` や `--cookies` を渡す。
+駄目なら `[ytmusic].ytdlp_args` に `--extractor-args`（`youtube:lang=ja;player_client=…` のように `;` で並べる）や
+`--cookies` を足す。
 
 ## 12. ジョブ画面
 

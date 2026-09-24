@@ -2282,7 +2282,7 @@ enabled = true
 metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
 metadata_timeout_secs = 30
 download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
-# ytdlp_args = ["--extractor-args", "youtube:player_client=web_safari"]   # 弾かれたときの口（P4-13）。UA / Referer は付けない
+ytdlp_args = ["--extractor-args", "youtube:lang=ja"]   # 翻訳タイトルでなく日本語のタイトル・チャンネル名を取る。弾かれたときの口にもなる（P4-13）。UA / Referer は付けない
 sync_interval_hours = 0        # 再生リストの購読を定期同期する間隔（時間）。0 = 手動と承認の後続だけ（D-78）
 
 [hires]                        # 偽ハイレゾ検出（§7.10、D-71）

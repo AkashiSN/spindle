@@ -650,11 +650,11 @@ fn ytmusic_ytdlp_args_default_empty_and_reject_blank_elements() {
     ))
     .unwrap();
     assert!(cfg.ytmusic.ytdlp_args.is_empty());
-    assert!(Config::parse(EXAMPLE)
-        .unwrap()
-        .ytmusic
-        .ytdlp_args
-        .is_empty());
+    // サンプルは日本語のタイトルを取るため言語を指定する（翻訳タイトルが返らないように）
+    assert_eq!(
+        Config::parse(EXAMPLE).unwrap().ytmusic.ytdlp_args,
+        ["--extractor-args", "youtube:lang=ja"]
+    );
     let cfg = Config::parse(&replace_section(
         "ytmusic",
         "enabled = true\nmetadata_command = [\"p\"]\nytdlp_args = [\"--extractor-args\", \"youtube:player_client=web_safari\"]",
