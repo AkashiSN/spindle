@@ -1808,6 +1808,13 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       90.0%・ARTIST 一致 95.4%（直す前は 38.9% / 25.2% / 25.6%）。`[ytmusic].ytdlp_args` に `youtube:lang=ja` が要る（無いと
       翻訳タイトルの英語が返る）。実機で明透「再会」・理芽「Tropical Therapy」を落とし直し、手直し無しで承認 → 配置 → 再同期で
       9 本とも差分 0 を確認
+- [ ] Inbox の既存 album への追記で `DISCNUMBER` を宛先に合わせる。YouTube の件は提案が disc 1 固定で、配置が
+      `DISCNUMBER=1` を書くため、ディスク番号の無い既存 album（明透 178 曲・理芽 233 曲など。Library 全体で 6,659 曲が
+      disc なし）に追記すると、並べ替え（disc → track）で追記した曲だけが末尾に回った（2026-09-25 実機。バッチ 22 で 2 曲の
+      `DISCNUMBER` を消して復旧）。宛先の album の曲が全部 disc なしなら書かない / 提案も空にする。CD の件（複数枚）は従来どおり
+- [ ] 要確認: 同じディレクトリでファイル名の書式が混ざる。旧パイプラインの `83. アンメルト・アンブレラ.opus`（番号の後に
+      ピリオド）と、購読の番号揃え・Inbox の配置が `[layout]` で付ける `165 再会 (Cover).opus`。揃えるなら album ごとの
+      リネーム（全体を今の書式へ）か、`[layout]` をピリオド付きにするか
 - [x] `audio_version` が上がった行の RG を**自動で解析し直す**（2026-09-25 ユーザの決定。D-47 追記 2）。スキャナの
       外部の差し替え（deep scan での `audio_md5` の変化を含む）と tagwrite の overlay 解消で値を捨てるとき、同じ
       トランザクションで rg ジョブを積む（`db::replaygain::reset_and_reanalyze`。投入単位と dedup は `POST /api/rg` と
