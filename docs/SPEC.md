@@ -342,7 +342,8 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
 
 `missing_since` による論理削除。SMB 一時切断やスキャン中のマウント欠落で行を物理削除すると、
 プレイリストと編集履歴が巻き添えになる。既定 30 日経過後に GC（`gc` ジョブ。missing トラック・
-アルバムの行、`Archive/` の退避ファイル、Derived の孤児、アートワークの孤児を回収する。
+アルバムの行、`Archive/` の退避ファイル、Derived の孤児、アートワークの孤児、却下して「削除」した
+Inbox の件のファイル（D-90）を回収する。
 1 日 1 回自動、`POST /api/gc` で手動、`GET /api/gc/preview` が dry-run。D-56）。GC は保持期間を過ぎた
 終端の**ジョブ行**も消す（done / cancelled は `[gc].jobs_done_days`、failed は `jobs_failed_days`。0 で
 消さない。P4-18、D-81）。
@@ -1087,6 +1088,13 @@ Inbox/ に配置（ポーリング検出）
   stat（inode / size / mtime / ctime）が変わったファイルだけタグを読み直す。**正は Inbox のファイル**で、
   行はキャッシュ: ディレクトリが消えれば行も消す（`placed` は 24 時間残して結果を見せる）。`approved` の件で
   ファイルが変わっていたら `pending` に戻す（再承認）
+- **却下した件の削除**（D-90）: `rejected` の件に「削除」で `discard_requested_at`（破棄待ち）を入れる。ファイルは
+  すぐには消さず、GC が `[gc].retention_days` 経過後に件のディレクトリの直下の**走査が写した音声**（stat が一致
+  するもの）・既知の同梱ファイル・サイドカーを消し、ディレクトリが空なら消し、行を消す（サブディレクトリ = 別の件と
+  知らないファイルは残す）。それまでは「削除を取り消す」で `rejected` に戻る。`rejected` から出る遷移（下書きに
+  戻す）でも破棄待ちは解ける。走査が破棄待ちの件でファイルの変化（足された・差し替えられた）を見たら、人が
+  見ていないものを消さないよう破棄待ちを解いて `rejected` のまま理由を `error` に残す（GC も消す直前に同じ
+  照合をして、合わなければ何も消さずに解く）
 - **同名の警告**（P4-19、D-70 追記）: 追記先の album に**同じタイトル**の active な行があれば、そのトラックに
   `same_title: [{ track_id, rel_path, duration_ms }]` を付ける（承認は止めない。画面は「⚠ Library に同名:
   <ファイル名>（長さ）」と、件の見出しに「同名 N」）。鍵は NFKD + casefold + 空白の畳み込み（全角・半角の
@@ -1526,6 +1534,7 @@ POST   /api/inbox/:id/preview                     { draft }（approve と同じ�
                                                   200 { rel_dir, paths, error }（決められなければ rel_dir は null で error に
                                                   理由）。自分の成果物の再利用は見ないので見込み（D-86）
 POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
+POST   /api/inbox/:id/discard, /undiscard         却下した件を破棄待ちにする / 取り消す（rejected だけ。消すのは GC。D-90）
 POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
 POST   /api/ytmusic/lookup                        { urls: [string] }（200 件まで）→ { items: [{ url, kind: video|playlist|other|invalid,
                                                    video_url?, located?: { location: library|inbox, path }, list_id?, subscription?: { id, albumartist, album } }] }
@@ -2079,7 +2088,9 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   盤の名前を直すのもこの画面と、トラックごとの disc / # / タイトル / アーティスト（ファイル名・コーデック・長さは
   表示のみ）。初期値はタグからの提案（`proposal`）、承認済み・失敗の件は保存した下書き。検証はサーバと
   同じ規則（`lib/inbox.ts` の `validateDraft`）で、問題が無いときだけ「承認して配置」が押せる。
-  「却下」はファイルを残したまま一覧から外し、「下書きに戻す」で pending に戻る。placed の件は 24 時間
+  「却下」はファイルを残したまま件を却下にし（一覧には「却下」のバッジで残る）、「下書きに戻す」で pending に戻る。
+  却下した件には「削除」（確認ダイアログ → 破棄待ち。一覧に「削除待ち」のバッジ、承認画面に「削除待ち: <期限> 以降の
+  GC でファイルを消す」と「削除を取り消す」。期限は `GET /api/inbox` の `discard_retention_days` から。D-90）。placed の件は 24 時間
   残り、「アルバムを開く」で表を `album_id` に絞る。inbox ジョブの完了で一覧を取り直す。
   `destination` があれば「宛先: 既存の『…』（N 曲）に追加」と出す（配置済みの件は `destination` を引かないので、宛先も
   同名の警告も出ない。引くと自分が置いた album に当たる）。**同名の警告**（P4-19）はタイトル欄の下に
@@ -2496,7 +2507,7 @@ src/
 │   │                        購読の dispatcher は handlers/playlist_sync.rs）
 │   └── handlers/        種別ごと（playlist_sync.rs = 購読の同期: 列挙 → 追記先 → 揃え → 投入。D-78）
 ├── gc/
-│   └── mod.rs           物理削除の唯一の経路。plan（判定・dry-run）と execute_*（5 区分。D-56）
+│   └── mod.rs           物理削除の唯一の経路。plan（判定・dry-run）と execute_*（6 区分。D-56 / D-90）
 ├── playlist/
 │   ├── dsl.rs           pest 文法 → AST
 │   ├── compile.rs       AST → パラメータ化 SQL

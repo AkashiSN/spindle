@@ -26,6 +26,11 @@ export type InboxState = {
   approve: (id: number, draft: InboxDraft) => Promise<string | null>
   reject: (id: number) => Promise<void>
   reopen: (id: number) => Promise<void>
+  /** 却下した件を削除（破棄待ち）にする / 取り消す（D-90） */
+  discard: (id: number) => Promise<void>
+  undiscard: (id: number) => Promise<void>
+  /** 破棄待ちの件を GC が消すまでの日数（`[gc].retention_days`）。旧サーバでは null */
+  discardRetentionDays: number | null
   setNotice: (s: string | null) => void
 }
 
@@ -47,13 +52,15 @@ export function useInbox(enabled: boolean, onChanged?: () => void): InboxState {
   const [unavailable, setUnavailable] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [discardRetentionDays, setDiscardRetentionDays] = useState<number | null>(null)
   const timer = useRef<number | null>(null)
 
   const fetchNow = useCallback(() => {
-    apiFetch<{ items: InboxItem[]; watch?: InboxWatch }>('/api/inbox')
+    apiFetch<{ items: InboxItem[]; watch?: InboxWatch; discard_retention_days?: number }>('/api/inbox')
       .then((r) => {
         setItems(r.items)
         setWatch(r.watch ?? null)
+        setDiscardRetentionDays(r.discard_retention_days ?? null)
         setError(null)
         setUnavailable(false)
       })
@@ -148,5 +155,43 @@ export function useInbox(enabled: boolean, onChanged?: () => void): InboxState {
     [run],
   )
 
-  return { items, watch, error, unavailable, notice, busy, refresh, scan, approve, reject, reopen, setNotice }
+  const discard = useCallback(
+    async (id: number) => {
+      await run(async () => {
+        await apiPost<undefined>(`/api/inbox/${id}/discard`, {})
+        setNotice('削除した。ファイルは期限が来たら GC が消す（それまでは取り消せる）')
+        return null
+      })
+    },
+    [run],
+  )
+
+  const undiscard = useCallback(
+    async (id: number) => {
+      await run(async () => {
+        await apiPost<undefined>(`/api/inbox/${id}/undiscard`, {})
+        setNotice('削除を取り消した（却下のまま）')
+        return null
+      })
+    },
+    [run],
+  )
+
+  return {
+    items,
+    watch,
+    error,
+    unavailable,
+    notice,
+    busy,
+    refresh,
+    scan,
+    approve,
+    reject,
+    reopen,
+    discard,
+    undiscard,
+    discardRetentionDays,
+    setNotice,
+  }
 }

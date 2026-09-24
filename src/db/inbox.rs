@@ -56,6 +56,8 @@ pub struct Item {
     pub error: Option<String>,
     pub placed_album_id: Option<i64>,
     pub placed_at: Option<i64>,
+    /// 破棄待ち（rejected の件の「削除」。GC が `[gc].retention_days` 経過後にファイルと行を消す。D-90）
+    pub discard_requested_at: Option<i64>,
 }
 
 /// 件の中の音声ファイル 1 本
@@ -76,7 +78,7 @@ pub struct FileRow {
     pub tags: Vec<(String, String)>,
 }
 
-const ITEM_COLS: &str = "id, rel_dir, state, detected_at, seen_at, approved_at, draft, error, placed_album_id, placed_at";
+const ITEM_COLS: &str = "id, rel_dir, state, detected_at, seen_at, approved_at, draft, error, placed_album_id, placed_at, discard_requested_at";
 
 fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     let state: String = r.get(2)?;
@@ -92,6 +94,7 @@ fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         error: r.get(7)?,
         placed_album_id: r.get(8)?,
         placed_at: r.get(9)?,
+        discard_requested_at: r.get(10)?,
     })
 }
 
@@ -224,7 +227,8 @@ pub fn replace_files(conn: &Connection, item_id: i64, files: &[FileRow]) -> Resu
     Ok(())
 }
 
-/// 状態を変える。`approved` にすると `approved_at`、それ以外に戻すと `error` を置き換える
+/// 状態を変える。`approved` にすると `approved_at`、それ以外に戻すと `error` を置き換える。
+/// rejected 以外にすると破棄待ちを解く（D-90）
 pub fn set_state(
     conn: &Connection,
     id: i64,
@@ -235,7 +239,8 @@ pub fn set_state(
     conn.execute(
         "UPDATE inbox_items
             SET state = ?2, error = ?3,
-                approved_at = CASE WHEN ?2 = 'approved' THEN ?4 ELSE approved_at END
+                approved_at = CASE WHEN ?2 = 'approved' THEN ?4 ELSE approved_at END,
+                discard_requested_at = CASE WHEN ?2 = 'rejected' THEN discard_requested_at ELSE NULL END
           WHERE id = ?1",
         params![id, state.as_str(), error, now],
     )?;
@@ -243,6 +248,7 @@ pub fn set_state(
 }
 
 /// 状態遷移の CAS: 今の状態が `from` のどれかであるときだけ `to` にする。変えたら true。
+/// 遷移は破棄待ちを解く（rejected → rejected は無いので、rejected から出る遷移で必ず NULL になる。D-90）。
 /// 状態検査と更新を 1 文にして、読んでから書くまでの間に他（API / worker / 走査）が動かした
 /// 件を上書きしない
 pub fn transition(
@@ -264,7 +270,8 @@ pub fn transition(
     let sql = format!(
         "UPDATE inbox_items
             SET state = ?2, error = ?3,
-                approved_at = CASE WHEN ?2 = 'approved' THEN ?4 ELSE approved_at END
+                approved_at = CASE WHEN ?2 = 'approved' THEN ?4 ELSE approved_at END,
+                discard_requested_at = NULL
           WHERE id = ?1 AND state IN ({marks})"
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
@@ -277,6 +284,51 @@ pub fn transition(
         params.push(Box::new(f.as_str()));
     }
     let n = conn.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+    Ok(n == 1)
+}
+
+/// 破棄要求（D-90）: rejected で破棄待ちでない件に時刻を入れる。入れたら true
+pub fn request_discard(conn: &Connection, id: i64, now: i64) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE inbox_items SET discard_requested_at = ?2
+          WHERE id = ?1 AND state = 'rejected' AND discard_requested_at IS NULL",
+        params![id, now],
+    )?;
+    Ok(n == 1)
+}
+
+/// 破棄待ちを解いて rejected に戻す（D-90）。`note` は `error` に残す理由（人の取り消しは None）。
+/// 解いたら true
+pub fn cancel_discard(conn: &Connection, id: i64, note: Option<&str>) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE inbox_items SET discard_requested_at = NULL, error = ?2
+          WHERE id = ?1 AND state = 'rejected' AND discard_requested_at IS NOT NULL",
+        params![id, note],
+    )?;
+    Ok(n == 1)
+}
+
+/// GC の対象: rejected で `discard_requested_at <= cutoff` の件（id 順。D-90）
+pub fn discard_due(conn: &Connection, cutoff: i64) -> Result<Vec<Item>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {ITEM_COLS} FROM inbox_items
+          WHERE state = 'rejected' AND discard_requested_at IS NOT NULL AND discard_requested_at <= ?1
+          ORDER BY id"
+    ))?;
+    let rows = st
+        .query_map([cutoff], row_to_item)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// GC が件を消す（CAS: まだ rejected で `discard_requested_at <= cutoff` のときだけ。D-90）。消したら true
+pub fn delete_discarded(conn: &Connection, id: i64, cutoff: i64) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM inbox_items
+          WHERE id = ?1 AND state = 'rejected' AND discard_requested_at IS NOT NULL
+            AND discard_requested_at <= ?2",
+        params![id, cutoff],
+    )?;
     Ok(n == 1)
 }
 

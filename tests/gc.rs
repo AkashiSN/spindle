@@ -40,7 +40,7 @@ struct Env {
 impl Env {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        for d in ["Library", "Archive", "Derived", "thumbs"] {
+        for d in ["Library", "Archive", "Derived", "Inbox", "thumbs"] {
             std::fs::create_dir(dir.path().join(d)).unwrap();
         }
         let db_path = dir.path().join("spindle.db");
@@ -58,6 +58,7 @@ impl Env {
             archive: Arc::new(RootDir::open(&dir.path().join("Archive")).unwrap()),
             derived: Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap()),
             artwork: Arc::new(ArtworkStore::new(dir.path().join("thumbs"))),
+            inbox: Some(Arc::new(RootDir::open(&dir.path().join("Inbox")).unwrap())),
         });
         Self {
             dir,

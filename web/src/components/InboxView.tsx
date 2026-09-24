@@ -2,7 +2,8 @@
 // 承認画面は CD 画面と同じく番号付きの段で流れを見せる: ① 取り込む件 → ② アルバム情報（画像の欄と、
 // ライブラリのプロパティと同じ操作の表）→ ③ トラック（全項目をダブルクリックで編集）→ ④ 確認して配置
 // （確認項目・配置先の見込み・承認）。下書きは画面の中だけで持ち、承認でサーバに保存して inbox ジョブが
-// 配置する。却下はファイルを Inbox に残したまま一覧から外す（再開できる）。placed の件は 24 時間残るので、
+// 配置する。却下はファイルを Inbox に残したまま件を却下にする（再開できる）。却下した件の「削除」は
+// 破棄待ちにするだけで、ファイルは GC が retention 日後に消す（D-90）。placed の件は 24 時間残るので、
 // そこからアルバムへ飛べる
 
 import { useEffect, useMemo, useState } from 'react'
@@ -26,6 +27,7 @@ import {
   artworkUrl,
   codecSummary,
   destinationLabel,
+  discardLabel,
   discNumbers,
   draftChangeCount,
   draftForSubmit,
@@ -125,6 +127,9 @@ export function InboxView({
                   {sameTitleCount(it) > 0 && (
                     <span className="badge inbox-same-title-badge">同名 {sameTitleCount(it)}</span>
                   )}
+                  {it.state === 'rejected' && it.discard_requested_at != null && (
+                    <span className="badge inbox-discard-badge">削除待ち</span>
+                  )}
                   {it.error != null && <span className="error small">{it.error}</span>}
                   </span>
                 </button>
@@ -218,6 +223,10 @@ function ItemForm({
         </div>
       )}
       {item.state === 'failed' && item.error != null && <p className="error">失敗: {item.error}</p>}
+      {item.state === 'rejected' && item.error != null && <p className="muted small">{item.error}</p>}
+      {discardLabel(item, inbox.discardRetentionDays, formatDateTime) != null && (
+        <p className="notice small">{discardLabel(item, inbox.discardRetentionDays, formatDateTime)}</p>
+      )}
       {item.state === 'approved' && (
         <p className="muted small">
           {item.approved_at != null ? `${formatDateTime(item.approved_at)} に承認。` : ''}
@@ -356,6 +365,31 @@ function ItemForm({
           {(item.state === 'approved' || item.state === 'rejected' || item.state === 'failed') && (
             <button type="button" disabled={inbox.busy} onClick={() => void inbox.reopen(item.id)}>
               下書きに戻す
+            </button>
+          )}
+          {item.state === 'rejected' && item.discard_requested_at == null && (
+            <button
+              type="button"
+              className="danger"
+              disabled={inbox.busy}
+              onClick={() => {
+                const days = inbox.discardRetentionDays
+                const when = days == null ? '期限が来たら' : `${days} 日後の`
+                if (
+                  window.confirm(
+                    `Inbox/${item.rel_dir} のファイル（${item.tracks.length} 曲と同梱の画像など）を削除しますか？\n` +
+                      `すぐには消さず、${when} GC が消す。それまでは「削除を取り消す」で戻せる`,
+                  )
+                )
+                  void inbox.discard(item.id)
+              }}
+            >
+              削除
+            </button>
+          )}
+          {item.state === 'rejected' && item.discard_requested_at != null && (
+            <button type="button" disabled={inbox.busy} onClick={() => void inbox.undiscard(item.id)}>
+              削除を取り消す
             </button>
           )}
           {editable && (

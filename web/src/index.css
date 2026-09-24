@@ -2379,6 +2379,12 @@ table.inbox-tracks tr.inbox-unmatched td {
 .inbox-same-title-badge {
   color: var(--warn);
 }
+.inbox-discard-badge {
+  color: var(--error);
+}
+.inbox-form button.danger {
+  color: var(--error);
+}
 .inbox-verdict-details summary {
   cursor: pointer;
   list-style: none;

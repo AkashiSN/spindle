@@ -25,6 +25,8 @@ import {
   keepArtistsFor,
   pictureOf,
   destinationLabel,
+  discardDeadline,
+  discardLabel,
   draftForSubmit,
   draftFrom,
   itemTitle,
@@ -227,6 +229,22 @@ describe('表示', () => {
     expect(itemTitle(item({ rel_dir: '' }))).toBe('(Inbox 直下)')
     expect(stateLabel('pending')).toBe('未処理')
     expect(stateLabel('placed')).toBe('配置済み')
+  })
+
+  it('削除待ちの期限と表示（D-90）', () => {
+    const fmt = (t: number) => `t=${t}`
+    const waiting = { state: 'rejected' as const, discard_requested_at: 1000 }
+    expect(discardDeadline(waiting, 30)).toBe(1000 + 30 * 86_400)
+    expect(discardLabel(waiting, 30, fmt)).toBe(
+      `削除待ち: t=${1000 + 30 * 86_400} 以降の GC でファイルを消す（それまでは取り消せる）`,
+    )
+    // 日数が分からない（旧サーバ）ときは期限を出さない
+    expect(discardDeadline(waiting, null)).toBeNull()
+    expect(discardLabel(waiting, null, fmt)).toBe('削除待ち（GC がファイルを消す。それまでは取り消せる）')
+    // 破棄待ちでない・rejected 以外は null
+    expect(discardLabel({ state: 'rejected', discard_requested_at: null }, 30, fmt)).toBeNull()
+    expect(discardLabel({ state: 'rejected' }, 30, fmt)).toBeNull()
+    expect(discardDeadline({ state: 'pending', discard_requested_at: 1000 }, 30)).toBeNull()
   })
 
   it('コーデックの集合', () => {

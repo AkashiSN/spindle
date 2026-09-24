@@ -152,6 +152,8 @@ export type InboxItem = {
   error: string | null
   placed_album_id: number | null
   placed_at: number | null
+  /** 破棄待ち（却下した件の「削除」の時刻。GC が retention 日後にファイルと件を消す。D-90）。旧サーバでは無い */
+  discard_requested_at?: number | null
   tracks: InboxFile[]
   /** タグから作った提案（毎回作り直される） */
   proposal: InboxDraft
@@ -173,6 +175,28 @@ export const STATE_LABELS: Record<InboxState, string> = {
 
 export function stateLabel(state: InboxState): string {
   return STATE_LABELS[state]
+}
+
+/** 破棄待ちの件を GC が消す時刻（D-90）。破棄待ちでない・日数が分からなければ null */
+export function discardDeadline(
+  item: Pick<InboxItem, 'state' | 'discard_requested_at'>,
+  retentionDays: number | null,
+): number | null {
+  if (item.state !== 'rejected' || item.discard_requested_at == null || retentionDays == null) return null
+  return item.discard_requested_at + retentionDays * 86_400
+}
+
+/** 破棄待ちの表示（「YYYY-MM-DD HH:MM 以降の GC でファイルを消す」）。破棄待ちでなければ null */
+export function discardLabel(
+  item: Pick<InboxItem, 'state' | 'discard_requested_at'>,
+  retentionDays: number | null,
+  formatTime: (epoch: number) => string,
+): string | null {
+  if (item.state !== 'rejected' || item.discard_requested_at == null) return null
+  const at = discardDeadline(item, retentionDays)
+  return at == null
+    ? '削除待ち（GC がファイルを消す。それまでは取り消せる）'
+    : `削除待ち: ${formatTime(at)} 以降の GC でファイルを消す（それまでは取り消せる）`
 }
 
 export function itemTitle(item: Pick<InboxItem, 'rel_dir'>): string {

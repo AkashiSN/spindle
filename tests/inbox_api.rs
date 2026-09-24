@@ -395,6 +395,50 @@ async fn reject_reopen_and_scan() {
 }
 
 #[tokio::test]
+async fn discard_and_undiscard_only_on_rejected_items() {
+    // D-90: 「削除」は却下した件の破棄待ち（ファイルは GC が消す）。取り消しで rejected に戻り、
+    // 下書きに戻すと破棄待ちも解ける
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = app.item("AlbumA").await;
+    let discard = format!("/api/inbox/{id}/discard");
+    let undiscard = format!("/api/inbox/{id}/undiscard");
+    // pending は削除できない
+    let (st, body) = app.post(&c, &discard, json!({})).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "state");
+    app.post(&c, &format!("/api/inbox/{id}/reject"), json!({}))
+        .await;
+    let (st, _) = app.post(&c, &discard, json!({})).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (_, list) = app.get(&c, "/api/inbox").await;
+    assert!(list["items"][0]["discard_requested_at"].is_i64(), "{list}");
+    assert_eq!(list["items"][0]["state"], "rejected");
+    assert_eq!(list["discard_retention_days"], 30);
+    // 二度目は 409、取り消しで null に戻る
+    let (st, _) = app.post(&c, &discard, json!({})).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _) = app.post(&c, &undiscard, json!({})).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (_, list) = app.get(&c, "/api/inbox").await;
+    assert!(list["items"][0]["discard_requested_at"].is_null());
+    let (st, _) = app.post(&c, &undiscard, json!({})).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    // 破棄待ちのまま下書きに戻すと破棄待ちは解ける
+    app.post(&c, &discard, json!({})).await;
+    let (st, _) = app
+        .post(&c, &format!("/api/inbox/{id}/reopen"), json!({}))
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (_, list) = app.get(&c, "/api/inbox").await;
+    assert_eq!(list["items"][0]["state"], "pending");
+    assert!(list["items"][0]["discard_requested_at"].is_null());
+    // 無い件は 404
+    let (st, _) = app.post(&c, "/api/inbox/9999/discard", json!({})).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn inbox_requires_login() {
     let app = App::new().await;
     let r = req(Method::GET, "/api/inbox").body(Body::empty()).unwrap();

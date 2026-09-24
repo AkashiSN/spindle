@@ -10,8 +10,10 @@
 //!   `.spindle-tmp-*` と [`ORPHAN_GRACE_SECS`] 以内の実体は除外 → unlink、空ディレクトリも消す
 //! - E artwork: `albums.artwork_id` からも編集履歴の `PICTURE` 値からも参照されない行（dir が
 //!   [`ORPHAN_GRACE_SECS`] 以内なら残す。D-60）と、行の無い `thumbs/<hex>/`
+//! - F Inbox: 却下した件のうち「削除」で破棄待ちにしてから `retention` が経ったもの → 件のファイル
+//!   （[`crate::import::inbox::discard_item_files`]）と行を消す（D-90）
 //!
-//! 実行順は A → B → E(行) を 1 トランザクション → C → D → E(dir)。ファイル削除は 1 件ずつ、
+//! 実行順は A → B → E(行) を 1 トランザクション → C → D → E(dir) → F。ファイル削除は 1 件ずつ、
 //! 失敗はログして続行し、最後に区分ごとの件数・バイト数を出す
 
 use std::collections::HashSet;
@@ -20,7 +22,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{gc as dbgc, jobs as dbjobs, now_epoch, Db, DbError};
+use crate::db::{gc as dbgc, inbox as dbinbox, jobs as dbjobs, now_epoch, Db, DbError};
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::fsroot::{FileKind, FsError, RootDir, Stat, TMP_PREFIX};
 use crate::media::artwork::ArtworkStore;
@@ -34,6 +36,8 @@ pub struct GcRoots {
     pub archive: Arc<RootDir>,
     pub derived: Arc<RootDir>,
     pub artwork: Arc<ArtworkStore>,
+    /// Inbox（`[paths].inbox` が無ければ None。F 区分を飛ばす）
+    pub inbox: Option<Arc<RootDir>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -81,6 +85,14 @@ pub struct PlannedFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlannedInbox {
+    pub id: i64,
+    pub rel_dir: String,
+    /// 件の音声の合計（実行時に消せたバイト数とは限らない）
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlannedArtwork {
     pub id: i64,
     pub hex: String,
@@ -102,6 +114,8 @@ pub struct Plan {
     pub artwork_rows: Vec<PlannedArtwork>,
     /// 行の無い `thumbs/<hex>`
     pub artwork_dirs: Vec<String>,
+    /// 破棄待ちで期限の来た Inbox の件（D-90）
+    pub inbox: Vec<PlannedInbox>,
 }
 
 /// 消すものを決める（読み取りのみ）。`retention_secs` は `[gc].retention_days` を秒にしたもの
@@ -112,14 +126,33 @@ pub async fn plan(
     now: i64,
 ) -> Result<Plan, GcError> {
     let cutoff = now.saturating_sub(retention_secs);
-    let (missing, albums, archived, artwork_rows, hashes) = db
+    let with_inbox = roots.inbox.is_some();
+    let (missing, albums, archived, artwork_rows, hashes, inbox) = db
         .read(move |c| {
+            let inbox = if with_inbox {
+                let mut out = Vec::new();
+                for it in dbinbox::discard_due(c, cutoff)? {
+                    let bytes = dbinbox::files(c, it.id)?
+                        .iter()
+                        .map(|f| f.size.max(0) as u64)
+                        .sum();
+                    out.push(PlannedInbox {
+                        id: it.id,
+                        rel_dir: it.rel_dir,
+                        bytes,
+                    });
+                }
+                out
+            } else {
+                Vec::new()
+            };
             Ok((
                 dbgc::missing_tracks(c, cutoff)?,
                 dbgc::missing_albums(c, cutoff)?,
                 dbgc::eligible_archived(c, now)?,
                 dbgc::unreferenced_artwork(c)?,
                 dbgc::artwork_hashes(c)?,
+                inbox,
             ))
         })
         .await?;
@@ -214,6 +247,7 @@ pub async fn plan(
         derived_dirs,
         artwork_rows,
         artwork_dirs,
+        inbox,
     })
 }
 
@@ -353,6 +387,7 @@ pub struct Summary {
     pub derived: Counts,
     pub artwork_rows: Counts,
     pub artwork_dirs: Counts,
+    pub inbox: Counts,
 }
 
 impl Summary {
@@ -363,10 +398,11 @@ impl Summary {
             + self.derived.deleted
             + self.artwork_rows.deleted
             + self.artwork_dirs.deleted
+            + self.inbox.deleted
     }
 
     pub fn total_bytes(&self) -> u64 {
-        self.archived.bytes + self.derived.bytes + self.artwork_dirs.bytes
+        self.archived.bytes + self.derived.bytes + self.artwork_dirs.bytes + self.inbox.bytes
     }
 }
 
@@ -645,6 +681,106 @@ pub async fn execute_artwork_dirs(
     Ok(counts)
 }
 
+/// F: 破棄待ちの Inbox の件を消す（D-90）。1 件ごとに書き込みのトランザクションの中で、まだ rejected で
+/// 期限が来ているか（計画の後の取り消し・下書きに戻す）を確かめ直し、ファイルを消してから行を消す。
+/// 取り消しの API も同じ writer を通るので、確かめてから消すまでの間に取り消されることはない。走査が写した
+/// 後にファイルが足された・変わっていれば何も消さず、破棄待ちを解いて理由を残す
+pub async fn execute_inbox(
+    db: &Db,
+    roots: &GcRoots,
+    plan: &Plan,
+    token: &CancellationToken,
+) -> Result<Counts, GcError> {
+    let mut counts = Counts {
+        planned: plan.inbox.len(),
+        ..Counts::default()
+    };
+    let Some(inbox) = roots.inbox.clone() else {
+        counts.skipped = counts.planned;
+        return Ok(counts);
+    };
+    for item in &plan.inbox {
+        cancelled(token)?;
+        let (id, cutoff) = (item.id, plan.cutoff);
+        let root = Arc::clone(&inbox);
+        let outcome = db
+            .transaction(move |c| {
+                let Some(it) = dbinbox::get(c, id)? else {
+                    return Ok(InboxGc::Skipped);
+                };
+                let due = it.state == dbinbox::ItemState::Rejected
+                    && it.discard_requested_at.is_some_and(|t| t <= cutoff);
+                if !due {
+                    return Ok(InboxGc::Skipped);
+                }
+                let files = dbinbox::files(c, id)?;
+                match crate::import::inbox::discard_item_files(&root, &it, &files) {
+                    Ok(crate::import::inbox::DiscardOutcome::Deleted { files, bytes }) => {
+                        dbinbox::delete_discarded(c, id, cutoff)?;
+                        Ok(InboxGc::Deleted { files, bytes })
+                    }
+                    Ok(crate::import::inbox::DiscardOutcome::Changed(reason)) => {
+                        dbinbox::cancel_discard(
+                            c,
+                            id,
+                            Some(crate::import::inbox::DISCARD_CANCELLED_BY_CHANGE),
+                        )?;
+                        Ok(InboxGc::Changed(reason))
+                    }
+                    Err(e) => Ok(InboxGc::Failed(e.to_string())),
+                }
+            })
+            .await?;
+        match outcome {
+            InboxGc::Deleted { files, bytes } => {
+                counts.deleted += 1;
+                counts.bytes += bytes;
+                tracing::info!(
+                    id,
+                    rel_dir = item.rel_dir,
+                    files,
+                    bytes,
+                    "破棄待ちの Inbox の件を消した"
+                );
+            }
+            InboxGc::Skipped => {
+                counts.skipped += 1;
+                tracing::info!(
+                    id,
+                    rel_dir = item.rel_dir,
+                    "計画の後に状態が変わったので残す"
+                );
+            }
+            InboxGc::Changed(reason) => {
+                counts.skipped += 1;
+                tracing::warn!(
+                    id,
+                    rel_dir = item.rel_dir,
+                    reason,
+                    "破棄待ちの Inbox の件が変わったので削除を取り消した"
+                );
+            }
+            InboxGc::Failed(e) => {
+                counts.failed += 1;
+                tracing::warn!(
+                    id,
+                    rel_dir = item.rel_dir,
+                    error = e,
+                    "破棄待ちの Inbox の件を消せない"
+                );
+            }
+        }
+    }
+    Ok(counts)
+}
+
+enum InboxGc {
+    Deleted { files: usize, bytes: u64 },
+    Skipped,
+    Changed(String),
+    Failed(String),
+}
+
 /// 全区分を順に実行して集計を返す（ログも出す）。`job_id` はロック・予約の持ち主（無ければ取らない）
 pub async fn execute_all(
     db: &Db,
@@ -658,6 +794,7 @@ pub async fn execute_all(
     summary.archived = execute_archive(db, roots, plan, token, job_id).await?;
     summary.derived = execute_derived(db, roots, plan, token, job_id).await?;
     summary.artwork_dirs = execute_artwork_dirs(db, roots, plan, token).await?;
+    summary.inbox = execute_inbox(db, roots, plan, token).await?;
     log_summary(&summary);
     Ok(summary)
 }
@@ -674,13 +811,16 @@ pub fn log_summary(s: &Summary) {
         artwork_rows = s.artwork_rows.deleted,
         artwork_dirs = s.artwork_dirs.deleted,
         artwork_bytes = s.artwork_dirs.bytes,
+        inbox = s.inbox.deleted,
+        inbox_bytes = s.inbox.bytes,
         skipped = s.tracks.skipped
             + s.albums.skipped
             + s.archived.skipped
             + s.derived.skipped
             + s.artwork_rows.skipped
-            + s.artwork_dirs.skipped,
-        failed = s.archived.failed + s.derived.failed + s.artwork_dirs.failed,
+            + s.artwork_dirs.skipped
+            + s.inbox.skipped,
+        failed = s.archived.failed + s.derived.failed + s.artwork_dirs.failed + s.inbox.failed,
         "GC を実行した"
     );
 }
@@ -757,6 +897,8 @@ pub struct Preview {
     pub derived: PreviewSection,
     pub artwork_rows: PreviewSection,
     pub artwork_dirs: PreviewSection,
+    /// 破棄待ちで期限の来た Inbox の件（D-90）
+    pub inbox: PreviewSection,
     /// 掃除するジョブ行の数（P4-18）
     pub jobs: PreviewJobs,
 }
@@ -798,6 +940,9 @@ impl Preview {
             ),
             artwork_rows: section(&plan.artwork_rows, 0, |a| a.hex.clone()),
             artwork_dirs: section(&plan.artwork_dirs, 0, Clone::clone),
+            inbox: section(&plan.inbox, plan.inbox.iter().map(|i| i.bytes).sum(), |i| {
+                i.rel_dir.clone()
+            }),
             jobs: PreviewJobs::default(),
         }
     }

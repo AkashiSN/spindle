@@ -1,6 +1,7 @@
 //! Inbox の承認キュー（SPEC §7.8 / §9、D-68、P2-10）。
 //! `GET /api/inbox`（件と下書き・警告）、`POST /api/inbox/scan`、`POST /api/inbox/:id/approve`
-//! （検証して approved にし、inbox ジョブを投入）、`/reject`、`/reopen`
+//! （検証して approved にし、inbox ジョブを投入）、`/reject`、`/reopen`、`/discard`・`/undiscard`
+//! （却下した件の破棄待ちとその取り消し。消すのは GC。D-90）
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -49,6 +50,8 @@ pub struct ItemList {
     pub items: Vec<ItemView>,
     /// 周期監視の状態（P4-18）
     pub watch: WatchView,
+    /// 破棄待ちの件を GC が消すまでの日数（`[gc].retention_days`。D-90）
+    pub discard_retention_days: u32,
 }
 
 /// 周期監視（`[inbox].poll_interval_secs`）の状態。画面が「最後に確認: HH:MM:SS」を出す
@@ -161,6 +164,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
             checked_at,
             poll_interval_secs: state.config.inbox.poll_interval_secs,
         },
+        discard_retention_days: state.config.gc.retention_days,
     })
     .into_response())
 }
@@ -362,6 +366,48 @@ pub async fn reopen(
         ItemState::Pending,
     )
     .await
+}
+
+/// `POST /api/inbox/:id/discard`（D-90）: 却下した件を破棄待ちにする。ファイルはまだ消さない
+/// （GC が `[gc].retention_days` 経過後に消す）。rejected で破棄待ちでない件だけ
+pub async fn discard(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    discard_cas(&state, id, true).await
+}
+
+/// `POST /api/inbox/:id/undiscard`（D-90）: 破棄待ちを解いて rejected に戻す
+pub async fn undiscard(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    discard_cas(&state, id, false).await
+}
+
+async fn discard_cas(state: &AppState, id: i64, request: bool) -> Result<Response, ApiError> {
+    if let Some(r) = unavailable(state) {
+        return Ok(r);
+    }
+    let moved = state
+        .db
+        .transaction(move |c| {
+            let done = if request {
+                dbinbox::request_discard(c, id, now_epoch())?
+            } else {
+                dbinbox::cancel_discard(c, id, None)?
+            };
+            if done {
+                return Ok(Some(true));
+            }
+            Ok(dbinbox::get(c, id)?.map(|_| false))
+        })
+        .await?;
+    Ok(match moved {
+        Some(true) => StatusCode::NO_CONTENT.into_response(),
+        Some(false) => error_response(StatusCode::CONFLICT, "state"),
+        None => error_response(StatusCode::NOT_FOUND, "not_found"),
+    })
 }
 
 /// `GET /api/inbox/:id/artwork/:hash`（SPEC §7.8、P4-4）。件のファイルのうち `PICTURE` の sha256 が

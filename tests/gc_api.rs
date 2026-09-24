@@ -48,6 +48,7 @@ async fn build(with_gc: bool) -> App {
             archive: Arc::new(RootDir::open(&dir.path().join("Archive")).unwrap()),
             derived: Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap()),
             artwork: Arc::new(ArtworkStore::new(dir.path().join("thumbs"))),
+            inbox: None,
         }));
     }
     App {

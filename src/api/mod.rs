@@ -124,6 +124,8 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox/{id}/approve", post(inbox::approve))
         .route("/inbox/{id}/reject", post(inbox::reject))
         .route("/inbox/{id}/reopen", post(inbox::reopen))
+        .route("/inbox/{id}/discard", post(inbox::discard))
+        .route("/inbox/{id}/undiscard", post(inbox::undiscard))
         .route("/inbox/{id}/artwork/{hash}", get(inbox::artwork))
         .route("/inbox/{id}/preview", post(inbox::preview))
         .route("/ytmusic/download", post(ytmusic::download))

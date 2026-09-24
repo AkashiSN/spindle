@@ -307,6 +307,7 @@ async fn main() -> anyhow::Result<()> {
         archive: Arc::clone(&archive_root),
         derived: Arc::clone(&derived_root),
         artwork: Arc::clone(&artwork),
+        inbox: Some(Arc::clone(&inbox_root)),
     });
     state = state.with_gc(Arc::clone(&gc_roots));
     // MusicBrainz の照会（P2-3）。UA 必須・1 req/s

@@ -50,7 +50,7 @@ deep_interval_days = 30         # tag_hash / audio_md5 を全件再計算する 
 poll_interval_secs = 60         # Inbox の確認間隔（秒。変化があったときだけ走査を投入）。0 で自動なし（UI の「今すぐ確認」だけ）
 
 [gc]
-retention_days = 30             # missing_since / 退避 WAV / Derived 孤児を物理削除するまでの日数
+retention_days = 30             # missing_since / 退避 WAV / Derived 孤児 / 却下して削除した Inbox の件を物理削除するまでの日数
 jobs_done_days = 7              # 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない
 jobs_failed_days = 30           # failed のジョブ行を消すまでの日数。0 で消さない
 
