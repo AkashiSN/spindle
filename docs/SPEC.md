@@ -143,9 +143,9 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 
 ```toml
 [layout]
-multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02} {title}"
-single_disc = "{category}/{albumartist}/{album}/{track:02} {title}"
-unsorted    = "_Unsorted/{albumartist}/{album}/{track:02} {title}"
+multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02}. {title}"
+single_disc = "{category}/{albumartist}/{album}/{track:02}. {title}"
+unsorted    = "_Unsorted/{albumartist}/{album}/{track:02}. {title}"
 ```
 
 - 階層は Artist ではなく **AlbumArtist**。コンピレーションは `Various Artists`
@@ -2212,9 +2212,9 @@ playlists = "/playlists"
 data     = "/data"
 
 [layout]
-multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02} {title}"
-single_disc = "{category}/{albumartist}/{album}/{track:02} {title}"
-unsorted    = "_Unsorted/{albumartist}/{album}/{track:02} {title}"
+multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02}. {title}"
+single_disc = "{category}/{albumartist}/{album}/{track:02}. {title}"
+unsorted    = "_Unsorted/{albumartist}/{album}/{track:02}. {title}"
 
 [rip]
 device = "/dev/sr0"

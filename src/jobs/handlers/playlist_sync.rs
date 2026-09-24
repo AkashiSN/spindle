@@ -858,3 +858,18 @@ fn leading_number(file_name: &str) -> Option<i64> {
         .collect();
     digits.parse().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::leading_number;
+
+    #[test]
+    fn leading_number_reads_both_layout_forms() {
+        // `[layout]` の `{track:02}. {title}`（旧パイプラインと同じ形）と、ピリオド無しの旧 spindle の形
+        assert_eq!(leading_number("165. 再会 (Cover).opus"), Some(165));
+        assert_eq!(leading_number("03. title.flac"), Some(3));
+        assert_eq!(leading_number("165 再会 (Cover).opus"), Some(165));
+        assert_eq!(leading_number("3-title.opus"), Some(3));
+        assert_eq!(leading_number("title.opus"), None);
+    }
+}

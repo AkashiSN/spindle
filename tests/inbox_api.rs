@@ -1349,7 +1349,7 @@ async fn preview_returns_the_destination_and_approve_checks_pictures() {
         .await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["rel_dir"], "_Unsorted/Artist/Album");
-    assert_eq!(body["paths"][1], "_Unsorted/Artist/Album/02 Two.flac");
+    assert_eq!(body["paths"][1], "_Unsorted/Artist/Album/02. Two.flac");
     assert!(body["error"].is_null());
     // 問題のある下書き: 200 で理由
     let mut bad = draft("AlbumA");

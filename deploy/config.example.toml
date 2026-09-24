@@ -10,9 +10,9 @@ playlists = "/playlists"
 data      = "/data"
 
 [layout]
-multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02} {title}"
-single_disc = "{category}/{albumartist}/{album}/{track:02} {title}"
-unsorted    = "_Unsorted/{albumartist}/{album}/{track:02} {title}"
+multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02}. {title}"
+single_disc = "{category}/{albumartist}/{album}/{track:02}. {title}"
+unsorted    = "_Unsorted/{albumartist}/{album}/{track:02}. {title}"
 
 [rip]
 device = "/dev/sr0"
