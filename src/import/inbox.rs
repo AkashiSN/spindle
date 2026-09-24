@@ -2445,22 +2445,49 @@ fn consume_inbox(
 /// 破棄待ちの件のファイルを消した結果（D-90）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscardOutcome {
-    /// 消した音声・同梱ファイルの数とバイト数
+    /// 全部消した（消した音声・同梱ファイルの数とバイト数）。行を消してよい
     Deleted { files: usize, bytes: u64 },
-    /// 走査が写した後にファイルが足された・変わった（何も消していない）。理由
+    /// 破棄を要求した後にファイルが足された・変わった。確かめの段で見つけたなら何も消していない。
+    /// 消している途中で見つけたなら、それまでに消したのは確かめ済みのものだけで、残りは触っていない。
+    /// 破棄待ちを解いて行を残す。理由
     Changed(String),
+    /// 消せなかった（NotFound 以外の失敗）。行と破棄待ちを残して次の GC で続きを行う。理由
+    Failed(String),
+}
+
+/// 直下のファイル 1 本の確かめ済みの stat
+struct Checked {
+    rel: RelPath,
+    st: crate::fsroot::Stat,
+}
+
+/// 破棄を要求した後に作られた・変えられた（ctime が要求の秒以降）。同じ秒は安全側に「後」とみなす
+fn touched_since(st: &crate::fsroot::Stat, requested_at: i64) -> bool {
+    st.ctime_ns.div_euclid(1_000_000_000) >= requested_at
+}
+
+fn same_stat(a: &crate::fsroot::Stat, b: &crate::fsroot::Stat) -> bool {
+    a.inode == b.inode && a.size == b.size && a.mtime_ns == b.mtime_ns && a.ctime_ns == b.ctime_ns
 }
 
 /// GC が破棄待ちの件のファイルを消す（D-90。物理削除は GC だけ）。消すのは件のディレクトリの直下の
-/// **走査が写した音声**（stat が一致するもの）・既知の同梱ファイル（cover 画像 / cue / toc / log）・
-/// サイドカーだけで、ディレクトリは空になったときだけ消す。先に全部を確かめ、写した後に音声が足された・
-/// 変わったなら何も消さずに [`DiscardOutcome::Changed`]。サブディレクトリ（別の件）と symlink は辿らない。
-/// Inbox 直下の件（`rel_dir` が空）は音声だけを消す
+/// **走査が写した音声**（`inbox_files` と stat が一致するもの）・既知の同梱ファイル（cover 画像 / cue / toc /
+/// log）・サイドカーだけで、ディレクトリは空になったときだけ消す。サブディレクトリ（別の件）・symlink・
+/// 知らないファイルは触らない。Inbox 直下の件（`rel_dir` が空）は音声だけ。
+///
+/// 1. **確かめ**（何も消さない）: 直下の音声がすべて写した行にあって stat が同じこと、同梱ファイルとサイドカーが
+///    破棄の要求（`discard_requested_at`）より後に作られた・変えられた（ctime）ものでないこと。どれかが外れたら
+///    [`DiscardOutcome::Changed`]（同梱ファイルは `inbox_files` に写らないので、要求の時刻で新旧を分ける）
+/// 2. **削除**: 1 本ずつ、消す直前に確かめたときの stat と照合する。外れたらそこで止めて `Changed`。
+///    NotFound 以外で消せなければそこで止めて [`DiscardOutcome::Failed`]（行を残して次の GC で続き）
 pub fn discard_item_files(
     inbox: &RootDir,
     item: &Item,
     files: &[FileRow],
 ) -> Result<DiscardOutcome, FsError> {
+    let Some(requested_at) = item.discard_requested_at else {
+        return Ok(DiscardOutcome::Changed("破棄待ちでない".to_owned()));
+    };
     let dir = if item.rel_dir.is_empty() {
         None
     } else {
@@ -2470,7 +2497,7 @@ pub fn discard_item_files(
         .iter()
         .map(|f| (canonical_key(&f.rel_path), f))
         .collect();
-    // 1. 確かめる: 直下の音声がすべて写した行にあり、stat が同じ
+    // 1. 確かめる
     let entries = match inbox.read_dir(dir.as_ref()) {
         Ok(e) => e,
         Err(FsError::NotFound) => Vec::new(),
@@ -2480,8 +2507,7 @@ pub fn discard_item_files(
         Some(d) => d.join(name),
         None => RelPath::parse(name),
     };
-    let mut audio = Vec::new();
-    let mut companions = Vec::new();
+    let mut targets: Vec<Checked> = Vec::new();
     for e in &entries {
         let Some(name) = e.name.to_str() else {
             continue;
@@ -2496,71 +2522,75 @@ pub fn discard_item_files(
             .rsplit_once('.')
             .and_then(|(_, ext)| Codec::from_extension(ext))
             .is_some();
+        let is_other = dir.is_some()
+            && (crate::cd::riplog::is_companion_name(name)
+                || name == crate::import::sidecar::SIDECAR_NAME);
+        if !is_audio && !is_other {
+            continue;
+        }
+        let st = match inbox.stat(&rel) {
+            Ok(st) => st,
+            Err(FsError::NotFound) => continue,
+            Err(e) => return Err(e),
+        };
         if is_audio {
-            let st = match inbox.stat(&rel) {
-                Ok(st) => st,
-                Err(FsError::NotFound) => continue,
-                Err(e) => return Err(e),
-            };
             match rows.get(&rel.key()) {
-                Some(row) if stat_matches(row, &st) => audio.push((rel, st.size)),
+                Some(row) if stat_matches(row, &st) => {}
                 Some(_) => return Ok(DiscardOutcome::Changed(format!("{rel} が変わっている"))),
                 None => return Ok(DiscardOutcome::Changed(format!("{rel} が足されている"))),
             }
-        } else if dir.is_some() && crate::cd::riplog::is_companion_name(name) {
-            companions.push(rel);
+        } else if touched_since(&st, requested_at) {
+            return Ok(DiscardOutcome::Changed(format!(
+                "{rel} が削除の後に置かれた・変えられた"
+            )));
         }
+        targets.push(Checked { rel, st });
     }
-    let sidecar = current_sidecar_key(inbox, &item.rel_dir);
-    // 2. 消す（1 件ずつ。消す直前にもう一度 stat を照合する）
+    // 2. 消す（音声を先に。サイドカーは最後）
+    targets.sort_by_key(|c| {
+        let name = c.rel.file_name();
+        if name == crate::import::sidecar::SIDECAR_NAME {
+            2
+        } else if name
+            .rsplit_once('.')
+            .and_then(|(_, ext)| Codec::from_extension(ext))
+            .is_some()
+        {
+            0
+        } else {
+            1
+        }
+    });
     let mut out_files = 0;
     let mut bytes = 0;
-    for (rel, size) in audio {
-        let unchanged = rows
-            .get(&rel.key())
-            .zip(inbox.stat(&rel).ok())
-            .is_some_and(|(row, st)| stat_matches(row, &st));
-        if !unchanged {
-            tracing::warn!(path = %rel, "破棄の間に変わったので残す");
-            continue;
+    for c in &targets {
+        match inbox.stat(&c.rel) {
+            Ok(now) if same_stat(&now, &c.st) => {}
+            Ok(_) => {
+                return Ok(DiscardOutcome::Changed(format!(
+                    "{} が削除の途中で変わった",
+                    c.rel
+                )))
+            }
+            Err(FsError::NotFound) => continue,
+            Err(e) => return Ok(DiscardOutcome::Failed(format!("{}: {e}", c.rel))),
         }
-        match inbox.unlink(&rel) {
+        match inbox.unlink(&c.rel) {
             Ok(()) => {
                 out_files += 1;
-                bytes += size;
+                bytes += c.st.size;
             }
             Err(FsError::NotFound) => {}
-            Err(e) => tracing::warn!(path = %rel, error = %e, "Inbox のファイルを消せない"),
-        }
-    }
-    for rel in companions {
-        let size = inbox.stat(&rel).map(|st| st.size).unwrap_or(0);
-        match inbox.unlink(&rel) {
-            Ok(()) => {
-                out_files += 1;
-                bytes += size;
-            }
-            Err(FsError::NotFound) => {}
-            Err(e) => tracing::warn!(path = %rel, error = %e, "Inbox の同梱ファイルを消せない"),
+            Err(e) => return Ok(DiscardOutcome::Failed(format!("{}: {e}", c.rel))),
         }
     }
     if let Some(d) = &dir {
-        // サイドカーは確かめた時と同じもの（別の取り込みが書き直していない）だけ消す
-        if let (Some(rel), Some(_)) = (sidecar_rel(&item.rel_dir), sidecar) {
-            if current_sidecar_key(inbox, &item.rel_dir) == sidecar {
-                match inbox.unlink(&rel) {
-                    Ok(()) | Err(FsError::NotFound) => {}
-                    Err(e) => tracing::warn!(path = %rel, error = %e, "サイドカーを消せない"),
-                }
-            } else {
-                tracing::warn!(path = %rel, "サイドカーが破棄の間に変わったので残す");
-            }
-        }
         match inbox.remove_dir(d) {
             Ok(()) | Err(FsError::NotFound) => {}
+            // 知らないファイルやサブディレクトリが残っている（消さないもの）
             Err(FsError::Io(e))
                 if e.raw_os_error() == Some(rustix::io::Errno::NOTEMPTY.raw_os_error()) => {}
-            Err(e) => tracing::warn!(dir = %d, error = %e, "Inbox のディレクトリを消せない"),
+            Err(e) => return Ok(DiscardOutcome::Failed(format!("{d}: {e}"))),
         }
     }
     Ok(DiscardOutcome::Deleted {

@@ -683,8 +683,9 @@ pub async fn execute_artwork_dirs(
 
 /// F: 破棄待ちの Inbox の件を消す（D-90）。1 件ごとに書き込みのトランザクションの中で、まだ rejected で
 /// 期限が来ているか（計画の後の取り消し・下書きに戻す）を確かめ直し、ファイルを消してから行を消す。
-/// 取り消しの API も同じ writer を通るので、確かめてから消すまでの間に取り消されることはない。走査が写した
-/// 後にファイルが足された・変わっていれば何も消さず、破棄待ちを解いて理由を残す
+/// 取り消しの API も同じ writer を通るので、確かめてから消すまでの間に取り消されることはない。破棄の要求の
+/// 後にファイルが足された・変わっていれば破棄待ちを解いて理由を残し、消せなかったものがあれば行と破棄待ちを
+/// 残して次の GC で続きを行う（どちらも行は消さない）
 pub async fn execute_inbox(
     db: &Db,
     roots: &GcRoots,
@@ -727,6 +728,8 @@ pub async fn execute_inbox(
                         )?;
                         Ok(InboxGc::Changed(reason))
                     }
+                    // 行と破棄待ちを残す（次の GC で続きを行う）
+                    Ok(crate::import::inbox::DiscardOutcome::Failed(e)) => Ok(InboxGc::Failed(e)),
                     Err(e) => Ok(InboxGc::Failed(e.to_string())),
                 }
             })

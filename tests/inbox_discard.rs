@@ -20,10 +20,11 @@ use spindle::media::artwork::ArtworkStore;
 
 const DAY: i64 = 86_400;
 const RETENTION: i64 = 30 * DAY;
-/// 破棄を要求した時刻
-const T0: i64 = 1_000_000;
 
 struct Env {
+    /// 破棄を要求する時刻。同梱ファイルの新旧は ctime と比べる（D-90）ので実時刻にし、準備で置くファイルより
+    /// 後（2 秒先）にする
+    t0: i64,
     dir: tempfile::TempDir,
     db: Arc<Db>,
     inbox: Arc<RootDir>,
@@ -46,6 +47,7 @@ impl Env {
             inbox: Some(Arc::clone(&inbox)),
         };
         Self {
+            t0: spindle::db::now_epoch() + 2,
             dir,
             db,
             inbox,
@@ -61,6 +63,13 @@ impl Env {
         let p = self.path(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         common::write_wav(&p, &common::pcm_samples(seed), 16);
+    }
+
+    /// 実時刻が破棄の要求（`t0`）に達するまで待つ（要求の後に置いたファイルを作るため）
+    async fn wait_past_request(&self) {
+        while spindle::db::now_epoch() < self.t0 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     fn file(&self, rel: &str, body: &[u8]) {
@@ -130,7 +139,7 @@ async fn seeded() -> (Env, i64) {
     env.file("youtube/A/Aのお歌/spindle-inbox.json", b"{}");
     env.wav("youtube/A/Aのお歌/sub/03 z.wav", 3);
     env.wav("youtube/A/other/04 w.wav", 4);
-    env.scan(T0 - 10).await;
+    env.scan(env.t0 - 10).await;
     let id = env.item_id("youtube/A/Aのお歌").await;
     (env, id)
 }
@@ -138,13 +147,13 @@ async fn seeded() -> (Env, i64) {
 #[tokio::test]
 async fn discarded_item_is_deleted_only_after_the_retention() {
     let (env, id) = seeded().await;
-    env.reject_and_discard(id, T0).await;
+    env.reject_and_discard(id, env.t0).await;
     // 期限前は計画にも載らない
-    assert_eq!(env.gc(T0 + RETENTION - 1).await, (0, 0, 0));
+    assert_eq!(env.gc(env.t0 + RETENTION - 1).await, (0, 0, 0));
     assert!(exists(&env.path("youtube/A/Aのお歌/01 x.wav")));
     assert!(env.item(id).await.is_some());
     // 期限後: 件の音声・同梱の画像・サイドカーを消し、行も消す
-    assert_eq!(env.gc(T0 + RETENTION).await, (1, 1, 0));
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (1, 1, 0));
     for gone in [
         "youtube/A/Aのお歌/01 x.wav",
         "youtube/A/Aのお歌/02 y.wav",
@@ -169,12 +178,12 @@ async fn empty_directory_is_removed_and_unknown_files_keep_it() {
     env.wav("youtube/B/Bのお歌/01 x.wav", 1);
     env.wav("youtube/C/Cのお歌/01 x.wav", 2);
     env.file("youtube/C/Cのお歌/memo.txt", b"keep");
-    env.scan(T0 - 10).await;
+    env.scan(env.t0 - 10).await;
     let b = env.item_id("youtube/B/Bのお歌").await;
     let c = env.item_id("youtube/C/Cのお歌").await;
-    env.reject_and_discard(b, T0).await;
-    env.reject_and_discard(c, T0).await;
-    assert_eq!(env.gc(T0 + RETENTION).await, (2, 2, 0));
+    env.reject_and_discard(b, env.t0).await;
+    env.reject_and_discard(c, env.t0).await;
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (2, 2, 0));
     // 空になったディレクトリは消える。親（youtube/B）は残す
     assert!(!exists(&env.path("youtube/B/Bのお歌")));
     assert!(exists(&env.path("youtube/B")));
@@ -186,7 +195,7 @@ async fn empty_directory_is_removed_and_unknown_files_keep_it() {
 #[tokio::test]
 async fn cancelled_discard_is_kept() {
     let (env, id) = seeded().await;
-    env.reject_and_discard(id, T0).await;
+    env.reject_and_discard(id, env.t0).await;
     env.db
         .write(move |c| {
             assert!(dbinbox::cancel_discard(c, id, None)?);
@@ -194,7 +203,7 @@ async fn cancelled_discard_is_kept() {
         })
         .await
         .unwrap();
-    assert_eq!(env.gc(T0 + RETENTION).await, (0, 0, 0));
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (0, 0, 0));
     let it = env.item(id).await.unwrap();
     assert_eq!(it.state, ItemState::Rejected);
     assert_eq!(it.discard_requested_at, None);
@@ -205,8 +214,8 @@ async fn cancelled_discard_is_kept() {
 async fn cancel_after_planning_keeps_the_item() {
     // 計画の後に取り消された（下書きに戻された）件は、実行時の確かめ直しで残す
     let (env, id) = seeded().await;
-    env.reject_and_discard(id, T0).await;
-    let p = plan(&env.db, &env.roots, RETENTION, T0 + RETENTION)
+    env.reject_and_discard(id, env.t0).await;
+    let p = plan(&env.db, &env.roots, RETENTION, env.t0 + RETENTION)
         .await
         .unwrap();
     assert_eq!(p.inbox.len(), 1);
@@ -218,7 +227,7 @@ async fn cancel_after_planning_keeps_the_item() {
                 &[ItemState::Rejected],
                 ItemState::Pending,
                 None,
-                T0 + 1
+                env.t0 + 1
             )?);
             Ok(())
         })
@@ -241,9 +250,9 @@ async fn cancel_after_planning_keeps_the_item() {
 async fn a_file_added_after_the_scan_stops_the_deletion() {
     // 走査が写した後（次の走査の前）に音声が足された。何も消さず、破棄待ちを解いて理由を残す
     let (env, id) = seeded().await;
-    env.reject_and_discard(id, T0).await;
+    env.reject_and_discard(id, env.t0).await;
     env.wav("youtube/A/Aのお歌/05 new.wav", 5);
-    assert_eq!(env.gc(T0 + RETENTION).await, (1, 0, 1));
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (1, 0, 1));
     for kept in [
         "youtube/A/Aのお歌/01 x.wav",
         "youtube/A/Aのお歌/05 new.wav",
@@ -261,11 +270,11 @@ async fn a_file_added_after_the_scan_stops_the_deletion() {
 #[tokio::test]
 async fn a_changed_file_stops_the_deletion() {
     let (env, id) = seeded().await;
-    env.reject_and_discard(id, T0).await;
+    env.reject_and_discard(id, env.t0).await;
     // 同じ名前で中身（size / mtime）を差し替える
     env.wav("youtube/A/Aのお歌/02 y.wav", 9);
     std::fs::write(env.path("youtube/A/Aのお歌/02 y.wav"), b"RIFF-changed").unwrap();
-    assert_eq!(env.gc(T0 + RETENTION).await, (1, 0, 1));
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (1, 0, 1));
     assert!(exists(&env.path("youtube/A/Aのお歌/01 x.wav")));
     assert_eq!(env.item(id).await.unwrap().discard_requested_at, None);
 }
@@ -273,9 +282,9 @@ async fn a_changed_file_stops_the_deletion() {
 #[tokio::test]
 async fn scan_that_sees_changed_files_cancels_the_discard() {
     let (env, id) = seeded().await;
-    env.reject_and_discard(id, T0).await;
+    env.reject_and_discard(id, env.t0).await;
     env.wav("youtube/A/Aのお歌/05 new.wav", 5);
-    env.scan(T0 + 10).await;
+    env.scan(env.t0 + 10).await;
     let it = env.item(id).await.unwrap();
     assert_eq!(it.state, ItemState::Rejected, "却下のまま（人が見直す）");
     assert_eq!(it.discard_requested_at, None);
@@ -283,23 +292,88 @@ async fn scan_that_sees_changed_files_cancels_the_discard() {
     // 変化の無い走査では破棄待ちは解けない
     env.db
         .write(move |c| {
-            assert!(dbinbox::request_discard(c, id, T0 + 20)?);
+            assert!(dbinbox::request_discard(c, id, env.t0 + 20)?);
             Ok(())
         })
         .await
         .unwrap();
-    env.scan(T0 + 30).await;
+    env.scan(env.t0 + 30).await;
     assert_eq!(
         env.item(id).await.unwrap().discard_requested_at,
-        Some(T0 + 20)
+        Some(env.t0 + 20)
     );
 }
 
 #[tokio::test]
 async fn inbox_category_is_skipped_without_an_inbox_root() {
     let (mut env, id) = seeded().await;
-    env.reject_and_discard(id, T0).await;
+    env.reject_and_discard(id, env.t0).await;
     env.roots.inbox = None;
-    assert_eq!(env.gc(T0 + RETENTION).await, (0, 0, 0));
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (0, 0, 0));
     assert!(env.item(id).await.is_some());
+}
+
+#[tokio::test]
+async fn a_companion_placed_after_the_request_stops_the_deletion() {
+    // 同梱ファイル（cover.jpg 等）は inbox_files に写らないので、破棄の要求より後に置かれたものは ctime で見分ける。
+    // 要求の後に差し替えられた cover を黙って消さない
+    let (env, id) = seeded().await;
+    env.reject_and_discard(id, env.t0).await;
+    env.wait_past_request().await;
+    std::fs::remove_file(env.path("youtube/A/Aのお歌/cover.jpg")).unwrap();
+    env.file("youtube/A/Aのお歌/cover.jpg", b"new jpeg");
+    env.file("youtube/A/Aのお歌/disc1.cue", b"cue");
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (1, 0, 1));
+    for kept in [
+        "youtube/A/Aのお歌/01 x.wav",
+        "youtube/A/Aのお歌/cover.jpg",
+        "youtube/A/Aのお歌/disc1.cue",
+        "youtube/A/Aのお歌/spindle-inbox.json",
+    ] {
+        assert!(exists(&env.path(kept)), "{kept} が消えた");
+    }
+    let it = env.item(id).await.unwrap();
+    assert_eq!(it.discard_requested_at, None);
+    assert_eq!(it.error.as_deref(), Some(DISCARD_CANCELLED_BY_CHANGE));
+}
+
+#[tokio::test]
+async fn a_failed_unlink_keeps_the_row_and_the_request_for_the_next_gc() {
+    // 消せなかった（EACCES）ら成功扱いにせず、行と破棄待ちを残す。直れば次の GC で消える
+    use std::os::unix::fs::PermissionsExt as _;
+    if is_root() {
+        eprintln!("root では権限で unlink を失敗させられないので skip");
+        return;
+    }
+    let (env, id) = seeded().await;
+    env.reject_and_discard(id, env.t0).await;
+    let dir = env.path("youtube/A/Aのお歌");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let p = plan(&env.db, &env.roots, RETENTION, env.t0 + RETENTION)
+        .await
+        .unwrap();
+    let c = execute_inbox(&env.db, &env.roots, &p, &CancellationToken::new())
+        .await
+        .unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!((c.deleted, c.failed), (0, 1));
+    let it = env.item(id).await.unwrap();
+    assert_eq!(it.state, ItemState::Rejected);
+    assert_eq!(it.discard_requested_at, Some(env.t0), "破棄待ちは残る");
+    assert!(exists(&env.path("youtube/A/Aのお歌/01 x.wav")));
+    // 次の GC で続きを行い、行も消す
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (1, 1, 0));
+    assert!(!exists(&env.path("youtube/A/Aのお歌/01 x.wav")));
+    assert!(env.item(id).await.is_none());
+}
+
+fn is_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1).map(|u| u == "0"))
+        })
+        .unwrap_or(false)
 }

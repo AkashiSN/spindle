@@ -243,7 +243,9 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
         if t is None or i in assigned or i in claimed:
             continue
         if not is_available(e):
-            take(i, i, "position-only")
+            # 非公開 / 削除でも長さが分かって食い違えば採らない（別の動画の位置）
+            if durations_agree(e, t):
+                take(i, i, "position-only")
         elif title_matches(e["title"], t.get("title") or "") and durations_agree(e, t):
             # 位置とタイトルが合っても長さが食い違えば採らない（曲名をタイトルに含む別動画。VALIS の 628 秒の
             # ドキュメンタリーが 270 秒の曲の位置にあった）。手順 2 の救済か no-track に回る

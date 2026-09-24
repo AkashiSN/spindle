@@ -219,6 +219,22 @@ class Plan(unittest.TestCase):
         self.assertEqual(by_video["doc"]["status"], "no-track")
         self.assertIsNone(by_video["doc"]["track_id"])
 
+    def test_unavailable_entry_with_a_disagreeing_length_is_not_position_only(self):
+        # 非公開 / 削除の動画でも長さが分かって食い違えば位置で採らない（別の動画の位置）
+        entries = [entry("v1", "曲 1 / A", 200), {"id": "p", "title": "[Private video]", "duration": 628},
+                   entry("v3", "曲 3 / A", 220)]
+        tracks = [track(1, 1, "曲 1", duration_ms=200_000), track(2, 2, "曲 2", duration_ms=270_000),
+                  track(3, 3, "曲 3", duration_ms=220_000)]
+        rows = build_plan("A のお歌", entries, tracks)
+        by_no = {r["track_no"]: r for r in rows}
+        # 人が見る title-mismatch に回る（既定では書かない）
+        self.assertEqual(by_no[2]["status"], "title-mismatch")
+        self.assertNotIn(2, rows_to_apply(rows, include_mismatch=False, include_inferred=True))
+        # 長さが不明なら従来どおり位置で採る
+        entries[1] = {"id": "p", "title": "[Private video]"}
+        rows = build_plan("A のお歌", entries, tracks)
+        self.assertEqual({r["track_no"]: r for r in rows}[2]["status"], "position-only")
+
     def test_neighbour_inference_skips_a_run_whose_length_disagrees(self):
         # 英題で位置推定になる区間でも、長さが食い違う行は採らない（人が見る title-mismatch に回す）
         entries = [entry("v1", "曲 1 / A", 200), entry("v2", "Yarn [Music Video]", 628), entry("v3", "曲 3 / A", 220)]
