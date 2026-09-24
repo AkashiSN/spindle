@@ -23,6 +23,7 @@ import {
   extraTagKeys,
   inboxColumns,
   newTagKeyProblem,
+  omitsDisc,
   parseHiddenColumns,
   sameTitleLabel,
   setTrackTag,
@@ -124,6 +125,7 @@ export function InboxTrackGrid({
   const [added, setAdded] = useState<string[]>([])
   const hasPicture = draft.tracks.some((t) => trackPictureUrl(item.id, files.get(t.rel_path), t) != null) || editable
   const hasSource = item.tracks.some((f) => f.source != null)
+  const noDisc = omitsDisc(item, draft)
   const tagKeys = useMemo(
     () => [...new Set([...extraTagKeys(item.tracks, draft.tracks), ...added])].sort(),
     [item.tracks, draft.tracks, added],
@@ -380,7 +382,8 @@ export function InboxTrackGrid({
           </td>
         )
       default: {
-        const text = cellText(c, t, draft, f)
+        // 宛先に合わせてディスク番号を書かない件は、disc 列を空で見せる（値は下書きに残る）
+        const text = c.id === 'disc' && noDisc ? '' : cellText(c, t, draft, f)
         const tagKey = c.id.startsWith('tag:') ? c.label : null
         const before = tagKey == null ? fieldChange(c, t) : null
         const changed = tagKey != null ? tagChanged(f, t, tagKey) : before != null

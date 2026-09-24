@@ -130,6 +130,8 @@ export type InboxDestination = {
   album_gain: boolean
   /** 追記先の既存の番号 `[disc, track]`（昇順。P4-22。旧サーバでは無い） */
   numbers?: Array<[number, number]>
+  /** 追記先の曲がディスク番号を持つか（false なら配置で `DISCNUMBER` を書かない。旧サーバでは無い） */
+  uses_disc?: boolean
 }
 
 /** 件が参照する購読の直近の同期（`GET /api/inbox` の `subscriptions`。P4-22） */
@@ -592,8 +594,22 @@ export function subscriptionNumbers(
  * 「番号 165 に入る」と出す（「max + 1 から」は購読の件には当たらない）。そうでなければ従来の文言。
  * `overlap` は下書きの番号が宛先の既存の番号と重なるときの警告（承認はサーバが 400 で止める）
  */
+/**
+ * 配置で `DISCNUMBER` を書かないか（サーバの `omits_disc` と同じ規則）。追記先の曲がどれもディスク番号を
+ * 持たず、件が 1 枚分で、CD の件（`rip` あり）でないとき。ディスク番号の無い album に 1 を書くと、並べ替えで
+ * 追記した曲だけが末尾に回る
+ */
+export function omitsDisc(
+  item: Pick<InboxItem, 'destination' | 'rip'>,
+  draft: Pick<InboxDraft, 'tracks'>,
+): boolean {
+  const d = item.destination
+  if (d == null || d.uses_disc !== false || d.track_count === 0 || item.rip != null) return false
+  return new Set(draft.tracks.map((t) => t.disc_no)).size <= 1
+}
+
 export function destinationText(
-  item: Pick<InboxItem, 'destination' | 'tracks'>,
+  item: Pick<InboxItem, 'destination' | 'tracks' | 'rip'>,
   draft: Pick<InboxDraft, 'tracks'>,
 ): { label: string; overlap: string | null } | null {
   const d = item.destination
@@ -604,10 +620,11 @@ export function destinationText(
     .map((t) => [t.disc_no, t.track_no])
   const overlap = clash.length === 0 ? null : `番号 ${numbersText(clash)} は宛先に既にある（③ で直す）`
   const subscribed = subscriptionNumbers(item, draft)
-  if (subscribed.length === 0) return { label: destinationLabel(d) ?? '', overlap }
+  const disc = omitsDisc(item, draft) ? '。ディスク番号は付けない（宛先の曲に無い）' : ''
+  if (subscribed.length === 0) return { label: (destinationLabel(d) ?? '') + disc, overlap }
   const name = d.album == null ? '既存のアルバム' : `既存の『${d.album}』`
   return {
-    label: `宛先: ${name}（${d.track_count} 曲）に追加。番号 ${numbersText(subscribed)} に入る（再生リストの位置。空けてある番号）`,
+    label: `宛先: ${name}（${d.track_count} 曲）に追加。番号 ${numbersText(subscribed)} に入る（再生リストの位置。空けてある番号）${disc}`,
     overlap,
   }
 }

@@ -42,6 +42,7 @@ import {
   type InboxDraft,
   type InboxFile,
   type InboxItem,
+  omitsDisc,
 } from './inbox'
 import type { ReleaseCandidate } from './cd'
 
@@ -293,6 +294,28 @@ describe('destinationLabel / verdictLabel（D-70）', () => {
     ] } as InboxDraft
     expect(destinationText(two, both)?.label).toContain('番号 170〜171 に入る')
     expect(destinationText(item({ destination: null }), draft(1))).toBeNull()
+  })
+
+  it('ディスク番号の無い album への追記は DISCNUMBER を書かない（omitsDisc）', () => {
+    const base = { album_id: 713, album: '明透のお歌', track_count: 178, max_track_no: 179, album_gain: false }
+    const one = { tracks: [{ rel_path: 'y/165.opus', disc_no: 1, track_no: 165 }] } as InboxDraft
+    const f = file('y/165.opus', 'opus')
+    const noDisc = item({ destination: { ...base, uses_disc: false }, tracks: [f] })
+    expect(omitsDisc(noDisc, one)).toBe(true)
+    expect(destinationText(noDisc, one)?.label).toBe(
+      '宛先: 既存の『明透のお歌』（178 曲）に追加。番号は 180 から。ディスク番号は付けない（宛先の曲に無い）',
+    )
+    // 宛先がディスク番号を使っている / 旧サーバ（uses_disc 無し）/ 宛先なし / CD の件 / 2 枚分は従来どおり
+    expect(omitsDisc(item({ destination: { ...base, uses_disc: true }, tracks: [f] }), one)).toBe(false)
+    expect(omitsDisc(item({ destination: base, tracks: [f] }), one)).toBe(false)
+    expect(omitsDisc(item({ destination: null, tracks: [f] }), one)).toBe(false)
+    const rip = { toc: '0:1:2', isrcs: [], mcn: null } as unknown as InboxItem['rip']
+    expect(omitsDisc(item({ destination: { ...base, uses_disc: false }, tracks: [f], rip }), one)).toBe(false)
+    const twoDiscs = { tracks: [
+      { rel_path: 'a', disc_no: 1, track_no: 1 },
+      { rel_path: 'b', disc_no: 2, track_no: 1 },
+    ] } as InboxDraft
+    expect(omitsDisc(item({ destination: { ...base, uses_disc: false }, tracks: [f] }), twoDiscs)).toBe(false)
   })
 
   it('同期が番号を空けた経緯（P4-22）', () => {

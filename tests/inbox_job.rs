@@ -967,6 +967,102 @@ async fn second_item_appends_to_the_existing_album_and_removes_the_sidecar() {
 
 /// 下書きの album_gain=true で配置した album は属性が on になり rg は album 単位。追記の下書きは
 /// 追記先の属性を上書きし、off にすると album の値が消える（D-74）
+/// 追記先の album がディスク番号を使っているかで `DISCNUMBER` を合わせる（D-70 追記）。`disc_less` なら
+/// 追記先のトラックを disc なしにしてから 2 件目を置く
+async fn append_second_item(disc_less: bool) -> Option<(Lib, i64)> {
+    let lib = Lib::new();
+    lib.add("AlbumA/01.flac", 1, "One", "A", 1)?;
+    lib.conn()
+        .execute("INSERT INTO categories (name) VALUES ('Rock')", [])
+        .unwrap();
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], Some("Rock"), "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    if disc_less {
+        // 旧パイプライン由来の album（DISCNUMBER なし）と同じ形にする。DB はキャッシュなので両方揃える
+        let p = lib.lib_path("Rock/Artist/Album/01 One.flac");
+        let mut f = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&p)
+            .unwrap();
+        spindle::domain::tags::write_tag_changes(
+            &mut f,
+            Some("flac"),
+            &[spindle::domain::tags::TagChange {
+                key: "DISCNUMBER".into(),
+                values: None,
+            }],
+            None,
+        )
+        .unwrap();
+        lib.conn()
+            .execute("UPDATE tracks SET disc_no = NULL", [])
+            .unwrap();
+    }
+    // 2 件目のファイルは DISCNUMBER=1 を持っている（set_basic_tags）
+    lib.add(
+        "youtube/Artist/Album/20260901 Two [abc].flac",
+        2,
+        "Two",
+        "Album",
+        0,
+    )?;
+    lib.scan(2000).await;
+    let b = lib.item("youtube/Artist/Album").unwrap();
+    lib.approve(
+        b.id,
+        &draft_for(
+            &[("youtube/Artist/Album/20260901 Two [abc].flac", 2, "Two")],
+            Some("Rock"),
+            "Album",
+        ),
+    );
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), b.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    let id = b.id;
+    Some((lib, id))
+}
+
+#[tokio::test]
+async fn append_to_a_disc_less_album_does_not_write_discnumber() {
+    let (lib, _) = require_ffmpeg!(append_second_item(true).await);
+    let p = lib.lib_path("Rock/Artist/Album/02 Two.flac");
+    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
+        .unwrap();
+    assert_eq!(
+        af.tags.first("DISCNUMBER"),
+        None,
+        "件のファイルにあった DISCNUMBER も消す"
+    );
+    assert_eq!(af.tags.first("TRACKNUMBER"), Some("2"));
+    assert_eq!(
+        lib.count(
+            "SELECT count(*) FROM tracks WHERE disc_no IS NOT NULL AND missing_since IS NULL"
+        ),
+        0
+    );
+}
+
+#[tokio::test]
+async fn append_to_an_album_with_disc_numbers_keeps_discnumber() {
+    let (lib, _) = require_ffmpeg!(append_second_item(false).await);
+    let p = lib.lib_path("Rock/Artist/Album/02 Two.flac");
+    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
+        .unwrap();
+    assert_eq!(af.tags.first("DISCNUMBER"), Some("1"));
+    assert_eq!(
+        lib.count("SELECT count(*) FROM tracks WHERE disc_no = 1 AND missing_since IS NULL"),
+        2
+    );
+}
+
 #[tokio::test]
 async fn album_gain_in_draft_sets_the_attribute_and_picks_the_rg_scope() {
     let lib = Lib::new();

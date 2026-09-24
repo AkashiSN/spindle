@@ -1234,7 +1234,13 @@ fn parse_template(name: &str, s: &str) -> Result<Template, InboxError> {
 }
 
 /// 補正で変わるタグ（現在値と違うキーだけ）
-fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -> Vec<TagChange> {
+/// `omit_disc` なら `DISCNUMBER` を書かず、ファイルにあれば消す（[`omits_disc`]）
+fn tag_changes(
+    draft: &InboxDraft,
+    index: usize,
+    current: &[(String, String)],
+    omit_disc: bool,
+) -> Vec<TagChange> {
     let t = &draft.tracks[index];
     let mut desired: Vec<(&str, String)> = vec![
         ("ALBUMARTIST", draft.albumartist.trim().to_owned()),
@@ -1242,8 +1248,10 @@ fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -
         ("TITLE", t.title.trim().to_owned()),
         ("ARTIST", draft.track_artist(index).to_owned()),
         ("TRACKNUMBER", t.track_no.to_string()),
-        ("DISCNUMBER", t.disc_no.to_string()),
     ];
+    if !omit_disc {
+        desired.push(("DISCNUMBER", t.disc_no.to_string()));
+    }
     if let Some(d) = draft
         .date
         .as_deref()
@@ -1284,6 +1292,12 @@ fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -
             values: Some(vec![v]),
         })
         .collect();
+    if omit_disc && current.iter().any(|(k, _)| k == "DISCNUMBER") {
+        out.push(TagChange {
+            key: "DISCNUMBER".to_owned(),
+            values: None,
+        });
+    }
     // 承認画面で直したファイルのタグ（D-86）。現在値と同じものは書かない
     for (key, values) in &t.tags {
         let values: Option<Vec<String>> = values
@@ -1349,6 +1363,7 @@ fn read_sources(
     inbox: &RootDir,
     draft: &InboxDraft,
     files: &HashMap<String, FileRow>,
+    omit_disc: bool,
 ) -> Result<Vec<Source>, InboxError> {
     let mut out = Vec::with_capacity(draft.tracks.len());
     for (i, t) in draft.tracks.iter().enumerate() {
@@ -1372,7 +1387,7 @@ fn read_sources(
             rel,
             ext,
             fp,
-            changes: tag_changes(draft, i, &row.tags),
+            changes: tag_changes(draft, i, &row.tags, omit_disc),
         });
     }
     Ok(out)
@@ -1475,6 +1490,9 @@ pub struct Destination {
     /// `[[disc, track], …]` の昇順）
     #[serde(serialize_with = "sorted_numbers")]
     pub numbers: HashSet<(u32, u32)>,
+    /// active なトラックに `disc_no` を持つものがあるか。無ければ追記でも `DISCNUMBER` を書かない
+    /// （ディスク番号の無い album に 1 を書くと、disc → track の並べ替えで追記した曲だけが末尾に回る）
+    pub uses_disc: bool,
 }
 
 fn sorted_numbers<S: serde::Serializer>(
@@ -1739,11 +1757,13 @@ pub fn destination(
     let mut numbers = HashSet::new();
     let mut track_count = 0;
     let mut max_track_no = 0;
+    let mut uses_disc = false;
     for row in st.query_map([album_id], |r| {
         Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))
     })? {
         let (disc_no, track_no) = row?;
         track_count += 1;
+        uses_disc |= disc_no.is_some();
         let track_no = track_no.unwrap_or(0);
         max_track_no = max_track_no.max(track_no);
         if let (Ok(d), Ok(t)) = (u32::try_from(disc_no.unwrap_or(1)), u32::try_from(track_no)) {
@@ -1757,7 +1777,17 @@ pub fn destination(
         max_track_no,
         album_gain: album_gain == 1,
         numbers,
+        uses_disc,
     }))
+}
+
+/// 配置で `DISCNUMBER` を書かない（ファイルにあれば消す）か: 追記先があり、その album のどのトラックも
+/// ディスク番号を持たず、件が 1 枚分（下書きの disc が 1 つ）で、CD の件でないとき（D-70 追記）。
+/// 宛先に合わせるので、件のファイルが持っていた `DISCNUMBER` も消す。CD の件と新規の album は従来どおり
+pub fn omits_disc(dest: Option<&Destination>, draft: &InboxDraft, files: &[FileRow]) -> bool {
+    dest.is_some_and(|d| d.track_count > 0 && !d.uses_disc)
+        && draft.disc_count() <= 1
+        && !incoming_is_cd(files)
 }
 
 fn plan_item(
@@ -1948,6 +1978,7 @@ fn place_files(
     sources: &[Source],
     pictures: &[Option<lofty::picture::Picture>],
     draft: &InboxDraft,
+    omit_disc: bool,
 ) -> Result<Placed, InboxError> {
     let created_top = create_dirs(library, &plan.rel_dir)?;
     let mut placed_new: Vec<RelPath> = Vec::new();
@@ -2009,7 +2040,7 @@ fn place_files(
                     if !same_audio(fp, src_fp) {
                         return Ok(false);
                     }
-                    let tags_ok = tag_changes(draft, i, af.tags.items()).is_empty();
+                    let tags_ok = tag_changes(draft, i, af.tags.items(), omit_disc).is_empty();
                     // 指定した画像は front cover として書く。同じ bytes が front 以外（裏表紙等）として
                     // あるだけなら補正済みとみなさない（codex 指摘）
                     let picture_ok = want_picture.is_none_or(|want| {
@@ -2619,11 +2650,22 @@ pub async fn place_item(
             .map(|f| (canonical_key(&f.rel_path), f))
             .collect(),
     );
+    // 0. 追記先がディスク番号を使っていなければ DISCNUMBER を書かない（宛先に合わせる）
+    let omit_disc = {
+        let (layout, draft, files) = (env.layout.clone(), draft.clone(), Arc::clone(&files));
+        env.db
+            .read(move |c| {
+                let list: Vec<FileRow> = files.values().cloned().collect();
+                Ok(destination(c, &layout, &draft, &list)
+                    .map(|d| omits_disc(d.as_ref(), &draft, &list)))
+            })
+            .await??
+    };
     // 1. Inbox 側を読む（stat の照合、フィンガープリント、補正）
     let sources: Arc<Vec<Source>> = {
         let (inbox, draft, files) = (Arc::clone(&env.inbox), draft.clone(), Arc::clone(&files));
         Arc::new(
-            tokio::task::spawn_blocking(move || read_sources(&inbox, &draft, &files))
+            tokio::task::spawn_blocking(move || read_sources(&inbox, &draft, &files, omit_disc))
                 .await
                 .map_err(|e| {
                     std::io::Error::other(format!("Inbox の読み取りタスクが異常終了: {e}"))
@@ -2692,7 +2734,7 @@ pub async fn place_item(
         );
         tokio::task::spawn_blocking(move || {
             place_files(
-                &library, &inbox, &item, &plan, &files, &sources, &pictures, &draft,
+                &library, &inbox, &item, &plan, &files, &sources, &pictures, &draft, omit_disc,
             )
         })
         .await
