@@ -10,7 +10,7 @@
 //! リーブ、リトルエンディアン、bps ぶんのバイト）で MD5 を取るので、同じ PCM なら
 //! WAV / ALAC / FLAC で同じ `audio_md5` になる（WAV → FLAC 正規化で同一性が保たれる）。
 //!
-//! デコード出力はコンテナの宣言長で打ち切る（[`FrameLimit`]、D-89）。
+//! ALAC のデコード出力はコンテナの宣言長で打ち切る（[`FrameLimit`]、D-89）。
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

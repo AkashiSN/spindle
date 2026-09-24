@@ -9,7 +9,7 @@
 //! - symphonia が demux もできない形式（WavPack / APE）は lofty のプロパティからチャンネル数と
 //!   レートを取り、同じく ffmpeg に回す
 //!
-//! プロセス内の経路はコンテナの宣言長で打ち切る（[`FrameLimit`]、D-89。ffmpeg は自分で打ち切る）。
+//! プロセス内の経路は ALAC に限りコンテナの宣言長で打ち切る（[`FrameLimit`]、D-89。ffmpeg は自分で打ち切る）。
 //!
 //! どちらの経路でも [`PcmSink`] には `start(info)` → `push(interleaved f32)` の順で同じ形で流れる。
 //! サンプルは -1.0..1.0 のインターリーブ
