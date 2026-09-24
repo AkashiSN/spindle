@@ -47,7 +47,9 @@ impl Env {
             inbox: Some(Arc::clone(&inbox)),
         };
         Self {
-            t0: spindle::db::now_epoch() + 2,
+            // 破棄の要求の時刻。種のファイル（今の実時刻に作る）の ctime が、比較の余裕（1 秒）を含めても
+            // 要求より前になるよう 4 秒先に置く
+            t0: spindle::db::now_epoch() + 4,
             dir,
             db,
             inbox,

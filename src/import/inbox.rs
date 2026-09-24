@@ -599,6 +599,35 @@ pub fn title_key(title: &str) -> String {
 }
 
 #[cfg(test)]
+mod touched_since_tests {
+    use super::touched_since;
+    use crate::fsroot::{FileKind, Stat};
+
+    fn st(ctime_ns: i64) -> Stat {
+        Stat {
+            kind: FileKind::File,
+            dev: 0,
+            inode: 1,
+            nlink: 1,
+            size: 0,
+            mtime_ns: ctime_ns,
+            ctime_ns,
+        }
+    }
+
+    #[test]
+    fn ctime_just_behind_the_request_second_counts_as_after() {
+        let req = 1_000;
+        // 粗い時計で要求の秒の直前（999.996 秒）に付いた ctime も「後」（秒の変わり目の見逃しを閉じる）
+        assert!(touched_since(&st(999 * 1_000_000_000 + 996_000_000), req));
+        assert!(touched_since(&st(req * 1_000_000_000), req));
+        assert!(touched_since(&st(req * 1_000_000_000 + 5), req));
+        // 2 秒以上前は「前」（消してよい）
+        assert!(!touched_since(&st(998 * 1_000_000_000 + 999_999_999), req));
+    }
+}
+
+#[cfg(test)]
 mod title_key_tests {
     use super::title_key;
 
@@ -2492,9 +2521,15 @@ struct Checked {
     st: crate::fsroot::Stat,
 }
 
-/// 破棄を要求した後に作られた・変えられた（ctime が要求の秒以降）。同じ秒は安全側に「後」とみなす
+/// 破棄の要求と ctime を比べるときの余裕（秒）。要求の時刻は `SystemTime`（実時刻）の秒、ファイルの ctime は
+/// カーネルの粗い時計（jiffy 単位で実時刻より数 ms 遅れうる）で付くので、要求の直後（秒の変わり目の数 ms 以内）に
+/// 置かれたファイルの ctime が要求の 1 秒前の秒になりうる。1 秒の余裕で「要求の後」の見逃しを閉じる（代わりに
+/// 要求の直前 1 秒に触られたファイルも「後」とみなして削除を取り消す。安全側）
+const DISCARD_CTIME_SLACK_SECS: i64 = 1;
+
+/// 破棄を要求した後に作られた・変えられた（ctime が要求の秒 − 余裕 以降）。境目は安全側に「後」とみなす
 fn touched_since(st: &crate::fsroot::Stat, requested_at: i64) -> bool {
-    st.ctime_ns.div_euclid(1_000_000_000) >= requested_at
+    st.ctime_ns.div_euclid(1_000_000_000) >= requested_at - DISCARD_CTIME_SLACK_SECS
 }
 
 fn same_stat(a: &crate::fsroot::Stat, b: &crate::fsroot::Stat) -> bool {
