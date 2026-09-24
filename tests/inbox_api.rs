@@ -638,7 +638,8 @@ async fn list_reports_destination_source_and_numbers_after_the_existing_album() 
         it["destination"]["album_gain"], false,
         "追記先の属性（D-74）"
     );
-    assert!(it["destination"].get("numbers").is_none());
+    // 宛先の既存の番号（承認画面の「番号が重なる」警告に使う。P4-22）
+    assert_eq!(it["destination"]["numbers"], json!([[1, 11], [1, 12]]));
     assert_eq!(it["proposal"]["album_gain"], false);
     // 採番は 13 から
     assert_eq!(it["proposal"]["tracks"][0]["track_no"], 13);
@@ -688,6 +689,68 @@ async fn list_reports_destination_source_and_numbers_after_the_existing_album() 
         .find(|i| i["id"] == id4)
         .unwrap();
     assert!(it["tracks"][0]["source"].is_null());
+}
+
+#[tokio::test]
+async fn list_carries_the_last_sync_of_referenced_subscriptions() {
+    // P4-22: 購読由来の件（サイドカーに subscription_id / position）の承認画面が、同期が番号を空けた経緯を
+    // 出せるように、参照される購読の直近の同期の要約を一覧に載せる。参照されない購読は載せない
+    use spindle::import::sidecar::{FileEntry, Sidecar};
+    let app = App::new().await;
+    let c = app.cookie().await;
+    seed_album(&app).await;
+    youtube_item(&app, "youtube/Artist/Album", None, "ok").await;
+    let root = RootDir::open(&app.dir.path().join("Inbox")).unwrap();
+    Sidecar::upsert(
+        &root,
+        &spindle::domain::relpath::RelPath::parse("youtube/Artist/Album").unwrap(),
+        None,
+        "20260901 New [abc].opus",
+        FileEntry {
+            source: "youtube".into(),
+            url: Some("https://www.youtube.com/watch?v=abc".into()),
+            channel: Some("CH".into()),
+            verdict: "ok".into(),
+            message: None,
+            subscription_id: Some(3),
+            position: Some(165),
+        },
+    )
+    .unwrap();
+    app.db
+        .write(|c| {
+            let result = json!({
+                "state": "done",
+                "synced_at": 5000,
+                "align": {"moved": 14, "renamed": 14, "unchanged": 164, "blocked": [],
+                          "outsiders": 0, "unnumbered": 0,
+                          "tags": {"batch_id": 14, "total": 14, "pending": 0, "applied": 14,
+                                   "conflict": 0, "failed": 0},
+                          "rename": {"batch_id": 15, "total": 14, "pending": 0, "applied": 14,
+                                     "conflict": 0, "failed": 0}}
+            });
+            for (id, list) in [(3, "PLa"), (4, "PLb")] {
+                c.execute(
+                    "INSERT INTO playlist_subscriptions (id, list_id, url, target_key, albumartist, album,
+                                                         created_at, updated_at, last_result)
+                     VALUES (?1, ?2, 'https://x', ?2, 'Artist', 'Album', 0, 0, ?3)",
+                    rusqlite::params![id, list, result.to_string()],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, body) = app.get(&c, "/api/inbox").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["subscriptions"],
+        json!([{"id": 3, "album": "Album", "synced_at": 5000, "moved": 14, "renamed": 14,
+                "tags_batch_id": 14, "rename_batch_id": 15}])
+    );
+    let it = &body["items"][0];
+    assert_eq!(it["tracks"][0]["source"]["subscription_id"], 3);
+    assert_eq!(it["tracks"][0]["source"]["position"], 165);
 }
 
 #[tokio::test]

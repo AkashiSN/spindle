@@ -26,7 +26,7 @@ import {
   applyTracklist,
   artworkUrl,
   codecSummary,
-  destinationLabel,
+  destinationText,
   discardLabel,
   discNumbers,
   draftChangeCount,
@@ -38,6 +38,7 @@ import {
   pictureState,
   sameTitleCount,
   stateLabel,
+  syncNote,
   trackPictureUrl,
   validateDraft,
   watchLabel,
@@ -177,6 +178,8 @@ function ItemForm({
   const changes = draftChangeCount(item, draft)
   const source = item.rip != null ? 'CD' : item.tracks.some((f) => f.source != null) ? 'YouTube' : '手置き'
   const cover = draftCoverUrl(item, draft, files)
+  const dest = destinationText(item, draft)
+  const sync = syncNote(item, draft, inbox.subscriptions, formatDateTime)
 
   const approve = async () => {
     setSubmitError(null)
@@ -261,9 +264,9 @@ function ItemForm({
             <dd>{formatDateTime(item.detected_at)}</dd>
           </div>
         </dl>
-        {destinationLabel(item.destination) != null && (
-          <p className="notice small inbox-destination">{destinationLabel(item.destination)}</p>
-        )}
+        {dest != null && <p className="notice small inbox-destination">{dest.label}</p>}
+        {dest?.overlap != null && <p className="error small">{dest.overlap}</p>}
+        {sync != null && <p className="muted small inbox-sync-note">{sync}</p>}
         {item.warnings.length > 0 && (
           <>
             <p className="muted small inbox-file-notes-head">ファイルのタグで足りないもの（② / ③ で補う）</p>

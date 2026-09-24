@@ -87,16 +87,18 @@ export type SameTitle = {
 
 /**
  * トラック行の「Library に同名」警告（P4-19）。無ければ null。
- * 長さを添えるのは、同じタイトルの別テイク（Cover / Live）と本当の二重取り込みを人が見分けるため
+ * 長さを添えるのは、同じタイトルの別テイク（Cover / Live）と本当の二重取り込みを人が見分けるため。
+ * 件の曲の長さも並べる（P4-22。Library 側だけでは比べられない）
  */
-export function sameTitleLabel(f: Pick<InboxFile, 'same_title'>): string | null {
+export function sameTitleLabel(f: Pick<InboxFile, 'same_title' | 'duration_ms'>): string | null {
   const rows = f.same_title ?? []
   if (rows.length === 0) return null
   const parts = rows.map((r) => {
     const name = r.rel_path.split('/').pop() ?? r.rel_path
     return r.duration_ms == null ? name : `${name}（${formatDuration(r.duration_ms)}）`
   })
-  return `Library に同名: ${parts.join('、')}`
+  const own = f.duration_ms == null ? '' : `／この曲 ${formatDuration(f.duration_ms)}`
+  return `Library に同名: ${parts.join('、')}${own}`
 }
 
 /** 件の中で同名の警告が付いたトラックの数（見出しに出す） */
@@ -113,6 +115,9 @@ export type InboxSource = {
   verdict: string
   /** 判定できなかった理由（参照実装ならルールの足し方）。ok なら null */
   message: string | null
+  /** 再生リストの購読から落とした曲の購読 id と再生リスト上の位置（D-78）。それ以外は無い */
+  subscription_id?: number
+  position?: number
 }
 
 /** 追記先の既存 album（GET /api/inbox の destination。D-70） */
@@ -123,6 +128,20 @@ export type InboxDestination = {
   max_track_no: number
   /** 追記先の album gain の属性（チェックボックスの初期値。D-74） */
   album_gain: boolean
+  /** 追記先の既存の番号 `[disc, track]`（昇順。P4-22。旧サーバでは無い） */
+  numbers?: Array<[number, number]>
+}
+
+/** 件が参照する購読の直近の同期（`GET /api/inbox` の `subscriptions`。P4-22） */
+export type InboxSubscriptionSync = {
+  id: number
+  album: string
+  synced_at: number | null
+  /** 番号を揃えた行数・名前を変えた行数 */
+  moved: number
+  renamed: number
+  tags_batch_id: number | null
+  rename_batch_id: number | null
 }
 
 /** GET /api/inbox の 1 件 */
@@ -535,6 +554,92 @@ export function destinationLabel(d: InboxDestination | null): string | null {
   if (d == null) return null
   const name = d.album == null ? '既存のアルバム' : `既存の『${d.album}』`
   return `宛先: ${name}（${d.track_count} 曲）に追加。番号は ${d.max_track_no + 1} から`
+}
+
+/** 番号の表示（2 枚目以降だけ disc を前置。`165`、`2-03`） */
+function numberText(disc: number, track: number): string {
+  return disc > 1 ? `${disc}-${String(track).padStart(2, '0')}` : String(track)
+}
+
+/** 番号の並びを短く（連続は範囲に: `165`、`165〜167`、`12, 165`）。disc ごと */
+function numbersText(nums: Array<[number, number]>): string {
+  const sorted = [...nums].sort((a, b) => a[0] - b[0] || a[1] - b[1])
+  const parts: string[] = []
+  let i = 0
+  while (i < sorted.length) {
+    let j = i
+    while (j + 1 < sorted.length && sorted[j + 1][0] === sorted[i][0] && sorted[j + 1][1] === sorted[j][1] + 1) j++
+    const [d, a] = sorted[i]
+    parts.push(j === i ? numberText(d, a) : `${numberText(d, a)}〜${numberText(d, sorted[j][1])}`)
+    i = j + 1
+  }
+  return parts.join(', ')
+}
+
+/** 購読から落とした曲（サイドカーに購読 id と位置がある）の下書きの番号 */
+export function subscriptionNumbers(
+  item: Pick<InboxItem, 'tracks'>,
+  draft: Pick<InboxDraft, 'tracks'>,
+): Array<[number, number]> {
+  const subscribed = new Set(
+    item.tracks.filter((f) => f.source?.subscription_id != null).map((f) => f.rel_path),
+  )
+  return draft.tracks.filter((t) => subscribed.has(t.rel_path)).map((t) => [t.disc_no, t.track_no])
+}
+
+/**
+ * 宛先の表示（P4-22）。購読から落とした曲を含む件は、番号が再生リストの位置（同期が空けた番号）に入るので
+ * 「番号 165 に入る」と出す（「max + 1 から」は購読の件には当たらない）。そうでなければ従来の文言。
+ * `overlap` は下書きの番号が宛先の既存の番号と重なるときの警告（承認はサーバが 400 で止める）
+ */
+export function destinationText(
+  item: Pick<InboxItem, 'destination' | 'tracks'>,
+  draft: Pick<InboxDraft, 'tracks'>,
+): { label: string; overlap: string | null } | null {
+  const d = item.destination
+  if (d == null) return null
+  const taken = new Set((d.numbers ?? []).map(([disc, no]) => `${disc}:${no}`))
+  const clash: Array<[number, number]> = draft.tracks
+    .filter((t) => taken.has(`${t.disc_no}:${t.track_no}`))
+    .map((t) => [t.disc_no, t.track_no])
+  const overlap = clash.length === 0 ? null : `番号 ${numbersText(clash)} は宛先に既にある（③ で直す）`
+  const subscribed = subscriptionNumbers(item, draft)
+  if (subscribed.length === 0) return { label: destinationLabel(d) ?? '', overlap }
+  const name = d.album == null ? '既存のアルバム' : `既存の『${d.album}』`
+  return {
+    label: `宛先: ${name}（${d.track_count} 曲）に追加。番号 ${numbersText(subscribed)} に入る（再生リストの位置。空けてある番号）`,
+    overlap,
+  }
+}
+
+/**
+ * 購読の同期が番号を空けた経緯（P4-22）。購読から落とした曲が無ければ null。要約は購読の**直近の**同期なので、
+ * 件を落とした後にもう一度同期していれば揃え直しは 0 件になる（そのときは「承認しても既存の曲は動かない」）
+ */
+export function syncNote(
+  item: Pick<InboxItem, 'tracks'>,
+  draft: Pick<InboxDraft, 'tracks'>,
+  subs: InboxSubscriptionSync[],
+  formatTime: (epoch: number) => string,
+): string | null {
+  const ids = [...new Set(item.tracks.map((f) => f.source?.subscription_id).filter((x): x is number => x != null))]
+  if (ids.length === 0) return null
+  const nums = numbersText(subscriptionNumbers(item, draft))
+  const notes = ids.map((id) => {
+    const s = subs.find((x) => x.id === id)
+    if (s == null) return `購読 #${id} の同期の記録が無い`
+    const when = s.synced_at == null ? '' : `（${formatTime(s.synced_at)}）`
+    if (s.moved === 0) {
+      return `直近の同期${when}では番号の揃え直しは無かった。承認しても既存の曲の番号は動かない`
+    }
+    const batches = [s.tags_batch_id, s.rename_batch_id].filter((b): b is number => b != null).map((b) => `#${b}`)
+    const renamed = s.renamed > 0 ? `、${s.renamed} 曲のファイル名を直して` : ''
+    return (
+      `同期${when}で既存の ${s.moved} 曲の番号を揃え${renamed} ${nums} を空けた` +
+      `${batches.length > 0 ? `（バッチ ${batches.join(' / ')}。履歴で巻き戻せる）` : ''}。承認しても既存の曲は動かない`
+    )
+  })
+  return notes.join(' / ')
 }
 
 /** 判定バッジの文言（D-70） */

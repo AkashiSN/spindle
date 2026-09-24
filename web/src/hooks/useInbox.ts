@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPost } from '../api/client'
-import type { InboxDraft, InboxItem, InboxWatch } from '../lib/inbox'
+import type { InboxDraft, InboxItem, InboxSubscriptionSync, InboxWatch } from '../lib/inbox'
 
 export type InboxState = {
   items: InboxItem[] | null
@@ -31,6 +31,8 @@ export type InboxState = {
   undiscard: (id: number) => Promise<void>
   /** 破棄待ちの件を GC が消すまでの日数（`[gc].retention_days`）。旧サーバでは null */
   discardRetentionDays: number | null
+  /** 件が参照する購読の直近の同期（承認画面の「同期が番号を空けた経緯」。P4-22）。旧サーバでは空 */
+  subscriptions: InboxSubscriptionSync[]
   setNotice: (s: string | null) => void
 }
 
@@ -53,14 +55,21 @@ export function useInbox(enabled: boolean, onChanged?: () => void): InboxState {
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [discardRetentionDays, setDiscardRetentionDays] = useState<number | null>(null)
+  const [subscriptions, setSubscriptions] = useState<InboxSubscriptionSync[]>([])
   const timer = useRef<number | null>(null)
 
   const fetchNow = useCallback(() => {
-    apiFetch<{ items: InboxItem[]; watch?: InboxWatch; discard_retention_days?: number }>('/api/inbox')
+    apiFetch<{
+      items: InboxItem[]
+      watch?: InboxWatch
+      discard_retention_days?: number
+      subscriptions?: InboxSubscriptionSync[]
+    }>('/api/inbox')
       .then((r) => {
         setItems(r.items)
         setWatch(r.watch ?? null)
         setDiscardRetentionDays(r.discard_retention_days ?? null)
+        setSubscriptions(r.subscriptions ?? [])
         setError(null)
         setUnavailable(false)
       })
@@ -192,6 +201,7 @@ export function useInbox(enabled: boolean, onChanged?: () => void): InboxState {
     discard,
     undiscard,
     discardRetentionDays,
+    subscriptions,
     setNotice,
   }
 }

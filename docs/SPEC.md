@@ -1519,9 +1519,13 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   proposal, draft, warnings, destination, tracks: [{ rel_path, codec, lossless,
                                                   sample_rate, bit_depth, channels, duration_ms, tags, source,
                                                   same_title: [{ track_id, rel_path, duration_ms }] }] }],
-                                                  watch: { checked_at, poll_interval_secs } }   # P4-18 / P4-19
+                                                  watch: { checked_at, poll_interval_secs }, discard_retention_days,
+                                                  subscriptions: [{ id, album, synced_at, moved, renamed, tags_batch_id,
+                                                  rename_batch_id }] }   # P4-18 / P4-19 / P4-22 / D-90
                                                   （§7.8、D-68。destination と source は D-70: source は spindle-inbox.json の
-                                                  項 { source, url, channel, verdict, message } | null）
+                                                  項 { source, url, channel, verdict, message, subscription_id?, position? } | null。
+                                                  destination.numbers は宛先の既存の番号 [[disc, track], …]（昇順）。subscriptions は
+                                                  件のトラックが参照する購読の直近の同期の要約（last_result の align から。1 回で読む））
 GET    /api/inbox/:id/artwork/:hash               件のファイルの埋め込み画像（PICTURE の sha256 で実体を照合してから ETag / 304。
                                                   原寸、MIME は sniff、immutable。件に無い / 実体消失 / 不一致は 404。状態非依存。
                                                   セッション必須。§7.8、P4-4）
@@ -2092,10 +2096,14 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   却下した件には「削除」（確認ダイアログ → 破棄待ち。一覧に「削除待ち」のバッジ、承認画面に「削除待ち: <期限> 以降の
   GC でファイルを消す」と「削除を取り消す」。期限は `GET /api/inbox` の `discard_retention_days` から。D-90）。placed の件は 24 時間
   残り、「アルバムを開く」で表を `album_id` に絞る。inbox ジョブの完了で一覧を取り直す。
-  `destination` があれば「宛先: 既存の『…』（N 曲）に追加」と出す（配置済みの件は `destination` を引かないので、宛先も
-  同名の警告も出ない。引くと自分が置いた album に当たる）。**同名の警告**（P4-19）はタイトル欄の下に
-  「⚠ Library に同名: <ファイル名>（長さ）」、件の一覧に「同名 N」のバッジ（承認は止めない。長さで別テイクと
-  見分ける）。ツールバーに周期監視の「最後に確認: HH:MM:SS（N 秒ごと）」（P4-18）。`source` のあるトラック行は判定バッジ
+  `destination` があれば「宛先: 既存の『…』（N 曲）に追加。番号は <max+1> から」と出す。**購読から落とした曲**
+  （`source.subscription_id` あり）を含む件は番号が再生リストの位置（同期が空けた番号）に入るので、「番号 165 に入る
+  （再生リストの位置。空けてある番号）」と出し、その下に購読の直近の同期の要約（「同期（日時）で既存の 14 曲の番号を
+  揃え … 165 を空けた（バッチ #14 / #15）。承認しても既存の曲は動かない」。直近の同期で揃え直しが無ければその旨）を
+  出す。下書きの番号が `destination.numbers` と重なれば赤で警告する（承認はサーバが 400 で止める。P4-22）
+  （配置済みの件は `destination` を引かないので、宛先も同名の警告も出ない。引くと自分が置いた album に当たる）。
+  **同名の警告**（P4-19）はタイトル欄の下に「⚠ Library に同名: <ファイル名>（長さ）／この曲 <長さ>」（件の曲の長さも
+  並べる。P4-22）、件の一覧に「同名 N」のバッジ（承認は止めない。長さで別テイクと見分ける）。ツールバーに周期監視の「最後に確認: HH:MM:SS（N 秒ごと）」（P4-18）。`source` のあるトラック行は判定バッジ
   （ok / 未判定）を出し、行を開くと `message`（参照実装ならルールの足し方）と URL が読める（D-70）。
   「album gain を計算する」のチェックボックス（既定 off。`destination` があればその現在値が初期値。D-74）。
   **忠実表示**（P4-4、D-70）: ARTIST が多値のファイルの行は元の値をチップで見せ、「ファイルの多値をそのまま

@@ -25,6 +25,7 @@ import {
   keepArtistsFor,
   pictureOf,
   destinationLabel,
+  destinationText,
   discardDeadline,
   discardLabel,
   draftForSubmit,
@@ -35,6 +36,7 @@ import {
   verdictLabel,
   sameTitleCount,
   sameTitleLabel,
+  syncNote,
   watchLabel,
   type DraftTrack,
   type InboxDraft,
@@ -263,6 +265,53 @@ describe('destinationLabel / verdictLabel（D-70）', () => {
     )
     expect(destinationLabel(null)).toBeNull()
   })
+  it('購読の件は再生リストの位置に入る番号を出し、宛先の番号と重なれば警告する（P4-22）', () => {
+    const dest = { album_id: 713, album: '明透のお歌', track_count: 178, max_track_no: 179, album_gain: false,
+                   numbers: [[1, 164], [1, 166]] as Array<[number, number]> }
+    const sub = { source: 'youtube', url: null, channel: null, verdict: 'ok', message: null, subscription_id: 7, position: 165 }
+    const it = item({ destination: dest, tracks: [{ ...file('y/165.opus', 'opus'), source: sub }] })
+    const draft = (no: number) => ({ tracks: [{ rel_path: 'y/165.opus', disc_no: 1, track_no: no }] }) as InboxDraft
+    expect(destinationText(it, draft(165))).toEqual({
+      label: '宛先: 既存の『明透のお歌』（178 曲）に追加。番号 165 に入る（再生リストの位置。空けてある番号）',
+      overlap: null,
+    })
+    expect(destinationText(it, draft(166))?.overlap).toBe('番号 166 は宛先に既にある（③ で直す）')
+    // 購読でない件は従来の「max + 1 から」
+    const plain = item({ destination: dest, tracks: [file('y/165.opus', 'opus')] })
+    expect(destinationText(plain, draft(180))).toEqual({
+      label: '宛先: 既存の『明透のお歌』（178 曲）に追加。番号は 180 から',
+      overlap: null,
+    })
+    // 連続する番号は範囲にまとめる
+    const two = item({
+      destination: dest,
+      tracks: [{ ...file('y/a.opus', 'opus'), source: sub }, { ...file('y/b.opus', 'opus'), source: sub }],
+    })
+    const both = { tracks: [
+      { rel_path: 'y/a.opus', disc_no: 1, track_no: 170 },
+      { rel_path: 'y/b.opus', disc_no: 1, track_no: 171 },
+    ] } as InboxDraft
+    expect(destinationText(two, both)?.label).toContain('番号 170〜171 に入る')
+    expect(destinationText(item({ destination: null }), draft(1))).toBeNull()
+  })
+
+  it('同期が番号を空けた経緯（P4-22）', () => {
+    const sub = { source: 'youtube', url: null, channel: null, verdict: 'ok', message: null, subscription_id: 7, position: 165 }
+    const it = item({ tracks: [{ ...file('y/165.opus', 'opus'), source: sub }] })
+    const draft = { tracks: [{ rel_path: 'y/165.opus', disc_no: 1, track_no: 165 }] } as InboxDraft
+    const t = (e: number) => `T${e}`
+    const s = { id: 7, album: '明透のお歌', synced_at: 5, moved: 14, renamed: 14, tags_batch_id: 14, rename_batch_id: 15 }
+    expect(syncNote(it, draft, [s], t)).toBe(
+      '同期（T5）で既存の 14 曲の番号を揃え、14 曲のファイル名を直して 165 を空けた（バッチ #14 / #15。履歴で巻き戻せる）。承認しても既存の曲は動かない',
+    )
+    expect(syncNote(it, draft, [{ ...s, moved: 0, renamed: 0, tags_batch_id: null, rename_batch_id: null }], t)).toBe(
+      '直近の同期（T5）では番号の揃え直しは無かった。承認しても既存の曲の番号は動かない',
+    )
+    expect(syncNote(it, draft, [], t)).toBe('購読 #7 の同期の記録が無い')
+    // 購読の件でなければ null
+    expect(syncNote(item(), draft, [s], t)).toBeNull()
+  })
+
   it('判定は ok なら「判定済み」、それ以外は reason 付きの「未判定」', () => {
     const src = (verdict: string) => ({ source: 'youtube', url: null, channel: null, verdict, message: null })
     expect(verdictLabel(src('ok'))).toEqual({ text: '判定済み', ok: true })
@@ -427,6 +476,11 @@ describe('sameTitleLabel / sameTitleCount', () => {
         ]),
       ),
     ).toBe('Library に同名: 13 new.flac、14 new.flac（0:01）')
+  })
+
+  it('この曲の長さも並べる（P4-22。二重取り込みか別テイクかを長さで比べる）', () => {
+    const own = { ...f([{ track_id: 8363, rel_path: 'A/B/174 再会 (Cover).opus', duration_ms: 245381 }]), duration_ms: 265561 }
+    expect(sameTitleLabel(own)).toBe('Library に同名: 174 再会 (Cover).opus（4:05）／この曲 4:26')
   })
 
   it('件ごとの同名の数を数える', () => {

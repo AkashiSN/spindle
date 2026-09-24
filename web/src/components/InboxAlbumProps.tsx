@@ -6,7 +6,7 @@
 
 import { useRef, useState, type KeyboardEvent } from 'react'
 import { editSession } from '../lib/editSession'
-import { destinationLabel, type InboxDraft, type InboxItem } from '../lib/inbox'
+import { destinationText, type InboxDraft, type InboxItem } from '../lib/inbox'
 import { CategoryField } from './CategoryField'
 
 type Row = {
@@ -95,7 +95,7 @@ export function InboxAlbumProps({
   // 「変更」の基準: ファイルのタグから作った提案。album gain の初期値は追記先の現在値（draftFrom と同じ）
   const baseline = { ...item.proposal, album_gain: item.destination?.album_gain ?? item.proposal.album_gain }
   const discs = new Set(draft.tracks.map((t) => t.disc_no)).size
-  const dest = destinationLabel(item.destination)
+  const dest = destinationText(item, draft)?.label ?? null
 
   return (
     <table className="kv inbox-kv" ref={tableRef} tabIndex={0} onKeyDown={onKey} aria-label="アルバム情報">

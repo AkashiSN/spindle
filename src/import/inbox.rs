@@ -1471,9 +1471,19 @@ pub struct Destination {
     pub max_track_no: i64,
     /// 追記先の album gain の属性（承認画面のチェックボックスの初期値。D-74）
     pub album_gain: bool,
-    /// active なトラックの `(disc_no, track_no)`（承認の検証に使う。応答には出さない）
-    #[serde(skip)]
+    /// active なトラックの `(disc_no, track_no)`（承認の検証と、承認画面の「番号が重なる」警告。応答では
+    /// `[[disc, track], …]` の昇順）
+    #[serde(serialize_with = "sorted_numbers")]
     pub numbers: HashSet<(u32, u32)>,
+}
+
+fn sorted_numbers<S: serde::Serializer>(
+    numbers: &HashSet<(u32, u32)>,
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let mut v: Vec<&(u32, u32)> = numbers.iter().collect();
+    v.sort_unstable();
+    serde::Serialize::serialize(&v, s)
 }
 
 impl Destination {

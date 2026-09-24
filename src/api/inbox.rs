@@ -48,10 +48,57 @@ pub struct ItemView {
 #[derive(Serialize)]
 pub struct ItemList {
     pub items: Vec<ItemView>,
+    /// 件のトラックが参照する購読の直近の同期（承認画面が「同期が番号を空けた経緯」を出す。P4-22）
+    pub subscriptions: Vec<SubscriptionSync>,
     /// 周期監視の状態（P4-18）
     pub watch: WatchView,
     /// 破棄待ちの件を GC が消すまでの日数（`[gc].retention_days`。D-90）
     pub discard_retention_days: u32,
+}
+
+/// 購読の直近の同期の要約（`last_result` から。P4-22）
+#[derive(Serialize)]
+pub struct SubscriptionSync {
+    pub id: i64,
+    pub album: String,
+    /// 直近の同期の時刻。まだ同期していなければ null
+    pub synced_at: Option<i64>,
+    /// 番号を揃えた（tags バッチに載せた）行数と、名前を変えた行数
+    pub moved: u64,
+    pub renamed: u64,
+    pub tags_batch_id: Option<i64>,
+    pub rename_batch_id: Option<i64>,
+}
+
+impl SubscriptionSync {
+    fn of(s: &crate::db::subscriptions::Subscription) -> Self {
+        let result = s.last_result.as_ref();
+        let align = result.and_then(|r| r.get("align"));
+        let num = |k: &str| {
+            align
+                .and_then(|a| a.get(k))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        };
+        let batch = |k: &str| {
+            align
+                .and_then(|a| a.get(k))
+                .and_then(|b| b.get("batch_id"))
+                .and_then(|v| v.as_i64())
+        };
+        Self {
+            id: s.id,
+            album: s.album.clone(),
+            synced_at: result
+                .and_then(|r| r.get("synced_at"))
+                .and_then(|v| v.as_i64())
+                .or(s.last_synced_at),
+            moved: num("moved"),
+            renamed: num("renamed"),
+            tags_batch_id: batch("tags"),
+            rename_batch_id: batch("rename"),
+        }
+    }
 }
 
 /// 周期監視（`[inbox].poll_interval_secs`）の状態。画面が「最後に確認: HH:MM:SS」を出す
@@ -114,7 +161,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
         ));
     };
     let layout = state.config.layout.clone();
-    let items = state
+    let (items, subscriptions) = state
         .db
         .read(move |c| {
             // 表示名（`scans::load_categories` は照合用の canonical key を返す）
@@ -149,7 +196,22 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
                     rip: p.lookup,
                 });
             }
-            Ok(Ok(out))
+            // 件が参照する購読だけ（購読の表は小さいので 1 回で読んで絞る。件ごとに引かない）
+            let referenced: std::collections::HashSet<i64> = out
+                .iter()
+                .flat_map(|v| v.tracks.iter())
+                .filter_map(|t| t.source.as_ref().and_then(|s| s.subscription_id))
+                .collect();
+            let subs = if referenced.is_empty() {
+                Vec::new()
+            } else {
+                crate::db::subscriptions::list(c)?
+                    .iter()
+                    .filter(|s| referenced.contains(&s.id))
+                    .map(SubscriptionSync::of)
+                    .collect()
+            };
+            Ok(Ok((out, subs)))
         })
         .await?
         .map_err(ApiError::Internal)?;
@@ -160,6 +222,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
         .filter(|t| *t > 0);
     Ok(Json(ItemList {
         items,
+        subscriptions,
         watch: WatchView {
             checked_at,
             poll_interval_secs: state.config.inbox.poll_interval_secs,
