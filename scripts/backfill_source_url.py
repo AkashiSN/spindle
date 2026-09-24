@@ -84,7 +84,7 @@ def parse_flat_playlist(dump: dict) -> list[dict]:
     """`yt-dlp --flat-playlist --dump-single-json` の entries を順に。非公開 / 削除は available=False"""
     out = []
     for e in dump.get("entries") or []:
-        entry = {"id": e.get("id") or "", "title": e.get("title") or ""}
+        entry = {"id": e.get("id") or "", "title": e.get("title") or "", "duration": e.get("duration")}
         entry["available"] = is_available(entry)
         out.append(entry)
     return out
@@ -164,6 +164,20 @@ def _bounded_in(needle: str, hay: str) -> bool:
         start = i + 1
 
 
+# 動画と行の長さの許容差（秒）。webm → opus は remux で長さは変わらないが、flat playlist の duration は
+# 整数秒に丸められている
+DURATION_TOLERANCE_SEC = 2.0
+
+
+def durations_agree(entry: dict, track: dict) -> bool:
+    """長さが両方分かっていれば許容差に収まるか。どちらかが不明なら判定しない（True）"""
+    duration = entry.get("duration")
+    duration_ms = track.get("duration_ms")
+    if duration is None or duration_ms is None:
+        return True
+    return abs(float(duration) - float(duration_ms) / 1000.0) <= DURATION_TOLERANCE_SEC
+
+
 def title_matches(video_title: str, library_title: str) -> bool:
     return match_length(video_title, library_title) > 0
 
@@ -190,7 +204,9 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
 
     1. 位置どおりの行とタイトルが合えば verified（非公開 / 削除は position-only、同じ URL なら already）
     2. 合わなかった entry は未割り当ての行からタイトルで探す（再生リストの順の入れ替え・欠落によるずれ）。
-       候補が複数なら期待位置に最も近い行（同距離なら決めない）→ verified-by-title
+       (entry, 行) の組を「一致の長さ → 期待位置との距離」で全体に並べ、良い組から採る（同名の別曲が
+       再生リストの先の位置にあっても、行に近い方が取る）。同じ評価の候補が 2 行以上残る entry は決めない。
+       長さが両方分かっていて食い違う組は候補にしない → verified-by-title
     3. それでも残った entry の連続区間は、両端の隣が位置どおりに対応していて、区間の行数が
        entry 数と同じなら位置で採る（英題の動画など、タイトルで判定できないがずれも無い）
        → verified-by-neighbors
@@ -229,24 +245,40 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
             take(i, i, "position-only")
         elif title_matches(e["title"], t.get("title") or ""):
             take(i, i, "verified")
-    # 2. タイトルによる救済（一致の長い行 → 期待位置に近い行 の順で選ぶ。同点なら決めない）
+    # 2. タイトルによる救済。entry ごとに先着で選ぶと、同名の別曲（位置の離れた再アップロードや別カバー）が
+    #    先に行を取ってしまうので、組を全体で評価の良い順に採る。同じ評価の組の中は再生リストの順に採り、
+    #    1 つの entry に同じ評価の候補が 2 行以上残るときだけ、その entry は決めない
+    pairs: list[tuple[tuple[int, int], int, int]] = []
     for i, e in enumerate(entries, start=1):
         if i in assigned or not is_available(e):
             continue
-        cands = []
         for no, t in by_no.items():
-            if no in claimed:
+            if no in claimed or not durations_agree(e, t):
                 continue
             n_match = match_length(e["title"], t.get("title") or "")
             if n_match:
-                cands.append((-n_match, abs(no - i), no))
-        if not cands:
-            continue
-        cands.sort()
-        if len(cands) == 1 or cands[0][:2] != cands[1][:2]:
-            no = cands[0][2]
-            same = by_no[no].get("source_url") == (watch_url(e["id"]) if e["id"] else "")
-            take(i, no, "already" if same else "verified-by-title")
+                pairs.append(((-n_match, abs(no - i)), i, no))
+    pairs.sort()
+    undecided: set[int] = set()
+    k = 0
+    while k < len(pairs):
+        key = pairs[k][0]
+        group: dict[int, list[int]] = {}
+        while k < len(pairs) and pairs[k][0] == key:
+            _, i, no = pairs[k]
+            group.setdefault(i, []).append(no)
+            k += 1
+        for i in sorted(group):
+            if i in assigned or i in undecided:
+                continue
+            rows_left = [no for no in group[i] if no not in claimed]
+            if len(rows_left) > 1:
+                undecided.add(i)
+            elif rows_left:
+                no = rows_left[0]
+                e = entries[i - 1]
+                same = by_no[no].get("source_url") == (watch_url(e["id"]) if e["id"] else "")
+                take(i, no, "already" if same else "verified-by-title")
     # 3. 両隣が同じずれ幅で対応している区間は、そのずれで位置から採る。先頭の区間は右隣が
     #    ずれ 0 のとき、末尾の区間は左隣がずれ 0 で行が余っていないときだけ（欠落を見落とさない）
     max_no = max(by_no) if by_no else 0

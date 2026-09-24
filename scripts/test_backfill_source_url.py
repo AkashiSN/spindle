@@ -17,17 +17,18 @@ from backfill_source_url import (  # noqa: E402
 )
 
 
-def entry(id_, title):
-    return {"id": id_, "title": title}
+def entry(id_, title, duration=None):
+    return {"id": id_, "title": title, "duration": duration}
 
 
-def track(id_, no, title, source_url=None, rel_path=None):
+def track(id_, no, title, source_url=None, rel_path=None, duration_ms=None):
     return {
         "id": id_,
         "track_no": no,
         "title": title,
         "rel_path": rel_path or f"X/A/A のお歌/{no:02} {title}.opus",
         "source_url": source_url,
+        "duration_ms": duration_ms,
     }
 
 
@@ -180,6 +181,29 @@ class Plan(unittest.TestCase):
         st = {(r["track_no"], r["video_id"]): r["status"] for r in rows}
         self.assertEqual(st[(2, "v2")], "no-track")
         self.assertEqual(st[(2, "v3")], "verified-by-title")
+
+    def test_same_title_videos_competing_for_one_row_go_to_the_nearest(self):
+        # 同名の別曲（「再会」の Vaundy カバーと LiSA,Uru カバー）が再生リストの別の位置にあり、Library には
+        # 後者だけがある。先に現れた動画が行を取ってはいけない。行に近い方（位置 5 ↔ 行 4）が取る
+        entries = [entry("v1", "曲 1 / A"), entry("v2", "再会 - Vaundy covered by A"), entry("v3", "曲 2 / A"),
+                   entry("v4", "曲 3 / A"), entry("v5", "再会 - LiSA,Uru covered by A")]
+        tracks = [track(1, 1, "曲 1"), track(2, 2, "曲 2"), track(3, 3, "曲 3"), track(4, 4, "再会 (Cover)")]
+        rows = build_plan("A のお歌", entries, tracks)
+        by_video = {r["video_id"]: r for r in rows}
+        self.assertEqual((by_video["v5"]["status"], by_video["v5"]["track_no"]), ("verified-by-title", 4))
+        self.assertEqual(by_video["v2"]["status"], "no-track")
+        self.assertIsNone(by_video["v2"]["track_id"])
+
+    def test_title_rescue_rejects_a_video_whose_length_disagrees(self):
+        # 同じ配置でも、長さが分かっていれば長さの合う方を採る（webm → opus は remux なので長さは一致する）
+        entries = [entry("v1", "曲 1 / A"), entry("v2", "再会 - LiSA,Uru covered by A", 246), entry("v3", "曲 2 / A"),
+                   entry("v4", "曲 3 / A"), entry("v5", "再会 - Vaundy covered by A", 266)]
+        tracks = [track(1, 1, "曲 1"), track(2, 2, "曲 2"), track(3, 3, "曲 3"),
+                  track(4, 4, "再会 (Cover)", duration_ms=245_387)]
+        rows = build_plan("A のお歌", entries, tracks)
+        by_video = {r["video_id"]: r for r in rows}
+        self.assertEqual((by_video["v2"]["status"], by_video["v2"]["track_no"]), ("verified-by-title", 4))
+        self.assertEqual(by_video["v5"]["status"], "no-track")
 
     def test_title_rescue_with_equidistant_candidates_stays_mismatch(self):
         entries = [entry("v1", "違う / A"), entry("v2", "同じ / A"), entry("v3", "別 / A")]
