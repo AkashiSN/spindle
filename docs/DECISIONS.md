@@ -3764,11 +3764,15 @@ yt-dlp が走る）。
 
 **決定**（2026-09-24。リハーサルの FLAC 正規化で見つかった不一致への対応）:
 
-- symphonia のデコード出力を、トラックの宣言長（`Track::num_frames`）で打ち切る（`media::fingerprint::FrameLimit`）。
-  対象は `decoded_pcm_md5`（`audio_md5`、正規化の照合値、MD5 補填）、`decode_s16`（CD の CRC）、
-  `media::decode` のプロセス内経路（RG / 偽ハイレゾ検出）。宣言長が無いトラックと、delay / padding を持つ
-  トラック（LAME ヘッダ付きの MP3、Opus 等。宣言長は trim 後の長さだが、パケットの trim は適用していない）は
-  従来どおり打ち切らない。ffmpeg の経路は ffmpeg 自身が打ち切るので変えない
+- symphonia のデコード出力を、**ALAC のトラックに限り**宣言長（`Track::num_frames`）で打ち切る
+  （`media::fingerprint::FrameLimit`）。対象は `decoded_pcm_md5`（`audio_md5`、正規化の照合値、MD5 補填）、
+  `decode_s16`（CD の CRC）、`media::decode` のプロセス内経路（RG / 偽ハイレゾ検出）。宣言長が無いトラックと、
+  delay / padding を持つトラックは打ち切らない。ffmpeg の経路は ffmpeg 自身が打ち切るので変えない
+- ALAC 以外に広げない。symphonia 0.6.1 の MP4 は edit list を読まず、AAC の encoder delay も
+  `delay` / `padding` に載せないので、AAC の `num_frames`（`stts` の合計）は trim 前の長さでも再生長でもない
+  （1 秒 / 44.1k の AAC で num_frames 45,124、symphonia のデコード 46,080、ffmpeg 44,100）。打ち切ると
+  AAC の RG 値が中途半端な長さで変わるだけなので、従来の出力（46,080）を保つ（codex レビューの指摘）。
+  FLAC / WAV / AIFF は宣言長とデコード長が一致するので掛けても値は変わらないが、必要が無いので掛けない
 - ALAC を ffmpeg でデコードする経路には変えない。デコーダの構成（symphonia 優先・Opus は ffmpeg）はそのまま
 
 **原因**: リハーサル環境の正規化で ALAC 7 本（24 bit の 48k / 96k）が「変換前後の PCM MD5 が一致しない」で
@@ -3785,7 +3789,7 @@ symphonia 0.6.1 の MP4 読みはパケットとして返し、デコーダは 1
 
 **既存 DB への影響**: 該当する ALAC（末尾に長さ 0 のサンプルを持つもの）は次の deep scan で `audio_md5` が
 変わり、`audio_version` が上がって RG と Derived が自動でやり直される。それ以外の ALAC / FLAC / WAV / AIFF は
-宣言長 = デコード長なので値が変わらない。
+宣言長 = デコード長なので値が変わらない。AAC / MP3 / Opus / Vorbis は打ち切りの対象外で値が変わらない。
 
 **却下**: ALAC だけ ffmpeg でデコードする（照合の独立性を失う。同期の呼び出し元に外部プロセスを通す変更も大きい）。
 正規化の照合で長さの差を許す（本物の欠損・切り詰めも通してしまう）。

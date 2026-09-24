@@ -86,6 +86,28 @@ async fn alac_stops_at_the_declared_length() {
 }
 
 #[tokio::test]
+async fn aac_in_mp4_is_not_cut_at_the_declared_length() {
+    // D-89: 打ち切りは ALAC だけ。symphonia の MP4 は edit list を読まず AAC の encoder delay も
+    // delay / padding に載せないので、AAC の num_frames（stts の合計。1 秒 / 44.1k で 45,124 前後）で切ると
+    // 中途半端な長さになる。従来どおり全パケット（1,024 フレーム単位）を出すこと
+    let dir = tempfile::tempdir().unwrap();
+    let path = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "m4a", 1));
+    let ffmpeg = common::ffmpeg().unwrap();
+    let (_, out) = Decoder::new(&ffmpeg)
+        .decode(
+            File::open(&path).unwrap(),
+            Some("m4a"),
+            Collect::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let frames = out.samples.len() / 2;
+    assert!(frames >= 44_100, "{frames}");
+    assert_eq!(frames % 1024, 0, "宣言長で切られている: {frames}");
+}
+
+#[tokio::test]
 async fn decodes_opus_via_ffmpeg() {
     let ffmpeg = require_ffmpeg!(common::ffmpeg());
     let dir = tempfile::tempdir().unwrap();

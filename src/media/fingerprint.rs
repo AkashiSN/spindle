@@ -140,7 +140,11 @@ fn read_streaminfo<R: Read + Seek>(mut r: R) -> Result<([u8; 34], u64), Fingerpr
 /// （`mdhd` の duration）はそれを含まない。ffmpeg は宣言どおり捨てるので、打ち切らないと同じ ALAC から
 /// 出る PCM の長さが食い違い、正規化の照合（D-46）が失敗する。宣言長は delay / padding を除いた再生
 /// フレーム数で、パケットの trim は適用していないので、delay / padding を持つトラック（LAME ヘッダ付きの
-/// MP3、Opus 等）は打ち切らない。宣言長が無ければ打ち切らない
+/// MP3、Opus 等）は打ち切らない。宣言長が無ければ打ち切らない。
+///
+/// [`Self::of_track`] は **ALAC だけ**に掛ける。symphonia の MP4 は edit list を読まず、AAC の encoder
+/// delay を `delay` / `padding` に載せないので、AAC の宣言長（`stts` の合計）は trim 前でも再生長でもなく、
+/// 打ち切ると既存の RG 値が中途半端な長さで変わる。FLAC / WAV / AIFF は宣言長とデコード長が一致する
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLimit {
     remaining: Option<u64>,
@@ -155,6 +159,15 @@ impl FrameLimit {
     }
 
     pub fn of_track(track: &Track) -> Self {
+        use symphonia::core::codecs::audio::well_known::CODEC_ID_ALAC;
+        let is_alac = track
+            .codec_params
+            .as_ref()
+            .and_then(|p| p.audio())
+            .is_some_and(|p| p.codec == CODEC_ID_ALAC);
+        if !is_alac {
+            return Self { remaining: None };
+        }
         Self::new(track.num_frames, track.delay, track.padding)
     }
 
