@@ -2615,10 +2615,11 @@ async fn missing_draft_picture_fails_placement() {
     assert!(lib.inbox_path("Gone/01.flac").exists());
 }
 
-/// コピー後・登録前に落ちた件を、パスの変わらない補正（任意のタグ）だけ直して再承認すると、宛先の
-/// 自分の成果物を今回の補正で置き換えてから登録する（再利用で補正を黙って捨てない。D-86、codex 指摘）
+/// コピー後・登録前に落ちた件を、パスの変わらない補正（任意のタグ）だけ変えて再承認すると、宛先の自分の
+/// 成果物は上書きせず（ファイルが正）、補正が入っていないので失敗にして件と下書きを残す（補正を黙って
+/// 捨てて成功にしない。D-86、codex 指摘）。前回と同じ下書きなら再利用して配置を終える
 #[tokio::test]
-async fn rerun_after_crash_applies_the_new_tag_changes_to_the_reused_file() {
+async fn rerun_after_crash_with_other_corrections_fails_without_overwriting() {
     let lib = Lib::new();
     require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
     lib.scan(1000).await;
@@ -2643,42 +2644,41 @@ async fn rerun_after_crash_applies_the_new_tag_changes_to_the_reused_file() {
         .unwrap();
     drop(c);
     let p = lib.lib_path("_Unsorted/Artist/Album/01 One.flac");
-    assert!(p.exists());
+    let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&p).unwrap());
     std::fs::create_dir_all(lib.inbox_path("AlbumA")).unwrap();
     lib.add("AlbumA/01.flac", 1, "One", "A", 1).unwrap();
     lib.scan(1001).await;
     let a2 = lib.item("AlbumA").unwrap();
-    // 2 回目はパスの変わらない補正だけを変える
-    draft.tracks[0]
+    // 2 回目はパスの変わらない補正だけを変える → 失敗（上書きしない）
+    let mut other = draft.clone();
+    other.tracks[0]
         .tags
         .insert("COMMENT".into(), Some(vec!["second".into()]));
-    draft.tracks[0]
-        .tags
-        .insert("GENRE".into(), Some(vec!["Rock".into()]));
-    lib.approve(a2.id, &draft);
+    lib.approve(a2.id, &other);
     lib.start(false);
+    lib.run_job().await;
+    let it = inbox::get(&lib.conn(), a2.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Failed);
+    assert!(it.error.unwrap_or_default().contains("今回の補正"));
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 0);
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&p).unwrap()),
+        inode
+    );
+    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
+        .unwrap();
+    assert_eq!(af.tags.values("COMMENT").collect::<Vec<_>>(), vec!["first"]);
+    assert!(lib.inbox_path("AlbumA/01.flac").exists());
+    // 前回と同じ下書きで承認し直せば、宛先を再利用して配置を終える
+    lib.approve(a2.id, &draft);
     assert_eq!(lib.run_job().await, JobState::Done);
     let it = inbox::get(&lib.conn(), a2.id).unwrap().unwrap();
     assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
     assert_eq!(lib.count("SELECT count(*) FROM tracks"), 1);
-    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
-        .unwrap();
-    assert_eq!(
-        af.tags.values("COMMENT").collect::<Vec<_>>(),
-        vec!["second"]
-    );
-    assert_eq!(af.tags.values("GENRE").collect::<Vec<_>>(), vec!["Rock"]);
-    // 登録した行も置き換えた後のファイル（inode）を指す
-    let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&p).unwrap()) as i64;
-    assert_eq!(
-        lib.count("SELECT inode FROM tracks WHERE rel_path = '_Unsorted/Artist/Album/01 One.flac'"),
-        inode
-    );
 }
 
-/// 登録済み（active な行がある）の自分の成果物は、再承認で置き換えない: 外部（foobar2000 等）が
-/// Library 側に足したタグは残り、今回の下書きのタグの補正は書かない（ファイルが正。履歴なしに
-/// 上書きしない。D-86、codex 指摘）
+/// 登録済み（active な行がある）の自分の成果物は、再承認で上書きしない: 外部（foobar2000 等）が
+/// Library 側に足したタグは残る。今回の補正がそのファイルに入っていなければ失敗（D-86、codex 指摘）
 #[tokio::test]
 async fn rerun_does_not_overwrite_a_registered_file_changed_outside() {
     let lib = Lib::new();
@@ -2700,23 +2700,45 @@ async fn rerun_does_not_overwrite_a_registered_file_changed_outside() {
     let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&p).unwrap());
     lib.scan(1001).await;
     let a2 = lib.item("AlbumA").unwrap();
-    let mut draft2 = draft.clone();
-    draft2.tracks[0]
-        .tags
-        .insert("GENRE".into(), Some(vec!["Rock".into()]));
-    lib.approve(a2.id, &draft2);
+    // 補正が同じ（外部のタグは下書きに無い）なら、上書きせずに再利用する
+    lib.approve(a2.id, &draft);
     let item = inbox::get(&lib.conn(), a2.id).unwrap().unwrap();
     let second = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(second.track_ids, first.track_ids);
-    // 置き換えていない（同じ実体、外部のタグが残る）
+    let read = || {
+        spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
+            .unwrap()
+    };
+    assert_eq!(
+        read().tags.values("COMMENT").collect::<Vec<_>>(),
+        vec!["outside"]
+    );
+    // もう一度戻して、今度は入っていない補正（GENRE）を付けて承認 → 失敗、ファイルはそのまま
+    std::fs::create_dir_all(lib.inbox_path("AlbumA")).unwrap();
+    std::fs::copy(
+        lib.lib_path("_Unsorted/Artist/Album/01 One.flac"),
+        lib.inbox_path("AlbumA/01.flac"),
+    )
+    .unwrap();
+    lib.scan(1002).await;
+    let a3 = lib.item("AlbumA").unwrap();
+    let mut draft3 = draft.clone();
+    draft3.tracks[0]
+        .tags
+        .insert("GENRE".into(), Some(vec!["Rock".into()]));
+    lib.approve(a3.id, &draft3);
+    let item = inbox::get(&lib.conn(), a3.id).unwrap().unwrap();
+    let err = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("今回の補正"), "{err}");
     assert_eq!(
         std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&p).unwrap()),
         inode
     );
-    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
-        .unwrap();
+    let af = read();
     assert_eq!(
         af.tags.values("COMMENT").collect::<Vec<_>>(),
         vec!["outside"]
