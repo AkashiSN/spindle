@@ -11,7 +11,7 @@
 // 確かめる場所。TOC の貼り付けとリリース URL の指定は編集ではなく照会の入力なので「詳細」に残す
 // （ドライブ無しの環境とデバッグ用）。
 
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState } from 'react'
 import type { CdDriveState } from '../hooks/useCdDrive'
 import { useCdLibrary } from '../hooks/useCdLibrary'
 import type { CdLookupState } from '../hooks/useCdLookup'
@@ -24,36 +24,7 @@ import { CdAlbumSummary } from './CdAlbumSummary'
 import { CdCandidates } from './CdCandidates'
 import { CdTrackTable } from './CdTrackTable'
 import { Hint } from './Hint'
-
-/** 番号付きの段。見出しの右に要約（`aside`）と説明（`hint`） */
-function Step({
-  no,
-  title,
-  aside,
-  hint,
-  children,
-}: {
-  no: number
-  title: string
-  aside?: ReactNode
-  hint?: ReactNode
-  children: ReactNode
-}) {
-  return (
-    <section className="cd-step" aria-label={title}>
-      <header className="cd-step-head">
-        <span className="cd-step-no" aria-hidden="true">
-          {no}
-        </span>
-        <h2>{title}</h2>
-        {aside != null && <span className="cd-step-aside small">{aside}</span>}
-        <span className="spacer" />
-        {hint != null && <Hint align="right">{hint}</Hint>}
-      </header>
-      <div className="cd-step-body">{children}</div>
-    </section>
-  )
-}
+import { Step } from './Step'
 
 export function CdView({
   cd,

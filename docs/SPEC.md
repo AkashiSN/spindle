@@ -2073,14 +2073,37 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   旨を示す）。見出しの横と**件の一覧の各件の左**（48px。無い件は同じ寸法の空枠。D-85）に件の代表画像
   （各ファイルの代表 = `PICTURE` の先頭、の最頻）、トラック表に小さなサムネイル列
   （`GET /api/inbox/:id/artwork/:hash`。無ければ空）。
-  **トラック表は全項目**（D-85。ユーザ要望）: ライブラリの表のように列で並べ、枠の中で横スクロールする。
-  disc / # / 画像 / タイトルは横スクロールしても左端に残す（`stickyColumns`。どの行のタグか分かるように）。
-  列は左から disc / # / 画像 / タイトル / アーティスト（ここで直す）、アルバム / アルバムアーティスト /
-  日付 / category（上の欄の値を全行に写す。読み取り専用）、長さ / codec / ファイル / 判定（ファイルから）、
-  そのあとに**ファイルの全タグ**（件のファイルが持つキーのうち、上の列が出している TITLE / ARTIST / ALBUM /
-  ALBUMARTIST / DATE / TRACKNUMBER / DISCNUMBER と PICTURE を除いたもの。ABC 順、多値は `"; "` で結合。
-  配置では変えない）。列の組み立ては `lib/inbox.ts` の `inboxColumns` / `extraTagKeys`。「列」メニューで
+  **導線**（D-86。ユーザ要望・モックで合意）: 承認画面は CD 画面と同じ番号付きの段（`components/Step.tsx`）で
+  **① 取り込む件**（出どころ CD / YouTube / 手置き・ディレクトリ・検出時刻・追記先・ファイルのタグで足りないもの
+  = `warnings`）→ **② アルバム情報** → **③ トラック** → **④ 確認して配置**。見出しに件の代表画像
+  （下書きを当てた後の各曲の画像の最頻）・出どころ・状態・「変更 N 件」（`draftChangeCount`）。
+  **② アルバム情報**: 先頭に画像の欄（`InboxCover`）、その下にライブラリのプロパティと同じ操作の 2 列の表
+  （`InboxAlbumProps`）。Metadata（アルバムアーティスト / アルバム / 日付 / category / album gain）は最初から
+  入力欄にせず、行をクリックで選び、ダブルクリック（Enter / F2）で入力欄、Enter で確定、Esc で取り消し、↑↓ で
+  行を移る。category は統制語彙の選択欄（`CategoryField` の inline）、album gain はダブルクリックで切り替わる。
+  提案（album gain は追記先の現在値）と違う行に「変更」、行のツールチップに元の値。Info（MusicBrainz リリース /
+  ディスク・トラック数 / 追記先）は表示のみ。
+  **画像の欄**: 全曲が同じ画像なら 1 枚（クリックかドロップで差し替え＝全曲）、画像なしは点線の枠、**曲ごとに
+  違う（YouTube）なら既定で曲ごとの画像を保ち**、サムネイルを並べて「画像の無い N 曲に入れる」「全曲を 1 枚に
+  そろえる」を明示的な操作にする。CD の件でリリースが決まっていれば「Cover Art Archive から取る」
+  （`POST /api/artwork/from-caa`）。画像は `POST /api/artwork/upload` で置き、下書きの `picture` に入れる
+  （`hooks/useArtworkUpload`、`lib/inbox.ts` の `pictureState` / `applyPicture` / `resetPictures`）。
+  **③ トラック表は全項目**（D-85 / D-86）: ライブラリの表のように列で並べ、枠の中で横スクロールする
+  （`InboxTrackGrid`）。セルをクリックで選び、ダブルクリック（Enter / F2）で入力欄、↑↓←→ で直せるセルを移る。
+  disc / # / タイトル / アーティストはその行だけ、**画像**はその曲だけ差し替える（ファイルを選ぶかドロップ）、
+  アルバム / アルバムアーティスト / 日付は**アルバム単位**（どの行で直しても全行と ② に反映。列を薄く塗る）、
+  **ファイルの全タグ**（件のファイルと下書きで足したキーのうち、固定列が出している TITLE / ARTIST / ALBUM /
+  ALBUMARTIST / DATE / TRACKNUMBER / DISCNUMBER と PICTURE を除いたもの。ABC 順、多値は `"; "` で結合）は
+  その行だけ直し、空にするとそのタグを消す（`setTrackTag`）。表の下の「タグを追加」で新しいキーの列を足す
+  （`newTagKeyProblem`）。長さ / codec / ファイル / 判定 / category と、**🔒 の付いた同一性のタグ**
+  （`SOURCE_URL` / `MUSICBRAINZ_*`）と DISCTOTAL は直せない。変更したセルは色で示し、ツールチップに元の値。
+  ARTIST が多値の行はセルに「多値を保つ」のチェック（D-70）。disc / # / 画像 / タイトルは横スクロールしても
+  左端に残す（`stickyColumns`）。列の組み立ては `inboxColumns` / `extraTagKeys`。「列」メニューで
   disc / # / タイトル以外を隠せ、隠した列は localStorage（`inbox.columns.hidden`）に覚える。
+  **④ 確認して配置**: 赤（`validateDraft` の問題。あると承認できない）/ 黄（判定できなかった曲・Library に
+  同名・画像の無い曲）/ 緑（タグを直す曲数・画像を差し替える曲数）の一覧、配置先の見込み
+  （`POST /api/inbox/:id/preview` を下書きの変更から 400ms 後に引く。`hooks/useInboxPreview`）、
+  「承認して配置」「却下」「下書きに戻す」。
   **MusicBrainz の引き直し**（P4-21、D-84）: CD の件（`GET /api/inbox` の `rip` がある件）だけ、アルバムの欄の
   下に節を出す。ボタンで `POST /api/cd/lookup { toc, isrcs, mcn, release?, refresh?, widen? }`（CD 画面と同じ）を
   引いて候補を並べ、選ぶと下書きの `release_id` / `release_group_id` を写し、ディスク番号を候補の medium の位置に

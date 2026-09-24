@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyPicture,
+  draftChangeCount,
+  effectiveTag,
+  isLockedTagKey,
+  newTagKeyProblem,
+  pictureState,
+  resetPictures,
+  setTrackTag,
+  tagChanged,
+  trackPictureUrl,
   stickyColumns,
   extraTagKeys,
   inboxColumns,
@@ -636,5 +646,157 @@ describe('stickyColumns', () => {
   it('画像の列を隠すとタイトルが詰まる', () => {
     const m = stickyColumns([{ id: 'disc' }, { id: 'no' }, { id: 'title' }])
     expect(m.get('title')).toEqual({ left: 144, width: 292, last: true })
+  })
+})
+
+describe('タグの変更（D-86）', () => {
+  const f = file('d/01.flac', 'flac', [
+    ['GENRE', 'Rock'],
+    ['GENRE', 'Pop'],
+    ['COMMENT', 'c'],
+  ])
+  const t: DraftTrack = { rel_path: 'd/01.flac', disc_no: 1, track_no: 1, title: 'one', artist: '' }
+  it('setTrackTag はファイルの値と違うときだけ変更を持つ', () => {
+    const a = setTrackTag(t, f, 'GENRE', 'Jazz; Soul')
+    expect(a.tags).toEqual({ GENRE: ['Jazz', 'Soul'] })
+    expect(effectiveTag(f, a, 'GENRE')).toBe('Jazz; Soul')
+    expect(tagChanged(f, a, 'GENRE')).toBe(true)
+    // 元に戻すと変更を消す
+    const b = setTrackTag(a, f, 'GENRE', 'Rock;Pop')
+    expect(b.tags).toEqual({})
+    expect(tagChanged(f, b, 'GENRE')).toBe(false)
+  })
+  it('空にするとファイルにあるキーは消し、無いキーは変更を持たない', () => {
+    expect(setTrackTag(t, f, 'COMMENT', '  ').tags).toEqual({ COMMENT: null })
+    expect(effectiveTag(f, setTrackTag(t, f, 'COMMENT', ''), 'COMMENT')).toBe('')
+    expect(setTrackTag(t, f, 'LYRICIST', '').tags).toEqual({})
+    expect(setTrackTag(t, f, 'LYRICIST', 'L').tags).toEqual({ LYRICIST: ['L'] })
+  })
+  it('newTagKeyProblem は形・上の欄のキー・鍵・既存の列を弾き、小文字は大文字にして通す', () => {
+    expect(newTagKeyProblem('lyricist', ['GENRE'])).toBeNull()
+    expect(newTagKeyProblem('', [])).not.toBeNull()
+    expect(newTagKeyProblem('A=B', [])).not.toBeNull()
+    expect(newTagKeyProblem('title', [])).toContain('TITLE')
+    expect(newTagKeyProblem('source_url', [])).toContain('識別')
+    expect(newTagKeyProblem('genre', ['GENRE'])).toContain('既にある')
+    expect(isLockedTagKey('MUSICBRAINZ_DISCID')).toBe(true)
+    expect(isLockedTagKey('GENRE')).toBe(false)
+  })
+  it('validateDraft はサーバと同じ規則でタグのキーと画像を検証する', () => {
+    const d = draftFrom(item())
+    const files = ['d/01.flac', 'd/02.flac']
+    expect(validateDraft({ ...d, tracks: [{ ...d.tracks[0], tags: { GENRE: ['x'] } }, d.tracks[1]] }, files)).toEqual([])
+    const bad = (tags: Record<string, string[] | null>) =>
+      validateDraft({ ...d, tracks: [{ ...d.tracks[0], tags }, d.tracks[1]] }, files)
+    expect(bad({ genre: ['x'] })[0]).toContain('タグのキーが不正')
+    expect(bad({ TITLE: ['x'] })[0]).toContain('上の欄で直す')
+    expect(bad({ SOURCE_URL: ['x'] })[0]).toContain('識別')
+    const pic = (picture: string) =>
+      validateDraft({ ...d, tracks: [{ ...d.tracks[0], picture }, d.tracks[1]] }, files)
+    expect(pic(`image/png:${'a'.repeat(64)}`)).toEqual([])
+    expect(pic(`image/gif:${'a'.repeat(64)}`)[0]).toContain('画像の指定が不正')
+  })
+  it('draftForSubmit はタグの空の値を null にし、変更の無い欄は送らない', () => {
+    const d = draftFrom(item())
+    const out = draftForSubmit({
+      ...d,
+      tracks: [{ ...d.tracks[0], tags: { GENRE: [' Jazz ', ''], COMMENT: [] }, picture: `image/png:${'b'.repeat(64)}` }, d.tracks[1]],
+    })
+    expect(out.tracks[0].tags).toEqual({ GENRE: ['Jazz'], COMMENT: null })
+    expect(out.tracks[0].picture).toBe(`image/png:${'b'.repeat(64)}`)
+    expect('tags' in out.tracks[1]).toBe(false)
+    expect('picture' in out.tracks[1]).toBe(false)
+  })
+  it('保存済みの下書きのタグの変更と画像は draftFrom で戻る', () => {
+    const saved: InboxDraft = {
+      ...proposal,
+      tracks: [{ ...proposal.tracks[0], tags: { GENRE: ['Jazz'] }, picture: `image/png:${'c'.repeat(64)}` }, proposal.tracks[1]],
+    }
+    const d = draftFrom(item({ draft: saved }))
+    expect(d.tracks[0].tags).toEqual({ GENRE: ['Jazz'] })
+    expect(d.tracks[0].picture).toBe(`image/png:${'c'.repeat(64)}`)
+    expect(d.tracks[1].tags).toBeUndefined()
+  })
+})
+
+describe('画像の差し替え（D-86）', () => {
+  const h = (c: string) => c.repeat(64)
+  const pic = (c: string) => ['PICTURE', `image/jpeg:${h(c)}`] as [string, string]
+  const withFiles = (tags: Array<Array<[string, string]>>) => {
+    const fs = tags.map((t, i) => file(`d/0${i + 1}.flac`, 'flac', t))
+    const d: InboxDraft = {
+      ...proposal,
+      tracks: fs.map((f, i) => ({ rel_path: f.rel_path, disc_no: 1, track_no: i + 1, title: 't', artist: '' })),
+    }
+    return { files: new Map(fs.map((f) => [f.rel_path, f])), d }
+  }
+  it('pictureState は無し / 全曲同じ / 曲ごとに違う（一部無し）を見分ける', () => {
+    expect(pictureState(withFiles([[], []]).files, withFiles([[], []]).d)).toMatchObject({ mode: 'none', missing: 2 })
+    const u = withFiles([[pic('a')], [pic('a')]])
+    expect(pictureState(u.files, u.d)).toMatchObject({ mode: 'uniform', kinds: 1, missing: 0 })
+    const m = withFiles([[pic('a')], [pic('b')], []])
+    expect(pictureState(m.files, m.d)).toEqual({ mode: 'mixed', kinds: 2, missing: 1, changed: 0 })
+  })
+  it('applyPicture は全曲 / 画像の無い曲 / 1 曲に当て、resetPictures で戻る', () => {
+    const { files, d } = withFiles([[pic('a')], [pic('b')], []])
+    const v = `image/png:${h('e')}`
+    const missing = applyPicture(d, files, v, 'missing')
+    expect(missing.tracks.map((t) => t.picture ?? null)).toEqual([undefined, undefined, v].map((x) => x ?? null))
+    expect(pictureState(files, missing)).toMatchObject({ mode: 'mixed', kinds: 3, missing: 0, changed: 1 })
+    const one = applyPicture(d, files, v, 1)
+    expect(one.tracks[1].picture).toBe(v)
+    expect(one.tracks[0].picture).toBeUndefined()
+    const all = applyPicture(d, files, v, 'all')
+    expect(pictureState(files, all)).toMatchObject({ mode: 'uniform', changed: 3 })
+    expect(pictureState(files, resetPictures(all))).toMatchObject({ mode: 'mixed', changed: 0 })
+  })
+  it('trackPictureUrl は差し替えた画像を /api/artwork、ファイルの画像を件の埋め込み画像で引く', () => {
+    const f = file('d/01.flac', 'flac', [pic('a')])
+    expect(trackPictureUrl(7, f, {})).toBe(`/api/inbox/7/artwork/${h('a')}`)
+    expect(trackPictureUrl(7, f, { picture: `image/png:${h('f')}` })).toBe(`/api/artwork/${h('f')}`)
+    expect(trackPictureUrl(7, file('d/02.flac'), {})).toBeNull()
+  })
+})
+
+describe('列の編集可否（D-86）', () => {
+  it('アルバム単位の列とタグは直せ、鍵のタグ・DISCTOTAL・ファイル由来は直せない', () => {
+    const cols = inboxColumns({ hasPicture: true, hasSource: false, tagKeys: ['DISCTOTAL', 'GENRE', 'SOURCE_URL'] })
+    const ed = Object.fromEntries(cols.map((c) => [c.id, c.editable]))
+    expect(ed).toMatchObject({
+      disc: true,
+      thumb: true,
+      album: true,
+      date: true,
+      category: false,
+      duration: false,
+      file: false,
+      'tag:GENRE': true,
+      'tag:DISCTOTAL': false,
+      'tag:SOURCE_URL': false,
+    })
+    expect(cols.find((c) => c.id === 'tag:SOURCE_URL')?.locked).toBe(true)
+  })
+  it('extraTagKeys は下書きで足したキーも列にする（消すだけのキーは足さない）', () => {
+    const keys = extraTagKeys([file('d/01.flac', 'flac', [['GENRE', 'x']])], [{ tags: { LYRICIST: ['l'], MOOD: null } }])
+    expect(keys).toEqual(['GENRE', 'LYRICIST'])
+  })
+})
+
+describe('draftChangeCount（D-86）', () => {
+  it('提案からの変更を欄・トラック・タグ・画像ごとに数える', () => {
+    const d = draftFrom(item())
+    expect(draftChangeCount(item(), d)).toBe(0)
+    const e: InboxDraft = {
+      ...d,
+      album: 'Y',
+      tracks: [
+        { ...d.tracks[0], title: 'uno', tags: { GENRE: ['x'], COMMENT: null }, picture: `image/png:${'a'.repeat(64)}` },
+        d.tracks[1],
+      ],
+    }
+    expect(draftChangeCount(item(), e)).toBe(5)
+    // album gain の基準は追記先の現在値
+    const dest = item({ destination: { album_id: 1, album: 'X', track_count: 2, max_track_no: 2, album_gain: true } })
+    expect(draftChangeCount(dest, draftFrom(dest))).toBe(0)
   })
 })

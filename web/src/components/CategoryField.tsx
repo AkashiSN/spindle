@@ -9,9 +9,12 @@ import { useCategories } from '../hooks/useCategories'
 export function CategoryField({
   value,
   onChange,
+  inline = false,
 }: {
   value: string | null
   onChange: (v: string | null) => void
+  /** 表のセルの中で使う（見出しを出さず、選択欄にフォーカスする。Inbox のアルバム情報。D-86） */
+  inline?: boolean
 }) {
   const cats = useCategories(true)
   const [adding, setAdding] = useState('')
@@ -25,9 +28,14 @@ export function CategoryField({
     }
   }
   return (
-    <label className="cd-field cd-field-category">
-      <span>category（配置先。未選択なら _Unsorted）</span>
-      <select value={value ?? ''} onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}>
+    <label className={inline ? 'cd-category-inline' : 'cd-field cd-field-category'}>
+      {!inline && <span>category（配置先。未選択なら _Unsorted）</span>}
+      <select
+        value={value ?? ''}
+        aria-label="category"
+        autoFocus={inline}
+        onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
+      >
         <option value="">（未分類 → _Unsorted）</option>
         {cats.items.map((c) => (
           <option key={c.id} value={c.name}>

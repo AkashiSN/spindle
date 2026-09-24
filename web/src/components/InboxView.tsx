@@ -1,47 +1,15 @@
-// Inbox タブ（SPEC §12.6、D-68）。左に件の一覧（埋め込み画像のサムネイル付き）、右に選んだ件の補正フォーム。
-// 右のトラック表はライブラリの表のように全項目を列で出す（直せる列・アルバム単位の欄の写し・ファイル由来・
-// ファイルの全タグ）。列は「列」メニューで隠せ、隠した列は localStorage に覚える。
-// 承認すると下書きがサーバに保存され、inbox ジョブが配置する。却下はファイルを Inbox に残したまま
-// 一覧から外す（再開できる）。placed の件は 24 時間残るので、そこからアルバムへ飛べる
+// Inbox タブ（SPEC §12.6、D-68 / D-86）。左に件の一覧（埋め込み画像のサムネイル付き）、右に選んだ件の承認画面。
+// 承認画面は CD 画面と同じく番号付きの段で流れを見せる: ① 取り込む件 → ② アルバム情報（画像の欄と、
+// ライブラリのプロパティと同じ操作の表）→ ③ トラック（全項目をダブルクリックで編集）→ ④ 確認して配置
+// （確認項目・配置先の見込み・承認）。下書きは画面の中だけで持ち、承認でサーバに保存して inbox ジョブが
+// 配置する。却下はファイルを Inbox に残したまま一覧から外す（再開できる）。placed の件は 24 時間残るので、
+// そこからアルバムへ飛べる
 
-import { Fragment, useMemo, useState } from 'react'
-import type { InboxState } from '../hooks/useInbox'
-import { formatDuration } from '../lib/format'
-import { formatDateTime } from '../lib/history'
-import {
-  ARTIST_JOIN,
-  applyCandidate,
-  applyTracklist,
-  artistValues,
-  artworkUrl,
-  codecSummary,
-  destinationLabel,
-  discNumbers,
-  draftForSubmit,
-  draftFrom,
-  extraTagKeys,
-  inboxColumns,
-  parseHiddenColumns,
-  stickyColumns,
-  tagValue,
-  type InboxColumn,
-  isEditable,
-  itemCover,
-  itemTitle,
-  pictureOf,
-  stateLabel,
-  validateDraft,
-  sameTitleCount,
-  sameTitleLabel,
-  verdictLabel,
-  watchLabel,
-  type DraftTrack,
-  type InboxDraft,
-  type InboxItem,
-  type InboxSource,
-  type RipLookup,
-} from '../lib/inbox'
+import { useMemo, useState } from 'react'
 import { apiPost } from '../api/client'
+import { useArtworkUpload } from '../hooks/useArtworkUpload'
+import type { InboxState } from '../hooks/useInbox'
+import { useInboxPreview } from '../hooks/useInboxPreview'
 import { describeLookupError } from '../hooks/useCdLookup'
 import {
   candidateDetail,
@@ -51,9 +19,36 @@ import {
   type LookupResponse,
   type ReleaseCandidate,
 } from '../lib/cd'
+import { formatDateTime } from '../lib/history'
+import {
+  applyCandidate,
+  applyTracklist,
+  artworkUrl,
+  codecSummary,
+  destinationLabel,
+  discNumbers,
+  draftChangeCount,
+  draftForSubmit,
+  draftFrom,
+  isEditable,
+  itemCover,
+  itemTitle,
+  pictureState,
+  sameTitleCount,
+  stateLabel,
+  trackPictureUrl,
+  validateDraft,
+  watchLabel,
+  type InboxDraft,
+  type InboxFile,
+  type InboxItem,
+  type RipLookup,
+} from '../lib/inbox'
 import { parseTracklist } from '../lib/tracklist'
-import { CategoryField } from './CategoryField'
-import { Hint } from './Hint'
+import { InboxAlbumProps } from './InboxAlbumProps'
+import { InboxCover } from './InboxCover'
+import { InboxTrackGrid } from './InboxTrackGrid'
+import { Step } from './Step'
 
 export function InboxView({ inbox, onOpenAlbum }: { inbox: InboxState; onOpenAlbum: (albumId: number) => void }) {
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -142,75 +137,54 @@ function ItemForm({
   }
   const [submitError, setSubmitError] = useState<string | null>(null)
 
-  const files = useMemo(() => item.tracks.map((f) => f.rel_path), [item.tracks])
-  const byPath = useMemo(() => new Map(item.tracks.map((f) => [f.rel_path, f])), [item.tracks])
-  const problems = useMemo(() => validateDraft(draft, files), [draft, files])
+  const names = useMemo(() => item.tracks.map((f) => f.rel_path), [item.tracks])
+  const files = useMemo(() => new Map(item.tracks.map((f) => [f.rel_path, f])), [item.tracks])
+  const problems = useMemo(() => validateDraft(draft, names), [draft, names])
   const editable = isEditable(item.state)
   const placedAlbumId = item.placed_album_id
-  // ダウンローダが置いた件（サイドカーあり）だけ判定の列を出す
-  const hasSource = item.tracks.some((f) => f.source != null)
-  // 埋め込み画像のあるファイルがあればサムネイル列を出す（P4-4）
-  const hasPicture = item.tracks.some((f) => pictureOf(f) != null)
-  const columns = useMemo(
-    () => inboxColumns({ hasPicture, hasSource, tagKeys: extraTagKeys(item.tracks) }),
-    [hasPicture, hasSource, item.tracks],
-  )
-  const [hidden, setHidden] = useHiddenColumns()
-  const shown = columns.filter((c) => !c.hideable || !hidden.includes(c.id))
-  const sticky = stickyColumns(shown)
-  // 左端に固定する列のセルの属性（位置と幅は lib の stickyColumns が決める）
-  const stickyProps = (id: string, className?: string) => {
-    const s = sticky.get(id)
-    if (s == null) return className == null ? {} : { className }
-    return {
-      className: [className, 'inbox-sticky', s.last ? 'inbox-sticky-last' : null].filter(Boolean).join(' '),
-      style: { left: s.left, width: s.width, minWidth: s.width, maxWidth: s.width },
-    }
-  }
-  const cover = itemCover(item)
+  const artwork = useArtworkUpload()
+  const preview = useInboxPreview(item.id, draft, editable)
+  const pics = pictureState(files, draft)
+  const changes = draftChangeCount(item, draft)
+  const source = item.rip != null ? 'CD' : item.tracks.some((f) => f.source != null) ? 'YouTube' : '手置き'
+  const cover = draftCoverUrl(item, draft, files)
 
-  const update = (patch: Partial<InboxDraft>) => setDraft((d) => ({ ...d, ...patch }))
-  const updateTrack = (i: number, patch: Partial<DraftTrack>) =>
-    setDraft((d) => ({ ...d, tracks: d.tracks.map((t, j) => (j === i ? { ...t, ...patch } : t)) }))
   const approve = async () => {
     setSubmitError(null)
     const msg = await inbox.approve(item.id, draftForSubmit(draft))
     if (msg != null) setSubmitError(msg)
   }
-  const text = (label: string, key: 'albumartist' | 'album') => (
-    <label className="cd-field">
-      <span>{label}</span>
-      <input type="text" value={draft[key]} disabled={!editable} onChange={(e) => update({ [key]: e.target.value })} />
-    </label>
-  )
-  const num = (t: DraftTrack, i: number, key: 'disc_no' | 'track_no', label: string) => (
-    <input
-      type="number"
-      min={1}
-      max={999}
-      aria-label={`${t.rel_path} の${label}`}
-      value={t[key]}
-      disabled={!editable}
-      onChange={(e) => {
-        const v = Number.parseInt(e.target.value, 10)
-        updateTrack(i, { [key]: Number.isFinite(v) ? v : 0 })
-      }}
-    />
-  )
+
+  // ④ の確認項目: 赤（配置できない）/ 黄（注意だけ）/ 緑（配置で行うこと）
+  const warns: string[] = []
+  const unmatched = unmatchedCount(item)
+  if (unmatched > 0) warns.push(`判定できなかった曲が ${unmatched} 曲（③ の判定列を開くとルールの足し方が読める）`)
+  const same = sameTitleCount(item)
+  if (same > 0) warns.push(`Library に同名の曲がある: ${same} 曲（③ のタイトルの ⚠。別テイクなら承認してよい）`)
+  if (pics.mode === 'none') warns.push('カバー画像なし（② で追加できる。配置後に操作タブの「アートワーク」でも足せる）')
+  else if (pics.missing > 0) warns.push(`画像の無い曲が ${pics.missing} 曲（② の「画像の無い曲に入れる」か ③ の画像列で足せる）`)
+  const tagTracks = draft.tracks.filter((t) => Object.keys(t.tags ?? {}).length > 0).length
+  const oks: string[] = []
+  if (tagTracks > 0) oks.push(`${tagTracks} 曲のファイルのタグを直して書く`)
+  if (pics.changed > 0) oks.push(`${pics.changed} 曲の画像を埋め込む / 差し替える（ほかの曲の画像はそのまま）`)
 
   return (
     <div className="inbox-form">
-      <h2>
-        {cover != null && (
-          <img
-            className="inbox-cover"
-            src={artworkUrl(item.id, cover)}
-            alt=""
-            title="件の埋め込み画像（多数派の目安。配置後のアルバムの代表画像とは限らない）"
-          />
+      <div className="inbox-head">
+        {cover != null ? (
+          <img className="inbox-cover" src={cover} alt="" title="件の代表画像（配置後のアルバムの代表とは限らない）" />
+        ) : (
+          <span className="inbox-cover empty" aria-hidden="true" />
         )}
-        {itemTitle(item)} <span className={`badge inbox-state-${item.state}`}>{stateLabel(item.state)}</span>
-      </h2>
+        <div>
+          <h2>{draft.album.trim() || itemTitle(item)}</h2>
+          <div className="inbox-badges">
+            <span className="badge">{source}</span>
+            <span className={`badge inbox-state-${item.state}`}>{stateLabel(item.state)}</span>
+            {changes > 0 && <span className="badge inbox-changed-badge">変更 {changes} 件</span>}
+          </div>
+        </div>
+      </div>
       {item.state === 'placed' && placedAlbumId != null && (
         <div className="op-row">
           <button type="button" className="primary" onClick={() => onOpenAlbum(placedAlbumId)}>
@@ -226,197 +200,167 @@ function ItemForm({
           配置はジョブで進む。直すなら「下書きに戻す」
         </p>
       )}
-      {item.warnings.length > 0 && (
-        <ul className="cd-warnings small">
-          {item.warnings.map((w) => (
-            <li key={w}>{w}</li>
-          ))}
-        </ul>
-      )}
-      {destinationLabel(item.destination) != null && (
-        <p className="notice small inbox-destination">{destinationLabel(item.destination)}</p>
-      )}
 
-      <div className="cd-form">
-        {text('アルバムアーティスト', 'albumartist')}
-        {text('アルバム', 'album')}
-        <label className="cd-field">
-          <span>日付（YYYY / YYYY-MM / YYYY-MM-DD。空なら書かない）</span>
-          <input
-            type="text"
-            value={draft.date ?? ''}
-            disabled={!editable}
-            placeholder="YYYY-MM-DD"
-            onChange={(e) => update({ date: e.target.value === '' ? null : e.target.value })}
-          />
-        </label>
-        {editable ? (
-          <CategoryField value={draft.category} onChange={(v) => update({ category: v })} />
-        ) : (
-          <label className="cd-field">
-            <span>category</span>
-            <input type="text" value={draft.category ?? '_Unsorted'} disabled />
-          </label>
-        )}
-        <label className="cd-field inbox-album-gain">
-          <span>album gain</span>
-          <span className="small">
-            <input
-              type="checkbox"
-              checked={draft.album_gain}
-              disabled={!editable}
-              onChange={(e) => update({ album_gain: e.target.checked })}
-            />{' '}
-            album gain を計算する（アルバム通し再生用。既定 off。CD 取り込みは on。追記先があればその現在値）
+      <Step
+        no={1}
+        title="取り込む件"
+        done
+        aside={
+          <span className="muted">
+            {item.tracks.length} ファイル · {codecSummary(item.tracks)}
           </span>
-        </label>
-      </div>
-
-      {editable && item.rip != null && <MbLookup rip={item.rip} draft={draft} onApply={setDraft} />}
-
-      <div className="inbox-tracks-head">
-        <h2>トラック</h2>
-        <Hint>
-          disc / # / タイトル / アーティストはここで直す。アルバム・アルバムアーティスト・日付・category は上の欄が
-          正で、表には全行に同じ値を写して見せる。長さ・codec・ファイルと、右側のタグの列（ファイルのタグ）は
-          ファイルから読んだ値で、配置では変えない
-        </Hint>
-        <span className="spacer" />
-        <ColumnMenu columns={columns} hidden={hidden} onChange={setHidden} />
-      </div>
-      <div className="inbox-tracks-wrap">
-        <table className="cd-tracks cd-tracks-edit inbox-tracks">
-          <thead>
-            <tr>
-              {shown.map((c) => (
-                <th key={c.id} {...stickyProps(c.id, `inbox-col-${c.group}`)} title={COLUMN_GROUP_TITLES[c.group]}>
-                  {c.label}
-                </th>
+        }
+        hint="Inbox のディレクトリと、そこから読んだこと。出どころ（CD / YouTube / 手置き）で ③ の列と ④ の確認項目が変わる"
+      >
+        <dl className="cd-summary">
+          <div>
+            <dt>出どころ</dt>
+            <dd>{source}</dd>
+          </div>
+          <div>
+            <dt>ディレクトリ</dt>
+            <dd>
+              <code>Inbox/{item.rel_dir}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>検出</dt>
+            <dd>{formatDateTime(item.detected_at)}</dd>
+          </div>
+        </dl>
+        {destinationLabel(item.destination) != null && (
+          <p className="notice small inbox-destination">{destinationLabel(item.destination)}</p>
+        )}
+        {item.warnings.length > 0 && (
+          <>
+            <p className="muted small inbox-file-notes-head">ファイルのタグで足りないもの（② / ③ で補う）</p>
+            <ul className="cd-warnings small">
+              {item.warnings.map((w) => (
+                <li key={w}>{w}</li>
               ))}
-            </tr>
-          </thead>
-          <tbody>
-            {draft.tracks.map((t, i) => {
-              const f = byPath.get(t.rel_path)
-              const cell = (c: InboxColumn) => {
-                switch (c.id) {
-                  case 'disc':
-                    return <td {...stickyProps('disc', 'inbox-num')}>{num(t, i, 'disc_no', 'ディスク番号')}</td>
-                  case 'no':
-                    return <td {...stickyProps('no', 'inbox-num')}>{num(t, i, 'track_no', 'トラック番号')}</td>
-                  case 'thumb': {
-                    const pic = f == null ? null : pictureOf(f)
-                    return (
-                      <td {...stickyProps('thumb', 'inbox-thumb-cell')}>
-                        {pic != null && <img className="inbox-thumb" src={artworkUrl(item.id, pic)} alt="" />}
-                      </td>
-                    )
-                  }
-                  case 'title':
-                    return (
-                      <td {...stickyProps('title', 'inbox-title-cell')}>
-                        <input
-                          type="text"
-                          aria-label={`${t.rel_path} のタイトル`}
-                          value={t.title}
-                          disabled={!editable}
-                          onChange={(e) => updateTrack(i, { title: e.target.value })}
-                        />
-                        {f != null && sameTitleLabel(f) != null && (
-                          <div
-                            className="inbox-same-title small"
-                            title="同じ曲を二重に取り込もうとしている可能性がある（Cover / Live ver. は別曲。承認は止めない）"
-                          >
-                            ⚠ {sameTitleLabel(f)}
-                          </div>
-                        )}
-                      </td>
-                    )
-                  case 'artist':
-                    return (
-                      <td className="inbox-artist-cell">
-                        <ArtistCell
-                          track={t}
-                          values={f == null ? [] : artistValues(f)}
-                          albumartist={draft.albumartist}
-                          editable={editable}
-                          onChange={(patch) => updateTrack(i, patch)}
-                        />
-                      </td>
-                    )
-                  case 'album':
-                    return <td className="muted">{draft.album}</td>
-                  case 'albumartist':
-                    return <td className="muted">{draft.albumartist}</td>
-                  case 'date':
-                    return <td className="muted">{draft.date ?? ''}</td>
-                  case 'category':
-                    return <td className="muted">{draft.category ?? '_Unsorted'}</td>
-                  case 'duration':
-                    return <td className="muted num">{f != null ? formatDuration(f.duration_ms) : ''}</td>
-                  case 'codec':
-                    return (
-                      <td className="muted">{f != null ? `${f.codec}${f.lossless ? '' : '（非可逆）'}` : ''}</td>
-                    )
-                  case 'file':
-                    return (
-                      <td className="muted inbox-file-cell" title={t.rel_path}>
-                        {fileName(t.rel_path)}
-                      </td>
-                    )
-                  case 'verdict':
-                    return <td className="inbox-verdict">{f?.source != null && <VerdictCell source={f.source} />}</td>
-                  default: {
-                    const v = f != null ? tagValue(f, c.label) : ''
-                    return (
-                      <td className="inbox-tag-cell" title={v === '' ? undefined : v}>
-                        {v}
-                      </td>
-                    )
-                  }
-                }
-              }
-              return (
-                <tr key={t.rel_path} className={f?.source != null && f.source.verdict !== 'ok' ? 'inbox-unmatched' : ''}>
-                  {shown.map((c) => (
-                    <Fragment key={c.id}>{cell(c)}</Fragment>
-                  ))}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-      {editable && <TracklistPaste draft={draft} onApply={setDraft} />}
-      {editable && problems.length > 0 && (
-        <ul className="cd-errors small">
-          {problems.map((p) => (
-            <li key={p} className="error">
-              {p}
+            </ul>
+          </>
+        )}
+      </Step>
+
+      <Step
+        no={2}
+        title="アルバム情報"
+        aside={editable ? <span className="muted">ダブルクリックで編集</span> : undefined}
+        hint={
+          <>
+            ライブラリのプロパティと同じ操作。行をクリックで選び、ダブルクリック（Enter / F2）で入力欄になる。Enter で
+            確定、Esc で取り消し。「変更」はファイルの値から直したもの（行にカーソルを置くと元の値）。category は語彙から
+            選ぶ、album gain はダブルクリックで切り替わる。画像は配置のときに埋め込む
+          </>
+        }
+      >
+        <InboxCover item={item} draft={draft} files={files} editable={editable} artwork={artwork} update={setDraft} />
+        <InboxAlbumProps item={item} draft={draft} editable={editable} onChange={(p) => setDraft((d) => ({ ...d, ...p }))} />
+        {editable && item.rip != null && <MbLookup rip={item.rip} draft={draft} onApply={setDraft} />}
+      </Step>
+
+      <Step
+        no={3}
+        title="トラック"
+        aside={
+          <span className="muted">
+            {draft.tracks.length} 曲{editable ? ' · セルをダブルクリックで編集' : ''}
+          </span>
+        }
+        hint={
+          <>
+            セルをクリックで選び、ダブルクリック（Enter / F2）で編集。↑↓←→ で直せるセルを移る。アルバム / アルバム
+            アーティスト / 日付はアルバム単位で、どの行で直しても全行と ② に反映する。タグの列は空にするとそのタグを
+            消し、「タグを追加」で新しいキーの列を足せる。画像の列はその曲だけ差し替える。長さ・codec・ファイル名と 🔒
+            の列は直せない。左の 4 列は横にスクロールしても残る
+          </>
+        }
+      >
+        <InboxTrackGrid item={item} draft={draft} files={files} editable={editable} artwork={artwork} update={setDraft} />
+        {editable && <TracklistPaste draft={draft} onApply={setDraft} />}
+      </Step>
+
+      <Step
+        no={4}
+        title="確認して配置"
+        hint="赤の項目があると配置できない。黄の項目は注意だけで、承認は止めない。承認すると inbox ジョブがタグと画像を書いて配置先へ移す"
+      >
+        <ul className="inbox-checks small">
+          {editable && problems.map((p) => <li key={p} className="ng">{p}</li>)}
+          {warns.map((w) => (
+            <li key={w} className="wa">
+              {w}
             </li>
           ))}
+          {oks.map((o) => (
+            <li key={o} className="ok">
+              {o}
+            </li>
+          ))}
+          {editable && problems.length === 0 && warns.length === 0 && oks.length === 0 && <li className="ok">問題なし</li>}
         </ul>
-      )}
-      {submitError != null && <p className="error">{submitError}</p>}
-      <div className="op-row">
         {editable && (
-          <button type="button" className="primary" disabled={inbox.busy || problems.length > 0} onClick={() => void approve()}>
-            承認して配置
-          </button>
+          <div className="inbox-dest">
+            <span className="muted small">配置先（見込み）</span>
+            <code>
+              {preview == null
+                ? '…'
+                : preview.rel_dir != null
+                  ? `Library/${preview.rel_dir}/`
+                  : `決められない: ${preview.error ?? ''}`}
+            </code>
+          </div>
         )}
-        {(item.state === 'pending' || item.state === 'failed' || item.state === 'approved') && (
-          <button type="button" disabled={inbox.busy} onClick={() => void inbox.reject(item.id)}>
-            却下
-          </button>
-        )}
-        {(item.state === 'approved' || item.state === 'rejected' || item.state === 'failed') && (
-          <button type="button" disabled={inbox.busy} onClick={() => void inbox.reopen(item.id)}>
-            下書きに戻す
-          </button>
-        )}
-      </div>
+        {submitError != null && <p className="error">{submitError}</p>}
+        <div className="op-row">
+          {editable && (
+            <button
+              type="button"
+              className="primary"
+              disabled={inbox.busy || artwork.busy || problems.length > 0}
+              onClick={() => void approve()}
+            >
+              承認して配置
+            </button>
+          )}
+          {(item.state === 'pending' || item.state === 'failed' || item.state === 'approved') && (
+            <button type="button" disabled={inbox.busy} onClick={() => void inbox.reject(item.id)}>
+              却下
+            </button>
+          )}
+          {(item.state === 'approved' || item.state === 'rejected' || item.state === 'failed') && (
+            <button type="button" disabled={inbox.busy} onClick={() => void inbox.reopen(item.id)}>
+              下書きに戻す
+            </button>
+          )}
+          {editable && (
+            <span className="muted small">
+              {problems.length > 0 ? '赤の項目を直すと押せる' : `${draft.tracks.length} 曲を配置する`}
+            </span>
+          )}
+        </div>
+      </Step>
     </div>
   )
+}
+
+/** 見出しの画像: 下書きを当てた後の各曲の画像の最頻（同数なら先の曲） */
+function draftCoverUrl(item: InboxItem, draft: InboxDraft, files: ReadonlyMap<string, InboxFile>): string | null {
+  const counts = new Map<string, number>()
+  for (const t of draft.tracks) {
+    const u = trackPictureUrl(item.id, files.get(t.rel_path), t)
+    if (u != null) counts.set(u, (counts.get(u) ?? 0) + 1)
+  }
+  let best: string | null = null
+  let max = 0
+  for (const [u, n] of counts) {
+    if (n > max) {
+      best = u
+      max = n
+    }
+  }
+  return best
 }
 
 /**
@@ -588,81 +532,6 @@ function TracklistPaste({ draft, onApply }: { draft: InboxDraft; onApply: (d: In
   )
 }
 
-/**
- * アーティスト欄（P4-4、D-70）。ファイルの ARTIST が多値なら元の値をチップで見せ、「そのまま保つ」
- * （提案は on。on の間は "; " 結合の表示で編集不可）を外すと欄が編集できて 1 値で書く
- */
-function ArtistCell({
-  track,
-  values,
-  albumartist,
-  editable,
-  onChange,
-}: {
-  track: DraftTrack
-  values: string[]
-  albumartist: string
-  editable: boolean
-  onChange: (patch: Partial<DraftTrack>) => void
-}) {
-  const multi = values.length > 1
-  const keep = multi && track.keep_artists === true
-  const input = (
-    <input
-      type="text"
-      aria-label={`${track.rel_path} のアーティスト`}
-      value={keep ? values.join(ARTIST_JOIN) : track.artist}
-      placeholder={albumartist}
-      disabled={!editable || keep}
-      title={keep ? 'ファイルの多値をそのまま保つ（配置で ARTIST に触れない）' : undefined}
-      onChange={(e) => onChange({ artist: e.target.value })}
-    />
-  )
-  if (!multi) return input
-  return (
-    <div className="inbox-artist">
-      {input}
-      <div className="inbox-chips small">
-        {values.map((v, i) => (
-          <span key={`${i}-${v}`} className="chip">
-            {v}
-          </span>
-        ))}
-        <label className="inbox-keep">
-          <input
-            type="checkbox"
-            checked={keep}
-            disabled={!editable}
-            // on / off とも欄は現在のファイルの結合値から始める（外した直後の欄 = 見えていた文字列）
-            onChange={(e) => onChange({ keep_artists: e.target.checked, artist: values.join(ARTIST_JOIN) })}
-          />{' '}
-          そのまま保つ
-        </label>
-        {!keep && <span className="muted">1 値『{track.artist.trim() === '' ? albumartist : track.artist.trim()}』で書く</span>}
-      </div>
-    </div>
-  )
-}
-
-/** 判定バッジ。判定できなかったものは行を開くと message（ルールの足し方）と URL が読める */
-function VerdictCell({ source }: { source: InboxSource }) {
-  const v = verdictLabel(source)
-  const badge = <span className={`badge ${v.ok ? 'inbox-verdict-ok' : 'inbox-verdict-ng'}`}>{v.text}</span>
-  if (v.ok && source.url == null) return badge
-  return (
-    <details className="inbox-verdict-details">
-      <summary>{badge}</summary>
-      {source.message != null && <pre className="inbox-verdict-message small">{source.message}</pre>}
-      {source.url != null && (
-        <a className="small" href={source.url} target="_blank" rel="noreferrer">
-          {source.url}
-        </a>
-      )}
-      {source.channel != null && <div className="muted small">channel: {source.channel}</div>}
-    </details>
-  )
-}
-
 const NO_ITEMS: InboxItem[] = []
 
 /** 一覧の件のサムネイル（件の代表の埋め込み画像）。無い件・読めない件は同じ寸法の空枠 */
@@ -681,86 +550,6 @@ function ItemThumb({ item }: { item: InboxItem }) {
   )
 }
 
-const COLUMN_GROUP_TITLES: Record<InboxColumn['group'], string> = {
-  edit: 'ここで直す',
-  album: '上の欄の値（全行共通）',
-  file: 'ファイルから（表示のみ）',
-  tag: 'ファイルのタグ（配置では変えない）',
-}
-
-const HIDDEN_KEY = 'inbox.columns.hidden'
-
-/** 隠した列（利用者ごとの見た目の好みなので localStorage。読めない環境では毎回すべて出す） */
-function useHiddenColumns(): [string[], (v: string[]) => void] {
-  const [hidden, setHiddenState] = useState<string[]>(() => {
-    try {
-      return parseHiddenColumns(window.localStorage.getItem(HIDDEN_KEY))
-    } catch {
-      return []
-    }
-  })
-  const setHidden = (v: string[]) => {
-    setHiddenState(v)
-    try {
-      window.localStorage.setItem(HIDDEN_KEY, JSON.stringify(v))
-    } catch {
-      // 保存できなくても表示は切り替わる
-    }
-  }
-  return [hidden, setHidden]
-}
-
-/** 列の表示の切り替え（隠せる列だけ。グループごと） */
-function ColumnMenu({
-  columns,
-  hidden,
-  onChange,
-}: {
-  columns: InboxColumn[]
-  hidden: string[]
-  onChange: (v: string[]) => void
-}) {
-  const hideable = columns.filter((c) => c.hideable)
-  const toggle = (id: string, on: boolean) => onChange(on ? hidden.filter((h) => h !== id) : [...hidden, id])
-  const tagIds = hideable.filter((c) => c.group === 'tag').map((c) => c.id)
-  return (
-    <details className="inbox-column-menu">
-      <summary className="small">列</summary>
-      <div className="inbox-column-menu-body small">
-        {(['edit', 'album', 'file', 'tag'] as const).map((g) => {
-          const cs = hideable.filter((c) => c.group === g)
-          if (cs.length === 0) return null
-          return (
-            <fieldset key={g}>
-              <legend>{COLUMN_GROUP_TITLES[g]}</legend>
-              {g === 'tag' && (
-                <div className="op-row">
-                  <button type="button" className="ghost" onClick={() => onChange(hidden.filter((h) => !tagIds.includes(h)))}>
-                    すべて出す
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => onChange([...hidden.filter((h) => !tagIds.includes(h)), ...tagIds])}
-                  >
-                    すべて隠す
-                  </button>
-                </div>
-              )}
-              {cs.map((c) => (
-                <label key={c.id}>
-                  <input type="checkbox" checked={!hidden.includes(c.id)} onChange={(e) => toggle(c.id, e.target.checked)} />{' '}
-                  {c.label}
-                </label>
-              ))}
-            </fieldset>
-          )
-        })}
-      </div>
-    </details>
-  )
-}
-
 /** 判定できなかったトラックの数（一覧のバッジ） */
 function unmatchedCount(item: InboxItem): number {
   return item.tracks.filter((f) => f.source != null && f.source.verdict !== 'ok').length
@@ -769,9 +558,4 @@ function unmatchedCount(item: InboxItem): number {
 /** 件のファイル集合の鍵（走査で変わったかの判定に使う） */
 function filesKey(item: InboxItem): string {
   return item.tracks.map((f) => `${f.rel_path}\u0000${f.inode}\u0000${f.mtime_ns}\u0000${f.size}`).join('\n')
-}
-
-function fileName(relPath: string): string {
-  const i = relPath.lastIndexOf('/')
-  return i < 0 ? relPath : relPath.slice(i + 1)
 }

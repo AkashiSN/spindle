@@ -2523,3 +2523,299 @@ table.inbox-tracks td.inbox-thumb-cell.inbox-sticky {
 .cd-form .inbox-album-gain {
   grid-column: 1 / -1;
 }
+
+/* ---------------- Inbox の承認画面の導線（D-86） ---------------- */
+.inbox-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.inbox-head h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  color: var(--fg);
+}
+.inbox-head .inbox-cover {
+  width: 64px;
+  height: 64px;
+  margin: 0;
+  flex: none;
+}
+.inbox-cover.empty {
+  display: inline-block;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+}
+.inbox-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.inbox-changed-badge,
+.inbox-changed {
+  background: var(--badge-amber-bg);
+  color: var(--badge-amber-fg);
+}
+.inbox-changed {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
+/* ② 画像の欄 */
+.inbox-cover-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+.inbox-cover-drop {
+  width: 120px;
+  height: 120px;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-alt);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.inbox-cover-drop img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.inbox-cover-drop.empty {
+  border: 2px dashed var(--border);
+}
+.inbox-cover-drop.over,
+.inbox-cover-drop:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  outline: none;
+}
+.inbox-cover-drop:disabled {
+  cursor: default;
+}
+.inbox-cover-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 260px;
+}
+.inbox-cover-strip img,
+.inbox-cover-strip .inbox-nopic {
+  width: 56px;
+  height: 56px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  object-fit: cover;
+  box-sizing: border-box;
+}
+.inbox-nopic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border);
+  border-radius: 3px;
+  background: var(--bg-alt);
+  color: var(--muted);
+}
+.inbox-cover-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* ② プロパティ風の表 */
+table.inbox-kv {
+  font-size: 13px;
+  max-width: 820px;
+  outline: none;
+}
+table.inbox-kv:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+table.inbox-kv th,
+table.inbox-kv td {
+  height: var(--row-h);
+  padding: 0 8px;
+  border-bottom: 1px solid var(--row-border);
+  vertical-align: middle;
+}
+table.inbox-kv th {
+  width: 180px;
+  font-weight: normal;
+}
+table.inbox-kv tr.inbox-kv-sect td {
+  height: 22px;
+  background: var(--bg-alt);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+table.inbox-kv tbody tr:not(.inbox-kv-sect):not(.ro) {
+  cursor: default;
+}
+table.inbox-kv tbody tr:not(.inbox-kv-sect):not(.ro):hover > * {
+  background: var(--bg-alt);
+}
+table.inbox-kv tr.selected > * {
+  background: var(--accent-bg) !important;
+}
+table.inbox-kv tr.ro > * {
+  color: var(--muted);
+}
+table.inbox-kv tr.editing input,
+table.inbox-kv tr.editing select {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+}
+.cd-category-inline {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.cd-category-inline select {
+  flex: 1;
+}
+
+/* ③ セルの選択と編集 */
+.inbox-tracks-wrap:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+table.inbox-tracks td.inbox-cursor {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+table.inbox-tracks td.inbox-cell-changed {
+  background: var(--badge-amber-bg);
+}
+table.inbox-tracks td.inbox-cell-changed.inbox-sticky {
+  background: var(--badge-amber-bg);
+}
+table.inbox-tracks .inbox-album-col {
+  background: color-mix(in srgb, var(--accent-bg) 35%, transparent);
+}
+table.inbox-tracks td.inbox-editing input {
+  width: 100%;
+  min-width: 120px;
+  box-sizing: border-box;
+  font: inherit;
+}
+table.inbox-tracks td.inbox-thumb-cell {
+  cursor: default;
+}
+table.inbox-tracks td.inbox-thumb-cell .inbox-nopic {
+  width: 28px;
+  height: 28px;
+  font-size: 9px;
+}
+table.inbox-tracks td.inbox-title-cell {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.inbox-keep {
+  margin-left: 8px;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.inbox-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 6px;
+}
+.inbox-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.inbox-sw {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--bg);
+}
+.inbox-sw-album {
+  background: color-mix(in srgb, var(--accent-bg) 35%, var(--bg));
+}
+.inbox-sw-changed {
+  background: var(--badge-amber-bg);
+}
+.inbox-addtag {
+  margin-top: 8px;
+}
+.inbox-addtag input {
+  width: 200px;
+}
+
+/* ④ 確認して配置 */
+.inbox-checks {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.inbox-checks li::before {
+  display: inline-block;
+  width: 18px;
+  font-weight: 700;
+}
+.inbox-checks li.ng {
+  color: var(--error);
+}
+.inbox-checks li.ng::before {
+  content: '✗';
+}
+.inbox-checks li.wa {
+  color: var(--warn);
+}
+.inbox-checks li.wa::before {
+  content: '!';
+}
+.inbox-checks li.ok::before {
+  content: '✓';
+  color: var(--ok);
+}
+.inbox-dest {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.inbox-dest code {
+  display: block;
+  padding: 6px 8px;
+  background: var(--bg-alt);
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.inbox-grid-tools {
+  margin: 0 0 6px;
+}
+table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
+  background: var(--badge-amber-bg);
+}
+.inbox-file-notes-head {
+  margin: 8px 0 0;
+}

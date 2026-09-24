@@ -1,5 +1,7 @@
+import { parsePictureValue } from './artwork'
 import type { ReleaseCandidate } from './cd'
 import { formatDuration } from './format'
+import { splitValues } from './properties'
 
 // Inbox の承認キュー（SPEC §7.8、D-68）の純粋ロジック。件 = 音声ファイルのあるディレクトリ。
 // 下書き（InboxDraft）はアルバム単位 + トラック単位の補正で、承認時にサーバへ送り、配置時にタグへ書く。
@@ -20,6 +22,13 @@ export type DraftTrack = {
    * null / 無しはこの欄が無かった旧下書き（サーバは「多値で artist が先頭値のままなら保つ」と解釈）
    */
   keep_artists?: boolean | null
+  /**
+   * ファイルのタグの変更（D-86）。キー（大文字）→ 値の配列、null はそのタグを消す。書くのはここにある
+   * キーだけ。上の欄が扱うキー（COVERED_TAG_KEYS）と同一性のキー（isLockedTagKey）は不可
+   */
+  tags?: Record<string, string[] | null>
+  /** 埋め込み画像を差し替える（`<mime>:<sha256hex>`。アップロード済みの画像。D-86）。無ければファイルの画像 */
+  picture?: string | null
 }
 
 export type InboxDraft = {
@@ -183,6 +192,9 @@ function cloneTrack(t: DraftTrack): DraftTrack {
     title: t.title,
     artist: t.artist,
     keep_artists: t.keep_artists === true,
+    // 変更が無ければ欄ごと持たない（旧い下書き・提案と同じ形）
+    tags: t.tags != null && Object.keys(t.tags).length > 0 ? { ...t.tags } : undefined,
+    picture: t.picture ?? undefined,
   }
 }
 
@@ -328,6 +340,15 @@ export function validateDraft(d: InboxDraft, files: string[]): string[] {
     if (!known.has(key)) out.push(`件に無いファイル: ${t.rel_path}`)
     if (seen.has(key)) out.push(`下書きに同じファイルが 2 回: ${t.rel_path}`)
     seen.add(key)
+    for (const key of Object.keys(t.tags ?? {})) {
+      if (!isValidTagKey(key)) out.push(`タグのキーが不正: ${key}（${t.rel_path}。空・小文字・= や制御文字は使えない）`)
+      else if (COVERED_TAG_KEYS.includes(key)) out.push(`${key} は上の欄で直す（${t.rel_path}）`)
+      else if (isLockedTagKey(key)) out.push(`${key} は曲・盤の識別に使うので直せない（${t.rel_path}）`)
+    }
+    if (t.picture != null) {
+      const p = parsePictureValue(t.picture)
+      if (p == null || !DRAFT_PICTURE_MIMES.includes(p.mime)) out.push(`画像の指定が不正: ${t.picture}（${t.rel_path}）`)
+    }
     if (t.title.trim() === '') out.push(`タイトルが空: ${t.rel_path}`)
     if (!(t.disc_no >= 1) || !(t.track_no >= 1)) {
       out.push(`トラック番号 / ディスク番号は 1 以上: ${t.rel_path}`)
@@ -421,14 +442,27 @@ export function draftForSubmit(d: InboxDraft): InboxDraft {
     albumartist: d.albumartist.trim(),
     album: d.album.trim(),
     date: opt(d.date),
-    tracks: d.tracks.map((t) => ({
-      rel_path: t.rel_path,
-      disc_no: t.disc_no,
-      track_no: t.track_no,
-      title: t.title.trim(),
-      artist: t.artist.trim(),
-      keep_artists: t.keep_artists === true,
-    })),
+    tracks: d.tracks.map((t) => {
+      const out: DraftTrack = {
+        rel_path: t.rel_path,
+        disc_no: t.disc_no,
+        track_no: t.track_no,
+        title: t.title.trim(),
+        artist: t.artist.trim(),
+        keep_artists: t.keep_artists === true,
+      }
+      const tags = Object.entries(t.tags ?? {})
+      if (tags.length > 0) {
+        out.tags = Object.fromEntries(
+          tags.map(([k, vs]) => {
+            const kept = vs?.map((v) => v.trim()).filter((v) => v !== '') ?? []
+            return [k, kept.length > 0 ? kept : null]
+          }),
+        )
+      }
+      if (t.picture != null) out.picture = t.picture
+      return out
+    }),
     album_gain: d.album_gain,
     release_id: opt(d.release_id ?? null),
     release_group_id: opt(d.release_group_id ?? null),
@@ -485,13 +519,10 @@ export function verdictLabel(s: InboxSource): { text: string; ok: boolean } {
 }
 
 
-// ---------------------------------------------------------------- 承認画面の表の列（§12.6 Inbox）
+// ---------------------------------------------------------------- タグの変更（D-86）
 
-/**
- * 表の固定列が既に出しているタグ（全タグの列から外す）。TITLE / ARTIST / 番号は編集セル、ALBUM /
- * ALBUMARTIST / DATE はアルバム単位の欄の写し、PICTURE はサムネイル列
- */
-const COVERED_TAGS = new Set([
+/** 上の欄が扱うキー。`DraftTrack.tags` では受け付けない（サーバの COVERED_TAG_KEYS と同じ） */
+export const COVERED_TAG_KEYS: readonly string[] = [
   'TITLE',
   'ARTIST',
   'ALBUM',
@@ -499,19 +530,22 @@ const COVERED_TAGS = new Set([
   'DATE',
   'TRACKNUMBER',
   'DISCNUMBER',
+  'DISCTOTAL',
   'PICTURE',
-])
+]
 
-/** 件のファイルが持つタグのうち、固定列に無いキー（全タグの列）。ABC 順 */
-export function extraTagKeys(files: Pick<InboxFile, 'tags'>[]): string[] {
-  const keys = new Set<string>()
-  for (const f of files) {
-    for (const [k] of f.tags) {
-      if (!COVERED_TAGS.has(k)) keys.add(k)
-    }
-  }
-  return [...keys].sort()
+/** 曲・盤の同一性の判定に使うキー（鍵をかける。サーバの is_locked_tag_key と同じ。D-86） */
+export function isLockedTagKey(key: string): boolean {
+  return key === 'SOURCE_URL' || key.startsWith('MUSICBRAINZ_')
 }
+
+/** タグのキーの形（大文字・空でない・前後に空白が無い・= と制御文字を含まない。サーバの is_valid_tag_key） */
+export function isValidTagKey(key: string): boolean {
+  return key !== '' && key === key.trim() && key === key.toUpperCase() && /^[ -<>-}]+$/.test(key)
+}
+
+/** 差し替えに使える画像の形式（サーバの DRAFT_PICTURE_MIMES） */
+const DRAFT_PICTURE_MIMES: readonly string[] = ['image/jpeg', 'image/png', 'image/webp']
 
 /** ファイルのタグの値（多値は "; " で結合。無ければ空） */
 export function tagValue(file: Pick<InboxFile, 'tags'>, key: string): string {
@@ -521,35 +555,168 @@ export function tagValue(file: Pick<InboxFile, 'tags'>, key: string): string {
     .join(ARTIST_JOIN)
 }
 
+/** 下書きを当てた後のタグの値（表示用。変更が無ければファイルの値） */
+export function effectiveTag(file: Pick<InboxFile, 'tags'> | undefined, t: Pick<DraftTrack, 'tags'>, key: string): string {
+  const over = t.tags?.[key]
+  if (over !== undefined) return over == null ? '' : over.join(ARTIST_JOIN)
+  return file == null ? '' : tagValue(file, key)
+}
+
+/**
+ * タグのセルを直す。入力は "; " 区切りの多値。ファイルの値と同じに戻したら変更を消し、空にしたら
+ * ファイルにあるキーは null（消す）、無いキーは変更を消す
+ */
+export function setTrackTag(t: DraftTrack, file: Pick<InboxFile, 'tags'> | undefined, key: string, text: string): DraftTrack {
+  const values = splitValues(text)
+  const original = file == null ? [] : splitValues(tagValue(file, key))
+  const tags = { ...(t.tags ?? {}) }
+  const same = values.length === original.length && values.every((v, i) => v === original[i])
+  if (same) delete tags[key]
+  else if (values.length === 0) tags[key] = null
+  else tags[key] = values
+  return { ...t, tags }
+}
+
+/** タグが変わっているか（セルの印） */
+export function tagChanged(file: Pick<InboxFile, 'tags'> | undefined, t: Pick<DraftTrack, 'tags'>, key: string): boolean {
+  return t.tags?.[key] !== undefined && effectiveTag(file, t, key) !== (file == null ? '' : tagValue(file, key))
+}
+
+/** 「タグを追加」のキーの検証。問題が無ければ null */
+export function newTagKeyProblem(raw: string, existing: readonly string[]): string | null {
+  const key = raw.trim().toUpperCase()
+  if (!isValidTagKey(key)) return 'キーが空か、使えない文字（= や制御文字）を含んでいる'
+  if (COVERED_TAG_KEYS.includes(key)) return `${key} は左の列（または ②）で直す`
+  if (isLockedTagKey(key)) return `${key} は曲・盤の識別に使うので追加できない`
+  if (existing.includes(key)) return `${key} の列は既にある`
+  return null
+}
+
+// ---------------------------------------------------------------- 画像の差し替え（D-86）
+
+/** トラックの画像の同一性の鍵（sha256）。下書きで差し替えていればその画像、無ければファイルの代表 */
+export function trackPictureHash(file: Pick<InboxFile, 'tags'> | undefined, t: Pick<DraftTrack, 'picture'>): string | null {
+  if (t.picture != null) return parsePictureValue(t.picture)?.hash ?? null
+  return file == null ? null : pictureOf(file)
+}
+
+/** トラックの画像の URL。差し替えた画像は `/api/artwork/:hash`、ファイルの画像は件の埋め込み画像 */
+export function trackPictureUrl(itemId: number, file: Pick<InboxFile, 'tags'> | undefined, t: Pick<DraftTrack, 'picture'>): string | null {
+  if (t.picture != null) {
+    const p = parsePictureValue(t.picture)
+    return p == null ? null : `/api/artwork/${p.hash}`
+  }
+  const h = file == null ? null : pictureOf(file)
+  return h == null ? null : artworkUrl(itemId, h)
+}
+
+export type PictureState = {
+  /** none: どの曲にも無い / uniform: 全曲同じ / mixed: 曲ごとに違う・一部に無い */
+  mode: 'none' | 'uniform' | 'mixed'
+  kinds: number
+  missing: number
+  /** 差し替えた曲の数 */
+  changed: number
+}
+
+export function pictureState(files: ReadonlyMap<string, Pick<InboxFile, 'tags'>>, d: Pick<InboxDraft, 'tracks'>): PictureState {
+  const hashes = d.tracks.map((t) => trackPictureHash(files.get(t.rel_path), t))
+  const kinds = new Set(hashes.filter((h): h is string => h != null)).size
+  const missing = hashes.filter((h) => h == null).length
+  const changed = d.tracks.filter((t) => t.picture != null).length
+  const mode = kinds === 0 ? 'none' : kinds === 1 && missing === 0 ? 'uniform' : 'mixed'
+  return { mode, kinds, missing, changed }
+}
+
+/** 画像の当て先: 全曲 / 画像の無い曲 / 1 曲（下書きの位置） */
+export type PictureTarget = 'all' | 'missing' | number
+
+/** 下書きに画像を当てる（`value` は `<mime>:<sha256hex>`） */
+export function applyPicture(
+  d: InboxDraft,
+  files: ReadonlyMap<string, Pick<InboxFile, 'tags'>>,
+  value: string,
+  target: PictureTarget,
+): InboxDraft {
+  return {
+    ...d,
+    tracks: d.tracks.map((t, i) => {
+      const hit =
+        target === 'all' || (target === 'missing' && trackPictureHash(files.get(t.rel_path), t) == null) || target === i
+      return hit ? { ...t, picture: value } : t
+    }),
+  }
+}
+
+/** 画像の差し替えを全部戻す */
+export function resetPictures(d: InboxDraft): InboxDraft {
+  return { ...d, tracks: d.tracks.map((t) => ({ ...t, picture: null })) }
+}
+
+// ---------------------------------------------------------------- 承認画面の表の列（§12.6 Inbox）
+
+/** 固定列が出しているタグ（全タグの列から外す） */
+const COLUMN_TAGS = new Set(['TITLE', 'ARTIST', 'ALBUM', 'ALBUMARTIST', 'DATE', 'TRACKNUMBER', 'DISCNUMBER', 'PICTURE'])
+
+/** 件のファイルが持つタグと、下書きで足したキーのうち、固定列に無いもの（全タグの列）。ABC 順 */
+export function extraTagKeys(files: Pick<InboxFile, 'tags'>[], tracks: Pick<DraftTrack, 'tags'>[] = []): string[] {
+  const keys = new Set<string>()
+  for (const f of files) {
+    for (const [k] of f.tags) {
+      if (!COLUMN_TAGS.has(k)) keys.add(k)
+    }
+  }
+  for (const t of tracks) {
+    for (const [k, v] of Object.entries(t.tags ?? {})) {
+      if (v != null && !COLUMN_TAGS.has(k)) keys.add(k)
+    }
+  }
+  return [...keys].sort()
+}
+
 export type InboxColumn = {
   id: string
   label: string
-  /** edit: トラック単位で直す / album: 上の欄の写し / file: ファイルから / tag: ファイルのタグ */
+  /** edit: トラック単位で直す / album: アルバム単位（どの行で直しても全行）/ file: ファイルから / tag: ファイルのタグ */
   group: 'edit' | 'album' | 'file' | 'tag'
   /** 列メニューで隠せるか（番号とタイトルは常に出す） */
   hideable: boolean
+  /** ダブルクリックで直せるか */
+  editable: boolean
+  /** 同一性に使うタグ（鍵。D-86） */
+  locked?: boolean
 }
 
 /** 表の列（左から）。サムネイル・判定は件に該当するものがあるときだけ */
 export function inboxColumns(opts: { hasPicture: boolean; hasSource: boolean; tagKeys: string[] }): InboxColumn[] {
   const cols: InboxColumn[] = [
-    { id: 'disc', label: 'disc', group: 'edit', hideable: false },
-    { id: 'no', label: '#', group: 'edit', hideable: false },
+    { id: 'disc', label: 'disc', group: 'edit', hideable: false, editable: true },
+    { id: 'no', label: '#', group: 'edit', hideable: false, editable: true },
   ]
-  if (opts.hasPicture) cols.push({ id: 'thumb', label: '画像', group: 'file', hideable: true })
+  if (opts.hasPicture) cols.push({ id: 'thumb', label: '画像', group: 'edit', hideable: true, editable: true })
   cols.push(
-    { id: 'title', label: 'タイトル', group: 'edit', hideable: false },
-    { id: 'artist', label: 'アーティスト', group: 'edit', hideable: true },
-    { id: 'album', label: 'アルバム', group: 'album', hideable: true },
-    { id: 'albumartist', label: 'アルバムアーティスト', group: 'album', hideable: true },
-    { id: 'date', label: '日付', group: 'album', hideable: true },
-    { id: 'category', label: 'category', group: 'album', hideable: true },
-    { id: 'duration', label: '長さ', group: 'file', hideable: true },
-    { id: 'codec', label: 'codec', group: 'file', hideable: true },
-    { id: 'file', label: 'ファイル', group: 'file', hideable: true },
+    { id: 'title', label: 'タイトル', group: 'edit', hideable: false, editable: true },
+    { id: 'artist', label: 'アーティスト', group: 'edit', hideable: true, editable: true },
+    { id: 'album', label: 'アルバム', group: 'album', hideable: true, editable: true },
+    { id: 'albumartist', label: 'アルバムアーティスト', group: 'album', hideable: true, editable: true },
+    { id: 'date', label: '日付', group: 'album', hideable: true, editable: true },
+    { id: 'category', label: 'category', group: 'album', hideable: true, editable: false },
+    { id: 'duration', label: '長さ', group: 'file', hideable: true, editable: false },
+    { id: 'codec', label: 'codec', group: 'file', hideable: true, editable: false },
+    { id: 'file', label: 'ファイル', group: 'file', hideable: true, editable: false },
   )
-  if (opts.hasSource) cols.push({ id: 'verdict', label: '判定', group: 'file', hideable: true })
-  for (const k of opts.tagKeys) cols.push({ id: `tag:${k}`, label: k, group: 'tag', hideable: true })
+  if (opts.hasSource) cols.push({ id: 'verdict', label: '判定', group: 'file', hideable: true, editable: false })
+  for (const k of opts.tagKeys) {
+    const locked = isLockedTagKey(k)
+    cols.push({
+      id: `tag:${k}`,
+      label: k,
+      group: 'tag',
+      hideable: true,
+      editable: !locked && !COVERED_TAG_KEYS.includes(k),
+      locked,
+    })
+  }
   return cols
 }
 
@@ -586,4 +753,31 @@ export function stickyColumns(shown: Pick<InboxColumn, 'id'>[]): Map<string, Sti
   const tail = ids.length > 0 ? out.get(ids[ids.length - 1]) : undefined
   if (tail != null) tail.last = true
   return out
+}
+
+/**
+ * 下書きの変更の数（見出しの「変更 N 件」）。アルバム単位の欄（提案と違うもの。album gain の基準は
+ * 追記先の現在値）、トラックの番号・タイトル・アーティスト、タグの変更キー、画像の差し替えを数える
+ */
+export function draftChangeCount(item: Pick<InboxItem, 'proposal' | 'destination'>, d: InboxDraft): number {
+  const p = item.proposal
+  let n = 0
+  if (d.albumartist !== p.albumartist) n++
+  if (d.album !== p.album) n++
+  if ((d.date ?? '') !== (p.date ?? '')) n++
+  if ((d.category ?? null) !== (p.category ?? null)) n++
+  if (d.album_gain !== (item.destination?.album_gain ?? p.album_gain)) n++
+  const byPath = new Map(p.tracks.map((t) => [t.rel_path, t]))
+  for (const t of d.tracks) {
+    const o = byPath.get(t.rel_path)
+    if (o != null) {
+      if (t.disc_no !== o.disc_no) n++
+      if (t.track_no !== o.track_no) n++
+      if (t.title !== o.title) n++
+      if (t.artist !== o.artist && t.keep_artists !== true) n++
+    }
+    n += Object.keys(t.tags ?? {}).length
+    if (t.picture != null) n++
+  }
+  return n
 }
