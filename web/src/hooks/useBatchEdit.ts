@@ -29,7 +29,8 @@ export type BatchEdit = {
   setOps: (ops: readonly TagOp[]) => void
   /** 現在の選択・操作・ソートに対して有効なプレビュー（古ければ null） */
   preview: PreviewState | null
-  /** 直近のプレビュー（古くても持つ。表の差分は `preview` が有効なときだけ出す） */
+  /** プレビューしたが、その後に選択・操作・ソートが変わって古くなった（③ を「古い」にする。D-87） */
+  stale: boolean
   status: BatchStatus
   error: string | null
   pendingPrompt: PendingPrompt | null
@@ -61,6 +62,7 @@ export function useBatchEdit(selection: Selection, sortParam: string): BatchEdit
   const request: OpRequest[] = useMemo(() => opsToRequest(ops), [ops])
   const key = useMemo(() => previewKey(selection, request, sortParam), [selection, request, sortParam])
   const preview = result != null && result.key === key ? result : null
+  const stale = result != null && result.key !== key
   const pendingPrompt = visiblePendingPrompt(storedPrompt, key)
 
   const runPreview = useCallback(async () => {
@@ -217,6 +219,7 @@ export function useBatchEdit(selection: Selection, sortParam: string): BatchEdit
     ops,
     setOps,
     preview,
+    stale,
     status,
     error,
     pendingPrompt,

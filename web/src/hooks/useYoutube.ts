@@ -33,6 +33,8 @@ export interface YoutubeState {
   refresh: () => void
   /** 欄の URL を ytdl ジョブに投入する。投入できたら欄を空にして true */
   start: (urls: string[]) => Promise<boolean>
+  /** 直近の投入で返ったジョブ id（③ ④ はこれと、その再生リストの展開で増えた子を追う。D-87） */
+  sessionIds: number[]
   clearNotice: () => void
 }
 
@@ -43,6 +45,7 @@ export function useYoutube(enabled: boolean): YoutubeState {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [jobs, setJobs] = useState<Job[] | null>(null)
+  const [sessionIds, setSessionIds] = useState<number[]>([])
   const timer = useRef<number | null>(null)
   const fetchNow = useCallback(() => {
     apiFetch<JobList>('/api/jobs?type=ytdl')
@@ -76,6 +79,7 @@ export function useYoutube(enabled: boolean): YoutubeState {
       })
       if (r.ok) {
         setNotice(youtubeStartedMessage(r.body))
+        setSessionIds([...new Set(r.body.job_ids)])
         setUrls('')
         fetchNow()
         return true
@@ -90,5 +94,5 @@ export function useYoutube(enabled: boolean): YoutubeState {
     }
   }, [fetchNow])
   const clearNotice = useCallback(() => setNotice(null), [])
-  return { urls, setUrls, busy, notice, error, jobs, refresh, start, clearNotice }
+  return { urls, setUrls, busy, notice, error, jobs, refresh, start, sessionIds, clearNotice }
 }

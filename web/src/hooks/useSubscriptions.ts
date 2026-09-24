@@ -24,7 +24,8 @@ export interface SubscriptionsState {
   busy: boolean
   error: string | null
   refresh: () => void
-  create: (input: SubscriptionInput) => Promise<boolean>
+  /** 登録する。できたら登録した購読、できなければ null */
+  create: (input: SubscriptionInput) => Promise<Subscription | null>
   update: (id: number, patch: SubscriptionPatch) => Promise<boolean>
   remove: (id: number) => Promise<boolean>
   sync: (id: number) => Promise<boolean>
@@ -89,7 +90,13 @@ export function useSubscriptions(enabled: boolean): SubscriptionsState {
     [fetchNow],
   )
   const create = useCallback(
-    (input: SubscriptionInput) => run(() => apiPost<Subscription>('/api/ytmusic/subscriptions', input)),
+    async (input: SubscriptionInput) => {
+      let sub: Subscription | null = null
+      const ok = await run(async () => {
+        sub = await apiPost<Subscription>('/api/ytmusic/subscriptions', input)
+      })
+      return ok ? sub : null
+    },
     [run],
   )
   const update = useCallback(

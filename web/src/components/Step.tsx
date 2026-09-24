@@ -1,4 +1,6 @@
-// 番号付きの段（CD 画面と Inbox の承認画面の導線。§12.6）。見出しの右に要約（`aside`）と説明（`hint`。ⓘ）
+// 番号付きの段（CD / Inbox / YouTube 画面とライブラリの一括編集・操作タブの導線。§12.6、D-87）。
+// 見出しの右に要約（`aside`）と説明（`hint`。ⓘ）。状態は done（済み・緑）/ wait（前の段が済むまで淡く）/
+// stale（済んだ結果が古い・枠を警告色）
 
 import type { ReactNode } from 'react'
 import { Hint } from './Hint'
@@ -11,6 +13,9 @@ export function Step({
   hint,
   children,
   done = false,
+  wait = false,
+  stale = false,
+  className,
 }: {
   no: number
   title: string
@@ -19,9 +24,17 @@ export function Step({
   children: ReactNode
   /** 終わった段（番号を緑にする） */
   done?: boolean
+  /** 前の段が済むまで待つ段（淡くする） */
+  wait?: boolean
+  /** 結果が古くなった段（枠を警告色にする） */
+  stale?: boolean
+  className?: string
 }) {
+  const cls = ['cd-step', done ? 'done' : '', wait ? 'wait' : '', stale ? 'stale' : '', className ?? '']
+    .filter((c) => c !== '')
+    .join(' ')
   return (
-    <section className={done ? 'cd-step done' : 'cd-step'} aria-label={title}>
+    <section className={cls} aria-label={title}>
       <header className="cd-step-head">
         <span className="cd-step-no" aria-hidden="true">
           {no}

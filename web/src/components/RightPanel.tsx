@@ -2,7 +2,8 @@
 // 表の上に置き、高さはドラッグで可変（永続化）、折りたたみ可。
 // プロパティは PropertiesPanel（詳細は hooks/useTrackDetails）、
 // 一括編集の操作リスト・プレビュー・適用は BatchEditPanel（状態は hooks/useBatchEdit）、
-// 操作（リネーム / 正規化 / RG / FLAC 検査 / プレイリストへ追加）は OperationsPanel（hooks/useOperations）
+// 操作（リネーム / 正規化 / RG / FLAC 検査 / プレイリストへ追加）は OperationsPanel（hooks/useOperations）。
+// 一括編集・操作は横に並ぶ番号付きの段（① 対象は PanelTargetStep。D-87）
 
 import type { Playlist, TrackDetail, TrackRow } from '../api/types'
 import type { BatchEdit } from '../hooks/useBatchEdit'
@@ -11,7 +12,9 @@ import type { Operations } from '../hooks/useOperations'
 import { formatCount } from '../lib/format'
 import type { Selection } from '../lib/selection'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
+import { albumTitle } from '../lib/artwork'
 import { BatchEditPanel } from './BatchEditPanel'
+import type { PanelTarget } from './PanelTargetStep'
 import { OperationsPanel, type AlbumGainControl } from './OperationsPanel'
 import { PropertiesPanel } from './PropertiesPanel'
 
@@ -71,6 +74,13 @@ export function RightPanel({
     'props',
     (v): v is PanelTab => v === 'props' || v === 'edit' || v === 'ops',
   )
+
+  // 一括編集・操作タブの「① 対象」（D-87）
+  const target: PanelTarget = {
+    count: summary.count,
+    pending: summary.pending,
+    albums: albumGain.albums.map(albumTitle),
+  }
 
   if (collapsed) {
     return (
@@ -133,13 +143,14 @@ export function RightPanel({
       </div>
       {tab === 'edit' ? (
         <div className="panel-body">
-          <BatchEditPanel edit={edit} hasSelection={selection.kind !== 'none'} />
+          <BatchEditPanel edit={edit} hasSelection={selection.kind !== 'none'} target={target} />
         </div>
       ) : tab === 'ops' ? (
         <div className="panel-body">
           <OperationsPanel
             ops={ops}
             hasSelection={selection.kind !== 'none'}
+            target={target}
             playlists={playlists}
             onAddToPlaylist={onAddToPlaylist}
             albumGain={albumGain}

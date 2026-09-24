@@ -1528,6 +1528,11 @@ POST   /api/inbox/:id/preview                     { draft }（approve と同じ�
                                                   理由）。自分の成果物の再利用は見ないので見込み（D-86）
 POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
 POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
+POST   /api/ytmusic/lookup                        { urls: [string] }（200 件まで）→ { items: [{ url, kind: video|playlist|other|invalid,
+                                                   video_url?, located?: { location: library|inbox, path }, list_id?, subscription?: { id, albumartist, album } }] }
+                                                   （YouTube 画面 ① の照合。DB だけ。`list=` 付きは再生リスト。D-87）
+POST   /api/ytmusic/playlist                      { url }（再生リスト）→ { list_id, title, entries, unavailable, in_library, in_inbox, new, truncated, subscription? }
+                                                   | 400 | 502 ytdlp_failed（yt-dlp で列挙して所在ごとに数える。読むだけ。同時 2 本。D-87）
 GET    /api/ytmusic/subscriptions                 → { items: [Subscription] }（albumartist / album 順。P4-16、D-78）
 POST   /api/ytmusic/subscriptions                 { url, albumartist, album, category?, align? = true, enabled? = true, max_enqueue? = 50 }
                                                   → 201 Subscription | 400（YouTube の list= 付き URL でない、空、max_enqueue が 1〜1000 外）
@@ -1968,6 +1973,18 @@ foobar2000 の Properties と同じく、行末の × か右クリックのメ�
 タグ削除。プレビューは `POST /api/tracks/batch/preview` の結果を表に重ねる。別表は開かない。
 操作リストは選択を変えても残る（同じ操作を別の集合へ繰り返し適用できる）。
 
+**導線**（D-87。ユーザ要望・モックで合意）: 一括編集タブと操作タブは CD / Inbox と同じ番号付きの段を
+**横に 4 列**並べる（パネルは表の上で低く横長なので。コンテナ幅が狭ければ 2 列 → 1 列）。
+
+- 一括編集: **① 対象**（選択件数・アルバム・反映待ち。`PanelTargetStep`）→ **② 操作**（上の操作リスト）→
+  **③ プレビュー**（変更 / 変更なし / 反映待ち除外の件数。選択・操作・ソートを変えると「古い」になり枠が
+  警告色）→ **④ 適用**（説明と「N 曲に適用」。③ が済むまで押せない。済んだらバッチ #、巻き戻しは履歴）
+- 操作: **① 対象** → **② 操作を選ぶ**（ファイル / 音量 / 検査 / 画像・プレイリストの群から 1 つ。選んだものは
+  localStorage に残す）→ **③ 確かめる / プレビュー**（選んだ操作の説明と「巻き戻せる変更 / ジョブ / 読むだけ /
+  すぐ反映」の印。リネーム・正規化はパスのプレビュー、アートワークは画像の選択、album gain はチェックボックス、
+  プレイリストは追加先）→ **④ 実行**（見出しは適用 / 投入 / 反映。押せない理由を添える。結果の 1 行と
+  反映待ちの「除外して適用」もここ）
+
 ### 12.4 編集履歴
 
 ```
@@ -2120,7 +2137,19 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   チェックボックス（`PATCH /api/albums/:id`。20 album を超えたら絞るよう促す）。アルバム画面は無く
   アルバム一覧は表を絞るだけなので、切り替えはここに置く
 - **YouTube**（P3-3 → P4-13、D-70 追記）: 上部バーの独立した画面（取り込み元は Inbox / CD / YouTube で
-  横並び、結果は Inbox に集まる）。(1) 1 行 1 URL のテキストエリアと「ダウンロード」（`POST /api/ytmusic/
+  横並び、結果は Inbox に集まる）。
+  **導線**（D-87。ユーザ要望・モックで合意）: 見出しの切り替えで「ダウンロード」と「購読」。ダウンロードは
+  番号付きの段 **① URL を貼る**（入力が止まって 400ms で `POST /api/ytmusic/lookup` を引き、行ごとに種類と
+  状態（新規 / ライブラリにある / Inbox で承認待ち / YouTube 以外 / 取れない）を表で出す。再生リストは URL
+  ごとに 1 回 `POST /api/ytmusic/playlist` で本数と新規の数を出す）→ **② 取り込み方**（行き先・判定・展開・
+  画像の説明。未購読の再生リストがあれば「購読にする →」で購読の ① へ URL を渡す）→ **③ ダウンロード**
+  （飛ばす行を除いた「N 件をダウンロード」。投入後は今回のジョブ = 返ったジョブと、その再生リストの展開で増えた子（payload の
+  `parent_job_id`）を追う）→
+  **④ Inbox で承認**（今回のジョブの note から置いた件を並べ、「Inbox で開く」でその件を選んで開く。件が
+  まだ一覧に無ければ現れるまで待ち、人が別の件を選んだらやめる）。
+  これまでのジョブは折りたたみ。購読は **① 再生リスト**（list_id・題名・本数。購読済みなら止める）→
+  **② アルバムとして登録**（題名が取れたら空のアルバム名に入れる）→ **③ 登録して同期**（「登録して今すぐ同期」と
+  「登録だけ」。定期同期は既定で無いので、登録だけなら後から一覧の「同期」）、その下に登録済みの一覧。以下は各部の中身。(1) 1 行 1 URL のテキストエリアと「ダウンロード」（`POST /api/ytmusic/
   download`。再生リストは動画ごとに展開し、Library / Inbox に `SOURCE_URL` のある動画は投入しない）、
   (2) ytdl ジョブの一覧（`GET /api/jobs?type=ytdl` を新しい順。URL・結果（待ち / ダウンロード中 / 完了は
   `note` = Inbox に置いた・プラグインが skip・再生リストを展開した N 件 / 失敗の理由）・時刻・取り消し /

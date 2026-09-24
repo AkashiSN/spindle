@@ -5,7 +5,7 @@
 // 配置する。却下はファイルを Inbox に残したまま一覧から外す（再開できる）。placed の件は 24 時間残るので、
 // そこからアルバムへ飛べる
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { apiPost } from '../api/client'
 import { useArtworkUpload } from '../hooks/useArtworkUpload'
 import type { InboxState } from '../hooks/useInbox'
@@ -50,9 +50,27 @@ import { InboxCover } from './InboxCover'
 import { InboxTrackGrid } from './InboxTrackGrid'
 import { Step } from './Step'
 
-export function InboxView({ inbox, onOpenAlbum }: { inbox: InboxState; onOpenAlbum: (albumId: number) => void }) {
+export function InboxView({
+  inbox,
+  onOpenAlbum,
+  focusDir = null,
+  onFocused,
+}: {
+  inbox: InboxState
+  onOpenAlbum: (albumId: number) => void
+  /** 開いたときに選ぶ件のディレクトリ（YouTube 画面の ④ から。D-87）。選んだら（無くても）onFocused */
+  focusDir?: string | null
+  onFocused?: () => void
+}) {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const items = inbox.items ?? NO_ITEMS
+  // 指された件が一覧に現れたら選ぶ（ytdl の直後は Inbox の検出がまだで、後から SSE で現れることがある）。
+  // 選んだら親に知らせて focusDir を消してもらう。現れない間は待ち続け、人が別の件を選んだらやめる
+  const focusHit = focusDir != null ? items.find((i) => i.rel_dir === focusDir) : undefined
+  if (focusHit != null && selectedId !== focusHit.id) setSelectedId(focusHit.id)
+  useEffect(() => {
+    if (focusHit != null && selectedId === focusHit.id) onFocused?.()
+  }, [focusHit, selectedId, onFocused])
   // 選んでいた件が消えたら（placed の期限切れ・ディレクトリの消失）最初の件を出す
   const selected = items.find((i) => i.id === selectedId) ?? items[0] ?? null
 
@@ -87,7 +105,13 @@ export function InboxView({ inbox, onOpenAlbum }: { inbox: InboxState; onOpenAlb
           <ul className="inbox-list">
             {items.map((it) => (
               <li key={it.id} className={it.id === selected?.id ? 'selected' : ''}>
-                <button type="button" onClick={() => setSelectedId(it.id)}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedId(it.id)
+                    onFocused?.()
+                  }}
+                >
                   <ItemThumb item={it} />
                   <span className="inbox-item-text">
                   <span className="inbox-title">{itemTitle(it)}</span>

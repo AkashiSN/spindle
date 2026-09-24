@@ -128,6 +128,8 @@ export type Job = {
   note?: string | null
   /** 対象（トラックのパス / アルバムのディレクトリ / バッチの説明など。種別に対象が無ければ null） */
   subject: string | null
+  /** ジョブの入力（種別ごと。ytdl は url と、再生リストの展開なら parent_job_id。D-87） */
+  payload?: Record<string, unknown>
 }
 
 export type JobSummary = {

@@ -1,12 +1,15 @@
-// YouTube 画面の購読の節（SPEC §12.6、D-78、P4-16）: 再生リストの購読の一覧・追加・変更・削除・同期。
+// YouTube 画面の購読の節（SPEC §12.6、D-78、P4-16、D-87）: 追加は番号付きの段（① 再生リスト → ② アルバムとして
+// 登録 → ③ 登録して同期）、その下に登録済みの一覧（変更・削除・同期）。
 // 行を開くと最終同期の詳細（取れない・揃えられない・別の album・持ち越し・バッチ）
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { Subscription } from '../api/types'
 import { useCategories } from '../hooks/useCategories'
+import { useUrlLookup } from '../hooks/useUrlLookup'
 import type { SubscriptionInput, SubscriptionsState } from '../hooks/useSubscriptions'
 import { formatDateTime } from '../lib/history'
 import { activeSyncJob, listIdFromUrl, subscriptionStatusLabel, syncDetailLines } from '../lib/subscriptions'
+import { Step } from './Step'
 
 const EMPTY: SubscriptionInput = {
   url: '',
@@ -18,29 +21,199 @@ const EMPTY: SubscriptionInput = {
   max_enqueue: 50,
 }
 
-export function SubscriptionsSection({ subs }: { subs: SubscriptionsState }) {
+export function SubscriptionsSection({ subs, initialUrl = '' }: { subs: SubscriptionsState; initialUrl?: string }) {
   const cats = useCategories(true)
-  const [form, setForm] = useState<SubscriptionInput>(EMPTY)
+  const [form, setForm] = useState<SubscriptionInput>({ ...EMPTY, url: initialUrl })
   const [open, setOpen] = useState<number | null>(null)
   const [editing, setEditing] = useState<{ id: number; albumartist: string; album: string; category: string | null } | null>(
     null,
   )
+  // 登録した購読（③ の結果。「今すぐ同期」の相手）
+  const [created, setCreated] = useState<{ sub: Subscription; synced: boolean } | null>(null)
   const { items, jobs, busy } = subs
+  const url = form.url.trim()
   const listId = listIdFromUrl(form.url)
-  const canAdd = !busy && listId != null && form.albumartist.trim() !== '' && form.album.trim() !== ''
+  const probeUrls = useMemo(() => (listId != null ? [url] : []), [listId, url])
+  const { lookup, probes } = useUrlLookup(probeUrls)
+  const probe = listId != null ? probes.get(url) : undefined
+  const info = probe?.state === 'ok' ? probe.info : null
+  const already = lookup.get(url)?.subscription ?? info?.subscription ?? null
+  const urlOk = listId != null && already == null
+  const named = form.albumartist.trim() !== '' && form.album.trim() !== ''
+  const canAdd = !busy && urlOk && named
 
-  const submit = async () => {
-    if (await subs.create({ ...form, albumartist: form.albumartist.trim(), album: form.album.trim() })) {
-      setForm(EMPTY)
-    }
+  // 列挙で題名が取れたら、空のアルバム名に入れる（人が入れた値は上書きしない）
+  const title = info?.title ?? null
+  const [filledFrom, setFilledFrom] = useState<string | null>(null)
+  if (title != null && filledFrom !== url && form.album.trim() === '') {
+    setFilledFrom(url)
+    setForm({ ...form, album: title })
+  }
+
+  const submit = async (syncNow: boolean) => {
+    const sub = await subs.create({ ...form, url, albumartist: form.albumartist.trim(), album: form.album.trim() })
+    if (sub == null) return
+    setForm(EMPTY)
+    setCreated({ sub, synced: false })
+    // 同期の投入に失敗したら（409 duplicate・通信失敗）「登録した」だけを出し、「今すぐ同期」を残す
+    if (syncNow && (await subs.sync(sub.id))) setCreated({ sub, synced: true })
   }
 
   return (
     <>
-      <h2>購読</h2>
+      <Step
+        no={1}
+        title="再生リスト"
+        aside={urlOk ? (info?.title ?? listId) : undefined}
+        done={urlOk}
+        hint="YouTube の再生リストの URL（list= を含む）。登録すると、同期のたびに Library / Inbox に無い動画だけをダウンロードする"
+      >
+        <input
+          type="url"
+          className="subscription-url"
+          aria-label="再生リストの URL"
+          value={form.url}
+          placeholder="https://www.youtube.com/playlist?list=…"
+          disabled={busy}
+          onChange={(e) => {
+            setCreated(null)
+            setForm({ ...form, url: e.target.value })
+          }}
+        />
+        {url === '' ? (
+          <p className="muted small">再生リストの URL（list= を含む）を貼る</p>
+        ) : listId == null ? (
+          <p className="error small">YouTube の再生リスト URL（list= 付き）を入れてください（動画 1 本はダウンロードのほうで取る）</p>
+        ) : already != null ? (
+          <p className="yt-banner warn small">
+            この再生リストはもう購読している（{already.albumartist} / {already.album}）。下の一覧から同期する
+          </p>
+        ) : (
+          <table className="kv">
+            <tbody>
+              <tr>
+                <th>再生リスト</th>
+                <td>
+                  {info?.title ?? '（題名は中身を調べると分かる）'} <code className="muted">{listId}</code>
+                </td>
+              </tr>
+              <tr>
+                <th>本数</th>
+                <td>
+                  {probe == null || probe.state === 'loading'
+                    ? '中身を調べている…'
+                    : probe.state === 'error'
+                      ? `調べられない（${probe.message}）。同期のときに分かる`
+                      : `${probe.info.entries} 本（ライブラリに ${probe.info.in_library}・Inbox に ${probe.info.in_inbox} → 番号を揃えるだけ。新規 ${probe.info.new} 本をダウンロード${probe.info.unavailable > 0 ? `。取れない ${probe.info.unavailable} 本は番号を占める` : ''}）`}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+      </Step>
+
+      <Step
+        no={2}
+        title="アルバムとして登録"
+        aside="この再生リストを 1 枚のアルバムとして扱う"
+        wait={!urlOk}
+        done={urlOk && named}
+        hint="「揃える」を on にすると、同期のたびに既存の曲のトラック番号とファイル名を再生リストの順に揃える（巻き戻せるバッチ）。非公開・削除の動画も位置を占めるので、その分は番号が飛ぶ"
+      >
+        <div className="subscription-form">
+          <label>
+            アルバムアーティスト
+            <input
+              type="text"
+              value={form.albumartist}
+              disabled={busy}
+              onChange={(e) => setForm({ ...form, albumartist: e.target.value })}
+            />
+          </label>
+          <label>
+            アルバム
+            <input type="text" value={form.album} disabled={busy} onChange={(e) => setForm({ ...form, album: e.target.value })} />
+          </label>
+          <label>
+            category（配置先）
+            <select
+              value={form.category ?? ''}
+              disabled={busy}
+              onChange={(e) => setForm({ ...form, category: e.target.value === '' ? null : e.target.value })}
+            >
+              <option value="">（未分類 = _Unsorted）</option>
+              {cats.items.map((c) => (
+                <option key={c.id} value={c.name}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={form.align} disabled={busy} onChange={(e) => setForm({ ...form, align: e.target.checked })} />
+            番号とファイル名を再生リストの順に揃える
+          </label>
+          <label className="inline">
+            1 回の同期で投入する上限
+            <input
+              type="number"
+              min={1}
+              max={1000}
+              value={form.max_enqueue}
+              disabled={busy}
+              onChange={(e) => setForm({ ...form, max_enqueue: Math.max(1, Number(e.target.value) || 1) })}
+            />
+          </label>
+        </div>
+      </Step>
+
+      <Step
+        no={3}
+        title="登録して同期"
+        aside={canAdd ? `「${form.albumartist.trim()} / ${form.album.trim()}」として登録` : created == null ? 'アルバムアーティストとアルバムが要る' : undefined}
+        wait={!canAdd && created == null}
+        done={created != null}
+      >
+        {created == null ? (
+          <div className="op-row">
+            <button type="button" className="primary" disabled={!canAdd} onClick={() => void submit(true)}>
+              登録して今すぐ同期
+            </button>
+            <button type="button" disabled={!canAdd} onClick={() => void submit(false)}>
+              登録だけ
+            </button>
+            <span className="muted small">新規の曲は Inbox に届く（承認は Inbox）</span>
+          </div>
+        ) : (
+          <p className="yt-banner ok small">
+            「{created.sub.albumartist} / {created.sub.album}」を登録した。
+            {created.synced
+              ? '同期を投入した。新規の曲は Inbox に届く（承認は Inbox）'
+              : '同期は下の一覧の「同期」か、定期同期（設定していれば）で始まる'}{' '}
+            {!created.synced && (
+              <button
+                type="button"
+                disabled={busy || activeSyncJob(jobs, created.sub.id) != null}
+                onClick={() => {
+                  void subs.sync(created.sub.id).then((ok) => {
+                    if (ok) setCreated({ ...created, synced: true })
+                  })
+                }}
+              >
+                今すぐ同期
+              </button>
+            )}{' '}
+            <button type="button" className="ghost" onClick={() => setCreated(null)}>
+              続けて登録する
+            </button>
+          </p>
+        )}
+      </Step>
+
+      <h2>登録済みの購読</h2>
       <p className="muted small">
-        再生リストを登録しておくと、同期のたびに Library / Inbox に無い動画だけをダウンロードし、既存の曲の番号と
-        ファイル名を再生リストの順に揃える（承認は Inbox）。非公開・削除の動画も位置を占めるので、その分は番号が飛ぶ
+        同期のたびに Library / Inbox に無い動画だけをダウンロードし、既存の曲の番号とファイル名を再生リストの順に揃える
+        （承認は Inbox）。非公開・削除の動画も位置を占めるので、その分は番号が飛ぶ
       </p>
       {items == null ? (
         <p className="muted">読み込み中…</p>
@@ -104,70 +277,6 @@ export function SubscriptionsSection({ subs }: { subs: SubscriptionsState }) {
         </table>
       )}
 
-      <h3>購読を追加</h3>
-      <div className="subscription-form">
-        <label>
-          再生リストの URL
-          <input
-            type="url"
-            value={form.url}
-            placeholder="https://www.youtube.com/playlist?list=…"
-            disabled={busy}
-            onChange={(e) => setForm({ ...form, url: e.target.value })}
-          />
-        </label>
-        <label>
-          アルバムアーティスト
-          <input
-            type="text"
-            value={form.albumartist}
-            disabled={busy}
-            onChange={(e) => setForm({ ...form, albumartist: e.target.value })}
-          />
-        </label>
-        <label>
-          アルバム
-          <input type="text" value={form.album} disabled={busy} onChange={(e) => setForm({ ...form, album: e.target.value })} />
-        </label>
-        <label>
-          category
-          <select
-            value={form.category ?? ''}
-            disabled={busy}
-            onChange={(e) => setForm({ ...form, category: e.target.value === '' ? null : e.target.value })}
-          >
-            <option value="">（未分類 = _Unsorted）</option>
-            {cats.items.map((c) => (
-              <option key={c.id} value={c.name}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="inline">
-          <input type="checkbox" checked={form.align} disabled={busy} onChange={(e) => setForm({ ...form, align: e.target.checked })} />
-          番号とファイル名を再生リストの順に揃える
-        </label>
-        <label className="inline">
-          1 回の同期で投入する上限
-          <input
-            type="number"
-            min={1}
-            max={1000}
-            value={form.max_enqueue}
-            disabled={busy}
-            onChange={(e) => setForm({ ...form, max_enqueue: Math.max(1, Number(e.target.value) || 1) })}
-          />
-        </label>
-        <div className="op-row">
-          <button type="button" className="primary" disabled={!canAdd} onClick={() => void submit()}>
-            追加
-          </button>
-          {form.url.trim() !== '' && listId == null && (
-            <span className="error small">YouTube の再生リスト URL（list= 付き）を入れてください</span>
-          )}
-        </div>
-      </div>
     </>
   )
 }

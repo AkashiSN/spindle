@@ -54,6 +54,8 @@ export type Operations = {
   error: string | null
   /** 現在の選択・ソートに対して有効な preview（古ければ null） */
   pathPreview: PathPreviewState | null
+  /** preview したが選択・ソートが変わって古くなった種類（③ を「古い」にする。D-87）。無ければ null */
+  pathStale: PathKind | null
   pendingPrompt: OperationPending | null
   previewPaths: (kind: PathKind) => Promise<void>
   /** 適用。投入できたら true */
@@ -75,6 +77,9 @@ export type Operations = {
   embedArtwork: (description: string, skipPending?: boolean) => Promise<boolean>
   dismissPending: () => void
   clearNotice: () => void
+  /** 結果・失敗・反映待ちの確認をまとめて消す（操作タブで別の操作を選んだとき。前の操作の確認が
+   *  別の操作の段に出て押されないように。D-87） */
+  clearMessages: () => void
 }
 
 const PATH_URL: Record<PathKind, string> = { rename: '/api/rename', normalize: '/api/normalize' }
@@ -90,6 +95,7 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
   const sel = useMemo(() => toSelectionBody(selection), [selection])
   const selKey = useMemo(() => JSON.stringify([sel, sortParam]), [sel, sortParam])
   const pathPreview = stored != null && stored.key === `${stored.kind}|${selKey}` ? stored : null
+  const pathStale = stored != null && pathPreview == null ? stored.kind : null
   // 409 pending の確認は出したときの選択に紐づける。選択が変わったら「除外して適用」が別の集合に
   // 効いてしまうので出さない
   const pendingPrompt = storedPending != null && storedPending.key === selKey ? storedPending : null
@@ -385,6 +391,7 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     notice,
     error,
     pathPreview,
+    pathStale,
     pendingPrompt,
     previewPaths,
     applyPaths,
@@ -400,5 +407,10 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     embedArtwork,
     dismissPending: useCallback(() => setPendingPrompt(null), []),
     clearNotice: useCallback(() => setNotice(null), []),
+    clearMessages: useCallback(() => {
+      setNotice(null)
+      setError(null)
+      setPendingPrompt(null)
+    }, []),
   }
 }

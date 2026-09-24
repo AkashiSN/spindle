@@ -89,6 +89,9 @@ export default function App() {
 function Shell({ onLogout }: { onLogout: () => void }) {
   // `/youtube?url=` で開かれたら YouTube 画面から始める（ブックマークレットの受け口。hooks/useYoutube）
   const [view, setView] = useState<View>(OPENED_WITH_URL ? 'youtube' : 'tracks')
+  // YouTube 画面の ④ から Inbox を開いたときに選ぶ件（D-87）
+  const [inboxFocus, setInboxFocus] = useState<string | null>(null)
+  const clearInboxFocus = useCallback(() => setInboxFocus(null), [])
   const [scope, setScope] = useState<Scope>({})
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<Sort>(DEFAULT_SORT)
@@ -597,7 +600,12 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             onOpen={(a) => handleScope({ album_id: a.id })}
           />
         ) : view === 'inbox' ? (
-          <InboxView inbox={inbox} onOpenAlbum={(id) => handleScope({ album_id: id })} />
+          <InboxView
+            inbox={inbox}
+            onOpenAlbum={(id) => handleScope({ album_id: id })}
+            focusDir={inboxFocus}
+            onFocused={clearInboxFocus}
+          />
         ) : view === 'cd' ? (
           <CdView
             cd={cd}
@@ -607,7 +615,15 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             onOpenAlbum={(id) => handleScope({ album_id: id })}
           />
         ) : view === 'youtube' ? (
-          <YoutubeView youtube={youtube} subs={subs} jobs={jobs} onOpenInbox={() => setView('inbox')} />
+          <YoutubeView
+            youtube={youtube}
+            subs={subs}
+            jobs={jobs}
+            onOpenInbox={(dir) => {
+              setInboxFocus(dir ?? null)
+              setView('inbox')
+            }}
+          />
         ) : view === 'jobs' ? (
           <JobsView
             jobs={jobs}

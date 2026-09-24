@@ -2819,3 +2819,267 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 .inbox-file-notes-head {
   margin: 8px 0 0;
 }
+
+/* 段の状態（Step.tsx。D-87）: 済み = 番号が緑、待ち = 淡く、古い = 枠が警告色 */
+.cd-step.done .cd-step-no {
+  background: var(--ok);
+}
+.cd-step.wait {
+  opacity: 0.7;
+}
+.cd-step.wait .cd-step-no {
+  background: var(--muted);
+}
+.cd-step.stale {
+  border-color: var(--warn);
+}
+.cd-step .cd-step-head h2 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+/* YouTube 画面の段（D-87） */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.seg button {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  padding: 3px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.seg button + button {
+  border-left: 1px solid var(--border);
+}
+.seg button.on {
+  background: var(--accent-bg);
+  font-weight: 600;
+}
+.youtube .cd-step textarea.youtube-urls {
+  max-width: none;
+}
+.youtube-urls-table {
+  margin-top: 8px;
+}
+.youtube-urls-table td.path {
+  word-break: break-all;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+}
+.youtube-urls-table tr.tone-skip td {
+  color: var(--muted);
+}
+.youtube-urls-table tr.tone-bad td {
+  color: var(--error);
+}
+.badge.yt-new {
+  background: var(--accent-bg);
+  color: var(--fg);
+}
+.badge.yt-skip {
+  background: var(--badge-green-bg);
+  color: var(--badge-green-fg);
+}
+.badge.yt-bad {
+  background: var(--badge-red-bg);
+  color: var(--badge-red-fg);
+}
+.badge.yt-pending {
+  background: var(--badge-faint-bg);
+  color: var(--badge-faint-fg);
+}
+.yt-banner {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--accent-bg);
+}
+.yt-banner.warn {
+  background: var(--conflict-bg);
+  color: var(--warn);
+}
+.yt-banner.ok {
+  background: var(--badge-green-bg);
+  color: var(--badge-green-fg);
+}
+.yt-staged {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.yt-staged li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.yt-staged .path {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  word-break: break-all;
+}
+.yt-history {
+  margin-top: 16px;
+  max-width: 1100px;
+}
+.yt-history summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.subscription-url {
+  width: 100%;
+  max-width: 720px;
+  box-sizing: border-box;
+}
+
+/* 右パネルの一括編集・操作タブの横に並ぶ段（D-87）。パネルは低く横長なので横に 4 列。
+   狭ければ 2 列 → 1 列（.props-area はコンテナ） */
+.panel-steps {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(240px, 1.4fr) minmax(240px, 1.5fr) minmax(190px, 0.9fr);
+  gap: 8px;
+  align-items: stretch;
+}
+@container (max-width: 980px) {
+  .panel-steps {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@container (max-width: 560px) {
+  .panel-steps {
+    grid-template-columns: 1fr;
+  }
+}
+.panel-steps .cd-step {
+  margin-top: 0;
+  max-width: none;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.panel-steps .cd-step-head {
+  padding: 4px 8px;
+  flex-wrap: wrap;
+}
+.panel-steps .cd-step-body {
+  padding: 6px 8px 8px;
+  min-width: 0;
+}
+.panel-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+.panel-facts dt {
+  color: var(--muted);
+}
+.panel-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.panel-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+.panel-counts > div {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.panel-counts b {
+  display: block;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.panel-counts .changed b {
+  color: var(--warn);
+}
+.panel-banner {
+  margin: 0;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.panel-banner.warn {
+  background: var(--conflict-bg);
+  color: var(--warn);
+}
+.panel-banner.ok {
+  background: var(--badge-green-bg);
+  color: var(--badge-green-fg);
+}
+.badge.warn {
+  background: var(--badge-amber-bg);
+  color: var(--badge-amber-fg);
+}
+.badge.undo {
+  background: var(--conflict-bg);
+  color: var(--warn);
+}
+.badge.info {
+  background: var(--accent-bg);
+  color: var(--fg);
+}
+.operations .op-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.operations .op-actions input[type='text'],
+.operations .op-actions input:not([type]) {
+  width: 100%;
+  box-sizing: border-box;
+}
+.op-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.op-group h4 {
+  margin: 0 0 2px;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: normal;
+  letter-spacing: 0.04em;
+}
+.op-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.op-chips button {
+  border-radius: 12px;
+  padding: 1px 9px;
+  font-size: 12px;
+}
+.op-chips button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+.operations .album-gain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.operations .album-gain label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.operations .album-gain input[type='checkbox'] {
+  width: auto;
+}
