@@ -105,6 +105,18 @@ impl Lib {
         Connection::open(&self.db_path).unwrap()
     }
 
+    /// 積まれている rg ジョブの payload（id 順。状態は問わない）
+    fn rg_jobs(&self) -> Vec<serde_json::Value> {
+        let conn = self.conn();
+        let mut st = conn
+            .prepare("SELECT payload FROM jobs WHERE type = 'rg' ORDER BY id")
+            .unwrap();
+        st.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|p| serde_json::from_str(&p.unwrap()).unwrap())
+            .collect()
+    }
+
     fn track_id(&self, rel: &str) -> i64 {
         self.conn()
             .query_row("SELECT id FROM tracks WHERE rel_path = ?1", [rel], |r| {
@@ -558,9 +570,14 @@ async fn external_audio_replacement_resets_rg_analysis_on_scan() {
     assert_eq!(after.audio_version, before.audio_version + 1);
     assert_eq!(after.scanned_at, None);
     assert_eq!(after.written_at, None);
+    // 解析し直すジョブを自動で積む（album gain は既定 off なので track 単位。P4-22）
+    assert_eq!(lib.rg_jobs(), vec![serde_json::json!({ "track_id": id })]);
 
-    // 音声が変わらないタグだけの変更では据え置き
+    // 音声が変わらないタグだけの変更では据え置き（ジョブも積まない）
     lib.set_rg(id, values(-2.5, Some(-1.0)), 2000);
+    lib.conn()
+        .execute("DELETE FROM jobs WHERE type = 'rg'", [])
+        .unwrap();
     common::retag(&flac, |t| {
         t.insert_text(lofty::tag::ItemKey::TrackTitle, "renamed".to_owned());
     });
@@ -568,6 +585,36 @@ async fn external_audio_replacement_resets_rg_analysis_on_scan() {
     let row = lib.row(id);
     assert_eq!(row.audio_version, after.audio_version);
     assert_eq!(row.scanned_at, Some(2000));
+    assert!(lib.rg_jobs().is_empty());
+}
+
+/// album gain が on の album のトラックは album 単位で解析し直す（D-74 の投入単位と同じ。P4-22）。
+/// 同じ album の 2 本が同時に差し替わっても album のジョブは dedup で 1 本
+#[tokio::test]
+async fn audio_replacement_reanalyzes_the_album_when_album_gain_is_on() {
+    let lib = Lib::new();
+    let one = require_ffmpeg!(lib.add("A/1.flac", 1, "one"));
+    let two = lib.add("A/2.flac", 2, "two").unwrap();
+    lib.scan().await;
+    let id = lib.track_id("A/1.flac");
+    let album_id: i64 = lib
+        .conn()
+        .query_row("SELECT album_id FROM tracks WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    lib.conn()
+        .execute("UPDATE albums SET album_gain = 1 WHERE id = ?1", [album_id])
+        .unwrap();
+    std::fs::remove_file(&one).unwrap();
+    std::fs::remove_file(&two).unwrap();
+    lib.add("A/1.flac", 8, "one");
+    lib.add("A/2.flac", 9, "two");
+    lib.scan().await;
+    assert_eq!(
+        lib.rg_jobs(),
+        vec![serde_json::json!({ "album_id": album_id })]
+    );
 }
 
 /// 外部ツールが RG タグを消したり書き換えたりしたら `rg_written_at` を判定し直す
@@ -650,4 +697,6 @@ async fn audio_replacement_seen_by_tagwrite_conflict_resets_rg_analysis() {
     let row = lib.row(id);
     assert_eq!(row.audio_version, 2);
     assert_eq!(row.scanned_at, None);
+    // こちらの経路でも解析し直すジョブを積む（P4-22）
+    assert_eq!(lib.rg_jobs(), vec![serde_json::json!({ "track_id": id })]);
 }

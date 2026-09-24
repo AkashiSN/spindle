@@ -1644,7 +1644,9 @@ impl Commit {
                     scans::update_physical(&tx, *track_id, &e.ph, run_id, now)?;
                     match read {
                         Some(Ok(r)) => {
-                            self.apply_content(&tx, row, pending.get(track_id), r, now)?;
+                            let jobs =
+                                self.apply_content(&tx, row, pending.get(track_id), r, now)?;
+                            report.enqueued_jobs.extend(jobs);
                             report.updated += 1;
                             if !*revived && !moved_ids.contains(track_id) {
                                 report.changed_ids.push(*track_id);
@@ -1774,7 +1776,7 @@ impl Commit {
     }
 
     /// 変更ありの既存行にタグ・フィンガープリント・版を反映する（pending の tags op は
-    /// 論理フィールドを据え置く。D-24）
+    /// 論理フィールドを据え置く。D-24）。返り値は積んだジョブ id（音声の差し替えで RG の解析し直し）
     ///
     /// 呼び出し側が「行はスナップショットから変わっていない」ことを確認済み（追い越された行は
     /// ここへ来ない）なので、版・ハッシュはスナップショットの値と比較してよい。pending は
@@ -1786,7 +1788,7 @@ impl Commit {
         pending: Option<&scans::PendingOp>,
         r: &ReadResult,
         now: i64,
-    ) -> crate::db::Result<()> {
+    ) -> crate::db::Result<Vec<i64>> {
         let tags_pending = pending.is_some_and(|op| op.kind == "tags");
         if !tags_pending {
             let tags_changed = row.tag_hash.is_some_and(|old| old != r.content.tag_hash);
@@ -1802,16 +1804,17 @@ impl Commit {
                 dbrg::sync_written_at(tx, row.id, &r.content.tags, self.rg_reference, now)?;
             }
         }
+        let mut jobs = Vec::new();
         if audio_changed(r.fp, row.audio_md5, row.audio_fp) {
-            // 外部で音声が差し替わった: 解析値は古いので捨てる（D-47）
-            dbrg::reset_analysis(tx, row.id)?;
+            // 外部で音声が差し替わった: 解析値は古いので捨て、解析し直すジョブを積む（D-47、P4-22）
+            jobs = dbrg::reset_and_reanalyze(tx, row.id, now)?;
             let fp = effective_fingerprint(r.fp, row.audio_md5, row.audio_fp);
             scans::update_fingerprint(tx, row.id, fp, row.audio_version + 1)?;
         } else {
             let fp = effective_fingerprint(r.fp, row.audio_md5, row.audio_fp);
             scans::update_fingerprint(tx, row.id, fp, row.audio_version)?;
         }
-        Ok(())
+        Ok(jobs)
     }
 
     /// ディレクトリごとに album を引き当てる（SPEC §7.1「アルバムの照合」、D-32、D-38）。

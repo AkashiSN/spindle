@@ -1563,15 +1563,16 @@ fn sync_track_to_file(
     history::set_track_physical(tx, track_id, &fs.ph)?;
     scans::update_content(tx, track_id, &fs.content, row.tag_version)?;
     dbrg::sync_written_at(tx, track_id, &fs.content.tags, reference, now)?;
-    let followups = follow_picture_change(tx, track_id, artwork_before, &fs.content.picture, now)?;
+    let mut followups =
+        follow_picture_change(tx, track_id, artwork_before, &fs.content.picture, now)?;
     if let Some(fp) = fs.fp {
         let audio_version = if audio_changed(fp, row.audio_md5, row.audio_fp) {
             tracing::info!(
                 track_id,
                 "外部で音声が差し替えられていた。audio_version を進める"
             );
-            // 解析値は古いので捨てる（D-47。スキャナと同じ規則）
-            dbrg::reset_analysis(tx, track_id)?;
+            // 解析値は古いので捨て、解析し直すジョブを積む（D-47、P4-22。スキャナと同じ規則）
+            followups.extend(dbrg::reset_and_reanalyze(tx, track_id, now)?);
             row.audio_version + 1
         } else {
             row.audio_version

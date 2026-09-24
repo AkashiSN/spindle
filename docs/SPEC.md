@@ -375,7 +375,10 @@ Inbox の件のファイル（D-90）を回収する。
   行（`tag_hash` が変わった行）で判定し直す（D-48）
 - **外部で音声が差し替わった（`audio_version` が進んだ）行の解析値は捨てる**（`rg_*` と
   `rg_scanned_at` / `rg_written_at` を NULL。スキャナと tagwrite の overlay 解消の両方。D-47）。
-  古い解析値を Derived や再生に使わない。album の他のトラックの `rg_album_*` は次の album 解析で揃う
+  古い解析値を Derived や再生に使わない。album の他のトラックの `rg_album_*` は次の album 解析で揃う。
+  捨てた行は**同じトランザクションで rg ジョブを積んで解析し直す**（投入単位と dedup は `POST /api/rg` と
+  同じ。タグへの書き込みは `[replaygain].write_tags` に従う。aac の Derived は解析が揃ってから作られる。
+  新規トラックや未解析の行には自動で積まない。D-47 追記 2、P4-22）
 - album gain は `album_id` 単位で、**`albums.album_gain` が true の album だけ**計算・書き出しする（既定
   false。CD 取り込みは true、Inbox の承認画面で選ぶ。D-74、P4-5）。**2ch 以外は album 集計から除外**（判定はデコード結果の
   チャンネル数。除外されたトラックの album の値は NULL）。構成トラックが 1 本でも

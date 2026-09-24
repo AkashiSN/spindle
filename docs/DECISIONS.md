@@ -1405,6 +1405,23 @@ Archive から move で戻す（Archive の追記のみの原則に例外が増�
 （`db::replaygain::reset_analysis`: `rg_*` と `rg_scanned_at` / `rg_written_at` を NULL）。古い値を
 Derived や再生に使わないため。album の他のトラックの `rg_album_*` は次の album 解析で揃う。
 
+**追記 2（2026-09-25、P4-22。ユーザの決定）**: 値を捨てた行は**自動で解析し直す**
+（`db::replaygain::reset_and_reanalyze`。上の 2 経路が同じトランザクションで rg ジョブを積む）。
+投入単位は `POST /api/rg` と同じ規則（`scopes_of`: album gain が on の album は album 単位、それ以外は track
+単位。D-74）で、dedup も同じなので Inbox の配置や手動の投入と二重にならない（同じ album の複数トラックが
+同時に差し替わっても album のジョブは 1 本）。解析は DB に値を入れ、タグへの書き込みは従来どおり
+`[replaygain].write_tags` に従う。aac の Derived は RG が揃うまで作らない（D-75）ので、値を捨てるだけだと
+その行の aac が止まったままになっていた（リハーサルで D-89 により ALAC 7 本の `audio_md5` が変わったとき、
+手で `POST /api/rg` した）。ジョブの組み立て（`new_album_job` / `new_track_job`）はスキャナ・編集（DB 層）
+からも使うので `db::replaygain` に移し、`jobs::handlers::rg` から再公開する。
+
+投入量: 対象は「音声が変わった」と判定された行だけ（外部の差し替え・deep scan での `audio_md5` の変化）で、
+新規トラックや RG が未解析の行には積まない（冒頭の却下の理由どおり、移行直後の全曲解析は人が起動する）。
+deep scan で数千行の音声が変わったとき（デコーダの修正等）は track 単位で数千本積むが、scan 完了時の
+transcode の自動投入（`enqueue_all_stale`）と同じ扱いで、rg の並列度は CPU コア数・終端のジョブ行は
+`[gc].jobs_done_days` で消える。**却下**: scan 完了時に `rg_scanned_at IS NULL` の行をまとめて積む
+（未解析の新規トラック・移行直後の全曲まで拾ってしまい、上の「自動投入しない」と矛盾する）。
+
 ## D-48 ReplayGain のタグ書き込みは通常の編集バッチに乗せる（実装合わせ）
 
 **決定**（P1-2）:

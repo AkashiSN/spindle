@@ -1803,8 +1803,11 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       合わない（362 件はこれだけで救える）、`存流 -ᴀʀᴜ-` 等のチャンネル定義が無い、ルールが本当に無い書式が約 300 件。
       正解データは補填の計画（`plan.csv` の動画タイトル ↔ Library の TITLE。リポジトリ外）。直したら musl の static
       バイナリを `/mnt/ssd/apps/spindle/bin/` に置き直す（2026-09-25 着手）
-- [ ] 要確認: `audio_version` が上がった行の RG を自動で解析し直すか（今は RG の値が消されるだけで、aac の Derived は
-      RG を待ったまま止まる。リハーサルでは D-89 で 7 本の `audio_md5` が変わったとき手で `POST /api/rg` した）
+- [x] `audio_version` が上がった行の RG を**自動で解析し直す**（2026-09-25 ユーザの決定。D-47 追記 2）。スキャナの
+      外部の差し替え（deep scan での `audio_md5` の変化を含む）と tagwrite の overlay 解消で値を捨てるとき、同じ
+      トランザクションで rg ジョブを積む（`db::replaygain::reset_and_reanalyze`。投入単位と dedup は `POST /api/rg` と
+      同じ）。リハーサルでは D-89 で 7 本の `audio_md5` が変わったとき手で `POST /api/rg` した。`tests/rg_write.rs`
+      （track 単位・album gain on の album 単位・タグだけの変更では積まない・tagwrite の経路）
 
 ---
 

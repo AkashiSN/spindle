@@ -33,20 +33,11 @@ use crate::db::{now_epoch, DbError};
 use crate::domain::relpath::RelPath;
 use crate::domain::replaygain::{album_loudness, LoudnessMeter, TrackLoudness};
 use crate::fsroot::{self, RootDir};
-use crate::jobs::{
-    BoxFuture, Handler, HandlerResult, JobContext, JobError, JobType, NewJob, Outcome,
-};
+use crate::jobs::{BoxFuture, Handler, HandlerResult, JobContext, JobError, Outcome};
 use crate::media::decode::{DecodeError, Decoder, PcmInfo, PcmSink};
 
-pub fn new_album_job(album_id: i64) -> NewJob {
-    NewJob::new(JobType::Rg, serde_json::json!({ "album_id": album_id }))
-        .dedup_key(format!("rg:album:{album_id}"))
-}
-
-pub fn new_track_job(track_id: i64) -> NewJob {
-    NewJob::new(JobType::Rg, serde_json::json!({ "track_id": track_id }))
-        .dedup_key(format!("rg:track:{track_id}"))
-}
+// 投入はスキャナ・編集（DB 層）からも行うので、ジョブの組み立ては db::replaygain に置く
+pub use crate::db::replaygain::{new_album_job, new_track_job};
 
 /// album 集計に入れるチャンネル数（SPEC §6: 2ch 以外は除外）
 const ALBUM_CHANNELS: u32 = 2;

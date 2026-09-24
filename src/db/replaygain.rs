@@ -8,6 +8,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension as _};
 
+use super::jobs::{self as dbjobs, JobType, NewJob};
 use super::Result;
 use crate::domain::replaygain::file_matches;
 use crate::domain::tags::{Codec, TagSet};
@@ -292,6 +293,41 @@ pub fn set_written(conn: &Connection, track_ids: &[i64], now: i64) -> Result<usi
         n += st.execute(params![id, now])?;
     }
     Ok(n)
+}
+
+/// album 単位の rg ジョブ（dedup `rg:album:<N>`。album gain が on の album。D-74）
+pub fn new_album_job(album_id: i64) -> NewJob {
+    NewJob::new(JobType::Rg, serde_json::json!({ "album_id": album_id }))
+        .dedup_key(format!("rg:album:{album_id}"))
+}
+
+/// track 単位の rg ジョブ（dedup `rg:track:<N>`。album gain が off の album と album の無いトラック）
+pub fn new_track_job(track_id: i64) -> NewJob {
+    NewJob::new(JobType::Rg, serde_json::json!({ "track_id": track_id }))
+        .dedup_key(format!("rg:track:{track_id}"))
+}
+
+/// トラックの解析ジョブを投入単位の規則（[`scopes_of`]。album gain が on なら album 単位、それ以外は
+/// track 単位）で積む。同じ単位のジョブが queued / running なら dedup で既存の id を返す（Inbox の配置や
+/// 手動の `POST /api/rg` と二重にならない）。返り値は投入した（または既にあった）ジョブ id
+pub fn enqueue_analysis(conn: &Connection, track_ids: &[i64], now: i64) -> Result<Vec<i64>> {
+    let (albums, tracks) = scopes_of(conn, track_ids)?;
+    let mut ids = Vec::with_capacity(albums.len() + tracks.len());
+    for id in albums {
+        ids.push(dbjobs::enqueue(conn, &new_album_job(id), now)?.id());
+    }
+    for id in tracks {
+        ids.push(dbjobs::enqueue(conn, &new_track_job(id), now)?.id());
+    }
+    Ok(ids)
+}
+
+/// 音声が差し替わったトラックの解析値を捨て（[`reset_analysis`]）、解析し直すジョブを積む（P4-22。
+/// aac の Derived は RG が揃うまで作られないので、値を消すだけだと止まったままになる）。
+/// 返り値は積んだジョブ id（ワーカーを起こすのに使う）
+pub fn reset_and_reanalyze(conn: &Connection, track_id: i64, now: i64) -> Result<Vec<i64>> {
+    reset_analysis(conn, track_id)?;
+    enqueue_analysis(conn, &[track_id], now)
 }
 
 /// 音声が差し替わった（`audio_version` が進んだ）トラックの解析値を捨てる（D-47）。値は残さず
