@@ -60,6 +60,16 @@ pub fn new_ytdl_job(url: &str) -> NewJob {
     .dedup_key(format!("{DEDUP_PREFIX}{url}"))
 }
 
+/// 再生リストの展開が投入する ytdl。`parent_job_id` は展開したジョブ（YouTube 画面が「今回の投入」の
+/// 子として追う。D-87）。ハンドラは読まない
+pub fn new_playlist_entry_ytdl_job(url: &str, parent_job_id: i64) -> NewJob {
+    NewJob::new(
+        crate::jobs::JobType::Ytdl,
+        serde_json::json!({ "url": url, "parent_job_id": parent_job_id }),
+    )
+    .dedup_key(format!("{DEDUP_PREFIX}{url}"))
+}
+
 /// 購読の同期が投入する ytdl（P4-16）。dedup は同じ `ytdl:<url>`（別の投入が走行中なら Duplicate。
 /// その場合の扱いは同期側の規則: 「別の投入が走行中」として結果に出すだけ）
 pub fn new_subscription_ytdl_job(url: &str, subscription_id: i64, position: u32) -> NewJob {
@@ -482,8 +492,10 @@ pub async fn download_one(
                     skipped += 1;
                     continue;
                 }
-                if let crate::jobs::EnqueueResult::Inserted(_) =
-                    env.jobs.enqueue(new_ytdl_job(&u)).await?
+                if let crate::jobs::EnqueueResult::Inserted(_) = env
+                    .jobs
+                    .enqueue(new_playlist_entry_ytdl_job(&u, job_id))
+                    .await?
                 {
                     enqueued += 1;
                 }

@@ -394,8 +394,21 @@ async fn playlist_is_expanded_into_one_job_per_entry() {
         true,
     );
     lib.start();
-    let (_, st) = lib.run(pl).await;
+    let (parent, st) = lib.run(pl).await;
     assert_eq!(st, JobState::Done);
+    // 展開した子は親のジョブ id を持つ（YouTube 画面が今回の投入の子として追う。D-87）
+    let parents: Vec<Option<i64>> = lib
+        .conn()
+        .prepare(
+            "SELECT json_extract(payload, '$.parent_job_id') FROM jobs
+              WHERE type = 'ytdl' AND id <> ?1 ORDER BY id",
+        )
+        .unwrap()
+        .query_map([parent], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(parents, vec![Some(parent), Some(parent)]);
     let ids: Vec<i64> = lib
         .conn()
         .prepare("SELECT id FROM jobs WHERE type = 'ytdl' AND dedup_key LIKE ?1 ORDER BY id")

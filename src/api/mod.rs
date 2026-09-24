@@ -127,6 +127,8 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox/{id}/artwork/{hash}", get(inbox::artwork))
         .route("/inbox/{id}/preview", post(inbox::preview))
         .route("/ytmusic/download", post(ytmusic::download))
+        .route("/ytmusic/lookup", post(ytmusic::lookup))
+        .route("/ytmusic/playlist", post(ytmusic::playlist))
         .route(
             "/ytmusic/subscriptions",
             get(subscriptions::list).post(subscriptions::create),

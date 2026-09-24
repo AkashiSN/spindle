@@ -149,6 +149,14 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Subscription>> {
     Ok(st.query_row([id], row_to_subscription).optional()?)
 }
 
+/// `list_id` の購読（YouTube 画面の照合。D-87）。`list_id` は UNIQUE なので 0 / 1 件
+pub fn by_list_id(conn: &Connection, list_id: &str) -> Result<Option<Subscription>> {
+    let mut st = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM playlist_subscriptions WHERE list_id = ?1"
+    ))?;
+    Ok(st.query_row([list_id], row_to_subscription).optional()?)
+}
+
 fn target_taken(conn: &Connection, key: &str, except: Option<i64>) -> Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT count(*) FROM playlist_subscriptions WHERE target_key = ?1 AND id IS NOT ?2",
