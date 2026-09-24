@@ -13,6 +13,7 @@
 
 import { useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import type { ArtworkUploadState } from '../hooks/useArtworkUpload'
+import { editSession } from '../lib/editSession'
 import { formatDuration } from '../lib/format'
 import {
   ARTIST_JOIN,
@@ -136,6 +137,8 @@ export function InboxTrackGrid({
   const [cursor, setCursor] = useState<Cell | null>(null)
   const [editing, setEditing] = useState<(Cell & { text: string }) | null>(null)
   const gridRef = useRef<HTMLDivElement>(null)
+  // 1 回の編集で確定 / 取り消しは 1 回だけ（Esc の後の blur で確定しない）
+  const session = useRef(editSession())
   const fileInput = useRef<HTMLInputElement>(null)
   const [picRow, setPicRow] = useState<number | null>(null)
   const refocus = () => gridRef.current?.focus()
@@ -169,6 +172,7 @@ export function InboxTrackGrid({
       fileInput.current?.click()
       return
     }
+    session.current.start()
     setEditing({ ...cell, text: cellText(c, draft.tracks[cell.row], draft, files.get(draft.tracks[cell.row].rel_path)) })
   }
   const commit = () => {
@@ -240,7 +244,10 @@ export function InboxTrackGrid({
     setAdded((a) => [...a, k])
     setHidden(hidden.filter((h) => h !== `tag:${k}`))
     setNewKey('')
-    if (draft.tracks.length > 0) setEditing({ row: 0, col: `tag:${k}`, text: '' })
+    if (draft.tracks.length > 0) {
+      session.current.start()
+      setEditing({ row: 0, col: `tag:${k}`, text: '' })
+    }
   }
 
   const place = (id: string) => {
@@ -281,15 +288,14 @@ export function InboxTrackGrid({
             value={editing.text}
             onChange={(e) => setEditing({ ...editing, text: e.target.value })}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                commit()
-              } else if (e.key === 'Escape') {
-                e.preventDefault()
-                cancel()
-              }
+              const a = session.current.key(e.key)
+              if (a != null) e.preventDefault()
+              if (a === 'commit') commit()
+              else if (a === 'cancel') cancel()
             }}
-            onBlur={commit}
+            onBlur={() => {
+              if (session.current.blur() === 'commit') commit()
+            }}
           />
         </td>
       )

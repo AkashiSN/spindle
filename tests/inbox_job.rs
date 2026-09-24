@@ -2614,3 +2614,64 @@ async fn missing_draft_picture_fails_placement() {
     assert!(!lib.lib_path("_Unsorted/Artist/G").exists());
     assert!(lib.inbox_path("Gone/01.flac").exists());
 }
+
+/// コピー後・登録前に落ちた件を、パスの変わらない補正（任意のタグ）だけ直して再承認すると、宛先の
+/// 自分の成果物を今回の補正で置き換えてから登録する（再利用で補正を黙って捨てない。D-86、codex 指摘）
+#[tokio::test]
+async fn rerun_after_crash_applies_the_new_tag_changes_to_the_reused_file() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    let mut draft = draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album");
+    draft.tracks[0]
+        .tags
+        .insert("COMMENT".into(), Some(vec!["first".into()]));
+    lib.approve(a.id, &draft);
+    let env = lib.env(false);
+    let item = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    let first = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    // 登録を無かったことにし、Inbox に原本を戻す（Library のファイルは残る）
+    let c = lib.conn();
+    c.execute("DELETE FROM tracks WHERE id = ?1", [first.track_ids[0]])
+        .unwrap();
+    c.execute("DELETE FROM albums WHERE id = ?1", [first.album_id])
+        .unwrap();
+    c.execute("DELETE FROM jobs WHERE type IN ('rg', 'transcode')", [])
+        .unwrap();
+    drop(c);
+    let p = lib.lib_path("_Unsorted/Artist/Album/01 One.flac");
+    assert!(p.exists());
+    std::fs::create_dir_all(lib.inbox_path("AlbumA")).unwrap();
+    lib.add("AlbumA/01.flac", 1, "One", "A", 1).unwrap();
+    lib.scan(1001).await;
+    let a2 = lib.item("AlbumA").unwrap();
+    // 2 回目はパスの変わらない補正だけを変える
+    draft.tracks[0]
+        .tags
+        .insert("COMMENT".into(), Some(vec!["second".into()]));
+    draft.tracks[0]
+        .tags
+        .insert("GENRE".into(), Some(vec!["Rock".into()]));
+    lib.approve(a2.id, &draft);
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), a2.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert_eq!(lib.count("SELECT count(*) FROM tracks"), 1);
+    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
+        .unwrap();
+    assert_eq!(
+        af.tags.values("COMMENT").collect::<Vec<_>>(),
+        vec!["second"]
+    );
+    assert_eq!(af.tags.values("GENRE").collect::<Vec<_>>(), vec!["Rock"]);
+    // 登録した行も置き換えた後のファイル（inode）を指す
+    let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&p).unwrap()) as i64;
+    assert_eq!(
+        lib.count("SELECT inode FROM tracks WHERE rel_path = '_Unsorted/Artist/Album/01 One.flac'"),
+        inode
+    );
+}

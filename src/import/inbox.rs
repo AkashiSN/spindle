@@ -1112,7 +1112,8 @@ use crate::domain::pathgen::{self, PlanItem, Planned, Template, TrackFields};
 use crate::domain::tags::{write_tag_changes, TagChange};
 use crate::edit::Editor;
 use crate::import::placement::{
-    find_or_create_album, place_one, register_track, remove_placed, PlacedFile, PlacementError,
+    find_or_create_album, place_one, place_one_refreshing, register_track, remove_placed,
+    PlacedFile, PlacementError,
 };
 use crate::import::scanner::{read_fingerprint, track_content};
 use crate::import::sidecar::{RipEntry, Sidecar};
@@ -1949,7 +1950,8 @@ fn place_files(
             if !stat_matches(row, &before) {
                 return Err(InboxError::Changed(src.rel.to_string()));
             }
-            let outcome = place_one(
+            // 宛先の自分の成果物（前回の途中まで）は今回の補正で置き換える（D-86。codex 指摘）
+            let outcome = place_one_refreshing(
                 library,
                 &plan.rel_dir,
                 target,

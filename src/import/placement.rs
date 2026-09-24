@@ -46,9 +46,35 @@ pub fn place_one(
     root: &RootDir,
     dir: &RelPath,
     target: &RelPath,
+    content: impl Read,
+    prepare: impl FnOnce(&mut File) -> Result<(), PlacementError>,
+    verify_existing: impl FnOnce(File) -> Result<bool, PlacementError>,
+) -> Result<PlacedFile, PlacementError> {
+    place(root, dir, target, content, prepare, verify_existing, false)
+}
+
+/// [`place_one`] と同じだが、既存が自分の成果物（`verify_existing` が true）なら捨てずに今回の tmp で
+/// **置き換える**（`Reused`）。承認画面の補正（任意のタグ・画像。D-86）はパスを変えないので、途中で
+/// 落ちた件を直して再承認すると同じ宛先に当たる。そのまま再利用すると今回の補正が黙って捨てられる
+pub fn place_one_refreshing(
+    root: &RootDir,
+    dir: &RelPath,
+    target: &RelPath,
+    content: impl Read,
+    prepare: impl FnOnce(&mut File) -> Result<(), PlacementError>,
+    verify_existing: impl FnOnce(File) -> Result<bool, PlacementError>,
+) -> Result<PlacedFile, PlacementError> {
+    place(root, dir, target, content, prepare, verify_existing, true)
+}
+
+fn place(
+    root: &RootDir,
+    dir: &RelPath,
+    target: &RelPath,
     mut content: impl Read,
     prepare: impl FnOnce(&mut File) -> Result<(), PlacementError>,
     verify_existing: impl FnOnce(File) -> Result<bool, PlacementError>,
+    refresh: bool,
 ) -> Result<PlacedFile, PlacementError> {
     let (tmp_rel, mut tmp) = root.create_tmp(Some(dir))?;
     let written = (|| -> Result<(), PlacementError> {
@@ -64,9 +90,30 @@ pub fn place_one(
     match root.rename_noreplace(&tmp_rel, target) {
         Ok(()) => Ok(PlacedFile::New),
         Err(FsError::Exists) => {
+            let existing = match root.open_file(target) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = root.unlink(&tmp_rel);
+                    return Err(e.into());
+                }
+            };
+            let own = match verify_existing(existing) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = root.unlink(&tmp_rel);
+                    return Err(e);
+                }
+            };
+            if own && refresh {
+                // 自分の成果物を今回の内容（同じ音声 + 今回の補正）で置き換える
+                if let Err(e) = root.replace_file(&tmp_rel, target) {
+                    let _ = root.unlink(&tmp_rel);
+                    return Err(e.into());
+                }
+                return Ok(PlacedFile::Reused);
+            }
             let _ = root.unlink(&tmp_rel);
-            let existing = root.open_file(target)?;
-            if verify_existing(existing)? {
+            if own {
                 Ok(PlacedFile::Reused)
             } else {
                 Err(PlacementError::Conflict(format!(

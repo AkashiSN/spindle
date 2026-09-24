@@ -5,6 +5,7 @@
 // 「変更」の印はファイルのタグから作った提案（proposal）と違う行。下段の Info はファイルから（表示のみ）。
 
 import { useRef, useState, type KeyboardEvent } from 'react'
+import { editSession } from '../lib/editSession'
 import { destinationLabel, type InboxDraft, type InboxItem } from '../lib/inbox'
 import { CategoryField } from './CategoryField'
 
@@ -49,6 +50,8 @@ export function InboxAlbumProps({
   const [sel, setSel] = useState<Row['key'] | null>(null)
   const [editing, setEditing] = useState<{ key: Row['key']; text: string } | null>(null)
   const tableRef = useRef<HTMLTableElement>(null)
+  // 1 回の編集で確定 / 取り消しは 1 回だけ（Esc の後の blur で確定しない）
+  const session = useRef(editSession())
   const refocus = () => tableRef.current?.focus()
 
   const start = (key: Row['key']) => {
@@ -58,6 +61,7 @@ export function InboxAlbumProps({
       onChange({ album_gain: !draft.album_gain })
       return
     }
+    session.current.start()
     setEditing({ key, text: key === 'category' ? (draft.category ?? '') : display(draft, key) })
   }
   const commit = () => {
@@ -134,15 +138,14 @@ export function InboxAlbumProps({
                       placeholder={r.placeholder}
                       onChange={(e) => setEditing({ key: r.key, text: e.target.value })}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault()
-                          commit()
-                        } else if (e.key === 'Escape') {
-                          e.preventDefault()
-                          cancel()
-                        }
+                        const a = session.current.key(e.key)
+                        if (a != null) e.preventDefault()
+                        if (a === 'commit') commit()
+                        else if (a === 'cancel') cancel()
                       }}
-                      onBlur={commit}
+                      onBlur={() => {
+                        if (session.current.blur() === 'commit') commit()
+                      }}
                     />
                   )}
                 </td>

@@ -1107,8 +1107,10 @@ Inbox/ に配置（ポーリング検出）
   ALBUMARTIST / DATE / TRACKNUMBER / DISCNUMBER / DISCTOTAL / PICTURE）と、曲・盤の同一性に使うキー
   （`SOURCE_URL` / `MUSICBRAINZ_*`）は受け付けない。承認は差し替える画像の `artwork` 行が無ければ 400。
   配置は `tags` の変更を補正のタグに足して書き（現在値と同じものは書かない）、`picture` のある曲だけ埋め込み
-  画像を全部捨ててその 1 枚（front cover）にする。画像が store から消えていれば配置せず failed。下書きが
-  参照する画像は GC しない（区分 E の「参照」に Inbox の下書きを足す。D-56 / D-86）。`POST /api/inbox/:id/preview { draft }` は音声を読まずに
+  画像を全部捨ててその 1 枚（front cover）にする。宛先に自分の成果物（同じ音声。途中で落ちた前回の配置）が
+  あれば、今回の補正を書いた tmp で置き換える（再利用で補正を捨てない）。画像が store から消えていれば配置せず
+  failed。入力欄は Enter / Esc / blur のどれで決着しても 1 回だけ確定か取り消しをする（`lib/editSession.ts`）。
+  下書きが参照する画像は GC しない（区分 E の「参照」に Inbox の下書きを足す。D-56 / D-86）。`POST /api/inbox/:id/preview { draft }` は音声を読まずに
   配置の計画を引いて置き場所の見込みを返す（承認画面の ④）
 - **配置**は `approved` の件を `inbox` ジョブが順に処理する。`library` の排他（scan / gc / CD の配置と
   同じ）を取れなければ Requeue。draft から各ファイルの `TrackFields` を作り `pathgen::plan`（category 無しは

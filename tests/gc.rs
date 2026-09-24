@@ -1012,16 +1012,18 @@ async fn artwork_referenced_by_an_inbox_draft_is_kept() {
     let env = Env::new();
     let wanted = env.artwork(1, 0x11);
     let unrelated = env.artwork(2, 0x22);
-    for d in [&wanted, &unrelated] {
+    // 同じ hex が画像ではなく任意のタグの値にあるだけなら参照ではない（codex 指摘）
+    let in_a_tag = env.artwork(3, 0x33);
+    for d in [&wanted, &unrelated, &in_a_tag] {
         env.put(&format!("thumbs/{d}/orig.png"), b"x", 5 * DAY);
         set_age(&env.path(&format!("thumbs/{d}")), 5 * DAY);
     }
     env.conn()
         .execute(
             "INSERT INTO inbox_items (id, rel_dir, rel_dir_key, state, detected_at, seen_at, draft)
-             VALUES (1, 'x', 'x', 'failed', 0, 0, ?1)",
+             VALUES (1, 'x', 'x', 'failed', 0, 0, ?1), (2, 'y', 'y', 'failed', 0, 0, '{broken')",
             [format!(
-                r#"{{"albumartist":"A","album":"B","tracks":[{{"rel_path":"x/1.flac","disc_no":1,"track_no":1,"title":"t","picture":"image/png:{wanted}"}}]}}"#
+                r#"{{"albumartist":"A","album":"B","tracks":[{{"rel_path":"x/1.flac","disc_no":1,"track_no":1,"title":"t","picture":"image/png:{wanted}"}},{{"rel_path":"x/2.flac","disc_no":1,"track_no":2,"title":"{in_a_tag}","tags":{{"CHECKSUM":["{in_a_tag}"]}}}}]}}"#
             )],
         )
         .unwrap();
@@ -1029,10 +1031,10 @@ async fn artwork_referenced_by_an_inbox_draft_is_kept() {
     let p = plan(&env.db, &env.roots, RETENTION, env.now).await.unwrap();
     assert_eq!(
         p.artwork_rows.iter().map(|a| a.id).collect::<Vec<_>>(),
-        vec![2]
+        vec![2, 3]
     );
     let s = run(&env).await;
-    assert_eq!(s.artwork_rows.deleted, 1, "{s:?}");
+    assert_eq!(s.artwork_rows.deleted, 2, "{s:?}");
     assert!(env.path(&format!("thumbs/{wanted}/orig.png")).exists());
     assert_eq!(env.count("SELECT count(*) FROM artwork WHERE id = 1"), 1);
 }
