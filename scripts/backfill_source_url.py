@@ -202,13 +202,14 @@ def _row(album: str, no: int, t: dict | None, e: dict | None, status: str) -> di
 def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict]:
     """位置 i+1 ↔ track_no で対応付けて、行ごとの判定を返す（track_no 順）。
 
-    1. 位置どおりの行とタイトルが合えば verified（非公開 / 削除は position-only、同じ URL なら already）
+    1. 位置どおりの行とタイトルが合えば verified（非公開 / 削除は position-only、同じ URL なら already）。
+       長さが両方分かって食い違えば採らない（曲名をタイトルに含む別動画）
     2. 合わなかった entry は未割り当ての行からタイトルで探す（再生リストの順の入れ替え・欠落によるずれ）。
        (entry, 行) の組を「一致の長さ → 期待位置との距離」で全体に並べ、良い組から採る（同名の別曲が
        再生リストの先の位置にあっても、行に近い方が取る）。同じ評価の候補が 2 行以上残る entry は決めない。
        長さが両方分かっていて食い違う組は候補にしない → verified-by-title
     3. それでも残った entry の連続区間は、両端の隣が位置どおりに対応していて、区間の行数が
-       entry 数と同じなら位置で採る（英題の動画など、タイトルで判定できないがずれも無い）
+       entry 数と同じなら位置で採る（英題の動画など、タイトルで判定できないがずれも無い。長さが食い違う行があれば採らない）
        → verified-by-neighbors
     残りは title-mismatch（人が見る）。行に対応する entry が無ければ extra-track"""
     by_no: dict[int, dict] = {}
@@ -243,7 +244,9 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
             continue
         if not is_available(e):
             take(i, i, "position-only")
-        elif title_matches(e["title"], t.get("title") or ""):
+        elif title_matches(e["title"], t.get("title") or "") and durations_agree(e, t):
+            # 位置とタイトルが合っても長さが食い違えば採らない（曲名をタイトルに含む別動画。VALIS の 628 秒の
+            # ドキュメンタリーが 270 秒の曲の位置にあった）。手順 2 の救済か no-track に回る
             take(i, i, "verified")
     # 2. タイトルによる救済。entry ごとに先着で選ぶと、同名の別曲（位置の離れた再アップロードや別カバー）が
     #    先に行を取ってしまうので、組を全体で評価の良い順に採る。同じ評価の組の中は再生リストの順に採り、
@@ -305,7 +308,10 @@ def build_plan(album: str, entries: list[dict], tracks: list[dict]) -> list[dict
             d = d_left if d_left is not None and d_left == d_right else None
         if d is None:
             continue
-        if all((no + d) in by_no and (no + d) not in claimed for no in range(a, b + 1)):
+        if all(
+            (no + d) in by_no and (no + d) not in claimed and durations_agree(entries[no - 1], by_no[no + d])
+            for no in range(a, b + 1)
+        ):
             for pos in range(a, b + 1):
                 e = entries[pos - 1]
                 same = by_no[pos + d].get("source_url") == (watch_url(e["id"]) if e["id"] else "")

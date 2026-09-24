@@ -205,6 +205,29 @@ class Plan(unittest.TestCase):
         self.assertEqual((by_video["v2"]["status"], by_video["v2"]["track_no"]), ("verified-by-title", 4))
         self.assertEqual(by_video["v5"]["status"], "no-track")
 
+    def test_positional_match_with_a_disagreeing_length_is_not_taken(self):
+        # VALIS の実例: 位置 3 の動画は曲名を含む別動画（628 秒のドキュメンタリー）、Library の 3 番は 270.7 秒の
+        # 曲で、本来の動画は位置 4（271 秒）。位置とタイトルが合っても長さが食い違えば採らず、位置 4 が救済で取る
+        entries = [entry("v1", "曲 1 / A", 200), entry("v2", "曲 2 / A", 210),
+                   entry("doc", "7th ONE-MAN LIVE #彷徨フォーエバー BACKSTAGE DOCUMENTARY", 628),
+                   entry("song", "【VALIS】彷徨フォーエバー  Live ver.【Act.2】", 271)]
+        tracks = [track(1, 1, "曲 1", duration_ms=200_000), track(2, 2, "曲 2", duration_ms=210_000),
+                  track(3, 3, "彷徨フォーエバー 【Live ver.】", duration_ms=270_721)]
+        rows = build_plan("A のお歌", entries, tracks)
+        by_video = {r["video_id"]: r for r in rows}
+        self.assertEqual((by_video["song"]["status"], by_video["song"]["track_no"]), ("verified-by-title", 3))
+        self.assertEqual(by_video["doc"]["status"], "no-track")
+        self.assertIsNone(by_video["doc"]["track_id"])
+
+    def test_neighbour_inference_skips_a_run_whose_length_disagrees(self):
+        # 英題で位置推定になる区間でも、長さが食い違う行は採らない（人が見る title-mismatch に回す）
+        entries = [entry("v1", "曲 1 / A", 200), entry("v2", "Yarn [Music Video]", 628), entry("v3", "曲 3 / A", 220)]
+        tracks = [track(1, 1, "曲 1", duration_ms=200_000), track(2, 2, "糸", duration_ms=205_000),
+                  track(3, 3, "曲 3", duration_ms=220_000)]
+        rows = build_plan("A のお歌", entries, tracks)
+        by_no = {r["track_no"]: r for r in rows}
+        self.assertEqual(by_no[2]["status"], "title-mismatch")
+
     def test_title_rescue_with_equidistant_candidates_stays_mismatch(self):
         entries = [entry("v1", "違う / A"), entry("v2", "同じ / A"), entry("v3", "別 / A")]
         tracks = [track(11, 1, "同じ"), track(12, 2, "x"), track(13, 3, "同じ")]
