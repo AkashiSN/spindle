@@ -847,14 +847,13 @@ lossy_sources = true            # 非可逆原本も AAC へ（D-8 の例外。a
 multi_value_separator = " & "   # 多値フィールドの結合
 ```
 
-`derived_variants` の `lossy_sources` / `multi_value_separator` は 0019 で足す（`eligible` が前者を、ハンドラが後者を
+`derived_variants` の `lossy_sources` / `multi_value_separator` は aac 系統の設定（`eligible` が前者を、ハンドラが後者を
 表から引く。設定は config が正で、起動時に両系統を写す）。
 
-`derived_files` の主キーは `(track_id, variant)`（マイグレーションで `delivery` ビューを落とし、表を作り直し、
-既存行を `variant = 'opus'`・`audio_profile = 'opus:128:v1'`・`tag_profile = 'opus:v1'`・`rel_path` はルート直下の
-ままで移し、ビューを `variant = 'opus'` で作り直す）。既定の 256k では次の transcode が `audio_profile` の差分で
-再エンコードして `opus/` 配下へ置き、旧ファイルは transcode の退避経路で消える。`bitrate = 128` のまま
-（`audio_profile` が一致）ならパスの差分だけなので Move で `opus/` 配下へ移る。
+`derived_files` の主キーは `(track_id, variant)` で、配布ビュー `delivery` は `variant = 'opus'` の行を見る。
+系統を持つ前の行（ルート直下・`audio_profile = 'opus:128:v1'`）は、既定の 256k では次の transcode が
+`audio_profile` の差分で再エンコードして `opus/` 配下へ置き、旧ファイルは transcode の退避経路で消える。
+`bitrate = 128` のまま（`audio_profile` が一致）ならパスの差分だけなので Move で `opus/` 配下へ移る（D-75）。
 
 `has_derived`（DSL / フラグ / バッジ）は **`opus` 系統の行**の有無（= `opus` 系統を生成済みか。音声版が古い間は
 配布ビューが原本へ倒れるが、`has_derived` は行の有無のまま）。
@@ -976,7 +975,7 @@ multi_value_separator = " & "   # 多値フィールドの結合
 運用をなくす。再生リスト 1 本 → Library の album 1 つ（追記先）。`SOURCE_URL`（P4-14 で補填、ytdl が
 書く）で「再生リストのどこまで持っているか」が分かる。
 
-- **購読**（`db::subscriptions`、`/api/ytmusic/subscriptions`）: `id` は再利用しない（AUTOINCREMENT。0022。
+- **購読**（`db::subscriptions`、`/api/ytmusic/subscriptions`）: `id` は再利用しない（AUTOINCREMENT。
   ジョブの payload とサイドカーが裸の id を持つので、DELETE 直後に作った購読へ旧ジョブが誤帰属しない）、
   `list_id`（URL の `list=`。YouTube のホストだけ。UNIQUE）、`albumartist` / `album` / `category`（追記先の初期値と表示用）、`album_id`
   （**追記先の同一性**。登録時は NULL。同期か配置が `import::inbox::destination_of`（Inbox の追記先と
@@ -2310,8 +2309,8 @@ ytdlp = "yt-dlp"
   を `# renovate:` 注釈の custom manager で github-releases から追い、schedule の例外で 1 件ずつ即時）。
   マージは手動。Dependency Dashboard の issue に保留中の更新と手動実行のチェックボックスが出る。
   マージすれば `edge` が作り直され、本番へは次の `vX.Y.Z` で届く（yt-dlp だけの更新でもパッチ版を切る）
-- スカッシュ（`db/migrations` を `0001` に畳む）は最初の `vX.Y.Z` より前に 1 回だけ（公開イメージで
-  DB を作った後は既存ファイルを書き換えられない）
+- スカッシュ（`db/migrations` を `0001` に畳む）は最初の `vX.Y.Z` より前に 1 回だけ行った（2026-09-24、D-88）。
+  公開イメージで DB を作った後は既存ファイルを書き換えられないので、以後は連番を足すだけ
 
 ### TrueNAS Custom App (compose)
 

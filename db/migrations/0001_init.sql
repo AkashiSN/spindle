@@ -1,6 +1,9 @@
 -- spindle schema (SQLite 3.38+)
 -- 原則: ファイルが正 / パスは識別子でない / 音声とタグを別に版管理 / 破壊的操作は巻き戻せる
 --
+-- 最初の vX.Y.Z の前に、それまでの 0001〜0024 をこの 1 本に畳んだ（D-88）。以後の変更は
+-- 既存ファイルを書き換えず、新しい連番ファイルを足す。
+--
 -- PRAGMA はこのファイルに書かない。マイグレーションは 1 ファイル = 1 トランザクションで
 -- 適用するが、journal_mode / synchronous はトランザクション内で変更できず、
 -- foreign_keys はトランザクション中は無視される。これらはコネクション初期化時に
@@ -51,8 +54,16 @@ CREATE TABLE artwork (
 -- ============================================================
 
 -- album の同一性は rel_dir ではない（パスは識別子ではない）。ディレクトリが外部で
--- rename されても、構成トラックの id 集合と mb_release_id / discid から同じ行を
+-- rename されても、構成トラックの id 集合と mb_release_id から同じ行を
 -- 引き当てて rel_dir を書き換える（SPEC §7.1）。
+-- DiscID は 1 枚ごとの値で複数枚組の album には 1 つに収まらないので album には持たない
+-- （トラックのタグ MUSICBRAINZ_DISCID・album_verifications・rip.log に残る。D-67）。
+--
+-- アートワークは「ディレクトリの同梱カバー画像（cover.jpg 等）があればそれ、無ければ最初の
+-- トラックの埋め込み画像」で決まる（SPEC §7.1「アートワーク」、D-49）。同梱画像はトラックでは
+-- ないので tracks の最速パスでは変化を拾えない。cover_* に同梱画像の stat を持ち、スキャンの
+-- たびに inventory と比べて変わった album だけ解決し直す（トラックの最速パスと同じ規則:
+-- inode / size / mtime / ctime）。artwork_resolved_at が NULL の album は次のスキャンで必ず解決する。
 CREATE TABLE albums (
   id            INTEGER PRIMARY KEY,
   rel_dir       TEXT NOT NULL UNIQUE,          -- Library/ からの相対ディレクトリ（表示用）
@@ -64,16 +75,22 @@ CREATE TABLE albums (
   original_date TEXT,
   edition       TEXT,                          -- Remaster 等。衝突回避に使用
   mb_release_id TEXT,
-  discid        TEXT,
   disc_count    INTEGER,
   artwork_id    INTEGER REFERENCES artwork(id) ON DELETE SET NULL,
-  missing_since INTEGER                        -- 構成トラックが 0 になった album。行は消さない
+  missing_since INTEGER,                       -- 構成トラックが 0 になった album。行は消さない
                                                -- （verifications が CASCADE で消えるため）。GC が回収
+  cover_inode         INTEGER,
+  cover_size          INTEGER,
+  cover_mtime_ns      INTEGER,
+  cover_ctime_ns      INTEGER,
+  artwork_resolved_at INTEGER,
+  -- album gain は album ごとの属性（D-74）。既定 off。1 の album だけ rg を album 単位で投入し、
+  -- tracks.rg_album_* を持つ
+  album_gain INTEGER NOT NULL DEFAULT 0 CHECK (album_gain IN (0, 1))
 ) STRICT;
 
 CREATE INDEX idx_albums_artist   ON albums(albumartist, album);
 CREATE INDEX idx_albums_release  ON albums(mb_release_id) WHERE mb_release_id IS NOT NULL;
-CREATE INDEX idx_albums_discid   ON albums(discid)        WHERE discid IS NOT NULL;
 CREATE INDEX idx_albums_missing  ON albums(missing_since) WHERE missing_since IS NOT NULL;
 
 -- ============================================================
@@ -144,7 +161,7 @@ CREATE TABLE tracks (
   -- ReplayGain: 内部は RG2.0 / -18 LUFS 基準の dB。書き出し時に形式変換
   rg_track_gain REAL,
   rg_track_peak REAL,
-  rg_album_gain REAL,
+  rg_album_gain REAL,                          -- albums.album_gain = 1 の album だけが持つ（D-74）
   rg_album_peak REAL,
   rg_scanned_at INTEGER,
   rg_written_at INTEGER,                       -- スキャンと書き込みを分離
@@ -166,7 +183,40 @@ CREATE TABLE tracks (
 
   seen_at       INTEGER NOT NULL,
   seen_run_id   INTEGER REFERENCES scan_runs(id) ON DELETE SET NULL,  -- 最後に claim した走査
-  missing_since INTEGER                        -- 論理削除。既定 30 日後に GC
+  missing_since INTEGER,                       -- 論理削除。既定 30 日後に GC
+
+  -- 初回登録時刻（スマートプレイリスト DSL の `added`。D-54）。seen_at は走査のたびに更新される
+  -- ので使えない。スキャナが INSERT 時に設定し、復活（missing → 再発見）でも変えない
+  added_at INTEGER NOT NULL DEFAULT 0,
+
+  -- FLAC 健全性チェックの結果（D-57）。flaccheck ジョブが flac -t と STREAMINFO の MD5 から
+  -- 判定して書く。flac_check_version は検査時の audio_version で、現在値と違えば結果は古い
+  -- （スキャナはこれらの列を触らない）
+  flac_check TEXT
+  CHECK (flac_check IS NULL OR flac_check IN ('ok','md5_missing','decode_error')),
+  flac_checked_at INTEGER,
+  flac_check_version INTEGER,
+  flac_check_error TEXT,
+
+  -- トラック自身の埋め込み画像（front cover 優先。D-61）。album のアートワーク
+  -- （albums.artwork_id）とは別に持ち、トラックごとに画像が違う album で Derived と再生表示が
+  -- そのトラックの絵になる。スキャナ Phase 3 と tagwrite の読み戻しが埋める（NULL の間は album の絵へ倒す）
+  artwork_id INTEGER REFERENCES artwork(id) ON DELETE SET NULL,
+  -- 画像をキャッシュへ置けなかった（store の I/O 失敗）行の印。物理属性が変わらなくても次のスキャンが
+  -- 読み直す（Phase 3 の対象に含める）。画像を記録できたら 0 に戻す
+  artwork_dirty INTEGER NOT NULL DEFAULT 0,
+
+  -- 偽ハイレゾ検出の結果（D-71、SPEC §7.10）。hirescheck ジョブが書く。
+  -- hires_check_version は検査時の audio_version で、現在値と違えば結果は古い（スキャナは触らない）。
+  -- 計測値（カットオフ周波数 / 崖 / 実効ビット）は判定の根拠として残す。計測しなかった側は NULL
+  hires_check TEXT
+  CHECK (hires_check IS NULL OR hires_check IN ('ok','upsampled','padded','both','inconclusive','decode_error')),
+  hires_checked_at INTEGER,
+  hires_check_version INTEGER,
+  hires_check_error TEXT,
+  hires_cutoff_hz INTEGER,
+  hires_cliff_db REAL,
+  hires_effective_bits INTEGER
 ) STRICT;
 
 CREATE INDEX idx_tracks_inode   ON tracks(dev, inode);
@@ -178,6 +228,30 @@ CREATE INDEX idx_tracks_album   ON tracks(album_id, disc_no, track_no);
 CREATE INDEX idx_tracks_missing ON tracks(missing_since) WHERE missing_since IS NOT NULL;
 CREATE INDEX idx_tracks_rg      ON tracks(rg_scanned_at) WHERE rg_scanned_at IS NULL;
 CREATE INDEX idx_tracks_sort    ON tracks(albumartist, album_id, disc_no, track_no);
+CREATE INDEX idx_tracks_artwork ON tracks(artwork_id) WHERE artwork_id IS NOT NULL;
+CREATE INDEX idx_tracks_artwork_dirty ON tracks(id) WHERE artwork_dirty = 1;
+
+-- GET /api/tracks のソート列ごとのキーセット索引（D-39）。
+--
+-- カーソルページングは (ソートキー, id) の行値比較で次ページを引く。ソート列は NULL を
+-- 許すが、行値比較は NULL を含むと不定になるので、索引と ORDER BY の両方で
+-- coalesce() した式を使い NULL を '' / 0 / -1 に畳む（NULL は昇順で先頭、降順で末尾）。
+-- 式索引は ORDER BY / WHERE の式と字面が一致するときだけ使われるため、
+-- クエリ側（src/db/tracks.rs）の式はここと完全に同じでなければならない。
+--
+-- 上の idx_tracks_sort（albumartist, album_id, disc_no, track_no）は NULL を畳まないので
+-- キーセットには使えない。スキャナの album 照合が使う可能性があるので残す。
+-- rel_path は UNIQUE なので自動索引で足りる（id のタイブレークは不要）
+CREATE INDEX idx_tracks_ks_album ON tracks(
+  coalesce(albumartist, ''), coalesce(album_id, 0), coalesce(disc_no, 0), coalesce(track_no, 0), id
+);
+CREATE INDEX idx_tracks_ks_title       ON tracks(coalesce(title, ''), id);
+CREATE INDEX idx_tracks_ks_artist      ON tracks(coalesce(artist_display, ''), id);
+CREATE INDEX idx_tracks_ks_album_title ON tracks(coalesce(album, ''), id);
+CREATE INDEX idx_tracks_ks_albumartist ON tracks(coalesce(albumartist, ''), id);
+CREATE INDEX idx_tracks_ks_date        ON tracks(coalesce(date, ''), id);
+CREATE INDEX idx_tracks_ks_duration    ON tracks(coalesce(duration_ms, -1), id);
+CREATE INDEX idx_tracks_ks_codec       ON tracks(codec, id);
 
 -- 同一音声（audio_md5 一致）が複数の active トラックにある = 重複候補。
 -- 自動マージはしない。UI のバッジと一覧に使う（D-29）
@@ -206,6 +280,12 @@ CREATE INDEX idx_track_tags_key ON track_tags(key, value);
 -- 検証（AccurateRip / CTDB）
 -- ============================================================
 
+-- 遡及照合の単位は「アルバムの 1 ディスク」で、複数ディスクのアルバムはディスクごとに
+-- TOC を再構成して別々に照会する（SPEC §7.3、D-63）。disc_no は 1 ディスクのアルバムでも
+-- tracks.disc_no に合わせて 1 を入れる（disc_no が無いトラック群は 1 とみなす）。
+-- job_id はジョブの冪等性のため。記録（DB の commit）の後、ログの確定やジョブの done の前に
+-- 落ちて起動時リカバリで同じジョブが再実行されても、同じ (job_id, disc_no, method) の行が
+-- あれば再利用し、履歴を重複させない
 CREATE TABLE album_verifications (
   id              INTEGER PRIMARY KEY,
   album_id        INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
@@ -216,10 +296,14 @@ CREATE TABLE album_verifications (
   detected_offset INTEGER,
   confidence      INTEGER,
   verified_at     INTEGER NOT NULL,
-  log_path        TEXT                         -- rip.log / verify.log
+  log_path        TEXT,                        -- rip.log / verify.log
+  disc_no         INTEGER,
+  job_id          INTEGER REFERENCES jobs(id) ON DELETE SET NULL
 ) STRICT;
 
 CREATE INDEX idx_alb_verif ON album_verifications(album_id, verified_at DESC);
+CREATE UNIQUE INDEX idx_alb_verif_job ON album_verifications(job_id, disc_no, method)
+  WHERE job_id IS NOT NULL;
 
 -- 履歴として積む。再照合時も過去の結果を消さない
 CREATE TABLE track_verifications (
@@ -232,22 +316,75 @@ CREATE TABLE track_verifications (
   PRIMARY KEY (track_id, verification_id)
 ) STRICT, WITHOUT ROWID;
 
+-- 学習した読み取りオフセット（P2-5、D-83）。rip は最初オフセット 0 で吸い、CTDB / AccurateRip の照合で
+-- 見つかったずれを PCM に当ててから配置し、その値をドライブの型番（INQUIRY の vendor + product）ごとに
+-- 覚えて次の盤から使う。キャッシュなので消えても次に照合が通った盤で覚え直す（rip.log にも残る）
+CREATE TABLE drive_offsets (
+  drive        TEXT PRIMARY KEY,
+  offset       INTEGER NOT NULL,
+  method       TEXT NOT NULL CHECK (method IN ('ctdb', 'accuraterip')),
+  confidence   INTEGER NOT NULL,
+  detected_at  INTEGER NOT NULL
+);
+
 -- ============================================================
 -- 派生物（Derived）
 -- ============================================================
 
+-- Derived は系統（variant）ごとに 1 本（SPEC §7.6、D-75）。
+-- - src_artwork_id: 埋めた画像の artwork.id（NULL = 画像なし）。artwork 行が GC で消えたら
+--   NULL に戻り、album 側も SET NULL なので一致し続ける（D-51）
+-- - src_rg_scanned_at: 埋めた R128_* の元になった tracks.rg_scanned_at（NULL = 未解析で書いた）
+-- どちらも tag_version に乗らない（カバーの差し替えはトラックのタグではない。RG の解析値は
+-- DB の列で、ファイルへの書き込みは別のバッチ）ので、Derived に書いた時点の値を持って現在値と比べる
 CREATE TABLE derived_files (
-  track_id          INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
-  rel_path          TEXT NOT NULL UNIQUE,      -- Derived/ からの相対パス
+  track_id          INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  variant           TEXT NOT NULL CHECK (variant IN ('opus', 'aac')),
+  rel_path          TEXT NOT NULL UNIQUE,      -- Derived/ からの相対パス（<variant>/ 以下）
   rel_path_key      TEXT NOT NULL UNIQUE,
   codec             TEXT NOT NULL,
   bitrate           INTEGER,
   src_audio_version INTEGER NOT NULL CHECK (src_audio_version >= 1),  -- 差分 → 再エンコード
   src_tag_version   INTEGER NOT NULL CHECK (src_tag_version >= 1),    -- 差分のみ → タグ上書き
-  generated_at      INTEGER NOT NULL
+  generated_at      INTEGER NOT NULL,
+  src_artwork_id    INTEGER REFERENCES artwork(id) ON DELETE SET NULL,
+  src_rg_scanned_at INTEGER,
+  audio_profile     TEXT NOT NULL,             -- 音声に効く設定の世代（差分 → 再エンコード）
+  tag_profile       TEXT NOT NULL,             -- タグに効く設定の世代（差分 → タグ上書き）
+  PRIMARY KEY (track_id, variant)
 ) STRICT;
 
--- 配布ビュー: 可逆は Derived、非可逆は Library 原本
+CREATE INDEX idx_derived_files_variant ON derived_files(variant);
+
+-- 系統の設定を写す表。config.toml が正で、起動時に db::derived::sync_variants が両系統を揃える。
+-- `eligible` が lossy_sources を、transcode ハンドラが multi_value_separator を引く（aac 系統。D-75）
+CREATE TABLE derived_variants (
+  variant       TEXT PRIMARY KEY CHECK (variant IN ('opus', 'aac')),
+  enabled       INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  audio_profile TEXT NOT NULL,
+  tag_profile   TEXT NOT NULL,
+  codec         TEXT NOT NULL,
+  bitrate       INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL,
+  lossy_sources INTEGER NOT NULL DEFAULT 0
+  CHECK (lossy_sources IN (0, 1)),
+  multi_value_separator TEXT NOT NULL DEFAULT ' & '
+) STRICT;
+
+-- Derived のパス（canonical key）の排他予約。transcode ジョブが物理的な書き込みの前に取り、
+-- 終了時に解放する。x.flac と x.wav のように別の Library パスが同じ Derived パスに写る場合や、
+-- 占有を確定してから書くまでの間に別のジョブが同じ宛先へ書くのを防ぐ（track_locks は track 単位
+-- なので宛先の衝突は防げない）。GC が Derived の孤児（どのトラックにも紐づかない実体）を消す間も
+-- 同じ予約を track_id = NULL で持つ（D-56）。プロセス生存中しか意味を持たず、持ち主のジョブが
+-- running でなくなれば無効（起動時リカバリで全件消す）
+CREATE TABLE derived_path_locks (
+  rel_path_key TEXT PRIMARY KEY,
+  track_id     INTEGER REFERENCES tracks(id) ON DELETE CASCADE,   -- NULL = GC の予約
+  job_id       INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  acquired_at  INTEGER NOT NULL
+) STRICT;
+
+-- 配布ビュー: 可逆は Derived（opus 系統）、非可逆は Library 原本
 -- Derived を採用するのは音声版が現在値と一致するときだけ。音声が陳腐化した
 -- Derived（再エンコード待ち）は配布せず Library 原本へフォールバックする。
 -- タグだけ陳腐化した Derived は採用し stale_tags=1 で通知する（タグ上書きジョブが
@@ -270,13 +407,17 @@ SELECT
        THEN 1 ELSE 0
   END AS stale_tags
 FROM tracks t
-LEFT JOIN derived_files d ON d.track_id = t.id
+LEFT JOIN derived_files d ON d.track_id = t.id AND d.variant = 'opus'
 WHERE t.missing_since IS NULL;
 
 -- ============================================================
 -- プレイリスト
 -- ============================================================
 
+-- 名前はそのまま書き出しファイル名（Playlists/<profile>/<name>.m3u8）になる。ZFS の
+-- insensitive + formD では Foo.m3u8 と foo.m3u8、NFC と NFD の同名が同じ実体なので、
+-- `name` の BINARY UNIQUE だけでは別プレイリストの書き出しが上書きし合う。rel_path_key と
+-- 同じ規則（casefold + NFD。domain::relpath::canonical_key）の name_key を持ち、こちらで一意にする（D-53）
 CREATE TABLE playlists (
   id           INTEGER PRIMARY KEY,
   name         TEXT NOT NULL UNIQUE,
@@ -285,10 +426,13 @@ CREATE TABLE playlists (
   rule_ast     TEXT CHECK (rule_ast IS NULL OR json_valid(rule_ast)),  -- smart: パース済み AST (JSON)
   auto_export  INTEGER NOT NULL DEFAULT 1 CHECK (auto_export IN (0,1)),
   created_at   INTEGER NOT NULL,
-  updated_at   INTEGER NOT NULL
+  updated_at   INTEGER NOT NULL,
+  name_key TEXT NOT NULL DEFAULT ''            -- canonical_key(name)。アプリが INSERT / 改名時に書く
 ) STRICT;
 -- rule_source を残すのは、AST から DSL を逆生成すると整形が原文と変わり
 -- ユーザの意図した記述が失われるため。実行には rule_ast のみを使う。
+
+CREATE UNIQUE INDEX idx_playlists_name_key ON playlists(name_key);
 
 CREATE TABLE playlist_items (
   playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
@@ -322,6 +466,88 @@ CREATE TABLE playlist_exports (
   out_path    TEXT NOT NULL,
   exported_at INTEGER,
   PRIMARY KEY (playlist_id, profile_id)
+) STRICT, WITHOUT ROWID;
+
+-- ============================================================
+-- 再生リストの購読と同期（D-78、SPEC §7.7「再生リストの購読」）
+-- ============================================================
+
+-- YouTube の再生リスト 1 本 → Library の album 1 つ（追記先）。
+-- - id は再利用しない（AUTOINCREMENT）。ytdl / playlist_sync の payload と Inbox の
+--   spindle-inbox.json は裸の subscription_id を持ち、DELETE は走行中のジョブを止めないので、
+--   削除直後に別の購読を作ると旧ジョブが新しい購読へ誤帰属する
+-- - album_id は追記先の同一性（album 全体の移動は id を維持する。D-32）。登録時は NULL で、同期か配置が
+--   albumartist / album / category から解決できたときに束ねる（album_id IS NULL のときだけ = CAS）。
+--   album が消えれば NULL に戻り（SET NULL）、次の同期で再解決する
+-- - target_key は canonical_key(albumartist) || '/' || canonical_key(album)。同じ追記先の購読は 1 つだけ
+--   （Inbox の youtube/<albumartist>/<album> = 1 購読 = 1 category にする）。album_id も非 NULL の間は
+--   UNIQUE で、束ね同士の競合は DB で片方が失敗する
+-- - sync_requested_at は承認の後続・手動要求の latch（時刻は表示用で、比較には使わない）。同期の開始で
+--   NULL にし、終了時に立っていれば Requeue、残れば dispatcher が回収する
+-- - last_attempted_at は同期の開始時刻（成否を問わない。定期投入の基準）、last_synced_at は成功の終端
+-- - last_result は最終同期の結果 JSON（取れない一覧・揃えられない一覧・持ち越し・バッチ id 等）
+CREATE TABLE playlist_subscriptions (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  list_id           TEXT NOT NULL UNIQUE,
+  url               TEXT NOT NULL,
+  album_id          INTEGER REFERENCES albums(id) ON DELETE SET NULL,
+  target_key        TEXT NOT NULL UNIQUE,
+  albumartist       TEXT NOT NULL,
+  album             TEXT NOT NULL,
+  category          TEXT,
+  align             INTEGER NOT NULL DEFAULT 1 CHECK (align IN (0, 1)),
+  enabled           INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  max_enqueue       INTEGER NOT NULL DEFAULT 50 CHECK (max_enqueue >= 1),
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL,
+  last_attempted_at INTEGER,
+  last_synced_at    INTEGER,
+  sync_requested_at INTEGER,
+  last_result       TEXT CHECK (last_result IS NULL OR json_valid(last_result))
+) STRICT;
+
+CREATE UNIQUE INDEX idx_playlist_subscriptions_album ON playlist_subscriptions(album_id)
+  WHERE album_id IS NOT NULL;
+
+-- ============================================================
+-- Inbox の承認キュー（SPEC §7.8、D-68）
+-- ============================================================
+
+-- 正は Inbox のファイルで、行はキャッシュ（ディレクトリが消えれば行も消す。placed だけは
+-- 結果を見せるために一定時間残す）
+CREATE TABLE inbox_items (
+  id              INTEGER PRIMARY KEY,
+  rel_dir         TEXT NOT NULL,            -- Inbox 相対（root 直下の音声は ''）
+  rel_dir_key     TEXT NOT NULL UNIQUE,     -- casefold(NFD)
+  state           TEXT NOT NULL DEFAULT 'pending'
+      CHECK (state IN ('pending','approved','placing','placed','rejected','failed')),
+  detected_at     INTEGER NOT NULL,
+  seen_at         INTEGER NOT NULL,         -- 最後に走査で見た時刻
+  approved_at     INTEGER,
+  draft           TEXT,                     -- 承認時の補正（JSON。InboxDraft）
+  error           TEXT,                     -- failed の理由、pending に戻した理由
+  placed_album_id INTEGER REFERENCES albums(id) ON DELETE SET NULL,
+  placed_at       INTEGER
+) STRICT;
+
+CREATE INDEX idx_inbox_items_state ON inbox_items(state);
+
+CREATE TABLE inbox_files (
+  item_id      INTEGER NOT NULL REFERENCES inbox_items(id) ON DELETE CASCADE,
+  rel_path     TEXT NOT NULL,               -- Inbox 相対
+  rel_path_key TEXT NOT NULL UNIQUE,
+  inode        INTEGER NOT NULL,
+  size         INTEGER NOT NULL,
+  mtime_ns     INTEGER NOT NULL,
+  ctime_ns     INTEGER NOT NULL,
+  codec        TEXT NOT NULL,
+  lossless     INTEGER NOT NULL CHECK (lossless IN (0,1)),
+  sample_rate  INTEGER,
+  bit_depth    INTEGER,
+  channels     INTEGER,
+  duration_ms  INTEGER,
+  tags         TEXT NOT NULL,               -- [[key, value], ...] の JSON（表示と下書きに使う）
+  PRIMARY KEY (item_id, rel_path_key)
 ) STRICT, WITHOUT ROWID;
 
 -- ============================================================
@@ -387,12 +613,14 @@ CREATE INDEX idx_edit_batches_open ON edit_batches(state)
 -- 1 op = 1 トラックへの 1 操作。事前条件はここに持つ。
 -- pending の op があるトラックは再編集できない（HTTP 409。SPEC §7.5）。
 -- これを DB でも保証するため (track_id) WHERE result='pending' を UNIQUE にする。
+-- kind = 'md5' は FLAC の STREAMINFO に MD5 が無い（全ゼロ）トラックへ、デコードした PCM MD5 を書く
+-- 操作（SPEC §7.9、D-59）。音声もタグも変わらず audio_version / tag_version は据え置き
 CREATE TABLE edit_ops (
   id                INTEGER PRIMARY KEY,
   batch_id          INTEGER NOT NULL REFERENCES edit_batches(id) ON DELETE CASCADE,
   ordinal           INTEGER NOT NULL,          -- バッチ内の適用順（rename の 2 段階更新で意味を持つ）
   track_id          INTEGER NOT NULL,          -- あえて FK にしない（削除後も履歴を残す）
-  kind              TEXT NOT NULL CHECK (kind IN ('tags','rename','delete','archive')),
+  kind              TEXT NOT NULL CHECK (kind IN ('tags','rename','delete','archive','md5')),
 
   -- ファイル反映の事前条件。記録時点の実体。反映直前に一致しなければ
   -- 外部変更とみなし skipped_conflict にする（ファイルが正）。
@@ -430,6 +658,8 @@ CREATE INDEX idx_edit_ops_job ON edit_ops(job_id) WHERE job_id IS NOT NULL;
 --   rename:  key = 'rel_path'。値は文字列
 --   delete:  key = 'missing_since'。値は整数または null
 --   archive: key = 'archive'。値は {"from": Library 相対パス, "to": Archive 相対パス}
+--   md5:     key = 'audio_md5'。値は 32 桁の hex 文字列（全ゼロ = 未設定）。new_value は記録時 null で、
+--            反映時に計算値を書く
 CREATE TABLE edits (
   id        INTEGER PRIMARY KEY,
   op_id     INTEGER NOT NULL REFERENCES edit_ops(id) ON DELETE CASCADE,
@@ -441,6 +671,9 @@ CREATE TABLE edits (
 
 -- Archive へ退避したファイルの台帳。GC の削除適格性はここで決める
 -- （編集履歴は revert / redo で状態が動くため台帳に使わない）。
+-- reason: normalize = ロスレス正規化で退避した元ファイル。restore = 正規化の巻き戻しで、Library に
+-- あった FLAC を Archive へ move したもの（元ファイルは Archive から Library へコピーで戻し、その行は
+-- state = 'restored'。Archive は追記のみ。SPEC §7.4、D-46）
 CREATE TABLE archived_files (
   id             INTEGER PRIMARY KEY,
   track_id       INTEGER,                      -- FK にしない（トラック削除後も台帳は残す）
@@ -448,7 +681,7 @@ CREATE TABLE archived_files (
   rel_path       TEXT NOT NULL UNIQUE,         -- Archive/ からの相対パス
   rel_path_key   TEXT NOT NULL UNIQUE,         -- casefold(NFD(rel_path))
   source_rel_path TEXT NOT NULL,               -- 退避前の Library/ 相対パス（履歴値。比較には使わない）
-  reason         TEXT NOT NULL CHECK (reason IN ('normalize')),
+  reason         TEXT NOT NULL CHECK (reason IN ('normalize','restore')),
   archived_at    INTEGER NOT NULL,
   eligible_after INTEGER NOT NULL,             -- archived_at + [gc].retention_days
   state          TEXT NOT NULL DEFAULT 'held'
@@ -469,7 +702,8 @@ CREATE TABLE jobs (
   id          INTEGER PRIMARY KEY,
   type        TEXT NOT NULL
       CHECK (type IN ('scan','rip','verify','rg','transcode','tagwrite','rename',
-                      'normalize','thumbnail','flaccheck','inbox','gc','backup')),
+                      'normalize','thumbnail','flaccheck','inbox','ytdl','gc','backup','hirescheck',
+                      'playlist_sync')),
   dedup_key   TEXT,                            -- 二重投入防止。type を含めて構成する（例 'tagwrite:123:7'）
   payload     TEXT NOT NULL CHECK (json_valid(payload)),
   state       TEXT NOT NULL DEFAULT 'queued'
@@ -486,7 +720,8 @@ CREATE TABLE jobs (
   cancel_requested_at INTEGER,                 -- ハンドラが進捗更新のたびに見て自発的に止まる
   created_at  INTEGER NOT NULL,
   started_at  INTEGER,
-  finished_at INTEGER
+  finished_at INTEGER,
+  note        TEXT                             -- 完了時の結果 1 行（SPEC §8。失敗の理由は last_error）
 ) STRICT;
 
 -- dedup は「未完了のジョブ」の間だけ効かせる。列 UNIQUE にすると done/failed 後に
@@ -506,6 +741,15 @@ CREATE INDEX idx_jobs_batch ON jobs(edit_batch_id) WHERE edit_batch_id IS NOT NU
 CREATE TABLE track_locks (
   track_id   INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
   job_id     INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  acquired_at INTEGER NOT NULL
+) STRICT;
+
+-- ジョブ間の名前付き排他（D-56）。scan と gc は同じ `library` を取り、取れた側だけが走る
+-- （check-then-requeue を両側に置くだけでは同時 claim で譲り合いが続く）。track_locks と同じく
+-- プロセス生存中しか意味を持たず、持ち主のジョブが running でなくなれば無効。起動時リカバリで全件消す
+CREATE TABLE job_mutexes (
+  name        TEXT PRIMARY KEY,
+  job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   acquired_at INTEGER NOT NULL
 ) STRICT;
 

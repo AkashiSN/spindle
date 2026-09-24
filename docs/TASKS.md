@@ -1163,7 +1163,7 @@ unverifiable / 不完全 / 複数ディスク / 照会失敗 / 再照合の履�
 - [x] `src/import/placement.rs`（CD の配置と共通の tmp + rename / album の解決 / 行の登録。リリースキーは
       登録トランザクションで再検証）
 - [x] `src/jobs/handlers/inbox.rs`（`inbox` ジョブ = 走査 + 承認済みの配置。`[inbox].poll_interval_secs`
-      （既定 60、0 で自動なし）の周期投入と「今すぐ確認」）、`db/migrations/0014`、`src/db/inbox.rs`
+      （既定 60、0 で自動なし）の周期投入と「今すぐ確認」）、旧 `db/migrations/0014`（D-88 で `0001_init.sql` へ統合）、`src/db/inbox.rs`
 - [x] `src/api/inbox.rs`（`GET /api/inbox`、`POST /api/inbox/scan`、`POST /api/inbox/{id}/approve|reject|reopen`）
 - [x] web の Inbox タブ（`lib/inbox.ts` / `useInbox` / `InboxView`: 件の一覧とアルバム単位 + トラック単位の
       補正フォーム、placed からアルバムへ）
@@ -1255,7 +1255,7 @@ rg は Inbox の配置で投入済み。
       無音フレーム除外、サンプルの OR）→ `Measurement { cutoff_hz, cliff_db, effective_bits }`（候補は
       1/3 オクターブ平滑化、エッジは平滑化前の段差最大、崖は平滑化前。境界は SPEC §7.10）→ `[hires]` の
       しきい値で `Verdict`
-- [x] `db/migrations/0016_hires_check.sql`: `tracks.hires_check*` + `hires_cutoff_hz` / `hires_cliff_db` /
+- [x] 旧 `db/migrations/0016_hires_check.sql`（D-88 で `0001_init.sql` へ統合）: `tracks.hires_check*` + `hires_cutoff_hz` / `hires_cliff_db` /
       `hires_effective_bits`、`jobs.type` に `hirescheck`（0015 と同じ表の作り直し）。`db/hires.rs`（Status /
       Target / record / enqueue_all_unchecked / enqueue_selection）
 - [x] `jobs/handlers/hirescheck.rs`（並列 = max(1, コア数 / 2)、`version_field` で stale ゲートと track_locks、
@@ -1328,7 +1328,7 @@ D-70 追記。2026-09-20。
 
 D-74。2026-09-20。
 
-- [x] `db/migrations/0017_album_gain.sql`（`albums.album_gain` 既定 0、既存の `tracks.rg_album_*` を NULL）
+- [x] 旧 `db/migrations/0017_album_gain.sql`（D-88 で `0001_init.sql` へ統合）（`albums.album_gain` 既定 0、既存の `tracks.rg_album_*` を NULL）
 - [x] rg の投入経路（`POST /api/rg`、承認後、CD 配置後。スキャンは投入しない）は属性で album / track 単位を
       選ぶ。`cd/place.rs` は true で作る
 - [x] 承認画面のチェックボックス（既定 off、追記先 album の現在値が初期値）
@@ -1473,8 +1473,11 @@ lofty の generic `Tag` → `apply_generic`）は `ItemKey` の写像表に無�
       `edge` を使い、`build.sh` は開発中の未コミット確認用に残す
 - [x] (7) yt-dlp の更新は Dependabot / 自作ワークフローでなく **Renovate**（`renovate.json`。yt-dlp は
       `# renovate:` 注釈の custom manager）。`/health` に yt-dlp の版
-- [x] (8) `v0.1.0` はまだ切らず `edge` までを完了とする（スカッシュと最初のタグはリリース時）。
+- [x] (8) `v0.1.0` はまだ切らず `edge` までを完了とする（最初のタグはリリース時。スカッシュは (9) で実施済み）。
       ユーザ側の作業: GHCR のパッケージを public に、Renovate の GitHub App をインストール
+- [x] (9) スカッシュ: リリース時の再移行の前に `db/migrations` を `0001_init.sql` 1 本へ畳んだ（2026-09-24、D-88）。
+      最終スキーマは 24 本を流した結果と一致（`sqlite_sequence` の空行だけ差）。アップグレード試験は空 DB の
+      スキーマ試験へ移した。最初のタグはリリース時
 
 受け入れ（確認済み）: `main` への push で `edge` / `sha-<7>` が push され、リハーサル環境の compose を
 `edge` に切り替えて `compose pull` → `/health` が `{"status":"ok","version":"a10fb0d","ytdlp":"2026.08.19"}`。

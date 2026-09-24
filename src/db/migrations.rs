@@ -2,6 +2,7 @@
 //!
 //! ファイル名は `NNNN_name.sql`（4 桁ゼロ埋め、1 始まり）。既存ファイルは書き換えず、
 //! スキーマ変更は必ず新しい連番ファイルを追加する（CLAUDE.md 禁止事項）。
+//! 最初の vX.Y.Z の前に 1 回だけ、それまでの 0001〜0024 を `0001_init.sql` に畳んだ（D-88）。
 //! 適用は [`apply`]: `schema_version` の最大値より新しいファイルだけを、
 //! **1 ファイル = 1 トランザクション**で流す。PRAGMA は SQL に書かない（コネクション初期化で
 //! トランザクション外から設定する。`super::init_connection`）
@@ -120,7 +121,7 @@ pub fn current_version(conn: &Connection) -> Result<Option<u32>, MigrationError>
 
 /// マイグレーション SQL から呼べる関数。`spindle_canonical_key(text)` は
 /// [`crate::domain::relpath::canonical_key`] と同じ値（casefold + NFD）を返す。SQL の `lower()` は
-/// ASCII しか畳まず NFD もしないので、key 列の backfill はこれで行う（0006）
+/// ASCII しか畳まず NFD もしないので、key 列の backfill はこれで行う
 fn register_functions(conn: &Connection) -> Result<(), MigrationError> {
     use rusqlite::functions::FunctionFlags;
     conn.create_scalar_function(
@@ -133,77 +134,6 @@ fn register_functions(conn: &Connection) -> Result<(), MigrationError> {
         },
     )
     .map_err(|source| MigrationError::Sql { version: 0, source })
-}
-
-/// SQL では書けない手当て。その版の SQL を流した直後、同じトランザクションで実行する
-fn post_sql(tx: &Connection, version: u32) -> rusqlite::Result<()> {
-    match version {
-        6 => playlists_name_key::resolve_collisions_and_index(tx),
-        _ => Ok(()),
-    }
-}
-
-/// 0006: 既存プレイリスト名の衝突解消と UNIQUE INDEX の作成
-mod playlists_name_key {
-    use std::collections::HashSet;
-
-    use rusqlite::{params, Connection};
-
-    use crate::domain::relpath::{canonical_key, MAX_COMPONENT_BYTES};
-    use crate::playlist::export::EXPORT_EXT;
-
-    /// 同じ key の行は id 最小の 1 本が名前を保ち、後続は空いている `"<name> (n)"`（n = 2, 3, …）へ
-    /// 改名する。候補は他の全行の key（改名前の勝者と、既に決めた改名先）と衝突しないものを選び、
-    /// `<name> (n).m3u8` が要素長の上限に収まるよう名前側を削る。消さない
-    pub(super) fn resolve_collisions_and_index(tx: &Connection) -> rusqlite::Result<()> {
-        let rows: Vec<(i64, String, String)> = tx
-            .prepare("SELECT id, name, name_key FROM playlists ORDER BY id")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        // 勝者（各 key の最初の行）の key を先に押さえ、改名先がそこへ二次衝突しないようにする
-        let mut taken: HashSet<String> = HashSet::new();
-        let mut losers = Vec::new();
-        for (id, name, key) in &rows {
-            if taken.insert(key.clone()) {
-                continue;
-            }
-            losers.push((*id, name.clone()));
-        }
-        for (id, name) in losers {
-            let mut n = 2u64;
-            let renamed = loop {
-                let candidate = with_suffix(&name, n);
-                let key = canonical_key(&candidate);
-                if taken.insert(key.clone()) {
-                    break (candidate, key);
-                }
-                n += 1;
-            };
-            tx.execute(
-                "UPDATE playlists SET name = ?1, name_key = ?2 WHERE id = ?3",
-                params![renamed.0, renamed.1, id],
-            )?;
-        }
-        tx.execute_batch("CREATE UNIQUE INDEX idx_playlists_name_key ON playlists(name_key)")?;
-        Ok(())
-    }
-
-    /// `"<name> (n)"`。`.m3u8` 込みで要素長の上限を超えるなら name の末尾を文字境界で削る
-    fn with_suffix(name: &str, n: u64) -> String {
-        let suffix = format!(" ({n})");
-        let budget = MAX_COMPONENT_BYTES
-            .saturating_sub(EXPORT_EXT.len())
-            .saturating_sub(suffix.len());
-        let mut base = name.to_owned();
-        if base.len() > budget {
-            let mut cut = budget;
-            while cut > 0 && !base.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            base.truncate(cut);
-        }
-        format!("{base}{suffix}")
-    }
 }
 
 /// 埋め込みマイグレーションのうち未適用のものを適用し、適用した版の一覧を返す
@@ -249,8 +179,9 @@ pub fn apply_list(conn: &mut Connection, list: &[Migration]) -> Result<Vec<u32>,
     Ok(applied)
 }
 
-/// 参照されている表を作り直すため `foreign_keys=OFF` で適用する版（SQLite の 12 手順）
-const FOREIGN_KEYS_OFF: &[u32] = &[11, 15, 16, 18, 21];
+/// 参照されている表を作り直すため `foreign_keys=OFF` で適用する版（SQLite の 12 手順）。
+/// CHECK を ALTER できないので、列挙値を足すたびに表を作り直す版がここに載る
+const FOREIGN_KEYS_OFF: &[u32] = &[];
 
 /// 1 版を 1 トランザクションで適用する。`check_fk` なら commit 前に `PRAGMA foreign_key_check` で
 /// 参照の整合を確かめる（違反があればロールバック）
@@ -261,7 +192,6 @@ fn apply_one(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<(),
     };
     let tx = conn.transaction().map_err(sql_err)?;
     tx.execute_batch(&m.sql)
-        .and_then(|_| post_sql(&tx, m.version))
         .and_then(|_| {
             tx.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",

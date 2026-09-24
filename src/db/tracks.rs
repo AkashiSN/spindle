@@ -3,7 +3,7 @@
 //! SQL はここで組み立てるが、列名と演算子は `domain::filter` の列挙型からしか出てこない。
 //! 値はすべてバインドパラメータ（CLAUDE.md 禁止事項「生 SQL 文字列の組み立て」）。
 //!
-//! 一覧はキーセットページング。ソート式は `0002_tracks_sort_indexes.sql` の式索引と
+//! 一覧はキーセットページング。ソート式は `0001_init.sql` の式索引と
 //! 字面まで一致させる（`coalesce(t.title, '')` 等）。バッジ用の pending / 最新 op /
 //! duplicate は行ごとの索引検索（LEFT JOIN と相関サブクエリ）で引き、`duplicate_groups`
 //! ビューは使わない（ビューを LEFT JOIN すると毎回 GROUP BY の実体化と自動索引が走る）。
@@ -235,7 +235,7 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
     })
 }
 
-/// ソートキーごとの式。`0002_tracks_sort_indexes.sql` の索引式と一致させること
+/// ソートキーごとの式。`0001_init.sql` の索引式と一致させること
 fn sort_exprs(key: SortKey) -> &'static [&'static str] {
     match key {
         SortKey::Album => &[
