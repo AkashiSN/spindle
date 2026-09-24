@@ -2675,3 +2675,51 @@ async fn rerun_after_crash_applies_the_new_tag_changes_to_the_reused_file() {
         inode
     );
 }
+
+/// 登録済み（active な行がある）の自分の成果物は、再承認で置き換えない: 外部（foobar2000 等）が
+/// Library 側に足したタグは残り、今回の下書きのタグの補正は書かない（ファイルが正。履歴なしに
+/// 上書きしない。D-86、codex 指摘）
+#[tokio::test]
+async fn rerun_does_not_overwrite_a_registered_file_changed_outside() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    let draft = draft_for(&[("AlbumA/01.flac", 1, "One")], None, "Album");
+    lib.approve(a.id, &draft);
+    let env = lib.env(false);
+    let item = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    let first = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    let p = lib.lib_path("_Unsorted/Artist/Album/01 One.flac");
+    // Inbox に同じ音声が戻った後、外部が Library 側にタグを足す
+    std::fs::create_dir_all(lib.inbox_path("AlbumA")).unwrap();
+    std::fs::copy(&p, lib.inbox_path("AlbumA/01.flac")).unwrap();
+    set_tags(&p, "flac", &[("COMMENT", &["outside"])]);
+    let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&p).unwrap());
+    lib.scan(1001).await;
+    let a2 = lib.item("AlbumA").unwrap();
+    let mut draft2 = draft.clone();
+    draft2.tracks[0]
+        .tags
+        .insert("GENRE".into(), Some(vec!["Rock".into()]));
+    lib.approve(a2.id, &draft2);
+    let item = inbox::get(&lib.conn(), a2.id).unwrap().unwrap();
+    let second = spindle::import::inbox::place_item(&env, &item, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(second.track_ids, first.track_ids);
+    // 置き換えていない（同じ実体、外部のタグが残る）
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&p).unwrap()),
+        inode
+    );
+    let af = spindle::domain::tags::read_audio_file(std::fs::File::open(&p).unwrap(), Some("flac"))
+        .unwrap();
+    assert_eq!(
+        af.tags.values("COMMENT").collect::<Vec<_>>(),
+        vec!["outside"]
+    );
+    assert!(af.tags.values("GENRE").next().is_none());
+}

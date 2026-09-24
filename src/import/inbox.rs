@@ -1866,6 +1866,14 @@ pub fn missing_pictures(
     Ok(out)
 }
 
+/// 配置のときにトラックへ書くもの（下書きの順）
+struct TrackWrite {
+    /// 差し替える画像（D-86）
+    picture: Option<lofty::picture::Picture>,
+    /// 宛先に active な行がある（登録済みの自分の成果物は置き換えない）
+    registered: bool,
+}
+
 /// 置いた結果（登録の材料）
 struct Placed {
     tracks: Vec<(scans::Physical, scans::TrackContent, Fingerprint)>,
@@ -1927,7 +1935,7 @@ fn place_files(
     plan: &ItemPlan,
     files: &HashMap<String, FileRow>,
     sources: &[Source],
-    pictures: &[Option<lofty::picture::Picture>],
+    writes: &[TrackWrite],
 ) -> Result<Placed, InboxError> {
     let created_top = create_dirs(library, &plan.rel_dir)?;
     let mut placed_new: Vec<RelPath> = Vec::new();
@@ -1936,8 +1944,9 @@ fn place_files(
         for (i, (target, src)) in plan.paths.iter().zip(sources).enumerate() {
             let ext_for_write = src.ext.clone();
             let changes = src.changes.clone();
+            let w = writes.get(i);
             let picture: Option<Vec<lofty::picture::Picture>> =
-                pictures.get(i).cloned().flatten().map(|p| vec![p]);
+                w.and_then(|w| w.picture.clone()).map(|p| vec![p]);
             let src_fp = src.fp;
             // コピーに使う FD そのものを承認時の行（inode / size / mtime / ctime）と照合する。
             // read_sources の stat からここまでの間に差し替えられていれば Changed（D-68「コピー中に
@@ -1950,8 +1959,15 @@ fn place_files(
             if !stat_matches(row, &before) {
                 return Err(InboxError::Changed(src.rel.to_string()));
             }
-            // 宛先の自分の成果物（前回の途中まで）は今回の補正で置き換える（D-86。codex 指摘）
-            let outcome = place_one_refreshing(
+            // 宛先の自分の成果物のうち、登録前に落ちた孤児（active な行が無い）だけは今回の補正で
+            // 置き換える（D-86）。登録済みのファイルはファイルが正なので置き換えない（外部の変更を
+            // 履歴なしに上書きしない。今回のタグ・画像の補正はライブラリの編集で行う。codex 指摘）
+            let place_fn = if w.is_none_or(|w| w.registered) {
+                place_one
+            } else {
+                place_one_refreshing
+            };
+            let outcome = place_fn(
                 library,
                 &plan.rel_dir,
                 target,
@@ -1968,10 +1984,11 @@ fn place_files(
                     }
                     Ok(())
                 },
-                |_existing: File| {
-                    // 宛先に既にあるファイルが同じ音声なら自分の成果物（再実行）
+                |existing: File| {
+                    // 宛先に既にあるファイルが同じ音声なら自分の成果物（再実行）。置き換える場合に
+                    // 照合するのはこの FD なので、開き直さずにこれを読む
                     let ext = target.file_name().rsplit_once('.').map(|(_, e)| e);
-                    let af = match read_audio_file(library.open_file(target)?, ext) {
+                    let af = match read_audio_file(existing, ext) {
                         Ok(af) => af,
                         Err(_) => return Ok(false),
                     };
@@ -1980,6 +1997,14 @@ fn place_files(
             )?;
             if outcome == PlacedFile::New {
                 placed_new.push(target.clone());
+            } else if w.is_none_or(|w| w.registered)
+                && (!src.changes.is_empty() || w.is_some_and(|w| w.picture.is_some()))
+            {
+                // 登録済みのファイルを再利用した: 今回の補正（タグ・画像）は書いていない（ファイルが正）
+                tracing::warn!(
+                    path = %target,
+                    "登録済みのファイルを再利用したので、承認画面の補正は書いていない（ライブラリの編集で直す）"
+                );
             }
             let after = crate::fsroot::fstat(&src_file)?;
             if !stat_matches(row, &after) {
@@ -2471,9 +2496,28 @@ pub async fn place_item(
     if let Some(hook) = &env.before_place {
         hook();
     }
+    // 宛先ごとに active な行があるか（登録済みの自分の成果物は置き換えない。place_files）
+    let registered: Arc<Vec<bool>> = {
+        let keys: Vec<String> = plan.paths.iter().map(RelPath::key).collect();
+        Arc::new(
+            env.db
+                .read(move |c| {
+                    let mut st = c.prepare_cached(
+                        "SELECT EXISTS (SELECT 1 FROM tracks
+                                         WHERE rel_path_key = ?1 AND missing_since IS NULL)",
+                    )?;
+                    let mut out = Vec::with_capacity(keys.len());
+                    for k in &keys {
+                        out.push(st.query_row([k], |r| r.get::<_, bool>(0))?);
+                    }
+                    Ok(out)
+                })
+                .await?,
+        )
+    };
     // 3. 配置
     let placed = {
-        let (library, inbox, item, plan, files, sources, pictures) = (
+        let (library, inbox, item, plan, files, sources, pictures, registered) = (
             Arc::clone(&env.library),
             Arc::clone(&env.inbox),
             item.clone(),
@@ -2481,9 +2525,18 @@ pub async fn place_item(
             Arc::clone(&files),
             Arc::clone(&sources),
             Arc::clone(&pictures),
+            Arc::clone(&registered),
         );
         tokio::task::spawn_blocking(move || {
-            place_files(&library, &inbox, &item, &plan, &files, &sources, &pictures)
+            let writes: Vec<TrackWrite> = pictures
+                .iter()
+                .zip(registered.iter())
+                .map(|(p, &r)| TrackWrite {
+                    picture: p.clone(),
+                    registered: r,
+                })
+                .collect();
+            place_files(&library, &inbox, &item, &plan, &files, &sources, &writes)
         })
         .await
         .map_err(|e| std::io::Error::other(format!("配置タスクが異常終了: {e}")))??

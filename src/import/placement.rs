@@ -55,7 +55,10 @@ pub fn place_one(
 
 /// [`place_one`] と同じだが、既存が自分の成果物（`verify_existing` が true）なら捨てずに今回の tmp で
 /// **置き換える**（`Reused`）。承認画面の補正（任意のタグ・画像。D-86）はパスを変えないので、途中で
-/// 落ちた件を直して再承認すると同じ宛先に当たる。そのまま再利用すると今回の補正が黙って捨てられる
+/// 落ちた件を直して再承認すると同じ宛先に当たる。そのまま再利用すると今回の補正が黙って捨てられる。
+/// **呼び出し側は、宛先に active な行が無い（登録前に落ちた孤児）ときだけ使う**こと。登録済みのファイルは
+/// ファイルが正で、外部の変更を履歴なしに上書きしてはならない（codex 指摘）。置き換える直前に、確かめた FD と
+/// 今の宛先が同じ実体（dev / inode / size / mtime / ctime）であることを照合し、違えば Conflict
 pub fn place_one_refreshing(
     root: &RootDir,
     dir: &RelPath,
@@ -90,8 +93,11 @@ fn place(
     match root.rename_noreplace(&tmp_rel, target) {
         Ok(()) => Ok(PlacedFile::New),
         Err(FsError::Exists) => {
-            let existing = match root.open_file(target) {
-                Ok(f) => f,
+            let (existing, verified) = match root
+                .open_file(target)
+                .and_then(|f| crate::fsroot::fstat(&f).map(|st| (f, st)))
+            {
+                Ok(v) => v,
                 Err(e) => {
                     let _ = root.unlink(&tmp_rel);
                     return Err(e.into());
@@ -105,7 +111,23 @@ fn place(
                 }
             };
             if own && refresh {
-                // 自分の成果物を今回の内容（同じ音声 + 今回の補正）で置き換える
+                // 確かめたものと同じ実体のときだけ、今回の内容（同じ音声 + 今回の補正）で置き換える
+                let same = root.stat(target).is_ok_and(|now| {
+                    (now.dev, now.inode, now.size, now.mtime_ns, now.ctime_ns)
+                        == (
+                            verified.dev,
+                            verified.inode,
+                            verified.size,
+                            verified.mtime_ns,
+                            verified.ctime_ns,
+                        )
+                });
+                if !same {
+                    let _ = root.unlink(&tmp_rel);
+                    return Err(PlacementError::Conflict(format!(
+                        "{target}: 確かめている間に宛先が変わった"
+                    )));
+                }
                 if let Err(e) = root.replace_file(&tmp_rel, target) {
                     let _ = root.unlink(&tmp_rel);
                     return Err(e.into());

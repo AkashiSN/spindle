@@ -1021,7 +1021,8 @@ async fn artwork_referenced_by_an_inbox_draft_is_kept() {
     env.conn()
         .execute(
             "INSERT INTO inbox_items (id, rel_dir, rel_dir_key, state, detected_at, seen_at, draft)
-             VALUES (1, 'x', 'x', 'failed', 0, 0, ?1), (2, 'y', 'y', 'failed', 0, 0, '{broken')",
+             VALUES (1, 'x', 'x', 'failed', 0, 0, ?1), (2, 'y', 'y', 'failed', 0, 0, '{broken'),
+                    (3, 'z', 'z', 'failed', 0, 0, '{\"tracks\":[\"foo\",1,{\"picture\":7},{\"picture\":\"nocolon\"}]}')",
             [format!(
                 r#"{{"albumartist":"A","album":"B","tracks":[{{"rel_path":"x/1.flac","disc_no":1,"track_no":1,"title":"t","picture":"image/png:{wanted}"}},{{"rel_path":"x/2.flac","disc_no":1,"track_no":2,"title":"{in_a_tag}","tags":{{"CHECKSUM":["{in_a_tag}"]}}}}]}}"#
             )],

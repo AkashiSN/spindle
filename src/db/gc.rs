@@ -66,7 +66,8 @@ pub fn derived_keys(conn: &Connection, except: &HashSet<i64>) -> Result<HashSet<
 /// 値は JSON 文字列なので hex の部分一致で引く（64 桁の hex は他の値と衝突しない）。
 /// Inbox の下書きが差し替えに指定した画像（`tracks[].picture` の `<mime>:<sha256hex>`。D-86）も、配置まで
 /// 要るので参照とみなす。下書きには任意のタグの値も入るので全文の部分一致にはせず、`picture` の値だけを
-/// JSON として読んで `:` の後ろと照合する（壊れた JSON は空として扱う。codex 指摘）
+/// JSON として読んで `:` の後ろと照合する（壊れた JSON は空、`tracks` の object でない要素と文字列でない
+/// `picture` は飛ばす。GC 全体を落とさない。codex 指摘）
 const ARTWORK_REFERENCED: &str = "EXISTS (SELECT 1 FROM albums b WHERE b.artwork_id = a.id)
        OR EXISTS (SELECT 1 FROM tracks t WHERE t.artwork_id = a.id)
        OR EXISTS (SELECT 1 FROM edits e WHERE e.key = 'PICTURE'
@@ -75,9 +76,12 @@ const ARTWORK_REFERENCED: &str = "EXISTS (SELECT 1 FROM albums b WHERE b.artwork
        OR EXISTS (SELECT 1 FROM inbox_items i,
                     json_each(CASE WHEN json_valid(i.draft) THEN i.draft ELSE '{}' END, '$.tracks') d
                   WHERE i.draft IS NOT NULL
-                    AND lower(substr(json_extract(d.value, '$.picture'),
-                                     instr(json_extract(d.value, '$.picture'), ':') + 1))
-                        = lower(hex(a.sha256)))";
+                    AND d.type = 'object'
+                    AND (CASE WHEN d.type = 'object'
+                              AND json_type(d.value, '$.picture') = 'text'
+                         THEN lower(substr(json_extract(d.value, '$.picture'),
+                                           instr(json_extract(d.value, '$.picture'), ':') + 1))
+                         END) = lower(hex(a.sha256)))";
 
 /// どこからも参照されない `artwork` 行: `(id, sha256)`（[`ARTWORK_REFERENCED`] の否定）
 pub fn unreferenced_artwork(conn: &Connection) -> Result<Vec<(i64, Vec<u8>)>> {
