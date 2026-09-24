@@ -215,12 +215,12 @@ macro_rules! setup {
 #[tokio::test]
 async fn preview_returns_token_counts_and_planned_paths_and_excludes_pending() {
     let app = App::new().await;
-    setup!(app, "old/a.flac" => "a", "old/b.flac" => "b", "_Unsorted/AlbumArtist/Album/01 c.flac" => "c", "old/p.flac" => "p");
+    setup!(app, "old/a.flac" => "a", "old/b.flac" => "b", "_Unsorted/AlbumArtist/Album/01. c.flac" => "c", "old/p.flac" => "p");
     let c = app.cookie().await;
     let ids: Vec<i64> = [
         "old/a.flac",
         "old/b.flac",
-        "_Unsorted/AlbumArtist/Album/01 c.flac",
+        "_Unsorted/AlbumArtist/Album/01. c.flac",
         "old/p.flac",
     ]
     .iter()
@@ -288,12 +288,12 @@ async fn preview_plans_paths_from_layout() {
     assert_eq!(
         new_of("old/a.flac"),
         Some(serde_json::json!(
-            "_Unsorted/AlbumArtist/Album/01 曲： 一.flac"
+            "_Unsorted/AlbumArtist/Album/01. 曲： 一.flac"
         ))
     );
     assert_eq!(
         new_of("old/b.flac"),
-        Some(serde_json::json!("_Unsorted/AlbumArtist/Album/02 二.flac"))
+        Some(serde_json::json!("_Unsorted/AlbumArtist/Album/02. 二.flac"))
     );
 }
 
@@ -339,18 +339,18 @@ async fn apply_creates_rename_batch_and_worker_moves_files() {
     let batch_id = body["batch_id"].as_i64().unwrap();
     let batch = history::get_batch(&app.conn(), batch_id).unwrap().unwrap();
     assert_eq!(batch.description.as_deref(), Some("整理"));
-    let a = app.track_id("_Unsorted/AlbumArtist/Album/01 a.flac");
-    assert_eq!(app.rel_path(a), "_Unsorted/AlbumArtist/Album/01 a.flac");
+    let a = app.track_id("_Unsorted/AlbumArtist/Album/01. a.flac");
+    assert_eq!(app.rel_path(a), "_Unsorted/AlbumArtist/Album/01. a.flac");
 
     app.start_worker();
     assert_eq!(app.wait_batch(batch_id).await, BatchState::Applied);
     assert!(app
         .lib()
-        .join("_Unsorted/AlbumArtist/Album/01 a.flac")
+        .join("_Unsorted/AlbumArtist/Album/01. a.flac")
         .exists());
     assert!(app
         .lib()
-        .join("_Unsorted/AlbumArtist/Album/02 b.flac")
+        .join("_Unsorted/AlbumArtist/Album/02. b.flac")
         .exists());
     assert!(!app.lib().join("old/a.flac").exists());
     // token は消費済み
@@ -407,7 +407,7 @@ async fn apply_with_pending_tracks_is_409_unless_skip_pending() {
 #[tokio::test]
 async fn apply_with_nothing_to_change_is_409_no_changes() {
     let app = App::new().await;
-    setup!(app, "_Unsorted/AlbumArtist/Album/01 a.flac" => "a");
+    setup!(app, "_Unsorted/AlbumArtist/Album/01. a.flac" => "a");
     let c = app.cookie().await;
     let (_, body) = app
         .preview(&c, serde_json::json!({ "selection": { "filter": "{}" } }))
