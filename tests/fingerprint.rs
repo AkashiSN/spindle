@@ -14,11 +14,12 @@ use md5::{Digest, Md5};
 
 use spindle::media::fingerprint::{
     decoded_pcm_md5, flac_streaminfo_md5, flac_streaminfo_md5_at, packet_fp, FingerprintError,
+    FrameLimit,
 };
 
 // ---------------------------------------------------------------- 生成ヘルパ
 
-use common::{encode, pack_pcm, pcm_samples, write_wav};
+use common::{encode, pack_pcm, pcm_samples, write_wav, zero_last_stts_delta};
 
 /// 手組みの最小 FLAC（fLaC マーカー + STREAMINFO のみ）。`md5` を埋める
 fn minimal_flac(md5: [u8; 16]) -> Vec<u8> {
@@ -161,6 +162,58 @@ fn alac_24bit_shares_audio_md5_with_flac() {
         decoded_pcm_md5(File::open(&alac).unwrap(), Some("m4a")).unwrap(),
         from_flac
     );
+}
+
+#[test]
+fn alac_trailing_zero_duration_sample_is_not_hashed() {
+    // D-89: 実機の ALAC は stts の末尾に長さ 0 のサンプルを持つ（宣言長の外）。symphonia 0.6.1 は
+    // それもデコードして返すので、宣言長で打ち切らないと ffmpeg（宣言どおり捨てる）と PCM MD5 が
+    // 食い違い、正規化の照合が失敗する
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("a.wav");
+    let samples: Vec<i32> = pcm_samples(0).iter().map(|s| s * 200).collect();
+    write_wav(&wav, &samples, 24);
+    let alac = dir.path().join("a.m4a");
+    require_ffmpeg!(encode(
+        &wav,
+        &alac,
+        &["-c:a", "alac", "-sample_fmt", "s32p"]
+    ));
+    let dropped = zero_last_stts_delta(&alac) as usize;
+    let frames = samples.len() / 2;
+    assert!(dropped > 0 && dropped < frames);
+    let kept = &samples[..(frames - dropped) * 2];
+    assert_eq!(
+        decoded_pcm_md5(File::open(&alac).unwrap(), Some("m4a")).unwrap(),
+        md5_of(&pack_pcm(kept, 24))
+    );
+}
+
+#[test]
+fn frame_limit_cuts_at_the_declared_length() {
+    let mut l = FrameLimit::new(Some(10), None, None);
+    assert_eq!(l.take(4), 4);
+    assert!(!l.exhausted());
+    assert_eq!(l.take(4), 4);
+    assert_eq!(l.take(4), 2);
+    assert!(l.exhausted());
+    assert_eq!(l.take(4), 0);
+    // delay / padding 0 は「無い」と同じ
+    let mut l = FrameLimit::new(Some(3), Some(0), Some(0));
+    assert_eq!(l.take(4), 3);
+}
+
+#[test]
+fn frame_limit_is_off_without_a_declared_length_or_with_encoder_trims() {
+    // 宣言長が無い
+    let mut l = FrameLimit::new(None, None, None);
+    assert_eq!(l.take(4096), 4096);
+    assert!(!l.exhausted());
+    // 宣言長は delay / padding を除いた長さ。trim を適用していないので打ち切ると本物の末尾を失う
+    let mut l = FrameLimit::new(Some(10), Some(576), None);
+    assert_eq!(l.take(4096), 4096);
+    let mut l = FrameLimit::new(Some(10), None, Some(1000));
+    assert_eq!(l.take(4096), 4096);
 }
 
 // ---------------------------------------------------------------- 非可逆のパケット列

@@ -9,6 +9,8 @@
 //! - symphonia が demux もできない形式（WavPack / APE）は lofty のプロパティからチャンネル数と
 //!   レートを取り、同じく ffmpeg に回す
 //!
+//! プロセス内の経路はコンテナの宣言長で打ち切る（[`FrameLimit`]、D-89。ffmpeg は自分で打ち切る）。
+//!
 //! どちらの経路でも [`PcmSink`] には `start(info)` → `push(interleaved f32)` の順で同じ形で流れる。
 //! サンプルは -1.0..1.0 のインターリーブ
 
@@ -27,6 +29,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::jobs::process::{ExternalCommand, PathStyle, ProcessError};
+use crate::media::fingerprint::FrameLimit;
 
 /// ffmpeg デコードの上限。長尺の 24/96 でも数分だが NAS の CPU は遅い
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -232,6 +235,7 @@ fn decode_in_process<S: PcmSink>(
         .default_track(TrackType::Audio)
         .ok_or(DecodeError::NoAudioTrack)?;
     let track_id = track.id;
+    let mut limit = FrameLimit::of_track(track);
     let params = track
         .codec_params
         .as_ref()
@@ -264,6 +268,9 @@ fn decode_in_process<S: PcmSink>(
         if token.is_cancelled() {
             return Err(DecodeError::Cancelled);
         }
+        if limit.exhausted() {
+            break;
+        }
         let Some(packet) = reader.next_packet().map_err(DecodeError::Decode)? else {
             break;
         };
@@ -286,7 +293,9 @@ fn decode_in_process<S: PcmSink>(
             Some(_) => {}
         }
         buf.copy_to_vec_interleaved(&mut interleaved);
-        sink.push(&interleaved).map_err(DecodeError::Sink)?;
+        let channels = this.channels.max(1) as usize;
+        let keep = limit.take(interleaved.len() / channels) * channels;
+        sink.push(&interleaved[..keep]).map_err(DecodeError::Sink)?;
     }
     let info = match info {
         Some(i) => i,

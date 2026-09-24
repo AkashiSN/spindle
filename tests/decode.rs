@@ -67,6 +67,25 @@ async fn decodes_flac_in_process() {
 }
 
 #[tokio::test]
+async fn alac_stops_at_the_declared_length() {
+    // D-89: stts 末尾の長さ 0 のサンプルは RG / hirescheck の PCM にも入れない
+    let dir = tempfile::tempdir().unwrap();
+    let path = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "alac.m4a", 1));
+    let dropped = common::zero_last_stts_delta(&path) as usize;
+    let ffmpeg = common::ffmpeg().unwrap();
+    let (_, out) = Decoder::new(&ffmpeg)
+        .decode(
+            File::open(&path).unwrap(),
+            Some("m4a"),
+            Collect::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.samples.len(), (44_100 - dropped) * 2);
+}
+
+#[tokio::test]
 async fn decodes_opus_via_ffmpeg() {
     let ffmpeg = require_ffmpeg!(common::ffmpeg());
     let dir = tempfile::tempdir().unwrap();

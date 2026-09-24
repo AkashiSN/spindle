@@ -257,3 +257,62 @@ pub fn rip_entry(files: &[&str], ctdb_matched: &[bool]) -> spindle::import::side
         },
     }
 }
+
+/// MP4 の音声トラックの末尾サンプルを「長さ 0」と宣言し直す（D-89 の回帰試験用）。
+/// `stts` 最後の項の delta を 0 に、`mdhd` の duration をその分だけ減らす（どちらも同じ長さで上書き）。
+/// 実機の ALAC（`stts` が `[(N, 4096), (1, 0)]`）と同じ形になる。末尾の項が 1 サンプルでなければ、
+/// その項を分けられないので panic する。宣言から外したフレーム数を返す
+pub fn zero_last_stts_delta(path: &Path) -> u32 {
+    let mut data = std::fs::read(path).unwrap();
+    let mut stts = None;
+    let mut mdhd = None;
+    find_boxes(&data, 0, data.len(), &mut |typ, body, end| match typ {
+        b"stts" => stts = Some((body, end)),
+        b"mdhd" => mdhd = Some(body),
+        _ => {}
+    });
+    let (body, end) = stts.expect("stts が無い");
+    let be32 = |d: &[u8], at: usize| u32::from_be_bytes(d[at..at + 4].try_into().unwrap());
+    let count = be32(&data, body + 4) as usize;
+    assert!(
+        count > 0 && body + 8 + count * 8 <= end,
+        "stts が壊れている"
+    );
+    let last = body + 8 + (count - 1) * 8;
+    assert_eq!(be32(&data, last), 1, "末尾の stts 項が 1 サンプルでない");
+    let dropped = be32(&data, last + 4);
+    data[last + 4..last + 8].copy_from_slice(&0u32.to_be_bytes());
+    let mdhd = mdhd.expect("mdhd が無い");
+    if data[mdhd] == 0 {
+        let at = mdhd + 16;
+        let d = be32(&data, at) - dropped;
+        data[at..at + 4].copy_from_slice(&d.to_be_bytes());
+    } else {
+        let at = mdhd + 24;
+        let d = u64::from_be_bytes(data[at..at + 8].try_into().unwrap()) - u64::from(dropped);
+        data[at..at + 8].copy_from_slice(&d.to_be_bytes());
+    }
+    std::fs::write(path, data).unwrap();
+    dropped
+}
+
+fn find_boxes(data: &[u8], mut off: usize, end: usize, f: &mut dyn FnMut(&[u8; 4], usize, usize)) {
+    while off + 8 <= end {
+        let size = u32::from_be_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        let typ: [u8; 4] = data[off + 4..off + 8].try_into().unwrap();
+        let (hdr, size) = match size {
+            1 => (
+                16,
+                u64::from_be_bytes(data[off + 8..off + 16].try_into().unwrap()) as usize,
+            ),
+            0 => (8, end - off),
+            s => (8, s),
+        };
+        let (body, stop) = (off + hdr, (off + size).min(end));
+        f(&typ, body, stop);
+        if matches!(&typ, b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl") {
+            find_boxes(data, body, stop, f);
+        }
+        off += size.max(8);
+    }
+}

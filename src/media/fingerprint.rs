@@ -9,6 +9,8 @@
 //! `decoded_pcm_md5` は FLAC エンコーダが STREAMINFO に書くのと同じ流儀（チャンネルインター
 //! リーブ、リトルエンディアン、bps ぶんのバイト）で MD5 を取るので、同じ PCM なら
 //! WAV / ALAC / FLAC で同じ `audio_md5` になる（WAV → FLAC 正規化で同一性が保たれる）。
+//!
+//! デコード出力はコンテナの宣言長で打ち切る（[`FrameLimit`]、D-89）。
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -19,7 +21,7 @@ use symphonia::core::audio::sample::Sample;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, Track, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 
@@ -132,6 +134,48 @@ fn read_streaminfo<R: Read + Seek>(mut r: R) -> Result<([u8; 34], u64), Fingerpr
     Ok((info, end))
 }
 
+/// コンテナが宣言したトラック長（フレーム数）でデコード出力を打ち切るための残り枠（D-89）。
+///
+/// symphonia 0.6.1 の MP4 読みは `stts` 末尾の長さ 0 のサンプルもパケットとして返すが、宣言長
+/// （`mdhd` の duration）はそれを含まない。ffmpeg は宣言どおり捨てるので、打ち切らないと同じ ALAC から
+/// 出る PCM の長さが食い違い、正規化の照合（D-46）が失敗する。宣言長は delay / padding を除いた再生
+/// フレーム数で、パケットの trim は適用していないので、delay / padding を持つトラック（LAME ヘッダ付きの
+/// MP3、Opus 等）は打ち切らない。宣言長が無ければ打ち切らない
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameLimit {
+    remaining: Option<u64>,
+}
+
+impl FrameLimit {
+    pub fn new(num_frames: Option<u64>, delay: Option<u32>, padding: Option<u32>) -> Self {
+        let trimmed = delay.unwrap_or(0) != 0 || padding.unwrap_or(0) != 0;
+        Self {
+            remaining: if trimmed { None } else { num_frames },
+        }
+    }
+
+    pub fn of_track(track: &Track) -> Self {
+        Self::new(track.num_frames, track.delay, track.padding)
+    }
+
+    /// `frames` フレームの塊のうち残すフレーム数を返し、枠を減らす
+    pub fn take(&mut self, frames: usize) -> usize {
+        match &mut self.remaining {
+            None => frames,
+            Some(rem) => {
+                let keep = (*rem).min(frames as u64);
+                *rem -= keep;
+                keep as usize
+            }
+        }
+    }
+
+    /// 枠を使い切った（以降のパケットは読まなくてよい）
+    pub fn exhausted(&self) -> bool {
+        self.remaining == Some(0)
+    }
+}
+
 fn open_format(file: File, ext: Option<&str>) -> Result<Box<dyn FormatReader>, FingerprintError> {
     let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
@@ -160,6 +204,7 @@ pub fn decode_s16(
         .default_track(TrackType::Audio)
         .ok_or(FingerprintError::NoAudioTrack)?;
     let track_id = track.id;
+    let mut limit = FrameLimit::of_track(track);
     let params = track
         .codec_params
         .as_ref()
@@ -184,14 +229,18 @@ pub fn decode_s16(
     let mut out: Vec<i16> = Vec::new();
     let mut frames = 0u64;
     while let Some(packet) = reader.next_packet()? {
+        if limit.exhausted() {
+            break;
+        }
         if packet.track_id != track_id {
             continue;
         }
         let buf = decoder.decode(&packet)?;
         // デコーダは 32 bit 左詰めで返すので 16 bit へ戻す
         buf.copy_to_vec_interleaved(&mut interleaved);
+        let keep = limit.take(interleaved.len() / channels as usize) * channels as usize;
         out.clear();
-        out.extend(interleaved.iter().map(|&s| (s >> 16) as i16));
+        out.extend(interleaved[..keep].iter().map(|&s| (s >> 16) as i16));
         frames += out.len() as u64 / channels;
         sink(&out).map_err(FingerprintError::Sink)?;
     }
@@ -205,6 +254,7 @@ pub fn decoded_pcm_md5(file: File, ext: Option<&str>) -> Result<[u8; 16], Finger
         .default_track(TrackType::Audio)
         .ok_or(FingerprintError::NoAudioTrack)?;
     let track_id = track.id;
+    let mut limit = FrameLimit::of_track(track);
     let params = track
         .codec_params
         .as_ref()
@@ -218,6 +268,9 @@ pub fn decoded_pcm_md5(file: File, ext: Option<&str>) -> Result<[u8; 16], Finger
     let mut hasher = Md5::new();
     let mut interleaved: Vec<i32> = Vec::new();
     while let Some(packet) = reader.next_packet()? {
+        if limit.exhausted() {
+            break;
+        }
         if packet.track_id != track_id {
             continue;
         }
@@ -231,8 +284,10 @@ pub fn decoded_pcm_md5(file: File, ext: Option<&str>) -> Result<[u8; 16], Finger
         let bits = bits.clamp(8, 32);
         let bytes = bits.div_ceil(8) as usize;
         let shift = 32 - bits;
+        let channels = buf.spec().channels().count().max(1);
         buf.copy_to_vec_interleaved(&mut interleaved);
-        for s in &interleaved {
+        let keep = limit.take(interleaved.len() / channels) * channels;
+        for s in &interleaved[..keep] {
             let v = *s >> shift;
             hasher.update(&v.to_le_bytes()[..bytes]);
         }
