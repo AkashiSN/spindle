@@ -88,7 +88,7 @@ export function InboxView({
         </button>
       </div>
       <p className="muted small">
-        Inbox のディレクトリに置いた音声ファイルをここで確かめてから配置する。件 = ディレクトリ。承認すると
+        Inbox のディレクトリに置いた音声ファイルをここで確かめてから配置する。1 つのディレクトリが 1 つの取り込み。承認すると
         補正した内容をタグに書いて {'{category}'}/{'{albumartist}'}/{'{album}'} へ移し、Inbox からは消える
       </p>
       {inbox.notice != null && (
@@ -101,7 +101,7 @@ export function InboxView({
       )}
       {inbox.error != null && <p className="error">{inbox.error}</p>}
       {inbox.items != null && items.length === 0 && !inbox.unavailable && (
-        <p className="muted">件はない。ファイルを置くと定期の確認（設定 [inbox].poll_interval_secs。変化があったときだけ走査する）か「今すぐ確認」で現れる</p>
+        <p className="muted">取り込みはない。ファイルを置くと定期の確認（設定 [inbox].poll_interval_secs。変化があったときだけ走査する）か「今すぐ確認」で現れる</p>
       )}
       {items.length > 0 && (
         <div className="inbox-body">
@@ -204,7 +204,7 @@ function ItemForm({
     <div className="inbox-form">
       <div className="inbox-head">
         {cover != null ? (
-          <img className="inbox-cover" src={cover} alt="" title="件の代表画像（配置後のアルバムの代表とは限らない）" />
+          <img className="inbox-cover" src={cover} alt="" title="取り込みの代表画像（配置後のアルバムの代表とは限らない）" />
         ) : (
           <span className="inbox-cover empty" aria-hidden="true" />
         )}
@@ -239,7 +239,7 @@ function ItemForm({
 
       <Step
         no={1}
-        title="取り込む件"
+        title="取り込むファイル"
         done
         aside={
           <span className="muted">

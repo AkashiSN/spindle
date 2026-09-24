@@ -2419,7 +2419,7 @@ async fn cd_item_is_not_placed_when_the_rip_record_does_not_match() {
         proposed
             .warnings
             .iter()
-            .any(|w| w.contains("吸い出しの記録と件が合わない")),
+            .any(|w| w.contains("吸い出しの記録と取り込みが合わない")),
         "{:?}",
         proposed.warnings
     );
@@ -2444,7 +2444,7 @@ async fn cd_item_is_not_placed_when_the_rip_record_does_not_match() {
         it.error
             .as_deref()
             .unwrap_or("")
-            .contains("吸い出しの記録と件が合わない"),
+            .contains("吸い出しの記録と取り込みが合わない"),
         "{:?}",
         it.error
     );

@@ -152,7 +152,7 @@ impl InboxHandler {
             tracing::warn!(
                 job_id,
                 recovered,
-                "配置の途中で止まっていた Inbox の件を配置待ちに戻した"
+                "配置の途中で止まっていた Inbox の取り込みを配置待ちに戻した"
             );
         }
         let out = scan_inbox(&self.env.db, &self.env.inbox, now_epoch())
@@ -287,7 +287,7 @@ impl InboxHandler {
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
-                    tracing::warn!(job_id, item_id = id, error = %msg, "Inbox の件を配置できない");
+                    tracing::warn!(job_id, item_id = id, error = %msg, "Inbox の取り込みを配置できない");
                     ctx.db()
                         .write(move |c| {
                             dbinbox::set_state(c, id, ItemState::Failed, Some(&msg), now_epoch())

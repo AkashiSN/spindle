@@ -743,7 +743,7 @@ pub async fn execute_inbox(
                     rel_dir = item.rel_dir,
                     files,
                     bytes,
-                    "破棄待ちの Inbox の件を消した"
+                    "破棄待ちの Inbox の取り込みを消した"
                 );
             }
             InboxGc::Skipped => {
@@ -760,7 +760,7 @@ pub async fn execute_inbox(
                     id,
                     rel_dir = item.rel_dir,
                     reason,
-                    "破棄待ちの Inbox の件が変わったので削除を取り消した"
+                    "破棄待ちの Inbox の取り込みが変わったので削除を取り消した"
                 );
             }
             InboxGc::Failed(e) => {
@@ -769,7 +769,7 @@ pub async fn execute_inbox(
                     id,
                     rel_dir = item.rel_dir,
                     error = e,
-                    "破棄待ちの Inbox の件を消せない"
+                    "破棄待ちの Inbox の取り込みを消せない"
                 );
             }
         }

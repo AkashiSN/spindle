@@ -183,7 +183,7 @@ describe('validateDraft', () => {
         { rel_path: 'd/03.flac', disc_no: 1, track_no: 2, title: 'b', artist: '' },
       ],
     }
-    expect(validateDraft(d, files)).toEqual(['件に無いファイル: d/03.flac', '下書きに無いファイル: d/02.flac'])
+    expect(validateDraft(d, files)).toEqual(['取り込みに無いファイル: d/03.flac', '下書きに無いファイル: d/02.flac'])
     // 全ファイルを含んだ上で同じファイルをもう 1 行足しても通さない
     const dup: InboxDraft = {
       ...proposal,

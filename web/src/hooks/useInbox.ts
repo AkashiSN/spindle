@@ -38,8 +38,8 @@ export type InboxState = {
 
 function describe(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.code === 'state') return '件の状態が変わっている（一覧を取り直した）'
-    if (e.code === 'not_found') return '件が無くなっている（一覧を取り直した）'
+    if (e.code === 'state') return '取り込みの状態が変わっている（一覧を取り直した）'
+    if (e.code === 'not_found') return '取り込みが無くなっている（一覧を取り直した）'
     if (e.code === 'bad_request') return e.message
     if (e.code === 'duplicate') return '走査は既に投入されている'
     if (e.code === 'inbox_unavailable') return 'Inbox のディレクトリが設定されていない'

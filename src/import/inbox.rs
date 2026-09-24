@@ -111,7 +111,7 @@ pub enum DraftError {
     BadNumber { rel_path: String },
     #[error("番号が重複: disc {disc_no} track {track_no}")]
     DuplicateNumber { disc_no: u32, track_no: u32 },
-    #[error("件に無いファイル: {0}")]
+    #[error("取り込みに無いファイル: {0}")]
     UnknownFile(String),
     #[error("下書きに無いファイル: {0}")]
     MissingFile(String),
@@ -739,7 +739,7 @@ pub fn propose(
     if let Some(entry) = sidecar.as_ref().and_then(|s| s.rip.as_ref()) {
         if let Err(r) = bind_rip(entry, &draft) {
             warnings.push(format!(
-                "吸い出しの記録と件が合わない（このままでは配置できない）: {r}"
+                "吸い出しの記録と取り込みが合わない（このままでは配置できない）: {r}"
             ));
         }
         if let Some(w) = slip_warning(entry) {
@@ -1197,7 +1197,7 @@ pub fn bind_rip(entry: &RipEntry, draft: &InboxDraft) -> Result<RipBinding, Stri
     entry.check().map_err(|e| e.to_string())?;
     if draft.tracks.len() != entry.files.len() {
         return Err(format!(
-            "件のファイル数（{}）が記録のトラック数（{}）と違う",
+            "取り込みのファイル数（{}）が記録のトラック数（{}）と違う",
             draft.tracks.len(),
             entry.files.len()
         ));
@@ -1645,9 +1645,9 @@ fn fits_plain_album(rows: &[AlbumRow], incoming_cd: bool, discs: &[u32]) -> Resu
     let album_cd = rows.iter().any(|r| r.cd);
     if incoming_cd != album_cd {
         return Err(if incoming_cd {
-            "CD の件を CD でない album に入れない".into()
+            "CD の取り込みを CD でない album に入れない".into()
         } else {
-            "CD でない件を CD の album に入れない".into()
+            "CD でない取り込みを CD の album に入れない".into()
         });
     }
     if incoming_cd {
@@ -2694,7 +2694,7 @@ pub async fn place_item(
     let subscription_ids = subscription_ids(sidecar.as_ref());
     let rip: Option<Arc<RipBinding>> = match sidecar.as_ref().and_then(|s| s.rip.as_ref()) {
         Some(entry) => Some(Arc::new(bind_rip(entry, &draft).map_err(|r| {
-            InboxError::Conflict(format!("吸い出しの記録と件が合わない: {r}"))
+            InboxError::Conflict(format!("吸い出しの記録と取り込みが合わない: {r}"))
         })?)),
         None => None,
     };
@@ -2834,7 +2834,7 @@ pub async fn place_item(
         album_id = registered.album_id,
         dir = %plan.rel_dir,
         tracks = registered.track_ids.len(),
-        "Inbox の件を配置した"
+        "Inbox の取り込みを配置した"
     );
     Ok(ItemPlaced {
         album_id: registered.album_id,

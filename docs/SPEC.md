@@ -343,7 +343,7 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
 `missing_since` による論理削除。SMB 一時切断やスキャン中のマウント欠落で行を物理削除すると、
 プレイリストと編集履歴が巻き添えになる。既定 30 日経過後に GC（`gc` ジョブ。missing トラック・
 アルバムの行、`Archive/` の退避ファイル、Derived の孤児、アートワークの孤児、却下して「削除」した
-Inbox の件のファイル（D-90）を回収する。
+Inbox の取り込みのファイル（D-90）を回収する。
 1 日 1 回自動、`POST /api/gc` で手動、`GET /api/gc/preview` が dry-run。D-56）。GC は保持期間を過ぎた
 終端の**ジョブ行**も消す（done / cancelled は `[gc].jobs_done_days`、failed は `jobs_failed_days`。0 で
 消さない。P4-18、D-81）。
@@ -524,7 +524,7 @@ Phase 4  commit:     1 トランザクションで
    ↓
 [エンコード]    FLAC (master) を **Inbox へ**（D-67 追記。Library へ直行しない）。
    ↓            tmp の PCM は検証完了まで保持
-[ログ出力]      rip.log / disc.cue / disc.toc を件のディレクトリへ。MusicBrainz から写した内容と
+[ログ出力]      rip.log / disc.cue / disc.toc を取り込みのディレクトリへ。MusicBrainz から写した内容と
    ↓            RipReport（照合結果）は サイドカー spindle-inbox.json に書く（D-70 の仕組み）
 [承認]          Inbox の承認画面で名前と category を直して「承認して配置」
    ↓            → 配置が Library へ運び、source_type = cd_rip と検証記録を入れる
@@ -543,8 +543,8 @@ Inbox への配置（`src/cd/place.rs` の `place_disc`、D-67 追記、P2-5）:
   （TOC の番号。名前での対応付けの鍵なので承認で変わる値を入れない）、同梱ファイル、サイドカー
   （`category` と `rip`。§7.8）を置き、`CD/<albumartist - album> [<DiscID>]`（名前が空なら
   `CD/[<DiscID>]`。DiscID は `.` で始まり得るので括弧で包む）へディレクトリごと `RENAME_NOREPLACE`。
-  走査は `.` で始まるディレクトリを見ないので、揃う前の盤が件として見えて承認されることはない。
-  公開したら `inbox` ジョブを投入する。複数枚組は DiscID が違うのでディスクごとに別の件になる
+  走査は `.` で始まるディレクトリを見ないので、揃う前の盤が取り込みとして見えて承認されることはない。
+  公開したら `inbox` ジョブを投入する。複数枚組は DiscID が違うのでディスクごとに別の取り込みになる
 - **冪等性。** 公開先が既にあり、全トラックの STREAMINFO の MD5 が自分の PCM と一致し、サイドカーの
   記録が同じファイル名を持てば自分の成果物（公開の後に落ちた再実行）として組み立てを飛ばす。違えば
   衝突。前の実行の組み立ての残骸は消して作り直し、公開が衝突したら組み立てたものを消す
@@ -558,7 +558,7 @@ cdrdao 構文で生成、`rip.log` は先頭行 `spindle rip log v1` の自前�
 トラックごとの CRC と照合結果を持つ。トラック表の「ずれ」は、cd-paranoia が読み取り位置のずれ（ドライブの
 ジッター）を検出・補正した回数（drift / dropped / duped。`TrackRead.slips`。補正の通知なので回数だけでは誤りを
 意味しないが、多発と照合の不一致が併発した）。1 回でもあれば表の下に合計と
-意味を、試行ごとの合計（`RipReport.attempt_slips`）を「試行ごとのずれ」に出す。照合が通らずずれがある件は、
+意味を、試行ごとの合計（`RipReport.attempt_slips`）を「試行ごとのずれ」に出す。照合が通らずずれがある取り込みは、
 Inbox の承認画面の警告にも出る（P2-5 の調査。TASKS）。スキャナはこの rip.log のあるディレクトリで新規に登録する行を
 `cd_rip` にする（DB を消しても出自が戻る。検証は §7.3 で付け直す）。
 
@@ -956,12 +956,12 @@ multi_value_separator = " & "   # 多値フィールドの結合
   8. `.opus` を宛先へ `<YYYYMMDD> <title> [<id>].opus`（title は `sanitize_component`。名前順 = 公開順 =
      採番順。`RENAME_NOREPLACE`。既にあれば、その `SOURCE_URL` が同じときだけ自分の成果物（置いた後に
      落ちた再実行）として採用し、違えば `Fatal`）。仕上げ: 同じディレクトリの `spindle-inbox.json` を読んで
-     このファイルの項を足し tmp + rename で書く → ディレクトリを fsync → `inbox` ジョブを投入（すぐ件が
+     このファイルの項を足し tmp + rename で書く → ディレクトリを fsync → `inbox` ジョブを投入（すぐ取り込みが
      出る）。仕上げの失敗は `Failed`（再試行。次の実行は 3. か 8. の採用でここへ戻る）
 - **サイドカー `spindle-inbox.json`**（タグに載らない情報を Inbox へ渡す。Inbox の DB には書かない）
   ```jsonc
   { "version": 1,
-    "category": "<統制語彙の名前>" | null,          // 件の category（プラグインの判定。最後に書いたものが勝つ）
+    "category": "<統制語彙の名前>" | null,          // 取り込みの category（プラグインの判定。最後に書いたものが勝つ）
     "files": { "<ファイル名>": { "source": "youtube", "url": "<webpage_url>", "channel": "<uploader>",
                                  "verdict": "ok" | "unmatched" | "unknown_channel" | "skip" | "<未知の reason>",
                                  "message": "…" | null,
@@ -1050,7 +1050,7 @@ multi_value_separator = " & "   # 多値フィールドの結合
   行を揃えて隙間を空けている。承認画面の初期値がそのまま正しい番号になり、塞がっていれば承認の既存検査
   （400）で人が直す）。off なら書かず Inbox が max+1 を振る。購読が消えていれば通常の ytdl として振る舞う（skip も通常どおり。
   購読の有無はプラグインを呼ぶ前に引く）
-- **承認はそのまま**（D-70。判断は Inbox で人が行う）。配置（`place_item`）はサイドカーを消す前に件の
+- **承認はそのまま**（D-70。判断は Inbox で人が行う）。配置（`place_item`）はサイドカーを消す前に取り込みの
   `subscription_id` を集め、inbox ジョブが配置後に追記先を束ね（CAS）、latch を立ててから `playlist_sync`
   を投入する（走行中なら Duplicate だが latch は残る）
 - **dispatcher**（常駐、30 秒ごと。`[ytmusic].enabled` のとき）: (a) latch の立った購読を投入（enabled に
@@ -1089,28 +1089,28 @@ Inbox/ に配置（ポーリング検出）
   ジョブは Inbox を歩き、音声ファイルのあるディレクトリを
   1 件（アルバム候補。root 直下の音声は `""` の 1 件）として `inbox_items` / `inbox_files` に写す。
   stat（inode / size / mtime / ctime）が変わったファイルだけタグを読み直す。**正は Inbox のファイル**で、
-  行はキャッシュ: ディレクトリが消えれば行も消す（`placed` は 24 時間残して結果を見せる）。`approved` の件で
+  行はキャッシュ: ディレクトリが消えれば行も消す（`placed` は 24 時間残して結果を見せる）。`approved` の取り込みで
   ファイルが変わっていたら `pending` に戻す（再承認）
-- **却下した件の削除**（D-90）: `rejected` の件に「削除」で `discard_requested_at`（破棄待ち）を入れる。ファイルは
-  すぐには消さず、GC が `[gc].retention_days` 経過後に件のディレクトリの直下の**走査が写した音声**（stat が一致
-  するもの）・既知の同梱ファイル・サイドカーを消し、ディレクトリが空なら消し、行を消す（サブディレクトリ = 別の件と
+- **却下した取り込みの削除**（D-90）: `rejected` の取り込みに「削除」で `discard_requested_at`（破棄待ち）を入れる。ファイルは
+  すぐには消さず、GC が `[gc].retention_days` 経過後に取り込みのディレクトリの直下の**走査が写した音声**（stat が一致
+  するもの）・既知の同梱ファイル・サイドカーを消し、ディレクトリが空なら消し、行を消す（サブディレクトリ = 別の取り込みと
   知らないファイルは残す）。それまでは「削除を取り消す」で `rejected` に戻る。`rejected` から出る遷移（下書きに
-  戻す）でも破棄待ちは解ける。走査が破棄待ちの件でファイルの変化（足された・差し替えられた）を見たら、人が
+  戻す）でも破棄待ちは解ける。走査が破棄待ちの取り込みでファイルの変化（足された・差し替えられた）を見たら、人が
   見ていないものを消さないよう破棄待ちを解いて `rejected` のまま理由を `error` に残す（GC も確かめてから消す:
   音声は `inbox_files` と、同梱ファイル・サイドカーは ctime が破棄の要求より後でないかで照合し、合わなければ
   何も消さずに解く。消す途中で stat が変われば止めて解き、消せないものがあれば止めて行と破棄待ちを残し次の GC で
   続ける。D-90）
 - **同名の警告**（P4-19、D-70 追記）: 追記先の album に**同じタイトル**の active な行があれば、そのトラックに
   `same_title: [{ track_id, rel_path, duration_ms }]` を付ける（承認は止めない。画面は「⚠ Library に同名:
-  <ファイル名>（長さ）」と、件の見出しに「同名 N」）。鍵は NFKD + casefold + 空白の畳み込み（全角・半角の
+  <ファイル名>（長さ）」と、取り込みの見出しに「同名 N」）。鍵は NFKD + casefold + 空白の畳み込み（全角・半角の
   揺れは同じ、`(Cover)` / `【… Live ver.】` の注記は**落とさない** = 別曲扱い）。狙いは `SOURCE_URL` の
   補填漏れや別 URL の再アップロードによる二重取り込みで、判断は人が行う（同じ曲名の別テイクは正当なので、
   長さを添えて見分けられるようにする）
-- **承認キュー**は `GET /api/inbox`（`items` と監視の状態 `watch: { checked_at, poll_interval_secs }`）。件ごとにタグから作った下書き（`proposal`: albumartist / album / date の
+- **承認キュー**は `GET /api/inbox`（`items` と監視の状態 `watch: { checked_at, poll_interval_secs }`）。取り込みごとにタグから作った下書き（`proposal`: albumartist / album / date の
   最頻値、category は GENRE → `genre_category_map`、トラックは TRACKNUMBER / DISCNUMBER / TITLE / ARTIST）と
   不足の警告を返し、UI の Inbox タブで category / albumartist / album / date と各トラックの
   disc_no / track_no / title / artist を補正して `POST /api/inbox/:id/approve { draft }`。検証（album /
-  albumartist / 各 title が空でない、`(disc_no, track_no)` が 1 以上で重複なし、rel_path が件のファイルと
+  albumartist / 各 title が空でない、`(disc_no, track_no)` が 1 以上で重複なし、rel_path が取り込みのファイルと
   一致）に通らなければ 400 で、メタデータ不足のまま Library に入れない。`reject` / `reopen` で状態を戻す
 - **トラックのタグの変更と画像の差し替え**（D-86）: 下書きのトラックは `tags`（キー → 値の配列、`null` で
   そのタグを消す。書くのはここにあるキーだけ）と `picture`（`<mime>:<sha256hex>`。`POST /api/artwork/upload`
@@ -1125,26 +1125,26 @@ Inbox/ に配置（ポーリング検出）
   failed。入力欄は Enter / Esc / blur のどれで決着しても 1 回だけ確定か取り消しをする（`lib/editSession.ts`）。
   下書きが参照する画像は GC しない（区分 E の「参照」に Inbox の下書きを足す。D-56 / D-86）。`POST /api/inbox/:id/preview { draft }` は音声を読まずに
   配置の計画を引いて置き場所の見込みを返す（承認画面の ④）
-- **配置**は `approved` の件を `inbox` ジョブが順に処理する。`library` の排他（scan / gc / CD の配置と
+- **配置**は `approved` の取り込みを `inbox` ジョブが順に処理する。`library` の排他（scan / gc / CD の配置と
   同じ）を取れなければ Requeue。draft から各ファイルの `TrackFields` を作り `pathgen::plan`（category 無しは
   `_Unsorted`、`disc_no` の最大 ≥ 2 なら `multi_disc`、リリースキーは MUSICBRAINZ_ALBUMID の最頻値があれば
-  `mb:`、無ければ件ごとの新規）→ Inbox からハッシュを取りながら Library の tmp へコピー → 補正で変わる
+  `mb:`、無ければ取り込みごとの新規）→ Inbox からハッシュを取りながら Library の tmp へコピー → 補正で変わる
   タグだけ `write_tag_changes` で書く（ファイルが正のまま再スキャンしても DB と一致する）→ fsync →
   `RENAME_NOREPLACE` → 読み戻して 1 トランザクション登録（`source_type = 'download'`。宛先 album の
   リリースキー再検証と同パス行の MD5 検証は §7.2 の配置と同じ）→ Inbox 側を unlink → 既知の同梱ファイル
   （cover 画像 / cue / toc / log）も移し、空になった Inbox のディレクトリを消す。コピーに使う FD を
   fstat して承認時の行（inode / size / mtime / ctime）と照合し、コピーの後にも同じ FD を照合し、置いた
-  ファイルの音声の指紋が承認時に読んだものと一致することを確かめる。どれかが外れたら `Changed`（件は
-  `pending` に戻して再承認）。衝突・不足は件を `failed` にして理由を残し、この呼び出しで置いたファイルは
+  ファイルの音声の指紋が承認時に読んだものと一致することを確かめる。どれかが外れたら `Changed`（取り込みは
+  `pending` に戻して再承認）。衝突・不足は取り込みを `failed` にして理由を残し、この呼び出しで置いたファイルは
   片付ける。
 - **状態遷移は CAS。** `approve` / `reject` / `reopen` と worker の `approved → placing` は
   `UPDATE … WHERE id = ? AND state IN (…)` で行い（`db::inbox::transition`）、読んでから書くまでの間に
-  他（API / worker / 走査）が動かした件を上書きしない（API は 409 `state`、worker はその件を飛ばす）。
-  前のプロセスが配置の途中で落ちて `placing` のまま残った件は、次の `inbox` ジョブの先頭で `approved` に
+  他（API / worker / 走査）が動かした取り込みを上書きしない（API は 409 `state`、worker はその取り込みを飛ばす）。
+  前のプロセスが配置の途中で落ちて `placing` のまま残った取り込みは、次の `inbox` ジョブの先頭で `approved` に
   戻して配置し直す（並列 1 なので、そこで見える `placing` は必ず前の実行の残り。配置は音声の指紋で自分の
-  成果物を採用するので冪等）。件の `placed` と、WAV / ALAC / AIFF の normalize バッチ（`[normalize].wav_to_flac`）も登録
-  トランザクションの中で確定する（commit の直後に落ちても `placing` が残らず、投入も欠けない）。`placed` の件のディレクトリに走査で音声が見えたら（消せなかった原本、
-  配置の後に置かれたファイル）`pending` に戻して件として出し直す。
+  成果物を採用するので冪等）。取り込みの `placed` と、WAV / ALAC / AIFF の normalize バッチ（`[normalize].wav_to_flac`）も登録
+  トランザクションの中で確定する（commit の直後に落ちても `placing` が残らず、投入も欠けない）。`placed` の取り込みのディレクトリに走査で音声が見えたら（消せなかった原本、
+  配置の後に置かれたファイル）`pending` に戻して取り込みとして出し直す。
   Inbox は Library と別データセットなので move は実コピー（§5）
 - **後続**は `rg`（album の属性が on なら album 単位、off なら登録した track ごと。D-74）と `transcode`。WAV / ALAC / AIFF は `[normalize].wav_to_flac` なら `normalize` の
   編集バッチを作って投入する（D-46 の予告）。**アートワークは配置の直後にその album だけ解決する**
@@ -1155,13 +1155,13 @@ Inbox/ に配置（ポーリング検出）
   含む）次のスキャンが拾う。P3-4）
 - **既存の album への追記**（D-70）: リリースキーは MUSICBRAINZ_ALBUMID の最頻値があれば `mb:`、自分の成果物の
   album があればそれ、**無ければ宛先ディレクトリに active な album があり、その album にも MB キーが
-  無ければその album を採用**（`album:<id>`）、それも無ければ件ごとの新規。MB キー同士が違えば従来どおり
+  無ければその album を採用**（`album:<id>`）、それも無ければ取り込みごとの新規。MB キー同士が違えば従来どおり
   降格か衝突。**CD とそれ以外は混ぜない**（D-67 追記 3）: トラックのタグに `MUSICBRAINZ_DISCID` があるものを
-  CD とし、CD の件は CD の album にだけ、しかも album にまだ無い `disc_no` のときだけ採用する（MBID の無い
-  複数枚組の 2 枚目が 1 枚目に合流する。同じ番号は同名の別の盤）。CD でない件は CD でない album にだけ採用する。
+  CD とし、CD の取り込みは CD の album にだけ、しかも album にまだ無い `disc_no` のときだけ採用する（MBID の無い
+  複数枚組の 2 枚目が 1 枚目に合流する。同じ番号は同名の別の盤）。CD でない取り込みは CD でない album にだけ採用する。
   同じ判定を再実行の「自分の成果物」と登録のトランザクションでも通し、外れたら `failed`。購読（§7.7）の
   束ね先が CD の album になっていたら同期は失敗する。採用する album は `GET /api/inbox` の `destination`（`{ album_id, album, track_count,
-  max_track_no, album_gain }` | null。下書きの category / albumartist / album と件のファイルから引く。件に
+  max_track_no, album_gain }` | null。下書きの category / albumartist / album と取り込みのファイルから引く。取り込みに
   MUSICBRAINZ_ALBUMID があれば別リリースなので null）で見せる
 - **album gain**（D-74）: 下書きの `album_gain`（既定 false。承認画面のチェックボックス。追記先があればその
   現在値が初期値）を配置時に album の属性へ書く（追記先の属性も上書きし、off にすれば album の値を消す）
@@ -1175,15 +1175,15 @@ Inbox/ に配置（ポーリング検出）
   Library の `artist_display` と同じ `", "` 結合（ARTIST が無ければ `artist` → アルバムアーティストの順）
 - **埋め込み画像**（P4-4、D-70）: 走査は各ファイルの `PICTURE`（`"<mime>:<sha256>"`）を、Library の
   `pick_embedded` と同じ規則（front cover 優先、無ければ先頭）で選んだ画像が**先頭**になる順で記録する。
-  各ファイルの代表画像はその先頭。件の見出しに出す画像は各ファイルの代表の最頻（同数なら先に現れた
-  もの）で、**件の中の多数派を目安に見せる要約**。配置後の album の代表（同梱カバー → 最初のトラックの
+  各ファイルの代表画像はその先頭。取り込みの見出しに出す画像は各ファイルの代表の最頻（同数なら先に現れた
+  もの）で、**取り込みの中の多数派を目安に見せる要約**。配置後の album の代表（同梱カバー → 最初のトラックの
   埋め込み、追記先なら既存の代表）と同じとは限らない。忠実なのはトラックごとのサムネイル
-  `GET /api/inbox/:id/artwork/:hash` は、件があれば `PICTURE` にその sha256 を持つファイルを走査順に
+  `GET /api/inbox/:id/artwork/:hash` は、取り込みがあれば `PICTURE` にその sha256 を持つファイルを走査順に
   開き（openat2。symlink / 境界外 / 消失は次の候補へ）、埋め込み画像の内容の sha256 が一致するものを
-  探す。見つからなければ 404（件に無い hash、ファイルが消えた、画像が書き換わった）。見つかれば
+  探す。見つからなければ 404（取り込みに無い hash、ファイルが消えた、画像が書き換わった）。見つかれば
   `If-None-Match` が ETag `"<hash>-orig"` に一致すれば 304、でなければ原寸を返す（MIME はタグの値ではなく
   内容の sniff。sniff できなければ 404。`Cache-Control: public, max-age=31536000, immutable`）。
-  **304 の判定は実体の照合の後**（DB に `PICTURE` が残っていても実体が無ければ 404）。件の状態は見ない
+  **304 の判定は実体の照合の後**（DB に `PICTURE` が残っていても実体が無ければ 404）。取り込みの状態は見ない
   （rejected / failed でも実体があれば返す。placed は実体が消えているので普通 404）。セッション必須
   （allowlist 無し）。その他の I/O 失敗は 500。サムネイルは作らない（画面で縮小）。同梱の `cover.jpg`
   等は配置時に埋め込みより優先されるが（§7.1 の規則）、承認画面が見せるのは埋め込み画像だけ
@@ -1191,16 +1191,16 @@ Inbox/ に配置（ポーリング検出）
   ファイル名順に振る（無ければ 1 から）。承認の検証に「採用する album の active なトラックと `(disc_no, track_no)`
   が重ならない」を加え、配置で失敗する前に 400 で直させる。配置の登録トランザクションでも同じ検証をする
   （承認と配置の間に足された分。外れたら `failed`）
-- **サイドカー `spindle-inbox.json`**（§7.7、D-70）: 件のディレクトリにあれば `GET /api/inbox` が読み、
+- **サイドカー `spindle-inbox.json`**（§7.7、D-70）: 取り込みのディレクトリにあれば `GET /api/inbox` が読み、
   `category` を提案の category（語彙に同じ canonical key があるときだけ）に、`files` の `verdict` / `message` /
   `url` / `channel` を各トラックに付ける。走査は音声でないので無視し、配置の成功時に消す（Library へ
-  持っていかない）。壊れていれば無いものとして扱い、件の `warnings` に載せる。モジュールは `import/sidecar.rs`
+  持っていかない）。壊れていれば無いものとして扱い、取り込みの `warnings` に載せる。モジュールは `import/sidecar.rs`
   （ダウンローダと CD の吸い出しが共有する）
-- **CD の吸い出しの件**（D-67 追記、P2-5）: サイドカーの `rip`（`RipEntry`: CTDB 形式の `toc`、吸い出し開始時の
+- **CD の吸い出しの取り込み**（D-67 追記、P2-5）: サイドカーの `rip`（`RipEntry`: CTDB 形式の `toc`、吸い出し開始時の
   `metadata`（`DiscMetadata`。名前は空でもよい）、音声トラック順のファイル名 `files`、ドライブが読んだ `isrcs` /
   `mcn`（P4-21。旧サイドカーには無い）、rip.log の名前 `log`、`report`（`RipReport`））を持つ。提案は `album_gain = true`（D-74。保存した下書きがあればそちら）。配置は
   下書きの各トラックを **basename で `files` の位置へ結びつけ**（`bind_rip`。大小文字・正規化の違いは同じ名前）、
-  記録の形（件数が音声トラック数と揃う、名前の重複なし）・件のファイルとの 1 対 1・下書きの `disc_no` が 1 つに
+  記録の形（件数が音声トラック数と揃う、名前の重複なし）・取り込みのファイルとの 1 対 1・下書きの `disc_no` が 1 つに
   揃うこと（1 件 = 1 枚）を確かめ、外れたら配置せず `failed`（提案の `warnings` にも出す）。登録は
   `register_item` と同じトランザクションで `source_type = 'cd_rip'`、`album_verifications`（`source = 'rip'`、
   `disc_no` は下書きの値、`job_id` は NULL、`drive_offset` はレポートの `read_offset`（PCM に当てた
@@ -1208,7 +1208,7 @@ Inbox/ に配置（ポーリング検出）
   `track_verifications` / `tracks.verification`（写像は §7.3 と同じ）。全トラックに `rip` の記録が既にあれば
   書かない（commit の後に落ちて再配置したとき）。サイドカーは読んだ FD の inode / size / mtime / ctime を
   登録の直前と消す前に照合し、変わっていれば登録せず `pending`（登録後なら消さずに残す）
-- **承認後にファイルが増えた件**（同じ album への追加ダウンロード）は既存の規則で `pending` に戻る。そのとき
+- **承認後にファイルが増えた取り込み**（同じ album への追加ダウンロード）は既存の規則で `pending` に戻る。そのとき
   提案は「保存した下書き（既知のファイルの分）+ 新しいファイルの提案」を merge して返す（補正をやり直させない）
 
 ### 7.9 FLAC 健全性チェック（移行時 + 任意）
@@ -1530,9 +1530,9 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   （§7.8、D-68。destination と source は D-70: source は spindle-inbox.json の
                                                   項 { source, url, channel, verdict, message, subscription_id?, position? } | null。
                                                   destination.numbers は宛先の既存の番号 [[disc, track], …]（昇順）。subscriptions は
-                                                  件のトラックが参照する購読の直近の同期の要約（last_result の align から。1 回で読む））
-GET    /api/inbox/:id/artwork/:hash               件のファイルの埋め込み画像（PICTURE の sha256 で実体を照合してから ETag / 304。
-                                                  原寸、MIME は sniff、immutable。件に無い / 実体消失 / 不一致は 404。状態非依存。
+                                                  取り込みのトラックが参照する購読の直近の同期の要約（last_result の align から。1 回で読む））
+GET    /api/inbox/:id/artwork/:hash               取り込みのファイルの埋め込み画像（PICTURE の sha256 で実体を照合してから ETag / 304。
+                                                  原寸、MIME は sniff、immutable。取り込みに無い / 実体消失 / 不一致は 404。状態非依存。
                                                   セッション必須。§7.8、P4-4）
 POST   /api/inbox/scan                            inbox ジョブを投入（202 + job_id。queued / running があれば 409 duplicate）
 POST   /api/inbox/:id/approve                     { category, albumartist, album, date, album_gain?, tracks: [{ rel_path, disc_no,
@@ -1543,7 +1543,7 @@ POST   /api/inbox/:id/preview                     { draft }（approve と同じ�
                                                   200 { rel_dir, paths, error }（決められなければ rel_dir は null で error に
                                                   理由）。自分の成果物の再利用は見ないので見込み（D-86）
 POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
-POST   /api/inbox/:id/discard, /undiscard         却下した件を破棄待ちにする / 取り消す（rejected だけ。消すのは GC。D-90）
+POST   /api/inbox/:id/discard, /undiscard         却下した取り込みを破棄待ちにする / 取り消す（rejected だけ。消すのは GC。D-90）
 POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
 POST   /api/ytmusic/lookup                        { urls: [string] }（200 件まで）→ { items: [{ url, kind: video|playlist|other|invalid,
                                                    video_url?, located?: { location: library|inbox, path }, list_id?, subscription?: { id, albumartist, album } }] }
@@ -2090,38 +2090,38 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
     ボタンを無効にしておく）。遷移は `lib/cdState.ts` の reducer: フォームは TOC が読めた時点ででき、
     消えるのは別のディスクに替わったとき（`set_disc` / `set_toc` / `reset`）だけ。**照会の開始と
     失敗ではフォームを消さない**（表は照会の前から出ているため）
-- **Inbox**（P2-10、D-68）: 左に件（= `[paths].inbox` の音声ファイルのあるディレクトリ）の一覧
+- **Inbox**（P2-10、D-68）: 左に取り込み（= `[paths].inbox` の音声ファイルのあるディレクトリ）の一覧
   （状態バッジ・ファイル数・コーデック・検出時刻・失敗理由）と「今すぐ確認」（`POST /api/inbox/scan`）、
-  右に選んだ件の補正フォーム: アルバムアーティスト / アルバム / 日付 / category
+  右に選んだ取り込みの補正フォーム: アルバムアーティスト / アルバム / 日付 / category
   （`components/CategoryField.tsx`）。**CD で吸い出したものもここへ来る**（D-67 追記）ので、
   盤の名前を直すのもこの画面と、トラックごとの disc / # / タイトル / アーティスト（ファイル名・コーデック・長さは
-  表示のみ）。初期値はタグからの提案（`proposal`）、承認済み・失敗の件は保存した下書き。検証はサーバと
+  表示のみ）。初期値はタグからの提案（`proposal`）、承認済み・失敗の取り込みは保存した下書き。検証はサーバと
   同じ規則（`lib/inbox.ts` の `validateDraft`）で、問題が無いときだけ「承認して配置」が押せる。
-  「却下」はファイルを残したまま件を却下にし（一覧には「却下」のバッジで残る）、「下書きに戻す」で pending に戻る。
-  却下した件には「削除」（確認ダイアログ → 破棄待ち。一覧に「削除待ち」のバッジ、承認画面に「削除待ち: <期限> 以降の
-  GC でファイルを消す」と「削除を取り消す」。期限は `GET /api/inbox` の `discard_retention_days` から。D-90）。placed の件は 24 時間
+  「却下」はファイルを残したまま取り込みを却下にし（一覧には「却下」のバッジで残る）、「下書きに戻す」で pending に戻る。
+  却下した取り込みには「削除」（確認ダイアログ → 破棄待ち。一覧に「削除待ち」のバッジ、承認画面に「削除待ち: <期限> 以降の
+  GC でファイルを消す」と「削除を取り消す」。期限は `GET /api/inbox` の `discard_retention_days` から。D-90）。placed の取り込みは 24 時間
   残り、「アルバムを開く」で表を `album_id` に絞る。inbox ジョブの完了で一覧を取り直す。
   `destination` があれば「宛先: 既存の『…』（N 曲）に追加。番号は <max+1> から」と出す。**購読から落とした曲**
-  （`source.subscription_id` あり）を含む件は番号が再生リストの位置（同期が空けた番号）に入るので、「番号 165 に入る
+  （`source.subscription_id` あり）を含む取り込みは番号が再生リストの位置（同期が空けた番号）に入るので、「番号 165 に入る
   （再生リストの位置。空けてある番号）」と出し、その下に購読の直近の同期の要約（「同期（日時）で既存の 14 曲の番号を
   揃え … 165 を空けた（バッチ #14 / #15）。承認しても既存の曲は動かない」。直近の同期で揃え直しが無ければその旨）を
   出す。下書きの番号が `destination.numbers` と重なれば赤で警告する（承認はサーバが 400 で止める。P4-22）
-  追記先の曲がどれもディスク番号を持たない（`destination.uses_disc = false`）1 枚分の件（CD の件を除く）は、配置で
-  `DISCNUMBER` を書かず件のファイルにあれば消し（宛先に合わせる。DB の `disc_no` も NULL になる）、宛先の文言に
+  追記先の曲がどれもディスク番号を持たない（`destination.uses_disc = false`）1 枚分の取り込み（CD の取り込みを除く）は、配置で
+  `DISCNUMBER` を書かず取り込みのファイルにあれば消し（宛先に合わせる。DB の `disc_no` も NULL になる）、宛先の文言に
   「ディスク番号は付けない（宛先の曲に無い）」を足し、③ の disc 列を空で見せる（下書きの値は 1 のまま。D-70 追記）
-  （配置済みの件は `destination` を引かないので、宛先も同名の警告も出ない。引くと自分が置いた album に当たる）。
-  **同名の警告**（P4-19）はタイトル欄の下に「⚠ Library に同名: <ファイル名>（長さ）／この曲 <長さ>」（件の曲の長さも
-  並べる。P4-22）、件の一覧に「同名 N」のバッジ（承認は止めない。長さで別テイクと見分ける）。ツールバーに周期監視の「最後に確認: HH:MM:SS（N 秒ごと）」（P4-18）。`source` のあるトラック行は判定バッジ
+  （配置済みの取り込みは `destination` を引かないので、宛先も同名の警告も出ない。引くと自分が置いた album に当たる）。
+  **同名の警告**（P4-19）はタイトル欄の下に「⚠ Library に同名: <ファイル名>（長さ）／この曲 <長さ>」（取り込みの曲の長さも
+  並べる。P4-22）、取り込みの一覧に「同名 N」のバッジ（承認は止めない。長さで別テイクと見分ける）。ツールバーに周期監視の「最後に確認: HH:MM:SS（N 秒ごと）」（P4-18）。`source` のあるトラック行は判定バッジ
   （ok / 未判定）を出し、行を開くと `message`（参照実装ならルールの足し方）と URL が読める（D-70）。
   「album gain を計算する」のチェックボックス（既定 off。`destination` があればその現在値が初期値。D-74）。
   **忠実表示**（P4-4、D-70）: ARTIST が多値のファイルの行は元の値をチップで見せ、「ファイルの多値をそのまま
   保つ」のチェック（提案は on。on の間は欄が `"; "` 結合の表示で編集不可、外すと欄が編集できて 1 値で書く
-  旨を示す）。見出しの横と**件の一覧の各件の左**（48px。無い件は同じ寸法の空枠。D-85）に件の代表画像
+  旨を示す）。見出しの横と**取り込みの一覧の各取り込みの左**（48px。無い取り込みは同じ寸法の空枠。D-85）に取り込みの代表画像
   （各ファイルの代表 = `PICTURE` の先頭、の最頻）、トラック表に小さなサムネイル列
   （`GET /api/inbox/:id/artwork/:hash`。無ければ空）。
   **導線**（D-86。ユーザ要望・モックで合意）: 承認画面は CD 画面と同じ番号付きの段（`components/Step.tsx`）で
-  **① 取り込む件**（出どころ CD / YouTube / 手置き・ディレクトリ・検出時刻・追記先・ファイルのタグで足りないもの
-  = `warnings`）→ **② アルバム情報** → **③ トラック** → **④ 確認して配置**。見出しに件の代表画像
+  **① 取り込むファイル**（出どころ CD / YouTube / 手置き・ディレクトリ・検出時刻・追記先・ファイルのタグで足りないもの
+  = `warnings`）→ **② アルバム情報** → **③ トラック** → **④ 確認して配置**。見出しに取り込みの代表画像
   （下書きを当てた後の各曲の画像の最頻）・出どころ・状態・「変更 N 件」（`draftChangeCount`）。
   **② アルバム情報**: 先頭に画像の欄（`InboxCover`）、その下にライブラリのプロパティと同じ操作の 2 列の表
   （`InboxAlbumProps`）。Metadata（アルバムアーティスト / アルバム / 日付 / category / album gain）は最初から
@@ -2131,14 +2131,14 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   ディスク・トラック数 / 追記先）は表示のみ。
   **画像の欄**: 全曲が同じ画像なら 1 枚（クリックかドロップで差し替え＝全曲）、画像なしは点線の枠、**曲ごとに
   違う（YouTube）なら既定で曲ごとの画像を保ち**、サムネイルを並べて「画像の無い N 曲に入れる」「全曲を 1 枚に
-  そろえる」を明示的な操作にする。CD の件でリリースが決まっていれば「Cover Art Archive から取る」
+  そろえる」を明示的な操作にする。CD の取り込みでリリースが決まっていれば「Cover Art Archive から取る」
   （`POST /api/artwork/from-caa`）。画像は `POST /api/artwork/upload` で置き、下書きの `picture` に入れる
   （`hooks/useArtworkUpload`、`lib/inbox.ts` の `pictureState` / `applyPicture` / `resetPictures`）。
   **③ トラック表は全項目**（D-85 / D-86）: ライブラリの表のように列で並べ、枠の中で横スクロールする
   （`InboxTrackGrid`）。セルをクリックで選び、ダブルクリック（Enter / F2）で入力欄、↑↓←→ で直せるセルを移る。
   disc / # / タイトル / アーティストはその行だけ、**画像**はその曲だけ差し替える（ファイルを選ぶかドロップ）、
   アルバム / アルバムアーティスト / 日付は**アルバム単位**（どの行で直しても全行と ② に反映。列を薄く塗る）、
-  **ファイルの全タグ**（件のファイルと下書きで足したキーのうち、固定列が出している TITLE / ARTIST / ALBUM /
+  **ファイルの全タグ**（取り込みのファイルと下書きで足したキーのうち、固定列が出している TITLE / ARTIST / ALBUM /
   ALBUMARTIST / DATE / TRACKNUMBER / DISCNUMBER と PICTURE を除いたもの。ABC 順、多値は `"; "` で結合）は
   その行だけ直し、空にするとそのタグを消す（`setTrackTag`）。表の下の「タグを追加」で新しいキーの列を足す
   （`newTagKeyProblem`）。長さ / codec / ファイル / 判定 / category と、**🔒 の付いた同一性のタグ**
@@ -2150,14 +2150,14 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   同名・画像の無い曲）/ 緑（タグを直す曲数・画像を差し替える曲数）の一覧、配置先の見込み
   （`POST /api/inbox/:id/preview` を下書きの変更から 400ms 後に引く。`hooks/useInboxPreview`）、
   「承認して配置」「却下」「下書きに戻す」。
-  **MusicBrainz の引き直し**（P4-21、D-84）: CD の件（`GET /api/inbox` の `rip` がある件）だけ、アルバムの欄の
+  **MusicBrainz の引き直し**（P4-21、D-84）: CD の取り込み（`GET /api/inbox` の `rip` がある取り込み）だけ、アルバムの欄の
   下に節を出す。ボタンで `POST /api/cd/lookup { toc, isrcs, mcn, release?, refresh?, widen? }`（CD 画面と同じ）を
   引いて候補を並べ、選ぶと下書きの `release_id` / `release_group_id` を写し、ディスク番号を候補の medium の位置に
   し、空欄の名前（と `Track NN`）だけ埋める（`lib/inbox.ts` の `applyCandidate`）。結果は保存しない。
   **トラックリスト貼り付け**（P2-10、D-65 / D-65 追記 2）: トラック表の下の畳んだ節。テキストを
   `lib/tracklist.ts` で行解析し、`lib/inbox.ts` の `applyTracklist` で**選んだディスクの行へトラック番号で**
   写す（複数枚組のときだけ「写す先」のディスクを選ぶ）。アーティストの無い行は既存の値を保ち、
-  アーティストを貼った行は「そのまま保つ」を外す。件に無い番号・同じ番号の行が複数あるもの・行数の違い・
+  アーティストを貼った行は「そのまま保つ」を外す。取り込みに無い番号・同じ番号の行が複数あるもの・行数の違い・
   未設定の行と、解析の警告（飛ばした見出し・番号の重複 / 飛び）を節の中に出す。写した後もフォームで直せる
 - **操作タブの「album gain」**（P4-5、D-74）: 「ReplayGain / FLAC」節に、選択行が属する album ごとの
   チェックボックス（`PATCH /api/albums/:id`。20 album を超えたら絞るよう促す）。アルバム画面は無く
@@ -2171,8 +2171,8 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   画像の説明。未購読の再生リストがあれば「購読にする →」で購読の ① へ URL を渡す）→ **③ ダウンロード**
   （飛ばす行を除いた「N 件をダウンロード」。投入後は今回のジョブ = 返ったジョブと、その再生リストの展開で増えた子（payload の
   `parent_job_id`）を追う）→
-  **④ Inbox で承認**（今回のジョブの note から置いた件を並べ、「Inbox で開く」でその件を選んで開く。件が
-  まだ一覧に無ければ現れるまで待ち、人が別の件を選んだらやめる）。
+  **④ Inbox で承認**（今回のジョブの note から置いた取り込みを並べ、「Inbox で開く」でその取り込みを選んで開く。取り込みが
+  まだ一覧に無ければ現れるまで待ち、人が別の取り込みを選んだらやめる）。
   これまでのジョブは折りたたみ。購読は **① 再生リスト**（list_id・題名・本数。購読済みなら止める）→
   **② アルバムとして登録**（題名が取れたら空のアルバム名に入れる）→ **③ 登録して同期**（「登録して今すぐ同期」と
   「登録だけ」。定期同期は既定で無いので、登録だけなら後から一覧の「同期」）、その下に登録済みの一覧。以下は各部の中身。(1) 1 行 1 URL のテキストエリアと「ダウンロード」（`POST /api/ytmusic/
@@ -2512,7 +2512,7 @@ src/
 │   ├── scanner.rs
 │   ├── placement.rs     CD / Inbox 共通の配置（tmp + RENAME_NOREPLACE、album の解決と登録トランザクションでの
 │   │                    リリースキー再検証、行の登録 / 採用。D-67 / D-68）
-│   ├── inbox.rs         Inbox の走査（件 = ディレクトリ）、タグからの下書き、承認の検証、承認済みの配置
+│   ├── inbox.rs         Inbox の走査（取り込み = ディレクトリ）、タグからの下書き、承認の検証、承認済みの配置
 │   │                    （補正をタグに書いて pathgen::plan の宛先へ。source_type = download。D-68）
 │   └── ytmusic/         metadata.rs（メタデータプラグインのプロトコル v1 と呼び出し。D-69）、
 │                        downloader.rs（yt-dlp の dump / download、remux、タグ、Archive、Inbox への配置と

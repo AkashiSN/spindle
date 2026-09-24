@@ -382,7 +382,7 @@ export function validateDraft(d: InboxDraft, files: string[]): string[] {
   const numbers = new Set<string>()
   for (const t of d.tracks) {
     const key = pathKey(t.rel_path)
-    if (!known.has(key)) out.push(`件に無いファイル: ${t.rel_path}`)
+    if (!known.has(key)) out.push(`取り込みに無いファイル: ${t.rel_path}`)
     if (seen.has(key)) out.push(`下書きに同じファイルが 2 回: ${t.rel_path}`)
     seen.add(key)
     for (const key of Object.keys(t.tags ?? {})) {

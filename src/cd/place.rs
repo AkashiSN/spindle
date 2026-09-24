@@ -198,7 +198,7 @@ pub fn inbox_dir(toc: &Toc, meta: &DiscMetadata) -> Result<RelPath, PlaceError> 
         }
     };
     RelPath::parse(&format!("{INBOX_CD_DIR}/{name}"))
-        .map_err(|e| PlaceError::Conflict(format!("件のディレクトリ名を作れない: {e}")))
+        .map_err(|e| PlaceError::Conflict(format!("取り込みのディレクトリ名を作れない: {e}")))
 }
 
 /// 組み立て用の隠しディレクトリ（Inbox 直下。同じ盤の再実行は同じ名前）
@@ -471,7 +471,7 @@ pub async fn place_disc(
         Some(true) => true,
         Some(false) => {
             return Err(PlaceError::Conflict(format!(
-                "Inbox に同じ名前の件が既にある: {rel_dir}"
+                "Inbox に同じ名前の取り込みが既にある: {rel_dir}"
             )))
         }
         None => false,
@@ -571,7 +571,7 @@ pub async fn place_disc(
             let published = match inbox.rename_noreplace(&from, &to) {
                 Ok(()) => Ok(()),
                 Err(FsError::Exists) => Err(PlaceError::Conflict(format!(
-                    "Inbox に同じ名前の件が既にある: {to}"
+                    "Inbox に同じ名前の取り込みが既にある: {to}"
                 ))),
                 Err(e) => Err(e.into()),
             };
