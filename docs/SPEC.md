@@ -1087,7 +1087,7 @@ Inbox/ に配置（ポーリング検出）
   必ず 1 回。P4-18、D-81。inotify は使わない: D-68 追記）。`POST /api/inbox/scan` は常に投入。
   `GET /api/inbox` の `watch` に最後に確認した時刻と間隔（Inbox 画面が「最後に確認: HH:MM:SS」を出す）。
   ジョブは Inbox を歩き、音声ファイルのあるディレクトリを
-  1 件（アルバム候補。root 直下の音声は `""` の 1 件）として `inbox_items` / `inbox_files` に写す。
+  1 つの取り込み（アルバム候補。root 直下の音声は `""` の 1 つ）として `inbox_items` / `inbox_files` に写す。
   stat（inode / size / mtime / ctime）が変わったファイルだけタグを読み直す。**正は Inbox のファイル**で、
   行はキャッシュ: ディレクトリが消えれば行も消す（`placed` は 24 時間残して結果を見せる）。`approved` の取り込みで
   ファイルが変わっていたら `pending` に戻す（再承認）
@@ -1201,7 +1201,7 @@ Inbox/ に配置（ポーリング検出）
   `mcn`（P4-21。旧サイドカーには無い）、rip.log の名前 `log`、`report`（`RipReport`））を持つ。提案は `album_gain = true`（D-74。保存した下書きがあればそちら）。配置は
   下書きの各トラックを **basename で `files` の位置へ結びつけ**（`bind_rip`。大小文字・正規化の違いは同じ名前）、
   記録の形（件数が音声トラック数と揃う、名前の重複なし）・取り込みのファイルとの 1 対 1・下書きの `disc_no` が 1 つに
-  揃うこと（1 件 = 1 枚）を確かめ、外れたら配置せず `failed`（提案の `warnings` にも出す）。登録は
+  揃うこと（1 取り込み = 1 枚）を確かめ、外れたら配置せず `failed`（提案の `warnings` にも出す）。登録は
   `register_item` と同じトランザクションで `source_type = 'cd_rip'`、`album_verifications`（`source = 'rip'`、
   `disc_no` は下書きの値、`job_id` は NULL、`drive_offset` はレポートの `read_offset`（PCM に当てた
   読み取りオフセット。遡及照合の行は NULL。D-83 追記 3）、`log_path` は移した rip.log の Library 相対。移せなければ NULL）/
@@ -2106,7 +2106,8 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   （再生リストの位置。空けてある番号）」と出し、その下に購読の直近の同期の要約（「同期（日時）で既存の 14 曲の番号を
   揃え … 165 を空けた（バッチ #14 / #15）。承認しても既存の曲は動かない」。直近の同期で揃え直しが無ければその旨）を
   出す。下書きの番号が `destination.numbers` と重なれば赤で警告する（承認はサーバが 400 で止める。P4-22）
-  追記先の曲がどれもディスク番号を持たない（`destination.uses_disc = false`）1 枚分の取り込み（CD の取り込みを除く）は、配置で
+  追記先の曲がどれもディスク番号を持たない（`destination.uses_disc = false`）取り込みで、下書きの `disc_no` の最大が 1（人が 2 以上にしたら書く。
+  CD の取り込みを除く）なら、配置で
   `DISCNUMBER` を書かず取り込みのファイルにあれば消し（宛先に合わせる。DB の `disc_no` も NULL になる）、宛先の文言に
   「ディスク番号は付けない（宛先の曲に無い）」を足し、③ の disc 列を空で見せる（下書きの値は 1 のまま。D-70 追記）
   （配置済みの取り込みは `destination` を引かないので、宛先も同名の警告も出ない。引くと自分が置いた album に当たる）。

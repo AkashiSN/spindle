@@ -316,6 +316,9 @@ describe('destinationLabel / verdictLabel（D-70）', () => {
       { rel_path: 'b', disc_no: 2, track_no: 1 },
     ] } as InboxDraft
     expect(omitsDisc(item({ destination: { ...base, uses_disc: false }, tracks: [f] }), twoDiscs)).toBe(false)
+    // 全トラックを disc 2 に直した取り込みはサーバと同じく書く（最大が 1 のときだけ省く）
+    const allTwo = { tracks: [{ rel_path: 'y/165.opus', disc_no: 2, track_no: 165 }] } as InboxDraft
+    expect(omitsDisc(noDisc, allTwo)).toBe(false)
   })
 
   it('同期が番号を空けた経緯（P4-22）', () => {

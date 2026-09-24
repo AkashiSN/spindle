@@ -750,7 +750,7 @@ Derived は 30 GB（全件に album の WebP カバー入り）。`delivery` は
 
 ### P1-11 GC ジョブ
 
-`missing_since` 30 日超の行、`Archive/` へ退避した WAV、Derived の孤児。**物理削除を行う唯一の経路**。
+`missing_since` が保持期間（`[gc].retention_days`、既定 7 日。2026-09-25 に 30 から変更）を超えた行、`Archive/` へ退避した WAV、Derived の孤児。**物理削除を行う唯一の経路**。
 dry-run と削除件数のログを必須にする（D-56）。
 
 - [x] `gc::plan`（読み取りのみ）: A missing トラック（`stat` で実体が無いことを再確認）、B missing
@@ -1625,7 +1625,7 @@ D-70 追記、SPEC §12.6。2026-09-21。それまでは右パネル「操作」
 - [x] (4) **番号揃え**: 配置（Inbox 承認）の後、同期ジョブ（または承認の後続）が「再生リストの位置 ↔ 現在の `TRACKNUMBER`」の
       ずれを `SOURCE_URL` で計算し（目標番号 = 再生リストの位置。非公開・削除・未取り込みの位置も数えるので、
       それらの分は番号が飛ぶ）、ずれている行だけ `TRACKNUMBER` を `set_rows` の tags バッチで書き、続けて
-      rename バッチでファイル名（`{track:02} {title}`）を追随させる（どちらも履歴に載り巻き戻せる。Derived の
+      rename バッチでファイル名（`{track:02}. {title}`）を追随させる（どちらも履歴に載り巻き戻せる。Derived の
       opus / aac はタグ上書き・移動で追随）。`SOURCE_URL` の無い行と再生リストに無い行は触らず、ずれの一覧を
       購読の結果に出す。「番号揃えをしない」購読も選べる（既定は揃える）
 - [x] (5) yt-dlp を定期的に叩くので、ブロック時の `--extractor-args` / `--cookies` の口（P4-13 の `[bin].ytdlp`

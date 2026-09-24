@@ -1811,8 +1811,9 @@ pub fn destination(
 }
 
 /// 配置で `DISCNUMBER` を書かない（ファイルにあれば消す）か: 追記先があり、その album のどのトラックも
-/// ディスク番号を持たず、件が 1 枚分（下書きの disc が 1 つ）で、CD の件でないとき（D-70 追記）。
-/// 宛先に合わせるので、件のファイルが持っていた `DISCNUMBER` も消す。CD の件と新規の album は従来どおり
+/// ディスク番号を持たず、取り込みが 1 枚分（下書きの disc_no の最大が 1）で、CD の取り込みでないとき（D-70 追記）。
+/// 人が 2 以上にした disc は捨てない（書く）。宛先に合わせるので、取り込みのファイルが持っていた `DISCNUMBER` も
+/// 消す。CD の取り込みと新規の album は従来どおり
 pub fn omits_disc(dest: Option<&Destination>, draft: &InboxDraft, files: &[FileRow]) -> bool {
     dest.is_some_and(|d| d.track_count > 0 && !d.uses_disc)
         && draft.disc_count() <= 1

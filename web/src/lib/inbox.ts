@@ -596,7 +596,7 @@ export function subscriptionNumbers(
  */
 /**
  * 配置で `DISCNUMBER` を書かないか（サーバの `omits_disc` と同じ規則）。追記先の曲がどれもディスク番号を
- * 持たず、件が 1 枚分で、CD の件（`rip` あり）でないとき。ディスク番号の無い album に 1 を書くと、並べ替えで
+ * 持たず、下書きの disc_no の最大が 1 で（人が 2 以上にした値は書く）、CD の取り込み（`rip` あり）でないとき。ディスク番号の無い album に 1 を書くと、並べ替えで
  * 追記した曲だけが末尾に回る
  */
 export function omitsDisc(
@@ -605,7 +605,7 @@ export function omitsDisc(
 ): boolean {
   const d = item.destination
   if (d == null || d.uses_disc !== false || d.track_count === 0 || item.rip != null) return false
-  return new Set(draft.tracks.map((t) => t.disc_no)).size <= 1
+  return draft.tracks.every((t) => t.disc_no <= 1)
 }
 
 export function destinationText(
