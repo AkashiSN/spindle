@@ -1,17 +1,19 @@
 // CD 画面の候補（P4-20）。左に選択中の候補のジャケット（D-82。無ければ同じ寸法の空枠でレイアウトを
 // 動かさない）、右に候補のラジオ一覧。
 //
+// 段の見出し（「③ 候補を選ぶ」と照会の要約）は CdView が持つ。長い説明は ⓘ（Hint）に畳む。
+//
 // 候補は MusicBrainz へのリンク・収録構成（DVD 付き / BD 付き / デジタルの別）・ディスクとの長さ差で
 // 見分ける。CD 以外の medium に当たった候補は既定で畳む。まだ引いていない段があれば（`can_widen`）
 // 「さらに広げて探す」を出す（D-64 追記 4）。
 
 import { useState } from 'react'
+import { Hint } from './Hint'
 import type { CdLookupState } from '../hooks/useCdLookup'
 import {
   candidateDetail,
   COPY_SCOPE_LABELS,
   discidSubmissionUrl,
-  lookupHeadline,
   matchedByLabel,
   offersDiscidSubmission,
   releaseUrl,
@@ -90,7 +92,6 @@ export function CdCandidates({ cd }: { cd: CdLookupState }) {
 
   return (
     <>
-      <h2>{lookupHeadline(result)}</h2>
       {result.notes.map((n) => (
         <p key={n} className="error">
           {n}
@@ -126,9 +127,9 @@ export function CdCandidates({ cd }: { cd: CdLookupState }) {
             <div className="cd-other">
               <label className="small">
                 <input type="checkbox" checked={otherOpen} onChange={(e) => setShowOther(e.target.checked)} />{' '}
-                CD 以外の媒体に当たった候補も表示（{split.other.length} 件。デジタル配信・DVD・Blu-ray など、
-                このドライブでは吸い出せない）
-              </label>
+                CD 以外の媒体の候補も表示（{split.other.length} 件）
+              </label>{' '}
+              <Hint>デジタル配信・DVD・Blu-ray など、このドライブでは吸い出せない媒体に当たった候補</Hint>
               {otherOpen && (
                 <ul className="cd-candidates">
                   {split.other.map((c) => (
@@ -150,14 +151,20 @@ export function CdCandidates({ cd }: { cd: CdLookupState }) {
               <button type="button" disabled={cd.busy} onClick={() => void cd.widen()}>
                 さらに広げて探す
               </button>
-              <span className="muted small">
-                TOC の近さでも探す（トラック長の違う別の盤が混ざるので、どれも違うときだけ）
-              </span>
+              <Hint>TOC の近さでも探す。トラック長の違う別の盤が混ざるので、どれも違うときだけ使う</Hint>
             </div>
           )}
           {result.candidates.length > 0 && (
             <fieldset className="cd-copy-scope">
-              <legend className="small">候補から写す範囲</legend>
+              <legend className="small">
+                候補から写す範囲{' '}
+                <Hint>
+                  既定の「全部写す」はトラック名・アーティスト・レーベル・カタログ番号・JAN/UPC まで写す。
+                  「最小限」にすると盤を見分けるのに要るものだけ（アルバム名・アルバムアーティスト・日付・
+                  ディスク番号 / 枚数・MusicBrainz のリリース id）になり、トラック名は空のまま取り込まれる
+                  （Inbox の承認画面で入れる）
+                </Hint>
+              </legend>
               {(Object.keys(COPY_SCOPE_LABELS) as CopyScope[]).map((scope) => (
                 <label key={scope} className="small">
                   <input
@@ -169,12 +176,6 @@ export function CdCandidates({ cd }: { cd: CdLookupState }) {
                   {COPY_SCOPE_LABELS[scope]}
                 </label>
               ))}
-              <span className="muted small">
-                既定の「全部写す」はトラック名・アーティスト・レーベル・カタログ番号・JAN/UPC まで写す。
-                「最小限」にすると盤を見分けるのに要るものだけ（アルバム名・アルバムアーティスト・
-                日付・ディスク番号 / 枚数・MusicBrainz のリリース id）になり、トラック名は空のまま
-                取り込まれる（Inbox の承認画面で入れる）
-              </span>
             </fieldset>
           )}
           {result.candidates.length > 0 && (
@@ -182,9 +183,9 @@ export function CdCandidates({ cd }: { cd: CdLookupState }) {
               <button type="button" disabled={cd.draft?.source === 'manual'} onClick={cd.startManual}>
                 どれも違う（候補を使わない）
               </button>
-              <span className="muted small">
-                候補を選ぶと表に名前が入る。どれも違うなら名前の無いまま取り込んで、Inbox の承認画面で入れる
-              </span>
+              <Hint>
+                候補を選ぶと ① と ② に名前が入る。どれも違うなら名前の無いまま取り込んで、Inbox の承認画面で入れる
+              </Hint>
             </div>
           )}
         </div>

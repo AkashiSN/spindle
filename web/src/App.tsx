@@ -599,7 +599,13 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         ) : view === 'inbox' ? (
           <InboxView inbox={inbox} onOpenAlbum={(id) => handleScope({ album_id: id })} />
         ) : view === 'cd' ? (
-          <CdView cd={cd} drive={drive} rip={rip} onOpenInbox={() => setView('inbox')} />
+          <CdView
+            cd={cd}
+            drive={drive}
+            rip={rip}
+            onOpenInbox={() => setView('inbox')}
+            onOpenAlbum={(id) => handleScope({ album_id: id })}
+          />
         ) : view === 'youtube' ? (
           <YoutubeView youtube={youtube} subs={subs} jobs={jobs} onOpenInbox={() => setView('inbox')} />
         ) : view === 'jobs' ? (

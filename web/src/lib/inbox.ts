@@ -484,3 +484,106 @@ export function verdictLabel(s: InboxSource): { text: string; ok: boolean } {
   return s.verdict === 'ok' ? { text: '判定済み', ok: true } : { text: `未判定（${s.verdict}）`, ok: false }
 }
 
+
+// ---------------------------------------------------------------- 承認画面の表の列（§12.6 Inbox）
+
+/**
+ * 表の固定列が既に出しているタグ（全タグの列から外す）。TITLE / ARTIST / 番号は編集セル、ALBUM /
+ * ALBUMARTIST / DATE はアルバム単位の欄の写し、PICTURE はサムネイル列
+ */
+const COVERED_TAGS = new Set([
+  'TITLE',
+  'ARTIST',
+  'ALBUM',
+  'ALBUMARTIST',
+  'DATE',
+  'TRACKNUMBER',
+  'DISCNUMBER',
+  'PICTURE',
+])
+
+/** 件のファイルが持つタグのうち、固定列に無いキー（全タグの列）。ABC 順 */
+export function extraTagKeys(files: Pick<InboxFile, 'tags'>[]): string[] {
+  const keys = new Set<string>()
+  for (const f of files) {
+    for (const [k] of f.tags) {
+      if (!COVERED_TAGS.has(k)) keys.add(k)
+    }
+  }
+  return [...keys].sort()
+}
+
+/** ファイルのタグの値（多値は "; " で結合。無ければ空） */
+export function tagValue(file: Pick<InboxFile, 'tags'>, key: string): string {
+  return file.tags
+    .filter(([k]) => k === key)
+    .map(([, v]) => v)
+    .join(ARTIST_JOIN)
+}
+
+export type InboxColumn = {
+  id: string
+  label: string
+  /** edit: トラック単位で直す / album: 上の欄の写し / file: ファイルから / tag: ファイルのタグ */
+  group: 'edit' | 'album' | 'file' | 'tag'
+  /** 列メニューで隠せるか（番号とタイトルは常に出す） */
+  hideable: boolean
+}
+
+/** 表の列（左から）。サムネイル・判定は件に該当するものがあるときだけ */
+export function inboxColumns(opts: { hasPicture: boolean; hasSource: boolean; tagKeys: string[] }): InboxColumn[] {
+  const cols: InboxColumn[] = [
+    { id: 'disc', label: 'disc', group: 'edit', hideable: false },
+    { id: 'no', label: '#', group: 'edit', hideable: false },
+  ]
+  if (opts.hasPicture) cols.push({ id: 'thumb', label: '画像', group: 'file', hideable: true })
+  cols.push(
+    { id: 'title', label: 'タイトル', group: 'edit', hideable: false },
+    { id: 'artist', label: 'アーティスト', group: 'edit', hideable: true },
+    { id: 'album', label: 'アルバム', group: 'album', hideable: true },
+    { id: 'albumartist', label: 'アルバムアーティスト', group: 'album', hideable: true },
+    { id: 'date', label: '日付', group: 'album', hideable: true },
+    { id: 'category', label: 'category', group: 'album', hideable: true },
+    { id: 'duration', label: '長さ', group: 'file', hideable: true },
+    { id: 'codec', label: 'codec', group: 'file', hideable: true },
+    { id: 'file', label: 'ファイル', group: 'file', hideable: true },
+  )
+  if (opts.hasSource) cols.push({ id: 'verdict', label: '判定', group: 'file', hideable: true })
+  for (const k of opts.tagKeys) cols.push({ id: `tag:${k}`, label: k, group: 'tag', hideable: true })
+  return cols
+}
+
+/** 隠した列の保存形（localStorage）を読む。壊れていれば空 */
+export function parseHiddenColumns(raw: string | null): string[] {
+  if (raw == null) return []
+  try {
+    const v: unknown = JSON.parse(raw)
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 横スクロールしても左に残す列の幅（px。セルの枠込み）。どの行のタグを見ているか分かるよう、
+ * 番号・画像・タイトルは左端に固定する（D-85 追記）
+ */
+const STICKY_WIDTHS: Record<string, number> = { disc: 72, no: 72, thumb: 44, title: 292 }
+
+export type StickyCell = { left: number; width: number; last: boolean }
+
+/** 表示する列のうち左端に固定するものの位置（左からの累積）。固定の列は表示の先頭に続いて並ぶ前提 */
+export function stickyColumns(shown: Pick<InboxColumn, 'id'>[]): Map<string, StickyCell> {
+  const out = new Map<string, StickyCell>()
+  let left = 0
+  for (const c of shown) {
+    const width = STICKY_WIDTHS[c.id]
+    if (width == null) break
+    out.set(c.id, { left, width, last: false })
+    left += width
+  }
+  const ids = [...out.keys()]
+  const tail = ids.length > 0 ? out.get(ids[ids.length - 1]) : undefined
+  if (tail != null) tail.last = true
+  return out
+}

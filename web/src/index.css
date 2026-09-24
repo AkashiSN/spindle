@@ -1888,33 +1888,158 @@ table.cd-tracks .num {
   color: var(--muted);
 }
 
-/* アルバムの要約（P4-20 追記。読み取り専用） */
+/* ① 挿入中の CD（P4-20 追記。読み取り専用）。ラベル付きの 2 列の定義リスト */
 .cd-summary {
-  margin-top: 10px;
-}
-.cd-summary-title {
-  margin: 0;
-}
-.cd-summary-meta {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
   gap: 4px 16px;
-  margin: 4px 0;
+  margin: 0;
+  font-size: 13px;
+}
+.cd-summary div {
+  display: contents;
+}
+.cd-summary dt {
   color: var(--muted);
 }
-.cd-summary-meta div {
-  display: flex;
-  gap: 4px;
-}
-.cd-summary-meta dt::after {
-  content: ':';
-}
-.cd-summary-meta dd {
+.cd-summary dd {
   margin: 0;
+  overflow-wrap: anywhere;
+}
+.cd-summary .cd-summary-album dd {
+  font-size: 15px;
+  font-weight: 600;
+}
+.cd-summary .cd-summary-album dd.muted {
+  font-weight: normal;
+}
+
+/* CD 画面の番号付きの段（① 挿入中の CD → ② トラック → ③ 候補 → ④ 取り込む） */
+.cd-step {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-top: 12px;
+  max-width: 1100px;
+}
+.cd-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+}
+.cd .cd-step-head h2 {
+  margin: 0;
+  font-size: 13px;
   color: var(--fg);
+}
+.cd-step-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 12px;
+  font-weight: 600;
+  flex: none;
+}
+.cd-step-aside {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cd-step-body {
+  padding: 8px 10px 10px;
+}
+.cd-step-body table.cd-tracks {
+  margin-top: 0;
+}
+.cd-drive-state {
+  margin-left: 8px;
+}
+.cd-empty {
+  margin-top: 24px;
+}
+
+/* 最上部の「ライブラリにある」帯 */
+.cd-owned {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  max-width: 1100px;
+  box-sizing: border-box;
+}
+.cd-owned-disc {
+  background: var(--badge-green-bg);
+  color: var(--badge-green-fg);
+}
+.cd-owned-release {
+  background: var(--badge-amber-bg);
+  color: var(--badge-amber-fg);
+}
+.cd-owned button {
+  color: inherit;
+}
+
+/* 説明のツールチップ（components/Hint.tsx）。ホバーかフォーカスで出る */
+.hint {
+  position: relative;
+  display: inline-block;
+  color: var(--muted);
+  cursor: help;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 50%;
+}
+.hint:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.hint-tip {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 32px));
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 4px 12px var(--shadow);
+  font-size: 12px;
+  font-weight: normal;
+  line-height: 1.5;
+  text-align: left;
+  white-space: normal;
+}
+.hint-right .hint-tip {
+  left: auto;
+  right: 0;
+}
+.hint:hover .hint-tip,
+.hint:focus .hint-tip,
+.hint:focus-within .hint-tip {
+  display: block;
 }
 
 /* 候補（P4-20）: 左にジャケット、右に一覧。ジャケットが無くても枠で場所を取る */
+/* 候補が多いと ④ 取り込むが遠くなるので、一覧は枠の中でスクロールする */
+.cd-step .cd-candidates {
+  max-height: 420px;
+  overflow-y: auto;
+}
 .cd-candidates-row {
   display: grid;
   grid-template-columns: 160px minmax(0, 1fr);
@@ -2000,9 +2125,8 @@ table.cd-tracks .num {
 }
 .inbox-list button {
   display: flex;
-  flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  gap: 8px;
   width: 100%;
   padding: 6px 8px;
   border: 0;
@@ -2011,6 +2135,24 @@ table.cd-tracks .num {
   text-align: left;
   cursor: pointer;
   font: inherit;
+}
+/* 一覧のサムネイル（件の代表の埋め込み画像）。無い件は同じ寸法の空枠で並びを揃える */
+.inbox-list-thumb {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+}
+.inbox-item-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
 }
 .inbox-title {
   font-weight: 600;
@@ -2249,4 +2391,135 @@ table.inbox-tracks tr.inbox-unmatched td {
   white-space: pre-wrap;
   background: var(--bg-alt);
   padding: 4px 6px;
+}
+
+/* 承認画面のトラック表（全項目。§12.6 Inbox）。横に長いので枠の中で横スクロール */
+.inbox-tracks-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 6px;
+}
+.cd .inbox-tracks-head h2 {
+  margin: 0;
+}
+.inbox-tracks-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+table.inbox-tracks {
+  width: max-content;
+  min-width: 100%;
+  margin-top: 0;
+}
+table.inbox-tracks th,
+table.inbox-tracks td {
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+/* 上の cd-tracks / inbox-tracks の割合指定は幅の決まった表のもの。max-content の表では潰れる */
+table.inbox-tracks td:nth-child(2),
+table.inbox-tracks td:nth-child(3),
+table.inbox-tracks td:nth-child(4) {
+  width: auto;
+}
+table.inbox-tracks td.inbox-num input {
+  width: 56px;
+}
+table.inbox-tracks th.inbox-col-tag {
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+}
+table.inbox-tracks td.inbox-title-cell input {
+  width: 260px;
+}
+table.inbox-tracks td.inbox-artist-cell input[type='text'] {
+  width: 200px;
+}
+table.inbox-tracks td.inbox-title-cell,
+table.inbox-tracks td.inbox-artist-cell {
+  white-space: normal;
+}
+table.inbox-tracks td.inbox-file-cell,
+table.inbox-tracks td.inbox-tag-cell {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+table.inbox-tracks td.num {
+  text-align: right;
+}
+.inbox-column-menu {
+  position: relative;
+}
+.inbox-column-menu summary {
+  cursor: pointer;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.inbox-column-menu-body {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 32px));
+  max-height: 60vh;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 4px 12px var(--shadow);
+}
+.inbox-column-menu-body fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 4px 6px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.inbox-column-menu-body legend {
+  color: var(--muted);
+}
+.inbox-column-menu-body .op-row {
+  width: 100%;
+}
+
+/* 横スクロールしても左に残す列（disc / # / 画像 / タイトル。left と幅は stickyColumns） */
+table.inbox-tracks th.inbox-sticky,
+table.inbox-tracks td.inbox-sticky {
+  position: sticky;
+  box-sizing: border-box;
+  background: var(--bg);
+  z-index: 1;
+}
+table.inbox-tracks thead th.inbox-sticky {
+  background: var(--bg-alt);
+  z-index: 3;
+}
+table.inbox-tracks tbody tr:hover td.inbox-sticky {
+  background: var(--bg-alt);
+}
+table.inbox-tracks tr.inbox-unmatched td.inbox-sticky {
+  background: var(--pending-bg);
+}
+table.inbox-tracks .inbox-sticky-last {
+  box-shadow: 1px 0 0 var(--border), 4px 0 6px -4px var(--shadow);
+}
+table.inbox-tracks td.inbox-thumb-cell.inbox-sticky {
+  padding-right: 8px;
+}
+
+/* album gain は文言が長いので、フォームの格子の 1 行を占める（狭い格子の枠で折り返さない） */
+.cd-form .inbox-album-gain {
+  grid-column: 1 / -1;
 }

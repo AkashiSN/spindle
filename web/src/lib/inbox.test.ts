@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  stickyColumns,
+  extraTagKeys,
+  inboxColumns,
+  parseHiddenColumns,
+  tagValue,
   applyCandidate,
   applyTracklist,
   artistValues,
@@ -558,5 +563,78 @@ describe('MusicBrainz の候補を写す（P4-21）', () => {
     expect(validateDraft({ ...proposal, release_id: 'x' }, files)).toEqual(['MusicBrainz のリリース ID の形が不正: x'])
     // 大文字の UUID も通す（既存のタグ。サーバと同じ）
     expect(validateDraft({ ...proposal, release_id: MBID.toUpperCase() }, files)).toEqual([])
+  })
+})
+
+describe('承認画面の表の列', () => {
+  const f = (tags: Array<[string, string]>) => ({ tags })
+  it('extraTagKeys は固定列のタグを外して ABC 順に集める', () => {
+    const keys = extraTagKeys([
+      f([
+        ['TITLE', 'a'],
+        ['GENRE', 'Rock'],
+        ['PICTURE', 'image/jpeg:ab'],
+        ['ISRC', 'X'],
+      ]),
+      f([
+        ['MUSICBRAINZ_ALBUMID', 'm'],
+        ['GENRE', 'Pop'],
+        ['TRACKNUMBER', '1'],
+      ]),
+    ])
+    expect(keys).toEqual(['GENRE', 'ISRC', 'MUSICBRAINZ_ALBUMID'])
+  })
+  it('tagValue は多値を "; " で結合し、無ければ空', () => {
+    const file = f([
+      ['GENRE', 'Rock'],
+      ['GENRE', 'Pop'],
+    ])
+    expect(tagValue(file, 'GENRE')).toBe('Rock; Pop')
+    expect(tagValue(file, 'ISRC')).toBe('')
+  })
+  it('inboxColumns はサムネイル・判定を該当があるときだけ出し、タグ列を末尾に足す', () => {
+    const ids = (o: Parameters<typeof inboxColumns>[0]) => inboxColumns(o).map((c) => c.id)
+    expect(ids({ hasPicture: false, hasSource: false, tagKeys: [] })).toEqual([
+      'disc',
+      'no',
+      'title',
+      'artist',
+      'album',
+      'albumartist',
+      'date',
+      'category',
+      'duration',
+      'codec',
+      'file',
+    ])
+    const all = ids({ hasPicture: true, hasSource: true, tagKeys: ['GENRE'] })
+    expect(all[2]).toBe('thumb')
+    expect(all.slice(-2)).toEqual(['verdict', 'tag:GENRE'])
+  })
+  it('番号とタイトルは隠せない', () => {
+    const fixed = inboxColumns({ hasPicture: false, hasSource: false, tagKeys: [] })
+      .filter((c) => !c.hideable)
+      .map((c) => c.id)
+    expect(fixed).toEqual(['disc', 'no', 'title'])
+  })
+  it('parseHiddenColumns は壊れた値を空にする', () => {
+    expect(parseHiddenColumns(null)).toEqual([])
+    expect(parseHiddenColumns('{')).toEqual([])
+    expect(parseHiddenColumns('{"a":1}')).toEqual([])
+    expect(parseHiddenColumns('["tag:GENRE", 3]')).toEqual(['tag:GENRE'])
+  })
+})
+
+describe('stickyColumns', () => {
+  it('先頭から続く固定列の left を累積し、最後の列に印を付ける', () => {
+    const m = stickyColumns([{ id: 'disc' }, { id: 'no' }, { id: 'thumb' }, { id: 'title' }, { id: 'artist' }])
+    expect(m.get('disc')).toEqual({ left: 0, width: 72, last: false })
+    expect(m.get('thumb')).toEqual({ left: 144, width: 44, last: false })
+    expect(m.get('title')).toEqual({ left: 188, width: 292, last: true })
+    expect(m.has('artist')).toBe(false)
+  })
+  it('画像の列を隠すとタイトルが詰まる', () => {
+    const m = stickyColumns([{ id: 'disc' }, { id: 'no' }, { id: 'title' }])
+    expect(m.get('title')).toEqual({ left: 144, width: 292, last: true })
   })
 })

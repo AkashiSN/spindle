@@ -786,3 +786,53 @@ pub fn get_album(conn: &Connection, id: i64) -> Result<Option<AlbumRow>> {
     let mut stmt = conn.prepare_cached(&sql)?;
     Ok(stmt.query_row([id], read_album).optional()?)
 }
+
+// ---------------------------------------------------------------- CD の所持判定
+
+/// CD 画面の「ライブラリにある」の当たり先（`POST /api/cd/library`）
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AlbumRef {
+    pub album_id: i64,
+    pub rel_dir: String,
+    pub album: Option<String>,
+    pub albumartist: Option<String>,
+}
+
+fn read_album_ref(r: &Row) -> rusqlite::Result<AlbumRef> {
+    Ok(AlbumRef {
+        album_id: r.get(0)?,
+        rel_dir: r.get(1)?,
+        album: r.get(2)?,
+        albumartist: r.get(3)?,
+    })
+}
+
+/// その盤（DiscID）を持つ active な album。active なトラックの `MUSICBRAINZ_DISCID` タグで引く
+/// （DiscID は 1 枚ごとの値で album の列には無い。D-67 追記 3）。複数あれば id の小さいもの
+pub fn album_by_discid(conn: &Connection, discid: &str) -> Result<Option<AlbumRef>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT a.id, a.rel_dir, a.album, a.albumartist
+           FROM track_tags g
+           JOIN tracks t ON t.id = g.track_id AND t.missing_since IS NULL
+           JOIN albums a ON a.id = t.album_id AND a.missing_since IS NULL
+          WHERE g.key = 'MUSICBRAINZ_DISCID' AND g.value = ?1
+          ORDER BY a.id
+          LIMIT 1",
+    )?;
+    Ok(stmt.query_row([discid], read_album_ref).optional()?)
+}
+
+/// MusicBrainz のリリースを持つ active な album（大文字小文字は区別しない。D-84）。複数あれば id の小さいもの
+pub fn album_by_release(conn: &Connection, release_id: &str) -> Result<Option<AlbumRef>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT a.id, a.rel_dir, a.album, a.albumartist
+           FROM albums a
+          WHERE a.mb_release_id IS NOT NULL AND lower(trim(a.mb_release_id)) = ?1
+            AND a.missing_since IS NULL
+          ORDER BY a.id
+          LIMIT 1",
+    )?;
+    Ok(stmt
+        .query_row([release_id.trim().to_ascii_lowercase()], read_album_ref)
+        .optional()?)
+}

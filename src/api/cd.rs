@@ -402,6 +402,75 @@ pub async fn lookup(
     .into_response())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct LibraryBody {
+    pub toc: String,
+    /// 選択中の候補のリリース（`MUSICBRAINZ_ALBUMID`）。無ければリリースでは引かない
+    #[serde(default)]
+    pub release_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LibraryResponse {
+    /// TOC から計算した MusicBrainz DiscID
+    pub discid: String,
+    /// その盤そのもの（トラックの `MUSICBRAINZ_DISCID` が一致）を持つ album
+    pub disc: Option<crate::db::tracks::AlbumRef>,
+    /// `disc` が無いとき、同じリリースの album（別の盤だけ取り込んである等）
+    pub release: Option<crate::db::tracks::AlbumRef>,
+}
+
+/// `POST /api/cd/library { toc, release_id? }`（§12.6 CD の「ライブラリにある」）。DiscID はサーバが
+/// TOC から出すので、MusicBrainz の照会の前でも・失敗しても引ける。DB だけを読む
+pub async fn library(
+    State(state): State<AppState>,
+    body: Result<Json<LibraryBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = match body {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                e.body_text(),
+            ))
+        }
+    };
+    let toc = match Toc::parse(&body.toc) {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                format!("TOC: {e}"),
+            ))
+        }
+    };
+    let discid = toc.musicbrainz_disc_id();
+    let release_id = body
+        .release_id
+        .map(|r| r.trim().to_owned())
+        .filter(|r| !r.is_empty());
+    let id = discid.clone();
+    let (disc, release) = state
+        .db
+        .read(move |c| {
+            let disc = crate::db::tracks::album_by_discid(c, &id)?;
+            let release = match (&disc, release_id) {
+                (None, Some(r)) => crate::db::tracks::album_by_release(c, &r)?,
+                _ => None,
+            };
+            Ok((disc, release))
+        })
+        .await?;
+    Ok(Json(LibraryResponse {
+        discid,
+        disc,
+        release,
+    })
+    .into_response())
+}
+
 /// MBID（8-4-4-4-12 の 16 進）か。上流に投げる前に形を確かめる
 /// （利用者の文字列をそのまま URL に継ぎ足さない。D-82）
 fn is_mbid(s: &str) -> bool {
