@@ -143,7 +143,7 @@ inode）が合えば続きを反映し、合わなければ `skipped_conflict` �
 Library の WAV / ALAC / AIFF を FLAC に置き換える（SPEC §7.4、D-45 / D-46）。移行で取り込んだ
 ALAC 7,572 本が主対象。UI は未着手なので API を直接叩く。変換は `normalize` ジョブ（並列 2）が
 1 曲ずつ行い、元ファイルは `Archive/` の同じ相対パスへ退避される（`archived_files` 台帳、
-既定 30 日後に GC が回収。それまでは履歴画面の [巻き戻す] で元に戻せる）。
+既定 7 日後に GC が回収。それまでは履歴画面の [巻き戻す] で元に戻せる）。
 
 前提: Archive（`/mnt/hdd/media/Archive`）に退避ぶんの空き（ALAC 全件で約 220G）がある。
 `config.toml` の `[normalize].wav_to_flac = true`。

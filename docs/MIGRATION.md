@@ -161,7 +161,7 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
   `[replaygain].write_tags = true` なら解析と同時にタグへ書く（別の「解析値をタグに書く」は要らない）。
   aac の Derived は RG が揃った行から作られるので、解析が終わるまで aac は増えない
 - ロスレス → FLAC 正規化（P1-4）で ALAC を FLAC にする（全選択で「正規化をプレビュー」→ 適用）。
-  退避した ALAC は `Archive/` に 30 日置かれてから GC される。正規化は `audio_version` を上げないので、
+  退避した ALAC は `Archive/` に 7 日（`[gc].retention_days`）置かれてから GC される。正規化は `audio_version` を上げないので、
   Derived の生成と並行してよい（作り直しは起きない）。2 並列で 7,570 本に約 5 時間
 - 一括編集を 1 件行い、巻き戻しが通ること（P0 の完了条件）
 - Derived は P1-10 が Library から再生成する（起動時スキャンの後に自動で投入）。旧 `Opus/` の 7,568 本は
@@ -210,7 +210,7 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
       再生リスト側から外す（除外の仕組みは作らない）。長さが違えば別テイク（Cover / Live ver.）なので
       そのまま承認してよい。**Library のファイルを消す op は無い**ので、
       既に二重に入れてしまったら SMB でファイルを消す → スキャンが `missing_since` を立てる → GC
-      （既定 30 日）で行が消える
+      （既定 7 日）で行が消える
    1 と 2 は実データでは 1 回しか行わない（以後は購読の同期が日常運用）。リハーサル環境で一度通してから行う
 4. 正式運用後、数日間問題が出ないことを確認してから `ssd/musics` を破棄する。`AAC/`（48G）は
    この破棄で一緒に消える

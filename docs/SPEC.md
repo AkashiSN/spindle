@@ -341,7 +341,7 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
 ### 論理削除
 
 `missing_since` による論理削除。SMB 一時切断やスキャン中のマウント欠落で行を物理削除すると、
-プレイリストと編集履歴が巻き添えになる。既定 30 日経過後に GC（`gc` ジョブ。missing トラック・
+プレイリストと編集履歴が巻き添えになる。既定 7 日経過後に GC（`gc` ジョブ。missing トラック・
 アルバムの行、`Archive/` の退避ファイル、Derived の孤児、アートワークの孤児、却下して「削除」した
 Inbox の取り込みのファイル（D-90）を回収する。
 1 日 1 回自動、`POST /api/gc` で手動、`GET /api/gc/preview` が dry-run。D-56）。GC は保持期間を過ぎた
@@ -2252,7 +2252,7 @@ deep_interval_days = 30        # deep scan（tag_hash / audio_md5 全再計算�
 poll_interval_secs = 60        # Inbox の確認間隔（変化があったときだけ走査を投入。inotify は使わない: D-68 追記）。0 で自動なし
 
 [gc]
-retention_days = 30            # 物理削除までの猶予（missing_since / 退避 WAV / Derived 孤児）
+retention_days = 7             # 物理削除までの猶予（missing_since / 退避 WAV / Derived 孤児）
 jobs_done_days = 7             # 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない（P4-18）
 jobs_failed_days = 30          # failed のジョブ行を消すまでの日数。0 で消さない
 

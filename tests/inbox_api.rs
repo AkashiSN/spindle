@@ -414,7 +414,7 @@ async fn discard_and_undiscard_only_on_rejected_items() {
     let (_, list) = app.get(&c, "/api/inbox").await;
     assert!(list["items"][0]["discard_requested_at"].is_i64(), "{list}");
     assert_eq!(list["items"][0]["state"], "rejected");
-    assert_eq!(list["discard_retention_days"], 30);
+    assert_eq!(list["discard_retention_days"], 7);
     // 二度目は 409、取り消しで null に戻る
     let (st, _) = app.post(&c, &discard, json!({})).await;
     assert_eq!(st, StatusCode::CONFLICT);

@@ -149,10 +149,10 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
     // ジョブ行の掃除の対象（P4-18）。設定は例の既定（done 7 日 / failed 30 日）
     assert_eq!(body["jobs"]["done"], 1, "{body}");
     assert_eq!(body["jobs"]["failed"], 0);
-    // cutoff はサーバが受信時刻から数える。テストの now より後なので、秒が進んだぶんだけ大きくなり得る
+    // cutoff（例の既定の retention_days = 7 日）はサーバが受信時刻から数える。テストの now より後なので、秒が進んだぶんだけ大きくなり得る
     let cutoff = body["cutoff"].as_i64().unwrap();
     assert!(
-        cutoff >= now - 30 * 86_400 && cutoff <= now_epoch() - 30 * 86_400,
+        cutoff >= now - 7 * 86_400 && cutoff <= now_epoch() - 7 * 86_400,
         "cutoff={cutoff} now={now}"
     );
     // 何も消えていない
