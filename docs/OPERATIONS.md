@@ -20,7 +20,13 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
 - `user`: 既存ライブラリの所有者の UID:GID に合わせる（違うとタグ書き込みが全滅する）
 - `volumes`: Library / Derived / Archive / Inbox / Playlists / data の実パスと、メタデータプラグイン
   （`spindle-ytmusic-meta`。イメージには入っていない）のマウント
-- `SPINDLE_INITIAL_PASSWORD`: 初回だけ。初期化が済んだら消す
+- `SPINDLE_INITIAL_PASSWORD`: 初回だけ。カスタムアプリには `.env` が無いので、`${…:?…}` の行を
+  `- SPINDLE_INITIAL_PASSWORD=<生成したパスワード>` の値に書き換える。ログの「SPINDLE_INITIAL_PASSWORD から
+  パスワードを初期化した」とログインを確かめたら、アプリの Edit で `environment` ごと消す
+- **イメージは作る前に pull しておく。** ホストに同じタグ（`edge` など）の古いイメージが残っていると、
+  カスタムアプリはそれをそのまま使う（2026-09-24 のリハーサルで旧 compose の `edge` が起動した）。
+  `sudo docker pull ghcr.io/akashisn/spindle:<tag>` を先に打つか、作った直後に `/health` の `version` を見て、
+  違えば止める → `/data` の DB を消す → Pull image → 起動し直す
 
 ### 更新
 

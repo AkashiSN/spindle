@@ -92,17 +92,28 @@ $R --files-from=/tmp/plan/library-opus.list     /mnt/ssd/musics/Opus/           
 $R --files-from=/tmp/plan/archive-original.list /mnt/ssd/musics/Original/       /mnt/hdd/media/Archive/
 $R --files-from=/tmp/plan/playlists.list        /mnt/ssd/musics/Opus/Playlists/ /mnt/ssd/media/Playlists/m3u8/
 
-# 3. 検証（チェックサム比較。何も出なければ成功）
-V="sudo rsync -aHXn --checksum --itemize-changes --from0"
+# 3. 検証（チェックサム比較。何も出なければ成功）。-O はディレクトリの時刻を比べない:
+#    Original と Opus の 2 本を同じディレクトリへコピーするので、ディレクトリの mtime は必ず違う
+V="sudo rsync -aHXnO --checksum --itemize-changes --from0"
 $V --files-from=/tmp/plan/library-original.list /mnt/ssd/musics/Original/ /mnt/ssd/media/Library/
 $V --files-from=/tmp/plan/library-opus.list     /mnt/ssd/musics/Opus/     /mnt/ssd/media/Library/
 $V --files-from=/tmp/plan/archive-original.list /mnt/ssd/musics/Original/ /mnt/hdd/media/Archive/
 
-# 4. 所有者をコンテナの実行 UID/GID に合わせる
+# 4. 設定とメタデータプラグインを置く（初回起動より前。config.toml が無いと既定値で起動する）
+sudo install -m 644 config.toml /mnt/ssd/apps/spindle/config.toml
+sudo install -D -m 755 spindle-ytmusic-meta /mnt/ssd/apps/spindle/bin/spindle-ytmusic-meta
+
+# 5. 所有者をコンテナの実行 UID/GID に合わせる
 sudo chown -R 1000:1000 /mnt/ssd/media /mnt/hdd/media /mnt/ssd/apps/spindle
 
-# 5. spindle 初回スキャン完了と数日の運用までは ssd/musics を破棄しない
+# 6. spindle 初回スキャン完了と数日の運用までは ssd/musics を破棄しない
 ```
+
+`config.toml` は `deploy/config.example.toml` を元にする。`[encode.derived.aac]` を最初から有効にして
+よい（aac は RG の解析が済んだ行から作られる。§4）。プラグインはイメージに入っていない（D-70）。
+
+コピーと検証が済んだら、`docs/OPERATIONS.md`「カスタムアプリの作り方」でアプリを作って起動する。
+起動すると初回スキャン（deep）が走る（2026-09-24 のリハーサルで 9,098 本 9 分）。
 
 **ACL は rsync で引き継げない。** TrueNAS の SMB データセットは NFSv4 ACL を使うが、
 `rsync -A` が扱うのは POSIX ACL であり互換がない。コピー後に TrueNAS の ACL エディタで
@@ -141,11 +152,18 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
 
 ## 4. 移行後にやること
 
-- `backup` ジョブが 1 世代以上取れていること（`/mnt/ssd/apps/spindle/backup/`）
+- `backup` ジョブが 1 世代以上取れていること（`/mnt/ssd/apps/spindle/backup/`。起動時に 1 世代取る）
+- 旧 m3u8 を手動プレイリストとして取り込む（プレイリスト画面「Playlists/ の m3u8」、または
+  `GET /api/playlists/import` の各 `path` を `POST /api/playlists/import`）。28 本 14,205 行、未解決 0 が期待値
+- ReplayGain を全件解析する（`POST /api/rg {"selection":{"filter":""}}`、または全選択で「ReplayGain を解析」）。
+  `[replaygain].write_tags = true` なら解析と同時にタグへ書く（別の「解析値をタグに書く」は要らない）。
+  aac の Derived は RG が揃った行から作られるので、解析が終わるまで aac は増えない
+- ロスレス → FLAC 正規化（P1-4）で ALAC を FLAC にする（全選択で「正規化をプレビュー」→ 適用）。
+  退避した ALAC は `Archive/` に 30 日置かれてから GC される。正規化は `audio_version` を上げないので、
+  Derived の生成と並行してよい（作り直しは起きない）。2 並列で 7,570 本に約 5 時間
 - 一括編集を 1 件行い、巻き戻しが通ること（P0 の完了条件）
-- ロスレス → FLAC 正規化（P1-4）で ALAC を FLAC にする。退避した ALAC は `Archive/` に
-  30 日置かれてから GC される
-- Derived は P1-10 が Library から再生成する。旧 `Opus/` の 7,568 本は移していない
+- Derived は P1-10 が Library から再生成する（起動時スキャンの後に自動で投入）。旧 `Opus/` の 7,568 本は
+  移していない。opus + aac で約 130G 使うので、始める前に `ssd` の空きを見る
 
 ## 5. リリース時の再移行と旧データセットの破棄
 
@@ -173,7 +191,9 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
       明透 毎日）は**ユーザが YouTube 側で再生リストに追加済み**なので、1 の再実行で一緒に付く
       （手作業は要らない。前回は追加前に走らせたため残っていた）
    3. YouTube 画面で 9 本の再生リストを購読に登録（アルバムアーティスト / アルバム = 各 `〜のお歌`、
-      category = 神椿系の語彙）し、「同期」（P4-16、D-78）。同期は先に既存の行の `TRACKNUMBER` と
+      category = Library の最上位ディレクトリと同じ語彙: `神椿Studio` 5 本 / `深脊界Studio` 3 本 / `Vtuber`
+      （HIMEHINA）。**作り直した DB では語彙が空**なので、フォームの category 欄で足すか
+      `POST /api/categories {"name": …}` で先に作る）し、「同期」（P4-16、D-78）。同期は先に既存の行の `TRACKNUMBER` と
       ファイル名を再生リストの位置に揃え（tags バッチ → rename バッチ。Derived はタグ上書き・移動で追随）、
       `SOURCE_URL` の無いものだけを位置付きで Inbox に投入する → 承認で配置（初期値の番号がそのまま
       位置）→ 配置の後続で自動的にもう一度同期 → 結果が「番号を 0 件揃え」「揃えられない」無しで完了。
