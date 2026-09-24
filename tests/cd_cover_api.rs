@@ -40,6 +40,17 @@ const REDIRECTED: &str = "44444444-4444-4444-4444-444444444444";
 /// 自分自身へ飛ばし続ける盤
 const REDIRECT_LOOP: &str = "55555555-5555-5555-5555-555555555555";
 
+/// 取り込める本物の 1x1 PNG を返す盤（`POST /api/artwork/from-caa`。D-86）
+const REAL_ART: &str = "66666666-6666-6666-6666-666666666666";
+/// 1x1 の PNG（IHDR まである本物。寸法を読める）
+const REAL_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5, 0x1c, 0x0c,
+    0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64, 0x60, 0x00, 0x00,
+    0x00, 0x06, 0x00, 0x02, 0x30, 0x81, 0xd0, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+    0xae, 0x42, 0x60, 0x82,
+];
+
 /// 1x1 の PNG（中身は問わないので先頭の署名だけ）
 const PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -56,6 +67,7 @@ async fn caa_front(Path((id, size)): Path<(String, String)>) -> axum::response::
     }
     match id.as_str() {
         WITH_ART => ([(header::CONTENT_TYPE, "image/png")], PNG.to_vec()).into_response(),
+        REAL_ART => ([(header::CONTENT_TYPE, "image/png")], REAL_PNG.to_vec()).into_response(),
         BAD_TYPE => (
             [(header::CONTENT_TYPE, "text/html")],
             "<html>error</html>".to_owned(),
@@ -122,7 +134,10 @@ impl App {
         let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
             .await
             .expect("bootstrap");
-        let mut state = AppState::new(config, db, mode);
+        let store = Arc::new(spindle::media::artwork::ArtworkStore::new(
+            dir.path().join("thumbs"),
+        ));
+        let mut state = AppState::new(config, db, mode).with_artwork(store);
         if let Some(base) = caa_base {
             let client = CoverArtClient::new(base, "spindle-test/0.1").expect("client");
             state = state.with_coverart(Arc::new(client));
@@ -304,4 +319,49 @@ fn redirects_are_limited_and_never_downgrade() {
         0,
         5
     ));
+}
+
+async fn from_caa(app: &App, c: &str, body: &str) -> (StatusCode, serde_json::Value) {
+    let r = req(Method::POST, "/api/artwork/from-caa")
+        .header(header::COOKIE, c)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from(body.to_owned()))
+        .expect("request");
+    let res = app.router.clone().oneshot(r).await.expect("response");
+    let status = res.status();
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// `POST /api/artwork/from-caa`（D-86）: CAA の front 画像をアップロードと同じく取り込み、同じ応答を返す。
+/// 大文字の MBID も通す、画像の無い盤は 404、MBID でなければ 400、画像でない応答は 400、未構成は 503
+#[tokio::test]
+async fn from_caa_stores_the_front_image_like_an_upload() {
+    let app = App::new(Some(serve_caa().await)).await;
+    let c = app.cookie().await;
+    let (st, body) = from_caa(
+        &app,
+        &c,
+        &format!(r#"{{"release_id":"{}"}}"#, REAL_ART.to_ascii_uppercase()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert_eq!(body["mime"], "image/png");
+    assert_eq!(body["width"], 1);
+    assert_eq!(body["sha256"].as_str().map(str::len), Some(64));
+    let (st, _) = from_caa(&app, &c, &format!(r#"{{"release_id":"{NO_ART}"}}"#)).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = from_caa(&app, &c, r#"{"release_id":"../x"}"#).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, body) = from_caa(&app, &c, &format!(r#"{{"release_id":"{BAD_TYPE}"}}"#)).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{body}");
+    let app = App::new(None).await;
+    let c = app.cookie().await;
+    let (st, body) = from_caa(&app, &c, &format!(r#"{{"release_id":"{REAL_ART}"}}"#)).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "coverart_unavailable");
 }

@@ -12,7 +12,7 @@
 //! 正は Inbox のファイルで、行はキャッシュ。承認の補正はファイルのタグに書いてから置く
 //! （ファイルが正のまま再スキャンしても DB と一致する）
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,39 @@ pub struct DraftTrack {
     /// この欄が無かった旧下書きで、旧規則（多値で `artist` が先頭値のままなら保つ）で解釈する
     #[serde(default)]
     pub keep_artists: Option<bool>,
+    /// ファイルのタグの変更（D-86）。キー（大文字）→ 値の配列、`None` はそのタグを消す。書くのは
+    /// ここにあるキーだけで、無いキーはファイルのまま。上の欄が扱うキー（[`COVERED_TAG_KEYS`]）と
+    /// 同一性の判定に使うキー（[`is_locked_tag_key`]）は受け付けない
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, Option<Vec<String>>>,
+    /// 埋め込み画像を差し替える（`<mime>:<sha256hex>`。`POST /api/artwork/upload` で置いた画像。D-86）。
+    /// `None` ならファイルの画像のまま
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
 }
+
+/// 承認画面の固定の欄が扱うキー。`DraftTrack::tags` では受け付けない（二通りの直し方を作らない）
+pub const COVERED_TAG_KEYS: &[&str] = &[
+    "TITLE",
+    "ARTIST",
+    "ALBUM",
+    "ALBUMARTIST",
+    "DATE",
+    "TRACKNUMBER",
+    "DISCNUMBER",
+    "DISCTOTAL",
+    "PICTURE",
+];
+
+/// 曲・盤の同一性の判定に使うキー（D-86）。`SOURCE_URL` は YouTube の二重取り込みの判定（D-70）、
+/// `MUSICBRAINZ_*` は CD の盤とリリースの識別（D-67 追記 3）。手で書き換えると判定が静かに壊れるので
+/// 承認画面では直させない（リリースは MusicBrainz の引き直しで付け替える）
+pub fn is_locked_tag_key(key: &str) -> bool {
+    key == "SOURCE_URL" || key.starts_with("MUSICBRAINZ_")
+}
+
+/// 画像の形式（`POST /api/artwork/upload` が受け付けるもの）
+const DRAFT_PICTURE_MIMES: &[&str] = &["image/jpeg", "image/png", "image/webp"];
 
 /// 承認の入力（アルバム単位の補正とトラック単位の補正）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +125,22 @@ pub enum DraftError {
     BadReleaseId(String),
     #[error("MusicBrainz のリリースグループ ID の形が不正: {0}")]
     BadReleaseGroupId(String),
+    #[error("タグのキーが不正: {key}（{rel_path}。空・小文字・= や制御文字は使えない）")]
+    BadTagKey { rel_path: String, key: String },
+    #[error("{key} は上の欄で直す（{rel_path}）")]
+    CoveredTagKey { rel_path: String, key: String },
+    #[error("{key} は曲・盤の識別に使うので直せない（{rel_path}）")]
+    LockedTagKey { rel_path: String, key: String },
+    #[error("画像の指定が不正: {value}（{rel_path}）")]
+    BadPicture { rel_path: String, value: String },
+}
+
+/// タグのキーの形（`tagops` の `normalize_key` と同じ文字の規則。下書きは正規化済みのキーだけを受ける）
+fn is_valid_tag_key(key: &str) -> bool {
+    !key.is_empty()
+        && key == key.trim()
+        && key == key.to_uppercase()
+        && key.chars().all(|c| (' '..='}').contains(&c) && c != '=')
 }
 
 /// MusicBrainz の MBID（UUID `8-4-4-4-12`）か。大文字も通す（foobar2000 などが書いた既存のタグ。値は
@@ -165,6 +213,35 @@ impl InboxDraft {
                 out.push(DraftError::EmptyTitle {
                     rel_path: t.rel_path.clone(),
                 });
+            }
+            for key in t.tags.keys() {
+                let e = (t.rel_path.clone(), key.clone());
+                if !is_valid_tag_key(key) {
+                    out.push(DraftError::BadTagKey {
+                        rel_path: e.0,
+                        key: e.1,
+                    });
+                } else if COVERED_TAG_KEYS.contains(&key.as_str()) {
+                    out.push(DraftError::CoveredTagKey {
+                        rel_path: e.0,
+                        key: e.1,
+                    });
+                } else if is_locked_tag_key(key) {
+                    out.push(DraftError::LockedTagKey {
+                        rel_path: e.0,
+                        key: e.1,
+                    });
+                }
+            }
+            if let Some(p) = &t.picture {
+                let ok = crate::edit::picture::parse_picture_value(p)
+                    .is_some_and(|(mime, _)| DRAFT_PICTURE_MIMES.contains(&mime));
+                if !ok {
+                    out.push(DraftError::BadPicture {
+                        rel_path: t.rel_path.clone(),
+                        value: p.clone(),
+                    });
+                }
             }
             if t.disc_no == 0 || t.track_no == 0 {
                 out.push(DraftError::BadNumber {
@@ -397,6 +474,8 @@ pub fn proposal(
             title: tag(f, "TITLE").unwrap_or("").trim().to_owned(),
             artist: joined_artist(&f.tags),
             keep_artists: Some(artist_values(&f.tags).len() > 1),
+            tags: Default::default(),
+            picture: None,
         })
         .collect();
     InboxDraft {
@@ -1176,7 +1255,7 @@ fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -
             desired.push((k, v.to_owned()));
         }
     }
-    desired
+    let mut out: Vec<TagChange> = desired
         .into_iter()
         .filter(|(k, v)| {
             let now: Vec<&str> = current
@@ -1194,6 +1273,63 @@ fn tag_changes(draft: &InboxDraft, index: usize, current: &[(String, String)]) -
         .map(|(k, v)| TagChange {
             key: k.to_owned(),
             values: Some(vec![v]),
+        })
+        .collect();
+    // 承認画面で直したファイルのタグ（D-86）。現在値と同じものは書かない
+    for (key, values) in &t.tags {
+        let values: Option<Vec<String>> = values
+            .as_ref()
+            .map(|vs| {
+                vs.iter()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|vs| !vs.is_empty());
+        let now: Vec<&str> = current
+            .iter()
+            .filter(|(ck, _)| ck == key)
+            .map(|(_, cv)| cv.as_str())
+            .collect();
+        let same = match &values {
+            Some(vs) => now == vs.iter().map(String::as_str).collect::<Vec<_>>(),
+            None => now.is_empty(),
+        };
+        if !same {
+            out.push(TagChange {
+                key: key.clone(),
+                values,
+            });
+        }
+    }
+    out
+}
+
+/// 下書きの `picture`（D-86）を store から front cover として読む（下書きの順）。指定があるのに
+/// 置き場が無い・画像が無いなら Conflict（承認し直して選び直してもらう）
+fn load_draft_pictures(
+    store: Option<&crate::media::artwork::ArtworkStore>,
+    draft: &InboxDraft,
+) -> Result<Vec<Option<lofty::picture::Picture>>, InboxError> {
+    draft
+        .tracks
+        .iter()
+        .map(|t| {
+            let Some(value) = t.picture.as_deref() else {
+                return Ok(None);
+            };
+            let Some(store) = store else {
+                return Err(InboxError::Conflict(
+                    "画像の置き場（artwork）が無いので画像を埋め込めない".into(),
+                ));
+            };
+            match crate::edit::picture::load_picture(store, value)? {
+                Some(p) => Ok(Some(p)),
+                None => Err(InboxError::Conflict(format!(
+                    "{}: 画像が見つからない（{value}）。承認画面で選び直す",
+                    t.rel_path
+                ))),
+            }
         })
         .collect()
 }
@@ -1521,6 +1657,8 @@ pub fn destination_of(
             title: "x".to_owned(),
             artist: String::new(),
             keep_artists: None,
+            tags: Default::default(),
+            picture: None,
         }],
         album_gain: false,
         release_id: None,
@@ -1681,6 +1819,52 @@ fn plan_item(
     })
 }
 
+/// 配置先の見込み（承認画面の ④。`POST /api/inbox/:id/preview`、D-86）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlacePreview {
+    /// 置くディレクトリ（Library 相対）
+    pub rel_dir: String,
+    /// 置くファイル（Library 相対。下書きの順）
+    pub paths: Vec<String>,
+}
+
+/// 配置の計画（[`plan_item`]）を音声を読まずに引く。自分の成果物（同じ音声の既存行）は見ないので、
+/// 途中で失敗した件の再承認では実際の配置と食い違うことがある（見込みとして出す）
+pub fn preview(
+    conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    item: &Item,
+    draft: &InboxDraft,
+    files: &[FileRow],
+) -> Result<PlacePreview, InboxError> {
+    let names: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();
+    draft.validate(&names)?;
+    let plan = plan_item(conn, layout, item, draft, files, &[])?;
+    Ok(PlacePreview {
+        rel_dir: plan.rel_dir.to_string(),
+        paths: plan.paths.iter().map(ToString::to_string).collect(),
+    })
+}
+
+/// 下書きの `picture` のうち `artwork` 行の無いもの（承認の前に弾く。D-86）
+pub fn missing_pictures(
+    conn: &rusqlite::Connection,
+    draft: &InboxDraft,
+) -> Result<Vec<String>, DbError> {
+    let mut st = conn.prepare_cached("SELECT EXISTS (SELECT 1 FROM artwork WHERE sha256 = ?1)")?;
+    let mut out = Vec::new();
+    for p in draft.tracks.iter().filter_map(|t| t.picture.as_deref()) {
+        let Some((_, hash)) = crate::edit::picture::parse_picture_value(p) else {
+            continue;
+        };
+        let exists: bool = st.query_row([hash.to_vec()], |r| r.get(0))?;
+        if !exists && !out.iter().any(|o| o == p) {
+            out.push(p.to_owned());
+        }
+    }
+    Ok(out)
+}
+
 /// 置いた結果（登録の材料）
 struct Placed {
     tracks: Vec<(scans::Physical, scans::TrackContent, Fingerprint)>,
@@ -1742,14 +1926,17 @@ fn place_files(
     plan: &ItemPlan,
     files: &HashMap<String, FileRow>,
     sources: &[Source],
+    pictures: &[Option<lofty::picture::Picture>],
 ) -> Result<Placed, InboxError> {
     let created_top = create_dirs(library, &plan.rel_dir)?;
     let mut placed_new: Vec<RelPath> = Vec::new();
     let result = (|| -> Result<Placed, InboxError> {
         let mut tracks = Vec::with_capacity(plan.paths.len());
-        for (target, src) in plan.paths.iter().zip(sources) {
+        for (i, (target, src)) in plan.paths.iter().zip(sources).enumerate() {
             let ext_for_write = src.ext.clone();
             let changes = src.changes.clone();
+            let picture: Option<Vec<lofty::picture::Picture>> =
+                pictures.get(i).cloned().flatten().map(|p| vec![p]);
             let src_fp = src.fp;
             // コピーに使う FD そのものを承認時の行（inode / size / mtime / ctime）と照合する。
             // read_sources の stat からここまでの間に差し替えられていれば Changed（D-68「コピー中に
@@ -1768,10 +1955,14 @@ fn place_files(
                 target,
                 &src_file,
                 move |tmp: &mut File| {
-                    if !changes.is_empty() {
-                        write_tag_changes(tmp, ext_for_write.as_deref(), &changes, None).map_err(
-                            |e| PlacementError::Io(std::io::Error::other(e.to_string())),
-                        )?;
+                    if !changes.is_empty() || picture.is_some() {
+                        write_tag_changes(
+                            tmp,
+                            ext_for_write.as_deref(),
+                            &changes,
+                            picture.as_deref(),
+                        )
+                        .map_err(|e| PlacementError::Io(std::io::Error::other(e.to_string())))?;
                     }
                     Ok(())
                 },
@@ -2230,6 +2421,17 @@ pub async fn place_item(
                 })??,
         )
     };
+    // 差し替える画像（D-86）。承認後に GC された・置き場が無いなら配置しない（選び直してもらう）
+    let pictures: Arc<Vec<Option<lofty::picture::Picture>>> = {
+        let (store, draft) = (env.artwork.clone(), draft.clone());
+        Arc::new(
+            tokio::task::spawn_blocking(move || load_draft_pictures(store.as_deref(), &draft))
+                .await
+                .map_err(|e| {
+                    std::io::Error::other(format!("画像の読み込みタスクが異常終了: {e}"))
+                })??,
+        )
+    };
     // サイドカー（配置の成功で消えるので、消す前に読む）: 購読由来か（P4-16）と、CD の吸い出しの
     // 記録（D-67 追記。名前でトラックへ結びつけ、合わなければ配置しない）
     let (sidecar, sidecar_key): (Option<Sidecar>, SidecarKey) = {
@@ -2269,16 +2471,17 @@ pub async fn place_item(
     }
     // 3. 配置
     let placed = {
-        let (library, inbox, item, plan, files, sources) = (
+        let (library, inbox, item, plan, files, sources, pictures) = (
             Arc::clone(&env.library),
             Arc::clone(&env.inbox),
             item.clone(),
             plan.clone(),
             Arc::clone(&files),
             Arc::clone(&sources),
+            Arc::clone(&pictures),
         );
         tokio::task::spawn_blocking(move || {
-            place_files(&library, &inbox, &item, &plan, &files, &sources)
+            place_files(&library, &inbox, &item, &plan, &files, &sources, &pictures)
         })
         .await
         .map_err(|e| std::io::Error::other(format!("配置タスクが異常終了: {e}")))??

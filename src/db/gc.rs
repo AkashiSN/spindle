@@ -63,12 +63,15 @@ pub fn derived_keys(conn: &Connection, except: &HashSet<i64>) -> Result<HashSet<
 
 /// 「参照されている」の SQL 断片（`a` は `artwork`）: `albums.artwork_id` / `tracks.artwork_id`（D-61）
 /// から参照されるか、編集履歴の `PICTURE` 値（旧 / 新。`<mime>:<sha256hex>` の配列）に現れる（巻き戻しに要る。D-60）。
-/// 値は JSON 文字列なので hex の部分一致で引く（64 桁の hex は他の値と衝突しない）
+/// 値は JSON 文字列なので hex の部分一致で引く（64 桁の hex は他の値と衝突しない）。
+/// Inbox の下書きが差し替えに指定した画像（`tracks[].picture`。D-86）も、配置まで要るので参照とみなす
 const ARTWORK_REFERENCED: &str = "EXISTS (SELECT 1 FROM albums b WHERE b.artwork_id = a.id)
        OR EXISTS (SELECT 1 FROM tracks t WHERE t.artwork_id = a.id)
        OR EXISTS (SELECT 1 FROM edits e WHERE e.key = 'PICTURE'
                     AND (instr(e.old_value, lower(hex(a.sha256))) > 0
-                      OR instr(e.new_value, lower(hex(a.sha256))) > 0))";
+                      OR instr(e.new_value, lower(hex(a.sha256))) > 0))
+       OR EXISTS (SELECT 1 FROM inbox_items i WHERE i.draft IS NOT NULL
+                    AND instr(lower(i.draft), lower(hex(a.sha256))) > 0)";
 
 /// どこからも参照されない `artwork` 行: `(id, sha256)`（[`ARTWORK_REFERENCED`] の否定）
 pub fn unreferenced_artwork(conn: &Connection) -> Result<Vec<(i64, Vec<u8>)>> {

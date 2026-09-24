@@ -204,6 +204,12 @@ pub async fn approve(
             if let Err(e) = draft.validate(&names) {
                 return Ok(Approve::Bad(e.to_string()));
             }
+            // 差し替える画像が置いてあること（アップロードから時間が経って GC された等。D-86）
+            if let Some(p) = crate::import::inbox::missing_pictures(c, &draft)?.first() {
+                return Ok(Approve::Bad(format!(
+                    "画像が見つからない（{p}）。画像を選び直す"
+                )));
+            }
             // 追記先の active なトラックと番号が重ならないこと（配置で failed になる前に直させる。D-70）
             let dest = match destination(c, &layout, &draft, &files) {
                 Ok(d) => d,
@@ -254,6 +260,55 @@ enum Approve {
     State,
     Bad(String),
     Ok,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreviewResponse {
+    /// 置くディレクトリ（Library 相対）。決められなければ null
+    pub rel_dir: Option<String>,
+    pub paths: Vec<String>,
+    /// 決められない理由（下書きの問題・宛先の衝突）
+    pub error: Option<String>,
+}
+
+/// `POST /api/inbox/:id/preview`（D-86）: 下書きで配置したときの置き場所の見込み。決められないときも
+/// 200 で `error` に理由を入れる（承認画面の ④ に出す）
+pub async fn preview(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(draft): Json<InboxDraft>,
+) -> Result<Response, ApiError> {
+    if let Some(r) = unavailable(&state) {
+        return Ok(r);
+    }
+    let layout = state.config.layout.clone();
+    let out = state
+        .db
+        .read(move |c| {
+            let Some(item) = dbinbox::get(c, id)? else {
+                return Ok(None);
+            };
+            let files = dbinbox::files(c, id)?;
+            Ok(Some(
+                match crate::import::inbox::preview(c, &layout, &item, &draft, &files) {
+                    Ok(p) => PreviewResponse {
+                        rel_dir: Some(p.rel_dir),
+                        paths: p.paths,
+                        error: None,
+                    },
+                    Err(e) => PreviewResponse {
+                        rel_dir: None,
+                        paths: Vec::new(),
+                        error: Some(e.to_string()),
+                    },
+                },
+            ))
+        })
+        .await?;
+    Ok(match out {
+        Some(p) => Json(p).into_response(),
+        None => error_response(StatusCode::NOT_FOUND, "not_found"),
+    })
 }
 
 async fn transition(

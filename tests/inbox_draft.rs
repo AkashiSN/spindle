@@ -42,6 +42,8 @@ fn draft() -> InboxDraft {
                 title: "One".into(),
                 artist: String::new(),
                 keep_artists: None,
+                tags: Default::default(),
+                picture: None,
             },
             DraftTrack {
                 rel_path: "A/02.flac".into(),
@@ -50,6 +52,8 @@ fn draft() -> InboxDraft {
                 title: "Two".into(),
                 artist: "Guest".into(),
                 keep_artists: None,
+                tags: Default::default(),
+                picture: None,
             },
         ],
     }
@@ -233,6 +237,8 @@ fn number_missing_assigns_from_start_in_file_order_skipping_used_numbers() {
                 title: "b".into(),
                 artist: String::new(),
                 keep_artists: None,
+                tags: Default::default(),
+                picture: None,
             },
             DraftTrack {
                 rel_path: "x/20260901 a.opus".into(),
@@ -241,6 +247,8 @@ fn number_missing_assigns_from_start_in_file_order_skipping_used_numbers() {
                 title: "a".into(),
                 artist: String::new(),
                 keep_artists: None,
+                tags: Default::default(),
+                picture: None,
             },
             DraftTrack {
                 rel_path: "x/c.opus".into(),
@@ -249,6 +257,8 @@ fn number_missing_assigns_from_start_in_file_order_skipping_used_numbers() {
                 title: "c".into(),
                 artist: String::new(),
                 keep_artists: None,
+                tags: Default::default(),
+                picture: None,
             },
         ],
     };
@@ -286,6 +296,8 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
                 title: "Corrected".into(),
                 artist: String::new(),
                 keep_artists: None,
+                tags: Default::default(),
+                picture: None,
             },
             DraftTrack {
                 rel_path: "A/gone.flac".into(),
@@ -294,6 +306,8 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
                 title: "Gone".into(),
                 artist: String::new(),
                 keep_artists: None,
+                tags: Default::default(),
+                picture: None,
             },
         ],
     };
@@ -305,6 +319,8 @@ fn merge_saved_keeps_corrections_for_known_files_and_adds_new_ones() {
         title: "Three".into(),
         artist: String::new(),
         keep_artists: None,
+        tags: Default::default(),
+        picture: None,
     });
     let merged = merge_saved(&saved, &proposed);
     // アルバム単位の補正は保存した下書き
@@ -341,6 +357,8 @@ fn cd_draft(tracks: &[(&str, u32, u32)]) -> InboxDraft {
                 title: "t".into(),
                 artist: String::new(),
                 keep_artists: None,
+                tags: Default::default(),
+                picture: None,
             })
             .collect(),
         album_gain: true,
@@ -472,4 +490,89 @@ fn proposal_and_merge_carry_release_ids() {
         merge_saved(&saved, &p).release_id.as_deref(),
         Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
     );
+}
+
+/// トラックのタグの変更と画像の差し替え（D-86）: キーの形、上の欄が扱うキー、同一性に使うキー、画像の指定
+#[test]
+fn track_tags_and_picture_are_validated() {
+    let with = |key: &str| {
+        let mut d = draft();
+        d.tracks[0]
+            .tags
+            .insert(key.to_owned(), Some(vec!["v".to_owned()]));
+        d.validate(&files())
+    };
+    // 任意のキーの設定と削除は通る
+    assert_eq!(with("GENRE"), Ok(()));
+    assert_eq!(with("MY KEY"), Ok(()));
+    let mut d = draft();
+    d.tracks[1].tags.insert("COMMENT".into(), None);
+    assert_eq!(d.validate(&files()), Ok(()));
+    // 形の悪いキー（小文字・空・= を含む）
+    for bad in ["genre", "", "A=B", " GENRE"] {
+        assert_eq!(
+            with(bad),
+            Err(DraftError::BadTagKey {
+                rel_path: "A/01.flac".into(),
+                key: bad.into()
+            }),
+            "{bad:?}"
+        );
+    }
+    // 上の欄が扱うキー
+    for k in ["TITLE", "ALBUM", "TRACKNUMBER", "DISCTOTAL", "PICTURE"] {
+        assert_eq!(
+            with(k),
+            Err(DraftError::CoveredTagKey {
+                rel_path: "A/01.flac".into(),
+                key: k.into()
+            })
+        );
+    }
+    // 同一性に使うキー
+    for k in ["SOURCE_URL", "MUSICBRAINZ_DISCID", "MUSICBRAINZ_TRACKID"] {
+        assert_eq!(
+            with(k),
+            Err(DraftError::LockedTagKey {
+                rel_path: "A/01.flac".into(),
+                key: k.into()
+            })
+        );
+    }
+    // 画像は `<mime>:<sha256hex>`（受け付ける形式だけ）
+    let hex = "ab".repeat(32);
+    let pic = |v: &str| {
+        let mut d = draft();
+        d.tracks[1].picture = Some(v.to_owned());
+        d.validate(&files())
+    };
+    assert_eq!(pic(&format!("image/jpeg:{hex}")), Ok(()));
+    assert_eq!(pic(&format!("image/png:{hex}")), Ok(()));
+    for bad in [
+        format!("image/gif:{hex}"),
+        "image/jpeg:abc".to_owned(),
+        hex.clone(),
+    ] {
+        assert_eq!(
+            pic(&bad),
+            Err(DraftError::BadPicture {
+                rel_path: "A/02.flac".into(),
+                value: bad.clone()
+            })
+        );
+    }
+}
+
+/// 旧い下書き（tags / picture の欄が無い）も読め、空のものは書き出さない
+#[test]
+fn draft_without_tags_and_picture_round_trips() {
+    let v = serde_json::to_value(draft()).unwrap();
+    assert!(v["tracks"][0].get("tags").is_none());
+    assert!(v["tracks"][0].get("picture").is_none());
+    let back: InboxDraft = serde_json::from_value(v).unwrap();
+    assert_eq!(back, draft());
+    let mut d = draft();
+    d.tracks[0].tags.insert("GENRE".into(), None);
+    let v = serde_json::to_value(&d).unwrap();
+    assert_eq!(v["tracks"][0]["tags"], serde_json::json!({ "GENRE": null }));
 }

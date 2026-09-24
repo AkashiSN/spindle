@@ -79,6 +79,7 @@ pub fn router(state: AppState) -> Router {
             post(artwork::upload).layer(DefaultBodyLimit::max(artwork::UPLOAD_LIMIT)),
         )
         .route("/artwork/embed", post(artwork::embed))
+        .route("/artwork/from-caa", post(artwork::from_caa))
         .route("/playlists", get(playlists::list).post(playlists::create))
         .route(
             "/playlists/import",
@@ -124,6 +125,7 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox/{id}/reject", post(inbox::reject))
         .route("/inbox/{id}/reopen", post(inbox::reopen))
         .route("/inbox/{id}/artwork/{hash}", get(inbox::artwork))
+        .route("/inbox/{id}/preview", post(inbox::preview))
         .route("/ytmusic/download", post(ytmusic::download))
         .route(
             "/ytmusic/subscriptions",

@@ -24,7 +24,7 @@
 
 mod md5fill;
 mod normalize;
-mod picture;
+pub mod picture;
 pub(crate) mod rename;
 mod revert;
 

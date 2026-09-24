@@ -1006,6 +1006,37 @@ async fn artwork_referenced_by_picture_edits_is_kept() {
     assert_eq!(env.count("SELECT count(*) FROM artwork"), 2);
 }
 
+/// Inbox の下書きが差し替えに指定した画像（`tracks[].picture`。D-86）は、配置まで要るので残す
+#[tokio::test]
+async fn artwork_referenced_by_an_inbox_draft_is_kept() {
+    let env = Env::new();
+    let wanted = env.artwork(1, 0x11);
+    let unrelated = env.artwork(2, 0x22);
+    for d in [&wanted, &unrelated] {
+        env.put(&format!("thumbs/{d}/orig.png"), b"x", 5 * DAY);
+        set_age(&env.path(&format!("thumbs/{d}")), 5 * DAY);
+    }
+    env.conn()
+        .execute(
+            "INSERT INTO inbox_items (id, rel_dir, rel_dir_key, state, detected_at, seen_at, draft)
+             VALUES (1, 'x', 'x', 'failed', 0, 0, ?1)",
+            [format!(
+                r#"{{"albumartist":"A","album":"B","tracks":[{{"rel_path":"x/1.flac","disc_no":1,"track_no":1,"title":"t","picture":"image/png:{wanted}"}}]}}"#
+            )],
+        )
+        .unwrap();
+
+    let p = plan(&env.db, &env.roots, RETENTION, env.now).await.unwrap();
+    assert_eq!(
+        p.artwork_rows.iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![2]
+    );
+    let s = run(&env).await;
+    assert_eq!(s.artwork_rows.deleted, 1, "{s:?}");
+    assert!(env.path(&format!("thumbs/{wanted}/orig.png")).exists());
+    assert_eq!(env.count("SELECT count(*) FROM artwork WHERE id = 1"), 1);
+}
+
 /// アップロード直後（参照前）の行は dir と同じ 24 時間の猶予で残す
 #[tokio::test]
 async fn recently_uploaded_artwork_row_without_reference_is_kept() {

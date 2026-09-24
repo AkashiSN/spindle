@@ -149,6 +149,63 @@ pub struct UploadResponse {
 /// thumbnail ジョブを投入する。形式はヘッダで判別し（Content-Type と拡張子は信用しない）、
 /// JPEG / PNG / WebP 以外は 400 `unsupported_image`。同じ画像は 1 回だけ置かれる
 pub async fn upload(State(state): State<AppState>, body: Bytes) -> Result<Response, ApiError> {
+    store_image(&state, body).await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FromCaaBody {
+    /// MusicBrainz のリリース（MBID）
+    pub release_id: String,
+}
+
+/// `POST /api/artwork/from-caa { release_id }`（D-86）: Cover Art Archive の front 画像（500px）を取り、
+/// アップロードと同じく store と `artwork` 行に置く（応答も同じ）。Inbox の承認画面の「Cover Art Archive
+/// から取る」。画像の無い盤は 404、上流の失敗は 502 `lookup_failed`、クライアント未構成は 503
+pub async fn from_caa(
+    State(state): State<AppState>,
+    body: Result<Json<FromCaaBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = match body {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                e.body_text(),
+            ))
+        }
+    };
+    let release_id = body.release_id.trim().to_ascii_lowercase();
+    if !super::cd::is_mbid(&release_id) {
+        return Ok(error_response_with_message(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "リリース id は MusicBrainz の MBID（8-4-4-4-12）",
+        ));
+    }
+    let Some(client) = state.coverart.as_ref() else {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coverart_unavailable",
+        ));
+    };
+    match client.front(&release_id).await {
+        Ok(None) => Ok(error_response(StatusCode::NOT_FOUND, "not_found")),
+        Ok(Some((_content_type, bytes))) => store_image(&state, Bytes::from(bytes)).await,
+        Err(e) => {
+            let detail = crate::cd::error_chain(&e);
+            tracing::warn!(error = %detail, release_id, "ジャケットの取得に失敗");
+            Ok(error_response_with_message(
+                StatusCode::BAD_GATEWAY,
+                "lookup_failed",
+                detail,
+            ))
+        }
+    }
+}
+
+/// 画像のバイト列を store と `artwork` 行に置き、thumbnail ジョブを投入する（upload / from-caa 共通）
+async fn store_image(state: &AppState, body: Bytes) -> Result<Response, ApiError> {
     let Some(store) = state.artwork.clone() else {
         return Ok(error_response(
             StatusCode::SERVICE_UNAVAILABLE,

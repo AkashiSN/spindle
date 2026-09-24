@@ -473,7 +473,7 @@ pub async fn library(
 
 /// MBID（8-4-4-4-12 の 16 進）か。上流に投げる前に形を確かめる
 /// （利用者の文字列をそのまま URL に継ぎ足さない。D-82）
-fn is_mbid(s: &str) -> bool {
+pub(super) fn is_mbid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
         && [8, 4, 4, 4, 12]

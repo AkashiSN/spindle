@@ -1100,6 +1100,16 @@ Inbox/ に配置（ポーリング検出）
   disc_no / track_no / title / artist を補正して `POST /api/inbox/:id/approve { draft }`。検証（album /
   albumartist / 各 title が空でない、`(disc_no, track_no)` が 1 以上で重複なし、rel_path が件のファイルと
   一致）に通らなければ 400 で、メタデータ不足のまま Library に入れない。`reject` / `reopen` で状態を戻す
+- **トラックのタグの変更と画像の差し替え**（D-86）: 下書きのトラックは `tags`（キー → 値の配列、`null` で
+  そのタグを消す。書くのはここにあるキーだけ）と `picture`（`<mime>:<sha256hex>`。`POST /api/artwork/upload`
+  か `/from-caa` で置いた画像）を持てる（どちらも省略可。旧い下書きはそのまま読む）。キーは大文字・空でなく
+  `=` と制御文字を含まない（tagops と同じ文字の規則）。上の欄が扱うキー（TITLE / ARTIST / ALBUM /
+  ALBUMARTIST / DATE / TRACKNUMBER / DISCNUMBER / DISCTOTAL / PICTURE）と、曲・盤の同一性に使うキー
+  （`SOURCE_URL` / `MUSICBRAINZ_*`）は受け付けない。承認は差し替える画像の `artwork` 行が無ければ 400。
+  配置は `tags` の変更を補正のタグに足して書き（現在値と同じものは書かない）、`picture` のある曲だけ埋め込み
+  画像を全部捨ててその 1 枚（front cover）にする。画像が store から消えていれば配置せず failed。下書きが
+  参照する画像は GC しない（区分 E の「参照」に Inbox の下書きを足す。D-56 / D-86）。`POST /api/inbox/:id/preview { draft }` は音声を読まずに
+  配置の計画を引いて置き場所の見込みを返す（承認画面の ④）
 - **配置**は `approved` の件を `inbox` ジョブが順に処理する。`library` の排他（scan / gc / CD の配置と
   同じ）を取れなければ Requeue。draft から各ファイルの `TrackFields` を作り `pathgen::plan`（category 無しは
   `_Unsorted`、`disc_no` の最大 ≥ 2 なら `multi_disc`、リリースキーは MUSICBRAINZ_ALBUMID の最頻値があれば
@@ -1429,6 +1439,9 @@ POST   /api/artwork/embed                         { selection, sha256, descripti
                                                   active 全行の埋め込み画像をその 1 枚に差し替える tags op
                                                   （PICTURE）の編集バッチを記録（§7.5、D-60）
                                                   → 201 { batch_id, affected, unchanged, pending_excluded }
+POST   /api/artwork/from-caa                      { release_id }（MBID。大小無視）。Cover Art Archive の front 画像（500px）を
+                                                  取り、upload と同じく置く → 201（upload と同じ応答）。画像の無い盤は 404、
+                                                  上流の失敗は 502 lookup_failed、未構成は 503 coverart_unavailable（D-86）
                                                   → 404 artwork_not_found、409 pending | no_changes
 
 GET    /api/playlists, POST, PATCH, DELETE        プレイリストの CRUD（D-53）。POST / PATCH に rule があれば
@@ -1504,8 +1517,12 @@ GET    /api/inbox/:id/artwork/:hash               件のファイルの埋め込
                                                   セッション必須。§7.8、P4-4）
 POST   /api/inbox/scan                            inbox ジョブを投入（202 + job_id。queued / running があれば 409 duplicate）
 POST   /api/inbox/:id/approve                     { category, albumartist, album, date, album_gain?, tracks: [{ rel_path, disc_no,
-                                                  track_no, title, artist, keep_artists? }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved +
-                                                  ジョブ投入。album_gain は既定 false（D-74）
+                                                  track_no, title, artist, keep_artists?, tags?, picture? }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved +
+                                                  ジョブ投入。album_gain は既定 false（D-74）。tags / picture は §7.8（D-86）。
+                                                  差し替える画像の artwork 行が無ければ 400
+POST   /api/inbox/:id/preview                     { draft }（approve と同じ形）。音声を読まずに配置の計画を引く →
+                                                  200 { rel_dir, paths, error }（決められなければ rel_dir は null で error に
+                                                  理由）。自分の成果物の再利用は見ないので見込み（D-86）
 POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
 POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
 GET    /api/ytmusic/subscriptions                 → { items: [Subscription] }（albumartist / album 順。P4-16、D-78）

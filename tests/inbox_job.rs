@@ -327,6 +327,8 @@ fn draft_for(files: &[(&str, u32, &str)], category: Option<&str>, album: &str) -
                 title: title.to_string(),
                 artist: String::new(),
                 keep_artists: None,
+                tags: Default::default(),
+                picture: None,
             })
             .collect(),
         album_gain: false,
@@ -2481,4 +2483,134 @@ async fn cd_item_is_not_registered_when_the_sidecar_is_replaced_during_placement
         .tracks
         .iter()
         .all(|t| t.matched));
+}
+
+/// 承認画面で直したファイルのタグ（設定・削除・新しいキー）と差し替えた画像が、配置したファイルに
+/// 書かれる（D-86）。FLAC / Opus / MP4 のそれぞれで、画像を指定しなかった曲は元の画像のまま
+#[tokio::test]
+async fn draft_tags_and_pictures_are_written_on_placement() {
+    let lib = Lib::new();
+    let a = require_ffmpeg!(lib.add("Tags/01.flac", 1, "One", "T", 1));
+    let b = require_ffmpeg!(lib.add("Tags/02.opus", 2, "Two", "T", 2));
+    let c = require_ffmpeg!(lib.add("Tags/03.m4a", 3, "Three", "T", 3));
+    set_tags(
+        &a,
+        "flac",
+        &[("GENRE", &["Old"]), ("COMMENT", &["drop me"])],
+    );
+    set_tags(&b, "opus", &[("GENRE", &["Old"])]);
+    set_tags(&c, "m4a", &[("GENRE", &["Old"])]);
+    // 差し替える画像をアップロード済みにする（store と artwork 行）
+    let png_dir = lib.dir.path().join("png");
+    std::fs::create_dir_all(&png_dir).unwrap();
+    let png_path = png_dir.join("c.png");
+    let ok = std::process::Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=8x8",
+            "-frames:v",
+            "1",
+        ])
+        .arg(&png_path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("ffmpeg で画像を作れないので skip");
+        return;
+    }
+    let png = std::fs::read(&png_path).unwrap();
+    let hash = ArtworkStore::hash_of(&png);
+    ArtworkStore::new(lib.dir.path().join("thumbs"))
+        .put_original(&hash, "image/png", &png)
+        .unwrap();
+    spindle::db::artwork::upsert(
+        &lib.conn(),
+        &hash,
+        "image/png",
+        Some(8),
+        Some(8),
+        png.len(),
+        "embedded",
+    )
+    .unwrap();
+    let picture = format!("image/png:{}", ArtworkStore::hex(&hash));
+
+    lib.scan(1000).await;
+    let item = lib.item("Tags").unwrap();
+    let mut draft = draft_for(
+        &[
+            ("Tags/01.flac", 1, "One"),
+            ("Tags/02.opus", 2, "Two"),
+            ("Tags/03.m4a", 3, "Three"),
+        ],
+        None,
+        "T",
+    );
+    draft.tracks[0]
+        .tags
+        .insert("GENRE".into(), Some(vec!["Rock".into(), "Pop".into()]));
+    draft.tracks[0].tags.insert("COMMENT".into(), None);
+    draft.tracks[0].picture = Some(picture.clone());
+    draft.tracks[1]
+        .tags
+        .insert("LYRICIST".into(), Some(vec!["L2".into()]));
+    draft.tracks[2]
+        .tags
+        .insert("GENRE".into(), Some(vec!["Jazz".into()]));
+    draft.tracks[2]
+        .tags
+        .insert("LYRICIST".into(), Some(vec!["L3".into()]));
+    draft.tracks[2].picture = Some(picture.clone());
+    lib.approve(item.id, &draft);
+    lib.start(false);
+    assert_eq!(lib.run_job().await, JobState::Done);
+
+    let read = |rel: &str, ext: &str| {
+        spindle::domain::tags::read_audio_file_with_pictures(
+            std::fs::File::open(lib.lib_path(rel)).unwrap(),
+            Some(ext),
+        )
+        .unwrap()
+    };
+    let (af, pics) = read("_Unsorted/Artist/T/01 One.flac", "flac");
+    assert_eq!(
+        af.tags.values("GENRE").collect::<Vec<_>>(),
+        vec!["Rock", "Pop"]
+    );
+    assert!(af.tags.values("COMMENT").collect::<Vec<_>>().is_empty());
+    assert_eq!(pics.len(), 1);
+    assert_eq!(pics[0].data(), png.as_slice());
+    let (af, pics) = read("_Unsorted/Artist/T/02 Two.opus", "opus");
+    assert_eq!(af.tags.values("GENRE").collect::<Vec<_>>(), vec!["Old"]);
+    assert_eq!(af.tags.values("LYRICIST").collect::<Vec<_>>(), vec!["L2"]);
+    assert!(pics.is_empty(), "画像を指定しなかった曲は元のまま（無し）");
+    let (af, pics) = read("_Unsorted/Artist/T/03 Three.m4a", "m4a");
+    assert_eq!(af.tags.values("GENRE").collect::<Vec<_>>(), vec!["Jazz"]);
+    assert_eq!(af.tags.values("LYRICIST").collect::<Vec<_>>(), vec!["L3"]);
+    assert_eq!(pics.len(), 1);
+    assert_eq!(pics[0].data(), png.as_slice());
+}
+
+/// 下書きの画像が store から消えていたら配置せず failed にし、Library には何も残さない（D-86）
+#[tokio::test]
+async fn missing_draft_picture_fails_placement() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("Gone/01.flac", 1, "One", "G", 1));
+    lib.scan(1000).await;
+    let item = lib.item("Gone").unwrap();
+    let mut draft = draft_for(&[("Gone/01.flac", 1, "One")], None, "G");
+    draft.tracks[0].picture = Some(format!("image/png:{}", "cd".repeat(32)));
+    lib.approve(item.id, &draft);
+    lib.start(false);
+    lib.run_job().await;
+    let it = inbox::get(&lib.conn(), item.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Failed);
+    assert!(it.error.unwrap_or_default().contains("画像が見つからない"));
+    assert!(!lib.lib_path("_Unsorted/Artist/G").exists());
+    assert!(lib.inbox_path("Gone/01.flac").exists());
 }

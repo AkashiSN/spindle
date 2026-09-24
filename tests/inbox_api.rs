@@ -1229,3 +1229,63 @@ async fn summary_is_unavailable_without_an_inbox() {
     let res = router.oneshot(r).await.unwrap();
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+/// `POST /api/inbox/:id/preview`（D-86）: 下書きで配置したときの置き場所の見込み。下書きに問題が
+/// あれば 200 で `error` に理由。承認は差し替える画像が `artwork` に無ければ 400
+#[tokio::test]
+async fn preview_returns_the_destination_and_approve_checks_pictures() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = app.item("AlbumA").await;
+    let (st, body) = app
+        .post(&c, &format!("/api/inbox/{id}/preview"), draft("AlbumA"))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["rel_dir"], "_Unsorted/Artist/Album");
+    assert_eq!(body["paths"][1], "_Unsorted/Artist/Album/02 Two.flac");
+    assert!(body["error"].is_null());
+    // 問題のある下書き: 200 で理由
+    let mut bad = draft("AlbumA");
+    bad["tracks"][0]["tags"] = json!({ "SOURCE_URL": ["https://example.com"] });
+    let (st, body) = app.post(&c, &format!("/api/inbox/{id}/preview"), bad).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body["rel_dir"].is_null());
+    assert!(
+        body["error"].as_str().unwrap().contains("SOURCE_URL"),
+        "{body}"
+    );
+    // 404
+    let (st, _) = app
+        .post(&c, "/api/inbox/9999/preview", draft("AlbumA"))
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // 承認: 置いていない画像は 400、置いてあれば通る
+    let hex = "ef".repeat(32);
+    let mut d = draft("AlbumA");
+    d["tracks"][0]["picture"] = json!(format!("image/png:{hex}"));
+    d["tracks"][0]["tags"] = json!({ "GENRE": ["Rock"], "COMMENT": null });
+    let (st, body) = app
+        .post(&c, &format!("/api/inbox/{id}/approve"), d.clone())
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("画像が見つからない"));
+    let bytes: Vec<u8> = (0..32).map(|_| 0xef).collect();
+    app.db
+        .write(move |c| {
+            spindle::db::artwork::upsert(c, &bytes, "image/png", None, None, 1, "embedded")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, body) = app.post(&c, &format!("/api/inbox/{id}/approve"), d).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    // 保存した下書きにタグの変更と画像が残る
+    let (_, body) = app.get(&c, "/api/inbox").await;
+    let t = &body["items"][0]["draft"]["tracks"][0];
+    assert_eq!(t["tags"], json!({ "COMMENT": null, "GENRE": ["Rock"] }));
+    assert_eq!(t["picture"], json!(format!("image/png:{hex}")));
+}

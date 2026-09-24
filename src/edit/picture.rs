@@ -68,7 +68,7 @@ pub fn picture_value(mime: &str, sha256: &[u8]) -> String {
 
 /// store から `PICTURE` の値に対応する画像を front cover として読む。無ければ `None`。
 /// 上限は設けない（退避した旧画像はアップロードの上限に縛られず、巻き戻しには全体が要る）
-pub(super) fn load_picture(store: &ArtworkStore, value: &str) -> std::io::Result<Option<Picture>> {
+pub(crate) fn load_picture(store: &ArtworkStore, value: &str) -> std::io::Result<Option<Picture>> {
     let Some((mime, hash)) = parse_picture_value(value) else {
         return Ok(None);
     };
