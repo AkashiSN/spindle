@@ -1020,7 +1020,19 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       Quiet モード・速度制限なし（`READ BUFFER` 3C 01 F4 → limit 0 / silent 2）。保存しない指定（BB 04 … 80|mode）で
       Standard / Performance / 速度制限 ON に切り替えて測っても、ずれは Standard で 12〜200・Performance 183・
       Quiet 190〜257 個 / 559 窓とばらつくだけで 0 にならない（Standard がやや少ない傾向）。終わりに元の Quiet へ戻した。
-      PureRead は qpxtool でも `pioneer_set_pureread` が空の実装で、Linux から変える方法は見つからない
+      PureRead は qpxtool でも `pioneer_set_pureread` が空の実装で、Linux から変える方法は見つからない。
+      **原因の特定（同日夜）**: ドライブは正しく読めている。別の PC（Windows・EAC 1.8、ファームウェアを 1.54 に更新）で
+      So Honey EP が CTDB 8/8、Mrs. GREEN APPLE（19 曲）が AccurateRip v2（信頼度 37〜41）と CTDB で全曲一致、
+      オフセット +667 も AccurateRip のキーディスクで確認。TrueNAS に戻してファームウェア 1.54 でも Linux のずれは残る
+      （8 セクタ窓 560 個中 176〜248）。ずれは**複数セクタの READ CD の中のセクタ境界**で 16 バイト（4 サンプル）単位で
+      起きる転送側の問題で、1 回の要求が 1〜5 セクタなら起きず、6 セクタ以上で起きる。SG_IO で 1 セクタずつ /
+      4 セクタずつ読んだトラック 2 は EAC の AR v2 `A65C4EBB` と一致し、26 セクタずつは不一致。受け取りバッファの
+      アライメントは無関係。cd-paranoia（libcdio 2.2.0）は `-n 4` を無視して 25 セクタずつ読み（LD_PRELOAD で
+      CDROM_SEND_PACKET を記録して確認）、`/sys/block/sr0/queue/max_sectors_kb` = 12 もこの経路には効かない。Xiph の
+      cdparanoia 10.2 は `-n 4` を守るが、`-Z` でもまれに 16 バイトずれ、paranoia 有効では補正がずれを取り込んで
+      AR が合わない。ドライブは AMD 600 シリーズのチップセット SATA（1022:43f6、ASMedia 製）に接続。
+      次: ドライブを別の経路（USB-SATA ケース、または別コントローラのポート）に付けて jitter.py で測る。
+      直らなければ、spindle が自前で 1 セクタずつ SG_IO で読む方式（cd-paranoia を使わない）を検討（設計変更）
 - [x] Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
       `album_verifications`（`source = rip`、`log_path`）/ `tracks.verification` を見る
       （済: 2026-09-23 に同じ 2 トラックの盤で。吸い出しは表の +667・試行 3 回・CTDB mismatch / AR not_found →
