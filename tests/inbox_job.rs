@@ -1839,6 +1839,17 @@ async fn placement_resolves_album_artwork_and_enqueues_thumbnail() {
         lib.dir.path().join("thumbs").exists(),
         "原画像がキャッシュに置かれる"
     );
+    // 元から埋め込まれていた画像は、置いた曲自身の artwork_id にも入る（D-61。次のスキャンを待たない）
+    let track_sha: Option<Vec<u8>> = lib
+        .conn()
+        .query_row(
+            "SELECT w.sha256 FROM tracks t LEFT JOIN artwork w ON w.id = t.artwork_id
+              WHERE t.rel_path = '_Unsorted/Artist/Album/01 One.flac'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(track_sha, Some(ArtworkStore::hash_of(&pic).to_vec()));
 
     // 画像の無い件は「画像なし」で解決され、thumbnail は投入されない（次のスキャンで読み直さない）
     lib.add("AlbumB/01.flac", 2, "One", "B", 1);
@@ -1953,9 +1964,18 @@ async fn artwork_is_resolved_under_the_library_mutex_and_io_failure_keeps_the_re
         resolved_at.is_none(),
         "I/O で失敗したら予約を残す（次のスキャンが拾う）"
     );
+    // thumbnail は曲自身の画像（配置で記録した artwork_id。D-61）の 1 本だけ。album の解決からは出ない
     assert_eq!(
         lib.count("SELECT count(*) FROM jobs WHERE type = 'thumbnail'"),
-        0
+        1
+    );
+    assert_eq!(
+        lib.count(
+            "SELECT count(*) FROM jobs j JOIN tracks t
+                ON json_extract(j.payload, '$.artwork_id') = t.artwork_id
+             WHERE j.type = 'thumbnail'"
+        ),
+        1
     );
     // 排他は解放されている
     assert_eq!(lib.count("SELECT count(*) FROM job_mutexes"), 0);
@@ -2704,6 +2724,26 @@ async fn draft_tags_and_pictures_are_written_on_placement() {
     assert_eq!(af.tags.values("LYRICIST").collect::<Vec<_>>(), vec!["L3"]);
     assert_eq!(pics.len(), 1);
     assert_eq!(pics[0].data(), png.as_slice());
+    // 埋め込んだ画像は曲の artwork_id に入り、指定しなかった曲は画像なし（NULL）のまま
+    let track_art = |rel: &str| -> (Option<Vec<u8>>, i64) {
+        lib.conn()
+            .query_row(
+                "SELECT w.sha256, t.artwork_dirty FROM tracks t
+                   LEFT JOIN artwork w ON w.id = t.artwork_id WHERE t.rel_path = ?1",
+                [rel],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        track_art("_Unsorted/Artist/T/01 One.flac"),
+        (Some(hash.to_vec()), 0)
+    );
+    assert_eq!(track_art("_Unsorted/Artist/T/02 Two.opus"), (None, 0));
+    assert_eq!(
+        track_art("_Unsorted/Artist/T/03 Three.m4a"),
+        (Some(hash.to_vec()), 0)
+    );
 }
 
 /// 下書きの画像が store から消えていたら配置せず failed にし、Library には何も残さない（D-86）

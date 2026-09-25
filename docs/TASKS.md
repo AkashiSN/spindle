@@ -1848,7 +1848,7 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       画像置き場 `/api/artwork/:hash` から出す（`lib/inbox.ts` の `artworkUrl` / `trackPictureUrl` / `itemThumbUrl`）。
       受け入れ: `web/src/lib/inbox.test.ts`
 
-- [ ] Inbox の配置で画像を埋め込んだ曲の `tracks.artwork_id` が空のまま（2026-09-25 実機。D-91 で CD の取り込みに
+- [x] Inbox の配置で画像を埋め込んだ曲の `tracks.artwork_id` が空のまま（2026-09-25 実機。D-91 で CD の取り込みに
       Cover Art Archive の表の画像を自動で入れた嵐「Five」の 2 曲 = track 9101 / 9102）。ファイルには 500×500 の JPEG が
       埋め込まれ、album の `artwork_id`（2244）と Derived の `src_artwork_id` は正しいが、曲の行は `artwork_id = NULL`・
       `artwork_dirty = 0`。配置の曲の登録が、画像を埋め込む**前**の Inbox のファイル（画像なし）の状態を記録しているとみられる
@@ -1856,6 +1856,12 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       使う箇所に出ない。配置で下書きの `picture` を埋め込んだら、その画像で曲の `artwork_id` を記録する（または
       `artwork_dirty = 1` にして解決させる）。試験: 画像なしの取り込みに下書きで画像を入れて配置 → 曲の `artwork_id` が
       その画像。実機の 2 曲は修正後の deep scan か再解決で直るか確認
+      → 原因は配置が置いたファイルを画像なしで読み、`picture = Unread`（artwork_id を触らない）で登録していたこと
+      （Inbox の元の画像も同じく入らなかった）。配置は
+      置いたファイルを画像ごと読み、スキャナと同じ `track_content_with_pictures` で曲の画像を記録する（下書きで
+      埋めた画像・元からの画像の両方。store が無ければ Unread、キャッシュへ置けなければ `artwork_dirty`）。
+      サムネイルの無い画像は登録と同じトランザクションで thumbnail を投入する。既存の 2 曲は物理属性が変わらないので
+      通常のスキャンでは直らない。deep scan（画像を読み直す）で入る
 
 ---
 

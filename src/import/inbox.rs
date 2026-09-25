@@ -1159,7 +1159,7 @@ use crate::edit::Editor;
 use crate::import::placement::{
     find_or_create_album, place_one, register_track, remove_placed, PlacedFile, PlacementError,
 };
-use crate::import::scanner::{read_fingerprint, track_content};
+use crate::import::scanner::{read_fingerprint, track_content_with_pictures};
 use crate::import::sidecar::{RipEntry, Sidecar};
 use crate::jobs::handlers::rg::{new_album_job, new_track_job};
 use crate::jobs::{Event, Jobs, LibraryEvent};
@@ -2045,6 +2045,7 @@ fn place_files(
     files: &HashMap<String, FileRow>,
     sources: &[Source],
     pictures: &[Option<lofty::picture::Picture>],
+    store: Option<&crate::media::artwork::ArtworkStore>,
     draft: &InboxDraft,
     omit_disc: bool,
 ) -> Result<Placed, InboxError> {
@@ -2136,16 +2137,20 @@ fn place_files(
             }
             let file = library.open_file(target)?;
             let ph = crate::fsroot::fstat(&file)?;
-            let af = read_audio_file(file, src.ext.as_deref())
-                .map_err(|e| InboxError::Conflict(format!("{target}: {e}")))?;
+            let (af, pics) =
+                crate::domain::tags::read_audio_file_with_pictures(file, src.ext.as_deref())
+                    .map_err(|e| InboxError::Conflict(format!("{target}: {e}")))?;
             let fp = read_fingerprint(library, target, &af);
             // 置いたものの音声が承認時に読んだ音声と同じことを確かめる（コピー中の書き換え、
             // 宛先の既存ファイルの採用、いずれも指紋で閉じる）
             if !same_audio(fp, src_fp) {
                 return Err(InboxError::Changed(src.rel.to_string()));
             }
-            let mut content = track_content(af);
-            content.picture = PictureState::Unread;
+            // 置いたファイルの埋め込み画像（下書きの picture で書いたもの、元から入っていたもの）を
+            // 曲自身の画像として記録する（D-61）。物理属性は登録した値のままなので、次のスキャンは
+            // このファイルを読み直さない。ここで入れないと artwork_id が空のまま残る。store が無ければ
+            // 読んでいない扱い、キャッシュへ置けなければ artwork_dirty で次のスキャンが読み直す
+            let content = track_content_with_pictures(af, &pics, store, false);
             tracks.push((ph.into(), content, fp));
         }
         // 既知の同梱ファイル（cover 画像 / cue / toc / log）
@@ -2376,6 +2381,30 @@ fn register_item(
     }
     for &id in track_ids.iter().chain(gain_change.cleared.iter()) {
         job_ids.extend(crate::db::derived::enqueue_if_stale(&tx, id, now)?);
+    }
+    // 曲自身の画像でサムネイルがまだ無いものは thumbnail ジョブを投入する（スキャナと同じ。D-61。
+    // dedup は artwork_id 単位なので、album の解決が同じ画像で投入しても 1 本）
+    let mut want_thumbs: Vec<[u8; 32]> = placed
+        .tracks
+        .iter()
+        .filter_map(|(_, c, _)| match &c.picture {
+            PictureState::Found(p) if p.needs_thumbs => Some(p.sha256),
+            _ => None,
+        })
+        .collect();
+    want_thumbs.sort_unstable();
+    want_thumbs.dedup();
+    for sha in want_thumbs {
+        if let Some(art) = crate::db::artwork::get_by_sha256(&tx, &sha)? {
+            job_ids.push(
+                crate::db::jobs::enqueue(
+                    &tx,
+                    &crate::jobs::handlers::thumbnail::new_thumbnail_job(art.id),
+                    now,
+                )?
+                .id(),
+            );
+        }
     }
     // 後続の normalize（D-46 の予告。WAV / ALAC / AIFF を FLAC へ）も同じトランザクションで記録する。
     // 別トランザクションにすると、登録の commit からその間に落ちたとき投入が永久に欠ける
@@ -2802,7 +2831,7 @@ pub async fn place_item(
     }
     // 3. 配置
     let placed = {
-        let (library, inbox, item, plan, files, sources, pictures, draft) = (
+        let (library, inbox, item, plan, files, sources, pictures, store, draft) = (
             Arc::clone(&env.library),
             Arc::clone(&env.inbox),
             item.clone(),
@@ -2810,11 +2839,21 @@ pub async fn place_item(
             Arc::clone(&files),
             Arc::clone(&sources),
             Arc::clone(&pictures),
+            env.artwork.clone(),
             draft.clone(),
         );
         tokio::task::spawn_blocking(move || {
             place_files(
-                &library, &inbox, &item, &plan, &files, &sources, &pictures, &draft, omit_disc,
+                &library,
+                &inbox,
+                &item,
+                &plan,
+                &files,
+                &sources,
+                &pictures,
+                store.as_deref(),
+                &draft,
+                omit_disc,
             )
         })
         .await
