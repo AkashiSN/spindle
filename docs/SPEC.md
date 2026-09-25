@@ -224,6 +224,12 @@ Archive / Inbox / Playlists のいずれか）からの相対パス**で、次�
   - MusicBrainz 由来のジャンル文字列は表記揺れが激しい
   - ジャンルは後から変わる。パス直結だと数千ファイルが動く
 - `categories` テーブルで統制語彙として管理、`genre_category_map` で自動推定
+- **Library 直下のディレクトリ名はスキャナが自動で語彙にする**（D-92）。音声を含む album ディレクトリ
+  （直下 + 1 段以上。`Anime/<albumartist>/<album>`）の親になっている直下の名前を、canonical key で語彙に
+  無ければ登録し、その album の category にする。`_Unsorted`（`[layout].unsorted` の先頭）と、直下の
+  ディレクトリそのもの・root 直下に置かれた曲は対象外。category が NULL のまま残っている album（語彙が
+  後から入った既存の DB）も次のスキャンで直下の名前から埋める（NULL だけ。人が付けた値は変えない）。
+  album の category はディレクトリ名 → GENRE → `genre_category_map` の順
 - 語彙にマッチしないものは `_Unsorted/` に配置し、取り込みを止めない
 - ytmusic 由来のレーベル軸カテゴリ（神椿Studio 等）も同じ語彙表に混在させてよい
 

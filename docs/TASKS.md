@@ -1828,6 +1828,12 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       もう 1 回だけ。承認画面は「Cover Art Archive の表の画像（…自動で取った）」と「画像を外す」。`tests/inbox_cover.rs`
       （取得 → 提案・一度だけ・GC しない、404、失敗の再試行と上限、リリースなし / CD でないは取りに行かない、下書きが
       勝つ、inbox ジョブの配線と既存の取り込み）、vitest の `usesCaaPicture`
+- [x] Library 直下のディレクトリ名をスキャナが自動で category の語彙にする（2026-09-25 ユーザの決定。D-92）。作り直した
+      DB は語彙が空で、実機の 721 album 中 707 が category なし（Inbox / 購読 / CD の選択肢に Anime 等が出ない、
+      一括リネームが 7,505 曲を `_Unsorted/` へ移す提案をした）。スキャンで直下の名前を登録し album に付け、
+      NULL のまま残った album も次のスキャンで埋める（人が付けた値は変えない）。`_Unsorted` は登録しない。
+      受け入れ: `tests/scanner.rs`（空の語彙からの初回スキャン、既存 DB の NULL の埋め戻しと人の値の保護、
+      大小・NFD 違いの重複なし、`[layout].unsorted` の先頭）
 
 ---
 

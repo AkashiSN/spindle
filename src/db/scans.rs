@@ -183,6 +183,28 @@ pub fn load_categories(conn: &Connection) -> Result<Vec<(i64, String)>> {
     rows.map(|r| r.map_err(Into::into)).collect()
 }
 
+/// category が NULL の active な album: `(id, rel_dir)`（D-92）
+pub fn albums_without_category(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, rel_dir FROM albums WHERE category_id IS NULL AND missing_since IS NULL",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.map(|r| r.map_err(Into::into)).collect()
+}
+
+/// album の category を、まだ NULL のときだけ設定する。設定したら true（D-92。人が付けた値は触らない）
+pub fn set_album_category_if_null(
+    conn: &Connection,
+    album_id: i64,
+    category_id: i64,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE albums SET category_id = ?2 WHERE id = ?1 AND category_id IS NULL",
+        params![album_id, category_id],
+    )?;
+    Ok(n > 0)
+}
+
 /// GENRE → category: `(canonical_key(genre), category_id)`
 pub fn load_genre_map(conn: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare("SELECT genre, category_id FROM genre_category_map")?;

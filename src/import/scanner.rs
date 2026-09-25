@@ -107,6 +107,10 @@ pub struct ScanReport {
     pub enqueued_jobs: Vec<i64>,
     /// Phase 5 が失敗した（run は completed のまま。予約は DB に残る）
     pub artwork_error: Option<String>,
+    /// Library 直下のディレクトリから category の語彙に登録した数（D-92）
+    pub categories_registered: u64,
+    /// category が NULL だった album に直下のディレクトリ名で付けた数（D-92）
+    pub albums_categorized: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -131,6 +135,9 @@ impl From<tokio::task::JoinError> for ScanError {
     }
 }
 
+/// 未分類の置き場の既定名（`[layout].unsorted` の既定の先頭。D-92）
+const DEFAULT_UNSORTED_DIR: &str = "_Unsorted";
+
 pub struct Scanner {
     db: Arc<Db>,
     root: Arc<RootDir>,
@@ -142,6 +149,9 @@ pub struct Scanner {
     rg_reference: f64,
     /// テスト用: Phase 5 の予約の前後で呼ぶ（[`BeforeArtworkHook`]）
     before_artwork: Mutex<Option<BeforeArtworkHook>>,
+    /// category の語彙に自動で登録しない Library 直下のディレクトリ名（canonical key）。
+    /// 既定は `_Unsorted`、`[layout].unsorted` の先頭の固定部分も足す（D-92）
+    category_skip: Vec<String>,
 }
 
 /// Phase 5 のフック（テスト用。Phase 4 の commit 後の cancel / 停止を起こす）。引数は呼ばれる位置:
@@ -197,7 +207,22 @@ impl Scanner {
             artwork: None,
             rg_reference: -18.0,
             before_artwork: Mutex::new(None),
+            category_skip: vec![canonical_key(DEFAULT_UNSORTED_DIR)],
         }
+    }
+
+    /// `[layout].unsorted` の先頭の固定部分（`_Unsorted/{albumartist}/…` の `_Unsorted`）を、category の
+    /// 語彙に自動で登録しないディレクトリに足す（D-92）。先頭がプレースホルダを含むなら何もしない
+    pub fn with_unsorted_layout(mut self, template: &str) -> Self {
+        if let Some(first) = template.split('/').next() {
+            if !first.is_empty() && !first.contains('{') {
+                let key = canonical_key(first);
+                if !self.category_skip.contains(&key) {
+                    self.category_skip.push(key);
+                }
+            }
+        }
+        self
     }
 
     /// ReplayGain の内部基準を設定する（既定 -18 LUFS。`Editor::with_replaygain_reference` と同じ値にする）
@@ -422,6 +447,7 @@ impl Scanner {
             albums,
             categories,
             genre_map,
+            category_skip: self.category_skip.clone(),
             results,
         };
         let mut report = self.db.write(move |c| commit.apply(c)).await?;
@@ -1420,6 +1446,8 @@ struct Commit {
     albums: Vec<AlbumSnap>,
     categories: Vec<(i64, String)>,
     genre_map: Vec<(String, i64)>,
+    /// 語彙に自動で登録しない直下のディレクトリ（canonical key。D-92）
+    category_skip: Vec<String>,
     results: HashMap<usize, Result<ReadResult, String>>,
 }
 
@@ -1435,7 +1463,7 @@ struct DirGroup {
 }
 
 impl Commit {
-    fn apply(self, conn: &mut Connection) -> crate::db::Result<ScanReport> {
+    fn apply(mut self, conn: &mut Connection) -> crate::db::Result<ScanReport> {
         let tx = conn.transaction()?;
         let now = now_epoch();
         let run_id = self.run_id;
@@ -1716,8 +1744,17 @@ impl Commit {
             }
         }
 
-        // e. album 照合
+        // e. album 照合。先に Library 直下のディレクトリ名を category の語彙に登録し（D-92）、
+        //    照合で付ける category に間に合わせる
+        let registered = self.register_top_categories(&tx, &groups)?;
+        if registered > 0 {
+            self.categories = scans::load_categories(&tx)?;
+        }
+        report.categories_registered = registered;
         self.resolve_albums(&tx, groups, now)?;
+        // category が NULL のまま残っている album（語彙が後から入った既存の DB・変化の無い album）を
+        // 直下のディレクトリ名で埋める。人が付けた値（NULL でない）は触らない（D-92）
+        report.albums_categorized = self.fill_album_categories(&tx)?;
 
         // f. finalize
         let missing = scans::finalize_missing(&tx, run_id, now)?;
@@ -2018,6 +2055,68 @@ impl Commit {
             mb_release_id: mode("MUSICBRAINZ_ALBUMID"),
             disc_count: mode("DISCTOTAL").and_then(|s| leading_int(&s)),
         })
+    }
+
+    /// Library 直下のディレクトリ名のうち、音声を含む album ディレクトリ（直下 + 1 段以上。
+    /// `Anime/<albumartist>/<album>` の `Anime`）の親になっているものを、語彙に無ければ登録する（D-92）。
+    /// root 直下のファイルと、直下のディレクトリそのものに置かれたファイル（`<dir>/01.flac`）は
+    /// category を名乗らないので対象外。`category_skip`（`_Unsorted` 等）も登録しない。返り値は登録した数
+    fn register_top_categories(
+        &self,
+        tx: &Connection,
+        groups: &HashMap<String, DirGroup>,
+    ) -> crate::db::Result<u64> {
+        let mut tops: Vec<&str> = groups
+            .values()
+            .filter(|g| !g.track_ids.is_empty())
+            .filter_map(|g| {
+                let dir = g.dir.as_ref()?;
+                let mut comps = dir.components();
+                let first = comps.next()?;
+                comps.next().map(|_| first)
+            })
+            .collect();
+        tops.sort_unstable();
+        tops.dedup();
+        let mut known: HashSet<String> = self.categories.iter().map(|(_, k)| k.clone()).collect();
+        let mut registered = 0;
+        for name in tops {
+            let key = canonical_key(name);
+            if self.category_skip.contains(&key) || known.contains(&key) {
+                continue;
+            }
+            if crate::db::categories::insert(tx, name)?.is_some() {
+                registered += 1;
+                tracing::info!(
+                    category = name,
+                    "Library 直下のディレクトリを category の語彙に登録した"
+                );
+            }
+            known.insert(key);
+        }
+        Ok(registered)
+    }
+
+    /// category が NULL の active な album に、直下のディレクトリ名に当たる語彙を付ける（D-92）。
+    /// 対象は NULL の行だけなので、一度埋まった後は `_Unsorted` 等の数件しか読まない
+    fn fill_album_categories(&self, tx: &Connection) -> crate::db::Result<u64> {
+        let mut filled = 0;
+        for (album_id, rel_dir) in scans::albums_without_category(tx)? {
+            let mut comps = rel_dir.split('/');
+            let (Some(first), Some(_)) = (comps.next(), comps.next()) else {
+                continue;
+            };
+            let key = canonical_key(first);
+            if self.category_skip.contains(&key) {
+                continue;
+            }
+            if let Some((id, _)) = self.categories.iter().find(|(_, k)| *k == key) {
+                if scans::set_album_category_if_null(tx, album_id, *id)? {
+                    filled += 1;
+                }
+            }
+        }
+        Ok(filled)
     }
 
     /// category: 先頭ディレクトリ名が語彙に一致 → GENRE → map → NULL（D-38）

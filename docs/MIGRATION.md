@@ -194,8 +194,8 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
       （手作業は要らない。前回は追加前に走らせたため残っていた）
    3. YouTube 画面で 9 本の再生リストを購読に登録（アルバムアーティスト / アルバム = 各 `〜のお歌`、
       category = Library の最上位ディレクトリと同じ語彙: `神椿Studio` 5 本 / `深脊界Studio` 3 本 / `Vtuber`
-      （HIMEHINA）。**作り直した DB では語彙が空**なので、フォームの category 欄で足すか
-      `POST /api/categories {"name": …}` で先に作る）し、「同期」（P4-16、D-78）。同期は先に既存の行の `TRACKNUMBER` と
+      （HIMEHINA）。語彙は初回スキャンが Library 直下のディレクトリ名から自動で作るので（D-92）、
+      先に作る必要はない）し、「同期」（P4-16、D-78）。同期は先に既存の行の `TRACKNUMBER` と
       ファイル名を再生リストの位置に揃え（tags バッチ → rename バッチ。Derived はタグ上書き・移動で追随）、
       `SOURCE_URL` の無いものだけを位置付きで Inbox に投入する → 承認で配置（初期値の番号がそのまま
       位置）→ 配置の後続で自動的にもう一度同期 → 結果が「番号を 0 件揃え」「揃えられない」無しで完了。

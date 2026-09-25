@@ -3919,3 +3919,41 @@ symphonia 0.6.1 の MP4 読みはパケットとして返し、デコーダは 1
 承認で人が決める。外す操作が配置の前に効かない）。承認画面を開いたときに取る（一覧の表示が外部に引きずられ、
 開くたびに引き直す）。サイドカーに記録する（吸い出しの記録を後から書き換えることになり、D-90 の ctime の照合と
 干渉する）。
+
+## D-92 Library 直下のディレクトリ名はスキャナが自動で category の語彙にする
+
+**決定**（2026-09-25。2 回目のクリーンリハーサルで見つかった。ユーザの決定）:
+
+- スキャナ（Phase 4 の album 照合の前、同じ書き込みトランザクション）が、音声を含む album ディレクトリ
+  （直下 + 1 段以上。`Anime/<albumartist>/<album>` の `Anime`）の親になっている **Library 直下の
+  ディレクトリ名**を、canonical key で語彙（`categories`）に無ければ登録する（`db::categories::insert`。
+  API の `POST /api/categories` と同じ一意性。書き込みは単一コネクションなので API と並行しても重複しない）。
+  続く album 照合の `infer_category` は、登録後の語彙で直下の名前を category に付ける
+- 対象外: `_Unsorted`（既定）と `[layout].unsorted` の先頭の固定部分（`Scanner::with_unsorted_layout`）、
+  直下のディレクトリそのものに置かれた曲（`Loose/01.flac`。category/albumartist/album の形でない）、root
+  直下の曲
+- **category が NULL のまま残っている album を埋める**: 増分スキャンの最速パスでは変化の無い album を
+  照合し直さないので、album 照合の後に `category_id IS NULL AND missing_since IS NULL` の album だけを読み、
+  直下の名前に当たる語彙があれば `WHERE category_id IS NULL` の条件付きで付ける（`scans::albums_without_category`
+  / `set_album_category_if_null`）。一度埋まれば残るのは `_Unsorted` 等の数件なので、毎回の全件走査に
+  ならない。人が付けた値（NULL でない）は変えない
+- 優先順位はディレクトリ名 → GENRE → `genre_category_map`（D-38 のまま）。直下の名前は常に語彙になるので、
+  GENRE の写像が効くのは `_Unsorted` の下など直下の名前を使わない album だけになる
+- ScanReport に `categories_registered` / `albums_categorized` を足し、登録した語彙はログに出す
+
+**理由**: SPEC はカテゴリを「パスの最上位階層。統制語彙」と定義し、`[layout]` も `{category}/…` だが、
+`infer_category` は直下の名前が語彙に**あれば**付けるだけで、語彙を作る経路が API と購読・プラグインしか
+無かった。作り直した DB では語彙が空のため、リハーサルの実機で 721 album 中 707 が category なしになり、
+(1) Inbox・購読・CD の category の選択肢に Anime / J-POP 等が出ない、(2) 一括リネームが 7,505 曲を
+`_Unsorted/` へ移す提案をした。移行（MIGRATION）で毎回手で語彙を作る手順は忘れやすく、Library の実際の
+構成が語彙の正なので、スキャナが揃える。
+
+**既知の副作用**: album 照合（変化のあった album の `update_album_meta`）は従来どおり category を直下の
+名前で上書きする（D-38）。直下の名前が語彙に入るようになったので、人が API で直下の名前と違う category を
+付けた album は、その album のファイルが変わると直下の名前に戻る。category は配置先（パス）を決める値
+なので、違う category にしたいときはリネームで直下のフォルダを動かす
+
+**却下**: 移行手順で 1 回だけ登録する（手順漏れで同じ状態に戻る。SMB で直下に足したフォルダも拾えない）。
+直下のディレクトリを全部（音声の無いもの・ディレクトリの無い曲の置き場も）登録する（`Playlists` 等の
+関係ないものが語彙になる）。NULL の埋め戻しを deep scan だけで行う（最初の deep scan までの最大 30 日、
+category の無い album が残る）

@@ -168,6 +168,26 @@ impl Lib {
             .collect()
     }
 
+    fn album_category(&self, rel_dir: &str) -> Option<i64> {
+        self.conn()
+            .query_row(
+                "SELECT category_id FROM albums WHERE rel_dir = ?1",
+                [rel_dir],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn category_names(&self) -> Vec<String> {
+        self.conn()
+            .prepare("SELECT name FROM categories ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
     fn run_state(&self, run_id: i64) -> String {
         self.conn()
             .query_row("SELECT state FROM scan_runs WHERE id = ?1", [run_id], |r| {
@@ -279,13 +299,15 @@ async fn initial_scan_registers_tracks_albums_and_skips_non_targets() {
 
 #[tokio::test]
 async fn category_is_inferred_from_top_directory_then_genre_map() {
+    // D-92 以降、Library 直下のディレクトリは自動で語彙になるので、GENRE の写像が効くのは語彙に
+    // しない `_Unsorted` の下だけ
     let lib = Lib::new();
     require_ffmpeg!(lib.add("Pop/AA/A/01.flac", 1, "t", "A", 1));
-    let p = lib.add("Other/BB/B/01.flac", 2, "t", "B", 1).unwrap();
+    let p = lib.add("_Unsorted/BB/B/01.flac", 2, "t", "B", 1).unwrap();
     common::retag(&p, |tag| {
         tag.set_genre("J-Pop".to_owned());
     });
-    lib.add("Other/CC/C/01.flac", 3, "t", "C", 1);
+    lib.add("_Unsorted/CC/C/01.flac", 3, "t", "C", 1);
     {
         let c = lib.conn();
         c.execute(
@@ -300,18 +322,161 @@ async fn category_is_inferred_from_top_directory_then_genre_map() {
         .unwrap();
     }
     lib.scan().await;
-    let cat = |dir: &str| -> Option<i64> {
+    assert_eq!(
+        lib.album_category("Pop/AA/A"),
+        Some(1),
+        "先頭ディレクトリ名が語彙に一致"
+    );
+    assert_eq!(lib.album_category("_Unsorted/BB/B"), Some(2), "GENRE → map");
+    assert_eq!(lib.album_category("_Unsorted/CC/C"), None);
+}
+
+#[tokio::test]
+async fn top_directories_become_categories_on_the_first_scan() {
+    // D-92: 空の語彙から、Library 直下のディレクトリ名が語彙になり album に付く
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("Anime/AA/A/01.flac", 1, "t", "A", 1));
+    lib.add("J-POP/BB/B/01.flac", 2, "t", "B", 1);
+    lib.add("東方Project/CC/C/01.flac", 3, "t", "C", 1);
+    lib.add("_Unsorted/DD/D/01.flac", 4, "t", "D", 1);
+    // 直下のディレクトリそのものに置いた曲と root 直下の曲は category を名乗らない
+    lib.add("Loose/01.flac", 5, "t", "L", 1);
+    lib.add("root.flac", 6, "t", "R", 1);
+    let report = lib.scan().await;
+    assert_eq!(report.categories_registered, 3);
+    assert_eq!(
+        lib.category_names(),
+        vec![
+            "Anime".to_owned(),
+            "J-POP".to_owned(),
+            "東方Project".to_owned()
+        ]
+    );
+    let id_of = |name: &str| -> i64 {
         lib.conn()
-            .query_row(
-                "SELECT category_id FROM albums WHERE rel_dir = ?1",
-                [dir],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM categories WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })
             .unwrap()
     };
-    assert_eq!(cat("Pop/AA/A"), Some(1), "先頭ディレクトリ名が語彙に一致");
-    assert_eq!(cat("Other/BB/B"), Some(2), "GENRE → map");
-    assert_eq!(cat("Other/CC/C"), None);
+    assert_eq!(lib.album_category("Anime/AA/A"), Some(id_of("Anime")));
+    assert_eq!(lib.album_category("J-POP/BB/B"), Some(id_of("J-POP")));
+    assert_eq!(
+        lib.album_category("東方Project/CC/C"),
+        Some(id_of("東方Project"))
+    );
+    assert_eq!(
+        lib.album_category("_Unsorted/DD/D"),
+        None,
+        "_Unsorted は語彙にしない"
+    );
+    assert_eq!(lib.album_category("Loose"), None);
+    // 2 回目は何も足さない
+    let again = lib.scan().await;
+    assert_eq!(again.categories_registered, 0);
+    assert_eq!(again.albums_categorized, 0);
+    assert_eq!(lib.category_names().len(), 3);
+}
+
+#[tokio::test]
+async fn existing_names_are_not_registered_twice_across_case_and_normalization() {
+    // 語彙に大小・NFC/NFD 違いの同じ名前があれば、それを使って重複登録しない
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("anime/AA/A/01.flac", 1, "t", "A", 1));
+    lib.add("ボカロ/BB/B/01.flac", 2, "t", "B", 1);
+    {
+        let c = lib.conn();
+        // ボ を NFD（ホ + 結合濁点）で書いた語彙
+        c.execute(
+            "INSERT INTO categories (id, name) VALUES (1, 'Anime'), (2, ?1)",
+            ["\u{30db}\u{3099}\u{30ab}\u{30ed}"],
+        )
+        .unwrap();
+    }
+    let report = lib.scan().await;
+    assert_eq!(report.categories_registered, 0);
+    assert_eq!(lib.category_names().len(), 2);
+    assert_eq!(lib.album_category("anime/AA/A"), Some(1));
+    assert_eq!(lib.album_category("ボカロ/BB/B"), Some(2));
+}
+
+#[tokio::test]
+async fn null_categories_of_an_existing_db_are_filled_on_the_next_scan_without_overwriting() {
+    // 語彙の無い古い DB で category が NULL のまま登録された album も、次の（増分・変化なしの）スキャンで
+    // 埋まる。人が付けた値は変えない
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("Anime/AA/A/01.flac", 1, "t", "A", 1));
+    lib.add("Anime/BB/B/01.flac", 2, "t", "B", 1);
+    lib.add("Game/CC/C/01.flac", 3, "t", "C", 1);
+    lib.scan().await;
+    // D-92 以前の状態を作る: 語彙を消して（ON DELETE SET NULL で album は NULL）、人の値を 1 つ付ける
+    {
+        let c = lib.conn();
+        c.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        c.execute("DELETE FROM categories", []).unwrap();
+        c.execute("INSERT INTO categories (id, name) VALUES (50, 'Drama')", [])
+            .unwrap();
+        c.execute(
+            "UPDATE albums SET category_id = 50 WHERE rel_dir = 'Anime/BB/B'",
+            [],
+        )
+        .unwrap();
+    }
+    assert_eq!(lib.album_category("Anime/AA/A"), None);
+    let report = lib.scan().await;
+    assert_eq!(report.unchanged, 3, "ファイルは変わっていない（最速パス）");
+    assert_eq!(report.categories_registered, 2, "Anime と Game");
+    assert_eq!(report.albums_categorized, 2);
+    let anime: i64 = lib
+        .conn()
+        .query_row("SELECT id FROM categories WHERE name = 'Anime'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(lib.album_category("Anime/AA/A"), Some(anime));
+    assert_eq!(
+        lib.album_category("Anime/BB/B"),
+        Some(50),
+        "人が付けた値は上書きしない"
+    );
+    assert!(lib.album_category("Game/CC/C").is_some());
+}
+
+#[tokio::test]
+async fn unsorted_layout_prefix_is_not_registered() {
+    // `[layout].unsorted` の先頭を別名にしている場合もその名前は語彙にしない
+    let dir = tempfile::tempdir().unwrap();
+    let root_path = dir.path().join("Library");
+    std::fs::create_dir(&root_path).unwrap();
+    let db_path = dir.path().join("spindle.db");
+    let db = Arc::new(Db::open(&db_path).unwrap());
+    let root = Arc::new(RootDir::open(&root_path).unwrap());
+    let scanner = Scanner::new(db, root, 2)
+        .with_unsorted_layout("未分類/{albumartist}/{album}/{track:02}. {title}");
+    let p = root_path.join("未分類/AA/A");
+    std::fs::create_dir_all(&p).unwrap();
+    require_ffmpeg!(common::make_audio(&p, "01.flac", "flac", 1));
+    let q = root_path.join("Anime/BB/B");
+    std::fs::create_dir_all(&q).unwrap();
+    common::make_audio(&q, "01.flac", "flac", 2).unwrap();
+    let report = scanner
+        .run(
+            ScanKind::Incremental,
+            Arc::new(|_, _, _| {}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.categories_registered, 1);
+    let names: Vec<String> = Connection::open(&db_path)
+        .unwrap()
+        .prepare("SELECT name FROM categories ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(names, vec!["Anime".to_owned()]);
 }
 
 // ---------------------------------------------------------------- 2 回目（最速パス）
