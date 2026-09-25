@@ -1834,7 +1834,7 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       NULL のまま残った album も次のスキャンで埋める（人が付けた値は変えない）。`_Unsorted` は登録しない。
       受け入れ: `tests/scanner.rs`（空の語彙からの初回スキャン、既存 DB の NULL の埋め戻しと人の値の保護・
       `changed_ids`、大小・NFD 違いの重複なし、`[layout].unsorted` の先頭、Phase 3 中の API の追加、部分索引の
-      EXPLAIN QUERY PLAN）、`tests/categories_api.rs`（使われていない語彙だけ削除）、`web/src/lib/categories.test.ts`。
+      EXPLAIN QUERY PLAN）、`tests/scan_job.rs`（語彙だけ増えた run の bulk）、`tests/categories_api.rs`（使われていない語彙だけ削除）、`web/src/lib/categories.test.ts`。
       codex の指摘で、語彙の読み直し・`library` イベントでの一覧の取り直し・使われていない語彙の削除（設定画面）・
       部分索引（0004）を足した
 

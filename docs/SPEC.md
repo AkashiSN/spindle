@@ -230,7 +230,7 @@ Archive / Inbox / Playlists のいずれか）からの相対パス**で、次�
   ディレクトリそのもの・root 直下に置かれた曲は対象外。category が NULL のまま残っている album（語彙が
   後から入った既存の DB）も次のスキャンで直下の名前から埋める（NULL だけ。人が付けた値は変えない。
   部分索引 `idx_albums_category_null` で NULL の行だけを読む）。埋めた album のトラックは `library` イベントで
-  知らせ、画面の category の一覧は `library` イベントのたびに取り直す。自動登録は追加だけで、不要になった
+  知らせ（語彙だけが増えた run は `bulk`）、画面の category の一覧は `library` イベントのたびと語彙の追加・削除のたびに取り直す。自動登録は追加だけで、不要になった
   語彙は使われていなければ `DELETE /api/categories/:id`（設定画面）で消す。
   album の category はディレクトリ名 → GENRE → `genre_category_map` の順
 - 語彙にマッチしないものは `_Unsorted/` に配置し、取り込みを止めない

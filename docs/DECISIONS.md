@@ -3942,8 +3942,11 @@ symphonia 0.6.1 の MP4 読みはパケットとして返し、デコーダは 1
   ならない（マイグレーション 0004 の部分索引 `idx_albums_category_null ON albums(rel_dir) WHERE category_id IS NULL
   AND missing_since IS NULL` で NULL の行だけを読む）。人が付けた値（NULL でない）は変えない
 - **画面へ知らせる**: 埋めた album のトラックを `changed_ids` に足して `library` イベントを出す（ファイルが
-  変わらない増分スキャンでも表の category が変わるため）。category の一覧（`useCategories`）は `library`
-  イベントのたびに取り直す（語彙の追加は必ず album の変化を伴う。新しい SSE の種別は足さない）
+  変わらない増分スキャンでも表の category が変わるため）。語彙だけが増えて行が何も変わらない run（直下の
+  フォルダの album すべてに人が別の category を付けていて、その名前の語彙がまだ無い既存の DB）も、
+  `categories_registered > 0` なら `bulk` の `library` イベントを流す（codex 再レビューの指摘。まれなので表の
+  取り直しの重さは問題にしない。新しい SSE の種別は足さない）。category の一覧（`useCategories`）は
+  `library` イベントのたびと、画面から語彙を足した / 消したときに取り直す（複数の選択欄を揃える）
 - **自動登録は追加だけ。不要になった語彙は人が消す**: `DELETE /api/categories/:id`（設定画面の「category」）。
   active な album・GENRE の写像（CASCADE で黙って消えるので明示的に外してもらう）・購読（名前で持つ）・
   承認前 / 配置中の Inbox の保存済みの下書き（名前で持つ）のどれかが使っていれば 409 `in_use`。確かめと削除は

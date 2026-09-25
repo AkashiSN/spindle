@@ -213,9 +213,17 @@ impl Handler for ScanHandler {
                         }
                         ctx.jobs().notify_enqueued(&hires_jobs).await;
                     }
-                    // 変更行を表へ通知する（SPEC §9 `library`）。commit 済みなので取得すれば新しい値が見える
-                    if let Some(ev) = LibraryEvent::from_changes(report.run_id, report.changed_ids)
-                    {
+                    // 変更行を表へ通知する（SPEC §9 `library`）。commit 済みなので取得すれば新しい値が見える。
+                    // 語彙だけが増えた run（人が別の category を付けた album しか無い直下のフォルダ等で、行は
+                    // 何も変わらない）も、開いている category の選択欄に知らせるため `bulk` で流す（D-92）
+                    let run_id = report.run_id;
+                    let registered = report.categories_registered > 0;
+                    let ev = LibraryEvent::from_changes(run_id, report.changed_ids).or_else(|| {
+                        registered.then_some(LibraryEvent::Bulk {
+                            scan_run_id: run_id,
+                        })
+                    });
+                    if let Some(ev) = ev {
                         ctx.jobs().publish(Event::Library(ev));
                     }
                     Ok(Outcome::Done)

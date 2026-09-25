@@ -433,3 +433,55 @@ async fn post_scan_enqueues_once_and_rejects_bad_kind() {
     let res = send(&app, post_scan(&c, r#"{"kind":"full"}"#)).await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+/// 語彙だけが増えた run（行は何も変わらない）でも `bulk` の library イベントを流し、開いている category の
+/// 選択欄に知らせる（D-92）。直下のフォルダ `A` の album に人が別の category（Drama）を付けていて、`A` の語彙が
+/// まだ無い既存の DB
+#[tokio::test]
+async fn a_scan_that_only_registers_categories_still_publishes_a_library_event() {
+    let h = Harness::new();
+    let lib = h.dir.path().join("Library");
+    std::fs::create_dir_all(lib.join("A/B")).unwrap();
+    let p = require_ffmpeg!(common::make_audio(&lib.join("A/B"), "01.flac", "flac", 1));
+    common::set_basic_tags(&p, "t", "Ar", "B", "AA", 1, 1);
+    let mut events = h.jobs.subscribe();
+    h.start(0);
+    let EnqueueResult::Inserted(id) = enqueue_scan(&h.jobs, "incremental").await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(h.wait_terminal(id).await, JobState::Done);
+    {
+        let c = h.raw();
+        c.execute("INSERT INTO categories (id, name) VALUES (90, 'Drama')", [])
+            .unwrap();
+        c.execute("UPDATE albums SET category_id = 90", []).unwrap();
+        c.execute("DELETE FROM categories WHERE name = 'A'", [])
+            .unwrap();
+    }
+    while events.try_recv().is_ok() {}
+    let EnqueueResult::Inserted(id) = enqueue_scan(&h.jobs, "incremental").await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(h.wait_terminal(id).await, JobState::Done);
+    let names: Vec<String> = h
+        .raw()
+        .prepare("SELECT name FROM categories ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(names, vec!["A".to_owned(), "Drama".to_owned()]);
+    let cat: i64 = h
+        .raw()
+        .query_row("SELECT category_id FROM albums", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(cat, 90, "人が付けた値は変えない");
+    let mut library = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        if let Event::Library(l) = ev {
+            library.push(l);
+        }
+    }
+    assert_eq!(library, vec![LibraryEvent::Bulk { scan_run_id: 2 }]);
+}

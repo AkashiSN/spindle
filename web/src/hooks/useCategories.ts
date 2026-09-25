@@ -29,6 +29,8 @@ export function useCategories(enabled: boolean) {
       const c = await apiPost<Category>('/api/categories', { name })
       setItems((prev) => [...prev, c].sort((a, b) => a.name.localeCompare(b.name)))
       setError(null)
+      // ほかに開いている選択欄（CD / Inbox / 購読）にも知らせる
+      notifyCategoriesChanged()
       return c
     } catch (e) {
       if (e instanceof ApiError && e.code === 'duplicate') setError(`同じ語彙があります: ${name}`)
