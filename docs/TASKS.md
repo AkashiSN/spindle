@@ -1038,7 +1038,9 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       ファームウェア・spindle ではない）。spindle で Mrs. GREEN APPLE「10」（19 曲）を吸うと、表の +667・**試行 1 回・
       ずれ 0・C2 0**、全曲 AR OK（信頼度 37〜41、AR v1 / v2 は EAC のログと一致）・CTDB OK（1578〜1590）、
       結果 `verified_ctdb` ×19、`drive_offsets` に `PIONEER BD-RW   BDR-209M` = 667（source ctdb）を学習。
-      つなぎ先の注意は OPERATIONS の「カスタムアプリの作り方」に書いた。コードの変更は無し
+      つなぎ先の注意は OPERATIONS の「カスタムアプリの作り方」に書いた。コードの変更は無し。
+      その後 PCIe カードの ASM1062 の SATA ポートへ移しても、26 セクタずつの 2 回読みがバイト一致・AR v2 一致
+      （チップセットの SATA だけの問題。以後はこの SATA 接続で運用）
 - [x] Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
       `album_verifications`（`source = rip`、`log_path`）/ `tracks.verification` を見る
       （済: 2026-09-23 に同じ 2 トラックの盤で。吸い出しは表の +667・試行 3 回・CTDB mismatch / AR not_found →
