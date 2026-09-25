@@ -123,7 +123,7 @@ export function InboxTrackGrid({
   update: (f: (d: InboxDraft) => InboxDraft) => void
 }) {
   const [added, setAdded] = useState<string[]>([])
-  const hasPicture = draft.tracks.some((t) => trackPictureUrl(item.id, files.get(t.rel_path), t) != null) || editable
+  const hasPicture = draft.tracks.some((t) => trackPictureUrl(item, files.get(t.rel_path), t) != null) || editable
   const hasSource = item.tracks.some((f) => f.source != null)
   const noDisc = omitsDisc(item, draft)
   const tagKeys = useMemo(
@@ -304,7 +304,7 @@ export function InboxTrackGrid({
     }
     switch (c.id) {
       case 'thumb': {
-        const url = trackPictureUrl(item.id, f, t)
+        const url = trackPictureUrl(item, f, t)
         const changed = t.picture != null
         return (
           <td

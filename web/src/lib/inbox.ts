@@ -298,8 +298,14 @@ export function itemCover(item: Pick<InboxItem, 'tracks'>): string | null {
   return best
 }
 
-export function artworkUrl(itemId: number, hash: string): string {
-  return `/api/inbox/${itemId}/artwork/${hash}`
+/**
+ * 取り込みの埋め込み画像の URL。承認前は Inbox のファイルから読む（`/api/inbox/:id/artwork/:hash`）。
+ * **配置済み（placed）はファイルが Library に移っていて Inbox からは 404** なので、配置で登録された
+ * Library の画像置き場（`/api/artwork/:hash`）から出す。`size` は Library 側のサムネイルの大きさ
+ */
+export function artworkUrl(item: Pick<InboxItem, 'id' | 'state'>, hash: string, size?: 256 | 768): string {
+  if (item.state === 'placed') return size == null ? `/api/artwork/${hash}` : `/api/artwork/${hash}?size=${size}`
+  return `/api/inbox/${item.id}/artwork/${hash}`
 }
 
 /**
@@ -307,9 +313,9 @@ export function artworkUrl(itemId: number, hash: string): string {
  * 提案）で差し替える画像。提案には CD の取り込みの表の画像（Cover Art Archive から自動で取ったもの。D-91）が
  * 入るので、吸い出したばかりの画像の無い盤でもジャケットが出る。置いた画像は `/api/artwork/:hash`（256px）
  */
-export function itemThumbUrl(item: Pick<InboxItem, 'id' | 'tracks' | 'draft' | 'proposal'>): string | null {
+export function itemThumbUrl(item: Pick<InboxItem, 'id' | 'state' | 'tracks' | 'draft' | 'proposal'>): string | null {
   const embedded = itemCover(item)
-  if (embedded != null) return artworkUrl(item.id, embedded)
+  if (embedded != null) return artworkUrl(item, embedded, 256)
   const tracks = (item.draft ?? item.proposal).tracks
   for (const t of tracks) {
     const p = t.picture == null ? null : parsePictureValue(t.picture)
@@ -776,14 +782,14 @@ export function trackPictureHash(file: Pick<InboxFile, 'tags'> | undefined, t: P
   return file == null ? null : pictureOf(file)
 }
 
-/** トラックの画像の URL。差し替えた画像は `/api/artwork/:hash`、ファイルの画像は件の埋め込み画像 */
-export function trackPictureUrl(itemId: number, file: Pick<InboxFile, 'tags'> | undefined, t: Pick<DraftTrack, 'picture'>): string | null {
+/** トラックの画像の URL。差し替えた画像は `/api/artwork/:hash`、ファイルの画像は取り込みの埋め込み画像（配置済みは Library の画像置き場） */
+export function trackPictureUrl(item: Pick<InboxItem, 'id' | 'state'>, file: Pick<InboxFile, 'tags'> | undefined, t: Pick<DraftTrack, 'picture'>): string | null {
   if (t.picture != null) {
     const p = parsePictureValue(t.picture)
     return p == null ? null : `/api/artwork/${p.hash}`
   }
   const h = file == null ? null : pictureOf(file)
-  return h == null ? null : artworkUrl(itemId, h)
+  return h == null ? null : artworkUrl(item, h)
 }
 
 export type PictureState = {

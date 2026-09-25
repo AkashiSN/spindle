@@ -418,7 +418,7 @@ function ItemForm({
 function draftCoverUrl(item: InboxItem, draft: InboxDraft, files: ReadonlyMap<string, InboxFile>): string | null {
   const counts = new Map<string, number>()
   for (const t of draft.tracks) {
-    const u = trackPictureUrl(item.id, files.get(t.rel_path), t)
+    const u = trackPictureUrl(item, files.get(t.rel_path), t)
     if (u != null) counts.set(u, (counts.get(u) ?? 0) + 1)
   }
   let best: string | null = null

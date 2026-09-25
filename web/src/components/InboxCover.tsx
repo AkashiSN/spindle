@@ -43,7 +43,7 @@ export function InboxCover({
   // 吸い出したリリースの表の画像を Cover Art Archive から自動で取り、提案に入れてある（D-91）
   const fromCaa = usesCaaPicture(item, draft)
   const n = draft.tracks.length
-  const urls = draft.tracks.map((t) => trackPictureUrl(item.id, files.get(t.rel_path), t))
+  const urls = draft.tracks.map((t) => trackPictureUrl(item, files.get(t.rel_path), t))
   // 代表（最頻。同数なら先）
   const counts = new Map<string, number>()
   for (const u of urls) if (u != null) counts.set(u, (counts.get(u) ?? 0) + 1)

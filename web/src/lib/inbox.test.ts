@@ -470,8 +470,12 @@ describe('埋め込み画像', () => {
     expect(itemCover(item({ tracks: [file('a')] }))).toBeNull()
   })
 
-  it('artworkUrl', () => {
-    expect(artworkUrl(7, h1)).toBe(`/api/inbox/7/artwork/${h1}`)
+  it('artworkUrl は承認前は Inbox のファイル、配置済みは Library の画像置き場', () => {
+    expect(artworkUrl({ id: 7, state: 'pending' }, h1)).toBe(`/api/inbox/7/artwork/${h1}`)
+    expect(artworkUrl({ id: 7, state: 'failed' }, h1, 256)).toBe(`/api/inbox/7/artwork/${h1}`)
+    // 配置済みはファイルが Library に移っていて Inbox からは 404
+    expect(artworkUrl({ id: 7, state: 'placed' }, h1)).toBe(`/api/artwork/${h1}`)
+    expect(artworkUrl({ id: 7, state: 'placed' }, h1, 256)).toBe(`/api/artwork/${h1}?size=256`)
   })
 })
 
@@ -858,7 +862,7 @@ describe('画像の差し替え（D-86）', () => {
   it('itemThumbUrl は埋め込み画像、無ければ下書き・提案の画像を出す（D-91）', () => {
     const caa = `image/png:${h('c')}`
     const { files, d } = withFiles([[], []])
-    const base = { id: 7, tracks: [...files.values()], draft: null, proposal: d }
+    const base = { id: 7, state: 'pending' as const, tracks: [...files.values()], draft: null, proposal: d }
     expect(itemThumbUrl(base)).toBeNull()
     const proposal = { ...d, tracks: d.tracks.map((t) => ({ ...t, picture: caa })) }
     expect(itemThumbUrl({ ...base, proposal })).toBe(`/api/artwork/${h('c')}?size=256`)
@@ -866,7 +870,9 @@ describe('画像の差し替え（D-86）', () => {
     expect(itemThumbUrl({ ...base, proposal, draft: d })).toBeNull()
     // ファイルの埋め込み画像が先
     const emb = withFiles([[pic('a')], [pic('a')]])
-    expect(itemThumbUrl({ id: 7, tracks: [...emb.files.values()], draft: null, proposal })).toBe(`/api/inbox/7/artwork/${h('a')}`)
+    expect(itemThumbUrl({ id: 7, state: 'pending', tracks: [...emb.files.values()], draft: null, proposal })).toBe(`/api/inbox/7/artwork/${h('a')}`)
+    // 配置済みは Library の画像置き場から（Inbox のファイルはもう無い）
+    expect(itemThumbUrl({ id: 7, state: 'placed', tracks: [...emb.files.values()], draft: null, proposal })).toBe(`/api/artwork/${h('a')}?size=256`)
   })
   it('pictureState は無し / 全曲同じ / 曲ごとに違う（一部無し）を見分ける', () => {
     expect(pictureState(withFiles([[], []]).files, withFiles([[], []]).d)).toMatchObject({ mode: 'none', missing: 2 })
@@ -890,9 +896,12 @@ describe('画像の差し替え（D-86）', () => {
   })
   it('trackPictureUrl は差し替えた画像を /api/artwork、ファイルの画像を件の埋め込み画像で引く', () => {
     const f = file('d/01.flac', 'flac', [pic('a')])
-    expect(trackPictureUrl(7, f, {})).toBe(`/api/inbox/7/artwork/${h('a')}`)
-    expect(trackPictureUrl(7, f, { picture: `image/png:${h('f')}` })).toBe(`/api/artwork/${h('f')}`)
-    expect(trackPictureUrl(7, file('d/02.flac'), {})).toBeNull()
+    const pending = { id: 7, state: 'pending' as const }
+    expect(trackPictureUrl(pending, f, {})).toBe(`/api/inbox/7/artwork/${h('a')}`)
+    expect(trackPictureUrl(pending, f, { picture: `image/png:${h('f')}` })).toBe(`/api/artwork/${h('f')}`)
+    expect(trackPictureUrl(pending, file('d/02.flac'), {})).toBeNull()
+    // 配置済みのファイルの画像は Library の画像置き場
+    expect(trackPictureUrl({ id: 7, state: 'placed' }, f, {})).toBe(`/api/artwork/${h('a')}`)
   })
 })
 
