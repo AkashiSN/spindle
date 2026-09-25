@@ -283,11 +283,19 @@ fn album_variants_append_year_and_edition() {
 }
 
 #[test]
-fn variant_without_value_is_an_error() {
+fn variant_without_value() {
     let mut f = fields();
     f.year = None;
+    // 年が無ければ年の段は作れない
     assert!(single().render(&f, AlbumVariant::WithYear).is_err());
-    assert!(single().render(&f, AlbumVariant::WithEdition).is_err());
+    // edition が無ければ edition の段は元の `{album}` のまま（D-43 追記）
+    assert_eq!(
+        single()
+            .render(&f, AlbumVariant::WithEdition)
+            .unwrap()
+            .as_str(),
+        "J-Pop/花譜/魔法/03 過去を喰らう.flac"
+    );
 }
 
 fn item(track_id: i64, release: &str, f: TrackFields, current: &str) -> PlanItem {
@@ -352,6 +360,73 @@ fn same_year_falls_back_to_edition() {
         path(&out[1]),
         "J-Pop/花譜/魔法 (Remaster)/03 過去を喰らう.flac"
     );
+}
+
+#[test]
+fn release_without_edition_keeps_the_plain_name_when_the_other_has_one() {
+    // 通常版と Hi-Res 版: 同名・同年で、Hi-Res 側だけが EDITION を持つ。通常版は元の名前のまま、
+    // Hi-Res だけが `({edition})` で分かれる（D-43 追記。実機の IM@S CM Solo の形）
+    let mut hires = fields();
+    hires.edition = Some("Hi-Res".to_owned());
+    let items = vec![
+        item(1, "album:1", fields(), "old/a/1.flac"),
+        item(2, "album:2", hires, "old/a/Hi-Res/1.flac"),
+    ];
+    let out = plan(&items, &Occupancy::default());
+    assert_eq!(path(&out[0]), "J-Pop/花譜/魔法/03 過去を喰らう.flac");
+    assert_eq!(
+        path(&out[1]),
+        "J-Pop/花譜/魔法 (Hi-Res)/03 過去を喰らう.flac"
+    );
+}
+
+#[test]
+fn two_releases_without_edition_still_conflict_even_if_a_third_has_one() {
+    // edition の無いリリースが 2 つ → 元の名前どうしで衝突するので conflict。edition を持つ側は分かれる
+    let mut hires = fields();
+    hires.edition = Some("Hi-Res".to_owned());
+    let items = vec![
+        item(1, "album:1", fields(), "old/1.flac"),
+        item(2, "album:2", fields(), "old/2.flac"),
+        item(3, "album:3", hires, "old/3.flac"),
+    ];
+    let out = plan(&items, &Occupancy::default());
+    assert!(matches!(out[0], Planned::Conflict(_)), "{:?}", out[0]);
+    assert!(matches!(out[1], Planned::Conflict(_)), "{:?}", out[1]);
+    assert_eq!(
+        path(&out[2]),
+        "J-Pop/花譜/魔法 (Hi-Res)/03 過去を喰らう.flac"
+    );
+}
+
+#[test]
+fn same_edition_on_both_releases_is_a_conflict() {
+    let mut f1 = fields();
+    f1.edition = Some("Hi-Res".to_owned());
+    let mut f2 = fields();
+    f2.edition = Some("Hi-Res".to_owned());
+    let items = vec![
+        item(1, "album:1", f1, "old/1.flac"),
+        item(2, "album:2", f2, "old/2.flac"),
+    ];
+    let out = plan(&items, &Occupancy::default());
+    assert!(matches!(out[0], Planned::Conflict(_)), "{:?}", out[0]);
+    assert!(matches!(out[1], Planned::Conflict(_)), "{:?}", out[1]);
+}
+
+#[test]
+fn different_years_resolve_at_the_year_stage_even_with_an_edition() {
+    // 年が違えば従来どおり年で分かれる（edition の段まで行かない）
+    let mut hires = fields();
+    hires.year = Some("2021".to_owned());
+    hires.edition = Some("Hi-Res".to_owned());
+    let items = vec![
+        item(1, "album:1", fields(), "old/1.flac"),
+        item(2, "album:2", hires, "old/2.flac"),
+    ];
+    let out = plan(&items, &Occupancy::default());
+    assert_eq!(path(&out[0]), "J-Pop/花譜/魔法 (2020)/03 過去を喰らう.flac");
+    assert_eq!(path(&out[1]), "J-Pop/花譜/魔法 (2021)/03 過去を喰らう.flac");
 }
 
 #[test]

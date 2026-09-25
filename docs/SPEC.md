@@ -151,7 +151,11 @@ unsorted    = "_Unsorted/{albumartist}/{album}/{track:02}. {title}"
 - 階層は Artist ではなく **AlbumArtist**。コンピレーションは `Various Artists`
 - マルチディスクはサブフォルダを作らず `1-01` 前置き（アルバム = 1ディレクトリを維持）
 - 発売年はパスに含めない。DATE / ORIGINALDATE タグは必ず保持する
-- パス衝突時のみ自動降格: `{album}` → `{album} ({year})` → `{album} ({edition})`
+- パス衝突時のみ自動降格: `{album}` → `{album} ({year})` → `{album} ({edition})`。最後の段で edition を
+  持たないリリースは元の `{album}` のまま（通常版と Hi-Res 版のように片方だけが EDITION を持つ同名の組は、持つ
+  側だけが分かれる。edition の無いリリースが 2 つ以上、または edition が同じなら conflict）。edition は
+  album の構成トラックの `EDITION` タグの最頻値（`albums.edition`。スキャナ・Inbox の配置が入れ、変化の無い
+  既存の album は NULL のときだけ次のスキャンで埋める。D-43 追記）
 - **衝突 = マージではない。** 配置前に MusicBrainz Release ID（無ければ album 行）で
   同一リリース判定を行い、異なる場合は必ず別ディレクトリにする。DiscID は 1 枚ごとの値なので
   リリースの鍵にしない（D-67 追記 3）
@@ -1203,7 +1207,9 @@ Inbox/ に配置（ポーリング検出）
   `If-None-Match` が ETag `"<hash>-orig"` に一致すれば 304、でなければ原寸を返す（MIME はタグの値ではなく
   内容の sniff。sniff できなければ 404。`Cache-Control: public, max-age=31536000, immutable`）。
   **304 の判定は実体の照合の後**（DB に `PICTURE` が残っていても実体が無ければ 404）。取り込みの状態は見ない
-  （rejected / failed でも実体があれば返す。placed は実体が消えているので普通 404）。セッション必須
+  （rejected / failed でも実体があれば返す。placed は実体が消えているので普通 404。**画面は配置済みの取り込みの
+  画像を Library の画像置き場 `/api/artwork/:hash` から出す**（配置で同じ画像が登録されている。`lib/inbox.ts` の
+  `artworkUrl` / `trackPictureUrl` / `itemThumbUrl`））。セッション必須
   （allowlist 無し）。その他の I/O 失敗は 500。サムネイルは作らない（画面で縮小）。同梱の `cover.jpg`
   等は配置時に埋め込みより優先されるが（§7.1 の規則）、承認画面が見せるのは埋め込み画像だけ
 - **採番**: 下書きの提案で TRACKNUMBER の無いファイルは、採用する album の active な `track_no` の最大 + 1 から

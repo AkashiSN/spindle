@@ -1711,6 +1711,24 @@ fn incoming_release_id(draft: &InboxDraft, files: &[FileRow]) -> Option<String> 
         .or_else(|| mode(files.iter().filter_map(|f| tag(f, "MUSICBRAINZ_ALBUMID"))))
 }
 
+/// 配置で作る album の edition（D-43）: 各曲の `EDITION` は下書きの変更（`tags`）があればそれ（null = 消す）、
+/// 無ければファイルのタグ。その最頻値。スキャナ（`compute_album_meta`）と同じ規則
+fn incoming_edition(draft: &InboxDraft, files: &HashMap<String, FileRow>) -> Option<String> {
+    let values: Vec<String> = draft
+        .tracks
+        .iter()
+        .filter_map(|t| match t.tags.get("EDITION") {
+            Some(Some(v)) => v.first().cloned(),
+            Some(None) => None,
+            None => files
+                .get(&canonical_key(&t.rel_path))
+                .and_then(|f| tag(f, "EDITION"))
+                .map(str::to_owned),
+        })
+        .collect();
+    mode(values.iter().map(String::as_str))
+}
+
 /// albumartist / album / category から追記先の album を引く（購読の追記先。P4-16）。下書きの規則
 /// （[`destination`]）と同じで、Inbox の件が置かれる先と一致する
 pub fn destination_of(
@@ -2220,6 +2238,7 @@ fn register_item(
         original_date: None,
         mb_release_id: mb,
         disc_count: Some(i64::from(draft.disc_count())),
+        edition: incoming_edition(draft, files),
     };
     let album_id = match find_or_create_album(&tx, &plan.rel_dir, &plan.release, &meta) {
         Ok(Ok(id)) => id,

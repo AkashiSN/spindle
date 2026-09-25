@@ -8,6 +8,7 @@
 //!   切り詰める（要素はその要素、全体はファイル名の stem）
 //! - 衝突時のみ `{album}` → `{album} ({year})` → `{album} ({edition})` に降格する。
 //!   衝突の単位は**リリース**（MB Release ID / DiscID / album 行）であり、同名 ≠ 同一リリース。
+//!   最後の段で edition を持たないリリースは元の `{album}` に戻る（D-43 追記）。
 //!   降格しても解決しなければマージせず conflict として報告する
 //!
 //! DB には依存しない。テンプレートの選択（single / multi / unsorted）と値の取得は呼び出し側
@@ -334,14 +335,13 @@ impl TrackFields {
                             .ok_or(RenderError::MissingVariantValue("year"))?;
                         format!("{album} ({year})")
                     }
-                    AlbumVariant::WithEdition => {
-                        let edition = self
-                            .edition
-                            .as_deref()
-                            .filter(|e| !e.is_empty())
-                            .ok_or(RenderError::MissingVariantValue("edition"))?;
-                        format!("{album} ({edition})")
-                    }
+                    // edition を持たないリリースは元の `{album}` のまま（D-43 追記。通常版と Hi-Res 版の
+                    // ように片方だけが EDITION を持つ同名の組は、持つ側だけが `({edition})` で分かれる）。
+                    // edition の無いリリースが 2 つ以上なら元の名前どうしで再び衝突し、conflict になる
+                    AlbumVariant::WithEdition => match self.edition.as_deref().map(str::trim) {
+                        Some(edition) if !edition.is_empty() => format!("{album} ({edition})"),
+                        _ => album,
+                    },
                 }
             }
             Field::Title => self.title.clone().unwrap_or_else(|| self.stem.clone()),

@@ -1837,6 +1837,16 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       EXPLAIN QUERY PLAN）、`tests/scan_job.rs`（語彙だけ増えた run の bulk）、`tests/categories_api.rs`（使われていない語彙だけ削除）、`web/src/lib/categories.test.ts`。
       codex の指摘で、語彙の読み直し・`library` イベントでの一覧の取り直し・使われていない語彙の削除（設定画面）・
       部分索引（0004）を足した
+- [x] album の edition を `EDITION` タグから入れ、片方だけが edition を持つ同名の衝突では持たない方を元の名前に
+      する（2026-09-25 ユーザの決定。D-43 追記）。スキャナが `albums.edition` を一度も埋めておらず、実機の
+      IM@S CM Solo の 2 枚（通常版 + `Hi-Res/`）がリネームで「降格に必要な値が無い: edition」だった。Hi-Res 側の
+      2 曲にはバッチ 26 で `EDITION=Hi-Res` を付け済み。受け入れ: `tests/pathgen.rs`（通常版 + Hi-Res、edition 無しが
+      2 つ、edition 同士が同じ、年で分かれる）、`tests/rename_api.rs`（スキャンで edition が入る・既存 DB の NULL が
+      次のスキャンで埋まる・プレビューが通常版は元の名前、Hi-Res は `(Hi-Res)`）
+- [x] Inbox の配置済みの取り込みの画像が出ない（2026-09-25）。一覧と承認画面は Inbox のファイルの埋め込み画像を
+      `/api/inbox/:id/artwork/:hash` で読むが、配置済みはファイルが Library に移っていて 404。配置済みは Library の
+      画像置き場 `/api/artwork/:hash` から出す（`lib/inbox.ts` の `artworkUrl` / `trackPictureUrl` / `itemThumbUrl`）。
+      受け入れ: `web/src/lib/inbox.test.ts`
 
 ---
 

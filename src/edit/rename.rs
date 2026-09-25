@@ -658,7 +658,7 @@ fn album_name_of(tx: &Connection, album_id: i64) -> crate::db::Result<Option<Str
 }
 
 /// 新規 album のメタデータ: 構成トラックのキャッシュ列の最頻値。category は先頭ディレクトリ名が
-/// 語彙に一致すればそれ、無ければ旧 album から引き継ぐ
+/// 語彙に一致すればそれ、無ければ旧 album から引き継ぐ。edition は旧 album の値の最頻値
 fn album_meta_from_tracks(
     tx: &Connection,
     dir: &RelPath,
@@ -668,13 +668,24 @@ fn album_meta_from_tracks(
     let mut album: HashMap<String, usize> = HashMap::new();
     let mut date: HashMap<String, usize> = HashMap::new();
     let mut old_category: Option<i64> = None;
+    let mut edition: HashMap<String, usize> = HashMap::new();
     for id in track_ids {
-        let row: (Option<String>, Option<String>, Option<String>, Option<i64>) = tx.query_row(
-            "SELECT t.albumartist, t.album, t.date, a.category_id
+        type Row = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        );
+        let row: Row = tx.query_row(
+            "SELECT t.albumartist, t.album, t.date, a.category_id, a.edition
              FROM tracks t LEFT JOIN albums a ON a.id = t.album_id WHERE t.id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
+        if let Some(v) = row.4.clone() {
+            *edition.entry(v).or_default() += 1;
+        }
         if let Some(v) = row.0 {
             *albumartist.entry(v).or_default() += 1;
         }
@@ -710,6 +721,8 @@ fn album_meta_from_tracks(
         albumartist: mode(albumartist),
         album: mode(album),
         date: mode(date),
+        // edition はタグ（EDITION）由来の album の値。移動は構成トラックの旧 album から引き継ぐ（D-43）
+        edition: mode(edition),
         ..AlbumMeta::default()
     })
 }

@@ -16,7 +16,7 @@
 //! ジョブ基盤には依存しない。`Db` と `RootDir` と進捗コールバックと CancellationToken だけで動く
 //! （ジョブとしての起動は `jobs::handlers::scan`）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension as _};
@@ -1765,6 +1765,12 @@ impl Commit {
         report
             .changed_ids
             .extend(scans::track_ids_of_albums(&tx, &filled)?);
+        // edition が NULL のまま残っている album（edition を読む前の版で作った行・変化の無い album）を
+        // 構成トラックの EDITION タグの最頻値で埋める（D-43 追記）。NULL だけ埋める
+        let with_edition = Self::fill_album_editions(&tx)?;
+        report
+            .changed_ids
+            .extend(scans::track_ids_of_albums(&tx, &with_edition)?);
 
         // f. finalize
         let missing = scans::finalize_missing(&tx, run_id, now)?;
@@ -2064,6 +2070,7 @@ impl Commit {
             original_date: mode("ORIGINALDATE"),
             mb_release_id: mode("MUSICBRAINZ_ALBUMID"),
             disc_count: mode("DISCTOTAL").and_then(|s| leading_int(&s)),
+            edition: mode("EDITION"),
         })
     }
 
@@ -2129,6 +2136,37 @@ impl Commit {
         Ok(filled)
     }
 
+    /// edition が NULL の active な album を、active な構成トラックの `EDITION` の最頻値で埋める。
+    /// 埋めた album の id を返す（D-43 追記。ファイルの変化で再計算される album は `compute_album_meta` が
+    /// 同じ規則で入れる。これは変化の無い既存の album のため）
+    fn fill_album_editions(tx: &Connection) -> crate::db::Result<Vec<i64>> {
+        let mut per_album: BTreeMap<i64, HashMap<String, usize>> = BTreeMap::new();
+        for (album_id, value) in scans::albums_missing_edition(tx)? {
+            let v = value.trim();
+            if v.is_empty() {
+                continue;
+            }
+            *per_album
+                .entry(album_id)
+                .or_default()
+                .entry(v.to_owned())
+                .or_default() += 1;
+        }
+        let mut filled = Vec::new();
+        for (album_id, counts) in per_album {
+            let best = counts
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+                .map(|(v, _)| v);
+            if let Some(edition) = best {
+                if scans::set_album_edition_if_null(tx, album_id, &edition)? {
+                    filled.push(album_id);
+                }
+            }
+        }
+        Ok(filled)
+    }
+
     /// category: 先頭ディレクトリ名が語彙に一致 → GENRE → map → NULL（D-38）
     fn infer_category(&self, dir: &RelPath, values: &[(String, String)]) -> Option<i64> {
         let top = dir.components().next().map(canonical_key)?;
@@ -2164,7 +2202,7 @@ fn load_tag_values(
     conn: &Connection,
     track_ids: &[i64],
 ) -> crate::db::Result<Vec<(String, String)>> {
-    const KEYS: [&str; 8] = [
+    const KEYS: [&str; 9] = [
         "ALBUMARTIST",
         "ARTIST",
         "ALBUM",
@@ -2173,11 +2211,12 @@ fn load_tag_values(
         "MUSICBRAINZ_ALBUMID",
         "MUSICBRAINZ_DISCID",
         "DISCTOTAL",
+        "EDITION",
     ];
     let mut stmt = conn.prepare_cached(
         "SELECT key, value FROM track_tags WHERE track_id = ?1 AND idx = 0
            AND key IN ('ALBUMARTIST','ARTIST','ALBUM','DATE','ORIGINALDATE',
-                       'MUSICBRAINZ_ALBUMID','MUSICBRAINZ_DISCID','DISCTOTAL','GENRE')",
+                       'MUSICBRAINZ_ALBUMID','MUSICBRAINZ_DISCID','DISCTOTAL','EDITION','GENRE')",
     )?;
     let _ = KEYS;
     let mut out = Vec::new();

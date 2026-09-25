@@ -205,6 +205,29 @@ pub fn set_album_category_if_null(
     Ok(n > 0)
 }
 
+/// edition が NULL の active な album のうち、active な構成トラックに `EDITION` タグがあるもの:
+/// `(album_id, EDITION の値)` をトラックごとに（最頻値は呼び出し側で決める。D-43）。
+/// `idx_track_tags_key(key, value)` から引くので、EDITION を持つトラックの数だけ読む
+pub fn albums_missing_edition(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.album_id, tt.value FROM track_tags tt
+           JOIN tracks t ON t.id = tt.track_id AND t.missing_since IS NULL
+           JOIN albums a ON a.id = t.album_id AND a.missing_since IS NULL AND a.edition IS NULL
+          WHERE tt.key = 'EDITION' AND tt.idx = 0",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.map(|r| r.map_err(Into::into)).collect()
+}
+
+/// album の edition を、まだ NULL のときだけ設定する。設定したら true
+pub fn set_album_edition_if_null(conn: &Connection, album_id: i64, edition: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE albums SET edition = ?2 WHERE id = ?1 AND edition IS NULL",
+        params![album_id, edition],
+    )?;
+    Ok(n > 0)
+}
+
 /// GENRE → category: `(canonical_key(genre), category_id)`
 pub fn load_genre_map(conn: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare("SELECT genre, category_id FROM genre_category_map")?;
@@ -539,6 +562,8 @@ pub struct AlbumMeta {
     pub original_date: Option<String>,
     pub mb_release_id: Option<String>,
     pub disc_count: Option<i64>,
+    /// 同名の別版を区別する値（`EDITION` タグの最頻値）。パス生成の降格 `{album} ({edition})` に使う（D-43）
+    pub edition: Option<String>,
 }
 
 pub fn insert_album(
@@ -549,8 +574,8 @@ pub fn insert_album(
 ) -> Result<i64> {
     conn.execute(
         "INSERT INTO albums (rel_dir, rel_dir_key, category_id, albumartist, album, date,
-                             original_date, mb_release_id, disc_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                             original_date, mb_release_id, disc_count, edition)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             rel_dir,
             rel_dir_key,
@@ -560,7 +585,8 @@ pub fn insert_album(
             m.date,
             m.original_date,
             m.mb_release_id,
-            m.disc_count
+            m.disc_count,
+            m.edition
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -571,7 +597,7 @@ pub fn insert_album(
 pub fn update_album_meta(conn: &Connection, id: i64, m: &AlbumMeta) -> Result<()> {
     conn.execute(
         "UPDATE albums SET category_id = ?2, albumartist = ?3, album = ?4, date = ?5,
-                original_date = ?6, mb_release_id = ?7, disc_count = ?8,
+                original_date = ?6, mb_release_id = ?7, disc_count = ?8, edition = ?9,
                 missing_since = NULL
          WHERE id = ?1",
         params![
@@ -582,7 +608,8 @@ pub fn update_album_meta(conn: &Connection, id: i64, m: &AlbumMeta) -> Result<()
             m.date,
             m.original_date,
             m.mb_release_id,
-            m.disc_count
+            m.disc_count,
+            m.edition
         ],
     )?;
     Ok(())

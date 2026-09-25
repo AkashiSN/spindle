@@ -464,3 +464,86 @@ async fn apply_records_conflict_for_rows_whose_tags_changed_after_preview() {
     assert_eq!(ops[0].result, OpResult::SkippedConflict);
     assert_eq!(app.rel_path(a), "old/a.flac");
 }
+
+#[tokio::test]
+async fn edition_tag_splits_a_same_named_release_and_the_plain_one_keeps_its_name() {
+    // D-43 追記: 通常版（EDITION なし）と Hi-Res 版（EDITION=Hi-Res）が同名・同年。スキャナが EDITION を
+    // album.edition に入れ、リネームは Hi-Res だけを `({edition})` に分け、通常版は元の名前のまま
+    use lofty::tag::ItemKey;
+    let app = App::new().await;
+    require_ffmpeg!(app.add("Anime/X/A/01. a.flac", "a"));
+    let hires = app.add("Anime/X/A/Hi-Res/01. a.flac", "a").unwrap();
+    let main = app.lib().join("Anime/X/A/01. a.flac");
+    for p in [&main, &hires] {
+        common::retag(p, |t| {
+            t.insert_text(ItemKey::RecordingDate, "2015".into());
+        });
+    }
+    // EDITION は lofty の generic Tag に対応するキーが無いので VorbisComments に直接書く
+    {
+        use lofty::config::WriteOptions;
+        use lofty::file::AudioFile;
+        let mut f = std::fs::File::open(&hires).unwrap();
+        let mut flac = lofty::flac::FlacFile::read_from(&mut f, Default::default()).unwrap();
+        drop(f);
+        let vc = flac.vorbis_comments_mut().unwrap();
+        vc.push("EDITION".to_owned(), "Hi-Res".to_owned());
+        flac.save_to_path(&hires, WriteOptions::default()).unwrap();
+    }
+    app.scan().await;
+    let edition_of = |rel: &str| -> Option<String> {
+        app.conn()
+            .query_row(
+                "SELECT a.edition FROM tracks t JOIN albums a ON a.id = t.album_id WHERE t.rel_path = ?1",
+                [rel],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        edition_of("Anime/X/A/Hi-Res/01. a.flac").as_deref(),
+        Some("Hi-Res")
+    );
+    assert_eq!(edition_of("Anime/X/A/01. a.flac"), None);
+
+    // edition を読む前の版で作った既存 DB（edition が NULL）も、変化の無い次のスキャンで埋まる
+    app.conn()
+        .execute("UPDATE albums SET edition = NULL", [])
+        .unwrap();
+    let report = app.scan().await;
+    assert_eq!(
+        edition_of("Anime/X/A/Hi-Res/01. a.flac").as_deref(),
+        Some("Hi-Res")
+    );
+    let hires_id = app.track_id("Anime/X/A/Hi-Res/01. a.flac");
+    assert!(
+        report.changed_ids.contains(&hires_id),
+        "{:?}",
+        report.changed_ids
+    );
+
+    let c = app.cookie().await;
+    let (status, body) = app
+        .preview(&c, serde_json::json!({ "selection": { "filter": "{}" } }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().unwrap();
+    let new_of = |rel: &str| {
+        let id = app.track_id(rel);
+        items
+            .iter()
+            .find(|i| i["id"] == id)
+            .map(|i| i["new"].clone())
+    };
+    assert_eq!(
+        new_of("Anime/X/A/01. a.flac"),
+        Some(serde_json::json!("Anime/AlbumArtist/Album/01. a.flac"))
+    );
+    assert_eq!(
+        new_of("Anime/X/A/Hi-Res/01. a.flac"),
+        Some(serde_json::json!(
+            "Anime/AlbumArtist/Album (Hi-Res)/01. a.flac"
+        ))
+    );
+    assert_eq!(body["conflict"], 0, "{body}");
+}
