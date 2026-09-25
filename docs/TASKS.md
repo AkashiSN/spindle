@@ -1002,6 +1002,13 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       `GET /api/jobs?type=rip` の note と Inbox のサイドカー（`spindle-inbox.json` の `rip.report`）を見る。
       rip.log の「読み取りオフセット」と照合欄も確認。終わったら**自分で起動したプロセスだけ**止める
       （`pkill -f` はシェル自身に当たるので使わない。PID を控える）
+      **2 枚目も通らなかった（2026-09-25、実機のカスタムアプリ c9fe4d2 以前の 2d7812b）**: 新品の
+      King & Prince「So Honey EP」（6 曲、MCN あり、DiscID は MusicBrainz 未登録で ISRC から配信版の候補）。
+      表の +667・試行 3 回・ずれ 1065 / 1481 / 1446、C2 0。CTDB には同じ TOC で載っている（信頼度 8、
+      パリティあり）が、track CRC が全曲まるで違い（CTDB `4fc6dbd9 200556e9 …` / 吸い出し `4e6e1821 f187248c …`）、
+      パリティのオフセットも合わない。AccurateRip は not_found。Five と同じ症状で、2 枚とも新品なので
+      **盤ではなくこのドライブ（BDR-209M）の読みが原因とみてよい**。この項目はドライブ側の対処（PureRead の設定・
+      ファームウェア・別ドライブ / EAC での読み比べ）か、別のドライブが無いと閉じられない
 - [x] Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
       `album_verifications`（`source = rip`、`log_path`）/ `tracks.verification` を見る
       （済: 2026-09-23 に同じ 2 トラックの盤で。吸い出しは表の +667・試行 3 回・CTDB mismatch / AR not_found →
