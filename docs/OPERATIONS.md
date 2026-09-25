@@ -16,7 +16,12 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
 
 - `devices` / `device_cgroup_rules` / `group_add`: CD ドライブ（`/dev/sr0` と cdrom グループの GID。
   `/dev/sg*` は要らない）。ドライブが無い機体では 3 つとも消す（残すと compose が起動に失敗する。
-  アプリ側はデバイスを開けなくても起動し、CD 画面に「ドライブが無い」と出す）
+  アプリ側はデバイスを開けなくても起動し、CD 画面に「ドライブが無い」と出す）。
+  **ドライブのつなぎ先に注意**: 一部の SATA コントローラでは、複数セクタの READ CD の中のセクタ境界で
+  音声が 16 バイト（4 サンプル）ずれ、C2 もエラーも出ないまま照合（AccurateRip / CTDB）が全曲通らない。
+  実機（AMD 600 シリーズのチップセット SATA、1022:43f6）で起き、同じドライブを USB-SATA 変換につなぐと
+  消えた（2026-09-25、TASKS P2-5）。照合が一度も通らず rip.log の「ずれ」が毎回数百〜千回出るなら、
+  まずつなぎ先を変える
 - `user`: 既存ライブラリの所有者の UID:GID に合わせる（違うとタグ書き込みが全滅する）
 - `volumes`: Library / Derived / Archive / Inbox / Playlists / data の実パスと、メタデータプラグイン
   （`spindle-ytmusic-meta`。イメージには入っていない）のマウント

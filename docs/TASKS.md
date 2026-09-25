@@ -934,7 +934,7 @@ D-65。候補を写す先は 1 つの下書き（`DiscDraft`。`lib/cd.ts` の `
 
 ### P2-5 吸い出し
 
-**実装済み（2026-09-23）。残りは実機での照合成功の確認だけ**（下の「引き継ぎ」）。CD 取り込みは
+**完了（2026-09-25。実機の照合成功を確認）**。実装は 2026-09-23。CD 取り込みは
 CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library まで通しで動く。
 
 #### いまの状態（引き継ぎ。別セッションはここから読む）
@@ -994,7 +994,7 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
 
 #### 引き継ぎ: 残り
 
-- [ ] **実機での照合成功の確認**（ユーザに CTDB / AccurateRip に載っている傷の無い盤を入れてもらう）。
+- [x] **実機での照合成功の確認**（ユーザに CTDB / AccurateRip に載っている傷の無い盤を入れてもらう）。
       期待: 表の +667 で吸い（`offset_source: table`）、照合が 1 回で通り（`verified_ctdb` か
       `verified_ar`、試行 1）、`drive_offsets` に 667 を学習し、次の盤から `learned` になる。
       手順: ローカルでサーバを立てる（`SPINDLE_CONFIG` に scratchpad の config、`sudo -u ubuntu -g cdrom` で
@@ -1032,7 +1032,13 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       cdparanoia 10.2 は `-n 4` を守るが、`-Z` でもまれに 16 バイトずれ、paranoia 有効では補正がずれを取り込んで
       AR が合わない。ドライブは AMD 600 シリーズのチップセット SATA（1022:43f6、ASMedia 製）に接続。
       次: ドライブを別の経路（USB-SATA ケース、または別コントローラのポート）に付けて jitter.py で測る。
-      直らなければ、spindle が自前で 1 セクタずつ SG_IO で読む方式（cd-paranoia を使わない）を検討（設計変更）
+      直らなければ、spindle が自前で 1 セクタずつ SG_IO で読む方式（cd-paranoia を使わない）を検討（設計変更）。
+      **解決（同日）**: ドライブを USB-SATA 変換につなぎ替えると、26 セクタずつの 2 回読みがバイト一致（ずれ 0 / 560 窓）、
+      cd-paranoia のトラック 2 も AR v2 `A65C4EBB` で一致。原因は**チップセットの SATA コントローラ**（ドライブ・
+      ファームウェア・spindle ではない）。spindle で Mrs. GREEN APPLE「10」（19 曲）を吸うと、表の +667・**試行 1 回・
+      ずれ 0・C2 0**、全曲 AR OK（信頼度 37〜41、AR v1 / v2 は EAC のログと一致）・CTDB OK（1578〜1590）、
+      結果 `verified_ctdb` ×19、`drive_offsets` に `PIONEER BD-RW   BDR-209M` = 667（source ctdb）を学習。
+      つなぎ先の注意は OPERATIONS の「カスタムアプリの作り方」に書いた。コードの変更は無し
 - [x] Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
       `album_verifications`（`source = rip`、`log_path`）/ `tracks.verification` を見る
       （済: 2026-09-23 に同じ 2 トラックの盤で。吸い出しは表の +667・試行 3 回・CTDB mismatch / AR not_found →
