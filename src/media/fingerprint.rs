@@ -10,7 +10,7 @@
 //! リーブ、リトルエンディアン、bps ぶんのバイト）で MD5 を取るので、同じ PCM なら
 //! WAV / ALAC / FLAC で同じ `audio_md5` になる（WAV → FLAC 正規化で同一性が保たれる）。
 //!
-//! ALAC のデコード出力はコンテナの宣言長で打ち切る（[`FrameLimit`]、D-89）。
+//! ALAC のデコード出力は、ffmpeg と同じく edit list の範囲に揃える（[`FrameLimit`]、D-89 と追記）。
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -24,6 +24,8 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, Track, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
+
+use crate::media::mp4edit::{read_audio_edit, AudioEdit};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FingerprintError {
@@ -134,59 +136,75 @@ fn read_streaminfo<R: Read + Seek>(mut r: R) -> Result<([u8; 34], u64), Fingerpr
     Ok((info, end))
 }
 
-/// コンテナが宣言したトラック長（フレーム数）でデコード出力を打ち切るための残り枠（D-89）。
+/// プロセス内デコードの出力範囲を ffmpeg に揃える（D-89 と追記）。
 ///
-/// symphonia 0.6.1 の MP4 読みは `stts` 末尾の長さ 0 のサンプルもパケットとして返すが、宣言長
-/// （`mdhd` の duration）はそれを含まない。ffmpeg は宣言どおり捨てるので、打ち切らないと同じ ALAC から
-/// 出る PCM の長さが食い違い、正規化の照合（D-46）が失敗する。宣言長は delay / padding を除いた再生
-/// フレーム数で、パケットの trim は適用していないので、delay / padding を持つトラック（LAME ヘッダ付きの
-/// MP3、Opus 等）は打ち切らない。宣言長が無ければ打ち切らない。
+/// 正規化の照合（D-46）は元ファイルを symphonia、生成物を ffmpeg で読むので、同じ ALAC から出る PCM の
+/// 範囲が食い違うと必ず失敗する。symphonia 0.6.1 の MP4 読みは edit list（`elst`）を読まず全パケットを
+/// 返すが、ffmpeg は edit list に従う。本番の ffmpeg（5.1）の規則は次のとおりで、実 ALAC から作った
+/// ファイルで確かめた（D-89 追記 2）:
 ///
-/// [`Self::of_track`] は **ALAC だけ**に掛ける。symphonia の MP4 は edit list を読まず、AAC の encoder
-/// delay を `delay` / `padding` に載せないので、AAC の宣言長（`stts` の合計）は trim 前でも再生長でもなく、
-/// 打ち切ると既存の RG 値が中途半端な長さで変わる。FLAC / WAV / AIFF は宣言長とデコード長が一致する
+/// - 先頭は media_time サンプルちょうど削る
+/// - 終端（media_time + 区間の長さを media timescale へ換算して四捨五入）以降で**始まる**パケットは捨て、
+///   終端をまたぐパケットは丸ごと残す。`stts` 末尾の長さ 0 のサンプルも同じ規則で、始まりが終端より前なら残る
+/// - edit list が無ければ何も削らない
+///
+/// 単純な形（1 区間・media_time ≥ 0・等速）でない edit list は再現せず、何も削らない（照合で止まるだけで
+/// 音声は失わない）。**ALAC だけ**に掛ける: AAC は正規化の対象でなく、既存の RG 値を変えない。delay /
+/// padding を持つトラックも掛けない
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLimit {
-    remaining: Option<u64>,
+    /// 出力の先頭で捨てる残りフレーム数
+    skip: u64,
+    /// この位置（トラックの時間軸 = サンプル）以降で始まるパケットは読まない
+    end: Option<i64>,
 }
 
 impl FrameLimit {
-    pub fn new(num_frames: Option<u64>, delay: Option<u32>, padding: Option<u32>) -> Self {
-        let trimmed = delay.unwrap_or(0) != 0 || padding.unwrap_or(0) != 0;
-        Self {
-            remaining: if trimmed { None } else { num_frames },
-        }
+    /// 何も削らない
+    pub const NONE: Self = Self { skip: 0, end: None };
+
+    pub fn new(skip: u64, end: Option<i64>) -> Self {
+        Self { skip, end }
     }
 
-    pub fn of_track(track: &Track) -> Self {
+    /// `edit` は同じファイルから [`read_audio_edit`] で読んだもの
+    pub fn of_track(track: &Track, edit: Option<&AudioEdit>) -> Self {
         use symphonia::core::codecs::audio::well_known::CODEC_ID_ALAC;
-        let is_alac = track
-            .codec_params
-            .as_ref()
-            .and_then(|p| p.audio())
-            .is_some_and(|p| p.codec == CODEC_ID_ALAC);
-        if !is_alac {
-            return Self { remaining: None };
+        let Some(params) = track.codec_params.as_ref().and_then(|p| p.audio()) else {
+            return Self::NONE;
+        };
+        let trimmed = track.delay.unwrap_or(0) != 0 || track.padding.unwrap_or(0) != 0;
+        if params.codec != CODEC_ID_ALAC || trimmed {
+            return Self::NONE;
         }
-        Self::new(track.num_frames, track.delay, track.padding)
-    }
-
-    /// `frames` フレームの塊のうち残すフレーム数を返し、枠を減らす
-    pub fn take(&mut self, frames: usize) -> usize {
-        match &mut self.remaining {
-            None => frames,
-            Some(rem) => {
-                let keep = (*rem).min(frames as u64);
-                *rem -= keep;
-                keep as usize
-            }
+        // パケットの pts を「サンプル」として比べるので、トラックの時間軸がサンプル単位のときだけ
+        let Some(edit) = edit.filter(|e| Some(e.media_timescale) == params.sample_rate) else {
+            return Self::NONE;
+        };
+        match edit.window() {
+            Some(w) => Self::new(w.start, Some(w.end)),
+            None => Self::NONE,
         }
     }
 
-    /// 枠を使い切った（以降のパケットは読まなくてよい）
-    pub fn exhausted(&self) -> bool {
-        self.remaining == Some(0)
+    /// 開始位置 `pts` のパケットで打ち切る（以降のパケットは読まない）
+    pub fn stops_at(&self, pts: i64) -> bool {
+        self.end.is_some_and(|end| pts >= end)
     }
+
+    /// デコードした `frames` フレームの塊のうち残す範囲を返し、先頭の削り残りを減らす
+    pub fn take(&mut self, frames: usize) -> std::ops::Range<usize> {
+        let skip = self.skip.min(frames as u64);
+        self.skip -= skip;
+        skip as usize..frames
+    }
+}
+
+/// MP4 なら音声トラックの edit list を読み、`file` を先頭へ戻す（D-89 追記）
+pub fn read_edit_and_rewind(file: &mut File) -> std::io::Result<Option<AudioEdit>> {
+    let edit = read_audio_edit(file);
+    file.seek(SeekFrom::Start(0))?;
+    Ok(edit)
 }
 
 fn open_format(file: File, ext: Option<&str>) -> Result<Box<dyn FormatReader>, FingerprintError> {
@@ -208,16 +226,17 @@ fn open_format(file: File, ext: Option<&str>) -> Result<Box<dyn FormatReader>, F
 /// （CD の CRC 計算用。P2-9）。bps が 16 でなければ `Unsupported`。返り値はフレーム数
 /// （チャンネルをまたがないサンプル数）。ブロッキングなので `spawn_blocking` で呼ぶ
 pub fn decode_s16(
-    file: File,
+    mut file: File,
     ext: Option<&str>,
     mut sink: impl FnMut(&[i16]) -> anyhow::Result<()>,
 ) -> Result<u64, FingerprintError> {
+    let edit = read_edit_and_rewind(&mut file)?;
     let mut reader = open_format(file, ext)?;
     let track = reader
         .default_track(TrackType::Audio)
         .ok_or(FingerprintError::NoAudioTrack)?;
     let track_id = track.id;
-    let mut limit = FrameLimit::of_track(track);
+    let mut limit = FrameLimit::of_track(track, edit.as_ref());
     let params = track
         .codec_params
         .as_ref()
@@ -242,18 +261,19 @@ pub fn decode_s16(
     let mut out: Vec<i16> = Vec::new();
     let mut frames = 0u64;
     while let Some(packet) = reader.next_packet()? {
-        if limit.exhausted() {
-            break;
-        }
         if packet.track_id != track_id {
             continue;
+        }
+        if limit.stops_at(packet.pts.get()) {
+            break;
         }
         let buf = decoder.decode(&packet)?;
         // デコーダは 32 bit 左詰めで返すので 16 bit へ戻す
         buf.copy_to_vec_interleaved(&mut interleaved);
-        let keep = limit.take(interleaved.len() / channels as usize) * channels as usize;
+        let keep = limit.take(interleaved.len() / channels as usize);
+        let keep = keep.start * channels as usize..keep.end * channels as usize;
         out.clear();
-        out.extend(interleaved[..keep].iter().map(|&s| (s >> 16) as i16));
+        out.extend(interleaved[keep].iter().map(|&s| (s >> 16) as i16));
         frames += out.len() as u64 / channels;
         sink(&out).map_err(FingerprintError::Sink)?;
     }
@@ -261,13 +281,14 @@ pub fn decode_s16(
 }
 
 /// ALAC / WAV をデコードし、PCM の MD5 を FLAC の STREAMINFO と同じ流儀で算出する
-pub fn decoded_pcm_md5(file: File, ext: Option<&str>) -> Result<[u8; 16], FingerprintError> {
+pub fn decoded_pcm_md5(mut file: File, ext: Option<&str>) -> Result<[u8; 16], FingerprintError> {
+    let edit = read_edit_and_rewind(&mut file)?;
     let mut reader = open_format(file, ext)?;
     let track = reader
         .default_track(TrackType::Audio)
         .ok_or(FingerprintError::NoAudioTrack)?;
     let track_id = track.id;
-    let mut limit = FrameLimit::of_track(track);
+    let mut limit = FrameLimit::of_track(track, edit.as_ref());
     let params = track
         .codec_params
         .as_ref()
@@ -281,11 +302,11 @@ pub fn decoded_pcm_md5(file: File, ext: Option<&str>) -> Result<[u8; 16], Finger
     let mut hasher = Md5::new();
     let mut interleaved: Vec<i32> = Vec::new();
     while let Some(packet) = reader.next_packet()? {
-        if limit.exhausted() {
-            break;
-        }
         if packet.track_id != track_id {
             continue;
+        }
+        if limit.stops_at(packet.pts.get()) {
+            break;
         }
         let buf = decoder.decode(&packet)?;
         // デコーダはサンプルを 32 ビット幅に左詰めで返す（S16 は << 16、i24 は << 8、
@@ -299,8 +320,8 @@ pub fn decoded_pcm_md5(file: File, ext: Option<&str>) -> Result<[u8; 16], Finger
         let shift = 32 - bits;
         let channels = buf.spec().channels().count().max(1);
         buf.copy_to_vec_interleaved(&mut interleaved);
-        let keep = limit.take(interleaved.len() / channels) * channels;
-        for s in &interleaved[..keep] {
+        let keep = limit.take(interleaved.len() / channels);
+        for s in &interleaved[keep.start * channels..keep.end * channels] {
             let v = *s >> shift;
             hasher.update(&v.to_le_bytes()[..bytes]);
         }

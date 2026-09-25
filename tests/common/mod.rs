@@ -63,6 +63,22 @@ pub fn ffmpeg() -> Option<PathBuf> {
     p.status.success().then(|| PathBuf::from("ffmpeg"))
 }
 
+/// ffmpeg でデコードしたときのフレーム数（1ch の s16 に落として数える）。ffmpeg が無ければ None
+pub fn ffmpeg_frames(path: &Path) -> Option<usize> {
+    let out = Command::new(ffmpeg()?)
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:a", "-ac", "1", "-f", "s16le", "-"])
+        .output()
+        .ok()?;
+    assert!(
+        out.status.success(),
+        "ffmpeg が失敗: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(out.stdout.len() / 2)
+}
+
 /// `ffmpeg -i src <args> dst`。ffmpeg が無ければ None
 pub fn encode(src: &Path, dst: &Path, args: &[&str]) -> Option<()> {
     let ffmpeg = ffmpeg()?;
@@ -258,17 +274,35 @@ pub fn rip_entry(files: &[&str], ctdb_matched: &[bool]) -> spindle::import::side
     }
 }
 
+/// [`zero_last_stts_delta`] のとき edit list（`elst`）をどうするか（D-89 追記）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditEnd {
+    /// `elst` の終端も宣言長まで縮める。ffmpeg は長さ 0 のサンプルを捨てる（D-89 の 7 本と同じ形）
+    AtDeclared,
+    /// `elst` はそのまま（宣言長より後ろで終わる）。ffmpeg は長さ 0 のサンプルもデコードする
+    /// （2026-09-26 の再移行で正規化に失敗した 46 本と同じ形）
+    Beyond,
+    /// `edts` を `free` に書き換えて edit list を消す。ffmpeg は長さ 0 のサンプルもデコードする
+    Removed,
+}
+
 /// MP4 の音声トラックの末尾サンプルを「長さ 0」と宣言し直す（D-89 の回帰試験用）。
 /// `stts` 最後の項の delta を 0 に、`mdhd` の duration をその分だけ減らす（どちらも同じ長さで上書き）。
-/// 実機の ALAC（`stts` が `[(N, 4096), (1, 0)]`）と同じ形になる。末尾の項が 1 サンプルでなければ、
-/// その項を分けられないので panic する。宣言から外したフレーム数を返す
-pub fn zero_last_stts_delta(path: &Path) -> u32 {
+/// 実機の ALAC（`stts` が `[(N, 4096), (1, 0)]`）と同じ形になる。edit list は `edit` に従う。
+/// 末尾の項が 1 サンプルでなければ、その項を分けられないので panic する。宣言から外したフレーム数を返す
+pub fn zero_last_stts_delta(path: &Path, edit: EditEnd) -> u32 {
     let mut data = std::fs::read(path).unwrap();
     let mut stts = None;
     let mut mdhd = None;
+    let mut mvhd = None;
+    let mut elst = None;
+    let mut edts = None;
     find_boxes(&data, 0, data.len(), &mut |typ, body, end| match typ {
         b"stts" => stts = Some((body, end)),
         b"mdhd" => mdhd = Some(body),
+        b"mvhd" => mvhd = Some(body),
+        b"elst" => elst = Some(body),
+        b"edts" => edts = Some(body),
         _ => {}
     });
     let (body, end) = stts.expect("stts が無い");
@@ -283,17 +317,61 @@ pub fn zero_last_stts_delta(path: &Path) -> u32 {
     let dropped = be32(&data, last + 4);
     data[last + 4..last + 8].copy_from_slice(&0u32.to_be_bytes());
     let mdhd = mdhd.expect("mdhd が無い");
-    if data[mdhd] == 0 {
-        let at = mdhd + 16;
-        let d = be32(&data, at) - dropped;
-        data[at..at + 4].copy_from_slice(&d.to_be_bytes());
-    } else {
-        let at = mdhd + 24;
-        let d = u64::from_be_bytes(data[at..at + 8].try_into().unwrap()) - u64::from(dropped);
-        data[at..at + 8].copy_from_slice(&d.to_be_bytes());
+    assert_eq!(data[mdhd], 0, "mdhd が version 0 でない");
+    let media_ts = be32(&data, mdhd + 12);
+    let declared = be32(&data, mdhd + 16) - dropped;
+    data[mdhd + 16..mdhd + 20].copy_from_slice(&declared.to_be_bytes());
+    match edit {
+        EditEnd::Beyond => {}
+        EditEnd::AtDeclared => {
+            let mvhd = mvhd.expect("mvhd が無い");
+            assert_eq!(data[mvhd], 0, "mvhd が version 0 でない");
+            let movie_ts = be32(&data, mvhd + 12);
+            let seg = u64::from(declared) * u64::from(movie_ts);
+            assert_eq!(
+                seg % u64::from(media_ts),
+                0,
+                "宣言長が movie timescale で割り切れない"
+            );
+            let elst = elst.expect("elst が無い");
+            assert_eq!(data[elst], 0, "elst が version 0 でない");
+            assert_eq!(be32(&data, elst + 4), 1, "elst が 1 項でない");
+            let seg = (seg / u64::from(media_ts)) as u32;
+            data[elst + 8..elst + 12].copy_from_slice(&seg.to_be_bytes());
+        }
+        EditEnd::Removed => {
+            let edts = edts.expect("edts が無い");
+            data[edts - 4..edts].copy_from_slice(b"free");
+        }
     }
     std::fs::write(path, data).unwrap();
     dropped
+}
+
+/// 音声トラックの edit list を 1 区間に書き換える（`mvhd` の timescale も）。D-89 追記 2 の試験用。
+/// ffmpeg の muxer が書いた `elst`（version 0・1 項）を前提にする
+pub fn set_edit(path: &Path, movie_timescale: u32, segment_duration: u32, media_time: i32) {
+    let mut data = std::fs::read(path).unwrap();
+    let mut mvhd = None;
+    let mut elst = None;
+    find_boxes(&data, 0, data.len(), &mut |typ, body, _| match typ {
+        b"mvhd" => mvhd = Some(body),
+        b"elst" => elst = Some(body),
+        _ => {}
+    });
+    let mvhd = mvhd.expect("mvhd が無い");
+    assert_eq!(data[mvhd], 0, "mvhd が version 0 でない");
+    data[mvhd + 12..mvhd + 16].copy_from_slice(&movie_timescale.to_be_bytes());
+    let elst = elst.expect("elst が無い");
+    assert_eq!(data[elst], 0, "elst が version 0 でない");
+    assert_eq!(
+        &data[elst + 4..elst + 8],
+        &1u32.to_be_bytes(),
+        "elst が 1 項でない"
+    );
+    data[elst + 8..elst + 12].copy_from_slice(&segment_duration.to_be_bytes());
+    data[elst + 12..elst + 16].copy_from_slice(&media_time.to_be_bytes());
+    std::fs::write(path, data).unwrap();
 }
 
 fn find_boxes(data: &[u8], mut off: usize, end: usize, f: &mut dyn FnMut(&[u8; 4], usize, usize)) {
@@ -310,7 +388,10 @@ fn find_boxes(data: &[u8], mut off: usize, end: usize, f: &mut dyn FnMut(&[u8; 4
         };
         let (body, stop) = (off + hdr, (off + size).min(end));
         f(&typ, body, stop);
-        if matches!(&typ, b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl") {
+        if matches!(
+            &typ,
+            b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"edts"
+        ) {
             find_boxes(data, body, stop, f);
         }
         off += size.max(8);

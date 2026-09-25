@@ -66,13 +66,12 @@ async fn decodes_flac_in_process() {
     }
 }
 
-#[tokio::test]
-async fn alac_stops_at_the_declared_length() {
-    // D-89: stts 末尾の長さ 0 のサンプルは RG / hirescheck の PCM にも入れない
+/// ALAC の末尾サンプルを長さ 0 と宣言し直し、プロセス内デコードのフレーム数と ffmpeg のフレーム数を返す
+async fn alac_frames_after_zeroing(edit: common::EditEnd) -> Option<(usize, usize, usize)> {
     let dir = tempfile::tempdir().unwrap();
-    let path = require_ffmpeg!(common::make_audio(dir.path(), "a.m4a", "alac.m4a", 1));
-    let dropped = common::zero_last_stts_delta(&path) as usize;
-    let ffmpeg = common::ffmpeg().unwrap();
+    let path = common::make_audio(dir.path(), "a.m4a", "alac.m4a", 1)?;
+    let dropped = common::zero_last_stts_delta(&path, edit) as usize;
+    let ffmpeg = common::ffmpeg()?;
     let (_, out) = Decoder::new(&ffmpeg)
         .decode(
             File::open(&path).unwrap(),
@@ -82,7 +81,30 @@ async fn alac_stops_at_the_declared_length() {
         )
         .await
         .unwrap();
-    assert_eq!(out.samples.len(), (44_100 - dropped) * 2);
+    Some((
+        out.samples.len() / 2,
+        common::ffmpeg_frames(&path)?,
+        dropped,
+    ))
+}
+
+#[tokio::test]
+async fn alac_stops_where_ffmpeg_stops() {
+    // D-89: edit list が宣言長で終わる ALAC の長さ 0 のサンプルは RG / hirescheck の PCM にも入れない
+    let (ours, theirs, dropped) =
+        require_ffmpeg!(alac_frames_after_zeroing(common::EditEnd::AtDeclared).await);
+    assert_eq!(ours, 44_100 - dropped);
+    assert_eq!(ours, theirs);
+}
+
+#[tokio::test]
+async fn alac_keeps_the_tail_ffmpeg_keeps() {
+    // D-89 追記: edit list が宣言長より後ろで終わる・無いときは、ffmpeg と同じく全部出す
+    for edit in [common::EditEnd::Beyond, common::EditEnd::Removed] {
+        let (ours, theirs, _) = require_ffmpeg!(alac_frames_after_zeroing(edit).await);
+        assert_eq!(ours, 44_100, "{edit:?}");
+        assert_eq!(ours, theirs, "{edit:?}");
+    }
 }
 
 #[tokio::test]

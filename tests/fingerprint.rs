@@ -19,7 +19,10 @@ use spindle::media::fingerprint::{
 
 // ---------------------------------------------------------------- 生成ヘルパ
 
-use common::{encode, pack_pcm, pcm_samples, write_wav, zero_last_stts_delta};
+use common::{
+    encode, ffmpeg_frames, pack_pcm, pcm_samples, set_edit, write_wav, zero_last_stts_delta,
+    EditEnd,
+};
 
 /// 手組みの最小 FLAC（fLaC マーカー + STREAMINFO のみ）。`md5` を埋める
 fn minimal_flac(md5: [u8; 16]) -> Vec<u8> {
@@ -164,24 +167,33 @@ fn alac_24bit_shares_audio_md5_with_flac() {
     );
 }
 
-#[test]
-fn alac_trailing_zero_duration_sample_is_not_hashed() {
-    // D-89: 実機の ALAC は stts の末尾に長さ 0 のサンプルを持つ（宣言長の外）。symphonia 0.6.1 は
-    // それもデコードして返すので、宣言長で打ち切らないと ffmpeg（宣言どおり捨てる）と PCM MD5 が
-    // 食い違い、正規化の照合が失敗する
-    let dir = tempfile::tempdir().unwrap();
-    let wav = dir.path().join("a.wav");
+/// 24 bit の ALAC を作り、末尾サンプルを長さ 0 と宣言し直す。(サンプル, 宣言から外したフレーム数, パス)
+fn alac_with_zero_duration_tail(
+    dir: &std::path::Path,
+    edit: EditEnd,
+) -> Option<(Vec<i32>, usize, std::path::PathBuf)> {
+    let wav = dir.join("a.wav");
     let samples: Vec<i32> = pcm_samples(0).iter().map(|s| s * 200).collect();
     write_wav(&wav, &samples, 24);
-    let alac = dir.path().join("a.m4a");
-    require_ffmpeg!(encode(
-        &wav,
-        &alac,
-        &["-c:a", "alac", "-sample_fmt", "s32p"]
+    let alac = dir.join("a.m4a");
+    encode(&wav, &alac, &["-c:a", "alac", "-sample_fmt", "s32p"])?;
+    let dropped = zero_last_stts_delta(&alac, edit) as usize;
+    assert!(dropped > 0 && dropped < samples.len() / 2);
+    Some((samples, dropped, alac))
+}
+
+#[test]
+fn alac_zero_duration_tail_outside_the_edit_list_is_not_hashed() {
+    // D-89: 実機の ALAC は stts の末尾に長さ 0 のサンプルを持つ（宣言長の外）。edit list も宣言長で
+    // 終わっていれば ffmpeg はそれを捨てる。symphonia 0.6.1 はデコードして返すので、宣言長で打ち切らないと
+    // PCM MD5 が食い違い、正規化の照合が失敗する
+    let dir = tempfile::tempdir().unwrap();
+    let (samples, dropped, alac) = require_ffmpeg!(alac_with_zero_duration_tail(
+        dir.path(),
+        EditEnd::AtDeclared
     ));
-    let dropped = zero_last_stts_delta(&alac) as usize;
     let frames = samples.len() / 2;
-    assert!(dropped > 0 && dropped < frames);
+    assert_eq!(ffmpeg_frames(&alac), Some(frames - dropped));
     let kept = &samples[..(frames - dropped) * 2];
     assert_eq!(
         decoded_pcm_md5(File::open(&alac).unwrap(), Some("m4a")).unwrap(),
@@ -190,30 +202,164 @@ fn alac_trailing_zero_duration_sample_is_not_hashed() {
 }
 
 #[test]
-fn frame_limit_cuts_at_the_declared_length() {
-    let mut l = FrameLimit::new(Some(10), None, None);
-    assert_eq!(l.take(4), 4);
-    assert!(!l.exhausted());
-    assert_eq!(l.take(4), 4);
-    assert_eq!(l.take(4), 2);
-    assert!(l.exhausted());
-    assert_eq!(l.take(4), 0);
-    // delay / padding 0 は「無い」と同じ
-    let mut l = FrameLimit::new(Some(3), Some(0), Some(0));
-    assert_eq!(l.take(4), 3);
+fn alac_zero_duration_tail_inside_the_edit_list_is_hashed() {
+    // D-89 追記: edit list が宣言長より後ろで終わる（または無い）と、ffmpeg は長さ 0 のサンプルも
+    // デコードする（2026-09-26 の再移行で 46 本。うち 3 本は末尾にフェードの実音声があった）。打ち切ると
+    // 正規化の照合が失敗するうえ本物の末尾を落とすので、全部を MD5 に入れる
+    for edit in [EditEnd::Beyond, EditEnd::Removed] {
+        let dir = tempfile::tempdir().unwrap();
+        let (samples, _, alac) = require_ffmpeg!(alac_with_zero_duration_tail(dir.path(), edit));
+        assert_eq!(ffmpeg_frames(&alac), Some(samples.len() / 2), "{edit:?}");
+        assert_eq!(
+            decoded_pcm_md5(File::open(&alac).unwrap(), Some("m4a")).unwrap(),
+            md5_of(&pack_pcm(&samples, 24)),
+            "{edit:?}"
+        );
+    }
 }
 
 #[test]
-fn frame_limit_is_off_without_a_declared_length_or_with_encoder_trims() {
-    // 宣言長が無い
-    let mut l = FrameLimit::new(None, None, None);
-    assert_eq!(l.take(4096), 4096);
-    assert!(!l.exhausted());
-    // 宣言長は delay / padding を除いた長さ。trim を適用していないので打ち切ると本物の末尾を失う
-    let mut l = FrameLimit::new(Some(10), Some(576), None);
-    assert_eq!(l.take(4096), 4096);
-    let mut l = FrameLimit::new(Some(10), None, Some(1000));
-    assert_eq!(l.take(4096), 4096);
+fn frame_limit_skips_the_head_and_stops_at_the_end() {
+    let mut l = FrameLimit::new(5, Some(100));
+    assert_eq!(l.take(4), 4..4);
+    assert_eq!(l.take(4), 1..4);
+    assert_eq!(l.take(4), 0..4);
+    assert!(!l.stops_at(99));
+    assert!(l.stops_at(100));
+    let mut none = FrameLimit::NONE;
+    assert_eq!(none.take(4096), 0..4096);
+    assert!(!none.stops_at(i64::MAX));
+}
+
+/// ffmpeg がこのファイルから作る FLAC の STREAMINFO MD5（= 正規化の照合相手）。`ignore_editlist` なら
+/// edit list を無視して全パケットをデコードした値
+fn ffmpeg_flac_md5(src: &std::path::Path, ignore_editlist: bool) -> Option<[u8; 16]> {
+    let flac = src.with_extension("check.flac");
+    let input_opts: &[&str] = if ignore_editlist {
+        &["-ignore_editlist", "1"]
+    } else {
+        &[]
+    };
+    let out = std::process::Command::new(common::ffmpeg()?)
+        .args(["-v", "error", "-y"])
+        .args(input_opts)
+        .arg("-i")
+        .arg(src)
+        .args(["-map", "0:a", "-c:a", "flac"])
+        .arg(&flac)
+        .output()
+        .ok()?;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let md5 = flac_streaminfo_md5(File::open(&flac).unwrap()).unwrap();
+    let _ = std::fs::remove_file(&flac);
+    md5
+}
+
+/// 24 bit の ALAC（1 秒、44.1k、4096 フレームのパケット 11 個 = 最後は 3140）
+fn alac_24bit(dir: &std::path::Path) -> Option<(Vec<i32>, std::path::PathBuf)> {
+    let wav = dir.join("src.wav");
+    let samples: Vec<i32> = pcm_samples(0).iter().map(|s| s * 200).collect();
+    write_wav(&wav, &samples, 24);
+    let alac = dir.join("src.m4a");
+    encode(&wav, &alac, &["-c:a", "alac", "-sample_fmt", "s32p"])?;
+    Some((samples, alac))
+}
+
+#[test]
+fn alac_edit_lists_written_by_the_muxer_match_ffmpeg() {
+    // D-89 追記 2: ffmpeg の stream copy で途中から・途中までを切り出すと、muxer が elst を書く。
+    // 入力側の -ss は先頭を削る media_time と区間、-t は区間の長さ。どちらも終端 = 全パケットの終わりで、
+    // どの版の ffmpeg でも同じになるので、手元の ffmpeg で作った FLAC の MD5（= 正規化の照合相手）と比べる
+    let dir = tempfile::tempdir().unwrap();
+    let (_, alac) = require_ffmpeg!(alac_24bit(dir.path()));
+    for (name, input_ss, t) in [
+        ("t", None, Some("0.5432")),
+        ("ss_t", Some("0.1234"), Some("0.5432")),
+        ("ss", Some("0.1234"), None),
+    ] {
+        let cut = dir.path().join(format!("{name}.m4a"));
+        let mut cmd = std::process::Command::new(common::ffmpeg().unwrap());
+        cmd.args(["-v", "error", "-y"]);
+        if let Some(ss) = input_ss {
+            cmd.args(["-ss", ss]);
+        }
+        cmd.arg("-i").arg(&alac).args(["-map", "0:a", "-c", "copy"]);
+        if let Some(t) = t {
+            cmd.args(["-t", t]);
+        }
+        assert!(cmd.arg(&cut).status().unwrap().success());
+        assert_eq!(
+            Some(decoded_pcm_md5(File::open(&cut).unwrap(), Some("m4a")).unwrap()),
+            ffmpeg_flac_md5(&cut, false),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn alac_empty_edit_before_the_segment_is_not_reproduced() {
+    // 出力側の -ss で切り出すと、muxer は「空の編集 + 区間」の 2 項を書く。本番の ffmpeg 5.1 は全パケットを
+    // デコードし（2026-09-26 に確認）、新しい ffmpeg は末尾を空の編集の長さだけ削る。単純な形でない edit list は
+    // 再現せず全パケットを出す = 5.1 と同じ。手元の ffmpeg の版に依らないよう、edit list を無視した値と比べる
+    let dir = tempfile::tempdir().unwrap();
+    let (_, alac) = require_ffmpeg!(alac_24bit(dir.path()));
+    let cut = dir.path().join("out_ss.m4a");
+    require_ffmpeg!(encode(
+        &alac,
+        &cut,
+        &["-map", "0:a", "-c", "copy", "-ss", "0.1234"]
+    ));
+    let edit = spindle::media::mp4edit::read_audio_edit(&mut File::open(&cut).unwrap()).unwrap();
+    assert_eq!(edit.entries.len(), 2, "{edit:?}");
+    assert_eq!(edit.entries[0].media_time, -1, "{edit:?}");
+    assert_eq!(
+        Some(decoded_pcm_md5(File::open(&cut).unwrap(), Some("m4a")).unwrap()),
+        ffmpeg_flac_md5(&cut, true)
+    );
+}
+
+#[test]
+fn alac_head_is_trimmed_by_media_time() {
+    // 先頭を削る編集はどの版の ffmpeg も media_time ちょうど削る
+    let dir = tempfile::tempdir().unwrap();
+    let (samples, alac) = require_ffmpeg!(alac_24bit(dir.path()));
+    set_edit(&alac, 44_100, 44_100 - 1000, 1000);
+    assert_eq!(ffmpeg_frames(&alac), Some(44_100 - 1000));
+    assert_eq!(
+        decoded_pcm_md5(File::open(&alac).unwrap(), Some("m4a")).unwrap(),
+        md5_of(&pack_pcm(&samples[1000 * 2..], 24))
+    );
+}
+
+#[test]
+fn alac_packet_straddling_the_edit_end_is_kept_whole() {
+    // 本番の ffmpeg 5.1 の規則（D-89 追記 2）: 終端以降で始まるパケットは捨て、終端をまたぐパケットは丸ごと残す。
+    // 新しい ffmpeg は終端で端数を切るので、ここは手元の ffmpeg と比べず 5.1 で確かめた値に固定する。
+    // 最後のパケットは 40,960 から始まる
+    let dir = tempfile::tempdir().unwrap();
+    let (samples, alac) = require_ffmpeg!(alac_24bit(dir.path()));
+    let md5_upto = |frames: usize| md5_of(&pack_pcm(&samples[..frames * 2], 24));
+    for (movie_ts, seg, frames) in [
+        // 終端が最後のパケットの途中 → 丸ごと残す（5.1 は 44,100。新しい ffmpeg は 42,000）
+        (44_100, 42_000, 44_100),
+        // 終端が最後のパケットの手前 → 最後のパケットを捨て、その前のパケットは丸ごと（5.1 は 40,960）
+        (44_100, 40_000, 40_960),
+        // 終端 = 40,960 + 0.4 サンプル → 四捨五入で 40,960 = 最後のパケットの開始 → 捨てる
+        (441_000, 409_604, 40_960),
+        // 終端 = 40,960 + 0.5 サンプル → 40,961 → 残す
+        (441_000, 409_605, 44_100),
+    ] {
+        set_edit(&alac, movie_ts, seg, 0);
+        assert_eq!(
+            decoded_pcm_md5(File::open(&alac).unwrap(), Some("m4a")).unwrap(),
+            md5_upto(frames),
+            "movie_ts={movie_ts} seg={seg}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------- 非可逆のパケット列

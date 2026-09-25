@@ -1929,6 +1929,30 @@ ALAC 末尾の長さ 0 のサンプル）は済み
 - [x] Inbox の承認画面の「別のリリースから取る…」（`CaaReleasePicker`。同じグループの画像のある版の一覧・
       グループの代表画像・URL / MBID の貼り付け）。vitest の `formatsSummary` / `groupReleaseSummary`
 
+### P4-24 ALAC のプロセス内デコードの範囲を本番の ffmpeg に揃える
+
+D-89 追記。2026-09-26 の本番の再移行で、FLAC 正規化の 46 本が「PCM MD5 が一致しない」で止まった（照合が働き、元の
+ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプルを宣言どおり捨てる」前提で symphonia 側を宣言長で
+打ち切ったが、ffmpeg は edit list（`elst`）に従っていて、46 本は終端が宣言長を 3〜64 サンプル超えていたため最後の
+パケットを丸ごとデコードしていた（うち 3 本は末尾に −53〜−83 dBFS のフェード）。ユーザは「ffmpeg の実際のデコード長に
+合わせる」案を選び、実在しない形も実 ALAC で確かめながら再現するよう指示した
+
+- [x] `media::mp4edit`（最初の音声トラックの `mvhd` / `mdhd` の timescale と `elst`。`moov` だけ読み `mdat` は
+      読み飛ばす。MP4 でなければ None。`AudioEdit::window` は区間を media timescale へ四捨五入で換算）。
+      `tests/mp4edit.rs`（moov が後ろ・映像トラックの後ろの音声・壊れた箱・version 1・換算と丸めの境界・単純な形の判定）
+- [x] `FrameLimit`: 本番の ffmpeg 5.1 の出力範囲を再現する（先頭を media_time 削る、終端以降で始まるパケットを
+      読まない、終端をまたぐパケットは丸ごと）。edit list が無い・単純な形でないときは何も削らない。
+      `decoded_pcm_md5` / `decode_s16` / `media::decode` のプロセス内経路で、symphonia に渡す前に同じファイルから読む
+- [x] 試験: `zero_last_stts_delta` に `EditEnd`（`AtDeclared` = D-89 の 7 本の形 / `Beyond` = 今回の 46 本の形 /
+      `Removed`）と `set_edit`。版に依らない形（長さ 0 のパケット、stream copy の `-ss` / `-t`、先頭の削り）は
+      手元の ffmpeg と比べ、版で違う形（終端をまたぐパケット、丸めの境界、「空の編集 + 区間」）は 5.1 で確かめた値に
+      固定する（`tests/fingerprint.rs`、`tests/decode.rs`）
+- [x] 本番の ffmpeg 5.1 との照合（本番コンテナの ffmpeg で作った FLAC の STREAMINFO MD5 と `decoded_pcm_md5`）:
+      実 ALAC 53 本（D-89 の 7 本 + 今回の 46 本）、実 ALAC から作った 31 の形、`elst` 付きで長さ 0 のサンプルを
+      持たない実 ALAC 9 本がすべて一致
+- [ ] 実機に入れて deep scan（46 本の `audio_md5` が変わり `audio_version` が上がる → RG / Derived がその 46 本だけ
+      やり直される）→ 46 本だけを選んで正規化 → 全件 applied を確認
+
 ---
 
 ## 着手前に確認が必要な残課題

@@ -5,3 +5,4 @@ pub mod decode;
 pub mod encode;
 pub mod fingerprint;
 pub mod hires;
+pub mod mp4edit;

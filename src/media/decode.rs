@@ -9,7 +9,8 @@
 //! - symphonia が demux もできない形式（WavPack / APE）は lofty のプロパティからチャンネル数と
 //!   レートを取り、同じく ffmpeg に回す
 //!
-//! プロセス内の経路は ALAC に限りコンテナの宣言長で打ち切る（[`FrameLimit`]、D-89。ffmpeg は自分で打ち切る）。
+//! プロセス内の経路は ALAC に限り、ffmpeg と同じく edit list の範囲に揃える（[`FrameLimit`]、D-89 と追記。
+//! ffmpeg は自分で揃える）。
 //!
 //! どちらの経路でも [`PcmSink`] には `start(info)` → `push(interleaved f32)` の順で同じ形で流れる。
 //! サンプルは -1.0..1.0 のインターリーブ
@@ -29,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::jobs::process::{ExternalCommand, PathStyle, ProcessError};
-use crate::media::fingerprint::FrameLimit;
+use crate::media::fingerprint::{read_edit_and_rewind, FrameLimit};
 
 /// ffmpeg デコードの上限。長尺の 24/96 でも数分だが NAS の CPU は遅い
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -204,12 +205,13 @@ fn properties_via_lofty(mut file: File, ext: Option<&str>) -> Option<PcmInfo> {
 }
 
 fn decode_in_process<S: PcmSink>(
-    file: File,
+    mut file: File,
     probe_file: File,
     ext: Option<&str>,
     mut sink: S,
     token: &CancellationToken,
 ) -> Result<InProcess<S>, DecodeError> {
+    let edit = read_edit_and_rewind(&mut file).map_err(DecodeError::Io)?;
     let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
     if let Some(ext) = ext {
@@ -235,7 +237,7 @@ fn decode_in_process<S: PcmSink>(
         .default_track(TrackType::Audio)
         .ok_or(DecodeError::NoAudioTrack)?;
     let track_id = track.id;
-    let mut limit = FrameLimit::of_track(track);
+    let mut limit = FrameLimit::of_track(track, edit.as_ref());
     let params = track
         .codec_params
         .as_ref()
@@ -268,14 +270,14 @@ fn decode_in_process<S: PcmSink>(
         if token.is_cancelled() {
             return Err(DecodeError::Cancelled);
         }
-        if limit.exhausted() {
-            break;
-        }
         let Some(packet) = reader.next_packet().map_err(DecodeError::Decode)? else {
             break;
         };
         if packet.track_id != track_id {
             continue;
+        }
+        if limit.stops_at(packet.pts.get()) {
+            break;
         }
         let buf = decoder.decode(&packet).map_err(DecodeError::Decode)?;
         let spec = buf.spec();
@@ -294,8 +296,9 @@ fn decode_in_process<S: PcmSink>(
         }
         buf.copy_to_vec_interleaved(&mut interleaved);
         let channels = this.channels.max(1) as usize;
-        let keep = limit.take(interleaved.len() / channels) * channels;
-        sink.push(&interleaved[..keep]).map_err(DecodeError::Sink)?;
+        let keep = limit.take(interleaved.len() / channels);
+        sink.push(&interleaved[keep.start * channels..keep.end * channels])
+            .map_err(DecodeError::Sink)?;
     }
     let info = match info {
         Some(i) => i,
