@@ -1008,7 +1008,14 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       パリティあり）が、track CRC が全曲まるで違い（CTDB `4fc6dbd9 200556e9 …` / 吸い出し `4e6e1821 f187248c …`）、
       パリティのオフセットも合わない。AccurateRip は not_found。Five と同じ症状で、2 枚とも新品なので
       **盤ではなくこのドライブ（BDR-209M）の読みが原因とみてよい**。この項目はドライブ側の対処（PureRead の設定・
-      ファームウェア・別ドライブ / EAC での読み比べ）か、別のドライブが無いと閉じられない
+      ファームウェア・別ドライブ / EAC での読み比べ）か、別のドライブが無いと閉じられない。
+      **Linux 側の切り分け（同日）**: SATA はドライブの ata30 が 1.5 Gbps でエラー 0。SG_IO の READ CD で
+      トラック 2 の約 60 秒を 2 回読むと、8 セクタの窓 559 個のうち約 190〜220 個が ±4 サンプルずれる（既定の
+      速度で再現）。`SET CD SPEED`（0xBB）と `SET STREAMING`（0xB6）はどちらも受理されるが無視され
+      （706 / 353 KB/s を指定しても約 17 倍速のまま、ずれも同じ）、速度を落とす対策は取れない。
+      mode page 2Ah はドライブ自身が「CD-DA Stream is Accurate」= 1、C2 ポインタ非対応、バッファ 4000 KB と申告。
+      accurate stream を名乗りながら要求の継ぎ目で ±4 サンプルずれるので、残るのはドライブ本体（PureRead の設定・
+      ファームウェア 1.30・個体）。次は Windows の Pioneer ユーティリティ + EAC か別のドライブ
 - [x] Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
       `album_verifications`（`source = rip`、`log_path`）/ `tracks.verification` を見る
       （済: 2026-09-23 に同じ 2 トラックの盤で。吸い出しは表の +667・試行 3 回・CTDB mismatch / AR not_found →
