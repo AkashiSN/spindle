@@ -1091,6 +1091,14 @@ Inbox/ に配置（ポーリング検出）
   stat（inode / size / mtime / ctime）が変わったファイルだけタグを読み直す。**正は Inbox のファイル**で、
   行はキャッシュ: ディレクトリが消えれば行も消す（`placed` は 24 時間残して結果を見せる）。`approved` の取り込みで
   ファイルが変わっていたら `pending` に戻す（再承認）
+- **CD の取り込みの表の画像**（D-91）: 走査の後、承認前（`pending` / `failed`）で画像がまだ無い取り込みのうち、
+  サイドカーの `rip.metadata.release_id`（吸い出しで選んだリリース）があるものは、Cover Art Archive の front
+  画像を**一度だけ**取り（`POST /api/artwork/from-caa` と同じ経路・境界。`CoverArtClient` は `address_family`
+  を `Auto` 固定）、`artwork` の置き場に置いて `inbox_items.caa_picture`（`<mime>:<sha256hex>`）に記録する。
+  提案（`proposal`）は全曲の `picture` の初期値をその画像にする（保存した下書きがあればそちらが勝つ）。
+  画像の無い盤（404）とリリースの無い取り込み（候補を選ばずに吸い出した・CD でない）は 1 回で打ち止め、上流の
+  失敗は次の走査でもう 1 回だけ試す（`caa_tries`、上限 2）。どれも取り込みは失敗させず画像なしのまま。
+  承認画面を開くたび・`GET /api/inbox` のたびには外へ出ない。`caa_picture` の画像は GC しない（区分 E の参照）
 - **却下した取り込みの削除**（D-90）: `rejected` の取り込みに「削除」で `discard_requested_at`（破棄待ち）を入れる。ファイルは
   すぐには消さず、GC が `[gc].retention_days` 経過後に取り込みのディレクトリの直下の**走査が写した音声**（stat が一致
   するもの）・既知の同梱ファイル・サイドカーを消し、ディレクトリが空なら消し、行を消す（サブディレクトリ = 別の取り込みと
@@ -2132,8 +2140,10 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   ディスク・トラック数 / 追記先）は表示のみ。
   **画像の欄**: 全曲が同じ画像なら 1 枚（クリックかドロップで差し替え＝全曲）、画像なしは点線の枠、**曲ごとに
   違う（YouTube）なら既定で曲ごとの画像を保ち**、サムネイルを並べて「画像の無い N 曲に入れる」「全曲を 1 枚に
-  そろえる」を明示的な操作にする。CD の取り込みでリリースが決まっていれば「Cover Art Archive から取る」
-  （`POST /api/artwork/from-caa`）。画像は `POST /api/artwork/upload` で置き、下書きの `picture` に入れる
+  そろえる」を明示的な操作にする。CD の取り込みでリリースが決まっていれば、表の画像を Cover Art Archive から
+  自動で取って初期値に入れてある（D-91。欄に「Cover Art Archive の表の画像（…自動で取った）」、「画像を外す」で
+  外せる。`lib/inbox.ts` の `usesCaaPicture`）。手動の「Cover Art Archive から取る」
+  （`POST /api/artwork/from-caa`）も残す（リリースを引き直した後など）。画像は `POST /api/artwork/upload` で置き、下書きの `picture` に入れる
   （`hooks/useArtworkUpload`、`lib/inbox.ts` の `pictureState` / `applyPicture` / `resetPictures`）。
   **③ トラック表は全項目**（D-85 / D-86）: ライブラリの表のように列で並べ、枠の中で横スクロールする
   （`InboxTrackGrid`）。セルをクリックで選び、ダブルクリック（Enter / F2）で入力欄、↑↓←→ で直せるセルを移る。

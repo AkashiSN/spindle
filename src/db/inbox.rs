@@ -58,7 +58,14 @@ pub struct Item {
     pub placed_at: Option<i64>,
     /// 破棄待ち（rejected の件の「削除」。GC が `[gc].retention_days` 経過後にファイルと行を消す。D-90）
     pub discard_requested_at: Option<i64>,
+    /// Cover Art Archive から取った表の画像（`<mime>:<sha256hex>`。提案の picture の初期値。D-91）
+    pub caa_picture: Option<String>,
+    /// 表の画像の取得を試みた回数（[`CAA_MAX_TRIES`] で打ち止め。D-91）
+    pub caa_tries: i64,
 }
+
+/// 表の画像の取得の上限回数（1 回目の失敗は次の走査でもう 1 回だけ試す。D-91）
+pub const CAA_MAX_TRIES: i64 = 2;
 
 /// 件の中の音声ファイル 1 本
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,7 +85,7 @@ pub struct FileRow {
     pub tags: Vec<(String, String)>,
 }
 
-const ITEM_COLS: &str = "id, rel_dir, state, detected_at, seen_at, approved_at, draft, error, placed_album_id, placed_at, discard_requested_at";
+const ITEM_COLS: &str = "id, rel_dir, state, detected_at, seen_at, approved_at, draft, error, placed_album_id, placed_at, discard_requested_at, caa_picture, caa_tries";
 
 fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     let state: String = r.get(2)?;
@@ -95,6 +102,8 @@ fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         placed_album_id: r.get(8)?,
         placed_at: r.get(9)?,
         discard_requested_at: r.get(10)?,
+        caa_picture: r.get(11)?,
+        caa_tries: r.get(12)?,
     })
 }
 
@@ -535,4 +544,28 @@ pub fn album_rows(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// 表の画像を取りに行く件（D-91）: 承認前（pending / failed）で、まだ画像が無く、上限に達していないもの（id 順）
+pub fn caa_candidates(conn: &Connection) -> Result<Vec<Item>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {ITEM_COLS} FROM inbox_items
+          WHERE state IN ('pending', 'failed') AND caa_picture IS NULL AND caa_tries < ?1
+          ORDER BY id"
+    ))?;
+    let rows = st
+        .query_map([CAA_MAX_TRIES], row_to_item)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 表の画像の取得の結果を記録する（D-91）。`picture` があれば置き、`tries` を回数にする。
+/// 既に画像がある件は触らない（CAS）。記録したら true
+pub fn record_caa(conn: &Connection, id: i64, picture: Option<&str>, tries: i64) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE inbox_items SET caa_picture = ?2, caa_tries = ?3
+          WHERE id = ?1 AND caa_picture IS NULL",
+        rusqlite::params![id, picture, tries],
+    )?;
+    Ok(n == 1)
 }

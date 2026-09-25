@@ -166,6 +166,31 @@ impl InboxHandler {
             read = out.files_read,
             "Inbox を走査した"
         );
+        // CD の取り込みの表の画像（D-91）。走査で見つけた承認前の件に一度だけ取りに行く。失敗しても
+        // 走査・配置は続ける（取り込みは画像なしのまま）
+        if let (Some(client), Some(store)) = (&self.env.coverart, &self.env.artwork) {
+            match crate::import::cover::fetch_cd_covers(
+                &self.env.db,
+                &self.env.inbox,
+                store,
+                client,
+                &self.env.jobs,
+                &token,
+            )
+            .await
+            {
+                Ok(r) if r != crate::import::cover::CoverReport::default() => tracing::info!(
+                    job_id,
+                    found = r.found,
+                    absent = r.absent,
+                    skipped = r.skipped,
+                    failed = r.failed,
+                    "取り込みの表の画像を確かめた"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(job_id, error = %e, "取り込みの表の画像を確かめられない"),
+            }
+        }
         let approved = ctx
             .db()
             .read(|c| dbinbox::list_by_state(c, ItemState::Approved))

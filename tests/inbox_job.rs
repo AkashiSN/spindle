@@ -98,6 +98,7 @@ impl Lib {
             before_place,
             artwork: Some(Arc::new(ArtworkStore::new(self.dir.path().join("thumbs")))),
             before_artwork,
+            coverart: None,
         }
     }
 

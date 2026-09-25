@@ -10,6 +10,7 @@ import {
   setTrackTag,
   tagChanged,
   trackPictureUrl,
+  usesCaaPicture,
   stickyColumns,
   extraTagKeys,
   inboxColumns,
@@ -828,6 +829,19 @@ describe('画像の差し替え（D-86）', () => {
     }
     return { files: new Map(fs.map((f) => [f.rel_path, f])), d }
   }
+  it('usesCaaPicture は提案に入れた Cover Art Archive の画像が全曲にそのまま入っているときだけ true（D-91）', () => {
+    const caa = `image/png:${h('c')}`
+    const { d } = withFiles([[], []])
+    const all = { ...d, tracks: d.tracks.map((t) => ({ ...t, picture: caa })) }
+    expect(usesCaaPicture({ caa_picture: caa }, all)).toBe(true)
+    // 外した（resetPictures）・1 曲だけ差し替えた・取っていない（旧サーバ含む）は false
+    expect(usesCaaPicture({ caa_picture: caa }, resetPictures(all))).toBe(false)
+    const one = { ...all, tracks: all.tracks.map((t, i) => (i === 0 ? { ...t, picture: `image/jpeg:${h('d')}` } : t)) }
+    expect(usesCaaPicture({ caa_picture: caa }, one)).toBe(false)
+    expect(usesCaaPicture({ caa_picture: null }, all)).toBe(false)
+    expect(usesCaaPicture({}, all)).toBe(false)
+    expect(usesCaaPicture({ caa_picture: caa }, { tracks: [] })).toBe(false)
+  })
   it('pictureState は無し / 全曲同じ / 曲ごとに違う（一部無し）を見分ける', () => {
     expect(pictureState(withFiles([[], []]).files, withFiles([[], []]).d)).toMatchObject({ mode: 'none', missing: 2 })
     const u = withFiles([[pic('a')], [pic('a')]])

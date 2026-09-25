@@ -68,6 +68,8 @@ pub fn derived_keys(conn: &Connection, except: &HashSet<i64>) -> Result<HashSet<
 /// 要るので参照とみなす。下書きには任意のタグの値も入るので全文の部分一致にはせず、`picture` の値だけを
 /// JSON として読んで `:` の後ろと照合する（壊れた JSON は空、`tracks` の object でない要素と文字列でない
 /// `picture` は飛ばす。GC 全体を落とさない。codex 指摘）
+/// CD の取り込みのために Cover Art Archive から取った表の画像（`inbox_items.caa_picture`。D-91）も、
+/// 提案の初期値として配置まで要るので参照とみなす
 const ARTWORK_REFERENCED: &str = "EXISTS (SELECT 1 FROM albums b WHERE b.artwork_id = a.id)
        OR EXISTS (SELECT 1 FROM tracks t WHERE t.artwork_id = a.id)
        OR EXISTS (SELECT 1 FROM edits e WHERE e.key = 'PICTURE'
@@ -81,7 +83,10 @@ const ARTWORK_REFERENCED: &str = "EXISTS (SELECT 1 FROM albums b WHERE b.artwork
                               AND json_type(d.value, '$.picture') = 'text'
                          THEN lower(substr(json_extract(d.value, '$.picture'),
                                            instr(json_extract(d.value, '$.picture'), ':') + 1))
-                         END) = lower(hex(a.sha256)))";
+                         END) = lower(hex(a.sha256)))
+       OR EXISTS (SELECT 1 FROM inbox_items i
+                  WHERE i.caa_picture IS NOT NULL
+                    AND lower(substr(i.caa_picture, instr(i.caa_picture, ':') + 1)) = lower(hex(a.sha256)))";
 
 /// どこからも参照されない `artwork` 行: `(id, sha256)`（[`ARTWORK_REFERENCED`] の否定）
 pub fn unreferenced_artwork(conn: &Connection) -> Result<Vec<(i64, Vec<u8>)>> {

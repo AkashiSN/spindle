@@ -145,7 +145,7 @@ fn is_valid_tag_key(key: &str) -> bool {
 
 /// MusicBrainz の MBID（UUID `8-4-4-4-12`）か。大文字も通す（foobar2000 などが書いた既存のタグ。値は
 /// スキャナが album の `mb_release_id` に入れる値と揃えるため正規化しない。`/api/cd/lookup` の検証と同じ）
-fn is_mbid(s: &str) -> bool {
+pub(crate) fn is_mbid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
         && parts
@@ -724,6 +724,13 @@ pub fn propose(
     if sidecar.as_ref().is_some_and(|s| s.rip.is_some()) {
         draft.album_gain = true;
     }
+    // CD の取り込みの表の画像（D-91）: Cover Art Archive から取ってあれば、全曲の picture の初期値に
+    // する。保存した下書きがあればそちらが勝つ（人が外した・差し替えたものを上書きしない。merge_saved）
+    if let Some(picture) = item.caa_picture.as_deref() {
+        for t in &mut draft.tracks {
+            t.picture = Some(picture.to_owned());
+        }
+    }
     if item.state == ItemState::Pending {
         if let Some(saved) = item
             .draft
@@ -1175,6 +1182,8 @@ pub struct PlaceItemEnv {
     /// テスト用: 配置の後・アートワーク解決の前に呼ぶ（排他の保持と I/O 失敗の状況を作る）
     #[doc(hidden)]
     pub before_artwork: Option<crate::cd::place::PlaceHook>,
+    /// CD の取り込みの表の画像を取る Cover Art Archive（D-91）。無ければ取りに行かない
+    pub coverart: Option<Arc<crate::cd::coverart::CoverArtClient>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

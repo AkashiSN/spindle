@@ -327,7 +327,8 @@ async fn main() -> anyhow::Result<()> {
         &state.config.musicbrainz.user_agent,
     )
     .context("Cover Art Archive クライアントの初期化に失敗")?;
-    state = state.with_coverart(Arc::new(caa));
+    let caa = Arc::new(caa);
+    state = state.with_coverart(Arc::clone(&caa));
     // CD ドライブ（P2-1）。`[rip].device` を 2 秒間隔で見る。デバイスが無くても起動は止めない
     // （状態 no_drive として UI に出す。compose の devices が無い環境でも動く）
     let cd_drive: Arc<dyn cd_device::Drive> =
@@ -460,6 +461,7 @@ async fn main() -> anyhow::Result<()> {
             before_place: None,
             artwork: Some(Arc::clone(&artwork)),
             before_artwork: None,
+            coverart: Some(Arc::clone(&caa)),
         })),
     );
     // YouTube のダウンロード（P3-3、D-70）。Inbox に置くところまで。無効なら登録しない（API は 404）

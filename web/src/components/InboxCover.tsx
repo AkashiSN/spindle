@@ -3,7 +3,8 @@
 // - 曲ごとに違う（YouTube）: 既定で曲ごとの画像を保つ。「画像の無い曲に入れる」「全曲を 1 枚にそろえる」は
 //   明示的な操作。1 曲ずつはトラック表の画像列で差し替える
 // - 画像なし: 点線の枠（クリックかドロップ）で全曲に入れる
-// CD の件でリリースが決まっていれば「Cover Art Archive から取る」。画像は配置のときに埋め込む
+// CD の取り込みでリリースが決まっていれば、表の画像を Cover Art Archive から自動で取って初期値に入れてある
+// （D-91。「画像を外す」で外せる）。手動の「Cover Art Archive から取る」も残す。画像は配置のときに埋め込む
 
 import { useRef, useState, type DragEvent } from 'react'
 import type { ArtworkUploadState } from '../hooks/useArtworkUpload'
@@ -12,6 +13,7 @@ import {
   pictureState,
   resetPictures,
   trackPictureUrl,
+  usesCaaPicture,
   type InboxDraft,
   type InboxFile,
   type InboxItem,
@@ -38,6 +40,8 @@ export function InboxCover({
   const [target, setTarget] = useState<PictureTarget>('all')
   const [over, setOver] = useState(false)
   const st = pictureState(files, draft)
+  // 吸い出したリリースの表の画像を Cover Art Archive から自動で取り、提案に入れてある（D-91）
+  const fromCaa = usesCaaPicture(item, draft)
   const n = draft.tracks.length
   const urls = draft.tracks.map((t) => trackPictureUrl(item.id, files.get(t.rel_path), t))
   // 代表（最頻。同数なら先）
@@ -69,7 +73,11 @@ export function InboxCover({
   if (st.mode === 'mixed') {
     state = `トラックごとの画像（${n} 曲・${st.kinds} 種類${st.missing > 0 ? `・画像なし ${st.missing} 曲` : ''}）。そのまま保って配置する。1 曲ずつの差し替えは ③ の「画像」列をダブルクリック`
   } else if (st.mode === 'uniform') {
-    state = st.changed > 0 ? `選んだ画像を配置のとき全 ${n} 曲に埋め込む` : `ファイルの埋め込み画像（${n} 曲とも同じ）`
+    state = fromCaa
+      ? `Cover Art Archive の表の画像（吸い出したリリースから自動で取った）を配置のとき全 ${n} 曲に埋め込む`
+      : st.changed > 0
+        ? `選んだ画像を配置のとき全 ${n} 曲に埋め込む`
+        : `ファイルの埋め込み画像（${n} 曲とも同じ）`
   } else {
     state = 'カバー画像なし。画像を選ぶかここにドロップすると、配置のとき全曲に埋め込む'
   }
@@ -134,7 +142,7 @@ export function InboxCover({
             )}
             {st.changed > 0 && (
               <button type="button" className="ghost" onClick={() => update(resetPictures)}>
-                画像の変更を戻す
+                {fromCaa ? '画像を外す' : '画像の変更を戻す'}
               </button>
             )}
             {artwork.busy && <span className="muted small">画像を置いている…</span>}

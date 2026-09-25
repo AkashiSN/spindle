@@ -175,6 +175,8 @@ export type InboxItem = {
   placed_at: number | null
   /** 破棄待ち（却下した件の「削除」の時刻。GC が retention 日後にファイルと件を消す。D-90）。旧サーバでは無い */
   discard_requested_at?: number | null
+  /** CD の取り込みの表の画像（Cover Art Archive から自動で取ったもの。`<mime>:<sha256hex>`。D-91）。旧サーバでは無い */
+  caa_picture?: string | null
   tracks: InboxFile[]
   /** タグから作った提案（毎回作り直される） */
   proposal: InboxDraft
@@ -797,6 +799,15 @@ export function applyPicture(
 /** 画像の差し替えを全部戻す */
 export function resetPictures(d: InboxDraft): InboxDraft {
   return { ...d, tracks: d.tracks.map((t) => ({ ...t, picture: null })) }
+}
+
+/**
+ * 下書きの画像が、Cover Art Archive から自動で取った表の画像（`item.caa_picture`）そのものか（D-91）。
+ * 全曲がその 1 枚のときだけ true（人が差し替えた・外した曲があれば false）
+ */
+export function usesCaaPicture(item: Pick<InboxItem, 'caa_picture'>, d: Pick<InboxDraft, 'tracks'>): boolean {
+  const caa = item.caa_picture
+  return caa != null && d.tracks.length > 0 && d.tracks.every((t) => t.picture === caa)
 }
 
 // ---------------------------------------------------------------- 承認画面の表の列（§12.6 Inbox）

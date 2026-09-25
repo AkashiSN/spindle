@@ -21,17 +21,13 @@ use crate::db::artwork as dbart;
 use crate::db::{history, tracks};
 use crate::domain::selection::SelectionBody;
 use crate::edit::{EditError, Editor};
-use crate::jobs::handlers::thumbnail::new_thumbnail_job;
-use crate::media::artwork::{sniff, ArtworkStore, MAX_COVER_BYTES, THUMB_SIZES};
+use crate::media::artwork::{ArtworkStore, MAX_COVER_BYTES, THUMB_SIZES};
 
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 
 /// アップロードの上限（`DefaultBodyLimit`。[`MAX_COVER_BYTES`] と同じ）
 pub const UPLOAD_LIMIT: usize = MAX_COVER_BYTES as usize;
-
-/// 埋め込みに使う形式（[`sniff`] が読める形式のうち、lofty で書けて主要プレイヤーが表示するもの）
-const EMBED_MIMES: [&str; 3] = ["image/jpeg", "image/png", "image/webp"];
 
 #[derive(Debug, Deserialize)]
 pub struct SizeQuery {
@@ -204,7 +200,8 @@ pub async fn from_caa(
     }
 }
 
-/// 画像のバイト列を store と `artwork` 行に置き、thumbnail ジョブを投入する（upload / from-caa 共通）
+/// 画像のバイト列を store と `artwork` 行に置き、thumbnail ジョブを投入する（upload / from-caa 共通。
+/// 本体は [`crate::import::cover::store_image`]。CD の取り込みの表の画像も同じ経路で置く。D-91）
 async fn store_image(state: &AppState, body: Bytes) -> Result<Response, ApiError> {
     let Some(store) = state.artwork.clone() else {
         return Ok(error_response(
@@ -212,75 +209,36 @@ async fn store_image(state: &AppState, body: Bytes) -> Result<Response, ApiError
             "artwork_unavailable",
         ));
     };
-    let Some(info) = sniff(&body).filter(|i| EMBED_MIMES.contains(&i.mime)) else {
-        return Ok(error_response_with_message(
-            StatusCode::BAD_REQUEST,
-            "unsupported_image",
-            "JPEG / PNG / WebP の画像だけを受け付ける",
-        ));
+    let img = match crate::import::cover::store_image(&state.db, &store, body.to_vec()).await {
+        Ok(img) => img,
+        Err(crate::import::cover::StoreImageError::Unsupported) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "unsupported_image",
+                "JPEG / PNG / WebP の画像だけを受け付ける",
+            ))
+        }
+        Err(crate::import::cover::StoreImageError::Db(e)) => return Err(e.into()),
+        Err(e) => return Err(ApiError::Internal(e.to_string())),
     };
-    let bytes = body.len();
-    let hash = ArtworkStore::hash_of(&body);
-    {
-        // 既にある画像でも put_original が dir の mtime を今にするので、GC 区分 E の 24 時間の猶予は
-        // このアップロードから数え直される（embed までの窓を守る）
-        let store = Arc::clone(&store);
-        tokio::task::spawn_blocking(move || store.put_original(&hash, info.mime, &body))
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-            .map_err(|e| ApiError::Internal(format!("原画像を置けない: {e}")))?;
-    }
-    let (job, needs_thumbs) = {
-        let needs = !store.missing_thumbs(&hash).is_empty();
-        let job = state
-            .db
-            .write(move |c| {
-                let tx = c.transaction()?;
-                let id = dbart::upsert(
-                    &tx,
-                    &hash,
-                    info.mime,
-                    Some(info.width),
-                    Some(info.height),
-                    bytes,
-                    "embedded",
-                )?;
-                let job = if needs {
-                    Some(
-                        crate::db::jobs::enqueue(
-                            &tx,
-                            &new_thumbnail_job(id),
-                            crate::db::now_epoch(),
-                        )?
-                        .id(),
-                    )
-                } else {
-                    None
-                };
-                tx.commit()?;
-                Ok(job)
-            })
-            .await?;
-        (job, needs)
-    };
-    if let Some(id) = job {
+    if let Some(id) = img.thumbnail_job {
         state.jobs.notify_enqueued(&[id]).await;
     }
     tracing::info!(
-        sha256 = %ArtworkStore::hex(&hash),
-        mime = info.mime,
-        bytes,
-        needs_thumbs,
+        sha256 = %ArtworkStore::hex(&img.hash),
+        mime = img.mime,
+        bytes = img.bytes,
+        needs_thumbs = img.thumbnail_job.is_some(),
         "画像をアップロードした"
     );
     Ok((
         StatusCode::CREATED,
         Json(UploadResponse {
-            sha256: ArtworkStore::hex(&hash),
-            mime: info.mime.to_owned(),
-            width: info.width,
-            height: info.height,
-            bytes,
+            sha256: ArtworkStore::hex(&img.hash),
+            mime: img.mime.to_owned(),
+            width: img.width,
+            height: img.height,
+            bytes: img.bytes,
         }),
     )
         .into_response())

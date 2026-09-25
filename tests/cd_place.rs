@@ -427,6 +427,7 @@ async fn nameless_disc_completes_to_inbox_and_through_approval() {
         before_place: None,
         artwork: None,
         before_artwork: None,
+        coverart: None,
     };
     let out = place_item(&env, &item, &CancellationToken::new())
         .await

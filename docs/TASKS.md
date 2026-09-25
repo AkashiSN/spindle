@@ -1820,6 +1820,14 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       トランザクションで rg ジョブを積む（`db::replaygain::reset_and_reanalyze`。投入単位と dedup は `POST /api/rg` と
       同じ）。リハーサルでは D-89 で 7 本の `audio_md5` が変わったとき手で `POST /api/rg` した。`tests/rg_write.rs`
       （track 単位・album gain on の album 単位・タグだけの変更では積まない・tagwrite の経路）
+- [x] CD の取り込みの表の画像を承認画面の初期値に入れる（2026-09-25 ユーザの決定。D-91）。CD 画面では Cover Art
+      Archive のジャケットが見えていたのに、吸い出したファイルには画像が無く、承認画面で「Cover Art Archive から取る」を
+      押さないと入らなかった（実機の嵐「Five」）。inbox ジョブの走査の後、サイドカーの `rip.metadata.release_id` が
+      ある承認前の取り込みに一度だけ front を取り（マイグレーション 0003 の `inbox_items.caa_picture` / `caa_tries`）、
+      提案の全曲の `picture` に入れる（保存した下書きが勝つ）。404・リリースなしは 1 回で打ち止め、上流の失敗は
+      もう 1 回だけ。承認画面は「Cover Art Archive の表の画像（…自動で取った）」と「画像を外す」。`tests/inbox_cover.rs`
+      （取得 → 提案・一度だけ・GC しない、404、失敗の再試行と上限、リリースなし / CD でないは取りに行かない、下書きが
+      勝つ、inbox ジョブの配線と既存の取り込み）、vitest の `usesCaaPicture`
 
 ---
 
