@@ -1,10 +1,12 @@
 // 設定画面（SPEC §12.6、D-58）: config.toml の閲覧、再スキャン / deep scan、GC の preview → 実行、
 // 退避ファイル（archived_files）の一覧。復元は対応バッチの履歴から巻き戻す（バッチ #n で履歴へ）
 
+import { useCategories } from '../hooks/useCategories'
 import type { SettingsState } from '../hooks/useSettings'
 import type { ThemeState } from '../hooks/useTheme'
 import { formatCount } from '../lib/format'
 import { formatDateTime } from '../lib/history'
+import { deleteConfirmText } from '../lib/categories'
 import { archiveReasonLabel, archiveStateLabel, formatBytes, gcPreviewRows } from '../lib/settings'
 import { THEME_PREFS } from '../lib/theme'
 
@@ -20,6 +22,7 @@ export function SettingsView({
   const { config, archive, gcPreview, busy, notice, error } = settings
   const gcRows = gcPreview ? gcPreviewRows(gcPreview) : null
   const gcTotal = gcRows ? gcRows.reduce((a, r) => a + r.count, 0) : 0
+  const cats = useCategories(true)
 
   return (
     <section className="settings">
@@ -101,6 +104,33 @@ export function SettingsView({
             ))}
           </tbody>
         </table>
+      )}
+
+      <h2>category</h2>
+      <p className="muted small">
+        配置先の最上位のフォルダ。Library 直下のフォルダ名からスキャンで自動で作られる（追加だけ）。
+        使われていない語彙（どのアルバム・購読・Inbox の下書きにも使われていない）は削除できる
+      </p>
+      {cats.error != null && <p className="error">{cats.error}</p>}
+      {cats.items.length === 0 ? (
+        <p className="muted">category はまだない</p>
+      ) : (
+        <ul className="category-list">
+          {cats.items.map((c) => (
+            <li key={c.id}>
+              <span>{c.name}</span>{' '}
+              <button
+                type="button"
+                className="small"
+                onClick={() => {
+                  if (window.confirm(deleteConfirmText(c.name))) void cats.remove(c.id)
+                }}
+              >
+                削除
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
 
       <h2>退避ファイル</h2>

@@ -72,6 +72,10 @@ pub fn router(state: AppState) -> Router {
             "/categories",
             get(categories::list).post(categories::create),
         )
+        .route(
+            "/categories/{id}",
+            axum::routing::delete(categories::delete),
+        )
         .route("/albums/{id}", get(albums::get).patch(albums::patch))
         .route("/artwork/{hash}", get(artwork::get))
         .route(

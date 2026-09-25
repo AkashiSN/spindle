@@ -715,6 +715,23 @@ pub fn conflict_pending_op(conn: &Connection, op_id: i64, error: &str, now: i64)
 /// finalize（`completed` のときだけ）: この run で claim されなかった active 行に missing を立て、
 /// 構成 0 の album に missing を立てる。戻り値は missing にしたトラック数
 /// `track_ids` の行が現在属している album（重複なし）
+/// album に属する active なトラックの id（D-92。category を埋めた album を表へ知らせる）
+pub fn track_ids_of_albums(conn: &Connection, album_ids: &[i64]) -> Result<Vec<i64>> {
+    if album_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let json =
+        serde_json::to_string(album_ids).map_err(|e| super::DbError::Internal(e.to_string()))?;
+    let mut st = conn.prepare_cached(
+        "SELECT id FROM tracks
+          WHERE missing_since IS NULL AND album_id IN (SELECT value FROM json_each(?1))",
+    )?;
+    let ids = st
+        .query_map([&json], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
 pub fn album_ids_of_tracks(conn: &Connection, track_ids: &[i64]) -> Result<Vec<i64>> {
     let json =
         serde_json::to_string(track_ids).map_err(|e| super::DbError::Internal(e.to_string()))?;

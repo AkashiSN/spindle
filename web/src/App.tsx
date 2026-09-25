@@ -24,6 +24,7 @@ import { TopBar } from './components/TopBar'
 import { TrackTable } from './components/TrackTable'
 import { YoutubeView } from './components/YoutubeView'
 import { useAlbums } from './hooks/useAlbums'
+import { notifyCategoriesChanged } from './lib/categories'
 import { useBatchEdit } from './hooks/useBatchEdit'
 import { useDragSize } from './hooks/useDragSize'
 import { useEvents } from './hooks/useEvents'
@@ -176,6 +177,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const onLibrary = useCallback(
     (e: LibraryEvent) => {
       albums.refresh()
+      // スキャンが Library 直下のフォルダ名から category の語彙を足していることがある（D-92）
+      notifyCategoriesChanged()
       // missing の件数が変わる
       refreshPlaylists()
       // 選択集合内の行が変わったかは client で分からないので、library は常に数え直す

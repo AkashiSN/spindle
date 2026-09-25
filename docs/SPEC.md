@@ -228,7 +228,10 @@ Archive / Inbox / Playlists のいずれか）からの相対パス**で、次�
   （直下 + 1 段以上。`Anime/<albumartist>/<album>`）の親になっている直下の名前を、canonical key で語彙に
   無ければ登録し、その album の category にする。`_Unsorted`（`[layout].unsorted` の先頭）と、直下の
   ディレクトリそのもの・root 直下に置かれた曲は対象外。category が NULL のまま残っている album（語彙が
-  後から入った既存の DB）も次のスキャンで直下の名前から埋める（NULL だけ。人が付けた値は変えない）。
+  後から入った既存の DB）も次のスキャンで直下の名前から埋める（NULL だけ。人が付けた値は変えない。
+  部分索引 `idx_albums_category_null` で NULL の行だけを読む）。埋めた album のトラックは `library` イベントで
+  知らせ、画面の category の一覧は `library` イベントのたびに取り直す。自動登録は追加だけで、不要になった
+  語彙は使われていなければ `DELETE /api/categories/:id`（設定画面）で消す。
   album の category はディレクトリ名 → GENRE → `genre_category_map` の順
 - 語彙にマッチしないものは `_Unsorted/` に配置し、取り込みを止めない
 - ytmusic 由来のレーベル軸カテゴリ（神椿Studio 等）も同じ語彙表に混在させてよい
@@ -1454,6 +1457,9 @@ PATCH  /api/albums/:id                            { album_gain }。album gain �
                                                   404 not_found / 400 bad_request
 GET    /api/categories, POST /api/categories        統制語彙 { "items": [{ id, name }] }。POST は { name }（重複は 409）。
                                                   CD 取り込みの確定フォームの category に使う（D-67）
+DELETE /api/categories/:id                        使われていない語彙だけ消す（D-92）。204 / 404 / 409 `in_use`
+                                                  （active な album・GENRE の写像・購読・Inbox の下書きのどれかが
+                                                  使っている。`message` に理由）。missing の album は SET NULL
 GET    /api/search?q=                             FTS5 trigram（3 文字未満は LIKE）。/api/tracks と同じ
                                                   レスポンス形で、filter / sort / cursor / limit も受ける
 

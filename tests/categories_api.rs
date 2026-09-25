@@ -75,6 +75,19 @@ impl App {
         self.send(r).await
     }
 
+    async fn delete(&self, c: &str, uri: &str) -> (StatusCode, Value) {
+        let r = req(Method::DELETE, uri)
+            .header(header::COOKIE, c)
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::empty())
+            .unwrap();
+        self.send(r).await
+    }
+
+    fn conn(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.dir.path().join("spindle.db")).unwrap()
+    }
+
     async fn send(&self, r: Request<Body>) -> (StatusCode, Value) {
         let res = self.router.clone().oneshot(r).await.unwrap();
         let status = res.status();
@@ -144,4 +157,100 @@ async fn categories_require_login() {
         .unwrap();
     let res = app.router.clone().oneshot(r).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------- 削除（D-92）
+
+/// 使われていない語彙だけ消せる。使われていれば 409 `in_use`（理由付き）、無ければ 404
+#[tokio::test]
+async fn delete_removes_only_unused_categories() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let mut ids = std::collections::HashMap::new();
+    for name in ["Anime", "Game", "Drama", "Vtuber", "Temp", "Gone"] {
+        let (st, body) = app
+            .post(&c, "/api/categories", json!({ "name": name }))
+            .await;
+        assert_eq!(st, StatusCode::CREATED);
+        ids.insert(name, body["id"].as_i64().unwrap());
+    }
+    {
+        let db = app.conn();
+        // active な album が使う / missing の album だけが使う
+        db.execute(
+            "INSERT INTO albums (rel_dir, rel_dir_key, category_id) VALUES ('Anime/A/A', 'anime/a/a', ?1)",
+            [ids["Anime"]],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO albums (rel_dir, rel_dir_key, category_id, missing_since)
+             VALUES ('Gone/G/G', 'gone/g/g', ?1, 1)",
+            [ids["Gone"]],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO genre_category_map (genre, category_id) VALUES ('RPG', ?1)",
+            [ids["Game"]],
+        )
+        .unwrap();
+        // 購読と下書きは名前で持つ（大小違いでも同じ語彙）
+        db.execute(
+            "INSERT INTO playlist_subscriptions (list_id, url, target_key, albumartist, album, category,
+                                                 created_at, updated_at)
+             VALUES ('PL1', 'https://x/1', 'k1', 'A', 'A のお歌', 'vtuber', 1, 1)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO inbox_items (rel_dir, rel_dir_key, state, detected_at, seen_at, draft)
+             VALUES ('d', 'd', 'pending', 1, 1, '{\"category\":\"DRAMA\"}')",
+            [],
+        )
+        .unwrap();
+    }
+    for (name, why) in [
+        ("Anime", "アルバム"),
+        ("Game", "GENRE"),
+        ("Vtuber", "購読"),
+        ("Drama", "下書き"),
+    ] {
+        let (st, body) = app
+            .delete(&c, &format!("/api/categories/{}", ids[name]))
+            .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{name}");
+        assert_eq!(body["error"], "in_use");
+        assert!(
+            body["message"].as_str().unwrap().contains(why),
+            "{name}: {body}"
+        );
+    }
+    // 使われていない / missing の album だけが使う語彙は消せる（album の category は SET NULL で外れる）
+    for name in ["Temp", "Gone"] {
+        let (st, _) = app
+            .delete(&c, &format!("/api/categories/{}", ids[name]))
+            .await;
+        assert_eq!(st, StatusCode::NO_CONTENT, "{name}");
+    }
+    let gone: Option<i64> = app
+        .conn()
+        .query_row(
+            "SELECT category_id FROM albums WHERE rel_dir = 'Gone/G/G'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(gone, None);
+    let (_, list) = app.get(&c, "/api/categories").await;
+    let names: Vec<&str> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 4);
+    assert!(!names.contains(&"Temp") && !names.contains(&"Gone"));
+    let (st, _) = app
+        .delete(&c, &format!("/api/categories/{}", ids["Temp"]))
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }

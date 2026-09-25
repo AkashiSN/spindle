@@ -440,6 +440,71 @@ async fn null_categories_of_an_existing_db_are_filled_on_the_next_scan_without_o
         "人が付けた値は上書きしない"
     );
     assert!(lib.album_category("Game/CC/C").is_some());
+    // ファイルは変わっていないが、埋めた album のトラックは `library` イベントで表へ知らせる
+    let aa = lib.track("Anime/AA/A/01.flac").unwrap().id;
+    let bb = lib.track("Anime/BB/B/01.flac").unwrap().id;
+    let cc = lib.track("Game/CC/C/01.flac").unwrap().id;
+    assert!(report.changed_ids.contains(&aa) && report.changed_ids.contains(&cc));
+    assert!(
+        !report.changed_ids.contains(&bb),
+        "埋めていない album は知らせない"
+    );
+}
+
+#[tokio::test]
+async fn a_category_added_by_the_api_during_the_scan_is_used_instead_of_the_genre_map() {
+    // Phase 2 で語彙を読んだ後・Phase 4 の前に API が同じ名前（大小違い）を足しても、Phase 4 は
+    // トランザクションの中で読み直してその語彙を付ける（古い語彙のまま GENRE の写像が付かない）
+    let lib = Lib::new();
+    let p = require_ffmpeg!(lib.add("Anime/AA/A/01.flac", 1, "t", "A", 1));
+    common::retag(&p, |tag| {
+        tag.set_genre("Pop".to_owned());
+    });
+    {
+        let c = lib.conn();
+        c.execute("INSERT INTO categories (id, name) VALUES (7, 'Pop')", [])
+            .unwrap();
+        c.execute(
+            "INSERT INTO genre_category_map (genre, category_id) VALUES ('Pop', 7)",
+            [],
+        )
+        .unwrap();
+    }
+    let db_path = lib.db_path.clone();
+    lib.scanner.set_before_artwork_hook(Arc::new(move |point| {
+        if point == "before_commit" {
+            Connection::open(&db_path)
+                .unwrap()
+                .execute("INSERT INTO categories (id, name) VALUES (8, 'anime')", [])
+                .unwrap();
+        }
+    }));
+    let report = lib.scan().await;
+    assert_eq!(report.categories_registered, 0, "API が先に足した");
+    assert_eq!(lib.album_category("Anime/AA/A"), Some(8));
+    assert_eq!(lib.category_names().len(), 2);
+}
+
+#[test]
+fn the_null_category_fill_uses_the_partial_index() {
+    // D-92: スキャンごとの「category が NULL の album」の問い合わせは部分索引を使い、全 album を走査しない
+    let conn = Connection::open_in_memory().unwrap();
+    let mut conn = conn;
+    spindle::db::migrations::apply(&mut conn).unwrap();
+    let plan: Vec<String> = conn
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT id, rel_dir FROM albums
+              WHERE category_id IS NULL AND missing_since IS NULL",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        plan.iter().any(|p| p.contains("idx_albums_category_null")),
+        "{plan:?}"
+    );
 }
 
 #[tokio::test]

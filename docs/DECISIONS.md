@@ -3929,6 +3929,9 @@ symphonia 0.6.1 の MP4 読みはパケットとして返し、デコーダは 1
   ディレクトリ名**を、canonical key で語彙（`categories`）に無ければ登録する（`db::categories::insert`。
   API の `POST /api/categories` と同じ一意性。書き込みは単一コネクションなので API と並行しても重複しない）。
   続く album 照合の `infer_category` は、登録後の語彙で直下の名前を category に付ける
+- **語彙は Phase 4 のトランザクションの中で読み直してから**登録・照合する。Phase 2 で読んだ語彙のまま進むと、
+  Phase 3 の間に API が同じ名前を足したとき登録が `None`（重複）になり、古い語彙のまま GENRE の写像が付いて
+  NULL の埋め戻しでも直らない（codex レビューの指摘。試験は Phase 4 の直前のフック `before_commit` で割り込む）
 - 対象外: `_Unsorted`（既定）と `[layout].unsorted` の先頭の固定部分（`Scanner::with_unsorted_layout`）、
   直下のディレクトリそのものに置かれた曲（`Loose/01.flac`。category/albumartist/album の形でない）、root
   直下の曲
@@ -3936,7 +3939,16 @@ symphonia 0.6.1 の MP4 読みはパケットとして返し、デコーダは 1
   照合し直さないので、album 照合の後に `category_id IS NULL AND missing_since IS NULL` の album だけを読み、
   直下の名前に当たる語彙があれば `WHERE category_id IS NULL` の条件付きで付ける（`scans::albums_without_category`
   / `set_album_category_if_null`）。一度埋まれば残るのは `_Unsorted` 等の数件なので、毎回の全件走査に
-  ならない。人が付けた値（NULL でない）は変えない
+  ならない（マイグレーション 0004 の部分索引 `idx_albums_category_null ON albums(rel_dir) WHERE category_id IS NULL
+  AND missing_since IS NULL` で NULL の行だけを読む）。人が付けた値（NULL でない）は変えない
+- **画面へ知らせる**: 埋めた album のトラックを `changed_ids` に足して `library` イベントを出す（ファイルが
+  変わらない増分スキャンでも表の category が変わるため）。category の一覧（`useCategories`）は `library`
+  イベントのたびに取り直す（語彙の追加は必ず album の変化を伴う。新しい SSE の種別は足さない）
+- **自動登録は追加だけ。不要になった語彙は人が消す**: `DELETE /api/categories/:id`（設定画面の「category」）。
+  active な album・GENRE の写像（CASCADE で黙って消えるので明示的に外してもらう）・購読（名前で持つ）・
+  承認前 / 配置中の Inbox の保存済みの下書き（名前で持つ）のどれかが使っていれば 409 `in_use`。確かめと削除は
+  同じ書き込みトランザクション。missing の album は ON DELETE SET NULL で外れる。下書きを保存していない
+  取り込み（提案は CD のサイドカーの category）は見ない。消した語彙の取り込みは配置で `_Unsorted` になる
 - 優先順位はディレクトリ名 → GENRE → `genre_category_map`（D-38 のまま）。直下の名前は常に語彙になるので、
   GENRE の写像が効くのは `_Unsorted` の下など直下の名前を使わない album だけになる
 - ScanReport に `categories_registered` / `albums_categorized` を足し、登録した語彙はログに出す

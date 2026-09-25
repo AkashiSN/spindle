@@ -156,7 +156,8 @@ pub struct Scanner {
 
 /// Phase 5 のフック（テスト用。Phase 4 の commit 後の cancel / 停止を起こす）。引数は呼ばれる位置:
 /// `"before_reserve"`（Phase 4 の commit 直後・Phase 5 の予約前）、`"after_reserve"`（候補を予約した
-/// 直後・解決を始める前）
+/// 直後・解決を始める前）。`"before_commit"`（Phase 2 の読み取りの後・Phase 4 の書き込みの前。Phase 3 の
+/// 間に他の書き手が割り込んだ状態を作る）でも呼ぶ
 pub type BeforeArtworkHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Phase 1 で見つけた同梱カバー画像（ディレクトリごとに最も優先度の高い 1 つ）
@@ -450,6 +451,7 @@ impl Scanner {
             category_skip: self.category_skip.clone(),
             results,
         };
+        self.artwork_hook("before_commit");
         let mut report = self.db.write(move |c| commit.apply(c)).await?;
         report.files_seen = files_seen;
 
@@ -1746,15 +1748,23 @@ impl Commit {
 
         // e. album 照合。先に Library 直下のディレクトリ名を category の語彙に登録し（D-92）、
         //    照合で付ける category に間に合わせる
-        let registered = self.register_top_categories(&tx, &groups)?;
-        if registered > 0 {
+        //    照合で付ける category に間に合わせる。語彙は Phase 2 で読んだものだが、Phase 3 の間に API
+        //    （`POST /api/categories`）が足している場合もあるので、登録の有無にかかわらずこのトランザクションで
+        //    読み直してから登録・照合する（古い語彙のまま GENRE の写像が付くのを防ぐ）
+        self.categories = scans::load_categories(&tx)?;
+        report.categories_registered = self.register_top_categories(&tx, &groups)?;
+        if report.categories_registered > 0 {
             self.categories = scans::load_categories(&tx)?;
         }
-        report.categories_registered = registered;
         self.resolve_albums(&tx, groups, now)?;
         // category が NULL のまま残っている album（語彙が後から入った既存の DB・変化の無い album）を
-        // 直下のディレクトリ名で埋める。人が付けた値（NULL でない）は触らない（D-92）
-        report.albums_categorized = self.fill_album_categories(&tx)?;
+        // 直下のディレクトリ名で埋める。人が付けた値（NULL でない）は触らない（D-92）。埋めた album の
+        // トラックは `library` イベントで表へ知らせる（ファイルが変わっていなくても表の category が変わる）
+        let filled = self.fill_album_categories(&tx)?;
+        report.albums_categorized = filled.len() as u64;
+        report
+            .changed_ids
+            .extend(scans::track_ids_of_albums(&tx, &filled)?);
 
         // f. finalize
         let missing = scans::finalize_missing(&tx, run_id, now)?;
@@ -2099,8 +2109,8 @@ impl Commit {
 
     /// category が NULL の active な album に、直下のディレクトリ名に当たる語彙を付ける（D-92）。
     /// 対象は NULL の行だけなので、一度埋まった後は `_Unsorted` 等の数件しか読まない
-    fn fill_album_categories(&self, tx: &Connection) -> crate::db::Result<u64> {
-        let mut filled = 0;
+    fn fill_album_categories(&self, tx: &Connection) -> crate::db::Result<Vec<i64>> {
+        let mut filled = Vec::new();
         for (album_id, rel_dir) in scans::albums_without_category(tx)? {
             let mut comps = rel_dir.split('/');
             let (Some(first), Some(_)) = (comps.next(), comps.next()) else {
@@ -2112,7 +2122,7 @@ impl Commit {
             }
             if let Some((id, _)) = self.categories.iter().find(|(_, k)| *k == key) {
                 if scans::set_album_category_if_null(tx, album_id, *id)? {
-                    filled += 1;
+                    filled.push(album_id);
                 }
             }
         }
