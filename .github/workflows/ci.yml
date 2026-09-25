@@ -233,4 +233,6 @@ jobs:
         run: |
           set -eu
           notes=$(printf 'Docker image: `%s`\n\n```\n%s\n```\n' "${IMAGE}:${GITHUB_REF_NAME#v}" "$DIGEST")
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --notes "$notes"
+          # このジョブは checkout しないので、gh にリポジトリを明示する（無いと「not a git repository」で落ちる）
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --generate-notes --notes "$notes"

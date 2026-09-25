@@ -1526,6 +1526,9 @@ lofty の generic `Tag` → `apply_generic`）は `ItemKey` の写像表に無�
       `idx_albums_category_null` を `0001_init.sql` に直接書いた。空 DB の比較は `ALTER TABLE ADD COLUMN` が
       `sqlite_master` の SQL に残す空白の位置（`placed_at INTEGER ,`）だけが違い、ほかは一致。
       0002〜0004 専用のアップグレード試験は無く、各機能の試験は空 DB で動くので移すものは無かった
+      同日 `7a18882` に `v0.1.0` を切った（GHCR `0.1.0` / `0.1` / `latest` は同じ digest `sha256:58f4519e…`）。
+      CI の Release 作成は publish ジョブが checkout しないため `gh release create` がリポジトリを判別できず落ちた
+      ので、Release は手で作り、ワークフローに `--repo "$GITHUB_REPOSITORY"` を足した
 
 受け入れ（確認済み）: `main` への push で `edge` / `sha-<7>` が push され、リハーサル環境の compose を
 `edge` に切り替えて `compose pull` → `/health` が `{"status":"ok","version":"a10fb0d","ytdlp":"2026.08.19"}`。
