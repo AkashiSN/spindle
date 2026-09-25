@@ -1765,17 +1765,18 @@ impl Commit {
         report
             .changed_ids
             .extend(scans::track_ids_of_albums(&tx, &filled)?);
-        // edition が NULL のまま残っている album（edition を読む前の版で作った行・変化の無い album）を
-        // 構成トラックの EDITION タグの最頻値で埋める（D-43 追記）。NULL だけ埋める
-        let with_edition = Self::fill_album_editions(&tx)?;
-        report
-            .changed_ids
-            .extend(scans::track_ids_of_albums(&tx, &with_edition)?);
 
         // f. finalize
         let missing = scans::finalize_missing(&tx, run_id, now)?;
         report.missing_marked = missing.len() as u64;
         report.changed_ids.extend(missing);
+        // edition が NULL のまま残っている album（edition を読む前の版で作った行・変化の無い album）を
+        // 構成トラックの EDITION タグの最頻値で埋める（D-43 追記）。NULL だけ埋める。**finalize の後**に
+        // 行う: この run で消えたトラックもその前は active なので、消えた曲の EDITION を album に残してしまう
+        let with_edition = Self::fill_album_editions(&tx)?;
+        report
+            .changed_ids
+            .extend(scans::track_ids_of_albums(&tx, &with_edition)?);
         // 1 行が複数の経路（conflict + 物理更新など）で入ることがある
         report.changed_ids.sort_unstable();
         report.changed_ids.dedup();

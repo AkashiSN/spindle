@@ -1712,7 +1712,7 @@ fn incoming_release_id(draft: &InboxDraft, files: &[FileRow]) -> Option<String> 
 }
 
 /// 配置で作る album の edition（D-43）: 各曲の `EDITION` は下書きの変更（`tags`）があればそれ（null = 消す）、
-/// 無ければファイルのタグ。その最頻値。スキャナ（`compute_album_meta`）と同じ規則
+/// 無ければファイルのタグ。その最頻値（同数なら文字列の小さい方）。スキャナ（`Scanner::album_meta`）と同じ規則
 fn incoming_edition(draft: &InboxDraft, files: &HashMap<String, FileRow>) -> Option<String> {
     let values: Vec<String> = draft
         .tracks
@@ -1726,7 +1726,18 @@ fn incoming_edition(draft: &InboxDraft, files: &HashMap<String, FileRow>) -> Opt
                 .map(str::to_owned),
         })
         .collect();
-    mode(values.iter().map(String::as_str))
+    // スキャナの album 値（`Scanner::album_meta`）と同じ決め方: 最頻値、同数なら文字列の小さい方
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for v in &values {
+        let v = v.trim();
+        if !v.is_empty() {
+            *counts.entry(v).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(v, _)| v.to_owned())
 }
 
 /// albumartist / album / category から追記先の album を引く（購読の追記先。P4-16）。下書きの規則
@@ -2251,6 +2262,11 @@ fn register_item(
             return Ok(Err(e.into()));
         }
     };
+    // 既存の同一リリースを採用した（追記・合流・missing の復活）ときは `meta` が使われないので、edition が
+    // NULL なら今回の曲の値で埋める（新規 insert は `meta` で入る。人やスキャナが入れた値は変えない。D-43 追記）
+    if let Some(edition) = meta.edition.as_deref() {
+        crate::db::scans::set_album_edition_if_null(&tx, album_id, edition)?;
+    }
     let album_name: Option<String> = tx
         .query_row("SELECT album FROM albums WHERE id = ?1", [album_id], |r| {
             r.get(0)

@@ -1169,7 +1169,10 @@ DATE が同じ）がリネームで「降格に必要な値が無い: edition」
 - **edition = 構成トラックの `EDITION` タグの最頻値**（大文字正規化済みのキー。他の album 値と同じ決め方）。
   スキャナの album の再計算、Inbox の配置（下書きの `tags` の変更を当てた後の値）で入れる。リネームで album 行を
   作り直すときは旧 album の値を引き継ぐ。変化の無い既存の album は、edition が NULL で構成トラックに `EDITION` が
-  あれば次のスキャンで埋める（NULL のときだけ。`idx_track_tags_key` で EDITION を持つトラックだけを読む）
+  あれば次のスキャンで埋める（NULL のときだけ。`idx_track_tags_key` で EDITION を持つトラックだけを読む。
+  **missing の確定の後**に行う: この run で消えた曲もその前は active なので、消えた曲の値を残さない）。Inbox の配置が
+  既存の同一リリースの album を採用した（追記・合流・missing の復活）ときも、edition が NULL なら今回の曲の値で埋める。
+  同数のときは文字列の小さい方（スキャナ・配置・埋め戻しで同じ。下書きの順には依らない）
 - **最後の段で edition を持たないリリースは元の `{album}` のまま**（ユーザの判断）。通常版 + Hi-Res 版は通常版が
   `IM@S CM Solo - 034 速水奏`、Hi-Res が `IM@S CM Solo - 034 速水奏 (Hi-Res)` になる。edition の無いリリースが
   2 つ以上なら元の名前どうしで再び衝突し、edition 同士が同じでも衝突するので、どちらも conflict（マージにはしない）。

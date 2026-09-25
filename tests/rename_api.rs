@@ -547,3 +547,39 @@ async fn edition_tag_splits_a_same_named_release_and_the_plain_one_keeps_its_nam
     );
     assert_eq!(body["conflict"], 0, "{body}");
 }
+
+#[tokio::test]
+async fn edition_fill_ignores_tracks_that_went_missing_in_the_same_scan() {
+    // 既存 DB（edition が NULL）で、EDITION を持っていた曲だけがこの run で消えた。消えた曲の値を album に
+    // 残してはいけない（埋めるのは finalize の後の active な構成から。codex の指摘）
+    let app = App::new().await;
+    require_ffmpeg!(app.add("Anime/X/B/01. a.flac", "a"));
+    let gone = app.add("Anime/X/B/02. b.flac", "b").unwrap();
+    {
+        use lofty::config::WriteOptions;
+        use lofty::file::AudioFile;
+        let mut f = std::fs::File::open(&gone).unwrap();
+        let mut flac = lofty::flac::FlacFile::read_from(&mut f, Default::default()).unwrap();
+        drop(f);
+        let vc = flac.vorbis_comments_mut().unwrap();
+        vc.push("EDITION".to_owned(), "Deluxe".to_owned());
+        flac.save_to_path(&gone, WriteOptions::default()).unwrap();
+    }
+    app.scan().await;
+    let edition = || -> Option<String> {
+        app.conn()
+            .query_row(
+                "SELECT a.edition FROM tracks t JOIN albums a ON a.id = t.album_id WHERE t.rel_path = ?1",
+                ["Anime/X/B/01. a.flac"],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(edition().as_deref(), Some("Deluxe"));
+    app.conn()
+        .execute("UPDATE albums SET edition = NULL", [])
+        .unwrap();
+    std::fs::remove_file(&gone).unwrap();
+    app.scan().await;
+    assert_eq!(edition(), None);
+}

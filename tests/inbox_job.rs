@@ -2952,3 +2952,89 @@ async fn rerun_picture_check_requires_the_front_cover() {
         .unwrap();
     assert_eq!(lib.count("SELECT count(*) FROM tracks"), 1);
 }
+
+/// 既存の同一リリースの album へ追記するとき（`find_or_create_album` が既存の行を採用して `meta` を使わない）、
+/// album の edition が NULL なら今回の曲の EDITION で埋める（D-43 追記。codex の指摘）
+#[tokio::test]
+async fn append_fills_a_null_album_edition_from_the_incoming_tracks() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    lib.conn()
+        .execute("INSERT INTO categories (name) VALUES ('Rock')", [])
+        .unwrap();
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], Some("Rock"), "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let edition = || -> Option<String> {
+        lib.conn()
+            .query_row(
+                "SELECT edition FROM albums WHERE rel_dir = 'Rock/Artist/Album'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(edition(), None);
+    // 2 件目を同じ album に追記。下書きで EDITION を付ける
+    require_ffmpeg!(lib.add("B/02.flac", 2, "Two", "Album", 1));
+    lib.scan(2000).await;
+    let b = lib.item("B").unwrap();
+    let mut d = draft_for(&[("B/02.flac", 2, "Two")], Some("Rock"), "Album");
+    d.tracks[0]
+        .tags
+        .insert("EDITION".into(), Some(vec!["Hi-Res".into()]));
+    lib.approve(b.id, &d);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), b.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    assert_eq!(
+        lib.count("SELECT count(*) FROM albums WHERE missing_since IS NULL"),
+        1,
+        "追記で別の album を作らない"
+    );
+    assert_eq!(edition().as_deref(), Some("Hi-Res"));
+}
+
+/// 配置で作る album の edition は、スキャナと同じく最頻値・同数なら文字列の小さい方（下書きの順ではない）
+#[tokio::test]
+async fn placed_album_edition_breaks_ties_like_the_scanner() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    require_ffmpeg!(lib.add("AlbumA/02.flac", 2, "Two", "A", 1));
+    lib.conn()
+        .execute("INSERT INTO categories (name) VALUES ('Rock')", [])
+        .unwrap();
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    let mut d = draft_for(
+        &[("AlbumA/01.flac", 1, "One"), ("AlbumA/02.flac", 2, "Two")],
+        Some("Rock"),
+        "Album",
+    );
+    // 下書きの順では "Remaster" が先に現れる。同数なので文字列の小さい "Deluxe" を採る
+    d.tracks[0]
+        .tags
+        .insert("EDITION".into(), Some(vec!["Remaster".into()]));
+    d.tracks[1]
+        .tags
+        .insert("EDITION".into(), Some(vec!["Deluxe".into()]));
+    lib.approve(a.id, &d);
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    let it = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
+    assert_eq!(it.state, ItemState::Placed, "{:?}", it.error);
+    let edition: Option<String> = lib
+        .conn()
+        .query_row(
+            "SELECT edition FROM albums WHERE rel_dir = 'Rock/Artist/Album'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(edition.as_deref(), Some("Deluxe"));
+}
