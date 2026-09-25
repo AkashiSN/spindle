@@ -1015,7 +1015,12 @@ CD 画面の「取り込む」→ rip ジョブ → Inbox → 承認 → Library
       （706 / 353 KB/s を指定しても約 17 倍速のまま、ずれも同じ）、速度を落とす対策は取れない。
       mode page 2Ah はドライブ自身が「CD-DA Stream is Accurate」= 1、C2 ポインタ非対応、バッファ 4000 KB と申告。
       accurate stream を名乗りながら要求の継ぎ目で ±4 サンプルずれるので、残るのはドライブ本体（PureRead の設定・
-      ファームウェア 1.30・個体）。次は Windows の Pioneer ユーティリティ + EAC か別のドライブ
+      ファームウェア 1.30・個体）。次は Windows の Pioneer ユーティリティ + EAC か別のドライブ。
+      **Pioneer 独自の設定（同日）**: qpxtool（`speed47/qpxtool` の `lib/qpxpioneer`）の命令で読むと、このドライブは
+      Quiet モード・速度制限なし（`READ BUFFER` 3C 01 F4 → limit 0 / silent 2）。保存しない指定（BB 04 … 80|mode）で
+      Standard / Performance / 速度制限 ON に切り替えて測っても、ずれは Standard で 12〜200・Performance 183・
+      Quiet 190〜257 個 / 559 窓とばらつくだけで 0 にならない（Standard がやや少ない傾向）。終わりに元の Quiet へ戻した。
+      PureRead は qpxtool でも `pioneer_set_pureread` が空の実装で、Linux から変える方法は見つからない
 - [x] Inbox で名前を入れて承認し、Library の `tracks.source_type = cd_rip` /
       `album_verifications`（`source = rip`、`log_path`）/ `tracks.verification` を見る
       （済: 2026-09-23 に同じ 2 トラックの盤で。吸い出しは表の +667・試行 3 回・CTDB mismatch / AR not_found →
