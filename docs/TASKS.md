@@ -1517,6 +1517,11 @@ lofty の generic `Tag` → `apply_generic`）は `ItemKey` の写像表に無�
 - [x] (9) スカッシュ: リリース時の再移行の前に `db/migrations` を `0001_init.sql` 1 本へ畳んだ（2026-09-24、D-88）。
       最終スキーマは 24 本を流した結果と一致（`sqlite_sequence` の空行だけ差）。アップグレード試験は空 DB の
       スキーマ試験へ移した。最初のタグはリリース時
+- [ ] (10) リリース直前の 2 回目のスカッシュ（2026-09-26 ユーザ依頼。D-88 追記）: (9) の後に足した `0002`〜
+      （いまは 0002 / 0003 / 0004）を `0001_init.sql` へ畳む。やり方と確かめ方は (9) / D-88 と同じ（空 DB の
+      `sqlite_master` と全表の `table_xinfo` / `index_list` / `index_xinfo` / `foreign_key_list` と種データを比べる。
+      各版の試験は空 DB のスキーマ試験へ移す）。最初の `vX.Y.Z` を切るコミットの直前に行い（その後に版が
+      増えないように）、MIGRATION §5 の手順 0。タグの後は CLAUDE.md の禁止事項どおり連番を足すだけ
 
 受け入れ（確認済み）: `main` への push で `edge` / `sha-<7>` が push され、リハーサル環境の compose を
 `edge` に切り替えて `compose pull` → `/health` が `{"status":"ok","version":"a10fb0d","ytdlp":"2026.08.19"}`。

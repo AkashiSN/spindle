@@ -172,6 +172,11 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
 リリースまで `ssd/musics` は正のライブラリとして使い続ける（`readonly` は外してよい。
 `@pre-migration` スナップショットは残す）。リリース時は次の順で作り直す:
 
+0. **マイグレーションをもう一度 `0001_init.sql` へ畳む**（リリースのコミットで。D-88 追記）。D-88 の後に
+   足した `0002`〜（2026-09-26 時点で `0002_inbox_discard` / `0003_inbox_cover` / `0004_albums_category_null_index`）を
+   `0001_init.sql` に統合し、空 DB へ流した最終スキーマが畳む前と一致すること（D-88 と同じ比べ方）を確かめる。
+   リハーサル環境の DB は版が新しすぎて開けなくなるが、次の 1 で消すので構わない。これを入れたイメージで
+   最初の `vX.Y.Z` を切り、以下はそのイメージで行う。**タグを切った後は二度と畳まない**
 1. リハーサル環境を消す: spindle を止め、`ssd/media`、`hdd/media`、`ssd/apps/spindle` を
    `zfs destroy -r`（Derived / DB / バックアップも開発用なので捨てる）
 2. §0 から本手順をやり直す（preflight → migrate_plan → データセット作成 → readonly → snapshot →
