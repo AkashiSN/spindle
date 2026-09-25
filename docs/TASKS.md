@@ -1902,6 +1902,21 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       サムネイルの無い画像は登録と同じトランザクションで thumbnail を投入する。既存の 2 曲は物理属性が変わらないので
       通常のスキャンでは直らない。deep scan（画像を読み直す）で入る
 
+### P4-23 表の画像を同じリリースグループの別の版から取る
+
+2026-09-25 ユーザの要望。取り込む通常盤に Cover Art Archive の表の画像が無く、同じリリースグループの BD 付きや
+初回限定盤にはあるとき、メタデータは通常盤のまま画像だけ別の版から取る（D-93）
+
+- [x] 自動: D-91 の取得でリリースの front が 404 なら、サイドカーの `release_group_id` のリリースグループの front を
+      同じ回で 1 度だけ試す（`CoverArtClient::group_front`、`import::cover::fetch_front`）。`tests/inbox_cover.rs`
+      （グループへの補完・リリースに画像があればグループを引かない・両方 404 で打ち止め・グループの失敗の再試行と上限）
+- [x] `POST /api/artwork/from-caa` が `{ release_group_id }` と、リリースの URL の貼り付けを受ける。
+      `tests/cd_cover_api.rs`
+- [x] `GET /api/cd/release-group/{id}/releases`（MusicBrainz の browse。表の画像の有無付き）。`tests/cd_musicbrainz.rs`
+      （実応答のフィクスチャ `group_releases_five.json` の解釈と並び、クライアントの要求と 404）、`tests/cd_lookup_api.rs`
+- [x] Inbox の承認画面の「別のリリースから取る…」（`CaaReleasePicker`。同じグループの画像のある版の一覧・
+      グループの代表画像・URL / MBID の貼り付け）。vitest の `formatsSummary` / `groupReleaseSummary`
+
 ---
 
 ## 着手前に確認が必要な残課題

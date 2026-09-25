@@ -106,9 +106,18 @@ async fn moved_image() -> axum::response::Response {
     ([(header::CONTENT_TYPE, "image/png")], PNG.to_vec()).into_response()
 }
 
+/// リリースグループの front（D-93）。REAL_ART だけ画像を持つ
+async fn caa_group_front(Path((id, size)): Path<(String, String)>) -> axum::response::Response {
+    if size == "front-500" && id == REAL_ART {
+        return ([(header::CONTENT_TYPE, "image/png")], REAL_PNG.to_vec()).into_response();
+    }
+    (StatusCode::NOT_FOUND, "no image").into_response()
+}
+
 async fn serve_caa() -> String {
     let app = Router::new()
         .route("/release/{id}/{size}", get(caa_front))
+        .route("/release-group/{id}/{size}", get(caa_group_front))
         .route("/moved/image.png", get(moved_image));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -364,4 +373,42 @@ async fn from_caa_stores_the_front_image_like_an_upload() {
     let (st, body) = from_caa(&app, &c, &format!(r#"{{"release_id":"{REAL_ART}"}}"#)).await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "coverart_unavailable");
+}
+
+/// `from-caa` はリリースの代わりにリリースグループも受ける（D-93）。リリースは MusicBrainz の URL の
+/// 貼り付けも通す。どちらか片方だけ（両方・どちらも無しは 400）
+#[tokio::test]
+async fn from_caa_takes_a_release_group_or_a_pasted_release_url() {
+    let app = App::new(Some(serve_caa().await)).await;
+    let c = app.cookie().await;
+    let (st, body) = from_caa(
+        &app,
+        &c,
+        &format!(
+            r#"{{"release_group_id":"{}"}}"#,
+            REAL_ART.to_ascii_uppercase()
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert_eq!(body["mime"], "image/png");
+    let (st, _) = from_caa(&app, &c, &format!(r#"{{"release_group_id":"{NO_ART}"}}"#)).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, body) = from_caa(
+        &app,
+        &c,
+        &format!(r#"{{"release_id":"https://musicbrainz.org/release/{REAL_ART}?tab=cover-art"}}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    for bad in [
+        format!(r#"{{"release_id":"{REAL_ART}","release_group_id":"{REAL_ART}"}}"#),
+        "{}".to_owned(),
+        r#"{"release_group_id":"../x"}"#.to_owned(),
+        // グループの URL をリリースとしては受けない
+        format!(r#"{{"release_id":"https://musicbrainz.org/release-group/{REAL_ART}"}}"#),
+    ] {
+        let (st, body) = from_caa(&app, &c, &bad).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
 }

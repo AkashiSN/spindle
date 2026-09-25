@@ -4,10 +4,13 @@
 //   明示的な操作。1 曲ずつはトラック表の画像列で差し替える
 // - 画像なし: 点線の枠（クリックかドロップ）で全曲に入れる
 // CD の取り込みでリリースが決まっていれば、表の画像を Cover Art Archive から自動で取って初期値に入れてある
-// （D-91。「画像を外す」で外せる）。手動の「Cover Art Archive から取る」も残す。画像は配置のときに埋め込む
+// （D-91。「画像を外す」で外せる）。そのリリースに無ければリリースグループの代表画像を取ってある（D-93）。
+// 手動の「Cover Art Archive から取る」と、画像だけ別の版から取る「別のリリースから取る…」（D-93）もある。
+// 画像は配置のときに埋め込む
 
 import { useRef, useState, type DragEvent } from 'react'
-import type { ArtworkUploadState } from '../hooks/useArtworkUpload'
+import type { ArtworkUploadState, CaaTarget } from '../hooks/useArtworkUpload'
+import { CaaReleasePicker } from './CaaReleasePicker'
 import {
   applyPicture,
   pictureState,
@@ -39,6 +42,7 @@ export function InboxCover({
   const input = useRef<HTMLInputElement>(null)
   const [target, setTarget] = useState<PictureTarget>('all')
   const [over, setOver] = useState(false)
+  const [picking, setPicking] = useState(false)
   const st = pictureState(files, draft)
   // 吸い出したリリースの表の画像を Cover Art Archive から自動で取り、提案に入れてある（D-91）
   const fromCaa = usesCaaPicture(item, draft)
@@ -63,18 +67,20 @@ export function InboxCover({
     setOver(false)
     if (editable) void take(e.dataTransfer.files[0], 'all')
   }
-  const caa = async () => {
-    if (draft.release_id == null) return
-    const value = await artwork.fromCaa(draft.release_id)
+  const caa = async (target: CaaTarget): Promise<boolean> => {
+    const value = await artwork.fromCaa(target)
     if (value != null) update((d) => applyPicture(d, files, value, 'all'))
+    return value != null
   }
+  const releaseId = nonEmpty(draft.release_id)
+  const groupId = nonEmpty(draft.release_group_id)
 
   let state: string
   if (st.mode === 'mixed') {
     state = `トラックごとの画像（${n} 曲・${st.kinds} 種類${st.missing > 0 ? `・画像なし ${st.missing} 曲` : ''}）。そのまま保って配置する。1 曲ずつの差し替えは ③ の「画像」列をダブルクリック`
   } else if (st.mode === 'uniform') {
     state = fromCaa
-      ? `Cover Art Archive の表の画像（吸い出したリリースから自動で取った）を配置のとき全 ${n} 曲に埋め込む`
+      ? `Cover Art Archive の表の画像（吸い出したリリースかそのリリースグループから自動で取った）を配置のとき全 ${n} 曲に埋め込む`
       : st.changed > 0
         ? `選んだ画像を配置のとき全 ${n} 曲に埋め込む`
         : `ファイルの埋め込み画像（${n} 曲とも同じ）`
@@ -135,9 +141,14 @@ export function InboxCover({
                 {cover == null ? '画像を選ぶ…' : st.changed > 0 ? '別の画像を選ぶ…' : '差し替える…'}
               </button>
             )}
-            {item.rip != null && draft.release_id != null && draft.release_id !== '' && st.mode !== 'mixed' && (
-              <button type="button" disabled={artwork.busy} onClick={() => void caa()}>
+            {item.rip != null && releaseId != null && st.mode !== 'mixed' && (
+              <button type="button" disabled={artwork.busy} onClick={() => void caa({ release_id: releaseId })}>
                 Cover Art Archive から取る
+              </button>
+            )}
+            {st.mode !== 'mixed' && !picking && (
+              <button type="button" className="ghost" disabled={artwork.busy} onClick={() => setPicking(true)}>
+                別のリリースから取る…
               </button>
             )}
             {st.changed > 0 && (
@@ -147,6 +158,15 @@ export function InboxCover({
             )}
             {artwork.busy && <span className="muted small">画像を置いている…</span>}
           </div>
+        )}
+        {editable && picking && st.mode !== 'mixed' && (
+          <CaaReleasePicker
+            groupId={groupId}
+            releaseId={releaseId}
+            busy={artwork.busy}
+            pick={caa}
+            close={() => setPicking(false)}
+          />
         )}
         <span className="muted small">JPEG / PNG / WebP。配置のとき選んだ曲の埋め込み画像をこの 1 枚にする</span>
         {artwork.error != null && <span className="error small">{artwork.error}</span>}
@@ -163,4 +183,9 @@ export function InboxCover({
       />
     </div>
   )
+}
+
+function nonEmpty(v: string | null | undefined): string | null {
+  const t = v?.trim()
+  return t == null || t === '' ? null : t
 }

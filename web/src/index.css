@@ -2646,6 +2646,73 @@ table.inbox-tracks td.inbox-thumb-cell.inbox-sticky {
   min-width: 0;
 }
 
+/* 画像だけ別のリリースから取る（D-93） */
+.caa-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-alt);
+}
+.caa-picker-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.caa-picker-head .ghost {
+  margin-left: auto;
+}
+.caa-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.caa-picker-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.caa-picker-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 4px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  overflow-wrap: anywhere;
+}
+.caa-picker-item:hover:not(:disabled),
+.caa-picker-item:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.caa-picker-thumb {
+  width: 120px;
+  height: 120px;
+  object-fit: contain;
+  border-radius: 3px;
+  background: var(--bg-alt);
+}
+.caa-picker-thumb.empty {
+  display: block;
+  border: 1px dashed var(--border);
+  box-sizing: border-box;
+}
+.caa-picker-paste {
+  flex: 1;
+  min-width: 12em;
+}
+
 /* ② プロパティ風の表 */
 table.inbox-kv {
   font-size: 13px;

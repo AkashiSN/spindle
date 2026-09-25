@@ -1,6 +1,6 @@
 // Inbox の承認画面の画像の差し替え（D-86）。画像を置く 2 つの経路: ファイルのアップロード
-// （`POST /api/artwork/upload`。ライブラリの「アートワーク」と同じ）と、CD の件の Cover Art Archive
-// （`POST /api/artwork/from-caa`）。どちらも置いた画像の `<mime>:<sha256hex>`（下書きの picture）を返す。
+// （`POST /api/artwork/upload`。ライブラリの「アートワーク」と同じ）と、Cover Art Archive
+// （`POST /api/artwork/from-caa`。リリースか、リリースグループの代表。D-93）。どちらも置いた画像の `<mime>:<sha256hex>`（下書きの picture）を返す。
 // 失敗は error に入れて null を返す
 
 import { useCallback, useState } from 'react'
@@ -12,8 +12,11 @@ export type ArtworkUploadState = {
   busy: boolean
   error: string | null
   upload: (file: File) => Promise<string | null>
-  fromCaa: (releaseId: string) => Promise<string | null>
+  fromCaa: (target: CaaTarget) => Promise<string | null>
 }
+
+/** Cover Art Archive の取り先。リリースは MBID か MusicBrainz のリリースの URL（貼り付け）。D-93 */
+export type CaaTarget = { release_id: string } | { release_group_id: string }
 
 function valueOf(u: UploadedArtwork): string {
   return `${u.mime}:${u.sha256}`
@@ -47,11 +50,11 @@ export function useArtworkUpload(): ArtworkUploadState {
     [run],
   )
   const fromCaa = useCallback(
-    (releaseId: string) =>
+    (target: CaaTarget) =>
       run('/api/artwork/from-caa', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ release_id: releaseId }),
+        body: JSON.stringify(target),
       }),
     [run],
   )

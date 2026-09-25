@@ -1108,6 +1108,10 @@ Inbox/ に配置（ポーリング検出）
   サイドカーの `rip.metadata.release_id`（吸い出しで選んだリリース）があるものは、Cover Art Archive の front
   画像を**一度だけ**取り（`POST /api/artwork/from-caa` と同じ経路・境界。`CoverArtClient` は `address_family`
   を `Auto` 固定）、`artwork` の置き場に置いて `inbox_items.caa_picture`（`<mime>:<sha256hex>`）に記録する。
+  そのリリースに front が無く（404）、サイドカーに `rip.metadata.release_group_id` があれば、同じ回の中で
+  リリースグループの front（`release-group/{id}/front-500`。CAA がグループの代表に選んだ版の表の画像）を 1 度だけ
+  試す（D-93。通常盤に画像が無く初回限定盤・BD 付きの版にある盤。回数は 1 回と数え、グループの 404 はリリースの
+  404 と同じ打ち止め、グループの上流の失敗はリリースの失敗と同じ再試行）。
   提案（`proposal`）は全曲の `picture` の初期値をその画像にする（保存した下書きがあればそちらが勝つ）。
   画像の無い盤（404）とリリースの無い取り込み（候補を選ばずに吸い出した・CD でない）は 1 回で打ち止め、上流の
   失敗は次の走査でもう 1 回だけ試す（`caa_tries`、上限 2。回数は外へ出る前に CAS で進めて永続化する）。1 回の
@@ -1482,8 +1486,11 @@ POST   /api/artwork/embed                         { selection, sha256, descripti
                                                   active 全行の埋め込み画像をその 1 枚に差し替える tags op
                                                   （PICTURE）の編集バッチを記録（§7.5、D-60）
                                                   → 201 { batch_id, affected, unchanged, pending_excluded }
-POST   /api/artwork/from-caa                      { release_id }（MBID。大小無視）。Cover Art Archive の front 画像（500px）を
-                                                  取り、upload と同じく置く → 201（upload と同じ応答）。画像の無い盤は 404、
+POST   /api/artwork/from-caa                      { release_id } か { release_group_id }（どちらか片方。D-93）。release_id は MBID
+                                                  （大小無視）か musicbrainz.org の /release/<MBID> の URL、release_group_id は
+                                                  MBID。Cover Art Archive の front 画像（500px）を
+                                                  取り、upload と同じく置く → 201（upload と同じ応答）。両方・どちらも無し・形が
+                                                  違えば 400 bad_request。画像の無い盤は 404、
                                                   上流の失敗は 502 lookup_failed、未構成は 503 coverart_unavailable（D-86）
                                                   → 404 artwork_not_found、409 pending | no_changes
 
@@ -1532,6 +1539,14 @@ POST   /api/cd/library                            { toc, release_id? }。いま�
                                                   引かない）→ 200 { discid, disc: AlbumRef | null, release: AlbumRef | null }
                                                   （AlbumRef = { album_id, rel_dir, album, albumartist }。複数あれば id の
                                                   小さいもの。disc が当たれば release は引かない）。400 bad_request（TOC）
+GET    /api/cd/cover/{release_id}                 候補のジャケット。Cover Art Archive の front（500px）の中継（D-82）。
+                                                  画像の無い盤は 404、上流の失敗は 502 lookup_failed、未構成は 503 coverart_unavailable
+GET    /api/cd/release-group/{id}/releases        リリースグループの版（D-93）。MusicBrainz の browse
+                                                  （ws/2/release?release-group=…&inc=media+labels、先頭 100 件）→ 200 { releases:
+                                                  [{ release_id, title, disambiguation, date, country, status, formats: [媒体の形式],
+                                                  label, catalog_number, front: CAA に表の画像があるか }]（front のある版が先、
+                                                  同じなら日付の古い順）, total }。知らないグループは 404、MBID でなければ 400、
+                                                  502 lookup_failed、503 musicbrainz_unavailable（負荷制限・未構成）
 POST   /api/cd/rip                                { toc, metadata }（P2-5）。metadata は CD 画面の下書き（DiscMetadata。名前は空でもよい）。
                                                   盤がドライブにあり TOC が一致するときだけ rip ジョブを投入 → 202 { job_id }。
                                                   400 bad_toc / bad_metadata、409 disc_mismatch（盤が違う・無い）/ duplicate
@@ -2161,9 +2176,17 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   **画像の欄**: 全曲が同じ画像なら 1 枚（クリックかドロップで差し替え＝全曲）、画像なしは点線の枠、**曲ごとに
   違う（YouTube）なら既定で曲ごとの画像を保ち**、サムネイルを並べて「画像の無い N 曲に入れる」「全曲を 1 枚に
   そろえる」を明示的な操作にする。CD の取り込みでリリースが決まっていれば、表の画像を Cover Art Archive から
-  自動で取って初期値に入れてある（D-91。欄に「Cover Art Archive の表の画像（…自動で取った）」、「画像を外す」で
+  自動で取って初期値に入れてある（D-91。そのリリースに無ければリリースグループの代表画像。D-93。欄に
+  「Cover Art Archive の表の画像（…自動で取った）」、「画像を外す」で
   外せる。`lib/inbox.ts` の `usesCaaPicture`）。手動の「Cover Art Archive から取る」
-  （`POST /api/artwork/from-caa`）も残す（リリースを引き直した後など）。画像は `POST /api/artwork/upload` で置き、下書きの `picture` に入れる
+  （`POST /api/artwork/from-caa`）も残す（リリースを引き直した後など）。**「別のリリースから取る…」**（D-93。
+  曲ごとに違う画像のときは出さない）は、メタデータを取り込むリリースのまま表の画像だけを別の版から取る
+  （`components/CaaReleasePicker.tsx`）: 下書きの `release_group_id` があれば同じグループの版
+  （`GET /api/cd/release-group/{id}/releases`）のうち表の画像のある版をジャケット（`/api/cd/cover/{id}`）・
+  日付・国・形式・レーベル・カタログ番号付きで並べ（取り込むリリースに印。画像の無い版は件数だけ）、クリックで
+  その画像を全曲に入れる。「リリースグループの代表画像を取る」と、別のグループに登録された版のための
+  MusicBrainz のリリースの URL / MBID の貼り付けもある（この 3 つと「Cover Art Archive から取る」は `POST /api/artwork/from-caa`
+  で置く）。選んだ・ドロップしたファイルは `POST /api/artwork/upload` で置く。どちらも置いた画像を下書きの `picture` に入れる
   （`hooks/useArtworkUpload`、`lib/inbox.ts` の `pictureState` / `applyPicture` / `resetPictures`）。
   **③ トラック表は全項目**（D-85 / D-86）: ライブラリの表のように列で並べ、枠の中で横スクロールする
   （`InboxTrackGrid`）。セルをクリックで選び、ダブルクリック（Enter / F2）で入力欄、↑↓←→ で直せるセルを移る。

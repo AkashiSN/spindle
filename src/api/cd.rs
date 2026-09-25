@@ -489,6 +489,54 @@ pub(super) fn is_mbid(s: &str) -> bool {
             .all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// `GET /api/cd/release-group/{id}/releases`（D-93）: リリースグループの版（表の画像のある版を先に）。
+/// Inbox の承認画面で表の画像だけ別の版（初回限定盤・BD 付き等）から取るために並べる。
+/// 知らないグループは 404、MB の負荷制限・クライアント未構成は 503 `musicbrainz_unavailable`、
+/// 届かない・壊れているときは 502 `lookup_failed`
+pub async fn group_releases(
+    State(state): State<AppState>,
+    axum::extract::Path(group_id): axum::extract::Path<String>,
+) -> Result<Response, ApiError> {
+    let group_id = group_id.trim().to_ascii_lowercase();
+    if !is_mbid(&group_id) {
+        return Ok(error_response_with_message(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "リリースグループ id は MusicBrainz の MBID（8-4-4-4-12）".to_owned(),
+        ));
+    }
+    let Some(client) = state.musicbrainz.as_ref() else {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "musicbrainz_unavailable",
+        ));
+    };
+    match client.releases_in_group(&group_id).await {
+        Ok(Some(g)) => Ok(Json(g).into_response()),
+        Ok(None) => Ok(error_response(StatusCode::NOT_FOUND, "not_found")),
+        Err(LookupError::Status(503)) => {
+            tracing::warn!(
+                group_id,
+                "MusicBrainz が 503（負荷制限）。版の一覧を取れない"
+            );
+            Ok(error_response_with_message(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "musicbrainz_unavailable",
+                "MusicBrainz が負荷制限中（503）。しばらく待って再試行",
+            ))
+        }
+        Err(e) => {
+            let detail = crate::cd::error_chain(&e);
+            tracing::warn!(error = %detail, group_id, "リリースグループの版を取れない");
+            Ok(error_response_with_message(
+                StatusCode::BAD_GATEWAY,
+                "lookup_failed",
+                detail,
+            ))
+        }
+    }
+}
+
 /// 候補のジャケット（D-82、P4-20）。Cover Art Archive の front 画像を中継する。
 /// 画像が無い盤は 404、上流が壊れているときは 502（混ぜると診断できない）
 pub async fn cover(

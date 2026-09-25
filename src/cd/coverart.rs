@@ -1,4 +1,5 @@
-//! Cover Art Archive（D-82、P4-20）。MusicBrainz のリリース MBID からジャケットを 1 枚取る。
+//! Cover Art Archive（D-82、P4-20）。MusicBrainz のリリース（またはリリースグループ。D-93）の MBID から
+//! ジャケットを 1 枚取る。
 //!
 //! MB 本体の 1 req/s とは別の相手（CAA は archive.org へ 307 で飛ばす）なので、間隔制御は持たない。
 //! 画像の取得で照会のスロットを食うと本末転倒なため、クライアントも分ける。UA は `[musicbrainz]` の
@@ -60,9 +61,24 @@ impl CoverArtClient {
     /// リリースの front 画像。画像が無ければ `Ok(None)`（404 は普通の結果）。
     /// 上流が壊れている（画像でない / 大きすぎる）ときは `Err`（呼び出し側が 502 にする）
     pub async fn front(&self, release_id: &str) -> Result<Option<(String, Vec<u8>)>, LookupError> {
+        self.get_front(&format!("release/{release_id}/{SIZE}"))
+            .await
+    }
+
+    /// リリースグループの front 画像（D-93）。CAA がグループの代表に選んだリリースの表の画像で、
+    /// 通常盤に画像が無くても初回限定盤や BD 付きの版にあれば返る。境界と戻り値は [`Self::front`] と同じ
+    pub async fn group_front(
+        &self,
+        release_group_id: &str,
+    ) -> Result<Option<(String, Vec<u8>)>, LookupError> {
+        self.get_front(&format!("release-group/{release_group_id}/{SIZE}"))
+            .await
+    }
+
+    async fn get_front(&self, path: &str) -> Result<Option<(String, Vec<u8>)>, LookupError> {
         let url = self
             .base
-            .join(&format!("release/{release_id}/{SIZE}"))
+            .join(path)
             .map_err(|e| LookupError::Parse(format!("URL を組み立てられない: {e}")))?;
         let mut res = self.http.get(url.clone()).send().await?;
         let status = res.status();

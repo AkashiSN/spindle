@@ -13,6 +13,10 @@ import {
   lengthDiffMs,
   lookupHeadline,
   mediaSummary,
+  formatsSummary,
+  groupReleaseSummary,
+  currentListing,
+  type GroupRelease,
   offersDiscidSubmission,
   matchedByLabel,
   releaseUrl,
@@ -502,5 +506,58 @@ describe('候補の見分け（P2-3 の UI 改修）', () => {
     expect(formatLengthDiff(0)).toBe('長さ一致')
     expect(lengthDiffMs({ ...base, tracks: [{ ...base.tracks[0]!, length_ms: null }] }, toc)).toBeNull()
     expect(lengthDiffMs(base, [])).toBeNull()
+  })
+})
+
+describe('リリースグループの版（D-93）', () => {
+  it('formatsSummary は形式ごとの枚数を出てきた順に並べる', () => {
+    expect(formatsSummary(['CD'])).toBe('CD')
+    expect(formatsSummary(['CD', 'Blu-ray'])).toBe('CD + Blu-ray')
+    expect(formatsSummary(['CD', 'CD'])).toBe('CD 2 枚組')
+    expect(formatsSummary(['CD', 'CD', 'DVD-Video'])).toBe('CD 2 枚 + DVD-Video')
+    expect(formatsSummary([null])).toBe('形式不明')
+    expect(formatsSummary([])).toBe('形式不明')
+  })
+
+  const bd: GroupRelease = {
+    release_id: 'f1223d63-f359-457d-b935-fc27eb24a6de',
+    title: 'Five',
+    disambiguation: null,
+    date: '2026-05-31',
+    country: 'JP',
+    status: 'Official',
+    formats: ['CD', 'Blu-ray'],
+    label: 'Storm Labels',
+    catalog_number: 'LCNC-0097 / LCNC-0098',
+    front: true,
+  }
+
+  it('groupReleaseSummary は日付・国・形式・レーベルを並べ、Official は出さない', () => {
+    expect(groupReleaseSummary(bd)).toBe('2026-05-31 · JP · CD + Blu-ray · Storm Labels LCNC-0097 / LCNC-0098')
+    expect(
+      groupReleaseSummary({
+        ...bd,
+        date: null,
+        country: 'XW',
+        formats: ['Digital Media'],
+        catalog_number: null,
+        status: 'Promotion',
+        disambiguation: '初回限定盤',
+      }),
+    ).toBe('XW · Digital Media · Storm Labels · Promotion · 初回限定盤')
+  })
+
+  it('currentListing は表示中のグループの結果だけを返し、グループが変われば loading に戻す', () => {
+    const value = { releases: [bd], total: 1 }
+    const stored = { groupId: 'A', listing: { state: 'ok' as const, value } }
+    expect(currentListing(null, 'A')).toEqual({ state: 'loading' })
+    expect(currentListing(stored, 'A')).toEqual({ state: 'ok', value })
+    // 候補を引き直してグループが B になった: A の版は出さない（選べない）
+    expect(currentListing(stored, 'B')).toEqual({ state: 'loading' })
+    // A の遅い応答が B の後に来ても、B の表示には使わない
+    expect(currentListing(stored, 'B').state).toBe('loading')
+    const failed = { groupId: 'B', listing: { state: 'error' as const, message: 'x' } }
+    expect(currentListing(failed, 'B')).toEqual({ state: 'error', message: 'x' })
+    expect(currentListing(failed, null)).toEqual({ state: 'loading' })
   })
 })

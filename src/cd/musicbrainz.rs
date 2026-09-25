@@ -400,6 +400,121 @@ pub fn parse_release_search(json: &str) -> Result<Vec<String>, MbParseError> {
     Ok(resp.releases.into_iter().map(|r| r.id).collect())
 }
 
+/// リリースグループの版（`ws/2/release?release-group=<id>` の 1 件。D-93）。Inbox の承認画面で
+/// 「表の画像だけ別の版から取る」ために並べる
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GroupRelease {
+    pub release_id: String,
+    pub title: String,
+    pub disambiguation: Option<String>,
+    pub date: Option<String>,
+    pub country: Option<String>,
+    pub status: Option<String>,
+    /// 媒体の形式（媒体の順。形式の無い媒体は None）
+    pub formats: Vec<Option<String>>,
+    /// 最初のレーベル
+    pub label: Option<String>,
+    /// カタログ番号（重ねずに ` / ` で並べる。複数枚組は枚ごとに番号がある）
+    pub catalog_number: Option<String>,
+    /// Cover Art Archive に表の画像がある（`cover-art-archive.front`）
+    pub front: bool,
+}
+
+/// リリースグループの版の一覧と、グループにある版の総数（1 回で取るのは [`GROUP_RELEASE_LIMIT`] 件まで）
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GroupReleases {
+    pub releases: Vec<GroupRelease>,
+    pub total: usize,
+}
+
+/// リリースグループの版を 1 回で取る件数（MusicBrainz の browse の上限）。これを超えるグループは
+/// 先頭のぶんだけ並べる（残りは URL の貼り付けで指せる）
+pub const GROUP_RELEASE_LIMIT: usize = 100;
+
+/// `ws/2/release?release-group=…`（browse）の応答を版の一覧に直す。表の画像のある版を先に、
+/// 同じなら日付の古い順（日付の無い版は後ろ。それ以外は MusicBrainz の順）
+pub fn parse_group_releases(json: &str) -> Result<GroupReleases, MbParseError> {
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(rename = "release-count", default)]
+        release_count: usize,
+        releases: Vec<R>,
+    }
+    #[derive(Deserialize)]
+    struct R {
+        id: String,
+        title: String,
+        #[serde(default)]
+        date: Option<String>,
+        #[serde(default)]
+        country: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        disambiguation: Option<String>,
+        #[serde(rename = "label-info", default)]
+        label_info: Vec<LabelInfo>,
+        #[serde(default)]
+        media: Vec<M>,
+        #[serde(rename = "cover-art-archive", default)]
+        cover_art_archive: Option<Caa>,
+    }
+    #[derive(Deserialize)]
+    struct M {
+        #[serde(default)]
+        format: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Caa {
+        #[serde(default)]
+        front: bool,
+    }
+    let resp: Resp = serde_json::from_str(json)?;
+    let mut releases: Vec<GroupRelease> = resp
+        .releases
+        .into_iter()
+        .map(|r| {
+            let mut catalogs: Vec<String> = Vec::new();
+            for c in r
+                .label_info
+                .iter()
+                .filter_map(|l| non_empty(l.catalog_number.clone()))
+            {
+                if !catalogs.contains(&c) {
+                    catalogs.push(c);
+                }
+            }
+            GroupRelease {
+                release_id: r.id.to_ascii_lowercase(),
+                title: r.title,
+                disambiguation: non_empty(r.disambiguation),
+                date: non_empty(r.date),
+                country: non_empty(r.country),
+                status: non_empty(r.status),
+                formats: r.media.into_iter().map(|m| non_empty(m.format)).collect(),
+                label: r
+                    .label_info
+                    .iter()
+                    .find_map(|l| l.label.as_ref().map(|x| x.name.clone())),
+                catalog_number: (!catalogs.is_empty()).then(|| catalogs.join(" / ")),
+                front: r.cover_art_archive.is_some_and(|c| c.front),
+            }
+        })
+        .collect();
+    releases.sort_by(|a, b| {
+        b.front
+            .cmp(&a.front)
+            .then_with(|| match (&a.date, &b.date) {
+                (Some(x), Some(y)) => x.cmp(y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+    });
+    let total = resp.release_count.max(releases.len());
+    Ok(GroupReleases { releases, total })
+}
+
 /// ユーザが貼ったリリースの指定から MBID（小文字）を取り出す。素の UUID か、musicbrainz.org
 /// （サブドメイン可）の `/release/<uuid>` を含む URL。他のエンティティ（recording 等）は受けない
 pub fn parse_release_ref(s: &str) -> Option<String> {
@@ -852,6 +967,35 @@ impl MusicBrainzClient {
         };
         self.remember(key, &result);
         Ok(result)
+    }
+
+    /// リリースグループの版を並べる（D-93）。知らないグループ（404）は `Ok(None)`。
+    /// 他の失敗（503 の再試行後を含む）は `Err`（503 は呼び出し側が musicbrainz_unavailable にする）
+    pub async fn releases_in_group(
+        &self,
+        group_id: &str,
+    ) -> Result<Option<GroupReleases>, LookupError> {
+        let limit = GROUP_RELEASE_LIMIT.to_string();
+        let (status, body) = self
+            .get(
+                "release",
+                &[
+                    ("release-group", group_id),
+                    ("inc", "media labels"),
+                    ("limit", &limit),
+                    ("fmt", "json"),
+                ],
+            )
+            .await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(LookupError::Status(status.as_u16()));
+        }
+        parse_group_releases(&body)
+            .map(Some)
+            .map_err(|e| LookupError::Parse(e.to_string()))
     }
 
     /// リリースを 1 件取って候補に直す。404 等の「取れない」は `Ok(Err(status))`（経路ごとに

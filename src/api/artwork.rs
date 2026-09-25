@@ -150,13 +150,18 @@ pub async fn upload(State(state): State<AppState>, body: Bytes) -> Result<Respon
 
 #[derive(Debug, Deserialize)]
 pub struct FromCaaBody {
-    /// MusicBrainz のリリース（MBID）
-    pub release_id: String,
+    /// MusicBrainz のリリース（MBID か musicbrainz.org の `/release/<MBID>` の URL）
+    #[serde(default)]
+    pub release_id: Option<String>,
+    /// MusicBrainz のリリースグループ（MBID。D-93）。`release_id` とどちらか片方
+    #[serde(default)]
+    pub release_group_id: Option<String>,
 }
 
-/// `POST /api/artwork/from-caa { release_id }`（D-86）: Cover Art Archive の front 画像（500px）を取り、
-/// アップロードと同じく store と `artwork` 行に置く（応答も同じ）。Inbox の承認画面の「Cover Art Archive
-/// から取る」。画像の無い盤は 404、上流の失敗は 502 `lookup_failed`、クライアント未構成は 503
+/// `POST /api/artwork/from-caa { release_id | release_group_id }`（D-86、D-93）: Cover Art Archive の front
+/// 画像（500px）を取り、アップロードと同じく store と `artwork` 行に置く（応答も同じ）。Inbox の承認画面の
+/// 「Cover Art Archive から取る」と「別のリリースから取る」。リリースは貼り付けた URL も通す。
+/// 画像の無い盤は 404、上流の失敗は 502 `lookup_failed`、クライアント未構成は 503
 pub async fn from_caa(
     State(state): State<AppState>,
     body: Result<Json<FromCaaBody>, JsonRejection>,
@@ -171,26 +176,45 @@ pub async fn from_caa(
             ))
         }
     };
-    let release_id = body.release_id.trim().to_ascii_lowercase();
-    if !super::cd::is_mbid(&release_id) {
-        return Ok(error_response_with_message(
+    let bad = |message: &str| {
+        Ok(error_response_with_message(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "リリース id は MusicBrainz の MBID（8-4-4-4-12）",
-        ));
-    }
+            message.to_owned(),
+        ))
+    };
+    let target = match (body.release_id, body.release_group_id) {
+        (Some(r), None) => match crate::cd::musicbrainz::parse_release_ref(&r) {
+            Some(id) => CaaTarget::Release(id),
+            None => return bad(
+                "リリースは MusicBrainz の MBID（8-4-4-4-12）か musicbrainz.org のリリースの URL",
+            ),
+        },
+        (None, Some(g)) => {
+            let id = g.trim().to_ascii_lowercase();
+            if !super::cd::is_mbid(&id) {
+                return bad("リリースグループ id は MusicBrainz の MBID（8-4-4-4-12）");
+            }
+            CaaTarget::Group(id)
+        }
+        _ => return bad("release_id と release_group_id のどちらか片方を指定する"),
+    };
     let Some(client) = state.coverart.as_ref() else {
         return Ok(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "coverart_unavailable",
         ));
     };
-    match client.front(&release_id).await {
+    let fetched = match &target {
+        CaaTarget::Release(id) => client.front(id).await,
+        CaaTarget::Group(id) => client.group_front(id).await,
+    };
+    match fetched {
         Ok(None) => Ok(error_response(StatusCode::NOT_FOUND, "not_found")),
         Ok(Some((_content_type, bytes))) => store_image(&state, Bytes::from(bytes)).await,
         Err(e) => {
             let detail = crate::cd::error_chain(&e);
-            tracing::warn!(error = %detail, release_id, "ジャケットの取得に失敗");
+            tracing::warn!(error = %detail, ?target, "ジャケットの取得に失敗");
             Ok(error_response_with_message(
                 StatusCode::BAD_GATEWAY,
                 "lookup_failed",
@@ -198,6 +222,13 @@ pub async fn from_caa(
             ))
         }
     }
+}
+
+/// `from-caa` の取り先
+#[derive(Debug)]
+enum CaaTarget {
+    Release(String),
+    Group(String),
 }
 
 /// 画像のバイト列を store と `artwork` 行に置き、thumbnail ジョブを投入する（upload / from-caa 共通。

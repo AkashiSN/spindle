@@ -3,7 +3,8 @@
 //! 見るもの: リリースの決まった CD の取り込みは画像を置いて提案の全曲の picture に入る、画像の無い盤（404）と
 //! 上流の失敗は取り込みを止めず画像なし（失敗は次の走査でもう 1 回だけ試す）、リリースの無い取り込み・CD で
 //! ない取り込みは取りに行かない、保存した下書きが勝つ、この機能より前からある取り込みにも効く、inbox
-//! ジョブの走査の後に取る、取った画像は GC しない
+//! ジョブの走査の後に取る、取った画像は GC しない。リリースに画像が無ければリリースグループの表の画像を
+//! 同じ回で 1 度だけ試す（D-93）
 
 mod common;
 
@@ -42,6 +43,11 @@ const BROKEN: &str = "77777777-7777-7777-7777-777777777777";
 /// 応答が遅い盤（取り消しの確認）
 const SLOW: &str = "88888888-8888-8888-8888-888888888888";
 
+/// 表の画像のあるリリースグループ（D-93）
+const GROUP_WITH_ART: &str = "99999999-9999-9999-9999-999999999999";
+/// 上流が 500 を返すリリースグループ
+const GROUP_BROKEN: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+
 /// 1x1 の PNG（IHDR まである本物。寸法を読める）
 const REAL_PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -70,11 +76,29 @@ async fn caa_front(
     }
 }
 
+async fn caa_group_front(
+    State(hits): State<Arc<AtomicUsize>>,
+    Path((id, size)): Path<(String, String)>,
+) -> axum::response::Response {
+    hits.fetch_add(1, Ordering::SeqCst);
+    if size != "front-500" {
+        return (StatusCode::NOT_FOUND, "wrong size").into_response();
+    }
+    match id.as_str() {
+        GROUP_WITH_ART => {
+            ([(header::CONTENT_TYPE, "image/png")], REAL_PNG.to_vec()).into_response()
+        }
+        GROUP_BROKEN => (StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response(),
+        _ => (StatusCode::NOT_FOUND, "no art").into_response(),
+    }
+}
+
 /// CAA の模擬を立て、ベース URL と呼ばれた回数を返す
 async fn serve_caa() -> (String, Arc<AtomicUsize>) {
     let hits = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/release/{id}/{size}", get(caa_front))
+        .route("/release-group/{id}/{size}", get(caa_group_front))
         .with_state(Arc::clone(&hits));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -133,6 +157,17 @@ impl Lib {
     /// Inbox の `dir` に音声を 2 本置く（CD の吸い出しと同じ形）。`release` があればサイドカーの
     /// `rip.metadata.release_id` に入れる。`rip` が false ならサイドカーの `rip` 自体を置かない
     fn add_item(&self, dir: &str, release: Option<&str>, rip: bool) -> Option<()> {
+        self.add_item_in_group(dir, release, None, rip)
+    }
+
+    /// [`Self::add_item`] に `rip.metadata.release_group_id` も入れる版
+    fn add_item_in_group(
+        &self,
+        dir: &str,
+        release: Option<&str>,
+        group: Option<&str>,
+        rip: bool,
+    ) -> Option<()> {
         let root = self.dir.path().join("Inbox").join(dir);
         std::fs::create_dir_all(&root).unwrap();
         for (i, name) in ["01.flac", "02.flac"].iter().enumerate() {
@@ -143,6 +178,7 @@ impl Lib {
         if rip {
             let mut e = common::rip_entry(&["01.flac", "02.flac"], &[true, true]);
             e.metadata.release_id = release.map(str::to_owned);
+            e.metadata.release_group_id = group.map(str::to_owned);
             s.rip = Some(e);
         }
         s.write(&self.inbox, &RelPath::parse(dir).unwrap()).unwrap();
@@ -422,4 +458,70 @@ async fn cancel_is_observed_while_waiting_for_the_upstream() {
     assert_eq!(r, CoverReport::default());
     let item = lib.item("CD/Slow");
     assert_eq!((item.caa_picture, item.caa_tries), (None, 1));
+}
+
+/// リリースに表の画像が無ければ、同じ回でリリースグループの表の画像を 1 度だけ試す（D-93）。
+/// 通常盤に画像が無く、同じグループの初回限定盤などにある盤
+#[tokio::test]
+async fn a_release_without_art_falls_back_to_its_release_group() {
+    let lib = Lib::new().await;
+    require_ffmpeg!(lib.add_item_in_group("CD/Regular", Some(NO_ART), Some(GROUP_WITH_ART), true));
+    lib.scan().await;
+    let r = lib.fetch().await;
+    assert_eq!(r.found, 1, "{r:?}");
+    assert_eq!(
+        lib.hits.load(Ordering::SeqCst),
+        2,
+        "リリース → グループの 2 回"
+    );
+    let item = lib.item("CD/Regular");
+    let picture = item.caa_picture.clone().expect("グループの画像を記録する");
+    assert!(picture.starts_with("image/png:"), "{picture}");
+    assert_eq!(item.caa_tries, 1, "同じ回の中の試行（1 回と数える）");
+    assert_eq!(
+        lib.proposed_pictures("CD/Regular"),
+        vec![Some(picture.clone()), Some(picture)]
+    );
+}
+
+/// リリースに画像があればグループは引かない
+#[tokio::test]
+async fn a_release_with_art_does_not_ask_its_release_group() {
+    let lib = Lib::new().await;
+    require_ffmpeg!(lib.add_item_in_group("CD/Five", Some(WITH_ART), Some(GROUP_WITH_ART), true));
+    lib.scan().await;
+    assert_eq!(lib.fetch().await.found, 1);
+    assert_eq!(lib.hits.load(Ordering::SeqCst), 1);
+}
+
+/// グループにも無ければ 404 と同じく 1 回で打ち止め
+#[tokio::test]
+async fn no_art_in_the_release_or_its_group_stops_after_one_try() {
+    let lib = Lib::new().await;
+    // グループの模擬は知らない id に 404 を返す
+    require_ffmpeg!(lib.add_item_in_group("CD/NoArt", Some(NO_ART), Some(NO_ART), true));
+    lib.scan().await;
+    assert_eq!(lib.fetch().await.absent, 1);
+    let item = lib.item("CD/NoArt");
+    assert_eq!((item.caa_picture, item.caa_tries), (None, CAA_MAX_TRIES));
+    assert_eq!(lib.hits.load(Ordering::SeqCst), 2);
+}
+
+/// グループの取得が上流の失敗なら、リリースの失敗と同じく次の走査でもう 1 回だけ
+#[tokio::test]
+async fn a_failure_on_the_release_group_is_retried_once() {
+    let lib = Lib::new().await;
+    require_ffmpeg!(lib.add_item_in_group("CD/Regular", Some(NO_ART), Some(GROUP_BROKEN), true));
+    lib.scan().await;
+    assert_eq!(lib.fetch().await.failed, 1);
+    assert_eq!(lib.item("CD/Regular").caa_tries, 1);
+    assert_eq!(lib.fetch().await.failed, 1);
+    assert_eq!(lib.item("CD/Regular").caa_tries, CAA_MAX_TRIES);
+    assert_eq!(lib.hits.load(Ordering::SeqCst), 4);
+    assert_eq!(lib.fetch().await, CoverReport::default());
+    assert_eq!(
+        lib.hits.load(Ordering::SeqCst),
+        4,
+        "上限の後は取りに行かない"
+    );
 }

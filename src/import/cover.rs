@@ -123,8 +123,9 @@ pub struct CoverReport {
     pub failed: usize,
 }
 
-/// 件のサイドカーの `rip.metadata.release_id`（MBID を小文字にしたもの）。無ければ None
-fn rip_release_id(inbox: &RootDir, item: &Item) -> Option<String> {
+/// 件のサイドカーの `rip.metadata.release_id` と `release_group_id`（MBID を小文字にしたもの）。
+/// リリースが無ければ None（グループだけでは取りに行かない）。グループは形が MBID でなければ無いものとする
+fn rip_release_ids(inbox: &RootDir, item: &Item) -> Option<(String, Option<String>)> {
     if item.rel_dir.is_empty() {
         return None;
     }
@@ -136,9 +137,33 @@ fn rip_release_id(inbox: &RootDir, item: &Item) -> Option<String> {
             return None;
         }
     };
-    let id = sidecar.rip?.metadata.release_id?;
-    let id = id.trim().to_ascii_lowercase();
-    crate::import::inbox::is_mbid(&id).then_some(id)
+    let metadata = sidecar.rip?.metadata;
+    let normalize = |id: String| {
+        let id = id.trim().to_ascii_lowercase();
+        crate::import::inbox::is_mbid(&id).then_some(id)
+    };
+    let release = normalize(metadata.release_id?)?;
+    Some((release, metadata.release_group_id.and_then(normalize)))
+}
+
+/// リリースの表の画像を取り、無ければ（404）リリースグループの表の画像を 1 度だけ試す（D-93）。
+/// 通常盤に画像が無くても、同じグループの初回限定盤や BD 付きの版にあることが多い。
+/// 取れたら出どころ（ログ用に `release` / `release-group`）と本文を返す
+async fn fetch_front(
+    client: &CoverArtClient,
+    release_id: &str,
+    group_id: Option<&str>,
+) -> Result<Option<(&'static str, Vec<u8>)>, crate::cd::LookupError> {
+    if let Some((_content_type, bytes)) = client.front(release_id).await? {
+        return Ok(Some(("release", bytes)));
+    }
+    let Some(group_id) = group_id else {
+        return Ok(None);
+    };
+    Ok(client
+        .group_front(group_id)
+        .await?
+        .map(|(_content_type, bytes)| ("release-group", bytes)))
 }
 
 /// 1 回の inbox ジョブで表の画像を取りに行く件数の上限（D-91）。残りは次の周回で続ける（`needs_attention`）
@@ -149,6 +174,7 @@ pub const CAA_PER_RUN: usize = 4;
 pub const CAA_RUN_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// 承認前の CD の取り込みの表の画像を Cover Art Archive から取り、置いて件に記録する（D-91）。
+/// リリースに無ければリリースグループの表の画像を同じ回で試す（D-93。回数は 1 回と数える）。
 /// 1 回に [`CAA_PER_RUN`] 件・[`CAA_RUN_BUDGET`] まで。失敗は件ごとにログへ出して続ける（取り込みも走査も
 /// 失敗させない）。**外へ出る前に回数を claim して永続化する**（通信の途中で落ちても上限を超えない）。
 /// `cancel` は通信の待ちの間も見る（立てば取りやめ、claim した回数はそのまま = 1 回と数える）
@@ -170,14 +196,14 @@ pub async fn fetch_cd_covers(
             break;
         }
         let id = item.id;
-        let release_id = {
+        let ids = {
             let (inbox, item) = (Arc::clone(inbox), item.clone());
-            tokio::task::spawn_blocking(move || rip_release_id(&inbox, &item))
+            tokio::task::spawn_blocking(move || rip_release_ids(&inbox, &item))
                 .await
                 .ok()
                 .flatten()
         };
-        let Some(release_id) = release_id else {
+        let Some((release_id, group_id)) = ids else {
             // 外へ出ないので claim は要らない
             db.write(move |c| dbinbox::record_caa(c, id, None, CAA_MAX_TRIES))
                 .await?;
@@ -198,10 +224,10 @@ pub async fn fetch_cd_covers(
                 tracing::info!(item_id = id, release_id, "取り消されたので表の画像の取得をやめる");
                 break;
             }
-            r = client.front(&release_id) => r,
+            r = fetch_front(client, &release_id, group_id.as_deref()) => r,
         };
         match fetched {
-            Ok(Some((_content_type, bytes))) => match store_image(db, store, bytes).await {
+            Ok(Some((source, bytes))) => match store_image(db, store, bytes).await {
                 Ok(img) => {
                     let value = img.picture_value();
                     let recorded = {
@@ -213,7 +239,7 @@ pub async fn fetch_cd_covers(
                         jobs.notify_enqueued(&[job]).await;
                     }
                     if recorded {
-                        tracing::info!(item_id = id, release_id, picture = %value, "取り込みの表の画像を Cover Art Archive から取った");
+                        tracing::info!(item_id = id, release_id, group_id, source, picture = %value, "取り込みの表の画像を Cover Art Archive から取った");
                         report.found += 1;
                     }
                 }
@@ -227,7 +253,8 @@ pub async fn fetch_cd_covers(
                 tracing::info!(
                     item_id = id,
                     release_id,
-                    "Cover Art Archive にこの盤の表の画像が無い"
+                    group_id,
+                    "Cover Art Archive にこの盤（とリリースグループ）の表の画像が無い"
                 );
                 db.write(move |c| dbinbox::record_caa(c, id, None, CAA_MAX_TRIES))
                     .await?;

@@ -26,6 +26,10 @@ const NOTFOUND: &str = include_str!("fixtures/mb/notfound.json");
 const RELEASE_FIVE: &str = include_str!("fixtures/mb/release_five.json");
 const ISRC_SEARCH_FIVE: &str = include_str!("fixtures/mb/isrc_search_five.json");
 const FIVE_RELEASE: &str = "f1223d63-f359-457d-b935-fc27eb24a6de";
+const GROUP_RELEASES_FIVE: &str = include_str!("fixtures/mb/group_releases_five.json");
+const FIVE_GROUP: &str = "18865794-00c3-4501-a69c-bbce0c3a0acb";
+/// mock が常に 503 を返すリリースグループ
+const OVERLOADED_GROUP: &str = "55555555-5555-5555-5555-555555555555";
 const NEVERMIND_ID: &str = "y6Br7t4P.bldLe_6Im2d9Z42IU4-";
 const NEVERMIND_TOC: &str =
     "0:22593:41700:58133:71920:91198:104468:115188:131988:143758:159678:174415:191880";
@@ -93,9 +97,23 @@ async fn serve_mb_counting() -> (String, std::sync::Arc<std::sync::atomic::Atomi
     (format!("http://{addr}/ws/2/"), count)
 }
 
+/// `ws/2/release?release-group=…`（browse。D-93）
+async fn group_browse_handler(Query(q): Query<Vec<(String, String)>>) -> (StatusCode, String) {
+    match q
+        .iter()
+        .find(|(k, _)| k == "release-group")
+        .map(|(_, v)| v.as_str())
+    {
+        Some(FIVE_GROUP) => (StatusCode::OK, GROUP_RELEASES_FIVE.to_owned()),
+        Some(OVERLOADED_GROUP) => (StatusCode::SERVICE_UNAVAILABLE, String::new()),
+        _ => (StatusCode::NOT_FOUND, r#"{"error":"Not Found"}"#.to_owned()),
+    }
+}
+
 async fn serve_mb() -> String {
     let app = Router::new()
         .route("/ws/2/discid/{discid}", get(mb_handler))
+        .route("/ws/2/release", get(group_browse_handler))
         .route("/ws/2/release/{id}", get(release_handler))
         .route("/ws/2/recording", get(recording_search_handler));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -157,6 +175,22 @@ impl App {
             .header(header::CONTENT_TYPE, "application/json")
             .header("sec-fetch-site", "same-origin")
             .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = self.router.clone().oneshot(r).await.unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+}
+
+impl App {
+    async fn get(&self, c: &str, uri: &str) -> (StatusCode, Value) {
+        let r = req(Method::GET, uri)
+            .header(header::COOKIE, c)
+            .body(Body::empty())
             .unwrap();
         let res = self.router.clone().oneshot(r).await.unwrap();
         let status = res.status();
@@ -429,4 +463,61 @@ async fn lookup_accepts_widen() {
     let (st, again) = app.post(&c, body).await;
     assert_eq!(st, StatusCode::OK, "{again}");
     assert_eq!(again["stage"], "ids");
+}
+
+/// `GET /api/cd/release-group/{id}/releases`（D-93）: リリースグループの版を、表の画像のある版を先に
+/// 返す。大文字の MBID も通す、知らないグループは 404、MBID でなければ 400、MB の負荷制限は 503、
+/// 届かなければ 502、クライアント未構成は 503
+#[tokio::test]
+async fn release_group_lists_its_releases() {
+    let app = App::new(Some(serve_mb().await)).await;
+    let c = app.cookie().await;
+    let (st, body) = app
+        .get(
+            &c,
+            &format!(
+                "/api/cd/release-group/{}/releases",
+                FIVE_GROUP.to_ascii_uppercase()
+            ),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["releases"][0]["release_id"], FIVE_RELEASE);
+    assert_eq!(body["releases"][0]["front"], true);
+    assert_eq!(body["releases"][0]["formats"], json!(["CD", "Blu-ray"]));
+    assert_eq!(body["releases"][1]["front"], false);
+    let (st, body) = app
+        .get(
+            &c,
+            "/api/cd/release-group/00000000-0000-0000-0000-000000000001/releases",
+        )
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    let (st, _) = app.get(&c, "/api/cd/release-group/nope/releases").await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, body) = app
+        .get(
+            &c,
+            &format!("/api/cd/release-group/{OVERLOADED_GROUP}/releases"),
+        )
+        .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], "musicbrainz_unavailable");
+
+    let app = App::new(Some("http://127.0.0.1:9/ws/2/".to_owned())).await;
+    let c = app.cookie().await;
+    let (st, body) = app
+        .get(&c, &format!("/api/cd/release-group/{FIVE_GROUP}/releases"))
+        .await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["error"], "lookup_failed");
+
+    let app = App::new(None).await;
+    let c = app.cookie().await;
+    let (st, body) = app
+        .get(&c, &format!("/api/cd/release-group/{FIVE_GROUP}/releases"))
+        .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], "musicbrainz_unavailable");
 }

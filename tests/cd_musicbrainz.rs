@@ -24,8 +24,9 @@ use axum::Router;
 use tokio::sync::Mutex;
 
 use spindle::cd::musicbrainz::{
-    merge_candidates, parse_lookup, parse_recording_search, parse_release, parse_release_ref,
-    parse_release_search, DiscQuery, LookupStage, MatchedBy, MusicBrainzClient, ReleaseCandidate,
+    merge_candidates, parse_group_releases, parse_lookup, parse_recording_search, parse_release,
+    parse_release_ref, parse_release_search, DiscQuery, LookupStage, MatchedBy, MusicBrainzClient,
+    ReleaseCandidate,
 };
 use spindle::cd::toc::{Toc, TocTrack};
 
@@ -39,6 +40,10 @@ const ISRC_SEARCH_FIVE: &str = include_str!("fixtures/mb/isrc_search_five.json")
 const BARCODE_SEARCH_FIVE: &str = include_str!("fixtures/mb/barcode_search_five.json");
 const RELEASE_FIVE: &str = include_str!("fixtures/mb/release_five.json");
 const RELEASE_NOTFOUND: &str = include_str!("fixtures/mb/release_notfound.json");
+/// `ws/2/release?release-group=<Five のグループ>&inc=media+labels`（実応答。D-93）。
+/// Blu-ray 付きだけ表の画像があり、DVD 付きと配信版には無い
+const GROUP_RELEASES_FIVE: &str = include_str!("fixtures/mb/group_releases_five.json");
+const FIVE_GROUP: &str = "18865794-00c3-4501-a69c-bbce0c3a0acb";
 
 const NEVERMIND_ID: &str = "y6Br7t4P.bldLe_6Im2d9Z42IU4-";
 const FIVE_RELEASE: &str = "f1223d63-f359-457d-b935-fc27eb24a6de";
@@ -441,6 +446,17 @@ async fn release_search_handler(
     s.started.push(Instant::now());
     s.requests
         .push(("release".to_owned(), q.clone(), String::new()));
+    // リリースグループの版の一覧（browse。D-93）
+    if let Some((_, group)) = q.iter().find(|(k, _)| k == "release-group") {
+        return if group == FIVE_GROUP {
+            (StatusCode::OK, GROUP_RELEASES_FIVE.to_owned())
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                r#"{"error":"Not Found","help":"For usage, please see: https://musicbrainz.org/development/mmd"}"#.to_owned(),
+            )
+        };
+    }
     let query = q
         .iter()
         .find(|(k, _)| k == "query")
@@ -1411,4 +1427,65 @@ async fn an_unparsable_release_is_a_different_key() {
         .await
         .expect("lookup");
     assert_ne!(a.notes, b.notes);
+}
+
+/// リリースグループの版（D-93）。表の画像のある版が先、同じなら日付の古い順。形式は媒体の順、
+/// カタログ番号は重ねずに並べる
+#[test]
+fn group_releases_put_the_ones_with_front_art_first() {
+    let g = parse_group_releases(GROUP_RELEASES_FIVE).unwrap();
+    assert_eq!(g.total, 3);
+    let ids: Vec<&str> = g.releases.iter().map(|r| r.release_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            FIVE_RELEASE,
+            "e2602123-a2f5-4578-ba41-55e1d4c627f5",
+            "df1b88a4-9298-419a-a7a1-d9316b5e4015",
+        ]
+    );
+    let bd = &g.releases[0];
+    assert!(bd.front);
+    assert_eq!(bd.title, "Five");
+    assert_eq!(bd.date.as_deref(), Some("2026-05-31"));
+    assert_eq!(bd.country.as_deref(), Some("JP"));
+    assert_eq!(
+        bd.formats,
+        [Some("CD".to_owned()), Some("Blu-ray".to_owned())]
+    );
+    assert_eq!(bd.label.as_deref(), Some("Storm Labels"));
+    assert_eq!(bd.catalog_number.as_deref(), Some("LCNC-0097 / LCNC-0098"));
+    assert_eq!(bd.disambiguation, None, "空の注記は None");
+    assert!(g.releases[1..].iter().all(|r| !r.front));
+    // 配信版はカタログ番号なし
+    assert_eq!(g.releases[1].catalog_number, None);
+}
+
+#[tokio::test]
+async fn client_lists_the_releases_of_a_group() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let g = client
+        .releases_in_group(FIVE_GROUP)
+        .await
+        .expect("browse")
+        .expect("グループがある");
+    assert_eq!(g.releases.len(), 3);
+    {
+        let s = seen.lock().await;
+        let (_, q, _) = s.requests.last().expect("要求");
+        let get = |k: &str| q.iter().find(|(qk, _)| qk == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("release-group"), Some(FIVE_GROUP));
+        assert_eq!(get("inc"), Some("media labels"));
+        assert_eq!(get("limit"), Some("100"));
+    }
+    // 知らないグループは None（404）
+    assert_eq!(
+        client
+            .releases_in_group("00000000-0000-0000-0000-000000000001")
+            .await
+            .expect("browse"),
+        None
+    );
 }

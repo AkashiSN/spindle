@@ -230,25 +230,83 @@ export function splitByMedium(candidates: ReleaseCandidate[]): {
 }
 
 /**
+ * 媒体の形式の並びの要約。`CD + Blu-ray`、`CD 2 枚組`、`CD 2 枚 + DVD-Video`、`CD`。
+ * 形式ごとの枚数を出てきた順に（CD 2 枚 + Blu-ray と CD + Blu-ray は別の版）。形式の無い媒体は「形式不明」
+ */
+export function formatsSummary(formats: readonly (string | null)[]): string {
+  const names = formats.length > 0 ? formats.map((f) => f ?? '形式不明') : ['形式不明']
+  const counts = new Map<string, number>()
+  for (const f of names) counts.set(f, (counts.get(f) ?? 0) + 1)
+  if (counts.size === 1) {
+    return names.length === 1 ? names[0]! : `${[...counts.keys()][0]} ${names.length} 枚組`
+  }
+  return [...counts].map(([f, n]) => (n > 1 ? `${f} ${n} 枚` : f)).join(' + ')
+}
+
+/**
  * リリースの収録構成と、いま見ている枚。`CD + Blu-ray の 1 枚目`、`CD 2 枚組の 1 枚目`、`CD`。
  * 同じ曲でも DVD 付き / BD 付き / デジタルで別リリースになるので、これが選別の決め手になる
  */
 export function mediaSummary(c: ReleaseCandidate): string {
-  const formats = c.media.length > 0 ? c.media.map((m) => m.format ?? '形式不明') : [c.format ?? '形式不明']
-  // 形式ごとの枚数を出てきた順に（CD 2 枚 + Blu-ray と CD + Blu-ray は別の版）
-  const counts = new Map<string, number>()
-  for (const f of formats) counts.set(f, (counts.get(f) ?? 0) + 1)
-  const single = counts.size === 1
-  const all =
-    single && formats.length === 1
-      ? formats[0]!
-      : single
-        ? `${[...counts.keys()][0]} ${formats.length} 枚組`
-        : [...counts].map(([f, n]) => (n > 1 ? `${f} ${n} 枚` : f)).join(' + ')
+  const all = formatsSummary(c.media.length > 0 ? c.media.map((m) => m.format) : [c.format])
   if (c.medium_count <= 1) return all
   // 「CD 2 枚組の 1 枚目」「CD + Blu-ray の 1 枚目」
+  const single = new Set(c.media.length > 0 ? c.media.map((m) => m.format ?? '形式不明') : [c.format]).size === 1
   const joiner = single ? 'の' : ' の'
   return `${all}${joiner} ${c.medium_position} 枚目`
+}
+
+/** リリースグループの版（`GET /api/cd/release-group/{id}/releases`。D-93） */
+export type GroupRelease = {
+  release_id: string
+  title: string
+  disambiguation: string | null
+  date: string | null
+  country: string | null
+  status: string | null
+  formats: (string | null)[]
+  label: string | null
+  catalog_number: string | null
+  /** Cover Art Archive に表の画像がある */
+  front: boolean
+}
+
+export type GroupReleases = {
+  /** 表の画像のある版が先、同じなら日付の古い順 */
+  releases: GroupRelease[]
+  /** グループにある版の総数（一覧は先頭の 100 件まで） */
+  total: number
+}
+
+/** 「別のリリースから取る」の版の一覧の取得状態（D-93） */
+export type GroupListing =
+  | { state: 'loading' }
+  | { state: 'ok'; value: GroupReleases }
+  | { state: 'error'; message: string }
+
+/**
+ * いま表示中のグループの取得状態。取得結果はどのグループのものかと組で持ち、グループが変わったら
+ * （承認画面で候補を引き直した等）新しい結果が来るまで loading とみなす。前のグループの版を
+ * 出したまま・選べるままにしない
+ */
+export function currentListing(
+  stored: { groupId: string; listing: GroupListing } | null,
+  groupId: string | null,
+): GroupListing {
+  return stored != null && stored.groupId === groupId ? stored.listing : { state: 'loading' }
+}
+
+/** 版の一行要約: 日付 · 国 · 形式 · レーベル カタログ番号 · 状態（Official 以外）· 注記 */
+export function groupReleaseSummary(r: GroupRelease): string {
+  const parts: string[] = []
+  if (r.date) parts.push(r.date)
+  if (r.country) parts.push(r.country)
+  parts.push(formatsSummary(r.formats))
+  const label = [r.label, r.catalog_number].filter((v) => v != null && v !== '').join(' ')
+  if (label !== '') parts.push(label)
+  if (r.status && r.status !== 'Official') parts.push(r.status)
+  if (r.disambiguation) parts.push(r.disambiguation)
+  return parts.join(' · ')
 }
 
 /** ディスク（TOC）と候補の長さの差（ms。候補に長さ不明があるか TOC が空なら null） */
