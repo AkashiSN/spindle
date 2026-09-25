@@ -445,6 +445,8 @@ async fn main() -> anyhow::Result<()> {
     );
     // Inbox 取り込み（P2-10、D-68）。走査と承認済みの配置を 1 本のジョブで
     let inbox_watch = Arc::new(inbox_job::WatchStatus::default());
+    // inbox ジョブに Cover Art Archive を渡すので、取りきれなかった表の画像の候補でも投入する（D-91）
+    inbox_watch.enable_covers();
     state = state
         .with_inbox(Arc::clone(&inbox_root))
         .with_inbox_watch(Arc::clone(&inbox_watch));

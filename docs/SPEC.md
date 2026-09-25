@@ -1091,13 +1091,15 @@ Inbox/ に配置（ポーリング検出）
   stat（inode / size / mtime / ctime）が変わったファイルだけタグを読み直す。**正は Inbox のファイル**で、
   行はキャッシュ: ディレクトリが消えれば行も消す（`placed` は 24 時間残して結果を見せる）。`approved` の取り込みで
   ファイルが変わっていたら `pending` に戻す（再承認）
-- **CD の取り込みの表の画像**（D-91）: 走査の後、承認前（`pending` / `failed`）で画像がまだ無い取り込みのうち、
+- **CD の取り込みの表の画像**（D-91）: 走査と承認済みの配置の後、承認前（`pending` / `failed`）で画像がまだ無い取り込みのうち、
   サイドカーの `rip.metadata.release_id`（吸い出しで選んだリリース）があるものは、Cover Art Archive の front
   画像を**一度だけ**取り（`POST /api/artwork/from-caa` と同じ経路・境界。`CoverArtClient` は `address_family`
   を `Auto` 固定）、`artwork` の置き場に置いて `inbox_items.caa_picture`（`<mime>:<sha256hex>`）に記録する。
   提案（`proposal`）は全曲の `picture` の初期値をその画像にする（保存した下書きがあればそちらが勝つ）。
   画像の無い盤（404）とリリースの無い取り込み（候補を選ばずに吸い出した・CD でない）は 1 回で打ち止め、上流の
-  失敗は次の走査でもう 1 回だけ試す（`caa_tries`、上限 2）。どれも取り込みは失敗させず画像なしのまま。
+  失敗は次の走査でもう 1 回だけ試す（`caa_tries`、上限 2。回数は外へ出る前に CAS で進めて永続化する）。1 回の
+  実行で 4 件・90 秒まで、残りは周期の監視が次の周回で投入する（`needs_attention`）。取り消しは通信の待ちの間も
+  効く。どれも取り込みは失敗させず画像なしのまま。
   承認画面を開くたび・`GET /api/inbox` のたびには外へ出ない。`caa_picture` の画像は GC しない（区分 E の参照）
 - **却下した取り込みの削除**（D-90）: `rejected` の取り込みに「削除」で `discard_requested_at`（破棄待ち）を入れる。ファイルは
   すぐには消さず、GC が `[gc].retention_days` 経過後に取り込みのディレクトリの直下の**走査が写した音声**（stat が一致

@@ -24,7 +24,6 @@ import { formatDateTime } from '../lib/history'
 import {
   applyCandidate,
   applyTracklist,
-  artworkUrl,
   codecSummary,
   destinationText,
   discardLabel,
@@ -33,9 +32,10 @@ import {
   draftForSubmit,
   draftFrom,
   isEditable,
-  itemCover,
+  itemThumbUrl,
   itemTitle,
   pictureState,
+  refreshedDraft,
   sameTitleCount,
   stateLabel,
   syncNote,
@@ -158,12 +158,20 @@ function ItemForm({
   // 初期値は保存済みの下書き（無ければ提案）。編集中は一覧が取り直されても上書きしない。
   // 走査でファイルが変わった（pending に戻った）ときだけ作り直す（描画中の setState で前回の鍵を持つ
   // React の作法。App.tsx の settleFilterTotal と同じ）
-  const [draft, setDraft] = useState<InboxDraft>(() => draftFrom(item))
+  // 提案だけが変わった（走査の後に CD の表の画像が取れた等。D-91）ときは、人がまだ触っていなければ取り込む
+  const fresh = useMemo(() => draftFrom(item), [item])
+  const [draft, setDraft] = useState<InboxDraft>(fresh)
+  const [base, setBase] = useState<InboxDraft>(fresh)
   const [fileKey, setFileKey] = useState(() => filesKey(item))
   const currentKey = filesKey(item)
   if (currentKey !== fileKey) {
     setFileKey(currentKey)
-    setDraft(draftFrom(item))
+    setDraft(fresh)
+    setBase(fresh)
+  } else if (base !== fresh) {
+    const next = refreshedDraft(base, draft, fresh)
+    setBase(fresh)
+    if (next != null) setDraft(next)
   }
   const [submitError, setSubmitError] = useState<string | null>(null)
 
@@ -595,15 +603,15 @@ function TracklistPaste({ draft, onApply }: { draft: InboxDraft; onApply: (d: In
 
 const NO_ITEMS: InboxItem[] = []
 
-/** 一覧の件のサムネイル（件の代表の埋め込み画像）。無い件・読めない件は同じ寸法の空枠 */
+/** 一覧の取り込みのサムネイル（代表の埋め込み画像、無ければ下書き・提案の画像。D-91）。無い・読めないものは同じ寸法の空枠 */
 function ItemThumb({ item }: { item: InboxItem }) {
-  const cover = itemCover(item)
+  const cover = itemThumbUrl(item)
   const [failed, setFailed] = useState<string | null>(null)
   if (cover == null || failed === cover) return <span className="inbox-list-thumb empty" aria-hidden="true" />
   return (
     <img
       className="inbox-list-thumb"
-      src={artworkUrl(item.id, cover)}
+      src={cover}
       alt=""
       loading="lazy"
       onError={() => setFailed(cover)}

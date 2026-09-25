@@ -11,6 +11,8 @@ import {
   tagChanged,
   trackPictureUrl,
   usesCaaPicture,
+  itemThumbUrl,
+  refreshedDraft,
   stickyColumns,
   extraTagKeys,
   inboxColumns,
@@ -841,6 +843,30 @@ describe('画像の差し替え（D-86）', () => {
     expect(usesCaaPicture({ caa_picture: null }, all)).toBe(false)
     expect(usesCaaPicture({}, all)).toBe(false)
     expect(usesCaaPicture({ caa_picture: caa }, { tracks: [] })).toBe(false)
+  })
+  it('refreshedDraft は人が触っていないときだけ新しい初期値を返す（走査で表の画像が入った。D-91）', () => {
+    const { d } = withFiles([[], []])
+    const withPic = { ...d, tracks: d.tracks.map((t) => ({ ...t, picture: `image/png:${h('c')}` })) }
+    // 未編集: 提案に画像が入ったら取り込む
+    expect(refreshedDraft(d, d, withPic)).toEqual(withPic)
+    // 編集中: 上書きしない
+    const edited = { ...d, album: '直した' }
+    expect(refreshedDraft(d, edited, withPic)).toBeNull()
+    // 初期値が変わっていない（一覧を取り直しただけ）: 何もしない
+    expect(refreshedDraft(d, d, structuredClone(d))).toBeNull()
+  })
+  it('itemThumbUrl は埋め込み画像、無ければ下書き・提案の画像を出す（D-91）', () => {
+    const caa = `image/png:${h('c')}`
+    const { files, d } = withFiles([[], []])
+    const base = { id: 7, tracks: [...files.values()], draft: null, proposal: d }
+    expect(itemThumbUrl(base)).toBeNull()
+    const proposal = { ...d, tracks: d.tracks.map((t) => ({ ...t, picture: caa })) }
+    expect(itemThumbUrl({ ...base, proposal })).toBe(`/api/artwork/${h('c')}?size=256`)
+    // 保存した下書きが画像を外していれば出さない
+    expect(itemThumbUrl({ ...base, proposal, draft: d })).toBeNull()
+    // ファイルの埋め込み画像が先
+    const emb = withFiles([[pic('a')], [pic('a')]])
+    expect(itemThumbUrl({ id: 7, tracks: [...emb.files.values()], draft: null, proposal })).toBe(`/api/inbox/7/artwork/${h('a')}`)
   })
   it('pictureState は無し / 全曲同じ / 曲ごとに違う（一部無し）を見分ける', () => {
     expect(pictureState(withFiles([[], []]).files, withFiles([[], []]).d)).toMatchObject({ mode: 'none', missing: 2 })

@@ -423,14 +423,22 @@ pub fn same_title_in_album(
 }
 
 /// 走査の他に inbox ジョブがやることが残っているか: 配置待ち（`approved`。承認 API の投入が Requeue や
-/// 再起動で消えた後の保険）と、期限切れの `placed`（片付け）。周期の監視が Inbox に変化が無くても投入する
-/// 理由（P4-18）
-pub fn needs_attention(conn: &Connection, placed_before: i64) -> Result<bool> {
+/// 再起動で消えた後の保険）と、期限切れの `placed`（片付け）と、表の画像をまだ試していない承認前の取り込み
+/// （1 回の実行で取る件数に上限があるので、残りを次の周回で続ける。D-91）。周期の監視が Inbox に変化が無くても
+/// 投入する理由（P4-18）
+/// 表の画像を数えるのは `include_covers`（inbox ジョブが Cover Art Archive を使えるとき）だけ。使えないのに
+/// 数えると候補が減らず、毎周回投入し続ける
+pub fn needs_attention(
+    conn: &Connection,
+    placed_before: i64,
+    include_covers: bool,
+) -> Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT count(*) FROM inbox_items
          WHERE state = 'approved'
-            OR (state = 'placed' AND placed_at IS NOT NULL AND placed_at < ?1)",
-        [placed_before],
+            OR (state = 'placed' AND placed_at IS NOT NULL AND placed_at < ?1)
+            OR (?3 AND state IN ('pending', 'failed') AND caa_picture IS NULL AND caa_tries < ?2)",
+        params![placed_before, CAA_MAX_TRIES, include_covers],
         |r| r.get(0),
     )?;
     Ok(n > 0)
@@ -559,13 +567,26 @@ pub fn caa_candidates(conn: &Connection) -> Result<Vec<Item>> {
     Ok(rows)
 }
 
-/// 表の画像の取得の結果を記録する（D-91）。`picture` があれば置き、`tries` を回数にする。
-/// 既に画像がある件は触らない（CAS）。記録したら true
+/// 表の画像の取得を 1 回分 claim する（D-91）。**外へ出る前に**回数を進めて永続化する（通信の途中で落ちても
+/// 回数は戻らない = 上限を再起動で超えない）。`expected` は読んだときの回数で、承認前・画像なし・上限未満・
+/// 回数が変わっていないときだけ進める（CAS）。進めたら新しい回数
+pub fn claim_caa(conn: &Connection, id: i64, expected: i64) -> Result<Option<i64>> {
+    let n = conn.execute(
+        "UPDATE inbox_items SET caa_tries = caa_tries + 1
+          WHERE id = ?1 AND caa_tries = ?2 AND caa_tries < ?3 AND caa_picture IS NULL
+            AND state IN ('pending', 'failed')",
+        params![id, expected, CAA_MAX_TRIES],
+    )?;
+    Ok((n == 1).then_some(expected + 1))
+}
+
+/// 表の画像の取得の結果を記録する（D-91）。`picture` があれば置き、回数は `tries` 以上にする（claim で進めた
+/// 回数を戻さない）。既に画像がある件は触らない（CAS）。記録したら true
 pub fn record_caa(conn: &Connection, id: i64, picture: Option<&str>, tries: i64) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE inbox_items SET caa_picture = ?2, caa_tries = ?3
+        "UPDATE inbox_items SET caa_picture = ?2, caa_tries = max(caa_tries, ?3)
           WHERE id = ?1 AND caa_picture IS NULL",
-        rusqlite::params![id, picture, tries],
+        params![id, picture, tries],
     )?;
     Ok(n == 1)
 }

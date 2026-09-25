@@ -4,8 +4,10 @@
 //! 取得は inbox ジョブの走査の後に行う（承認画面を開くたび・`GET /api/inbox` のたびには外へ出ない）。
 //! 対象は承認前（pending / failed）で画像がまだ無く、試行が上限（[`CAA_MAX_TRIES`]）未満の取り込み。
 //! サイドカーの `rip.metadata.release_id` があるものだけ取りに行き、無いもの（CD でない・候補を選ばずに
-//! 吸い出した）と画像の無い盤（404）は 1 回で打ち止めにする。上流の失敗は回数を 1 つ進め、次の走査で
-//! もう 1 回だけ試す。どれも取り込み自体は失敗させない
+//! 吸い出した）と画像の無い盤（404）は 1 回で打ち止めにする。上流の失敗は次の走査でもう 1 回だけ試す。
+//! 回数は外へ出る前に claim して永続化する（途中で落ちても上限を超えない）。配置の後に、1 回の実行で
+//! [`CAA_PER_RUN`] 件・[`CAA_RUN_BUDGET`] までに限って行う（Inbox の配置を外部の障害で待たせない）。
+//! どれも取り込み自体は失敗させない
 
 use std::sync::Arc;
 
@@ -139,8 +141,17 @@ fn rip_release_id(inbox: &RootDir, item: &Item) -> Option<String> {
     crate::import::inbox::is_mbid(&id).then_some(id)
 }
 
+/// 1 回の inbox ジョブで表の画像を取りに行く件数の上限（D-91）。残りは次の周回で続ける（`needs_attention`）
+pub const CAA_PER_RUN: usize = 4;
+
+/// 1 回の inbox ジョブで表の画像の取得に使う時間の上限（D-91）。これを過ぎたら新しい件に手を付けない
+/// （走行中の 1 件は `CoverArtClient` の全体 timeout で終わる）
+pub const CAA_RUN_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// 承認前の CD の取り込みの表の画像を Cover Art Archive から取り、置いて件に記録する（D-91）。
-/// 失敗は件ごとにログへ出して続ける（取り込みも走査も失敗させない）。`cancel` が立てば途中で止める
+/// 1 回に [`CAA_PER_RUN`] 件・[`CAA_RUN_BUDGET`] まで。失敗は件ごとにログへ出して続ける（取り込みも走査も
+/// 失敗させない）。**外へ出る前に回数を claim して永続化する**（通信の途中で落ちても上限を超えない）。
+/// `cancel` は通信の待ちの間も見る（立てば取りやめ、claim した回数はそのまま = 1 回と数える）
 pub async fn fetch_cd_covers(
     db: &Db,
     inbox: &Arc<RootDir>,
@@ -149,10 +160,13 @@ pub async fn fetch_cd_covers(
     jobs: &Jobs,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CoverReport, crate::db::DbError> {
+    let started = std::time::Instant::now();
     let items = db.read(dbinbox::caa_candidates).await?;
     let mut report = CoverReport::default();
+    let mut attempted = 0usize;
     for item in items {
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || attempted >= CAA_PER_RUN || started.elapsed() >= CAA_RUN_BUDGET
+        {
             break;
         }
         let id = item.id;
@@ -164,13 +178,29 @@ pub async fn fetch_cd_covers(
                 .flatten()
         };
         let Some(release_id) = release_id else {
+            // 外へ出ないので claim は要らない
             db.write(move |c| dbinbox::record_caa(c, id, None, CAA_MAX_TRIES))
                 .await?;
             report.skipped += 1;
             continue;
         };
-        let tries = item.caa_tries + 1;
-        match client.front(&release_id).await {
+        // 1 回分を先に claim（CAS）。取れなければ別の実行が進めた・状態が変わった
+        let expected = item.caa_tries;
+        let Some(tries) = db
+            .write(move |c| dbinbox::claim_caa(c, id, expected))
+            .await?
+        else {
+            continue;
+        };
+        attempted += 1;
+        let fetched = tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!(item_id = id, release_id, "取り消されたので表の画像の取得をやめる");
+                break;
+            }
+            r = client.front(&release_id) => r,
+        };
+        match fetched {
             Ok(Some((_content_type, bytes))) => match store_image(db, store, bytes).await {
                 Ok(img) => {
                     let value = img.picture_value();
@@ -188,9 +218,8 @@ pub async fn fetch_cd_covers(
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(item_id = id, release_id, error = %e, "取り込みの表の画像を置けない");
-                    db.write(move |c| dbinbox::record_caa(c, id, None, tries))
-                        .await?;
+                    // 回数は claim で進めてある
+                    tracing::warn!(item_id = id, release_id, tries, error = %e, "取り込みの表の画像を置けない");
                     report.failed += 1;
                 }
             },
@@ -205,10 +234,9 @@ pub async fn fetch_cd_covers(
                 report.absent += 1;
             }
             Err(e) => {
+                // 回数は claim で進めてある。上限未満なら次の周回でもう 1 回
                 let detail = crate::cd::error_chain(&e);
                 tracing::warn!(item_id = id, release_id, tries, error = %detail, "取り込みの表の画像を取れない（次の走査で上限まで試す）");
-                db.write(move |c| dbinbox::record_caa(c, id, None, tries))
-                    .await?;
                 report.failed += 1;
             }
         }

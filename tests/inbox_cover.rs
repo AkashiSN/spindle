@@ -39,6 +39,8 @@ const WITH_ART: &str = "66666666-6666-6666-6666-666666666666";
 const NO_ART: &str = "00000000-0000-0000-0000-000000000000";
 /// 上流が 500 を返す盤
 const BROKEN: &str = "77777777-7777-7777-7777-777777777777";
+/// 応答が遅い盤（取り消しの確認）
+const SLOW: &str = "88888888-8888-8888-8888-888888888888";
 
 /// 1x1 の PNG（IHDR まである本物。寸法を読める）
 const REAL_PNG: &[u8] = &[
@@ -60,6 +62,10 @@ async fn caa_front(
     match id.as_str() {
         WITH_ART => ([(header::CONTENT_TYPE, "image/png")], REAL_PNG.to_vec()).into_response(),
         BROKEN => (StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response(),
+        SLOW => {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            (StatusCode::NOT_FOUND, "late").into_response()
+        }
         _ => (StatusCode::NOT_FOUND, "no art").into_response(),
     }
 }
@@ -148,13 +154,17 @@ impl Lib {
     }
 
     async fn fetch(&self) -> CoverReport {
+        self.fetch_with(&CancellationToken::new()).await
+    }
+
+    async fn fetch_with(&self, cancel: &CancellationToken) -> CoverReport {
         fetch_cd_covers(
             &self.db,
             &self.inbox,
             &self.store,
             &self.client,
             &self.jobs,
-            &CancellationToken::new(),
+            cancel,
         )
         .await
         .unwrap()
@@ -339,4 +349,77 @@ async fn the_inbox_job_fetches_covers_for_existing_imports() {
     assert!(item.caa_picture.is_some(), "{item:?}");
     assert_eq!(item.state, ItemState::Pending);
     lib.shutdown.cancel();
+}
+
+/// 回数は外へ出る前に claim して永続化する。claim の後・結果の記録の前に落ちた（= claim だけ残った）状態から
+/// 再開しても、上限（2 回）を超えて取りに行かない
+#[tokio::test]
+async fn a_crash_after_the_claim_still_counts_as_an_attempt() {
+    let lib = Lib::new().await;
+    require_ffmpeg!(lib.add_item("CD/Broken", Some(BROKEN), true));
+    lib.add_item("CD/NoArt", Some(NO_ART), true);
+    lib.scan().await;
+    // 1 回目: claim だけして落ちた
+    for dir in ["CD/Broken", "CD/NoArt"] {
+        let id = lib.item(dir).id;
+        assert_eq!(dbinbox::claim_caa(&lib.conn(), id, 0).unwrap(), Some(1));
+        // 読んだ回数が古ければ CAS で外れる
+        assert_eq!(dbinbox::claim_caa(&lib.conn(), id, 0).unwrap(), None);
+    }
+    assert_eq!(lib.hits.load(Ordering::SeqCst), 0);
+    // 再開: それぞれ残り 1 回だけ
+    lib.fetch().await;
+    assert_eq!(lib.hits.load(Ordering::SeqCst), 2);
+    assert_eq!(lib.item("CD/Broken").caa_tries, CAA_MAX_TRIES);
+    assert_eq!(lib.item("CD/NoArt").caa_tries, CAA_MAX_TRIES);
+    lib.fetch().await;
+    assert_eq!(lib.hits.load(Ordering::SeqCst), 2, "上限を超えない");
+}
+
+/// 1 回の実行で取りに行くのは CAA_PER_RUN 件まで。残りは needs_attention が立って次の周回で続く
+#[tokio::test]
+async fn one_run_fetches_a_bounded_number_and_leaves_the_rest_for_the_next() {
+    use spindle::import::cover::CAA_PER_RUN;
+    let lib = Lib::new().await;
+    let n = CAA_PER_RUN + 1;
+    for i in 0..n {
+        require_ffmpeg!(lib.add_item(&format!("CD/Disc{i}"), Some(WITH_ART), true));
+    }
+    lib.scan().await;
+    assert!(dbinbox::needs_attention(&lib.conn(), 0, true).unwrap());
+    assert!(
+        !dbinbox::needs_attention(&lib.conn(), 0, false).unwrap(),
+        "Cover Art Archive を使わないなら候補を数えない（毎周回投入しない）"
+    );
+    assert_eq!(lib.fetch().await.found, CAA_PER_RUN);
+    assert!(
+        dbinbox::needs_attention(&lib.conn(), 0, true).unwrap(),
+        "残りがあるので次の周回で投入する"
+    );
+    assert_eq!(lib.fetch().await.found, n - CAA_PER_RUN);
+    assert!(!dbinbox::needs_attention(&lib.conn(), 0, true).unwrap());
+}
+
+/// 取り消しは通信の待ちの間も効く（遅い相手を待ち続けない）。claim した回数は 1 回と数える
+#[tokio::test]
+async fn cancel_is_observed_while_waiting_for_the_upstream() {
+    let lib = Lib::new().await;
+    require_ffmpeg!(lib.add_item("CD/Slow", Some(SLOW), true));
+    lib.scan().await;
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        c2.cancel();
+    });
+    let started = std::time::Instant::now();
+    let r = lib.fetch_with(&cancel).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(r, CoverReport::default());
+    let item = lib.item("CD/Slow");
+    assert_eq!((item.caa_picture, item.caa_tries), (None, 1));
 }

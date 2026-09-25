@@ -39,9 +39,17 @@ pub fn new_inbox_job() -> NewJob {
 #[derive(Debug, Default)]
 pub struct WatchStatus {
     checked_at: std::sync::atomic::AtomicI64,
+    /// inbox ジョブが CD の取り込みの表の画像を取る（D-91）。取りきれなかった候補があれば投入する
+    covers: std::sync::atomic::AtomicBool,
 }
 
 impl WatchStatus {
+    /// 表の画像の候補も「inbox ジョブがやること」に数える（inbox ジョブに Cover Art Archive を渡したとき。D-91）
+    pub fn enable_covers(&self) {
+        self.covers
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// 最後に Inbox を確認した時刻（epoch 秒）。まだなら 0
     pub fn checked_at(&self) -> i64 {
         self.checked_at.load(std::sync::atomic::Ordering::Relaxed)
@@ -99,9 +107,10 @@ pub fn spawn_watcher_with(
                 }
             };
             let now = now_epoch();
+            let covers = status.covers.load(std::sync::atomic::Ordering::Relaxed);
             let needs = match jobs
                 .db()
-                .read(move |c| dbinbox::needs_attention(c, now - PLACED_RETENTION_SECS))
+                .read(move |c| dbinbox::needs_attention(c, now - PLACED_RETENTION_SECS, covers))
                 .await
             {
                 Ok(b) => b,
@@ -166,31 +175,6 @@ impl InboxHandler {
             read = out.files_read,
             "Inbox を走査した"
         );
-        // CD の取り込みの表の画像（D-91）。走査で見つけた承認前の件に一度だけ取りに行く。失敗しても
-        // 走査・配置は続ける（取り込みは画像なしのまま）
-        if let (Some(client), Some(store)) = (&self.env.coverart, &self.env.artwork) {
-            match crate::import::cover::fetch_cd_covers(
-                &self.env.db,
-                &self.env.inbox,
-                store,
-                client,
-                &self.env.jobs,
-                &token,
-            )
-            .await
-            {
-                Ok(r) if r != crate::import::cover::CoverReport::default() => tracing::info!(
-                    job_id,
-                    found = r.found,
-                    absent = r.absent,
-                    skipped = r.skipped,
-                    failed = r.failed,
-                    "取り込みの表の画像を確かめた"
-                ),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(job_id, error = %e, "取り込みの表の画像を確かめられない"),
-            }
-        }
         let approved = ctx
             .db()
             .read(|c| dbinbox::list_by_state(c, ItemState::Approved))
@@ -319,6 +303,32 @@ impl InboxHandler {
                         })
                         .await?;
                 }
+            }
+        }
+        // CD の取り込みの表の画像（D-91）。**配置の後に**、承認前の件に一度だけ取りに行く（外部の障害で配置を
+        // 待たせない）。1 回の実行で件数・時間に上限があり、残りは周期の監視が次の周回で投入する
+        // （needs_attention）。失敗しても取り込みは画像なしのまま
+        if let (Some(client), Some(store)) = (&self.env.coverart, &self.env.artwork) {
+            match crate::import::cover::fetch_cd_covers(
+                &self.env.db,
+                &self.env.inbox,
+                store,
+                client,
+                &self.env.jobs,
+                &token,
+            )
+            .await
+            {
+                Ok(r) if r != crate::import::cover::CoverReport::default() => tracing::info!(
+                    job_id,
+                    found = r.found,
+                    absent = r.absent,
+                    skipped = r.skipped,
+                    failed = r.failed,
+                    "取り込みの表の画像を確かめた"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(job_id, error = %e, "取り込みの表の画像を確かめられない"),
             }
         }
         let _ = ctx.progress(total, total).await;

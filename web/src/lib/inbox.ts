@@ -302,6 +302,34 @@ export function artworkUrl(itemId: number, hash: string): string {
   return `/api/inbox/${itemId}/artwork/${hash}`
 }
 
+/**
+ * 一覧のサムネイルの URL。ファイルの埋め込み画像があればそれ（`itemCover`）、無ければ下書き（保存済み、無ければ
+ * 提案）で差し替える画像。提案には CD の取り込みの表の画像（Cover Art Archive から自動で取ったもの。D-91）が
+ * 入るので、吸い出したばかりの画像の無い盤でもジャケットが出る。置いた画像は `/api/artwork/:hash`（256px）
+ */
+export function itemThumbUrl(item: Pick<InboxItem, 'id' | 'tracks' | 'draft' | 'proposal'>): string | null {
+  const embedded = itemCover(item)
+  if (embedded != null) return artworkUrl(item.id, embedded)
+  const tracks = (item.draft ?? item.proposal).tracks
+  for (const t of tracks) {
+    const p = t.picture == null ? null : parsePictureValue(t.picture)
+    if (p != null) return `/api/artwork/${p.hash}?size=256`
+  }
+  return null
+}
+
+/**
+ * 開いている取り込みの下書きを、一覧の取り直しで作り直すか（D-91）。`base` は前回この画面が初期値にした下書き、
+ * `fresh` は今の一覧から作った初期値（`draftFrom`）。**人がまだ触っていない**（`draft` が `base` のまま）ときだけ
+ * 新しい初期値を返す。走査の後に提案だけが変わった（表の画像が取れた等）ときに画面へ出すため。触っていれば
+ * null（編集中の値を上書きしない）
+ */
+export function refreshedDraft(base: InboxDraft, draft: InboxDraft, fresh: InboxDraft): InboxDraft | null {
+  const same = (a: InboxDraft, b: InboxDraft) => JSON.stringify(a) === JSON.stringify(b)
+  if (same(base, fresh) || !same(draft, base)) return null
+  return fresh
+}
+
 /** パス照合の鍵（サーバの canonical_key の近似: NFD + casefold）。表示には使わない */
 function pathKey(s: string): string {
   return s.normalize('NFD').toLowerCase().normalize('NFD')
