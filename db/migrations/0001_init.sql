@@ -1,8 +1,9 @@
 -- spindle schema (SQLite 3.38+)
 -- 原則: ファイルが正 / パスは識別子でない / 音声とタグを別に版管理 / 破壊的操作は巻き戻せる
 --
--- 最初の vX.Y.Z の前に、それまでの 0001〜0024 をこの 1 本に畳んだ（D-88）。以後の変更は
--- 既存ファイルを書き換えず、新しい連番ファイルを足す。
+-- 最初の vX.Y.Z の前に、それまでの 0001〜0024 をこの 1 本に畳み（D-88）、リリース直前に
+-- その後の 0002〜0004 も畳んだ（D-88 追記）。以後の変更は既存ファイルを書き換えず、
+-- 新しい連番ファイルを足す。
 --
 -- PRAGMA はこのファイルに書かない。マイグレーションは 1 ファイル = 1 トランザクションで
 -- 適用するが、journal_mode / synchronous はトランザクション内で変更できず、
@@ -92,6 +93,10 @@ CREATE TABLE albums (
 CREATE INDEX idx_albums_artist   ON albums(albumartist, album);
 CREATE INDEX idx_albums_release  ON albums(mb_release_id) WHERE mb_release_id IS NOT NULL;
 CREATE INDEX idx_albums_missing  ON albums(missing_since) WHERE missing_since IS NOT NULL;
+-- category が NULL の active な album を引く部分索引（D-92）。スキャンごとに NULL の album を
+-- 直下のディレクトリ名で埋めるので、埋まった後は索引が数件だけになり全 album を走査しない
+CREATE INDEX idx_albums_category_null ON albums(rel_dir)
+  WHERE category_id IS NULL AND missing_since IS NULL;
 
 -- ============================================================
 -- 走査の実行単位
@@ -527,7 +532,17 @@ CREATE TABLE inbox_items (
   draft           TEXT,                     -- 承認時の補正（JSON。InboxDraft）
   error           TEXT,                     -- failed の理由、pending に戻した理由
   placed_album_id INTEGER REFERENCES albums(id) ON DELETE SET NULL,
-  placed_at       INTEGER
+  placed_at       INTEGER,
+  -- 却下した件の破棄（D-90）。rejected の件に「削除」で破棄要求の時刻を入れ、GC が
+  -- [gc].retention_days 経過後にファイルと行を消す。NULL = 破棄待ちでない。状態は rejected のまま
+  -- で、rejected 以外へ移るとき・走査でファイルが変わったときに NULL へ戻す
+  discard_requested_at INTEGER,
+  -- CD の取り込みの表の画像を Cover Art Archive から一度だけ取る（D-91）。承認画面の提案の初期値に使う。
+  -- caa_picture: 置いた画像（`<mime>:<sha256hex>`。下書きの picture と同じ形）。NULL = まだ無い
+  -- caa_tries:   取得を試みた回数。上限（2）に達したら以後は取りに行かない（画像の無い盤・CD でない
+  --              取り込みは 1 回目で上限にする）
+  caa_picture     TEXT,
+  caa_tries       INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE INDEX idx_inbox_items_state ON inbox_items(state);

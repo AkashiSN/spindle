@@ -3821,7 +3821,9 @@ yt-dlp が走る）。
 **追記（2026-09-26。ユーザ依頼）**: 「1 回だけ」を「最初の `vX.Y.Z` より前に限る」と読み替え、リリース直前に
 もう一度畳む。D-88 の後に 0002〜0004 が増えた（Inbox の破棄・表の画像・category の索引）。理由は本文と同じで、
 畳めるのはリハーサル環境の DB を捨てて作り直す最初のリリースの時だけ。タグを切った後は既存ファイルを書き換えない
-（TASKS P4-12 (10)、MIGRATION §5 の手順 0）。
+（TASKS P4-12 (10)、MIGRATION §5 の手順 0）。2026-09-26 に畳んだ。3 本とも列・索引の追加だけで、空 DB の最終スキーマは
+`ALTER TABLE ADD COLUMN` が `sqlite_master` の SQL に残す空白の位置を除いて一致。既存の DB（版 4）は新しいバイナリ
+（最新 1）で `Newer` になり起動しない（本文と同じく許容。リハーサル環境は §5 の手順 1 で作り直す）。
 
 ## D-89 プロセス内デコードはコンテナの宣言長で打ち切る（MP4 末尾の長さ 0 のサンプル）
 
@@ -3862,7 +3864,7 @@ symphonia 0.6.1 の MP4 読みはパケットとして返し、デコーダは 1
 **決定**（2026-09-25。P4-22。ユーザの決定: 「却下した後に Inbox に残っている行を削除したら GC で削除対象にする」）:
 
 - 二段にする。**却下**（従来どおり。ファイルは残し「下書きに戻す」で戻せる）と、却下した件の**削除**（破棄待ち）。
-  削除は `inbox_items.discard_requested_at` に時刻を入れるだけで、ファイルは消さない（マイグレーション 0002。
+  削除は `inbox_items.discard_requested_at` に時刻を入れるだけで、ファイルは消さない（旧マイグレーション 0002。D-88 追記で `0001_init.sql` へ統合。
   状態は `rejected` のままにして CHECK の作り直しを避けた）。`POST /api/inbox/:id/discard` / `/undiscard`
 - **物理削除は GC だけ**（CLAUDE.md の禁止事項）。GC の区分 F: `rejected` で `discard_requested_at <= now -
   [gc].retention_days` の件。消すのは件のディレクトリの直下の**走査が写した音声**（`inbox_files` と stat が一致する
@@ -3909,7 +3911,7 @@ symphonia 0.6.1 の MP4 読みはパケットとして返し、デコーダは 1
 - **経路は D-82 / D-86 と同じ。** `CoverArtClient`（`address_family` は `Auto` 固定、リダイレクト 5 回・8 MiB・
   `image/*` の境界）で front を取り、`POST /api/artwork/upload` / `from-caa` と共通の
   `import::cover::store_image` で `artwork` の置き場と行に置く（サムネイルのジョブも同じ）
-- **記録は DB（`inbox_items.caa_picture` / `caa_tries`。マイグレーション 0003）。** 外部から取ってきた値のキャッシュ
+- **記録は DB（`inbox_items.caa_picture` / `caa_tries`。旧マイグレーション 0003。D-88 追記で `0001_init.sql` へ統合）。** 外部から取ってきた値のキャッシュ
   なので DB に持つ（DB を作り直せば次の走査で取り直す）。サイドカーは吸い出しの記録で、後から書き換えると D-90 の
   破棄の確かめ（サイドカーの ctime）とも干渉する
 - **配置を待たせない**: inbox ジョブ（並列 1・固定の dedup キー）の中で、**承認済みの配置を先に済ませてから**取る。
@@ -3963,7 +3965,7 @@ symphonia 0.6.1 の MP4 読みはパケットとして返し、デコーダは 1
   照合し直さないので、album 照合の後に `category_id IS NULL AND missing_since IS NULL` の album だけを読み、
   直下の名前に当たる語彙があれば `WHERE category_id IS NULL` の条件付きで付ける（`scans::albums_without_category`
   / `set_album_category_if_null`）。一度埋まれば残るのは `_Unsorted` 等の数件なので、毎回の全件走査に
-  ならない（マイグレーション 0004 の部分索引 `idx_albums_category_null ON albums(rel_dir) WHERE category_id IS NULL
+  ならない（旧マイグレーション 0004。D-88 追記で `0001_init.sql` へ統合。その部分索引 `idx_albums_category_null ON albums(rel_dir) WHERE category_id IS NULL
   AND missing_since IS NULL` で NULL の行だけを読む）。人が付けた値（NULL でない）は変えない
 - **画面へ知らせる**: 埋めた album のトラックを `changed_ids` に足して `library` イベントを出す（ファイルが
   変わらない増分スキャンでも表の category が変わるため）。語彙だけが増えて行が何も変わらない run（直下の

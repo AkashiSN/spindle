@@ -1517,11 +1517,15 @@ lofty の generic `Tag` → `apply_generic`）は `ItemKey` の写像表に無�
 - [x] (9) スカッシュ: リリース時の再移行の前に `db/migrations` を `0001_init.sql` 1 本へ畳んだ（2026-09-24、D-88）。
       最終スキーマは 24 本を流した結果と一致（`sqlite_sequence` の空行だけ差）。アップグレード試験は空 DB の
       スキーマ試験へ移した。最初のタグはリリース時
-- [ ] (10) リリース直前の 2 回目のスカッシュ（2026-09-26 ユーザ依頼。D-88 追記）: (9) の後に足した `0002`〜
+- [x] (10) リリース直前の 2 回目のスカッシュ（2026-09-26 ユーザ依頼。D-88 追記）: (9) の後に足した `0002`〜
       （いまは 0002 / 0003 / 0004）を `0001_init.sql` へ畳む。やり方と確かめ方は (9) / D-88 と同じ（空 DB の
       `sqlite_master` と全表の `table_xinfo` / `index_list` / `index_xinfo` / `foreign_key_list` と種データを比べる。
       各版の試験は空 DB のスキーマ試験へ移す）。最初の `vX.Y.Z` を切るコミットの直前に行い（その後に版が
-      増えないように）、MIGRATION §5 の手順 0。タグの後は CLAUDE.md の禁止事項どおり連番を足すだけ
+      増えないように）、MIGRATION §5 の手順 0。タグの後は CLAUDE.md の禁止事項どおり連番を足すだけ。
+      2026-09-26 実施: 0002〜0004 はどれも列・索引の追加だけで、`inbox_items` の末尾の 3 列と
+      `idx_albums_category_null` を `0001_init.sql` に直接書いた。空 DB の比較は `ALTER TABLE ADD COLUMN` が
+      `sqlite_master` の SQL に残す空白の位置（`placed_at INTEGER ,`）だけが違い、ほかは一致。
+      0002〜0004 専用のアップグレード試験は無く、各機能の試験は空 DB で動くので移すものは無かった
 
 受け入れ（確認済み）: `main` への push で `edge` / `sha-<7>` が push され、リハーサル環境の compose を
 `edge` に切り替えて `compose pull` → `/health` が `{"status":"ok","version":"a10fb0d","ytdlp":"2026.08.19"}`。
@@ -1867,7 +1871,7 @@ ALAC 末尾の長さ 0 のサンプル）は済み
 - [x] CD の取り込みの表の画像を承認画面の初期値に入れる（2026-09-25 ユーザの決定。D-91）。CD 画面では Cover Art
       Archive のジャケットが見えていたのに、吸い出したファイルには画像が無く、承認画面で「Cover Art Archive から取る」を
       押さないと入らなかった（実機の嵐「Five」）。inbox ジョブの走査の後、サイドカーの `rip.metadata.release_id` が
-      ある承認前の取り込みに一度だけ front を取り（マイグレーション 0003 の `inbox_items.caa_picture` / `caa_tries`）、
+      ある承認前の取り込みに一度だけ front を取り（旧マイグレーション 0003 の `inbox_items.caa_picture` / `caa_tries`。D-88 追記で `0001_init.sql` へ統合）、
       提案の全曲の `picture` に入れる（保存した下書きが勝つ）。404・リリースなしは 1 回で打ち止め、上流の失敗は
       もう 1 回だけ。承認画面は「Cover Art Archive の表の画像（…自動で取った）」と「画像を外す」。`tests/inbox_cover.rs`
       （取得 → 提案・一度だけ・GC しない、404、失敗の再試行と上限、リリースなし / CD でないは取りに行かない、下書きが
@@ -1880,7 +1884,7 @@ ALAC 末尾の長さ 0 のサンプル）は済み
       `changed_ids`、大小・NFD 違いの重複なし、`[layout].unsorted` の先頭、Phase 3 中の API の追加、部分索引の
       EXPLAIN QUERY PLAN）、`tests/scan_job.rs`（語彙だけ増えた run の bulk）、`tests/categories_api.rs`（使われていない語彙だけ削除）、`web/src/lib/categories.test.ts`。
       codex の指摘で、語彙の読み直し・`library` イベントでの一覧の取り直し・使われていない語彙の削除（設定画面）・
-      部分索引（0004）を足した
+      部分索引（旧 0004。D-88 追記で `0001_init.sql` へ統合）を足した
 - [x] album の edition を `EDITION` タグから入れ、片方だけが edition を持つ同名の衝突では持たない方を元の名前に
       する（2026-09-25 ユーザの決定。D-43 追記）。スキャナが `albums.edition` を一度も埋めておらず、実機の
       IM@S CM Solo の 2 枚（通常版 + `Hi-Res/`）がリネームで「降格に必要な値が無い: edition」だった。Hi-Res 側の
