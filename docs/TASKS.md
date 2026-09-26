@@ -1953,6 +1953,8 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
       symphonia が選ぶ MP4 で、先頭トラックの edit list を当てないこと（トラック ID の照合を外すと落ちることを確認）
 - [x] codex のレビュー（2026-09-26）: トラックの取り違え・moov 内の確保量・トップレベルの走査量（major 3）と、D-89 の
       見出しが旧い規則のまま（minor 1）に対応
+- [x] CI の rust ジョブを `rust:1-bookworm` のコンテナで走らせ、ffmpeg を本番のイメージ（Debian bookworm、5.1）と
+      揃える（それまでは Ubuntu 24.04 の 6.1 で、本番の挙動を CI で確かめられなかった）。`opus-tools` も本番と同じく入れる
 - [x] 本番の ffmpeg 5.1 との照合（本番コンテナの ffmpeg で作った FLAC の STREAMINFO MD5 と `decoded_pcm_md5`）:
       実 ALAC 53 本（D-89 の 7 本 + 今回の 46 本）、実 ALAC から作った 31 の形、`elst` 付きで長さ 0 のサンプルを
       持たない実 ALAC 9 本がすべて一致
