@@ -324,20 +324,15 @@ pub fn zero_last_stts_delta(path: &Path, edit: EditEnd) -> u32 {
     match edit {
         EditEnd::Beyond => {}
         EditEnd::AtDeclared => {
+            // movie timescale を media timescale に揃え、区間 = 宣言長ちょうどにする（mvhd の timescale は
+            // ffmpeg の版で 1000 だったりサンプルレートだったりし、1000 だと宣言長が割り切れないことがある）
             let mvhd = mvhd.expect("mvhd が無い");
             assert_eq!(data[mvhd], 0, "mvhd が version 0 でない");
-            let movie_ts = be32(&data, mvhd + 12);
-            let seg = u64::from(declared) * u64::from(movie_ts);
-            assert_eq!(
-                seg % u64::from(media_ts),
-                0,
-                "宣言長が movie timescale で割り切れない"
-            );
+            data[mvhd + 12..mvhd + 16].copy_from_slice(&media_ts.to_be_bytes());
             let elst = elst.expect("elst が無い");
             assert_eq!(data[elst], 0, "elst が version 0 でない");
             assert_eq!(be32(&data, elst + 4), 1, "elst が 1 項でない");
-            let seg = (seg / u64::from(media_ts)) as u32;
-            data[elst + 8..elst + 12].copy_from_slice(&seg.to_be_bytes());
+            data[elst + 8..elst + 12].copy_from_slice(&declared.to_be_bytes());
         }
         EditEnd::Removed => {
             let edts = edts.expect("edts が無い");
