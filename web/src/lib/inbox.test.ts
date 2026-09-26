@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyPicture,
   draftChangeCount,
+  itemSource,
   effectiveTag,
   isLockedTagKey,
   newTagKeyProblem,
@@ -945,5 +946,43 @@ describe('draftChangeCount（D-86）', () => {
     // album gain の基準は追記先の現在値
     const dest = item({ destination: { album_id: 1, album: 'X', track_count: 2, max_track_no: 2, album_gain: true } })
     expect(draftChangeCount(dest, draftFrom(dest))).toBe(0)
+  })
+
+  it('画像は提案（CD の表の画像）と違うときだけ数える', () => {
+    const caa = `image/jpeg:${'c'.repeat(64)}`
+    const withCaa = item({
+      proposal: { ...proposal, tracks: proposal.tracks.map((t) => ({ ...t, picture: caa })) },
+    })
+    const d = draftFrom(withCaa)
+    expect(draftChangeCount(withCaa, d)).toBe(0)
+    const e: InboxDraft = { ...d, tracks: [{ ...d.tracks[0], picture: `image/png:${'a'.repeat(64)}` }, d.tracks[1]] }
+    expect(draftChangeCount(withCaa, e)).toBe(1)
+    // 表の画像を外したのも変更
+    const f: InboxDraft = { ...d, tracks: [{ ...d.tracks[0], picture: undefined }, d.tracks[1]] }
+    expect(draftChangeCount(withCaa, f)).toBe(1)
+  })
+})
+
+describe('itemSource', () => {
+  it('未配置はサイドカー（rip / 曲の出どころ）で決める', () => {
+    expect(itemSource(item({ rip: { toc: 't', isrcs: [], mcn: null } }))).toBe('CD')
+    expect(itemSource(item({ tracks: [{ ...file('d/01.flac'), source: { source: 'youtube', url: null, channel: null, verdict: 'ok', message: null } }] }))).toBe('YouTube')
+    expect(itemSource(item())).toBe('手置き')
+    // 未配置ではディレクトリだけで CD とはしない（手で CD/ の下に置いた件）
+    expect(itemSource(item({ rel_dir: 'CD/foo' }))).toBe('手置き')
+  })
+
+  it('配置済みはサイドカーが Inbox から消えているのでディレクトリだけで決める', () => {
+    const placed = { state: 'placed' as const }
+    expect(itemSource(item({ ...placed, rel_dir: 'CD/Mrs. GREEN APPLE - 10 [0CvfQ2Wy2_Z5VvcyFCmJe6JIBNg-]' }))).toBe('CD')
+    expect(itemSource(item({ ...placed, rel_dir: 'youtube/a/b' }))).toBe('YouTube')
+    expect(itemSource(item({ ...placed, rel_dir: 'foo' }))).toBe('手置き')
+    // Inbox の大文字小文字は区別しない（ZFS の insensitive）
+    expect(itemSource(item({ ...placed, rel_dir: 'cd/x' }))).toBe('CD')
+    // CD 自体を含むだけの名前は CD ではない
+    expect(itemSource(item({ ...placed, rel_dir: 'CDs/x' }))).toBe('手置き')
+    // 消し損ね・差し替えで残ったサイドカーより、取り込み元のディレクトリを信じる
+    expect(itemSource(item({ ...placed, rel_dir: 'foo', rip: { toc: 't', isrcs: [], mcn: null } }))).toBe('手置き')
+    expect(itemSource(item({ ...placed, rel_dir: 'CD/x', tracks: [{ ...file('d/01.flac'), source: { source: 'youtube', url: null, channel: null, verdict: 'ok', message: null } }] }))).toBe('CD')
   })
 })

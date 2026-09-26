@@ -222,6 +222,23 @@ export function discardLabel(
     : `削除待ち: ${formatTime(at)} 以降の GC でファイルを消す（それまでは取り消せる）`
 }
 
+/**
+ * 件の出どころ（見出しのバッジ）。未配置はサイドカー（`rip` / 曲ごとの出どころ）で決める。
+ * **配置済みはサイドカーが配置の後に Inbox から消えている**ので、取り込み元のディレクトリだけで
+ * 決める（CD の吸い出しは `CD/`、YouTube の取得は `youtube/` の下に公開される）。消し損ねや
+ * 差し替えで残ったサイドカーは配置したものと限らないので見ない。
+ * 表示だけに使う。CD 用の処理（照会・照合）はパスで判定しない
+ */
+export function itemSource(item: Pick<InboxItem, 'state' | 'rel_dir' | 'rip' | 'tracks'>): 'CD' | 'YouTube' | '手置き' {
+  if (item.state === 'placed') {
+    const top = item.rel_dir.split('/')[0].toLowerCase()
+    return top === 'cd' ? 'CD' : top === 'youtube' ? 'YouTube' : '手置き'
+  }
+  if (item.rip != null) return 'CD'
+  if (item.tracks.some((f) => f.source != null)) return 'YouTube'
+  return '手置き'
+}
+
 export function itemTitle(item: Pick<InboxItem, 'rel_dir'>): string {
   return item.rel_dir === '' ? '(Inbox 直下)' : item.rel_dir
 }
@@ -948,7 +965,8 @@ export function stickyColumns(shown: Pick<InboxColumn, 'id'>[]): Map<string, Sti
 
 /**
  * 下書きの変更の数（見出しの「変更 N 件」）。アルバム単位の欄（提案と違うもの。album gain の基準は
- * 追記先の現在値）、トラックの番号・タイトル・アーティスト、タグの変更キー、画像の差し替えを数える
+ * 追記先の現在値）、トラックの番号・タイトル・アーティスト、タグの変更キー、画像の差し替えを数える。
+ * 配置済みの件には使わない（サイドカーが Inbox から消えた後の提案と比べることになり、CD 由来の初期値が差に見える）
  */
 export function draftChangeCount(item: Pick<InboxItem, 'proposal' | 'destination'>, d: InboxDraft): number {
   const p = item.proposal
@@ -968,7 +986,8 @@ export function draftChangeCount(item: Pick<InboxItem, 'proposal' | 'destination
       if (t.artist !== o.artist && t.keep_artists !== true) n++
     }
     n += Object.keys(t.tags ?? {}).length
-    if (t.picture != null) n++
+    // 画像は提案（CD の表の画像。D-91）と違うときだけ。提案に無いトラックは指定があれば変更
+    if ((t.picture ?? null) !== (o?.picture ?? null)) n++
   }
   return n
 }

@@ -32,6 +32,7 @@ import {
   draftForSubmit,
   draftFrom,
   isEditable,
+  itemSource,
   itemThumbUrl,
   itemTitle,
   pictureState,
@@ -183,8 +184,9 @@ function ItemForm({
   const artwork = useArtworkUpload()
   const preview = useInboxPreview(item.id, draft, editable)
   const pics = pictureState(files, draft)
-  const changes = draftChangeCount(item, draft)
-  const source = item.rip != null ? 'CD' : item.tracks.some((f) => f.source != null) ? 'YouTube' : '手置き'
+  // 配置済みは作り直した提案と比べても意味が無い（配置でサイドカーが Inbox から消え、CD 由来の初期値が提案から抜ける）
+  const changes = item.state === 'placed' ? 0 : draftChangeCount(item, draft)
+  const source = itemSource(item)
   const cover = draftCoverUrl(item, draft, files)
   const dest = destinationText(item, draft)
   const sync = syncNote(item, draft, inbox.subscriptions, formatDateTime)
