@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use spindle::media::mp4edit::{read_audio_edit, AudioEdit, EditEntry, EditWindow};
+use spindle::media::mp4edit::{read_audio_edits, AudioEdit, EditEntry, EditWindow};
 
 fn boxed(typ: &[u8; 4], body: &[u8]) -> Vec<u8> {
     let mut v = ((body.len() + 8) as u32).to_be_bytes().to_vec();
@@ -38,12 +38,24 @@ fn elst_v0(entries: &[(u32, i32)]) -> Vec<u8> {
     boxed(b"elst", &b)
 }
 
+/// version 0 の tkhd（track ID だけ意味を持つ）
+fn tkhd(id: u32) -> Vec<u8> {
+    let mut b = vec![0u8; 12];
+    b.extend_from_slice(&id.to_be_bytes());
+    b.extend_from_slice(&[0u8; 68]);
+    boxed(b"tkhd", &b)
+}
+
 fn trak(kind: &[u8; 4], media_ts: u32, elst: Option<Vec<u8>>) -> Vec<u8> {
+    trak_id(1, kind, media_ts, elst)
+}
+
+fn trak_id(id: u32, kind: &[u8; 4], media_ts: u32, elst: Option<Vec<u8>>) -> Vec<u8> {
     let mdia = boxed(
         b"mdia",
         &[time_header(b"mdhd", media_ts), hdlr(kind)].concat(),
     );
-    let mut body = Vec::new();
+    let mut body = tkhd(id);
     if let Some(elst) = elst {
         body.extend(boxed(b"edts", &elst));
     }
@@ -67,8 +79,9 @@ fn mp4(movie_ts: u32, traks: &[Vec<u8>]) -> Vec<u8> {
     .concat()
 }
 
+/// 最初の音声トラックの edit list
 fn read(data: Vec<u8>) -> Option<AudioEdit> {
-    read_audio_edit(&mut Cursor::new(data))
+    read_audio_edits(&mut Cursor::new(data)).into_iter().next()
 }
 
 #[test]
@@ -81,6 +94,8 @@ fn reads_the_first_audio_track_after_mdat() {
         ],
     );
     let e = read(data).unwrap();
+    assert_eq!(e.track_id, 1);
+    assert_eq!(e.edit_count, 1);
     assert_eq!(e.movie_timescale, 1000);
     assert_eq!(e.media_timescale, 48_000);
     assert_eq!(
@@ -109,11 +124,14 @@ fn not_mp4_or_no_audio_track_is_none() {
 fn missing_edit_list_is_empty() {
     let e = read(mp4(1000, &[trak(b"soun", 44_100, None)])).unwrap();
     assert!(e.entries.is_empty());
+    assert_eq!(e.edit_count, 0);
     assert_eq!(e.window(), None);
 }
 
 fn plain(movie_timescale: u32, media_timescale: u32, seg: u64, media_time: i64) -> AudioEdit {
     AudioEdit {
+        track_id: 1,
+        edit_count: 1,
         movie_timescale,
         media_timescale,
         entries: vec![EditEntry {
@@ -181,6 +199,7 @@ fn only_a_single_plain_edit_has_a_window() {
     assert!(ok.window().is_some());
     let entry = ok.entries[0];
     let with = |entries: Vec<EditEntry>| AudioEdit {
+        edit_count: entries.len() as u32,
         entries,
         ..ok.clone()
     };
@@ -220,4 +239,68 @@ fn reads_version_1_elst() {
     let e = read(data).unwrap();
     assert_eq!(e.entries[0].segment_duration, 7_507_968);
     assert_eq!(e.window().map(|w| w.end), Some(7_507_968));
+}
+
+#[test]
+fn every_audio_track_is_read_with_its_track_id() {
+    // symphonia は既知の codec の最初のトラックを選ぶので、先頭の音声トラックとは限らない（codex の指摘）
+    let data = mp4(
+        1000,
+        &[
+            trak_id(1, b"soun", 48_000, Some(elst_v0(&[(1000, 256)]))),
+            trak_id(7, b"vide", 90_000, None),
+            trak_id(2, b"soun", 48_000, Some(elst_v0(&[(1000, 0)]))),
+        ],
+    );
+    let edits = read_audio_edits(&mut Cursor::new(data));
+    let ids: Vec<(u32, i64)> = edits
+        .iter()
+        .map(|e| (e.track_id, e.entries[0].media_time))
+        .collect();
+    assert_eq!(ids, vec![(1, 256), (2, 0)]);
+}
+
+#[test]
+fn many_tiny_boxes_and_edits_do_not_allocate_per_item() {
+    // 小さな箱ばかりの moov・項の多い elst でも、項ごとの確保をしない（codex の指摘）。項の数は正しく数え、
+    // 保持するのは先頭の数件だけ。単純な形でないので範囲は None
+    let mut body = Vec::new();
+    for _ in 0..200_000 {
+        body.extend(boxed(b"free", &[]));
+    }
+    let mut elst = vec![0u8; 4];
+    elst.extend_from_slice(&100_000u32.to_be_bytes());
+    for _ in 0..100_000 {
+        elst.extend_from_slice(&[0, 0, 0, 10, 0, 0, 0, 0, 0, 1, 0, 0]);
+    }
+    let t = trak(b"soun", 44_100, Some(boxed(b"elst", &elst)));
+    let moov = boxed(b"moov", &[time_header(b"mvhd", 1000), body, t].concat());
+    let data = [boxed(b"ftyp", b"M4A \0\0\0\0"), moov].concat();
+    let e = read(data).unwrap();
+    assert_eq!(e.edit_count, 100_000);
+    assert!(e.entries.len() <= 4);
+    assert_eq!(e.window(), None);
+}
+
+#[test]
+fn elst_count_larger_than_its_body_is_broken() {
+    let mut elst = vec![0u8; 4];
+    elst.extend_from_slice(&u32::MAX.to_be_bytes());
+    elst.extend_from_slice(&[0u8; 12]);
+    let data = mp4(1000, &[trak(b"soun", 44_100, Some(boxed(b"elst", &elst)))]);
+    assert_eq!(read(data), None);
+}
+
+#[test]
+fn too_many_top_level_boxes_before_moov_gives_up() {
+    // moov の無い（または遠い）巨大・疎なファイルで走査し続けない（codex の指摘）
+    let mut data = boxed(b"ftyp", b"M4A \0\0\0\0");
+    for _ in 0..100 {
+        data.extend(boxed(b"free", &[]));
+    }
+    data.extend(boxed(
+        b"moov",
+        &[time_header(b"mvhd", 1000), trak(b"soun", 44_100, None)].concat(),
+    ));
+    assert_eq!(read(data), None);
 }

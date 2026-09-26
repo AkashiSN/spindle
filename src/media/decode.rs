@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::jobs::process::{ExternalCommand, PathStyle, ProcessError};
-use crate::media::fingerprint::{read_edit_and_rewind, FrameLimit};
+use crate::media::fingerprint::{read_edits_and_rewind, FrameLimit};
 
 /// ffmpeg デコードの上限。長尺の 24/96 でも数分だが NAS の CPU は遅い
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -211,7 +211,7 @@ fn decode_in_process<S: PcmSink>(
     mut sink: S,
     token: &CancellationToken,
 ) -> Result<InProcess<S>, DecodeError> {
-    let edit = read_edit_and_rewind(&mut file).map_err(DecodeError::Io)?;
+    let edits = read_edits_and_rewind(&mut file).map_err(DecodeError::Io)?;
     let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
     if let Some(ext) = ext {
@@ -237,7 +237,7 @@ fn decode_in_process<S: PcmSink>(
         .default_track(TrackType::Audio)
         .ok_or(DecodeError::NoAudioTrack)?;
     let track_id = track.id;
-    let mut limit = FrameLimit::of_track(track, edit.as_ref());
+    let mut limit = FrameLimit::of_track(track, &edits);
     let params = track
         .codec_params
         .as_ref()

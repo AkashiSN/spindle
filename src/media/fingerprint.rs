@@ -25,7 +25,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, Track, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 
-use crate::media::mp4edit::{read_audio_edit, AudioEdit};
+use crate::media::mp4edit::{read_audio_edits, AudioEdit};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FingerprintError {
@@ -167,8 +167,9 @@ impl FrameLimit {
         Self { skip, end }
     }
 
-    /// `edit` は同じファイルから [`read_audio_edit`] で読んだもの
-    pub fn of_track(track: &Track, edit: Option<&AudioEdit>) -> Self {
+    /// `edits` は同じファイルから [`read_audio_edits`] で読んだもの。symphonia が選んだトラック
+    /// （`Track::id` = `tkhd` の track ID）の edit list だけを使う
+    pub fn of_track(track: &Track, edits: &[AudioEdit]) -> Self {
         use symphonia::core::codecs::audio::well_known::CODEC_ID_ALAC;
         let Some(params) = track.codec_params.as_ref().and_then(|p| p.audio()) else {
             return Self::NONE;
@@ -178,7 +179,10 @@ impl FrameLimit {
             return Self::NONE;
         }
         // パケットの pts を「サンプル」として比べるので、トラックの時間軸がサンプル単位のときだけ
-        let Some(edit) = edit.filter(|e| Some(e.media_timescale) == params.sample_rate) else {
+        let Some(edit) = edits
+            .iter()
+            .find(|e| e.track_id == track.id && Some(e.media_timescale) == params.sample_rate)
+        else {
             return Self::NONE;
         };
         match edit.window() {
@@ -200,11 +204,11 @@ impl FrameLimit {
     }
 }
 
-/// MP4 なら音声トラックの edit list を読み、`file` を先頭へ戻す（D-89 追記）
-pub fn read_edit_and_rewind(file: &mut File) -> std::io::Result<Option<AudioEdit>> {
-    let edit = read_audio_edit(file);
+/// MP4 なら音声トラックごとの edit list を読み、`file` を先頭へ戻す（D-89 追記）
+pub fn read_edits_and_rewind(file: &mut File) -> std::io::Result<Vec<AudioEdit>> {
+    let edits = read_audio_edits(file);
     file.seek(SeekFrom::Start(0))?;
-    Ok(edit)
+    Ok(edits)
 }
 
 fn open_format(file: File, ext: Option<&str>) -> Result<Box<dyn FormatReader>, FingerprintError> {
@@ -230,13 +234,13 @@ pub fn decode_s16(
     ext: Option<&str>,
     mut sink: impl FnMut(&[i16]) -> anyhow::Result<()>,
 ) -> Result<u64, FingerprintError> {
-    let edit = read_edit_and_rewind(&mut file)?;
+    let edits = read_edits_and_rewind(&mut file)?;
     let mut reader = open_format(file, ext)?;
     let track = reader
         .default_track(TrackType::Audio)
         .ok_or(FingerprintError::NoAudioTrack)?;
     let track_id = track.id;
-    let mut limit = FrameLimit::of_track(track, edit.as_ref());
+    let mut limit = FrameLimit::of_track(track, &edits);
     let params = track
         .codec_params
         .as_ref()
@@ -282,13 +286,13 @@ pub fn decode_s16(
 
 /// ALAC / WAV をデコードし、PCM の MD5 を FLAC の STREAMINFO と同じ流儀で算出する
 pub fn decoded_pcm_md5(mut file: File, ext: Option<&str>) -> Result<[u8; 16], FingerprintError> {
-    let edit = read_edit_and_rewind(&mut file)?;
+    let edits = read_edits_and_rewind(&mut file)?;
     let mut reader = open_format(file, ext)?;
     let track = reader
         .default_track(TrackType::Audio)
         .ok_or(FingerprintError::NoAudioTrack)?;
     let track_id = track.id;
-    let mut limit = FrameLimit::of_track(track, edit.as_ref());
+    let mut limit = FrameLimit::of_track(track, &edits);
     let params = track
         .codec_params
         .as_ref()

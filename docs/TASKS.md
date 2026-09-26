@@ -1938,15 +1938,21 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
 合わせる」案を選び、実在しない形も実 ALAC で確かめながら再現するよう指示した
 
 - [x] `media::mp4edit`（最初の音声トラックの `mvhd` / `mdhd` の timescale と `elst`。`moov` だけ読み `mdat` は
-      読み飛ばす。MP4 でなければ None。`AudioEdit::window` は区間を media timescale へ四捨五入で換算）。
-      `tests/mp4edit.rs`（moov が後ろ・映像トラックの後ろの音声・壊れた箱・version 1・換算と丸めの境界・単純な形の判定）
+      読み飛ばす。MP4 でなければ空。音声トラックごとに `tkhd` の track ID を持ち、`FrameLimit` は symphonia が選んだ
+      トラックのものだけを使う。`moov` 64 MiB・トップレベルの箱 64 個・音声トラック 8 本・保持する項 4 件の上限、
+      子の箱は確保せずに辿る。`AudioEdit::window` は区間を media timescale へ四捨五入で換算）。
+      `tests/mp4edit.rs`（moov が後ろ・映像トラックの後ろの音声・壊れた箱・version 1・換算と丸めの境界・単純な形の判定・
+      トラックごとの ID・小さな箱や項の大量・項の数が本体を超える・トップレベルの箱が多すぎる）
 - [x] `FrameLimit`: 本番の ffmpeg 5.1 の出力範囲を再現する（先頭を media_time 削る、終端以降で始まるパケットを
       読まない、終端をまたぐパケットは丸ごと）。edit list が無い・単純な形でないときは何も削らない。
       `decoded_pcm_md5` / `decode_s16` / `media::decode` のプロセス内経路で、symphonia に渡す前に同じファイルから読む
 - [x] 試験: `zero_last_stts_delta` に `EditEnd`（`AtDeclared` = D-89 の 7 本の形 / `Beyond` = 今回の 46 本の形 /
       `Removed`）と `set_edit`。版に依らない形（長さ 0 のパケット、stream copy の `-ss` / `-t`、先頭の削り）は
       手元の ffmpeg と比べ、版で違う形（終端をまたぐパケット、丸めの境界、「空の編集 + 区間」）は 5.1 で確かめた値に
-      固定する（`tests/fingerprint.rs`、`tests/decode.rs`）
+      固定する（`tests/fingerprint.rs`、`tests/decode.rs`）。先頭の音声トラックが未知の codec で 2 本目の ALAC を
+      symphonia が選ぶ MP4 で、先頭トラックの edit list を当てないこと（トラック ID の照合を外すと落ちることを確認）
+- [x] codex のレビュー（2026-09-26）: トラックの取り違え・moov 内の確保量・トップレベルの走査量（major 3）と、D-89 の
+      見出しが旧い規則のまま（minor 1）に対応
 - [x] 本番の ffmpeg 5.1 との照合（本番コンテナの ffmpeg で作った FLAC の STREAMINFO MD5 と `decoded_pcm_md5`）:
       実 ALAC 53 本（D-89 の 7 本 + 今回の 46 本）、実 ALAC から作った 31 の形、`elst` 付きで長さ 0 のサンプルを
       持たない実 ALAC 9 本がすべて一致

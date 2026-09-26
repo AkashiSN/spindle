@@ -301,6 +301,55 @@ fn alac_edit_lists_written_by_the_muxer_match_ffmpeg() {
 }
 
 #[test]
+fn alac_uses_its_own_edit_list_when_another_audio_track_comes_first() {
+    // codex の指摘: symphonia は codec の分かる最初の音声トラックを選ぶ。先頭の AC-3 は encoder delay の elst
+    // （media_time 256）を持つ。そのサンプルエントリを未知の種別に書き換えると symphonia は 2 本目の ALAC を選ぶので、
+    // 先頭トラックの edit list を ALAC に当てると先頭を誤って削る
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("a.wav");
+    write_wav(&wav, &pcm_samples(0), 16);
+    let two = dir.path().join("two.m4a");
+    let Some(ffmpeg) = common::ffmpeg() else {
+        eprintln!("ffmpeg が無いので skip");
+        return;
+    };
+    let ok = std::process::Command::new(&ffmpeg)
+        .args(["-v", "error", "-y", "-i"])
+        .arg(&wav)
+        .arg("-i")
+        .arg(&wav)
+        .args([
+            "-map", "0:a", "-map", "1:a", "-c:a:0", "ac3", "-c:a:1", "alac",
+        ])
+        .arg(&two)
+        .status()
+        .unwrap()
+        .success();
+    if !ok {
+        eprintln!("ffmpeg に AC-3 エンコーダが無いので skip");
+        return;
+    }
+    let alone = dir.path().join("alone.m4a");
+    require_ffmpeg!(encode(&two, &alone, &["-map", "0:a:1", "-c", "copy"]));
+    let mut data = std::fs::read(&two).unwrap();
+    let at = data
+        .windows(4)
+        .position(|w| w == b"ac-3")
+        .expect("AC-3 のサンプルエントリが無い");
+    data[at..at + 4].copy_from_slice(b"zzzz");
+    std::fs::write(&two, data).unwrap();
+    let edits = spindle::media::mp4edit::read_audio_edits(&mut File::open(&two).unwrap());
+    assert_eq!(edits.len(), 2, "{edits:?}");
+    assert!(edits[0].entries[0].media_time > 0, "{edits:?}");
+    let md5 = decoded_pcm_md5(File::open(&alone).unwrap(), Some("m4a")).unwrap();
+    assert_eq!(Some(md5), ffmpeg_flac_md5(&alone, false));
+    assert_eq!(
+        decoded_pcm_md5(File::open(&two).unwrap(), Some("m4a")).unwrap(),
+        md5
+    );
+}
+
+#[test]
 fn alac_empty_edit_before_the_segment_is_not_reproduced() {
     // 出力側の -ss で切り出すと、muxer は「空の編集 + 区間」の 2 項を書く。本番の ffmpeg 5.1 は全パケットを
     // デコードし（2026-09-26 に確認）、新しい ffmpeg は末尾を空の編集の長さだけ削る。単純な形でない edit list は
@@ -313,8 +362,11 @@ fn alac_empty_edit_before_the_segment_is_not_reproduced() {
         &cut,
         &["-map", "0:a", "-c", "copy", "-ss", "0.1234"]
     ));
-    let edit = spindle::media::mp4edit::read_audio_edit(&mut File::open(&cut).unwrap()).unwrap();
-    assert_eq!(edit.entries.len(), 2, "{edit:?}");
+    let edit = spindle::media::mp4edit::read_audio_edits(&mut File::open(&cut).unwrap())
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(edit.edit_count, 2, "{edit:?}");
     assert_eq!(edit.entries[0].media_time, -1, "{edit:?}");
     assert_eq!(
         Some(decoded_pcm_md5(File::open(&cut).unwrap(), Some("m4a")).unwrap()),

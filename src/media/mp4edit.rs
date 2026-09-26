@@ -4,22 +4,36 @@
 //! 始まるパケットを捨てる。ALAC のプロセス内デコード（[`crate::media::fingerprint::FrameLimit`]）の出力範囲を
 //! ffmpeg に揃えるためにこれを読む。
 //!
-//! 読むのはボックスの見出しと `moov` だけで、`mdat` は読み飛ばす。MP4 でない（先頭が `ftyp` でない）・
-//! 壊れている・音声トラックが無いときは `None`。
+//! 読むのはボックスの見出しと `moov` だけで、`mdat` は読み飛ばす。壊れた・悪意のあるファイルで確保量と
+//! 走査量が膨らまないよう、`moov` の大きさ・トップレベルの箱の数・音声トラックの数・保持する `elst` の項に
+//! 上限を置き、子の箱は Vec に積まずに順に辿る。MP4 でない（先頭が `ftyp` でない）・壊れているときは空。
+//! symphonia が選んだトラックと結び付けるため、音声トラックごとに `tkhd` の track ID を持つ
+//! （symphonia の MP4 の `Track::id` は `tkhd` の track ID）。
 
 use std::io::{Read, Seek, SeekFrom};
 
 /// `moov` をこれより大きく読まない（壊れたサイズで巨大な確保をしない）
 const MAX_MOOV: u64 = 64 << 20;
+/// トップレベルの箱をこれ以上辿らない（`moov` の無い巨大・疎なファイルで走査し続けない）。
+/// 実物は ftyp / free / mdat / moov / udta 程度
+const MAX_TOP_BOXES: usize = 64;
+/// 音声トラックをこれ以上読まない
+const MAX_AUDIO_TRACKS: usize = 8;
+/// `elst` の項をこれ以上保持しない（個数は `edit_count` に正しく数える）
+const MAX_KEPT_EDITS: usize = 4;
 
-/// 最初の音声トラック（`hdlr` が `soun`）の時間軸と edit list
+/// 音声トラック（`hdlr` が `soun`）1 本の時間軸と edit list
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioEdit {
+    /// `tkhd` の track ID（symphonia の `Track::id`）
+    pub track_id: u32,
     /// `mvhd` の timescale（`elst` の segment_duration の単位）
     pub movie_timescale: u32,
     /// `mdhd` の timescale（`elst` の media_time とトラックの宣言長の単位）
     pub media_timescale: u32,
-    /// `elst` の項。`edts` / `elst` が無ければ空
+    /// `elst` の項の数。`edts` / `elst` が無ければ 0
+    pub edit_count: u32,
+    /// `elst` の先頭の項（最大 [`MAX_KEPT_EDITS`] 件）
     pub entries: Vec<EditEntry>,
 }
 
@@ -46,7 +60,7 @@ impl AudioEdit {
     /// 四捨五入する（端数 0.5 で切り上げ、0.4 で切り捨てることを ffmpeg 5.1 で確かめた）。
     /// edit list が無い・単純な形でない・長さ 0 の区間なら `None`（何も削らない）
     pub fn window(&self) -> Option<EditWindow> {
-        let [e] = self.entries.as_slice() else {
+        let (1, [e]) = (self.edit_count, self.entries.as_slice()) else {
             return None;
         };
         if e.media_time < 0
@@ -67,20 +81,24 @@ impl AudioEdit {
     }
 }
 
-/// `r` の先頭から MP4 を読み、最初の音声トラックの edit list を返す。読み終えた位置は不定なので、
-/// 呼び出し側が巻き戻すこと
-pub fn read_audio_edit<R: Read + Seek>(r: &mut R) -> Option<AudioEdit> {
+/// `r` の先頭から MP4 を読み、音声トラックごとの edit list を返す（最大 [`MAX_AUDIO_TRACKS`] 本）。
+/// MP4 でない・壊れているときは空。読み終えた位置は不定なので、呼び出し側が巻き戻すこと
+pub fn read_audio_edits<R: Read + Seek>(r: &mut R) -> Vec<AudioEdit> {
+    read_moov(r).map(|m| parse_moov(&m)).unwrap_or_default()
+}
+
+fn read_moov<R: Read + Seek>(r: &mut R) -> Option<Vec<u8>> {
     let len = r.seek(SeekFrom::End(0)).ok()?;
-    r.seek(SeekFrom::Start(0)).ok()?;
     let mut pos = 0u64;
-    let mut first = true;
-    while pos + 8 <= len {
-        r.seek(SeekFrom::Start(pos)).ok()?;
-        let (typ, hdr, size) = read_header(r, len - pos)?;
-        if first && &typ != b"ftyp" {
+    for n in 0..MAX_TOP_BOXES {
+        if pos + 8 > len {
             return None;
         }
-        first = false;
+        r.seek(SeekFrom::Start(pos)).ok()?;
+        let (typ, hdr, size) = read_header(r, len - pos)?;
+        if n == 0 && &typ != b"ftyp" {
+            return None;
+        }
         if &typ == b"moov" {
             let body = size - hdr;
             if body > MAX_MOOV {
@@ -88,7 +106,7 @@ pub fn read_audio_edit<R: Read + Seek>(r: &mut R) -> Option<AudioEdit> {
             }
             let mut buf = vec![0u8; usize::try_from(body).ok()?];
             r.read_exact(&mut buf).ok()?;
-            return parse_moov(&buf);
+            return Some(buf);
         }
         pos += size;
     }
@@ -112,26 +130,33 @@ fn read_header<R: Read>(r: &mut R, avail: u64) -> Option<([u8; 4], u64, u64)> {
     (size >= hdr && size <= avail).then_some((typ, hdr, size))
 }
 
-/// `data` 直下のボックスを (型, 本体) で列挙する。壊れたところで打ち切る
-fn children(data: &[u8]) -> Vec<([u8; 4], &[u8])> {
-    let mut out = Vec::new();
-    let mut rest = data;
-    while rest.len() >= 8 {
-        let mut cur = rest;
-        let Some((typ, hdr, size)) = read_header(&mut cur, rest.len() as u64) else {
-            break;
+/// `data` 直下のボックスを (型, 本体) で順に辿る。確保はしない。壊れたところで終わる
+struct Children<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> Iterator for Children<'a> {
+    type Item = ([u8; 4], &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut cur = self.rest;
+        let Some((typ, hdr, size)) = read_header(&mut cur, self.rest.len() as u64) else {
+            self.rest = &[];
+            return None;
         };
         let (hdr, size) = (hdr as usize, size as usize);
-        out.push((typ, &rest[hdr..size]));
-        rest = &rest[size..];
+        let body = &self.rest[hdr..size];
+        self.rest = &self.rest[size..];
+        Some((typ, body))
     }
-    out
+}
+
+fn children(data: &[u8]) -> Children<'_> {
+    Children { rest: data }
 }
 
 fn child<'a>(data: &'a [u8], typ: &[u8; 4]) -> Option<&'a [u8]> {
-    children(data)
-        .into_iter()
-        .find_map(|(t, body)| (&t == typ).then_some(body))
+    children(data).find_map(|(t, body)| (&t == typ).then_some(body))
 }
 
 fn be_u32(d: &[u8], at: usize) -> Option<u32> {
@@ -155,41 +180,53 @@ fn timescale(full_box: &[u8]) -> Option<u32> {
     }
 }
 
-fn parse_moov(moov: &[u8]) -> Option<AudioEdit> {
-    let movie_timescale = timescale(child(moov, b"mvhd")?)?;
-    for (typ, trak) in children(moov) {
-        if &typ != b"trak" {
-            continue;
-        }
-        let Some(mdia) = child(trak, b"mdia") else {
-            continue;
-        };
-        let is_audio = child(mdia, b"hdlr").and_then(|h| h.get(8..12)) == Some(b"soun");
-        if !is_audio {
-            continue;
-        }
-        let media_timescale = timescale(child(mdia, b"mdhd")?)?;
-        let entries = match child(trak, b"edts").and_then(|e| child(e, b"elst")) {
-            Some(elst) => parse_elst(elst)?,
-            None => Vec::new(),
-        };
-        return Some(AudioEdit {
-            movie_timescale,
-            media_timescale,
-            entries,
-        });
+/// `tkhd` の track ID（version 0 は作成・更新時刻が 4 バイト、1 は 8 バイト）
+fn track_id(tkhd: &[u8]) -> Option<u32> {
+    match tkhd.first()? {
+        0 => be_u32(tkhd, 12),
+        1 => be_u32(tkhd, 20),
+        _ => None,
     }
-    None
 }
 
-fn parse_elst(elst: &[u8]) -> Option<Vec<EditEntry>> {
-    let version = *elst.first()?;
-    let count = be_u32(elst, 4)? as usize;
-    let width = if version == 1 { 20 } else { 12 };
-    if elst.len() < 8 + count.checked_mul(width)? {
+fn parse_moov(moov: &[u8]) -> Vec<AudioEdit> {
+    let Some(movie_timescale) = child(moov, b"mvhd").and_then(timescale) else {
+        return Vec::new();
+    };
+    children(moov)
+        .filter(|(typ, _)| typ == b"trak")
+        .filter_map(|(_, trak)| parse_audio_trak(trak, movie_timescale))
+        .take(MAX_AUDIO_TRACKS)
+        .collect()
+}
+
+fn parse_audio_trak(trak: &[u8], movie_timescale: u32) -> Option<AudioEdit> {
+    let mdia = child(trak, b"mdia")?;
+    if child(mdia, b"hdlr").and_then(|h| h.get(8..12)) != Some(b"soun") {
         return None;
     }
-    (0..count)
+    let (edit_count, entries) = match child(trak, b"edts").and_then(|e| child(e, b"elst")) {
+        Some(elst) => parse_elst(elst)?,
+        None => (0, Vec::new()),
+    };
+    Some(AudioEdit {
+        track_id: track_id(child(trak, b"tkhd")?)?,
+        movie_timescale,
+        media_timescale: timescale(child(mdia, b"mdhd")?)?,
+        edit_count,
+        entries,
+    })
+}
+
+/// (項の数, 先頭の項)。項の数が本体に収まらなければ壊れている
+fn parse_elst(elst: &[u8]) -> Option<(u32, Vec<EditEntry>)> {
+    let version = *elst.first()?;
+    let count = be_u32(elst, 4)?;
+    let width = if version == 1 { 20 } else { 12 };
+    if elst.len() < 8 + (count as usize).checked_mul(width)? {
+        return None;
+    }
+    let entries = (0..(count as usize).min(MAX_KEPT_EDITS))
         .map(|k| {
             let at = 8 + k * width;
             let (segment_duration, media_time, rate_at) = if version == 1 {
@@ -207,5 +244,6 @@ fn parse_elst(elst: &[u8]) -> Option<Vec<EditEntry>> {
                 rate: (be_i16(elst, rate_at)?, be_i16(elst, rate_at + 2)?),
             })
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    Some((count, entries))
 }
