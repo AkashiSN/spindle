@@ -43,7 +43,11 @@ jobs:
     # ffmpeg（6.1）では本番の挙動を確かめられない。Dockerfile のビルド段と同じイメージ
     # 試験は一般ユーザで走らせる（本番のコンテナも user 1000:1000）。root だと chmod で読めない・書けないを
     # 模擬する試験（artwork_scan / gc / normalize ほか）の失敗が起きない。パッケージとツールチェーンの用意だけ root
-    container: rust:1-bookworm
+    # --init: kill した孫プロセスは PID 1 に引き取られる。ジョブ用コンテナの PID 1 は回収しないので、ゾンビが
+    # 残ってプロセスグループの生存確認（tests/jobs.rs の cancel_kills_grandchild_*）が通らない
+    container:
+      image: rust:1-bookworm
+      options: --init
     steps:
       - uses: actions/checkout@v4
       # checkout の所有者と cargo を走らせるユーザが違うので、build.rs の git describe が dubious ownership で
