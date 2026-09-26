@@ -12,6 +12,7 @@ import { Hint } from './Hint'
 import type { CdLookupState } from '../hooks/useCdLookup'
 import {
   candidateDetail,
+  catnoMismatch,
   COPY_SCOPE_LABELS,
   discidSubmissionUrl,
   matchedByLabel,
@@ -89,6 +90,7 @@ export function CdCandidates({ cd }: { cd: CdLookupState }) {
   const indexOf = (c: ReleaseCandidate) => result.candidates.indexOf(c)
   const selected = cd.selected != null ? (result.candidates[cd.selected] ?? null) : null
   const otherOpen = showOther || (selected != null && split.other.includes(selected))
+  const mismatch = catnoMismatch(selected, cd.typed)
 
   return (
     <>
@@ -97,6 +99,11 @@ export function CdCandidates({ cd }: { cd: CdLookupState }) {
           {n}
         </p>
       ))}
+      {mismatch != null && (
+        <p className="cd-catno-mismatch small" role="status">
+          {mismatch}
+        </p>
+      )}
       {offersDiscidSubmission(result) && (
         <p className="muted small">
           この DiscID は MusicBrainz に未登録。候補を選んだら{' '}

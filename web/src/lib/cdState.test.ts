@@ -191,3 +191,49 @@ describe('cdReducer: ディスクの出し入れ（P4-20）', () => {
     expect(s.draft).toBe(filled.draft)
   })
 })
+
+describe('cdReducer: 手入力の品番と JAN（D-94）', () => {
+  const shokai: ReleaseCandidate = {
+    ...cand(true, 'S'),
+    labels: [['L', 'UPCJ-9001']],
+    barcode: '4988031278079',
+  }
+  const typed = { catno: 'UPCJ-9085', barcode: '' }
+
+  it('入れた時点で下書きに重なり、候補を選び直しても残る', () => {
+    const s0 = looked(response([shokai, cand(true, 'B')]))
+    const s1 = cdReducer(s0, { type: 'set_typed', typed })
+    expect(s1.draft).toMatchObject({ catalog_number: 'UPCJ-9085' })
+    const s2 = cdReducer(s1, { type: 'select', index: 0 })
+    expect(s2.draft).toMatchObject({ catalog_number: 'UPCJ-9085', barcode: '' })
+    const s3 = cdReducer(s2, { type: 'set_copy_scope', scope: 'minimal' })
+    expect(s3.draft).toMatchObject({ catalog_number: 'UPCJ-9085', barcode: '' })
+    const s4 = cdReducer(s3, { type: 'start_manual' })
+    expect(s4.draft).toMatchObject({ catalog_number: 'UPCJ-9085' })
+  })
+
+  it('消すと候補の値に戻る', () => {
+    const s0 = cdReducer(looked(response([shokai])), { type: 'select', index: 0 })
+    const s1 = cdReducer(s0, { type: 'set_typed', typed })
+    const s2 = cdReducer(s1, { type: 'set_typed', typed: { catno: '', barcode: '' } })
+    expect(s2.draft).toMatchObject({ catalog_number: 'UPCJ-9001', barcode: '4988031278079' })
+  })
+
+  it('照会の結果にも重なる（品番で当たった候補が選ばれる）', () => {
+    const s0 = cdReducer(looked(response([])), { type: 'set_typed', typed: { catno: 'upcj 9001', barcode: '' } })
+    const hit: ReleaseCandidate = { ...shokai, exact: false, matched_by: ['catno'] }
+    const s1 = run([{ type: 'lookup_start' }, { type: 'lookup_ok', result: response([hit, cand(true, 'B')]) }], s0)
+    expect(s1.selected).toBe(0)
+    expect(s1.draft).toMatchObject({ catalog_number: 'UPCJ-9001', barcode: '4988031278079' })
+  })
+
+  it('別のディスクに替わったら消す', () => {
+    const s0 = run([{ type: 'set_disc', toc: '0:1000:5000', tracks }, { type: 'set_typed', typed }])
+    expect(s0.draft).toMatchObject({ catalog_number: 'UPCJ-9085' })
+    const s1 = cdReducer(s0, { type: 'set_disc', toc: '0:2000:6000', tracks })
+    expect(s1.typed).toEqual({ catno: '', barcode: '' })
+    expect(s1.draft).toMatchObject({ catalog_number: '' })
+    // 同じディスクのポーリングでは消さない
+    expect(cdReducer(s0, { type: 'set_disc', toc: '0:1000:5000', tracks }).typed).toEqual(typed)
+  })
+})

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   albumTags,
+  applyTyped,
+  catnoMismatch,
+  normalizeCatno,
+  typedLookupExtra,
+  typedProblems,
   candidateLengthMs,
   candidateSummary,
   draftFromCandidate,
@@ -559,5 +564,105 @@ describe('リリースグループの版（D-93）', () => {
     const failed = { groupId: 'B', listing: { state: 'error' as const, message: 'x' } }
     expect(currentListing(failed, 'B')).toEqual({ state: 'error', message: 'x' })
     expect(currentListing(failed, null)).toEqual({ state: 'loading' })
+  })
+})
+
+describe('手入力の品番と JAN（D-94）', () => {
+  const toc = [
+    { number: 1, length_ms: 1000 },
+    { number: 2, length_ms: 2500 },
+  ]
+  const shokai: ReleaseCandidate = {
+    ...base,
+    release_id: 'shokai',
+    labels: [['Universal', 'UPCJ-9001']],
+    barcode: '4988031278079',
+    disambiguation: '初回限定盤A',
+  }
+  const typed = (catno: string, barcode = '') => ({ catno, barcode })
+
+  it('品番はサーバと同じ規則で比べる形にする', () => {
+    expect(normalizeCatno('UPCJ-9001')).toBe('UPCJ9001')
+    expect(normalizeCatno(' upcj 9001 ')).toBe('UPCJ9001')
+    expect(normalizeCatno('UPCJ*')).toBeNull()
+    expect(normalizeCatno('ＵＰＣＪ－９００１')).toBeNull()
+    expect(normalizeCatno(' - ')).toBeNull()
+  })
+
+  it('照会に載せられない形を知らせる。空は問題なし', () => {
+    expect(typedProblems(typed(''))).toEqual([])
+    expect(typedProblems(typed('UPCJ-9001', '4988031278079'))).toEqual([])
+    expect(typedProblems(typed('UPCJ-9001', '49880312'))).toEqual([])
+    expect(typedProblems(typed('UPCJ"9001'))).toHaveLength(1)
+    expect(typedProblems(typed('A'.repeat(33)))).toHaveLength(1)
+    expect(typedProblems(typed('', '12345'))).toHaveLength(1)
+    expect(typedLookupExtra(typed(' UPCJ-9001 ', ''))).toEqual({ catno: 'UPCJ-9001', barcode: null })
+  })
+
+  it('候補の品番と一致すれば候補の表記と JAN を使う', () => {
+    const d = applyTyped(draftFromCandidate(shokai, toc, 'full'), shokai, typed('upcj 9001'), 'full')
+    expect(d.catalog_number).toBe('UPCJ-9001')
+    expect(d.barcode).toBe('4988031278079')
+    expect(catnoMismatch(shokai, typed('upcj 9001'))).toBeNull()
+  })
+
+  it('一致するのが 2 つ目のレーベルなら、そのレーベルと品番を写す', () => {
+    const two: ReleaseCandidate = { ...shokai, labels: [['A', 'AAA-1'], ['B', 'UPCJ-9001']] }
+    const d = applyTyped(draftFromCandidate(two, toc, 'full'), two, typed('UPCJ-9001'), 'full')
+    expect(d).toMatchObject({ label: 'B', catalog_number: 'UPCJ-9001' })
+  })
+
+  it('食い違えば品番は入力値、JAN は写さない。ALBUMID などの id は残す', () => {
+    const d = applyTyped(draftFromCandidate(shokai, toc, 'full'), shokai, typed('UPCJ-9085'), 'full')
+    expect(d.catalog_number).toBe('UPCJ-9085')
+    expect(d.barcode).toBe('')
+    expect(d.release_id).toBe('shokai')
+    expect(d.label).toBe('Universal')
+    expect(d.tracks[0]!.mb).not.toBeNull()
+    const m = catnoMismatch(shokai, typed('UPCJ-9085'))
+    expect(m).toContain('UPCJ-9001')
+    expect(m).toContain('初回限定盤A')
+    expect(m).toContain('UPCJ-9085')
+  })
+
+  it('食い違っても JAN を入れていればその値', () => {
+    const d = applyTyped(draftFromCandidate(shokai, toc, 'full'), shokai, typed('UPCJ-9085', '4988031278086'), 'full')
+    expect(d).toMatchObject({ catalog_number: 'UPCJ-9085', barcode: '4988031278086' })
+  })
+
+  it('写す範囲が最小限でも入力値は書く', () => {
+    const d = applyTyped(draftFromCandidate(shokai, toc, 'minimal'), shokai, typed('UPCJ-9001', '4988031278079'), 'minimal')
+    expect(d).toMatchObject({ catalog_number: 'UPCJ-9001', barcode: '4988031278079', label: '' })
+  })
+
+  it('候補を使わないときも入力値を書く。未入力なら下書きはそのまま', () => {
+    const empty = emptyDraft(toc)
+    expect(applyTyped(empty, null, typed('UPCJ-9085', '4988031278086'), 'full')).toMatchObject({
+      catalog_number: 'UPCJ-9085',
+      barcode: '4988031278086',
+    })
+    const d = draftFromCandidate(shokai, toc, 'full')
+    expect(applyTyped(d, shokai, typed(''), 'full')).toBe(d)
+    expect(catnoMismatch(null, typed('UPCJ-9085'))).toBeNull()
+  })
+
+  it('品番で当たった候補が 1 件なら、DiscID の候補より先にそれを選ぶ', () => {
+    const r = {
+      discid: 'd',
+      mb_toc: '',
+      accuraterip_id: '',
+      ctdb_toc_id: '',
+      exact: true,
+      stage: 'discid' as const,
+      can_widen: false,
+      notes: [],
+      tracks: toc,
+      candidates: [
+        { ...base, release_id: 'normal', exact: false, matched_by: ['catno' as const] },
+        { ...shokai, matched_by: ['discid' as const] },
+      ],
+    }
+    expect(initialSelection(r)).toBe(0)
+    expect(matchedByLabel(r.candidates[0]!)).toBe('品番一致')
   })
 })

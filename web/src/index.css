@@ -1823,6 +1823,14 @@ table.gc-table td.sample {
   min-width: 240px;
   max-width: 560px;
 }
+/* ① の品番と JAN（D-94）。表示のみの定義リストの下に 1 行 */
+.cd .cd-typed {
+  margin-top: 8px;
+}
+/* 品番が選んだ候補と食い違う（別の版として取り込む）。取り込みは止めないので注記の色 */
+.cd-catno-mismatch {
+  color: var(--warn);
+}
 .cd-ids {
   display: grid;
   grid-template-columns: max-content 1fr;

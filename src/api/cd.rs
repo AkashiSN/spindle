@@ -20,7 +20,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::cd::device::DriveState;
-use crate::cd::musicbrainz::{LookupStage, ReleaseCandidate};
+use crate::cd::musicbrainz::{normalize_catno, LookupStage, ReleaseCandidate};
 use crate::cd::toc::Toc;
 use crate::cd::LookupError;
 use crate::db::now_epoch;
@@ -238,6 +238,12 @@ pub struct LookupBody {
     /// ユーザが貼った MusicBrainz のリリース URL か MBID
     #[serde(default)]
     pub release: Option<String>,
+    /// ユーザが盤（帯・背）から読んで入れた品番（D-94）。段に関係なく常に引く
+    #[serde(default)]
+    pub catno: Option<String>,
+    /// ユーザが入れた JAN / UPC（D-94）。盤から MCN が読めなかったときだけ、バーコードの検索に使う
+    #[serde(default)]
+    pub barcode: Option<String>,
     /// 覚えている結果を捨てて引き直す（画面の「MusicBrainz に照会」。ディスク検出の自動照会は省略）
     #[serde(default)]
     pub refresh: bool,
@@ -354,11 +360,47 @@ pub async fn lookup(
             ))
         }
     };
+    let barcode = match body
+        .barcode
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        None => None,
+        Some(b) if matches!(b.len(), 8 | 12 | 13) && b.chars().all(|c| c.is_ascii_digit()) => {
+            Some(b.to_owned())
+        }
+        Some(b) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                format!("JAN / UPC の形が不正: {b:?}（数字 8・12・13 桁）"),
+            ))
+        }
+    };
+    let catno = match body
+        .catno
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        None => None,
+        Some(c) if c.chars().count() <= 32 && normalize_catno(c).is_some() => Some(c),
+        Some(c) => {
+            return Ok(error_response_with_message(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                format!("品番の形が不正: {c:?}（英数字とハイフン・空白、32 文字まで）"),
+            ))
+        }
+    };
     let query = crate::cd::musicbrainz::DiscQuery {
         toc: &toc,
         isrcs: &isrcs,
-        mcn: mcn.as_deref(),
+        // 盤から読めた MCN が先。無いときだけ手入力の JAN を使う（D-94）
+        mcn: mcn.as_deref().or(barcode.as_deref()),
         release: body.release.as_deref().filter(|r| !r.trim().is_empty()),
+        catno,
         refresh: body.refresh,
         widen: body.widen,
     };

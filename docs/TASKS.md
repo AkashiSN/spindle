@@ -1970,19 +1970,23 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
 2026-09-26 のユーザ要望。DiscID で当たった候補が手元の盤と別の版（通常盤に対して初回限定盤）で、取り込むと
 どの盤かが落ちる。品番を手で入れて照会に使い、MusicBrainz に手元の版が無いときも品番をタグに残す（D-94）
 
-- [ ] `POST /api/cd/lookup` に `catno?` / `barcode?`（手入力の JAN。盤の MCN が無いときだけ使う）。`catno` は段に
-      関係なく常に `ws/2/release?query=catno:"…"` を引き、label-info の品番が正規化して一致する候補に経路 `catno`。
-      `matched_by` の順を `catno | discid | release | isrc | barcode | toc` に。照会のキャッシュの鍵に入れる
-- [ ] CD 画面の ① に「品番」「JAN」の入力欄（盤が替わったら消す）。品番を入れたら照会し直す
-- [ ] 候補を写すとき: 品番が一致すれば候補の表記、食い違えば入力値にして `BARCODE` を引き継がない（JAN の入力が
-      あればそれ）。写す範囲が「最小限」でも入力値は書く。食い違いの注意を ③ に出す
-- [ ] SPEC §7.2 と API 表（`/api/cd/lookup`）を更新
+- [x] `POST /api/cd/lookup` に `catno?` / `barcode?`（手入力の JAN。盤の MCN が無いときだけ使う）。`catno` は段に
+      関係なく常に `ws/2/release?query=catno:"…"` を引き（上限 3 件）、label-info の品番が正規化して一致する候補に
+      経路 `catno`（`normalize_catno` / `candidate_has_catno`）。`matched_by` の順を
+      `catno | discid | release | isrc | barcode | toc` に。照会のキャッシュの鍵に正規化した品番
+- [x] CD 画面の ① に「品番」「JAN/UPC」の入力欄と「品番で照会」（盤が替わったら消す。照会のボタンすべてに添える）
+- [x] 候補を写すとき（`applyTyped`。reducer の `withDraft` がいつも通す）: 品番が一致すれば候補の表記とその
+      レーベル、食い違えば入力値にして `BARCODE` を引き継がない（JAN の入力があればそれ）。写す範囲が「最小限」でも
+      入力値は書く。食い違いの注意を ③ に（`catnoMismatch`）。品番で当たった候補が 1 件なら既定で選ぶ
+- [x] SPEC §7.2 / §12.6 と API 表（`/api/cd/lookup`）を更新
+- [ ] 実機で、DiscID が初回盤にしか付いていない通常盤を品番で引き、通常盤の候補が先頭に出ること（MusicBrainz に
+      無い版なら、食い違いの注意が出て `CATALOGNUMBER` が入力値・`BARCODE` が空で Inbox に届くこと）
 
-受け入れ: `tests/cd_musicbrainz.rs`（`catno` の検索とクエリの消毒、正規化の一致だけに経路が付く、DiscID で
-当たっても引く、並び、キャッシュの鍵）、`tests/cd_lookup_api.rs`（`catno` / `barcode` の受け取り）、
-`web/src/lib/cd.test.ts`（一致 / 食い違いの写し方、最小限でも入力値が残る、JAN の扱い）。実機で、DiscID が
-初回盤にしか付いていない通常盤を品番で引き、通常盤の候補が先頭に出ること（MusicBrainz に無い版なら、
-食い違いの注意が出て `CATALOGNUMBER` が入力値・`BARCODE` が空で Inbox に届くこと）
+受け入れ: `tests/cd_musicbrainz.rs`（`catno` の検索とクエリの消毒、正規化の一致だけに経路が付く・部分一致は
+落ちる、DiscID で当たっても引く、並び、キャッシュの鍵と表記揺れ）、`tests/cd_lookup_api.rs`（`catno` /
+`barcode` の受け取りと 400）、`web/src/lib/cd.test.ts`（一致 / 食い違いの写し方、2 つ目のレーベルの一致、
+最小限でも入力値が残る、JAN の扱い、既定の選択）、`web/src/lib/cdState.test.ts`（選び直し・範囲の変更・
+どれも違う・照会の結果に重なる、盤の入れ替えで消える）
 
 ---
 

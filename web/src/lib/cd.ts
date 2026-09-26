@@ -18,11 +18,12 @@ export type TrackCandidate = {
 }
 
 /** 候補が出てきた経路（強い順。サーバの `MatchedBy`） */
-export type MatchedBy = 'discid' | 'release' | 'isrc' | 'barcode' | 'toc'
+export type MatchedBy = 'catno' | 'discid' | 'release' | 'isrc' | 'barcode' | 'toc'
 
-export const MATCHED_BY_ORDER: MatchedBy[] = ['discid', 'release', 'isrc', 'barcode', 'toc']
+export const MATCHED_BY_ORDER: MatchedBy[] = ['catno', 'discid', 'release', 'isrc', 'barcode', 'toc']
 
 export const MATCHED_BY_LABELS: Record<MatchedBy, string> = {
+  catno: '品番一致',
   discid: 'DiscID 一致',
   release: '指定',
   isrc: 'ISRC',
@@ -378,6 +379,9 @@ export function outcomeAfterTocEdit(prevToc: string, nextToc: string, outcome: L
 
 /** 照会が返ったときの選択: DiscID 一致がちょうど 1 件ならそれ、それ以外は未選択 */
 export function initialSelection(r: LookupResponse): number | null {
+  // 入力した品番で当たった版が 1 件ならそれ（DiscID は収録が同じ版を区別できない。D-94）
+  const catno = r.candidates.map((c, i) => (c.matched_by.includes('catno') ? i : -1)).filter((i) => i >= 0)
+  if (catno.length === 1) return catno[0]!
   const exact = r.candidates.map((c, i) => (c.exact ? i : -1)).filter((i) => i >= 0)
   return exact.length === 1 ? exact[0]! : null
 }
@@ -609,4 +613,83 @@ export function trackTags(t: DiscTrackMetadata): TagRow[] {
     ['MUSICBRAINZ_RELEASETRACKID', t.mb?.track_id ?? null],
     ['ISRC', t.mb?.isrcs ?? null],
   ])
+}
+
+// ---------------------------------------------------------------- 手入力の品番と JAN（D-94、P4-25）
+
+/** ユーザが盤（帯・背）から読んで入れた品番と JAN / UPC。空文字は「入れていない」 */
+export type TypedIds = { catno: string; barcode: string }
+
+export const EMPTY_TYPED: TypedIds = { catno: '', barcode: '' }
+
+/**
+ * 品番を比べる形（サーバの `normalize_catno` と同じ規則）: 大文字にし、ハイフン・空白を落とす。
+ * 英数字・ハイフン・空白以外を含む、または英数字が無いものは null（照会に載せられない）
+ */
+export function normalizeCatno(s: string): string | null {
+  const t = s.trim()
+  if (!/^[A-Za-z0-9 -]*$/.test(t)) return null
+  const n = t.replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+  return n === '' ? null : n
+}
+
+/** 照会に載せられる形か（サーバの検証と同じ。品番は 32 文字まで、JAN / UPC は数字 8・12・13 桁） */
+export function typedProblems(t: TypedIds): string[] {
+  const out: string[] = []
+  const catno = t.catno.trim()
+  if (catno !== '' && (catno.length > 32 || normalizeCatno(catno) == null))
+    out.push('品番は英数字とハイフン・空白（32 文字まで）')
+  const barcode = t.barcode.trim()
+  if (barcode !== '' && !/^(?:\d{8}|\d{12}|\d{13})$/.test(barcode)) out.push('JAN/UPC は数字 8・12・13 桁')
+  return out
+}
+
+/** 照会に添える形（`POST /api/cd/lookup` の catno / barcode）。空は null */
+export function typedLookupExtra(t: TypedIds): { catno: string | null; barcode: string | null } {
+  return { catno: orNull(t.catno), barcode: orNull(t.barcode) }
+}
+
+/** 候補のレーベルのうち、品番が入力と一致するもの（無ければ null） */
+function matchingLabel(c: ReleaseCandidate, catno: string): [string, string] | null {
+  const want = normalizeCatno(catno)
+  if (want == null) return null
+  for (const [label, cat] of c.labels) {
+    if (cat != null && normalizeCatno(cat) === want) return [label, cat]
+  }
+  return null
+}
+
+/**
+ * 入力した品番が選んだ候補と食い違うときの注意（一致・未入力・候補なしは null）。
+ * 食い違う = MusicBrainz に手元の版が無く、別の版として取り込む
+ */
+export function catnoMismatch(c: ReleaseCandidate | null, t: TypedIds): string | null {
+  const catno = t.catno.trim()
+  if (c == null || catno === '' || matchingLabel(c, catno) != null) return null
+  const cats = c.labels.map(([, cat]) => cat).filter((v): v is string => v != null)
+  const which = cats.length > 0 ? `品番は ${cats.join(' / ')}` : '品番は MusicBrainz に無い'
+  const note = c.disambiguation != null ? `（${c.disambiguation}）` : ''
+  return `この候補の${which}${note}で、入力した品番 ${catno} と違う。別の版として取り込み、品番は入力値にして JAN/UPC は写さない`
+}
+
+/**
+ * 手入力の品番と JAN を下書きに反映する（D-94）。写す範囲が「最小限」でも入力値は書く。
+ * - 品番: 候補の品番と一致すれば候補の表記（と、そのレーベル）、食い違う・候補なしなら入力値
+ * - JAN: 入力があれば入力値。品番が食い違えば候補の JAN は写さない（別の版の値なので）
+ * 版に固有の MusicBrainz の id（ALBUMID など）はそのまま残す（近い版を指す値として。D-94）
+ */
+export function applyTyped(d: DiscDraft, c: ReleaseCandidate | null, t: TypedIds, scope: CopyScope): DiscDraft {
+  const catno = t.catno.trim()
+  const barcode = t.barcode.trim()
+  let next = d
+  if (catno !== '') {
+    const hit = c != null ? matchingLabel(c, catno) : null
+    if (hit != null) {
+      next = { ...next, catalog_number: hit[1], label: scope === 'full' ? hit[0] : next.label }
+    } else {
+      next = { ...next, catalog_number: catno, barcode: c != null ? '' : next.barcode }
+    }
+  }
+  if (barcode !== '') next = { ...next, barcode }
+  return next
 }

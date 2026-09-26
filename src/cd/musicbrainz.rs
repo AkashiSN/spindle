@@ -12,7 +12,8 @@
 //! `discid`（`ws/2/discid/<id>`）→ `ids`（ディスクが持つ ISRC の検索 `ws/2/recording?query=isrc:…` と
 //! MCN = バーコードの検索 `ws/2/release?query=barcode:…`）→ `toc`（`ws/2/discid/<id>?toc=` の近似）。
 //! TOC 近似はトラック長の近い別の盤を大量に返すので最後の手段にする。ユーザが貼ったリリース
-//! URL / MBID（`ws/2/release/<id>`）は段に関係なく常に足す。同じリリース × medium は 1 件に束ねて
+//! URL / MBID（`ws/2/release/<id>`）と、ユーザが盤から読んで入れた品番の検索（`ws/2/release?query=catno:…`。
+//! D-94）は段に関係なく常に足す。同じリリース × medium は 1 件に束ねて
 //! 経路（[`MatchedBy`]）を付ける。[`DiscQuery::widen`] を立てると段を打ち切らずに全部引く。
 //!
 //! DiscID が 200 でも medium のトラック数が合わず候補が 0 件のときは次の段へ落とす（そこで止めると
@@ -82,6 +83,9 @@ pub struct ReleaseCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchedBy {
+    /// ユーザが盤から読んで入れた品番が、リリースのカタログ番号と一致（D-94）。収録が同じ版どうしは
+    /// DiscID が同じになるので、版を決めるのは品番の方。入力があるときだけ付く
+    Catno,
     /// medium が自分の DiscID を持つ
     Discid,
     /// ユーザが指定したリリース
@@ -146,6 +150,8 @@ pub struct DiscQuery<'a> {
     pub mcn: Option<&'a str>,
     /// ユーザが貼ったリリース URL か MBID（[`parse_release_ref`]）
     pub release: Option<&'a str>,
+    /// ユーザが盤から読んで入れた品番（D-94）。形は [`normalize_catno`] が通すもの
+    pub catno: Option<&'a str>,
     /// 覚えている結果を捨てて引き直す（画面の「MusicBrainz に照会」。自動の照会は false）
     pub refresh: bool,
     /// 段を打ち切らずに全部引く（画面の「さらに広げて探す」）
@@ -160,6 +166,8 @@ struct CacheKey {
     isrcs: Vec<String>,
     mcn: Option<String>,
     release: Option<ReleaseKey>,
+    /// 品番は正規化した形（表記揺れは同じ結果になる）
+    catno: Option<String>,
     /// 広げて引いた結果は別物（普通の照会に返してはいけない）
     widen: bool,
 }
@@ -179,6 +187,7 @@ impl DiscQuery<'_> {
             isrcs,
             mcn,
             release,
+            catno,
             // 覚えるかどうかの指示で、結果そのものは変わらない
             refresh: _,
             widen,
@@ -191,9 +200,36 @@ impl DiscQuery<'_> {
                 Some(id) => ReleaseKey::Id(id),
                 None => ReleaseKey::Unparsable(r.to_owned()),
             }),
+            catno: catno.map(|c| normalize_catno(c).unwrap_or_else(|| c.to_owned())),
             widen,
         }
     }
+}
+
+/// 品番を比べる形にする（D-94）: 大文字にし、ハイフン・空白を落とす。MusicBrainz の検索も
+/// 同じ揺れを吸収する（`catno:"upcj 9001"` と `UPCJ9001` は `UPCJ-9001` に当たる）。英数字・
+/// ハイフン・空白以外を含む、または英数字が無いものは `None`（検索に載せない。Lucene の記号を通さない）
+pub fn normalize_catno(s: &str) -> Option<String> {
+    let s = s.trim();
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ' ')
+    {
+        return None;
+    }
+    let n: String = s
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    (!n.is_empty()).then_some(n)
+}
+
+/// 候補のカタログ番号のどれかが品番（[`normalize_catno`] 済み）と一致するか
+pub fn candidate_has_catno(c: &ReleaseCandidate, normalized: &str) -> bool {
+    c.labels
+        .iter()
+        .any(|(_, cat)| cat.as_deref().and_then(normalize_catno).as_deref() == Some(normalized))
 }
 
 /// 覚えておく期限。ディスクを入れ替えずに画面を開き直したときの引き直しを止めるのが目的で、
@@ -206,6 +242,8 @@ const CACHE_CAPACITY: usize = 8;
 const ISRC_FETCH_LIMIT: usize = 5;
 /// バーコード検索で取りに行くリリースの上限
 const BARCODE_FETCH_LIMIT: usize = 3;
+/// 品番検索で取りに行くリリースの上限（D-94。バーコードと同じ）
+const CATNO_FETCH_LIMIT: usize = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MbParseError {
@@ -788,6 +826,7 @@ impl MusicBrainzClient {
             isrcs: &[],
             mcn: None,
             release: None,
+            catno: None,
             refresh: false,
             widen: false,
         })
@@ -867,6 +906,45 @@ impl MusicBrainzClient {
                         notes.push(format!("指定したリリース {id} を取れない（HTTP {status}）"));
                     }
                 },
+            }
+        }
+
+        // 品番も段に関係なく常に引く（D-94）。DiscID で当たっても引く: 収録が同じ版どうしは DiscID が
+        // 同じで、DiscID が別の版にしか登録されていないとき、手元の版は品番でしか見つからない。
+        // 検索は部分一致もありうるので、カタログ番号が正規化して一致するものだけを候補にする
+        if let Some(raw) = q.catno {
+            match normalize_catno(raw) {
+                None => notes.push(format!(
+                    "品番を読めない: {raw:?}（英数字とハイフン・空白だけ）"
+                )),
+                Some(norm) => {
+                    let query = format!("catno:\"{}\"", raw.trim());
+                    let (status, body) = self
+                        .get("release", &[("query", query.as_str()), ("fmt", "json")])
+                        .await?;
+                    if !status.is_success() {
+                        return Err(LookupError::Status(status.as_u16()));
+                    }
+                    let ids = parse_release_search(&body)
+                        .map_err(|e| LookupError::Parse(e.to_string()))?;
+                    let mut c = Vec::new();
+                    for id in ids.into_iter().take(CATNO_FETCH_LIMIT) {
+                        c.extend(
+                            self.fetch_cached(&mut cache, &id, &discid, audio_tracks)
+                                .await?
+                                .into_iter()
+                                .filter(|x| candidate_has_catno(x, &norm)),
+                        );
+                    }
+                    if c.is_empty() {
+                        notes.push(format!(
+                            "品番 {} で音声 {audio_tracks} トラックのリリースは MusicBrainz に見つからない",
+                            raw.trim()
+                        ));
+                    }
+                    hits += c.len();
+                    groups.push((MatchedBy::Catno, c));
+                }
             }
         }
 

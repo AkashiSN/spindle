@@ -12,6 +12,7 @@ import {
   type LookupResponse,
   type ReleaseCandidate,
   type TocTrackInfo,
+  type TypedIds,
 } from '../lib/cd'
 import { cdReducer, initialCdState, type CdState } from '../lib/cdState'
 import { Latest } from '../lib/latest'
@@ -21,6 +22,10 @@ export type LookupExtra = {
   isrcs?: Array<string | null>
   mcn?: string | null
   release?: string | null
+  /** 手入力の品番（D-94）。段に関係なく引く */
+  catno?: string | null
+  /** 手入力の JAN / UPC（D-94）。盤の MCN が無いときバーコードの検索に使う */
+  barcode?: string | null
   /** サーバが覚えている結果を捨てて引き直す（画面のボタン。ディスク検出の自動照会は付けない） */
   refresh?: boolean
   /** 段を打ち切らずに全部引く（「さらに広げて探す」。D-64 追記 4） */
@@ -41,6 +46,8 @@ export type CdLookupState = CdState & {
   widen: () => Promise<void>
   reset: () => void
   startManual: () => void
+  /** 手入力の品番と JAN を変える（下書きにすぐ反映する。照会は別に呼ぶ） */
+  setTyped: (typed: TypedIds) => void
 }
 
 /** 照会のエラーを画面の一行に（CD 画面と Inbox の引き直しで共有） */
@@ -81,6 +88,8 @@ export function useCdLookup(): CdLookupState {
         isrcs: extra.isrcs ?? [],
         mcn: extra.mcn ?? null,
         release: extra.release ?? null,
+        catno: extra.catno ?? null,
+        barcode: extra.barcode ?? null,
         refresh: extra.refresh ?? false,
         widen: extra.widen ?? false,
       })
@@ -108,6 +117,7 @@ export function useCdLookup(): CdLookupState {
       dispatch({ type: 'reset' })
     }, []),
     startManual: useCallback(() => dispatch({ type: 'start_manual' }), []),
+    setTyped: useCallback((typed: TypedIds) => dispatch({ type: 'set_typed', typed }), []),
     setDisc: useCallback(
       (toc: string, tracks: TocTrackInfo[]) => dispatch({ type: 'set_disc', toc, tracks }),
       [],

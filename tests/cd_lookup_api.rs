@@ -97,8 +97,18 @@ async fn serve_mb_counting() -> (String, std::sync::Arc<std::sync::atomic::Atomi
     (format!("http://{addr}/ws/2/"), count)
 }
 
-/// `ws/2/release?release-group=…`（browse。D-93）
+/// `ws/2/release?release-group=…`（browse。D-93）と `ws/2/release?query=…`（品番・バーコードの検索。
+/// Five の品番 LCNC-0097 と JAN だけ当たる。D-94）
 async fn group_browse_handler(Query(q): Query<Vec<(String, String)>>) -> (StatusCode, String) {
+    if let Some((_, query)) = q.iter().find(|(k, _)| k == "query") {
+        let hit = query == "catno:\"lcnc-0097\"" || query == "barcode:4582515778491";
+        let body = if hit {
+            format!(r#"{{"count":1,"releases":[{{"id":"{FIVE_RELEASE}"}}]}}"#)
+        } else {
+            r#"{"count":0,"releases":[]}"#.to_owned()
+        };
+        return (StatusCode::OK, body);
+    }
     match q
         .iter()
         .find(|(k, _)| k == "release-group")
@@ -332,6 +342,68 @@ async fn bad_isrcs_and_mcn_are_400() {
         .await;
     assert_eq!(st, StatusCode::OK, "{res}");
     assert_eq!(res["candidates"].as_array().unwrap().len(), 1, "{res}");
+}
+
+/// 品番と手入力の JAN（D-94）。品番は段に関係なく引き、JAN は盤の MCN が無いときバーコードの検索に使う
+#[tokio::test]
+async fn lookup_uses_a_typed_catno_and_barcode() {
+    let app = App::new(Some(serve_mb().await)).await;
+    let c = app.cookie().await;
+    let (st, body) = app
+        .post(
+            &c,
+            json!({ "toc": "0:20144:40290", "catno": " lcnc-0097 " }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let cands = body["candidates"].as_array().unwrap();
+    assert_eq!(cands.len(), 1, "{body}");
+    assert_eq!(cands[0]["release_id"], FIVE_RELEASE);
+    assert_eq!(cands[0]["matched_by"], json!(["catno"]));
+    let (st, body) = app
+        .post(
+            &c,
+            json!({ "toc": "0:20144:40290", "barcode": "4582515778491" }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let cands = body["candidates"].as_array().unwrap();
+    assert_eq!(cands.len(), 1, "{body}");
+    assert_eq!(cands[0]["matched_by"], json!(["barcode"]));
+    // 空文字は「無い」扱い
+    let (st, body) = app
+        .post(
+            &c,
+            json!({ "toc": "0:20144:40290", "catno": "  ", "barcode": "" }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    for (body, what) in [
+        (
+            json!({ "toc": "0:20144:40290", "catno": "LCNC\" OR *" }),
+            "クエリ文字",
+        ),
+        (
+            json!({ "toc": "0:20144:40290", "catno": "ＬＣＮＣ－００９７" }),
+            "全角",
+        ),
+        (
+            json!({ "toc": "0:20144:40290", "catno": "A".repeat(33) }),
+            "長すぎる",
+        ),
+        (
+            json!({ "toc": "0:20144:40290", "barcode": "12345" }),
+            "短い JAN",
+        ),
+        (
+            json!({ "toc": "0:20144:40290", "barcode": "458251577849A" }),
+            "数字でない JAN",
+        ),
+    ] {
+        let (st, res) = app.post(&c, body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{what}: {res}");
+        assert_eq!(res["error"], "bad_request", "{what}");
+    }
 }
 
 /// 同じディスクの照会は覚えている（D-64 追記 3）。`refresh` を付けたときだけ引き直す

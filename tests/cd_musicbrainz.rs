@@ -24,9 +24,9 @@ use axum::Router;
 use tokio::sync::Mutex;
 
 use spindle::cd::musicbrainz::{
-    merge_candidates, parse_group_releases, parse_lookup, parse_recording_search, parse_release,
-    parse_release_ref, parse_release_search, DiscQuery, LookupStage, MatchedBy, MusicBrainzClient,
-    ReleaseCandidate,
+    merge_candidates, normalize_catno, parse_group_releases, parse_lookup, parse_recording_search,
+    parse_release, parse_release_ref, parse_release_search, DiscQuery, LookupStage, MatchedBy,
+    MusicBrainzClient, ReleaseCandidate,
 };
 use spindle::cd::toc::{Toc, TocTrack};
 
@@ -359,6 +359,39 @@ fn matched_by_serializes_snake_case() {
         serde_json::to_string(&MatchedBy::Barcode).unwrap(),
         "\"barcode\""
     );
+    assert_eq!(
+        serde_json::to_string(&MatchedBy::Catno).unwrap(),
+        "\"catno\""
+    );
+}
+
+#[test]
+fn catno_is_normalized_for_comparison() {
+    assert_eq!(normalize_catno("UPCJ-9001").as_deref(), Some("UPCJ9001"));
+    assert_eq!(normalize_catno(" upcj 9001 ").as_deref(), Some("UPCJ9001"));
+    assert_eq!(normalize_catno("UPCJ9001").as_deref(), Some("UPCJ9001"));
+    // Lucene の記号・全角・英数字の無いものは通さない
+    assert_eq!(normalize_catno("UPCJ-9001\" OR x"), None);
+    assert_eq!(normalize_catno("UPCJ*"), None);
+    assert_eq!(normalize_catno("ＵＰＣＪ－９００１"), None);
+    assert_eq!(normalize_catno(" - "), None);
+    assert_eq!(normalize_catno(""), None);
+}
+
+/// 品番は一覧の先頭に並ぶ（DiscID より強い。D-94）
+#[test]
+fn catno_route_sorts_before_discid() {
+    let c = parse_lookup(NEVERMIND, NEVERMIND_ID, 12).expect("解釈できる");
+    let merged = merge_candidates(vec![
+        (MatchedBy::Discid, c.clone()),
+        (MatchedBy::Catno, vec![c[1].clone()]),
+    ]);
+    assert_eq!(merged[0].release_id, c[1].release_id);
+    assert_eq!(
+        merged[0].matched_by,
+        vec![MatchedBy::Catno, MatchedBy::Discid]
+    );
+    assert_eq!(merged[1].matched_by, vec![MatchedBy::Discid]);
 }
 
 #[derive(Default)]
@@ -464,6 +497,25 @@ async fn release_search_handler(
         .unwrap_or("");
     if query == "barcode:4582515778491" {
         (StatusCode::OK, BARCODE_SEARCH_FIVE.to_owned())
+    } else if let Some(cat) = query
+        .strip_prefix("catno:\"")
+        .and_then(|r| r.strip_suffix('"'))
+    {
+        // 品番検索（D-94）。MusicBrainz と同じく表記揺れを吸収し、部分一致も混ぜて返す
+        let ids: &[&str] = match normalize_catno(cat).as_deref() {
+            Some("DGCD24425") => &[NEVERMIND_A, NEVERMIND_B],
+            Some("XXCD1") => &[NORMAL_EDITION, PARTIAL_EDITION],
+            _ => &[],
+        };
+        let releases: Vec<String> = ids.iter().map(|id| format!(r#"{{"id":"{id}"}}"#)).collect();
+        (
+            StatusCode::OK,
+            format!(
+                r#"{{"count":{},"releases":[{}]}}"#,
+                ids.len(),
+                releases.join(",")
+            ),
+        )
     } else {
         (
             StatusCode::OK,
@@ -485,6 +537,8 @@ async fn release_handler(
         .push((format!("release/{id}"), q.clone(), String::new()));
     if id == FIVE_RELEASE {
         (StatusCode::OK, RELEASE_FIVE.to_owned())
+    } else if let Some(body) = nevermind_release(&id) {
+        (StatusCode::OK, body)
     } else if id.starts_with("df1b88a4") {
         (StatusCode::OK, RELEASE_FIVE.replace(FIVE_RELEASE, &id))
     } else {
@@ -493,6 +547,37 @@ async fn release_handler(
             r#"{"error":"Not Found","help":"For usage, please see: https://musicbrainz.org/development/mmd"}"#.to_owned(),
         )
     }
+}
+
+/// Nevermind の DiscID 応答にある 2 リリース（カタログ番号はどちらも DGCD-24425）
+const NEVERMIND_A: &str = "c12262e2-7185-4942-87ee-da27ddd45ddf";
+const NEVERMIND_B: &str = "28379cd4-8ded-4d98-847b-53acdb4dedc8";
+/// Nevermind と同じ収録で DiscID の登録が無い「通常盤」（カタログ番号 XXCD-1。D-94）
+const NORMAL_EDITION: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+/// 品番検索に部分一致で混ざる別の版（カタログ番号 XXCD-10）
+const PARTIAL_EDITION: &str = "aaaaaaaa-0000-4000-8000-000000000010";
+
+/// `ws/2/release/<id>` の応答を Nevermind の DiscID 応答から作る。通常盤と部分一致の版は 1 件目の
+/// id とカタログ番号を差し替え、DiscID を外したもの
+fn nevermind_release(id: &str) -> Option<String> {
+    let resp: serde_json::Value = serde_json::from_str(NEVERMIND).expect("JSON");
+    let releases = resp["releases"].as_array().expect("releases");
+    let (base, catno) = match id {
+        NEVERMIND_A | NEVERMIND_B => {
+            let r = releases.iter().find(|r| r["id"] == id).expect("リリース");
+            return Some(r.to_string());
+        }
+        NORMAL_EDITION => (&releases[0], "XXCD-1"),
+        PARTIAL_EDITION => (&releases[0], "XXCD-10"),
+        _ => return None,
+    };
+    let mut r = base.clone();
+    r["id"] = id.into();
+    r["label-info"][0]["catalog-number"] = catno.into();
+    for m in r["media"].as_array_mut().expect("media") {
+        m["discs"] = serde_json::json!([]);
+    }
+    Some(r.to_string())
 }
 
 async fn serve() -> (String, Shared) {
@@ -524,6 +609,7 @@ async fn lookup_fresh(
             isrcs: &[],
             mcn: None,
             release: None,
+            catno: None,
             refresh: true,
             widen: false,
         })
@@ -693,6 +779,7 @@ async fn client_combines_isrc_barcode_and_release_routes() {
             isrcs: &isrcs,
             mcn: Some("4582515778491"),
             release: Some(&release),
+            catno: None,
             refresh: false,
             widen: false,
         })
@@ -791,6 +878,7 @@ async fn client_notes_a_release_without_a_matching_medium() {
             isrcs: &[],
             mcn: None,
             release: Some(FIVE_RELEASE),
+            catno: None,
             refresh: false,
             widen: false,
         })
@@ -806,6 +894,7 @@ async fn client_notes_a_release_without_a_matching_medium() {
             isrcs: &[],
             mcn: None,
             release: Some("not-an-id"),
+            catno: None,
             refresh: false,
             widen: false,
         })
@@ -818,6 +907,7 @@ async fn client_notes_a_release_without_a_matching_medium() {
             isrcs: &[],
             mcn: None,
             release: Some("00000000-0000-0000-0000-000000000000"),
+            catno: None,
             refresh: false,
             widen: false,
         })
@@ -840,6 +930,7 @@ async fn client_skips_routes_without_inputs_and_after_an_exact_hit() {
             isrcs: &[],
             mcn: None,
             release: None,
+            catno: None,
             refresh: false,
             widen: false,
         })
@@ -860,6 +951,7 @@ async fn client_skips_routes_without_inputs_and_after_an_exact_hit() {
             isrcs: &isrcs,
             mcn: Some("4582515778491"),
             release: None,
+            catno: None,
             refresh: false,
             widen: false,
         })
@@ -890,6 +982,7 @@ async fn client_stops_at_the_ids_stage_when_it_yields_candidates() {
             isrcs: &isrcs,
             mcn: None,
             release: None,
+            catno: None,
             refresh: true,
             widen: false,
         })
@@ -921,6 +1014,7 @@ async fn client_falls_through_to_toc_when_the_ids_stage_is_empty() {
             isrcs: &isrcs,
             mcn: None,
             release: None,
+            catno: None,
             refresh: true,
             widen: false,
         })
@@ -948,6 +1042,7 @@ async fn widen_pulls_every_stage() {
             isrcs: &isrcs,
             mcn: None,
             release: None,
+            catno: None,
             refresh: true,
             widen: true,
         })
@@ -987,6 +1082,7 @@ async fn a_named_release_stops_the_toc_stage_but_not_the_ids_stage() {
             isrcs: &isrcs,
             mcn: None,
             release: Some(&release),
+            catno: None,
             refresh: true,
             widen: false,
         })
@@ -1058,6 +1154,7 @@ async fn widen_is_a_different_cache_key() {
         isrcs: &isrcs,
         mcn: None,
         release: None,
+        catno: None,
         refresh: false,
         widen,
     };
@@ -1216,6 +1313,7 @@ async fn lookup_is_cached_per_disc() {
         isrcs: &[],
         mcn: None,
         release: None,
+        catno: None,
         refresh: false,
         widen: false,
     };
@@ -1263,6 +1361,7 @@ async fn refresh_bypasses_the_cache() {
         isrcs: &[],
         mcn: None,
         release: None,
+        catno: None,
         refresh: false,
         widen: false,
     };
@@ -1292,6 +1391,7 @@ async fn cache_expires() {
         isrcs: &[],
         mcn: None,
         release: None,
+        catno: None,
         refresh: false,
         widen: false,
     };
@@ -1323,6 +1423,7 @@ async fn failures_are_not_cached() {
         isrcs: &[],
         mcn: None,
         release: None,
+        catno: None,
         refresh: false,
         widen: false,
     };
@@ -1344,6 +1445,7 @@ async fn a_failed_refresh_drops_the_remembered_result() {
         isrcs: &[],
         mcn: None,
         release: None,
+        catno: None,
         refresh: false,
         widen: false,
     };
@@ -1378,6 +1480,7 @@ async fn an_unparsable_release_is_a_different_key() {
         isrcs: &[],
         mcn: None,
         release: None,
+        catno: None,
         refresh: false,
         widen: false,
     };
@@ -1487,5 +1590,134 @@ async fn client_lists_the_releases_of_a_group() {
             .await
             .expect("browse"),
         None
+    );
+}
+
+// ---------------------------------------------------------------- 品番（D-94）
+
+fn catno_query<'a>(toc: &'a Toc, catno: Option<&'a str>) -> DiscQuery<'a> {
+    DiscQuery {
+        toc,
+        isrcs: &[],
+        mcn: None,
+        release: None,
+        catno,
+        refresh: false,
+        widen: false,
+    }
+}
+
+/// DiscID が別の版（初回盤）にしか登録されていないとき、品番で当たった通常盤が先頭に出る。
+/// 部分一致で混ざった版は候補にしない
+#[tokio::test]
+async fn catno_finds_the_edition_even_after_a_discid_hit() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = nevermind_toc();
+    let r = client
+        .lookup(&catno_query(&toc, Some("XXCD-1")))
+        .await
+        .expect("lookup");
+    assert!(r.exact);
+    assert_eq!(r.stage, LookupStage::Discid);
+    let ids: Vec<&str> = r.candidates.iter().map(|c| c.release_id.as_str()).collect();
+    assert_eq!(ids, vec![NORMAL_EDITION, NEVERMIND_A, NEVERMIND_B]);
+    assert_eq!(r.candidates[0].matched_by, vec![MatchedBy::Catno]);
+    assert!(!r.candidates[0].exact);
+    assert!(r.notes.is_empty(), "{:?}", r.notes);
+    let s = seen.lock().await;
+    let searches: Vec<&str> = s
+        .requests
+        .iter()
+        .filter(|(p, _, _)| p == "release")
+        .filter_map(|(_, q, _)| {
+            q.iter()
+                .find(|(k, _)| k == "query")
+                .map(|(_, v)| v.as_str())
+        })
+        .collect();
+    assert_eq!(searches, vec!["catno:\"XXCD-1\""]);
+    // DiscID で当たったので ISRC / バーコード / TOC 近似は引いていない
+    assert!(!s.requests.iter().any(|(p, _, _)| p == "recording"));
+}
+
+/// 品番が DiscID の候補と同じ版なら、経路を束ねてその版が先頭に来る。表記揺れも吸収する
+#[tokio::test]
+async fn catno_marks_the_discid_candidates_with_the_same_catalog_number() {
+    let (base, _seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = nevermind_toc();
+    let r = client
+        .lookup(&catno_query(&toc, Some("dgcd 24425")))
+        .await
+        .expect("lookup");
+    assert_eq!(r.candidates.len(), 2);
+    assert!(r
+        .candidates
+        .iter()
+        .all(|c| c.exact && c.matched_by == vec![MatchedBy::Catno, MatchedBy::Discid]));
+}
+
+/// 品番で見つからなければ note を出し、他の経路の候補は残る。読めない品番は引かずに note
+#[tokio::test]
+async fn catno_without_a_hit_leaves_a_note() {
+    let (base, seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = nevermind_toc();
+    let r = client
+        .lookup(&catno_query(&toc, Some("ZZZZ-1")))
+        .await
+        .expect("lookup");
+    assert_eq!(r.candidates.len(), 2);
+    assert!(r
+        .candidates
+        .iter()
+        .all(|c| c.matched_by == vec![MatchedBy::Discid]));
+    assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+    assert!(r.notes[0].contains("ZZZZ-1"), "{:?}", r.notes);
+
+    let before = seen.lock().await.requests.len();
+    let r = client
+        .lookup(&catno_query(&toc, Some("X\" OR catno:*")))
+        .await
+        .expect("lookup");
+    assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+    let s = seen.lock().await;
+    // DiscID の 1 本だけ（品番の検索は出していない）
+    assert_eq!(s.requests.len(), before + 1);
+    assert!(!s.requests[before..].iter().any(|(p, _, _)| p == "release"));
+}
+
+/// 品番は覚える鍵に入る（違う品番に前の結果を返さない。表記揺れは同じ鍵）
+#[tokio::test]
+async fn catno_is_part_of_the_cache_key() {
+    let (base, seen) = serve().await;
+    let client = MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0))
+        .expect("client")
+        .with_cache_ttl(Duration::from_secs(60));
+    let toc = nevermind_toc();
+    let none = client
+        .lookup(&catno_query(&toc, None))
+        .await
+        .expect("lookup");
+    assert_eq!(none.candidates.len(), 2);
+    let with = client
+        .lookup(&catno_query(&toc, Some("XXCD-1")))
+        .await
+        .expect("lookup");
+    assert_eq!(with.candidates.len(), 3);
+    let n = seen.lock().await.requests.len();
+    let again = client
+        .lookup(&catno_query(&toc, Some("xxcd 1")))
+        .await
+        .expect("lookup");
+    assert_eq!(again, with);
+    assert_eq!(
+        seen.lock().await.requests.len(),
+        n,
+        "表記揺れは覚えた結果を返す"
     );
 }

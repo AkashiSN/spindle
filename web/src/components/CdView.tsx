@@ -9,14 +9,15 @@
 // **この画面では編集させない**（P4-20 追記）。吸い出したものは Inbox を通るので（D-67 追記）、
 // 値を直すのは Inbox の承認画面に一本化してある。ここは「何が入っていて、どの盤として取り込むか」を
 // 確かめる場所。TOC の貼り付けとリリース URL の指定は編集ではなく照会の入力なので「詳細」に残す
-// （ドライブ無しの環境とデバッグ用）。
+// （ドライブ無しの環境とデバッグ用）。例外は ① の品番と JAN の欄（D-94）: 盤の帯・背から読んだ
+// 版の識別子で、照会に使い、そのままタグに残る（MusicBrainz に手元の版が無くても後で版を直せる）。
 
 import { useEffect, useState } from 'react'
 import type { CdDriveState } from '../hooks/useCdDrive'
 import { useCdLibrary } from '../hooks/useCdLibrary'
 import type { CdLookupState } from '../hooks/useCdLookup'
 import type { CdRipState } from '../hooks/useCdRip'
-import { lookupHeadline, validateDraft } from '../lib/cd'
+import { lookupHeadline, typedLookupExtra, typedProblems, validateDraft } from '../lib/cd'
 import { driveIdsFor, driveInfoLabel, driveStateLabel } from '../lib/cdDrive'
 import { libraryNotice } from '../lib/cdLibrary'
 import { ripStatusLabel } from '../lib/cdRip'
@@ -47,7 +48,9 @@ export function CdView({
   const driveLabel = drive.unavailable ? null : driveStateLabel(drive.status)
   // ドライブから読めた ISRC / MCN は、欄の TOC がその盤のものであるときだけ照会に添える
   // （別の盤の TOC を貼ったときに混ぜない。lib/cdDrive.ts の driveIdsFor）
-  const ids = driveIdsFor(cd.toc, drive.status)
+  // 手入力の品番と JAN は、照会のボタンすべてに添える（載せられない形なら添えない）
+  const typedErrors = typedProblems(cd.typed)
+  const ids = { ...driveIdsFor(cd.toc, drive.status), ...(typedErrors.length === 0 ? typedLookupExtra(cd.typed) : {}) }
   const [releaseRef, setReleaseRef] = useState('')
   const canEject =
     drive.status != null && drive.status.state !== 'no_drive' && drive.status.state !== 'unknown' && !drive.ejecting
@@ -113,16 +116,54 @@ export function CdView({
           <Step
             no={1}
             title="挿入中の CD"
-            aside={<span className="badge muted">表示のみ</span>}
             hint={
               <>
-                ③ で選んだ候補の値。ここでは直せない（表示のみ）。取り込んだものは Inbox に入るので、名前や
-                配置先（category）は Inbox の承認画面で直す。候補を選ばずに取り込むと、名前の付いていない盤として
-                Inbox に入る
+                ③ で選んだ候補の値。ここでは直せない。取り込んだものは Inbox に入るので、名前や配置先（category）は
+                Inbox の承認画面で直す。候補を選ばずに取り込むと、名前の付いていない盤として Inbox に入る。
+                品番と JAN/UPC だけは盤の帯・背から読んで入れられる。MusicBrainz で版を探すのに使い、候補が別の版
+                （通常盤に対して初回限定盤など）でも入れた値がタグに残る
               </>
             }
           >
             <CdAlbumSummary draft={draft} />
+            <form
+              className="op-row cd-typed"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void cd.lookupToc(cd.toc, { ...ids, refresh: true })
+              }}
+            >
+              <label className="small">
+                品番{' '}
+                <input
+                  type="text"
+                  size={14}
+                  placeholder="UPCJ-9001"
+                  value={cd.typed.catno}
+                  onChange={(e) => cd.setTyped({ ...cd.typed, catno: e.target.value })}
+                />
+              </label>
+              <label className="small">
+                JAN/UPC{' '}
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  size={14}
+                  placeholder="4988031278079"
+                  value={cd.typed.barcode}
+                  onChange={(e) => cd.setTyped({ ...cd.typed, barcode: e.target.value })}
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={
+                  cd.busy || typedErrors.length > 0 || (cd.typed.catno.trim() === '' && cd.typed.barcode.trim() === '')
+                }
+              >
+                品番で照会
+              </button>
+              {typedErrors.length > 0 && <span className="error small">{typedErrors.join('、')}</span>}
+            </form>
           </Step>
 
           <Step
@@ -149,6 +190,7 @@ export function CdView({
             }
             hint={
               <>
+                ① で品番を入れていれば、それで版を探して先頭に出す（DiscID は収録が同じ版を区別できない）。
                 DiscID → 無ければディスクの ISRC（録音ごとの国際コード）/ JAN/UPC（商品のバーコード）→
                 それでも出なければ TOC 近似、の順に広げて MusicBrainz を引く。結果は 10 分覚えていて、
                 「照会し直す」で引き直す。候補のバッジは当たった経路

@@ -508,14 +508,20 @@ Phase 4  commit:     1 トランザクションで
    ↓            「候補」はトラック数で絞ったあとの数で数える。DiscID が 200 でも候補 0 件なら次の段へ
    ↓            落とすが、exact は真のままにする（DiscID は登録済みなので登録を勧めない）。ユーザが
    ↓            貼ったリリース URL / MBID は段に関係なく常に足し、toc へ進むかの判定では候補に数える
-   ↓            （ids は引く）。同じ medium は 1 件に束ねて経路（matched_by）を付ける（D-64 追記）。
+   ↓            （ids は引く）。ユーザが盤の帯・背から読んで入れた品番（`ws/2/release?query=catno:"…"`）も
+   ↓            段に関係なく常に引き、カタログ番号が正規化して一致するリリースだけを経路 catno の候補にして
+   ↓            先頭に並べる（DiscID は収録が同じ版を区別できないため。D-94）。手入力の JAN は盤の MCN が
+   ↓            無いときだけ ids の段のバーコード検索に使う。
+   ↓            同じ medium は 1 件に束ねて経路（matched_by）を付ける（D-64 追記）。
    ↓            TOC 近似はトラック長の近い別の盤を大量に返すので最後の手段。応答の stage / can_widen で
    ↓            画面に段を見せ、「さらに広げて探す」（widen）で明示的に下の段まで引ける。候補を選んだら DiscID の登録リンク
    ↓            ※同人・VTuber・インディーズ国内盤は MusicBrainz 未登録が常態。
    ↓              照会結果ゼロでもウィザードが完走できることを必須要件とする。
    ↓              候補を写す先は 1 つのフォーム（D-65。写す範囲は既定で「全部写す」、「識別用の
    ↓              最小限」を選べる。D-72 追記 2、P4-2 / P4-20）。**CD 画面では直せない**（D-67 追記。
-   ↓              補正とトラックリスト貼り付けは Inbox の承認画面）。これが
+   ↓              補正とトラックリスト貼り付けは Inbox の承認画面）。例外は手入力の品番と JAN（D-94）で、
+   ↓              写す範囲に関わらず下書きに重ねる。品番が選んだ候補と食い違えば（手元の版が MusicBrainz に
+   ↓              無い）品番は入力値にし、候補の JAN は写さない。MB の id は近い版を指す値として残す。これが
    ↓              DiscMetadata（album / album_artist / date / label / catalog_number / barcode /
    ↓              disc_no / disc_count / tracks[{ number, title, artist, mb }]、source）になる。
    ↓              トラックリスト貼り付け（通販ページ等からのテキストを行解析して
@@ -1519,18 +1525,20 @@ GET    /api/cd/status                             { state: unknown | no_drive | 
                                                   （型番はディスクが無くても読む。D-83 追記 2）}
                                                   （P2-1。ポーラの状態で、ドライブは叩かない。TOC は下の lookup に渡す
                                                   文字列と同じ形。ドライブ未配線なら 503 cd_unavailable）
-POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?, refresh? }。TOC 文字列（CTDB 形式 0:13915:…:leadout か
+POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?, catno?, barcode?, refresh? }。TOC 文字列（CTDB 形式 0:13915:…:leadout か
                                                   MusicBrainz 形式 1 12 leadout+150 offset+150…）から各種 DiscID を出し、
                                                   MusicBrainz に照会（P2-3、D-21 / D-64）。isrcs / mcn は status が読んだもの
-                                                  （null は捨てる）、release は貼ったリリース URL か MBID。→ 200 { discid,
+                                                  （null は捨てる）、release は貼ったリリース URL か MBID。catno / barcode は
+                                                  ユーザが盤から読んで入れた品番（英数字・ハイフン・空白、32 文字まで）と
+                                                  JAN / UPC（数字 8・12・13 桁。mcn が無いときだけ使う）。D-94。→ 200 { discid,
                                                   mb_toc, accuraterip_id, ctdb_toc_id, exact, candidates: [リリース × medium。
-                                                  matched_by: [discid | release | isrc | barcode | toc] を強い順に持ち、その順に並ぶ。
+                                                  matched_by: [catno | discid | release | isrc | barcode | toc] を強い順に持ち、その順に並ぶ。
                                                   media: [{ position, format, track_count }]（リリース全体の収録構成）],
                                                   notes: [候補に入れられなかった理由], tracks: [{ number, length_ms }]（TOC の
                                                   音声トラック。手入力フォームの行。D-65）}。同じ入力の照会結果は
                                                   10 分覚えていて MusicBrainz を引き直さない（D-64 追記 3）。
                                                   refresh: true で捨てて引き直す（画面の「MusicBrainz に照会」）。
-                                                  400 bad_request（TOC）、502 lookup_failed（届かない・応答が壊れている）、
+                                                  400 bad_request（TOC・ISRC・MCN・品番・JAN の形）、502 lookup_failed（届かない・応答が壊れている）、
                                                   503 musicbrainz_unavailable（再試行しても 503 の負荷制限、または未構成）
 POST   /api/cd/library                            { toc, release_id? }。いまの盤がライブラリにあるか（§12.6 CD の帯、D-85）。
                                                   DiscID はサーバが TOC から出し、active なトラックの MUSICBRAINZ_DISCID
@@ -2109,7 +2117,9 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   - **アルバムの要約**（① 挿入中の CD。`CdAlbumSummary`）: 読み取り専用。**すべてラベル付き**の 2 列の
     定義リストで、アルバム（強調）/ アルバムアーティスト / 日付は常に（空は「—」、アルバムは「（候補を
     選んでいない）」）、ディスク番号（複数枚組のときだけ）/ レーベル / カタログ番号 / JAN/UPC は値のある
-    ときだけ。名前は Inbox で入れる旨は ⓘ に。
+    ときだけ。名前は Inbox で入れる旨は ⓘ に。その下に**品番と JAN/UPC の入力欄**と「品番で照会」
+    （D-94。盤の帯・背から読む版の識別子。入れた値はすぐ下書きに重なり、盤が替わったら消える。
+    照会のボタンすべてに添える）。
     **`category` は CD 画面に無い**（Inbox の承認時に選ぶ）。トラックリスト貼り付け（P2-4、D-65）も
     CD 画面からは外し、Inbox の承認画面へ移した（§12.6 の Inbox、P2-10）。TOC の貼り付け
     （CTDB 形式 / MusicBrainz 形式 / `cdrecord -toc` の出力）・各種 ID・用語の凡例は「詳細」に残す
@@ -2118,9 +2128,10 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
     ラジオ一覧。MusicBrainz のリリースへのリンク、収録構成（`mediaSummary`。`CD + Blu-ray の 1 枚目` /
     `CD 2 枚組の 1 枚目`）、ディスクとの長さ差（`lengthDiffMs`）で見分ける。CD 以外の medium
     （デジタル配信・DVD・Blu-ray）は既定で畳み、「CD 以外の媒体に当たった候補も表示」で出す
-    （`isCdMedium` / `splitByMedium`）。バッジは経路（DiscID 一致 / 指定 / ISRC / バーコード / TOC 近似。
+    （`isCdMedium` / `splitByMedium`）。バッジは経路（品番一致 / DiscID 一致 / 指定 / ISRC / バーコード / TOC 近似。
     複数可）、見出しは段と経路（`stage`。DiscID が登録済みのまま下の段に落ちたときは「未登録」と言わない）、
-    `notes` は赤字。DiscID 未登録なら「MusicBrainz に DiscID を登録」リンク（`discidSubmissionUrl`）。
+    `notes` は赤字。入力した品番が選んだ候補と食い違えば注記（`catnoMismatch`。別の版として取り込む）。
+    品番で当たった候補が 1 件なら既定でそれを選ぶ（`initialSelection`）。DiscID 未登録なら「MusicBrainz に DiscID を登録」リンク（`discidSubmissionUrl`）。
     応答の `can_widen` が真なら**「さらに広げて探す」**（`widen`。TOC 近似まで引き直す。D-64 追記 4）
   - **写す範囲**（D-72、P4-2）は**既定で「全部写す」**（D-72 追記 2、P4-20。レーベル・カタログ番号・
     JAN/UPC・`MUSICBRAINZ_RELEASEGROUPID`・各トラックのタイトル / アーティスト・MB id・ISRC まで写す）。

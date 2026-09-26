@@ -10,19 +10,25 @@
 // どれも違う」だけで、値を直すのは Inbox の承認画面（D-67 追記）。だから update_draft のような
 // 編集アクションも貼り付けも持たない。
 //
+// 例外は手入力の品番と JAN（D-94、P4-25）: 値の補正ではなく盤の識別子なので CD 画面で入れる。
+// 下書きへの反映は `applyTyped` で、候補を写し直すたびに通す。盤が替わったら消す。
+//
 // 照会をやり直すと消えるのは result と selected だけ（beforeLookup）。別のディスクに替わったときは
 // busy も落とす（進行中の照会は hook 側が Latest で捨てるので、busy を残すと戻らない）
 
 import {
+  applyTyped,
   draftFromCandidate,
+  EMPTY_TYPED,
   emptyDraft,
   initialSelection,
   outcomeAfterTocEdit,
   type CopyScope,
   type DiscDraft,
-
   type LookupResponse,
+  type ReleaseCandidate,
   type TocTrackInfo,
+  type TypedIds,
 } from './cd'
 
 export type CdState = {
@@ -36,6 +42,8 @@ export type CdState = {
   copyScope: CopyScope
   /** 取り込む内容。TOC が読めた時点で必ずある（表は照会の前から出る）。画面からは直せない */
   draft: DiscDraft | null
+  /** 手入力の品番と JAN（D-94）。盤が替わったら消す */
+  typed: TypedIds
 }
 
 export type CdAction =
@@ -49,6 +57,7 @@ export type CdAction =
   | { type: 'select'; index: number }
   | { type: 'set_copy_scope'; scope: CopyScope }
   | { type: 'start_manual' }
+  | { type: 'set_typed'; typed: TypedIds }
 
 export const initialCdState: CdState = {
   toc: '',
@@ -59,6 +68,7 @@ export const initialCdState: CdState = {
   // CD 画面の既定は「全部写す」（D-72 追記 2、P4-20）。表が主役なので、候補を選んだら名前が入る
   copyScope: 'full',
   draft: null,
+  typed: EMPTY_TYPED,
 }
 
 /**
@@ -74,12 +84,23 @@ function beforeLookup(s: CdState): CdState {
  * busy も落とす: 進行中の照会は hook が Latest で捨てるので、残すと戻らなくなる
  */
 function belowToc(s: CdState): CdState {
-  return { ...beforeLookup(s), draft: null, error: null, busy: false }
+  return { ...beforeLookup(s), draft: null, error: null, busy: false, typed: EMPTY_TYPED }
 }
 
-/** フォームを差し替える */
+/** フォームを差し替える。手入力の品番と JAN はいつも上に重ねる（D-94） */
 function withDraft(s: CdState, selected: number | null, draft: DiscDraft): CdState {
-  return { ...s, selected, draft }
+  const c: ReleaseCandidate | null =
+    selected != null && s.result != null ? (s.result.candidates[selected] ?? null) : null
+  return { ...s, selected, draft: applyTyped(draft, c, s.typed, s.copyScope) }
+}
+
+/** いまの選択（候補か、どれも違う = 空）から下書きを作り直す */
+function rederive(s: CdState): CdState {
+  const c = s.result != null && s.selected != null ? (s.result.candidates[s.selected] ?? null) : null
+  if (c != null && s.result != null) return withDraft(s, s.selected, draftFromCandidate(c, s.result.tracks, s.copyScope))
+  if (s.draft == null) return s
+  // 候補を選んでいない: 候補から写したものは無いので、品番と JAN を空に戻してから重ねる
+  return withDraft(s, null, { ...s.draft, catalog_number: '', barcode: '' })
 }
 
 export function cdReducer(s: CdState, a: CdAction): CdState {
@@ -132,5 +153,7 @@ export function cdReducer(s: CdState, a: CdAction): CdState {
     case 'start_manual':
       if (s.result == null) return s
       return withDraft(s, null, emptyDraft(s.result.tracks))
+    case 'set_typed':
+      return rederive({ ...s, typed: a.typed })
   }
 }
