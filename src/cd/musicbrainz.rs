@@ -64,7 +64,8 @@ pub struct ReleaseCandidate {
     pub status: Option<String>,
     pub barcode: Option<String>,
     pub disambiguation: Option<String>,
-    /// (レーベル名, カタログ番号)
+    /// (レーベル名, カタログ番号)。レーベルが未登録（label が null）で品番だけある label-info は
+    /// レーベル名を空文字にして残す（品番で版を探すのに要る。D-94）
     pub labels: Vec<(String, Option<String>)>,
     /// この medium が自分の DiscID を持つ
     pub exact: bool,
@@ -666,9 +667,11 @@ fn candidates_from(
                     .label_info
                     .iter()
                     .filter_map(|li| {
-                        li.label
-                            .as_ref()
-                            .map(|l| (l.name.clone(), non_empty(li.catalog_number.clone())))
+                        let catno = non_empty(li.catalog_number.clone());
+                        match &li.label {
+                            Some(l) => Some((l.name.clone(), catno)),
+                            None => catno.map(|c| (String::new(), Some(c))),
+                        }
                     })
                     .collect(),
                 exact,

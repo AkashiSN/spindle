@@ -8,6 +8,7 @@ import { useCallback, useReducer, useRef } from 'react'
 import { ApiError, apiPost } from '../api/client'
 import {
   normalizeTocInput,
+  withTyped,
   type CopyScope,
   type LookupResponse,
   type ReleaseCandidate,
@@ -123,8 +124,9 @@ export function useCdLookup(): CdLookupState {
       [],
     ),
     widen: useCallback(
-      () => lookupToc(s.toc, { ...lastExtra.current, refresh: true, widen: true }),
-      [lookupToc, s.toc],
+      // 直前の識別子（ドライブの ISRC / MCN・指定リリース）は使い回し、品番と JAN はいまの入力を重ねる
+      () => lookupToc(s.toc, withTyped({ ...lastExtra.current, refresh: true, widen: true }, s.typed)),
+      [lookupToc, s.toc, s.typed],
     ),
   }
 }

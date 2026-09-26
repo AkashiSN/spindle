@@ -505,6 +505,7 @@ async fn release_search_handler(
         let ids: &[&str] = match normalize_catno(cat).as_deref() {
             Some("DGCD24425") => &[NEVERMIND_A, NEVERMIND_B],
             Some("XXCD1") => &[NORMAL_EDITION, PARTIAL_EDITION],
+            Some("XXCD2") => &[NO_LABEL_EDITION],
             _ => &[],
         };
         let releases: Vec<String> = ids.iter().map(|id| format!(r#"{{"id":"{id}"}}"#)).collect();
@@ -556,6 +557,8 @@ const NEVERMIND_B: &str = "28379cd4-8ded-4d98-847b-53acdb4dedc8";
 const NORMAL_EDITION: &str = "aaaaaaaa-0000-4000-8000-000000000001";
 /// 品番検索に部分一致で混ざる別の版（カタログ番号 XXCD-10）
 const PARTIAL_EDITION: &str = "aaaaaaaa-0000-4000-8000-000000000010";
+/// レーベルが未登録（label-info の label が null）で品番 XXCD-2 だけある版
+const NO_LABEL_EDITION: &str = "aaaaaaaa-0000-4000-8000-000000000002";
 
 /// `ws/2/release/<id>` の応答を Nevermind の DiscID 応答から作る。通常盤と部分一致の版は 1 件目の
 /// id とカタログ番号を差し替え、DiscID を外したもの
@@ -569,11 +572,15 @@ fn nevermind_release(id: &str) -> Option<String> {
         }
         NORMAL_EDITION => (&releases[0], "XXCD-1"),
         PARTIAL_EDITION => (&releases[0], "XXCD-10"),
+        NO_LABEL_EDITION => (&releases[0], "XXCD-2"),
         _ => return None,
     };
     let mut r = base.clone();
     r["id"] = id.into();
     r["label-info"][0]["catalog-number"] = catno.into();
+    if id == NO_LABEL_EDITION {
+        r["label-info"][0]["label"] = serde_json::Value::Null;
+    }
     for m in r["media"].as_array_mut().expect("media") {
         m["discs"] = serde_json::json!([]);
     }
@@ -1719,5 +1726,40 @@ async fn catno_is_part_of_the_cache_key() {
         seen.lock().await.requests.len(),
         n,
         "表記揺れは覚えた結果を返す"
+    );
+}
+
+/// レーベルが未登録で品番だけある label-info も品番で当たる（codex 指摘）
+#[tokio::test]
+async fn catno_matches_a_label_info_without_a_label() {
+    let (base, _seen) = serve().await;
+    let client =
+        MusicBrainzClient::new(base, "spindle-test/0.1", Duration::from_millis(0)).expect("client");
+    let toc = nevermind_toc();
+    let r = client
+        .lookup(&catno_query(&toc, Some("XXCD-2")))
+        .await
+        .expect("lookup");
+    assert_eq!(r.candidates[0].release_id, NO_LABEL_EDITION);
+    assert_eq!(r.candidates[0].matched_by, vec![MatchedBy::Catno]);
+    assert_eq!(
+        r.candidates[0].labels,
+        vec![(String::new(), Some("XXCD-2".to_owned()))]
+    );
+    assert!(r.notes.is_empty(), "{:?}", r.notes);
+}
+
+/// label も品番も無い label-info は捨てる
+#[test]
+fn label_info_without_label_and_catalog_number_is_dropped() {
+    let mut v: serde_json::Value = serde_json::from_str(NEVERMIND).expect("JSON");
+    v["releases"][0]["label-info"] = serde_json::json!([
+        { "label": null, "catalog-number": null },
+        { "label": null, "catalog-number": "XXCD-2" }
+    ]);
+    let c = parse_lookup(&v.to_string(), NEVERMIND_ID, 12).expect("解釈できる");
+    assert_eq!(
+        c[0].labels,
+        vec![(String::new(), Some("XXCD-2".to_owned()))]
     );
 }

@@ -143,7 +143,11 @@ export function candidateSummary(c: ReleaseCandidate): string {
   const parts: string[] = []
   if (c.date) parts.push(c.date)
   if (c.country) parts.push(c.country)
-  for (const [label, catalog] of c.labels) parts.push(catalog ? `${label} ${catalog}` : label)
+  // レーベルが未登録で品番だけの label-info はレーベル名が空（D-94）
+  for (const [label, catalog] of c.labels) {
+    const s = [label, catalog ?? ''].filter((v) => v !== '').join(' ')
+    if (s !== '') parts.push(s)
+  }
   if (c.barcode) parts.push(`JAN/UPC ${c.barcode}`)
   // 形式と何枚目かは mediaSummary が出す（リリース全体の構成も含めて見せる）
   if (c.status && c.status !== 'Official') parts.push(c.status)
@@ -647,6 +651,15 @@ export function typedProblems(t: TypedIds): string[] {
 /** 照会に添える形（`POST /api/cd/lookup` の catno / barcode）。空は null */
 export function typedLookupExtra(t: TypedIds): { catno: string | null; barcode: string | null } {
   return { catno: orNull(t.catno), barcode: orNull(t.barcode) }
+}
+
+/**
+ * 照会に添える識別子に、**いまの**手入力の品番と JAN を重ねる。照会のボタンすべて（「さらに広げて探す」で
+ * 直前の識別子を使い回すときも）これを通す。載せられない形なら品番と JAN は添えない
+ */
+export function withTyped<T extends object>(extra: T, t: TypedIds): T & { catno: string | null; barcode: string | null } {
+  const typed = typedProblems(t).length === 0 ? typedLookupExtra(t) : { catno: null, barcode: null }
+  return { ...extra, ...typed }
 }
 
 /** 候補のレーベルのうち、品番が入力と一致するもの（無ければ null） */

@@ -6,6 +6,7 @@ import {
   normalizeCatno,
   typedLookupExtra,
   typedProblems,
+  withTyped,
   candidateLengthMs,
   candidateSummary,
   draftFromCandidate,
@@ -597,6 +598,25 @@ describe('手入力の品番と JAN（D-94）', () => {
     expect(typedProblems(typed('A'.repeat(33)))).toHaveLength(1)
     expect(typedProblems(typed('', '12345'))).toHaveLength(1)
     expect(typedLookupExtra(typed(' UPCJ-9001 ', ''))).toEqual({ catno: 'UPCJ-9001', barcode: null })
+  })
+
+  it('照会に添える識別子にいまの入力を重ねる。前の品番は上書きし、不正な形なら添えない', () => {
+    const last = { isrcs: ['JPQ402600330'], catno: 'OLD-1', refresh: true }
+    expect(withTyped(last, typed('UPCJ-9001'))).toEqual({
+      isrcs: ['JPQ402600330'],
+      catno: 'UPCJ-9001',
+      barcode: null,
+      refresh: true,
+    })
+    expect(withTyped(last, typed(''))).toMatchObject({ catno: null, barcode: null })
+    expect(withTyped(last, typed('UPCJ"9001'))).toMatchObject({ catno: null, barcode: null })
+  })
+
+  it('レーベルが未登録で品番だけの label-info も一致し、要約は品番だけ出す', () => {
+    const noLabel: ReleaseCandidate = { ...shokai, labels: [['', 'UPCJ-9001']] }
+    const d = applyTyped(draftFromCandidate(noLabel, toc, 'full'), noLabel, typed('UPCJ-9001'), 'full')
+    expect(d).toMatchObject({ label: '', catalog_number: 'UPCJ-9001', barcode: '4988031278079' })
+    expect(candidateSummary(noLabel)).toContain(' · UPCJ-9001 · ')
   })
 
   it('候補の品番と一致すれば候補の表記と JAN を使う', () => {

@@ -17,7 +17,7 @@ import type { CdDriveState } from '../hooks/useCdDrive'
 import { useCdLibrary } from '../hooks/useCdLibrary'
 import type { CdLookupState } from '../hooks/useCdLookup'
 import type { CdRipState } from '../hooks/useCdRip'
-import { lookupHeadline, typedLookupExtra, typedProblems, validateDraft } from '../lib/cd'
+import { lookupHeadline, typedProblems, validateDraft, withTyped } from '../lib/cd'
 import { driveIdsFor, driveInfoLabel, driveStateLabel } from '../lib/cdDrive'
 import { libraryNotice } from '../lib/cdLibrary'
 import { ripStatusLabel } from '../lib/cdRip'
@@ -50,14 +50,15 @@ export function CdView({
   // （別の盤の TOC を貼ったときに混ぜない。lib/cdDrive.ts の driveIdsFor）
   // 手入力の品番と JAN は、照会のボタンすべてに添える（載せられない形なら添えない）
   const typedErrors = typedProblems(cd.typed)
-  const ids = { ...driveIdsFor(cd.toc, drive.status), ...(typedErrors.length === 0 ? typedLookupExtra(cd.typed) : {}) }
+  const ids = withTyped(driveIdsFor(cd.toc, drive.status), cd.typed)
   const [releaseRef, setReleaseRef] = useState('')
   const canEject =
     drive.status != null && drive.status.state !== 'no_drive' && drive.status.state !== 'unknown' && !drive.ejecting
   const hasDisc = drive.status?.state === 'disc_ok'
   // 取り込めるのは、表の TOC がいまドライブに入っている盤のものであるとき（貼り付けた TOC は吸えない）
   const discToc = hasDisc ? (drive.status?.toc ?? null) : null
-  const ripProblems = draft != null ? validateDraft(draft) : []
+  // 品番と JAN の形が不正なら取り込みも止める（そのままタグに残るため。D-94）
+  const ripProblems = draft != null ? [...validateDraft(draft), ...typedErrors] : []
   const canRip =
     draft != null && discToc != null && discToc === cd.toc && ripProblems.length === 0 && !rip.running && !rip.starting
   const owned = libraryNotice(useCdLibrary(draft != null ? cd.toc : '', draft?.release_id ?? null))
