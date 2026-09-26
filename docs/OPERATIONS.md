@@ -48,6 +48,15 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
    旧タグ（`X.Y.Z`）を指して再作成 → `/health` の `version` で旧版を確認。順序を違えると、旧版を新 schema の
    DB で起動したり、稼働中の DB を差し替えたりすることになる
 
+### 外から https で使う（リバースプロキシ / Cloudflare Tunnel）
+
+プロキシが spindle へ http で転送するときは、`config.toml` の `[auth].trusted_proxies` にプロキシの接続元を入れる。
+入れないと spindle は `X-Forwarded-Proto: https` を信用せず、自分を `http://<host>` とみなすので、ブラウザの
+`Origin: https://<host>` と一致せず**ログインなど変更系の要求が CSRF 検査で 403 になる**（Cookie にも Secure が付かない）。
+接続元は spindle のログの `ログイン失敗 ip=` などで分かる。実機は cloudflared が host ネットワークから
+`172.16.100.24:80` へ転送するので、接続元は NAS 自身の `172.16.100.5`（`trusted_proxies = ["172.16.100.5/32"]`。
+2026-09-26）。変えたら再起動する
+
 ### YouTube の取り込みが失敗し始めたら
 
 まずイメージを更新する（yt-dlp が古いと YouTube の抽出が壊れる。新版は Renovate が PR にし、マージ
