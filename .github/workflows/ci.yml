@@ -41,11 +41,14 @@ jobs:
     # 本番のイメージ（deploy/Dockerfile の debian:bookworm-slim）と同じ Debian bookworm で試験を走らせ、ffmpeg を
     # 本番と同じ版（5.1）に揃える。ALAC の edit list の扱いは ffmpeg の版で違い（D-89 追記 2）、Ubuntu の
     # ffmpeg（6.1）では本番の挙動を確かめられない。Dockerfile のビルド段と同じイメージ
+    # 試験は一般ユーザで走らせる（本番のコンテナも user 1000:1000）。root だと chmod で読めない・書けないを
+    # 模擬する試験（artwork_scan / gc / normalize ほか）の失敗が起きない。パッケージとツールチェーンの用意だけ root
     container: rust:1-bookworm
     steps:
       - uses: actions/checkout@v4
-      # コンテナの root と checkout の所有者が違うので、build.rs の git describe が dubious ownership で落ちないように
-      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # checkout の所有者と cargo を走らせるユーザが違うので、build.rs の git describe が dubious ownership で
+      # 落ちないように（全ユーザに効く --system）
+      - run: git config --system --add safe.directory "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -56,9 +59,13 @@ jobs:
       # 本番のイメージと同じものを必ず入れる
       - run: apt-get update && apt-get install -y --no-install-recommends ffmpeg flac opus-tools
       - run: ffmpeg -version | head -n1
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - name: 試験用の一般ユーザ（uid 1000）
+        run: |
+          useradd -m -u 1000 ci
+          chown -R ci:ci "$GITHUB_WORKSPACE" "$CARGO_HOME" "$RUSTUP_HOME"
+      - run: runuser -u ci -- env "PATH=$PATH" cargo fmt --check
+      - run: runuser -u ci -- env "PATH=$PATH" cargo clippy --all-targets --locked -- -D warnings
+      - run: runuser -u ci -- env "PATH=$PATH" cargo test --locked
 
   docker:
     # イメージを 1 回だけビルドして起動確認する（PR でも走る。書き込み権限は持たない）。push は別ジョブ
