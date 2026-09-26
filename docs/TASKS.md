@@ -1965,6 +1965,25 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
 - [x] CI の `--init` で分かったこと: 本番のコンテナも init が無く spindle が PID 1 で、取り消しで kill した孫プロセスが
       ゾンビのまま残りうる。`deploy/compose.yaml` と実機のカスタムアプリに `init: true`（2026-09-26）
 
+### P4-25 CD の取り込みで品番（と JAN）を入れて版を識別する
+
+2026-09-26 のユーザ要望。DiscID で当たった候補が手元の盤と別の版（通常盤に対して初回限定盤）で、取り込むと
+どの盤かが落ちる。品番を手で入れて照会に使い、MusicBrainz に手元の版が無いときも品番をタグに残す（D-94）
+
+- [ ] `POST /api/cd/lookup` に `catno?` / `barcode?`（手入力の JAN。盤の MCN が無いときだけ使う）。`catno` は段に
+      関係なく常に `ws/2/release?query=catno:"…"` を引き、label-info の品番が正規化して一致する候補に経路 `catno`。
+      `matched_by` の順を `catno | discid | release | isrc | barcode | toc` に。照会のキャッシュの鍵に入れる
+- [ ] CD 画面の ① に「品番」「JAN」の入力欄（盤が替わったら消す）。品番を入れたら照会し直す
+- [ ] 候補を写すとき: 品番が一致すれば候補の表記、食い違えば入力値にして `BARCODE` を引き継がない（JAN の入力が
+      あればそれ）。写す範囲が「最小限」でも入力値は書く。食い違いの注意を ③ に出す
+- [ ] SPEC §7.2 と API 表（`/api/cd/lookup`）を更新
+
+受け入れ: `tests/cd_musicbrainz.rs`（`catno` の検索とクエリの消毒、正規化の一致だけに経路が付く、DiscID で
+当たっても引く、並び、キャッシュの鍵）、`tests/cd_lookup_api.rs`（`catno` / `barcode` の受け取り）、
+`web/src/lib/cd.test.ts`（一致 / 食い違いの写し方、最小限でも入力値が残る、JAN の扱い）。実機で、DiscID が
+初回盤にしか付いていない通常盤を品番で引き、通常盤の候補が先頭に出ること（MusicBrainz に無い版なら、
+食い違いの注意が出て `CATALOGNUMBER` が入力値・`BARCODE` が空で Inbox に届くこと）
+
 ---
 
 ## 着手前に確認が必要な残課題
@@ -1974,6 +1993,8 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
   MBID → album 行にした。CD とそれ以外は Inbox の追記先で混ぜない。D-67 追記 3、マイグレーション 0024）
 
 - ~~Discogs / VGMdb 連携の要否~~（2026-09-20。作らない。D-72）
+- 品番で MusicBrainz に当たらない盤の予備の取得先（Discogs の `catno=` 検索）。D-72 で却下済み。P4-25 を入れたあと、
+  当たらない盤がどれくらいあるかを見て再検討する（2026-09-26。D-94）
 - ~~`.fpl` 書き出しの要否~~（2026-09-20。作らない。D-72）
 - ~~Inbox のポーリング間隔~~（P2-10 で決めた。60 秒 + 手動。D-68）
 - ~~一括リネーム後の旧ディレクトリに残る同梱ファイル（cover.jpg / disc.cue / rip.log）と
