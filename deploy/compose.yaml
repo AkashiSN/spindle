@@ -1,6 +1,9 @@
 services:
   spindle:
     image: ghcr.io/akashisn/spindle:latest
+    # PID 1 を docker の init（tini）にする。spindle が PID 1 だと、ジョブの取り消しで kill した孫プロセス
+    # （TERM を無視したもの）が spindle に引き取られ、ゾンビのまま残る（spindle は自分の子しか回収しない）
+    init: true
     devices:
       - /dev/sr0:/dev/sr0          # CD ドライブ。ioctl / SG_IO とも sr0 に直接通る（/dev/sg* は不要）
     group_add:

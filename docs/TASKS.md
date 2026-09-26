@@ -1962,6 +1962,8 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
       やり直される）→ 46 本だけを選んで正規化 → 全件 applied を確認。2026-09-26 に `v0.1.1` で実施: deep scan で
       46 / 46 の `audio_md5` と `audio_version` が変わり、他の 9,054 本は不変。RG / Derived のやり直しは失敗 0。
       正規化バッチ 22 は 46 applied / 0 failed で、Library の ALAC は 0 本（FLAC 7,570）
+- [x] CI の `--init` で分かったこと: 本番のコンテナも init が無く spindle が PID 1 で、取り消しで kill した孫プロセスが
+      ゾンビのまま残りうる。`deploy/compose.yaml` と実機のカスタムアプリに `init: true`（2026-09-26）
 
 ---
 
