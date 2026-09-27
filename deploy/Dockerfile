@@ -1,5 +1,5 @@
 # ---- web ----
-FROM node:22-alpine AS web
+FROM node:24-alpine AS web
 WORKDIR /web
 COPY web/package*.json ./
 RUN npm ci
