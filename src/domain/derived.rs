@@ -21,7 +21,7 @@ use crate::domain::replaygain::{tag_changes, Values};
 use crate::domain::tags::{Codec, TransferTags};
 
 /// Derived の系統（SPEC §7.6、D-75）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Variant {
     /// Android の同期・Web 再生・配布ビュー

@@ -66,3 +66,120 @@ fn sha256_hex_of_empty() {
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     );
 }
+
+fn settings(variant: Variant, enabled: bool) -> spindle::domain::derived::VariantSettings {
+    spindle::domain::derived::VariantSettings {
+        variant,
+        enabled,
+        audio_profile: "opus:256:v1".into(),
+        tag_profile: "opus:v1".into(),
+        lossy_sources: variant == Variant::Aac,
+        multi_value_separator: " & ".into(),
+    }
+}
+
+fn input(id: i64, rel: &str, lossless: bool) -> TrackInput {
+    TrackInput {
+        track_id: id,
+        rel_path: rel.into(),
+        lossless,
+        channels: Some(2),
+        audio_version: 3,
+        tag_version: 5,
+        rg_ready: true,
+        derived: None,
+        hash_master: None,
+        hash_derived: None,
+    }
+}
+
+#[test]
+fn opus_lossy_original_is_sent_as_master() {
+    let t = input(1, "YT/a/b/x.opus", false);
+    let s = decide_source(&settings(Variant::Opus, true), &t).unwrap();
+    assert_eq!(s.kind, SourceKind::Master);
+    assert_eq!(s.root_rel_path, "YT/a/b/x.opus");
+    assert_eq!(s.semantic, semantic_master(3, 5));
+    assert_eq!(dest_path(&t, s.kind), "YT/a/b/x.opus");
+}
+
+#[test]
+fn up_to_date_derived_is_sent_and_path_keeps_library_layout() {
+    let mut t = input(1, "J-Pop/A/B/1-01 x.flac", true);
+    t.derived = Some(row());
+    let s = decide_source(&settings(Variant::Opus, true), &t).unwrap();
+    assert_eq!(s.kind, SourceKind::Derived(Variant::Opus));
+    assert_eq!(s.root_rel_path, "opus/A/B/1-01 x.opus");
+    assert_eq!(dest_path(&t, s.kind), "J-Pop/A/B/1-01 x.opus");
+}
+
+#[test]
+fn stale_tags_are_still_sent() {
+    let mut t = input(1, "a.flac", true);
+    let mut r = row();
+    r.src_tag_version = 4; // タグだけ古い（D-25）
+    t.derived = Some(r);
+    assert!(decide_source(&settings(Variant::Opus, true), &t).is_ok());
+}
+
+#[test]
+fn stale_audio_or_profile_waits_when_enabled() {
+    let mut t = input(1, "a.flac", true);
+    let mut r = row();
+    r.src_audio_version = 2;
+    t.derived = Some(r);
+    assert_eq!(
+        decide_source(&settings(Variant::Opus, true), &t),
+        Err(Wait::AudioStale)
+    );
+    let mut r = row();
+    r.audio_profile = "opus:128:v1".into();
+    t.derived = Some(r);
+    assert_eq!(
+        decide_source(&settings(Variant::Opus, true), &t),
+        Err(Wait::AudioStale)
+    );
+}
+
+#[test]
+fn frozen_variant_keeps_old_profile_but_never_serves_stale_audio() {
+    let mut t = input(1, "a.flac", true);
+    let mut r = row();
+    r.audio_profile = "opus:128:v1".into(); // 凍結中は行の profile を有効とみなす
+    t.derived = Some(r.clone());
+    assert!(decide_source(&settings(Variant::Opus, false), &t).is_ok());
+    r.src_audio_version = 2;
+    t.derived = Some(r);
+    assert_eq!(
+        decide_source(&settings(Variant::Opus, false), &t),
+        Err(Wait::AudioStale)
+    );
+}
+
+#[test]
+fn missing_derived_waits_with_reason() {
+    let t = input(1, "a.flac", true);
+    assert_eq!(
+        decide_source(&settings(Variant::Opus, true), &t),
+        Err(Wait::NoDerived)
+    );
+    let mut t = input(1, "a.flac", true);
+    t.rg_ready = false;
+    assert_eq!(
+        decide_source(&settings(Variant::Aac, true), &t),
+        Err(Wait::RgPending)
+    );
+    // aac は非可逆も Derived から（原本は送らない）
+    let t = input(2, "x.opus", false);
+    assert_eq!(
+        decide_source(&settings(Variant::Aac, true), &t),
+        Err(Wait::NoDerived)
+    );
+}
+
+#[test]
+fn utf16_len_counts_surrogates() {
+    assert_eq!(utf16_len("abc"), 3);
+    assert_eq!(utf16_len("群青"), 2);
+    assert_eq!(utf16_len("𝄞"), 2);
+}
