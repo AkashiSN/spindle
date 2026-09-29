@@ -641,6 +641,9 @@ CUETools の "verify from files" 相当。
   照合を始めたときの `audio_version` が 1 本でも進んでいれば何も書かない。verify.log は tmp に書き、
   トランザクションの中で本来の名前に rename してから commit する。`album_verifications.job_id` で
   同じジョブの再実行（commit の後に落ちた場合）を見分け、何もしない（履歴もログも初回のまま）
+- ジョブの結果 1 行（`jobs.note`）にディスクごと・手法ごとの結果（一致数と信頼度 / 登録なし /
+  検証不能・照合しなかった理由）を残し、操作タブが投入したジョブを追って出す（D-96）。結果 1 行は記録と
+  同じトランザクションで `jobs.note` に書き、commit の後に落ちた再実行はそれをそのまま返す
 - **不一致は不良を意味しない。** ギャップ処理差、隠しトラック、データトラックの存在で
   普通に外れる。`mismatch` は「要確認」として扱い、警告色で表示しない
 
@@ -1436,8 +1439,9 @@ GET    /api/tracks?filter=&sort=&cursor=&limit=   カーソルページング（
                                                   sort = album(既定) | title | artist | album_title |
                                                   albumartist | date | duration | codec | rel_path | id
                                                   （`-` 前置で降順）、limit = 1..=1000（既定 100）
-GET    /api/tracks/:id                            セッション有りは一覧と同じ行。trusted_cidrs からの
-                                                  セッション無しは限定フィールド（D-27 / D-39）
+GET    /api/tracks/:id                            セッション有りは一覧と同じ行に detail（タグ全部・物理属性・
+                                                  verifications = 手法ごとの最新の照合。D-58 / D-96）を足す。
+                                                  trusted_cidrs からのセッション無しは限定フィールド（D-27 / D-39）
 PATCH  /api/tracks/batch                          一括編集（dry_run フラグ）
 POST   /api/tracks/batch/preview                  変更プレビュー
 POST   /api/rename/preview                        テンプレート適用結果（selection_token を発行）
@@ -1738,6 +1742,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "note",          // 完了時の結果 1 行（ハンドラが返す。ytdl: "Inbox に置いた: <path>" /
                                 //   "プラグインが skip: <理由>" / "取り込み済み（Library|Inbox）: <パス>" /
                                 //   "再生リストを展開した: N 件を投入、M 件は取り込み済み"。
+                                //   verify: 手法ごとの結果（"CTDB 全 12 曲一致（信頼度 34） / AccurateRip
+                                //   12 曲中 10 曲一致"、複数ディスクは "disc N: " 付きで「。」区切り。D-96）。
                                 //   playlist_sync: 同期の要約。無ければ null）
                "subject" } ],   // subject = 対象の表示用文字列（track_id → Library のパス、album_id → ディレクトリ、
                                 //   batch_id → 説明、transcode は " [<variant>]" 付き、scan は kind、ytdl は url、
@@ -1979,7 +1985,7 @@ rel_path（既定非表示）
 
 | バッジ | 条件 | 出典 |
 |---|---|---|
-| 検証 | `verification` の 5 値をアイコン色で区別。`unverifiable` は「未検証」と別の見え方 | tracks |
+| 検証 | `verification` を検証済み / 不一致 / 検証不能 / 未検証の 4 つの見え方で出す。`verified_ctdb` と `verified_ar` は同じ「検証済み」（どちらで一致したかはプロパティの General の CTDB / AccurateRip 行。D-96）。`unverifiable` は「未検証」と別の見え方 | tracks |
 | 可逆 / 非可逆 | `lossless` | tracks |
 | RG | `rg_scanned_at` の有無。書き込み未反映（`rg_written_at < rg_scanned_at`）は半透明 | tracks |
 | Derived | `derived_files` の `opus` 系統あり（= 配布ビュー）。`stale_tags` は点付き。`aac` 系統はバッジにせずプロパティの Location 列に行を出す（§7.6） | delivery |
