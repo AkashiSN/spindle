@@ -15,6 +15,7 @@ import { HistoryView } from './components/HistoryView'
 import { JobsView } from './components/JobsView'
 import { Login } from './components/Login'
 import { CdView } from './components/CdView'
+import { DevicesView } from './components/DevicesView'
 import { InboxView } from './components/InboxView'
 import { SettingsView } from './components/SettingsView'
 import { RightPanel, type SelectionSummary } from './components/RightPanel'
@@ -41,6 +42,9 @@ import { useCdLookup } from './hooks/useCdLookup'
 import { useCdRip } from './hooks/useCdRip'
 import { useInbox } from './hooks/useInbox'
 import { useInboxSummary } from './hooks/useInboxSummary'
+import { useDevices } from './hooks/useDevices'
+import { useLocalStorageState } from './hooks/useLocalStorageState'
+import { totalBadge } from './lib/devices'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
 import { useSubscriptions } from './hooks/useSubscriptions'
@@ -161,6 +165,13 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   // 承認 / 却下 / 下書きに戻す は件数を変えるので、バッジにも知らせる（却下と下書きに戻すは
   // ジョブを作らないため、job イベントでは拾えない）
   const inbox = useInbox(sseOpen && view === 'inbox', inboxSummary.refresh)
+  // 端末の一覧は画面に関わらず取る（ナビの未反映バッジ）。差分は端末タブで選んだ端末だけ（P5-2）
+  const [deviceId, setDeviceId] = useLocalStorageState<number | null>(
+    'devices.selected',
+    null,
+    (v): v is number | null => v === null || typeof v === 'number',
+  )
+  const devices = useDevices(sseOpen, view === 'devices' ? deviceId : null)
   const visibleEnd = useRef(0)
 
   // filter 形の選択の「うち反映待ち」。選択集合は immutable でも中の行の pending はバッチの進行で
@@ -205,8 +216,9 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     // 切れている間に Inbox が変わっていることがある（周期監視の走査・配置）。
     // バッジは 60 秒の周期でしか直らないので、ここでも取り直す（P4-20）
     inboxSummary.refresh()
+    devices.refresh()
     if (view === 'history') history.refresh()
-  }, [jobs, albums, refreshPlaylists, tracks, refreshPending, bumpDetails, inboxSummary, view, history])
+  }, [jobs, albums, refreshPlaylists, tracks, refreshPending, bumpDetails, inboxSummary, devices, view, history])
   // SSE が切れたとき（401 で閉じられた場合を含む）にセッションを確かめる。401 なら
   // apiFetch の onUnauthorized 経由でログイン画面へ戻る。連続するエラーは 5 秒に 1 回に間引くが、
   // 最後のエラーは必ず確認する（サーバ再起動直後は接続拒否 → 再接続で 401 の順に来る。
@@ -264,6 +276,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         // バッジは画面に関わらず更新する（Inbox を開いていなくても数字が増える）
         inboxSummary.refresh()
         if (view === 'inbox') inbox.refresh()
+        // 端末の差分はハッシュ計算・変換・評価の完了で変わる（hook 側で 250ms に間引く）
+        devices.refresh()
       }
     },
     onBatch: () => {
@@ -503,6 +517,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         onView={setView}
         summary={jobs.summary}
         inbox={inboxSummary.summary}
+        devices={devices.items ? totalBadge(devices.items) : null}
         connected={connected}
         onLogout={logout}
         player={player}
@@ -627,6 +642,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
               setView('inbox')
             }}
           />
+        ) : view === 'devices' ? (
+          <DevicesView devices={devices} selectedId={deviceId} onSelect={setDeviceId} playlists={playlists} />
         ) : view === 'jobs' ? (
           <JobsView
             jobs={jobs}

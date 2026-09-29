@@ -276,6 +276,16 @@ code {
   background: var(--error);
   color: var(--bg);
 }
+/* 端末に未反映（P5-2、D-95）。Inbox と同じ形で、急ぎではないので黄で塗る */
+.top-bar .devices-count {
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 5px;
+  margin-left: 4px;
+  border-radius: 8px;
+  background: var(--badge-amber-strong-bg);
+  color: var(--badge-amber-strong-fg);
+}
 .top-bar .jobs-failed {
   display: inline-block;
   width: 7px;
@@ -3163,4 +3173,118 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 }
 .operations .album-gain input[type='checkbox'] {
   width: auto;
+}
+
+/* 端末タブ（P5-2、D-95）。Inbox と同じ 左に一覧 + 右に詳細 */
+.devices-body {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-top: 8px;
+}
+.devices-side {
+  flex: 0 0 240px;
+  max-width: 40%;
+}
+.devices-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.devices-list li {
+  border-bottom: 1px solid var(--border);
+}
+.devices-list li.selected {
+  background: var(--accent-bg);
+}
+.devices-list button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.devices-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  word-break: break-all;
+}
+.devices-add {
+  margin-top: 8px;
+}
+.devices-add-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 4px;
+}
+.devices-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.devices-add-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.devices-detail {
+  flex: 1;
+  min-width: 0;
+}
+.devices-detail .tabs {
+  display: flex;
+  margin-bottom: 8px;
+}
+.devices-detail .tabs button {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 6px 10px;
+}
+.devices-detail .tabs button.active {
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.devices-warn {
+  padding: 4px 6px;
+  border-left: 2px solid var(--warn);
+  background: var(--bg-alt);
+}
+.devices-evaluations {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+.devices-op {
+  white-space: nowrap;
+}
+.devices-diff-table tr.op-error td.devices-op {
+  color: var(--error);
+}
+.devices-diff-table tr.op-delete td.devices-op,
+.devices-diff-table tr.op-waiting td.devices-op {
+  color: var(--muted);
+}
+.devices-playlists {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+.devices-playlists li {
+  padding: 2px 0;
+}
+.devices-settings button.danger {
+  color: var(--error);
 }

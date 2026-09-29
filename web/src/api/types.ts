@@ -60,6 +60,8 @@ export type TrackRow = {
   album_id: number | null
   /** トラック自身の埋め込み画像の SHA-256（hex）。無ければ null（D-61） */
   artwork_hash: string | null
+  /** 端末ごとの状態（対象外の端末は含まない。旧サーバでは無い） */
+  devices?: TrackDeviceState[]
 }
 
 /** `GET /api/tracks/:id`（セッションあり）が行に加えて返す詳細（D-58）。一覧には付かない */
@@ -347,3 +349,70 @@ export interface Subscription {
 export interface SubscriptionList {
   items: Subscription[]
 }
+
+// ---------------------------------------------------------------- 端末（P5-2、D-95）
+export type DeviceTransport = 'adb' | 'agent'
+export type DeviceVariant = 'opus' | 'aac'
+export type DeviceSelection = 'all' | 'playlists'
+export type DeviceCounts = {
+  add: number
+  update: number
+  move: number
+  delete: number
+  waiting: number
+  error: number
+  synced: number
+}
+export type Device = {
+  id: number
+  name: string
+  transport: DeviceTransport
+  variant: DeviceVariant
+  selection: DeviceSelection
+  generation: number
+  /** 接続状態（Android は P5-3 で埋める。iPhone は常に null） */
+  connected: boolean | null
+  counts: DeviceCounts
+  last_synced_at: number | null
+  playlist_ids: number[]
+  /** 同期が途中か実行中（設定を変えられない） */
+  open_plan: boolean
+}
+export type DeviceList = { items: Device[] }
+export type DiffOp = 'add' | 'update' | 'move' | 'update_move' | 'delete' | 'waiting' | 'error'
+export type DiffItem = {
+  op: DiffOp
+  track_id: number
+  title: string | null
+  artist: string | null
+  from: string | null
+  dest_path: string | null
+  reason: string | null
+  size: number
+  has_copy: boolean
+}
+export type DiffPlaylist = {
+  op: 'add' | 'update' | 'delete' | 'error'
+  playlist_id: number
+  name: string | null
+  dest_path: string | null
+  reason: string | null
+}
+export type DeviceDiff = {
+  generation: number
+  plan_token: string
+  pending_reevaluation: boolean
+  items: DiffItem[]
+  playlists: DiffPlaylist[]
+  estimate: { transfer_bytes: number; peak_bytes: number; free: number | null }
+  evaluations: { playlist_id: number; name: string; evaluated_at: number | null; pending: boolean }[]
+  counts: DeviceCounts
+}
+export type SelectionEstimate = { tracks: number; bytes: number; unhashed: number }
+/** トラック行の端末ごとの状態（Task 9） */
+export type TrackDeviceState =
+  | { device_id: number; state: 'synced'; synced_at: number | null }
+  | { device_id: number; state: 'pending'; op: 'add' | 'update' | 'move' | 'update_move'; reason: string | null }
+  | { device_id: number; state: 'waiting'; reason: string; has_copy: boolean }
+  | { device_id: number; state: 'error'; reason: string; has_copy: boolean }
+  | { device_id: number; state: 'removing' }
