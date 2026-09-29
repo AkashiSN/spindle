@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { TrackDetail, TrackRow } from '../api/types'
+import type { Device, TrackDetail, TrackRow, TrackVerification } from '../api/types'
 import {
   commonValue,
   generalRows,
@@ -7,7 +7,12 @@ import {
   locationRows,
   metadataRows,
   splitValues,
-  STANDARD_KEYS, canDeleteRow, newFieldKeyProblem } from './properties'
+  STANDARD_KEYS,
+  canDeleteRow,
+  newFieldKeyProblem,
+  deviceLabel,
+  deviceRows,
+} from './properties'
 
 function row(over: Partial<TrackRow> = {}): TrackRow {
   return {
@@ -54,6 +59,7 @@ function detail(over: Partial<TrackDetail> = {}): TrackDetail {
     audio_md5: null,
     original_codec: null,
     added_at: 1_690_000_000,
+    verifications: [],
     ...over,
   }
 }
@@ -224,6 +230,73 @@ describe('generalRows', () => {
   })
 })
 
+describe('照合の手法ごとの結果（どちらで一致したかはプロパティだけが出す）', () => {
+  const v = (over: Partial<TrackVerification>): TrackVerification => ({
+    method: 'ctdb',
+    result: 'verified',
+    matched: true,
+    source: 'retro',
+    detected_offset: 0,
+    confidence: 34,
+    verified_at: 1,
+    disc_no: 1,
+    ...over,
+  })
+
+  it('バッジと同じく Verification は一致したかだけ。CTDB / AccurateRip の行に手法ごとの結果', () => {
+    const rows = generalRows(
+      [row({ verification: 'verified_ctdb' })],
+      new Map([
+        [
+          1,
+          detail({
+            verifications: [
+              v({ detected_offset: 6 }),
+              v({ method: 'accuraterip', result: 'mismatch', matched: false, confidence: 0, detected_offset: -3 }),
+            ],
+          }),
+        ],
+      ]),
+    )
+    expect(valueOf(rows, 'verification')).toEqual({ kind: 'text', text: '検証済み' })
+    expect(valueOf(rows, 'verify_ctdb')).toEqual({ kind: 'text', text: '一致（信頼度 34、オフセット +6）' })
+    expect(valueOf(rows, 'verify_ar')).toEqual({ kind: 'text', text: '不一致' })
+    // AccurateRip だけの一致もバッジは同じ「検証済み」
+    const ar = generalRows([row({ verification: 'verified_ar' })], new Map())
+    expect(valueOf(ar, 'verification')).toEqual({ kind: 'text', text: '検証済み' })
+  })
+
+  it('登録なし・検証不能・記録なし', () => {
+    const rows = generalRows(
+      [row()],
+      new Map([
+        [
+          1,
+          detail({
+            verifications: [
+              v({ result: 'not_found', matched: false, confidence: 0 }),
+              v({ method: 'accuraterip', result: 'unverifiable', matched: false, confidence: null, detected_offset: null }),
+            ],
+          }),
+        ],
+      ]),
+    )
+    expect(valueOf(rows, 'verify_ctdb')).toEqual({ kind: 'text', text: '登録なし' })
+    expect(valueOf(rows, 'verify_ar')).toEqual({ kind: 'text', text: '検証不能' })
+    const none = generalRows([row()], new Map([[1, detail()]]))
+    expect(valueOf(none, 'verify_ctdb')).toEqual({ kind: 'empty' })
+    expect(valueOf(none, 'verify_ar')).toEqual({ kind: 'empty' })
+  })
+
+  it('不一致のディスクで一致したトラックは信頼度を出さない（ディスクの信頼度は 0）', () => {
+    const rows = generalRows(
+      [row()],
+      new Map([[1, detail({ verifications: [v({ result: 'mismatch', matched: true, confidence: 0 })] })]]),
+    )
+    expect(valueOf(rows, 'verify_ctdb')).toEqual({ kind: 'text', text: '一致' })
+  })
+})
+
 describe('フィールドの追加 / 削除（P4-3、D-72）', () => {
   it('newFieldKeyProblem: 空・使えない文字・PICTURE・既存キーを弾き、大文字化して比べる', () => {
     const existing = ['ARTIST', 'TITLE', 'MYTAG']
@@ -240,5 +313,33 @@ describe('フィールドの追加 / 削除（P4-3、D-72）', () => {
     expect(canDeleteRow({ value: { kind: 'text', text: 'x' } })).toBe(true)
     expect(canDeleteRow({ value: { kind: 'multiple' } })).toBe(true)
     expect(canDeleteRow({ value: { kind: 'empty' } })).toBe(false)
+  })
+})
+
+describe('端末欄', () => {
+  const dev = (id: number, name: string) => ({ id, name }) as Device
+  it('状態ごとの文言', () => {
+    expect(deviceLabel({ device_id: 1, state: 'pending', op: 'update_move', reason: null })).toBe('未反映（更新 + 移動）')
+    expect(deviceLabel({ device_id: 1, state: 'waiting', reason: 'RG 未解析', has_copy: true })).toBe('待ち: RG 未解析（古い版が端末にあり）')
+    expect(deviceLabel({ device_id: 1, state: 'error', reason: 'パス衝突', has_copy: false })).toBe('エラー: パス衝突')
+    expect(deviceLabel({ device_id: 1, state: 'removing' })).toBe('対象外（次の同期で端末から削除）')
+    expect(deviceLabel(undefined)).toBe('対象外')
+    expect(deviceLabel({ device_id: 1, state: 'synced', synced_at: null })).toBe('✓ 反映済み')
+  })
+  it('全部 synced で日時だけ違えば反映済み、同じ日時ならその日時', () => {
+    const s = (at: number) => ({ devices: [{ device_id: 1, state: 'synced', synced_at: at }] }) as unknown as TrackRow
+    const d = [dev(1, 'iPhone')]
+    expect(deviceRows([s(1), s(100000)], d)[0]?.value).toEqual({ kind: 'text', text: '✓ 反映済み' })
+    const same = deviceRows([s(5), s(5)], d)[0]?.value
+    expect(same).toMatchObject({ kind: 'text' })
+    expect(same?.kind === 'text' && same.text.startsWith('✓ 反映済み（')).toBe(true)
+  })
+  it('端末ごとに 1 行、複数選択で違えば <複数の値>', () => {
+    const a = { devices: [{ device_id: 1, state: 'synced', synced_at: null }] } as unknown as TrackRow
+    const b = { devices: [] } as unknown as TrackRow
+    const rows = deviceRows([a, b], [dev(1, 'iPhone'), dev(2, 'Xperia')])
+    expect(rows.map((r) => r.label)).toEqual(['iPhone', 'Xperia'])
+    expect(rows[0]?.value).toEqual({ kind: 'multiple' })
+    expect(rows[1]?.value).toEqual({ kind: 'text', text: '対象外' })
   })
 })

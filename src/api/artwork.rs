@@ -23,6 +23,7 @@ use crate::domain::selection::SelectionBody;
 use crate::edit::{EditError, Editor};
 use crate::media::artwork::{ArtworkStore, MAX_COVER_BYTES, THUMB_SIZES};
 
+use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 
@@ -357,7 +358,7 @@ pub async fn embed(
             "sha256 は 64 桁の hex",
         ));
     };
-    let sel = match body.selection.parse() {
+    let mut sel = match body.selection.parse() {
         Ok(s) => s,
         Err(e) => {
             return Ok(error_response_with_message(
@@ -367,6 +368,9 @@ pub async fn embed(
             ))
         }
     };
+    if let Some(f) = sel.filter_mut() {
+        devices::attach_pending(&state, f).await?;
+    }
     let (ids, pending) = state
         .db
         .read(move |c| {

@@ -114,23 +114,29 @@ impl VerifyHandler {
             .read(move |c| {
                 let album = dbv::load_album(c, album_id)?;
                 let tracks = dbv::load_album_tracks(c, album_id)?;
-                let already = dbv::has_records_for_job(c, job_id)?;
+                let already = if dbv::has_records_for_job(c, job_id)? {
+                    Some(dbv::job_note(c, job_id)?)
+                } else {
+                    None
+                };
                 Ok((album, tracks, already))
             })
             .await?;
-        if already {
+        if let Some(note) = already {
             // commit の後・done の前に落ちて再実行された。DB もログ（rename は commit の前）も
-            // 確定済みなので、読み直して別の結果を上書きしない
+            // 結果 1 行（同じトランザクションで書いた）も確定済みなので、読み直して上書きしない
             tracing::info!(job_id, album_id, "前回の実行が記録済みなので何もしない");
-            return Ok(JobOutcome::Done);
+            return Ok(JobOutcome::DoneWith(
+                note.unwrap_or_else(|| "前回の実行で記録済み".into()),
+            ));
         }
         let Some(album) = album else {
             tracing::info!(job_id, album_id, "アルバムが無いので何もしない");
-            return Ok(JobOutcome::Done);
+            return Ok(JobOutcome::DoneWith("アルバムが無い".into()));
         };
         if tracks.is_empty() {
             tracing::info!(job_id, album_id, "active なトラックが無いので何もしない");
-            return Ok(JobOutcome::Done);
+            return Ok(JobOutcome::DoneWith("照合するトラックが無い".into()));
         }
 
         // ディスクごとに分ける（disc_no が無ければ 1）
@@ -196,10 +202,11 @@ impl VerifyHandler {
             .iter()
             .map(|r| format!("disc {}: {}", r.disc_no, r.kind.summary()))
             .collect();
+        let note = result_note(&reports);
         let discs: Vec<DiscRecord> = reports.iter().filter_map(disc_record).collect();
         if discs.is_empty() {
             tracing::info!(job_id, album_id, ?summary, "記録するディスクが無い");
-            return Ok(JobOutcome::Done);
+            return Ok(JobOutcome::DoneWith(note));
         }
         let expected: Vec<(i64, i64)> = reports
             .iter()
@@ -218,6 +225,7 @@ impl VerifyHandler {
         let tmp_guard = ctx.temp_file(&tmp_path);
         let log_path_str = log_path.to_string_lossy().into_owned();
         let (tmp_for_tx, log_for_tx) = (tmp_path.clone(), log_path.clone());
+        let note_for_tx = note.clone();
         let outcome = ctx
             .db()
             .transaction(move |c| {
@@ -232,6 +240,7 @@ impl VerifyHandler {
                     now,
                 )?;
                 if matches!(out, RecordOutcome::Recorded(_)) {
+                    dbv::set_job_note(c, job_id, &note_for_tx)?;
                     std::fs::rename(&tmp_for_tx, &log_for_tx).map_err(|e| {
                         crate::db::DbError::Internal(format!(
                             "verify.log を確定できない（{}）: {e}",
@@ -251,6 +260,9 @@ impl VerifyHandler {
                     "照合中に音声が変わったので記録しない。再スキャン後に再投入"
                 );
                 drop(tmp_guard);
+                Ok(JobOutcome::DoneWith(
+                    "照合中に音声が変わったので記録しなかった（再スキャン後に再投入）".into(),
+                ))
             }
             RecordOutcome::AlreadyRecorded => {
                 // 冒頭の判定の後に別の実行が記録した。今回の結果は捨て、既存のログも触らない
@@ -260,13 +272,18 @@ impl VerifyHandler {
                     "別の実行が記録済みなので今回の結果は捨てる"
                 );
                 drop(tmp_guard);
+                // 同じジョブの前回の実行が記録と一緒に書いた結果 1 行を返す
+                let saved = ctx.db().read(move |c| dbv::job_note(c, job_id)).await?;
+                Ok(JobOutcome::DoneWith(
+                    saved.unwrap_or_else(|| "前回の実行で記録済み".into()),
+                ))
             }
             RecordOutcome::Recorded(ids) => {
                 let _ = tmp_guard.keep();
                 tracing::info!(job_id, album_id, ?summary, verifications = ?ids, "遡及照合した");
+                Ok(JobOutcome::DoneWith(note))
             }
         }
-        Ok(JobOutcome::Done)
     }
 
     /// 1 ディスクを判定する。ネットワーク・デコードの失敗は Err（ジョブの失敗 → 再試行）
@@ -475,6 +492,53 @@ impl DiscKind {
                 ctdb.outcome, ctdb.offset, ar.outcome, ar.offset
             ),
         }
+    }
+}
+
+/// ジョブの結果 1 行（`jobs.note`。操作タブが出す）。1 ディスクなら前置き無し、複数なら
+/// 「disc N: 」を付けて「。」で繋ぐ
+fn result_note(reports: &[DiscReport]) -> String {
+    let one = reports.len() == 1;
+    reports
+        .iter()
+        .map(|r| {
+            let body = match &r.kind {
+                DiscKind::Skipped(why) => format!("照合しなかった: {why}"),
+                DiscKind::Unverifiable(why) => format!("検証不能: {why}"),
+                DiscKind::Verified { ctdb, ar, .. } => format!(
+                    "{} / {}",
+                    method_result_note("CTDB", ctdb),
+                    method_result_note("AccurateRip", ar)
+                ),
+            };
+            if one {
+                body
+            } else {
+                format!("disc {}: {body}", r.disc_no)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("。")
+}
+
+fn method_result_note(name: &str, r: &MethodResult) -> String {
+    let total = r.tracks.len();
+    let matched = r.tracks.iter().filter(|t| t.matched).count();
+    method_note(name, r.outcome, total, matched, i64::from(r.confidence))
+}
+
+/// 「CTDB 全 12 曲一致（信頼度 34）」「CTDB 12 曲中 10 曲一致」「CTDB 登録なし」
+fn method_note(
+    name: &str,
+    outcome: Outcome,
+    total: usize,
+    matched: usize,
+    confidence: i64,
+) -> String {
+    match outcome {
+        Outcome::Verified => format!("{name} 全 {total} 曲一致（信頼度 {confidence}）"),
+        Outcome::Mismatch => format!("{name} {total} 曲中 {matched} 曲一致"),
+        Outcome::NotFound => format!("{name} 登録なし"),
     }
 }
 

@@ -1261,7 +1261,7 @@ fn prepare_rg_write_tx(
         Err(e) => return Err(e),
     }
     prepared.unchanged = dbrg::set_written(&tx, &written, now)?;
-    // 書き込みを記録した（または一致を確認した）行は自動書き込みの対象から外す（D-96）
+    // 書き込みを記録した（または一致を確認した）行は自動書き込みの対象から外す（D-97）
     dbrg::clear_write_due(&tx, &target_ids)?;
     tx.commit()?;
     tracing::info!(

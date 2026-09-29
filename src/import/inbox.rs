@@ -2380,12 +2380,12 @@ fn register_item(
         }
     }
     // 新しい曲は RG が揃っていないのでここでは積まれない（rg → rgwrite → tagwrite の applied で積まれる。
-    // D-96）。album gain を off にして値が消えた既存の曲も、書き込みの後に追随する
+    // D-97）。album gain を off にして値が消えた既存の曲も、書き込みの後に追随する
     for &id in track_ids.iter().chain(gain_change.cleared.iter()) {
         job_ids.extend(crate::db::derived::enqueue_if_stale(&tx, id, now)?);
     }
     // off にして album の値を消した既存の曲は、ファイルの album のキーを消す（印は set_album_gain が
-    // 立てた。D-96）
+    // 立てた。D-97）
     if !gain_change.cleared.is_empty() {
         job_ids.push(dbrg::enqueue_write(&tx, now)?);
     }
@@ -2446,6 +2446,7 @@ fn register_item(
     }
     // 件の placed も同じトランザクションで確定する。commit の直後に落ちても placing のまま残らず
     // （Inbox の原本が残っていれば走査が pending に戻す）、24 時間の placed 表示も失わない
+    dbinbox::set_placed_tracks(&tx, item_id, &track_ids)?;
     dbinbox::set_placed(&tx, item_id, album_id, now)?;
     tx.commit()?;
     Ok(Ok(RegisteredItem {

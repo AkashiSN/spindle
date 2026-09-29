@@ -614,3 +614,187 @@ fn case_only_rename_is_a_move_not_a_collision() {
     assert_eq!(mv.from.as_deref(), Some("A/x.opus"));
     assert_eq!(mv.to.as_deref(), Some("A/X.opus"));
 }
+
+fn op(kind: OpKind, id: i64, from: Option<&str>, to: Option<&str>, size: u64) -> ItemOp {
+    ItemOp {
+        kind,
+        track_id: id,
+        from: from.map(str::to_owned),
+        to: to.map(str::to_owned),
+        token: to.map(|_| "tok".to_owned()),
+        size,
+        sha256: to.map(|_| "ab".repeat(32)),
+    }
+}
+
+fn item(id: i64, path: &str, size: u64) -> DeviceItem {
+    DeviceItem {
+        track_id: id,
+        dest_path: path.into(),
+        token: "old".into(),
+        size,
+        sha256: "cd".repeat(32),
+    }
+}
+
+#[test]
+fn track_states_classify_every_kind() {
+    let diff = Diff {
+        items: vec![
+            op(OpKind::Delete, 1, Some("a"), None, 0),
+            op(OpKind::Move, 2, Some("b"), Some("b2"), 10),
+            op(OpKind::Update, 3, None, Some("c"), 10),
+            op(OpKind::Add, 4, None, Some("d"), 10),
+        ],
+        held: vec![
+            HeldItem {
+                track_id: 5,
+                hold: Hold::Wait(Wait::Hashing),
+                has_copy: true,
+            },
+            HeldItem {
+                track_id: 6,
+                hold: Hold::Error(ItemError::PathCollision),
+                has_copy: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let current = vec![
+        item(1, "a", 1),
+        item(2, "b", 1),
+        item(3, "c", 1),
+        item(5, "e", 1),
+        item(7, "f", 1),
+    ];
+    let synced: std::collections::HashMap<i64, i64> = [(7, 100)].into_iter().collect();
+    let s = track_states(&diff, &current, &[(4, "前回 No space".into())], &synced);
+    assert_eq!(s[&1], TrackState::Removing);
+    assert_eq!(
+        s[&2],
+        TrackState::Pending {
+            op: "move",
+            reason: None
+        }
+    );
+    assert_eq!(
+        s[&3],
+        TrackState::Pending {
+            op: "update",
+            reason: None
+        }
+    );
+    assert_eq!(
+        s[&4],
+        TrackState::Pending {
+            op: "add",
+            reason: Some("前回 No space".into())
+        }
+    );
+    assert_eq!(
+        s[&5],
+        TrackState::Waiting {
+            reason: "ハッシュ計算中",
+            has_copy: true
+        }
+    );
+    assert_eq!(
+        s[&6],
+        TrackState::Error {
+            reason: "パス衝突".into(),
+            has_copy: false
+        }
+    );
+    assert_eq!(
+        s[&7],
+        TrackState::Synced {
+            synced_at: Some(100)
+        }
+    );
+    let c = counts(&s);
+    assert_eq!(
+        (c.add, c.update, c.r#move, c.delete, c.waiting, c.error, c.synced),
+        (1, 1, 1, 1, 1, 1, 1)
+    );
+}
+
+#[test]
+fn held_track_with_copy_is_not_removing() {
+    let diff = Diff {
+        held: vec![HeldItem {
+            track_id: 9,
+            hold: Hold::Error(ItemError::PathTooLong),
+            has_copy: true,
+        }],
+        ..Default::default()
+    };
+    let s = track_states(&diff, &[item(9, "x", 1)], &[], &Default::default());
+    assert_eq!(
+        s[&9],
+        TrackState::Error {
+            reason: "パスが長すぎる".into(),
+            has_copy: true
+        }
+    );
+}
+
+#[test]
+fn reported_error_on_synced_track_is_error() {
+    let s = track_states(
+        &Diff::default(),
+        &[item(3, "c", 1)],
+        &[(3, "転送に失敗".into())],
+        &Default::default(),
+    );
+    assert_eq!(
+        s[&3],
+        TrackState::Error {
+            reason: "転送に失敗".into(),
+            has_copy: true
+        }
+    );
+}
+
+#[test]
+fn estimate_follows_execution_order() {
+    // 現状: 1(100) を削除、2(50) を更新 + 移動で 80 に、3(30) を更新で 40 に、4 を 20 で追加
+    let current = vec![item(1, "a", 100), item(2, "b", 50), item(3, "c", 30)];
+    let diff = Diff {
+        items: vec![
+            op(OpKind::Delete, 1, Some("a"), None, 0),
+            op(OpKind::UpdateMove, 2, Some("b"), Some("b2"), 80),
+            op(OpKind::Update, 3, None, Some("c"), 40),
+            op(OpKind::Add, 4, None, Some("d"), 20),
+        ],
+        ..Default::default()
+    };
+    let e = estimate(&diff, &current);
+    assert_eq!(e.transfer_bytes, 80 + 40 + 20);
+    // 削除で -100 → prepared で +80（-20）→ vacating で -50（-70）→ 更新 tmp +40（-30）→ 旧 -30（-60）→ 追加 +20（-40）
+    // 今より増えることは無いので 0
+    assert_eq!(e.peak_bytes, 0);
+    let only_adds = Diff {
+        items: vec![
+            op(OpKind::Add, 4, None, Some("d"), 20),
+            op(OpKind::Add, 5, None, Some("e"), 5),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(estimate(&only_adds, &[]).peak_bytes, 25);
+    let update_peak = Diff {
+        items: vec![op(OpKind::Update, 3, None, Some("c"), 40)],
+        ..Default::default()
+    };
+    assert_eq!(
+        estimate(&update_peak, &current).peak_bytes,
+        40,
+        "tmp と旧版が並ぶ瞬間"
+    );
+}
+
+#[test]
+fn pending_sets_lookup_defaults_to_empty() {
+    let p = PendingSets::default();
+    assert!(p.for_key("iphone").is_empty());
+    assert!(p.for_id(1).is_empty());
+}

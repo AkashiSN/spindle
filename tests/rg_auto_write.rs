@@ -1,4 +1,4 @@
-//! ReplayGain の自動書き込みと、Derived を RG の書き込み後に作る順序（D-96）。
+//! ReplayGain の自動書き込みと、Derived を RG の書き込み後に作る順序（D-97）。
 //! スキャンで新規トラックの rg を積み、rg の保存で rgwrite を積み、rgwrite が編集バッチを作り、
 //! tagwrite の applied で `rg_written_at` が立ってから transcode が積まれる。
 //! 合成ファイルは ffmpeg で作る（無ければ skip）
@@ -516,7 +516,7 @@ async fn enqueue_after_release_creates_a_new_job() {
 }
 
 /// album gain を off にすると album の値を消した行に印が立ち、rgwrite がファイルの album のキーを消し、
-/// その後に Derived が追随する（write_tags = true。D-74 / D-96）
+/// その後に Derived が追随する（write_tags = true。D-74 / D-97）
 #[tokio::test]
 async fn album_gain_off_rewrites_tags_and_derived_follows() {
     let lib = Lib::new(true);

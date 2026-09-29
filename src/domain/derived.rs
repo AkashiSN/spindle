@@ -87,7 +87,7 @@ pub struct VariantSettings {
     pub lossy_sources: bool,
     /// `aac`: 同じキーの複数値を 1 値に結合する区切り。`opus` では使わない
     pub multi_value_separator: String,
-    /// RG が Library のタグへ書き込み済みになるまで作らない（`[replaygain].write_tags` の写し。D-96）。
+    /// RG が Library のタグへ書き込み済みになるまで作らない（`[replaygain].write_tags` の写し。D-97）。
     /// false（タグに書かない運用）なら解析済みだけを待つ
     pub rg_write_required: bool,
 }
@@ -143,7 +143,7 @@ pub struct Target {
     /// 残った行で 0 dB の焼き込みを確定させない）
     pub rg_ready: bool,
     /// RG が Library のタグへ書き込み済み: `rg_written_at >= rg_scanned_at`（ファイルの RG タグが
-    /// 解析値と一致していると確認済み。D-48 / D-96）
+    /// 解析値と一致していると確認済み。D-48 / D-97）
     pub rg_written: bool,
 }
 
@@ -185,7 +185,7 @@ impl Plan {
     }
 }
 
-/// RG の準備ができているか（D-96）。解析済みで、`rg_write_required` なら Library のタグへの書き込みも
+/// RG の準備ができているか（D-97）。解析済みで、`rg_write_required` なら Library のタグへの書き込みも
 /// 済んでいること。Derived はこれが揃ってから作る（揃う前に作ると、RG の無い・書き込み前の値の
 /// Derived が配られ、揃った後にもう一度作り直すことになる）
 pub fn rg_settled(s: &VariantSettings, t: &Target) -> bool {
@@ -198,9 +198,15 @@ pub fn rg_settled(s: &VariantSettings, t: &Target) -> bool {
 /// - `aac`: 可逆に加え `lossy_sources` なら非可逆も
 ///
 /// どちらも **RG が揃ってから**（[`rg_settled`]。未解析・未書き込みは待つ。書き込みの tagwrite の
-/// applied で投入される。D-96）。揃っていない間、既存の行とファイルは凍結と同じく触らない
+/// applied で投入される。D-97）。揃っていない間、既存の行とファイルは凍結と同じく触らない
 pub fn eligible(s: &VariantSettings, t: &Target) -> bool {
-    if t.missing || !matches!(t.channels, Some(1 | 2)) || !rg_settled(s, t) {
+    covered(s, t) && rg_settled(s, t)
+}
+
+/// RG が揃えば Derived を作る曲か（[`eligible`] から RG の条件を除いたもの）。進み具合の母数に使う
+/// （RG 待ちの曲も「これから作る」に数える）
+pub fn covered(s: &VariantSettings, t: &Target) -> bool {
+    if t.missing || !matches!(t.channels, Some(1 | 2)) {
         return false;
     }
     match s.variant {

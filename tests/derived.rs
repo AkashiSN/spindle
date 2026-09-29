@@ -134,7 +134,7 @@ fn eligibility_requires_lossless_present_and_stereo_or_mono() {
             ..target()
         }
     ));
-    // opus も RG が揃うまで待つ（D-96）
+    // opus も RG が揃うまで待つ（D-97）
     assert!(!eligible(
         &o,
         &Target {
@@ -146,7 +146,7 @@ fn eligibility_requires_lossless_present_and_stereo_or_mono() {
     ));
 }
 
-/// Derived は RG の解析だけでなく Library のタグへの書き込みまで済んでから作る（D-96）。
+/// Derived は RG の解析だけでなく Library のタグへの書き込みまで済んでから作る（D-97）。
 /// `rg_write_required = false`（タグに書かない運用）なら解析済みだけを待つ
 #[test]
 fn derived_waits_until_rg_is_written_to_library_tags() {

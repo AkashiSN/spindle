@@ -147,7 +147,7 @@ pub struct Scanner {
     /// ReplayGain の内部基準（LUFS。`[replaygain].reference_lufs`）。外部のタグ変更を取り込んだときの
     /// `rg_written_at` の判定に使う（D-48）
     rg_reference: f64,
-    /// 新規に登録したトラックの RG 解析と、残った RG の書き込み待ちの rgwrite を積む（D-96。本番は常に on。
+    /// 新規に登録したトラックの RG 解析と、残った RG の書き込み待ちの rgwrite を積む（D-97。本番は常に on。
     /// 既定 off は、ジョブの投入を数える他のテストに rg / rgwrite を混ぜないため）
     analyze_new_tracks: bool,
     /// テスト用: Phase 5 の予約の前後で呼ぶ（[`BeforeArtworkHook`]）
@@ -236,7 +236,7 @@ impl Scanner {
         self
     }
 
-    /// 新規に登録したトラックの RG 解析を積む（D-96。Derived は RG が揃うまで作られないので、Inbox を
+    /// 新規に登録したトラックの RG 解析を積む（D-97。Derived は RG が揃うまで作られないので、Inbox を
     /// 通さずに置かれた曲もここで解析に乗せる）
     pub fn with_analyze_new_tracks(mut self, on: bool) -> Self {
         self.analyze_new_tracks = on;
@@ -1454,7 +1454,7 @@ struct Commit {
     deep: bool,
     /// ReplayGain の内部基準（`rg_written_at` の判定）
     rg_reference: f64,
-    /// 新規トラックの RG 解析を積む（D-96）
+    /// 新規トラックの RG 解析を積む（D-97）
     analyze_new_tracks: bool,
     inv: Inventory,
     decisions: Vec<Decision>,
@@ -1491,7 +1491,7 @@ impl Commit {
             ..Default::default()
         };
         let mut groups: HashMap<String, DirGroup> = HashMap::new();
-        // この走査で新規に登録したトラック（album の照合の後に RG の解析を積む。D-96）
+        // この走査で新規に登録したトラック（album の照合の後に RG の解析を積む。D-97）
         let mut new_ids: Vec<i64> = Vec::new();
 
         // Phase 2 のスナップショット後に編集バッチが pending op を作っているかもしれないので、
@@ -1774,7 +1774,7 @@ impl Commit {
             self.categories = scans::load_categories(&tx)?;
         }
         self.resolve_albums(&tx, groups, now)?;
-        // 新規トラックの RG 解析を積む（D-96）。Derived は RG の解析と書き込みが揃うまで作られないので、
+        // 新規トラックの RG 解析を積む（D-97）。Derived は RG の解析と書き込みが揃うまで作られないので、
         // Inbox を通さずに置かれた曲もここで解析に乗せる。投入単位は album の照合の後に決める
         // （album gain が on の album に加わった曲は album 単位）。既存の未解析の行は拾わない
         if self.analyze_new_tracks {
@@ -1796,7 +1796,7 @@ impl Commit {
         report.missing_marked = missing.len() as u64;
         report.changed_ids.extend(missing);
         // RG の書き込み待ちが残っていれば rgwrite を積む（missing の間に回ってきた rgwrite が飛ばした行が
-        // この走査で戻った場合など。D-96）
+        // この走査で戻った場合など。D-97）
         if self.analyze_new_tracks {
             report
                 .enqueued_jobs
@@ -1893,7 +1893,7 @@ impl Commit {
                 dbrg::sync_written_at(tx, row.id, &r.content.tags, self.rg_reference, now)?;
             }
             if rg_changed_externally {
-                // 外部の RG の値を自動書き込みで上書きしない（ファイルが正。D-96）
+                // 外部の RG の値を自動書き込みで上書きしない（ファイルが正。D-97）
                 dbrg::cancel_write_due(tx, row.id)?;
             }
         }

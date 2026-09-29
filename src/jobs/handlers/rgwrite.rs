@@ -1,4 +1,4 @@
-//! `rgwrite` ジョブ（D-96）。解析値をタグへ書く必要がある行（`tracks.rg_write_due`）を、album ごとに
+//! `rgwrite` ジョブ（D-97）。解析値をタグへ書く必要がある行（`tracks.rg_write_due`）を、album ごとに
 //! 1 つの編集バッチにする。Library 全体で 1 本（dedup `rgwrite`、payload は空）。
 //!
 //! - 印は rg の保存（確認が成り立たなくなった行）と album gain の off で立ち、書き込みのバッチを記録した

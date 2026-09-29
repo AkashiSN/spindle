@@ -38,7 +38,10 @@ pub async fn resolve(
     state: &AppState,
     body: SelectionBody,
 ) -> Result<Vec<SnapshotRow>, SelectionError> {
-    let sel = body.parse()?;
+    let mut sel = body.parse()?;
+    if let Some(f) = sel.filter_mut() {
+        super::devices::attach_pending(state, f).await?;
+    }
     Ok(state
         .db
         .read(move |c| tracks::resolve_selection(c, &sel))

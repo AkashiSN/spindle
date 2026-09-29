@@ -110,6 +110,7 @@ impl JobContext {
         };
         self.jobs.publish(Event::Job(JobEvent {
             id: self.job.id,
+            job_type: self.job.job_type,
             state: JobState::Running,
             progress,
             done: Some(done),

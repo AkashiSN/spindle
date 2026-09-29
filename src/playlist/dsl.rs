@@ -84,7 +84,20 @@ impl Rule {
         walk(&self.r#where, &mut out);
         out
     }
+
+    /// WHERE か ORDER BY に端末のフィールドがあるか（NOT / OR の奥も見る）
+    pub fn references_device_fields(&self) -> bool {
+        let in_where = self.fields().iter().any(|f| DEVICE_FIELDS.contains(f));
+        let in_order = matches!(
+            &self.order,
+            Some(Order { field: OrderField::Field(f), .. }) if DEVICE_FIELDS.contains(&f.as_str())
+        );
+        in_where || in_order
+    }
 }
+
+/// 端末の状態を引くフィールド（仕様 ④ C）。これを使うルールは端末の選曲に載せられない（③ 循環の禁止）
+pub const DEVICE_FIELDS: [&str; 2] = ["on_device", "device_pending"];
 
 /// 構文エラー（1 始まりの行・桁）
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

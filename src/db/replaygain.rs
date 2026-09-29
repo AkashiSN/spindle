@@ -88,7 +88,7 @@ pub use crate::domain::replaygain::Values;
 /// 有効（`rg_written_at >= rg_scanned_at`）なら確認は成り立ったままなので `now` へ進める。
 ///
 /// 確認が成り立たなくなった行（値が変わった・未確認）は書き込み待ちの印 `rg_write_due` を立てる
-/// （rgwrite が書く。D-96）。確認が成り立ったままの行は印を変えない。
+/// （rgwrite が書く。D-97）。確認が成り立ったままの行は印を変えない。
 ///
 /// どちらの分岐でも `rg_scanned_at` は**前の値より小さくしない**（同じ秒に [`set_album_gain`] が
 /// `now + 1` へ進めた直後に、その前から走っていた解析が同じ値で保存すると巻き戻り、Derived の
@@ -154,7 +154,7 @@ pub struct AlbumGainChange {
 /// album gain の属性を変える（D-74）。off にするときは構成トラックの `rg_album_*` を NULL にし、
 /// `rg_written_at` を NULL に戻し（ファイルには album のキーが残っている）、`rg_scanned_at` を進める
 /// （Derived の `src_rg_scanned_at` との差分でタグ上書きが走る）。ファイルの album のキーを消すため
-/// 書き込み待ちの印 `rg_write_due` を立てる（呼び出し側が [`enqueue_write`] を積む。D-96）。on にするだけでは行を触らない
+/// 書き込み待ちの印 `rg_write_due` を立てる（呼び出し側が [`enqueue_write`] を積む。D-97）。on にするだけでは行を触らない
 /// （次の album 解析で揃う。呼び出し側が rg を投入する）。album が無ければ None
 pub fn set_album_gain(
     conn: &Connection,
@@ -296,7 +296,7 @@ pub fn write_rows(conn: &Connection, track_ids: &[i64]) -> Result<Vec<WriteRow>>
 /// `rg_written_at` を `now` にする（ファイルが既に解析値を持つと分かった行）。`rg_scanned_at` より
 /// 小さくしない（album gain の切り替えや同じ秒の再解析で `rg_scanned_at` は「前の値 + 1」へ進み、
 /// 壁時計より先にありうる。確認は今の解析値に対するものなので、`rg_written_at < rg_scanned_at` の
-/// 「未書き込み」に見せると Derived が止まる。D-96）
+/// 「未書き込み」に見せると Derived が止まる。D-97）
 pub fn set_written(conn: &Connection, track_ids: &[i64], now: i64) -> Result<usize> {
     let mut st = conn.prepare_cached(
         "UPDATE tracks SET rg_written_at = MAX(?2, rg_scanned_at)
@@ -336,7 +336,7 @@ pub fn enqueue_analysis(conn: &Connection, track_ids: &[i64], now: i64) -> Resul
     Ok(ids)
 }
 
-// ---------------------------------------------------------------- 自動書き込み（D-96）
+// ---------------------------------------------------------------- 自動書き込み（D-97）
 
 /// 書き込み待ちの印の付いた行を書く `rgwrite` ジョブ（Library 全体で 1 本。dedup `rgwrite`）。
 /// 対象は payload に持たず、実行時に `rg_write_due` から決める（album の移動・missing・実行中の
@@ -502,7 +502,7 @@ pub fn rg_tags_in(tags: &TagSet) -> Vec<(String, Vec<String>)> {
 }
 
 /// 外部ツールが RG のキーを書き換えた行の書き込み待ちの印を下ろす（ファイルが正。解析し直すまで自動では
-/// 書き直さない。D-96）。RG 以外のタグだけが変わった行は印を残す
+/// 書き直さない。D-97）。RG 以外のタグだけが変わった行は印を残す
 pub fn cancel_write_due(conn: &Connection, track_id: i64) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE tracks SET rg_write_due = 0 WHERE id = ?1 AND rg_write_due = 1",

@@ -23,7 +23,7 @@ use crate::domain::relpath::canonical_key;
 
 /// 起動時に `config.toml` の系統設定を `derived_variants` 表へ写す（opus / aac の 2 行。節を省略した
 /// 系統も既定値で行を作る。表に無い = 未設定、とは区別する）
-/// `rg_write_required` は `[replaygain].write_tags`（Derived を RG のタグ書き込みの後に作るか。D-96）
+/// `rg_write_required` は `[replaygain].write_tags`（Derived を RG のタグ書き込みの後に作るか。D-97）
 pub fn sync_variants(
     conn: &Connection,
     cfg: &DerivedConfig,
@@ -113,6 +113,19 @@ pub fn settings_of(conn: &Connection, variant: Variant) -> Result<Option<Variant
         .flatten())
 }
 
+/// Derived が RG のタグへの書き込みを待つ設定か（`[replaygain].write_tags` の写し。系統に依らず同じ値。
+/// 系統が 1 つも無ければ false）
+pub fn rg_write_required(conn: &Connection) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT max(rg_write_required) FROM derived_variants",
+            [],
+            |r| r.get::<_, Option<i64>>(0),
+        )?
+        .unwrap_or(0)
+        == 1)
+}
+
 pub fn load_target(conn: &Connection, track_id: i64) -> Result<Option<Target>> {
     Ok(conn
         .query_row(
@@ -160,16 +173,21 @@ pub fn target_drifted(conn: &Connection, before: &Target) -> Result<bool> {
         || now.missing != before.missing)
 }
 
-fn current_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Current> {
+/// `derived_files` の [`CURRENT_COLUMNS`] を、`base` 列目から読む（JOIN した行でも使う）
+pub(crate) fn current_at(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Current> {
     Ok(Current {
-        rel_path: r.get(0)?,
-        src_audio_version: r.get(1)?,
-        src_tag_version: r.get(2)?,
-        src_artwork_id: r.get(3)?,
-        src_rg_scanned_at: r.get(4)?,
-        audio_profile: r.get(5)?,
-        tag_profile: r.get(6)?,
+        rel_path: r.get(base)?,
+        src_audio_version: r.get(base + 1)?,
+        src_tag_version: r.get(base + 2)?,
+        src_artwork_id: r.get(base + 3)?,
+        src_rg_scanned_at: r.get(base + 4)?,
+        audio_profile: r.get(base + 5)?,
+        tag_profile: r.get(base + 6)?,
     })
+}
+
+fn current_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Current> {
+    current_at(r, 0)
 }
 
 const CURRENT_COLUMNS: &str = "rel_path, src_audio_version, src_tag_version, src_artwork_id,
@@ -382,6 +400,20 @@ pub fn delete(conn: &Connection, track_id: i64, variant: Variant) -> Result<bool
     )? == 1)
 }
 
+/// 行の `rel_path` が `rel_path` のままなら消す（読んだ後に transcode が動かしていれば消さない）。消したら true
+pub fn delete_if_path(
+    conn: &Connection,
+    track_id: i64,
+    variant: Variant,
+    rel_path: &str,
+) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM derived_files WHERE track_id = ?1 AND variant = ?2 AND rel_path = ?3",
+        params![track_id, variant.as_str(), rel_path],
+    )?;
+    Ok(n > 0)
+}
+
 pub fn dedup_key(track_id: i64, variant: Variant, audio_version: i64) -> String {
     format!("transcode:{track_id}:{variant}:{audio_version}")
 }
@@ -448,7 +480,7 @@ pub fn enqueue_if_stale(conn: &Connection, track_id: i64, now: i64) -> Result<Ve
 
 /// 対象になりうる全トラック（active・1ch / 2ch）を系統ごとに見て食い違う分を一括投入する（scan 完了時）。
 /// 期待パスの比較は SQL では書きにくいので行を取ってから Rust で判定する。非可逆と RG の有無は
-/// `eligible` が系統ごとに判定する（opus は可逆のみ、aac は非可逆も。どちらも RG が揃ってから。D-96）
+/// `eligible` が系統ごとに判定する（opus は可逆のみ、aac は非可逆も。どちらも RG が揃ってから。D-97）
 pub fn enqueue_all_stale(conn: &Connection, now: i64) -> Result<Vec<i64>> {
     let mut ids = Vec::new();
     for s in variant_settings(conn)? {

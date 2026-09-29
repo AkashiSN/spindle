@@ -1,4 +1,4 @@
-//! 0003_rg_auto_write の性質（D-96）。0002 まで当てた既存 DB に 0003 を流す（jobs の作り直し）
+//! 0004_rg_auto_write の性質（D-97）。0003 まで当てた既存 DB に 0004 を流す（jobs の作り直し）
 
 use rusqlite::Connection;
 use spindle::db::jobs::JobType;
@@ -8,12 +8,15 @@ use spindle::db::migrations;
 /// id のまま残り、FK が新しい jobs を指し続け（foreign_key_check が空、SET NULL / CASCADE が効く）、
 /// rgwrite を受け付け、`rg_write_due` は既存行で 0 になる
 #[test]
-fn upgrade_from_0002_keeps_jobs_children_and_adds_rgwrite() {
+fn upgrade_from_0003_keeps_jobs_children_and_adds_rgwrite() {
     let mut c = Connection::open_in_memory().unwrap();
     c.pragma_update(None, "foreign_keys", "ON").unwrap();
     let all = migrations::embedded().unwrap();
-    let upto2: Vec<_> = all.iter().filter(|m| m.version <= 2).cloned().collect();
-    assert_eq!(migrations::apply_list(&mut c, &upto2).unwrap(), vec![1, 2]);
+    let upto3: Vec<_> = all.iter().filter(|m| m.version <= 3).cloned().collect();
+    assert_eq!(
+        migrations::apply_list(&mut c, &upto3).unwrap(),
+        vec![1, 2, 3]
+    );
 
     c.execute_batch(
         "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless, seen_at)
@@ -29,7 +32,7 @@ fn upgrade_from_0002_keeps_jobs_children_and_adds_rgwrite() {
     )
     .unwrap();
 
-    assert_eq!(migrations::apply_list(&mut c, &all).unwrap(), vec![3]);
+    assert_eq!(migrations::apply_list(&mut c, &all).unwrap(), vec![4]);
 
     let count = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
     assert_eq!(count("PRAGMA foreign_keys"), 1, "適用後は FK が ON に戻る");

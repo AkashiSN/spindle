@@ -1,4 +1,4 @@
--- ReplayGain の自動書き込み（D-96）。
+-- ReplayGain の自動書き込み（D-97）。
 -- jobs は CHECK の列挙に rgwrite を足すため作り直す（foreign_keys=OFF で適用。migrations.rs の FOREIGN_KEYS_OFF）
 
 CREATE TABLE jobs_new (
@@ -44,7 +44,7 @@ CREATE INDEX idx_jobs_batch ON jobs(edit_batch_id) WHERE edit_batch_id IS NOT NU
 ALTER TABLE derived_variants ADD COLUMN rg_write_required INTEGER NOT NULL DEFAULT 1
   CHECK (rg_write_required IN (0, 1));
 
--- 解析値をタグへ書く必要がある行の印（D-96）。rg の保存・album gain の off で立て、書き込みの編集バッチを
+-- 解析値をタグへ書く必要がある行の印（D-97）。rg の保存・album gain の off で立て、書き込みの編集バッチを
 -- 作ったとき（一致済みで rg_written_at だけ立てた行も）に下ろす。巻き戻しでは立てない（書き直さない）。
 -- rgwrite はこの印の付いた active な行だけを書く（ジョブの payload に対象を持たないので、album の移動や
 -- missing・実行中のジョブへの dedup 合流で書き漏れない）

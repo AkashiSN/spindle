@@ -5,6 +5,7 @@
 use rusqlite::{params, Connection};
 
 use spindle::db::open_memory_connection;
+use spindle::domain::device::PendingSets;
 use spindle::playlist::compile::{check, evaluate, CompileError};
 use spindle::playlist::dsl::parse;
 
@@ -172,7 +173,7 @@ fn fixture() -> Connection {
 }
 
 fn eval(c: &Connection, src: &str) -> Vec<i64> {
-    evaluate(c, &parse(src).unwrap()).unwrap()
+    evaluate(c, &parse(src).unwrap(), &PendingSets::default()).unwrap()
 }
 
 #[test]

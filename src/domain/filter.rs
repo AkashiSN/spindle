@@ -12,6 +12,8 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use super::device::PendingSets;
+
 const BASE64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 /// 1 ページの既定件数と上限
@@ -49,6 +51,13 @@ pub struct Filter {
     /// 検索語。`FTS_MIN_CHARS` 以上なら FTS5 trigram、未満なら LIKE
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
+    /// 端末に未反映（端末 id。追加・更新・移動。④ C）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_pending: Option<i64>,
+    /// `device_pending` と DSL の端末フィールドを引く集合。JSON には出さず、API が
+    /// `api::devices::attach_pending` で埋める（埋めなければ空集合 = 一致なし）
+    #[serde(skip)]
+    pub pending: PendingSets,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -89,8 +98,39 @@ impl Filter {
         Ok(f)
     }
 
+    /// 条件が 1 つも無いか（`pending` は条件ではないので見ない）
     pub fn is_empty(&self) -> bool {
-        *self == Filter::default()
+        let Filter {
+            category,
+            albumartist,
+            album_id,
+            album_ids,
+            playlist_id,
+            flags,
+            dsl,
+            q,
+            device_pending,
+            pending: _,
+        } = self;
+        category.is_none()
+            && albumartist.is_none()
+            && album_id.is_none()
+            && album_ids.is_none()
+            && playlist_id.is_none()
+            && flags.is_empty()
+            && dsl.is_none()
+            && q.is_none()
+            && device_pending.is_none()
+    }
+
+    /// 端末の状態を引く条件を含むか（含むときだけ API がスナップショットを取る）
+    pub fn uses_devices(&self) -> bool {
+        self.device_pending.is_some()
+            || self
+                .dsl
+                .as_deref()
+                .and_then(|d| crate::playlist::dsl::parse(d).ok())
+                .is_some_and(|r| r.references_device_fields())
     }
 }
 

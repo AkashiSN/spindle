@@ -176,7 +176,7 @@ impl Lib {
     }
 
     /// 走査し、未解析の行を「RG の解析と書き込みが済んだ」状態にする（Derived は RG が揃うまで
-    /// 作られない。D-96）。gain 0 dB・peak 1.0・解析世代 0。RG を見るテストは `set_rg` / `clear_rg` で上書きする
+    /// 作られない。D-97）。gain 0 dB・peak 1.0・解析世代 0。RG を見るテストは `set_rg` / `clear_rg` で上書きする
     async fn scan(&self) {
         self.scanner
             .run(
@@ -544,7 +544,7 @@ async fn first_run_encodes_with_tags_rg_and_cover() {
     assert!(!has_tmp(&lib.derived().join("opus/A/B")));
 }
 
-/// 画像の無い曲はタグと R128 だけを写す（RG の無い opus は作らない。D-96）
+/// 画像の無い曲はタグと R128 だけを写す（RG の無い opus は作らない。D-97）
 #[tokio::test]
 async fn without_cover_tags_and_r128_only_transfer() {
     require_tools!();

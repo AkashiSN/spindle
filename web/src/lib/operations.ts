@@ -1,6 +1,7 @@
 // 操作タブ（D-58）の純粋ロジック: リネーム / 正規化の preview の集計、投入系の結果メッセージ、
 // 409 のコードの日本語化。API の呼び出しは hooks/useOperations
 
+import type { Job, TypeCounts } from '../api/types'
 import { formatCount } from './format'
 
 /** `POST /api/rename/preview` / `/api/normalize/preview` の共通部分 */
@@ -70,8 +71,79 @@ export function hirescheckStartedMessage(r: HirescheckStartResponse): string {
 }
 
 export function verifyStartedMessage(r: VerifyStartResponse): string {
-  const dup = r.duplicates > 0 ? `（既に投入済み ${formatCount(r.duplicates)}）` : ''
-  return `遡及照合を投入した: アルバム ${formatCount(r.albums)}${dup}`
+  const dup = r.duplicates > 0 ? `（${formatCount(r.duplicates)} アルバムは照合待ちなので足さなかった）` : ''
+  return `${formatCount(r.albums)} アルバムの照合を始めた${dup}。結果はこの下に出る`
+}
+
+export type VerifyResultLine = {
+  id: number
+  /** 対象のアルバム（ディレクトリ）。無ければ job #id */
+  subject: string
+  text: string
+  kind: 'done' | 'error' | 'pending'
+}
+
+/** 投入した verify ジョブ（`ids`）の結果。`seen` はこれまでの `GET /api/jobs?type=verify` で見えた
+ *  状態を id ごとに貯めたもの（[mergeVerifyJobs]。一覧は状態ごとに件数の上限があり、投入が多いと
+ *  まだ出てこない・もう落ちたジョブがある）。`active` は verify の待ちか実行中が残っているか。
+ *  終わったジョブ（と再試行待ち）は 1 行ずつ、終わっていないものは `pending` に数える。verify が 1 件も
+ *  動いていないのに終端が見えていないジョブ（一度も見えない、または待ち・実行中として見えた後に完了の
+ *  上限の外へ押し出された）は、もう終わっているのに結果を取れないので、その旨の行にする */
+export function verifyResults(
+  seen: ReadonlyMap<number, Job>,
+  ids: readonly number[],
+  active: boolean,
+): { pending: number; lines: VerifyResultLine[] } {
+  let pending = 0
+  const lines: VerifyResultLine[] = []
+  for (const id of ids) {
+    const j = seen.get(id)
+    const subject = j?.subject ?? `job #${id}`
+    const terminal = j != null && (j.state === 'done' || j.state === 'failed' || j.state === 'cancelled')
+    if (!terminal && !active) {
+      lines.push({ id, subject, text: '結果を取れない（ジョブ画面で確認）', kind: 'error' })
+      continue
+    }
+    if (!j) {
+      pending++
+      continue
+    }
+    switch (j.state) {
+      case 'done':
+        lines.push({ id, subject, text: j.note || '完了', kind: 'done' })
+        break
+      case 'failed':
+        lines.push({ id, subject, text: `失敗: ${j.last_error ?? '理由不明'}`, kind: 'error' })
+        break
+      case 'cancelled':
+        lines.push({ id, subject, text: '取り消した', kind: 'error' })
+        break
+      default:
+        pending++
+        if (j.state === 'queued' && j.last_error) {
+          lines.push({ id, subject, text: `再試行待ち: ${j.last_error}`, kind: 'pending' })
+        }
+    }
+  }
+  return { pending, lines }
+}
+
+/** 一覧の items のうち追っている id（`ids`）の状態で `prev` を上書きした新しい Map。一覧から落ちた
+ *  ジョブは前の状態を残す */
+export function mergeVerifyJobs(
+  prev: ReadonlyMap<number, Job>,
+  items: readonly Job[],
+  ids: ReadonlySet<number>,
+): Map<number, Job> {
+  const next = new Map(prev)
+  for (const j of items) if (ids.has(j.id)) next.set(j.id, j)
+  return next
+}
+
+/** `GET /api/jobs` の `by_type`（全件の集計）に verify の待ちか実行中が残っているか */
+export function verifyActive(byType: Readonly<Record<string, TypeCounts>>): boolean {
+  const c = byType.verify
+  return c != null && c.queued + c.running > 0
 }
 
 export function rgWrittenMessage(r: RgWriteResponse): string {

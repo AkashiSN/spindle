@@ -23,7 +23,7 @@
 //! - 書き込み時に `albums.album_gain` を読み直す（D-74）。album 単位の job でも off なら album の値は
 //!   書かず、track 単位の job は on の album に属する track の album 値を据え置く
 //! - 保存は確認が成り立たなくなった行に書き込み待ちの印（`rg_write_due`）を立て、`[replaygain].write_tags`
-//!   が有効なら同じトランザクションで `rgwrite` を積む（D-96。解析値をタグへ書く編集バッチは rgwrite が
+//!   が有効なら同じトランザクションで `rgwrite` を積む（D-97。解析値をタグへ書く編集バッチは rgwrite が
 //!   作る。Derived はその書き込みの applied を待つ）
 
 use std::fs::File;
@@ -62,7 +62,7 @@ impl RgHandler {
         }
     }
 
-    /// 解析の後に `rgwrite` を積む（`[replaygain].write_tags`。D-96）
+    /// 解析の後に `rgwrite` を積む（`[replaygain].write_tags`。D-97）
     pub fn with_write_tags(mut self, write_tags: bool) -> Self {
         self.write_tags = write_tags;
         self
@@ -341,13 +341,13 @@ impl Handler for RgHandler {
                         )));
                     }
                     // Derived の追随（D-51）。解析値は版に乗らないので、ここで retag を投入する。
-                    // 書き込みが要る設定では、タグに書かれるまで対象外なのでここでは積まれない（D-96）
+                    // 書き込みが要る設定では、タグに書かれるまで対象外なのでここでは積まれない（D-97）
                     let mut derived_jobs = Vec::new();
                     for (track_id, _) in &results {
                         derived_jobs
                             .extend(crate::db::derived::enqueue_if_stale(&tx, *track_id, now)?);
                     }
-                    // store が書き込み待ちの印を立てた行を rgwrite が書く（D-96）
+                    // store が書き込み待ちの印を立てた行を rgwrite が書く（D-97）
                     if write_tags {
                         derived_jobs.push(dbrg::enqueue_write(&tx, now)?);
                     }

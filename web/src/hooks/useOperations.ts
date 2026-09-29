@@ -4,18 +4,23 @@
 // - 409 `pending` は一括編集と同じ「M 件を除外して適用 / 待つ」の 2 択。除外して適用は同じ操作を
 //   `skip_pending` 付きでやり直す（リネーム / 正規化は同じ token、RG 書き込みは同じ selection）
 // - 投入系（RG 解析 / FLAC 検査）は preview が無い。結果は件数を notice に出す
+// - 遡及照合は投入したジョブを追い、終わったものから結果 1 行（jobs.note）を出す。追うのは
+//   notice と同じ寿命（閉じる・別の操作で消える）
 // - 埋め込み画像の差し替え（D-60）は upload → embed の 2 段。アップロード結果は選択に依らず残る
 //   （同じ画像を別の集合へ繰り返し適用できる）
 // - API はどれも既存（SPEC §9）。ここで新しい経路は作らない
 
-import { useCallback, useMemo, useState } from 'react'
-import { ApiError, parseErrorBody } from '../api/client'
-import type { PendingConflict } from '../api/types'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ApiError, apiFetch, parseErrorBody } from '../api/client'
+import type { Job, JobList, PendingConflict } from '../api/types'
 import type { UploadedArtwork } from '../lib/artwork'
 import {
   embedMessage,
   flaccheckStartedMessage,
   hirescheckStartedMessage,
+  mergeVerifyJobs,
+  verifyActive,
+  verifyResults,
   verifyStartedMessage,
   md5FillMessage,
   operationErrorMessage,
@@ -24,6 +29,7 @@ import {
   type EmbedResponse,
   type FlaccheckStartResponse,
   type HirescheckStartResponse,
+  type VerifyResultLine,
   type VerifyStartResponse,
   type Md5FillResponse,
   type PathApplyResponse,
@@ -66,6 +72,8 @@ export type Operations = {
   /** 偽ハイレゾ検出（可逆かつ 48 kHz 超または 16 bit 超のトラックを解析。読むだけ） */
   startHirescheck: () => Promise<void>
   startVerify: () => Promise<void>
+  /** 直近に投入した遡及照合の結果（終わったものから並ぶ）。追っていなければ null */
+  verifyResult: { total: number; pending: number; lines: VerifyResultLine[] } | null
   /** MD5 の補填（md5_missing の FLAC に編集バッチ。409 pending は 2 択） */
   startMd5Fill: (skipPending?: boolean) => Promise<void>
   /** アップロード済みの画像（埋め込み差し替えの元）。無ければ null */
@@ -91,6 +99,43 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
   const [stored, setStored] = useState<PathPreviewState | null>(null)
   const [storedPending, setPendingPrompt] = useState<OperationPending | null>(null)
   const [uploaded, setUploaded] = useState<UploadedArtwork | null>(null)
+  // 追っている遡及照合。seen は見えたジョブの状態を id ごとに貯めたもの（一覧は状態ごとに上限があり、
+  // 投入が多いとまだ出てこない・もう落ちたジョブがある）。active は verify の待ちか実行中が残っているか
+  // （まだ一度も取れていなければ true。一度も見えないジョブを待ちとして数える）
+  const [verify, setVerify] = useState<{
+    ids: number[]
+    seen: ReadonlyMap<number, Job>
+    active: boolean
+  } | null>(null)
+  const verifyResult = useMemo(
+    () =>
+      verify == null ? null : { total: verify.ids.length, ...verifyResults(verify.seen, verify.ids, verify.active) },
+    [verify],
+  )
+  const verifyIds = verify?.ids ?? null
+  const verifyPending = verifyResult != null && verifyResult.pending > 0
+  // 投入した直後と、終わるまで 2 秒ごとに取り直す（照合はアルバムあたり数十秒。SSE の job イベントには
+  // 種別も結果も無い）。応答は取りに行ったときの ids（同一の配列）を追っている間だけ採る。閉じる・別の
+  // 照合を始めた後に古い応答が返っても上書きしない
+  useEffect(() => {
+    if (verifyIds == null || !verifyPending) return
+    const idSet = new Set(verifyIds)
+    const fetchJobs = () =>
+      apiFetch<JobList>('/api/jobs?type=verify')
+        .then((l) =>
+          setVerify((v) =>
+            v == null || v.ids !== verifyIds
+              ? v
+              : { ids: v.ids, seen: mergeVerifyJobs(v.seen, l.items, idSet), active: verifyActive(l.by_type) },
+          ),
+        )
+        .catch(() => {
+          // 一時的な失敗は次の周で取り直す
+        })
+    void fetchJobs()
+    const timer = window.setInterval(fetchJobs, 2000)
+    return () => window.clearInterval(timer)
+  }, [verifyIds, verifyPending])
 
   const sel = useMemo(() => toSelectionBody(selection), [selection])
   const selKey = useMemo(() => JSON.stringify([sel, sortParam]), [sel, sortParam])
@@ -109,6 +154,7 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     setError(null)
     setNotice(null)
     setPendingPrompt(null)
+    setVerify(null)
   }, [])
 
   const previewPaths = useCallback(
@@ -280,8 +326,10 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
         method: 'POST',
         body: JSON.stringify({ selection: sel }),
       })
-      if (r.ok) setNotice(verifyStartedMessage(r.body))
-      else setError(operationErrorMessage(r.status, r.body))
+      if (r.ok) {
+        setNotice(verifyStartedMessage(r.body))
+        setVerify({ ids: r.body.job_ids, seen: new Map(), active: true })
+      } else setError(operationErrorMessage(r.status, r.body))
     } catch (e) {
       fail(e)
     } finally {
@@ -400,17 +448,22 @@ export function useOperations(selection: Selection, sortParam: string): Operatio
     startFlaccheck,
     startHirescheck,
     startVerify,
+    verifyResult,
     startMd5Fill,
     uploaded,
     uploadArtwork,
     clearUploaded: useCallback(() => setUploaded(null), []),
     embedArtwork,
     dismissPending: useCallback(() => setPendingPrompt(null), []),
-    clearNotice: useCallback(() => setNotice(null), []),
+    clearNotice: useCallback(() => {
+      setNotice(null)
+      setVerify(null)
+    }, []),
     clearMessages: useCallback(() => {
       setNotice(null)
       setError(null)
       setPendingPrompt(null)
+      setVerify(null)
     }, []),
   }
 }

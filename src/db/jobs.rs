@@ -16,7 +16,7 @@ use super::{DbError, Result};
 
 /// ジョブ種別。並列度と冪等キーの構成は SPEC §8 の表に従う
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum JobType {
     Scan,
     Rip,
@@ -37,7 +37,7 @@ pub enum JobType {
     PlaylistSync,
     /// 送る元のハッシュの計算（P5-1、D-95）
     SourceHash,
-    /// ReplayGain の解析値をタグへ書く編集バッチを作る（rg の後続。D-96）
+    /// ReplayGain の解析値をタグへ書く編集バッチを作る（rg の後続。D-97）
     Rgwrite,
 }
 
@@ -1227,7 +1227,7 @@ pub fn acquire_track_locks(
 }
 
 /// 実行中のジョブの dedup キーを外す。以後の同じキーの投入は Duplicate にならず新しいジョブになる。
-/// 対象を実行時に DB から決めるジョブ（rgwrite。D-96）が、対象を読んだ後に立った印を取りこぼさない
+/// 対象を実行時に DB から決めるジョブ（rgwrite。D-97）が、対象を読んだ後に立った印を取りこぼさない
 /// ように開始時に呼ぶ（running への合流は「もう読んだ」ジョブに吸われて消えるため）
 pub fn release_dedup_key(conn: &Connection, job_id: i64) -> Result<bool> {
     Ok(conn.execute(

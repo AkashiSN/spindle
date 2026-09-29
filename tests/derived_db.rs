@@ -84,7 +84,7 @@ fn put(
     derived::upsert(c, id, O, rel, bitrate, av, tags, &pr, now).unwrap();
 }
 
-/// RG は解析済み・書き込み済みで入れる（Derived は RG が揃ってから。D-96）。未解析を見るテストは
+/// RG は解析済み・書き込み済みで入れる（Derived は RG が揃ってから。D-97）。未解析を見るテストは
 /// 自分で消す
 fn insert_track(c: &Connection, id: i64, rel: &str, codec: &str, channels: Option<i64>) {
     let lossless = i64::from(!matches!(codec, "opus" | "mp3" | "aac" | "ogg"));
@@ -531,7 +531,7 @@ fn enqueue_all_stale_waits_for_rg_on_aac_and_includes_lossy_sources() {
     assert_eq!(keys, vec!["transcode:3:aac:1", "transcode:3:opus:1"]);
 }
 
-/// `[replaygain].write_tags` が有効なら、Derived は RG が Library のタグへ書き込まれてから作る（D-96）
+/// `[replaygain].write_tags` が有効なら、Derived は RG が Library のタグへ書き込まれてから作る（D-97）
 #[test]
 fn enqueue_waits_for_rg_written_when_required() {
     let c = open_memory_connection().unwrap();

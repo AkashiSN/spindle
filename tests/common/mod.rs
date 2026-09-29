@@ -193,7 +193,7 @@ pub fn enable_variants(
 }
 
 /// テスト用 DB にだけ置くトリガ: 新しく登録した行を「RG の解析と書き込みが済んだ」状態にする
-/// （gain 0 dB・peak 1.0・解析世代 0）。Derived は RG が揃うまで作られない（D-96）ので、RG 以外の
+/// （gain 0 dB・peak 1.0・解析世代 0）。Derived は RG が揃うまで作られない（D-97）ので、RG 以外の
 /// 追随を見るテストが解析のジョブを回さずに済むように
 pub fn settle_rg_on_insert(db_path: &Path) {
     rusqlite::Connection::open(db_path)

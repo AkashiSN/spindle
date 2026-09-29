@@ -375,14 +375,14 @@ Inbox の取り込みのファイル（D-90）を回収する。
   `OpusHead` の output gain は 0 のまま触らない（合成すると再解析時に二重に掛かる）
 - `rg_scanned_at` と `rg_written_at` を分離。数万件のスキャン後に書き込みが中断しても
   再スキャンなしで書き込みのみ再開できる
-- **解析が済むと自動でタグに書く**（`[replaygain].write_tags = true` のとき。D-96）。書くべき行は
+- **解析が済むと自動でタグに書く**（`[replaygain].write_tags = true` のとき。D-97）。書くべき行は
   `tracks.rg_write_due` の印で持つ（rg の保存で確認が成り立たなくなった行と album gain の off で立ち、書き込みの
   バッチを記録したときに下りる。巻き戻し・外部の変更では立たないので勝手に書き直さない。印が立った後に外部が
   RG のキーを書き換えたら走査で下ろす）。Library 全体で 1 本の `rgwrite` ジョブが印の付いた active な行を album
   ごとに 1 つの編集バッチにする（同じ album の rg が残っている album と反映待ちの編集がある album は後回しにし、
   キー付きの後継を 1 本だけ積む）。`write_tags = false` はタグに一切書かない（自動も手動も）
 - `rg_written_at` は `rg_scanned_at` より小さくしない（`rg_scanned_at` は「前の値 + 1」へ進んで壁時計より先に
-  ありうる。同じ秒の確認を未書き込みに見せない。D-96）
+  ありうる。同じ秒の確認を未書き込みに見せない。D-97）
 - **タグ書き込みは通常の編集バッチ**（`POST /api/rg/write { selection }` → tags op。旧値の
   記録・overlay・巻き戻しはタグ編集と同じ）。書くキーは形式ごとに固定で、値の無いキーは消す
   （Opus: `R128_TRACK_GAIN` / `R128_ALBUM_GAIN` を書き `REPLAYGAIN_*` を消す。他形式:
@@ -401,7 +401,7 @@ Inbox の取り込みのファイル（D-90）を回収する。
   同じ。タグへの書き込みは `[replaygain].write_tags` に従う。Derived は解析と書き込みが揃ってから作られる。
   D-47 追記 2、P4-22）
 - **スキャンで新規に登録したトラックにも rg を積む**（album の照合の後に投入単位を決める。既存の未解析の行は
-  拾わない。Inbox を通さずに置かれた曲も漏れなく解析 → 書き込み → Derived に乗せるため。D-96）
+  拾わない。Inbox を通さずに置かれた曲も漏れなく解析 → 書き込み → Derived に乗せるため。D-97）
 - album gain は `album_id` 単位で、**`albums.album_gain` が true の album だけ**計算・書き出しする（既定
   false。CD 取り込みは true、Inbox の承認画面で選ぶ。D-74、P4-5）。**2ch 以外は album 集計から除外**（判定はデコード結果の
   チャンネル数。除外されたトラックの album の値は NULL）。構成トラックが 1 本でも
@@ -651,6 +651,9 @@ CUETools の "verify from files" 相当。
   照合を始めたときの `audio_version` が 1 本でも進んでいれば何も書かない。verify.log は tmp に書き、
   トランザクションの中で本来の名前に rename してから commit する。`album_verifications.job_id` で
   同じジョブの再実行（commit の後に落ちた場合）を見分け、何もしない（履歴もログも初回のまま）
+- ジョブの結果 1 行（`jobs.note`）にディスクごと・手法ごとの結果（一致数と信頼度 / 登録なし /
+  検証不能・照合しなかった理由）を残し、操作タブが投入したジョブを追って出す（D-96）。結果 1 行は記録と
+  同じトランザクションで `jobs.note` に書き、commit の後に落ちた再実行はそれをそのまま返す
 - **不一致は不良を意味しない。** ギャップ処理差、隠しトラック、データトラックの存在で
   普通に外れる。`mismatch` は「要確認」として扱い、警告色で表示しない
 
@@ -841,7 +844,7 @@ D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に
 | 設定 | `[encode.derived.<variant>]` に `enabled` と `bitrate`（下記）。節を省略したときの `enabled` は **`opus` が true、`aac` が false**（既存の config をそのまま新版で起動しても aac は始まらない。RG 全件解析 → 有効化の順序を崩さない）。`enabled = false` の系統は**凍結**: 新しく作らず、既存の行とファイルは Move / Retag / Encode のどれも行わず、配布ビュー・バッジ・`has_derived` は既存行をそのまま使う。GC は系統を区別せず `Derived/` 全体で「行に無いファイル = 孤児」を回収する（凍結でも行は残るので消えない） |
 | 出力仕様の世代 | 系統ごとに 2 つの文字列を設定から作り、行に保存する。**`audio_profile`**（音声に効く設定: codec / bitrate / サンプルレート規則 / RG 焼き込み方式の版。例 `opus:256:v1`、`aac:256:48k:bake1`）と **`tag_profile`**（タグに効く設定: `multi_value_separator` / iTunNORM 規則の版。例 `aac:sep= & :itunnorm0:v1`）。エンコーダの引数や規則を変えるときは版を上げる |
 | 判定 | `audio_version` 差分・**行の `audio_profile` が設定と食い違う** → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）・**`tag_profile`** の差分のみ → タグ上書き（**`aac` は RG を音声に焼き込むので RG 世代の差分は再エンコード**）/ パスの差分のみ → rename。優先順はこの順（再エンコードは残りを兼ねる） |
-| RG の前提 | **どの系統も RG が揃ってから作る**: 解析済み（`rg_scanned_at` と `rg_track_gain` / `rg_track_peak`）で、`[replaygain].write_tags = true` なら Library のタグへの書き込みも確認済み（`rg_written_at >= rg_scanned_at`）。揃っていない間は凍結と同じく既存の行とファイルに触らない。順序は rg → rgwrite → tagwrite の applied → transcode（D-96） |
+| RG の前提 | **どの系統も RG が揃ってから作る**: 解析済み（`rg_scanned_at` と `rg_track_gain` / `rg_track_peak`）で、`[replaygain].write_tags = true` なら Library のタグへの書き込みも確認済み（`rg_written_at >= rg_scanned_at`）。揃っていない間は凍結と同じく既存の行とファイルに触らない。順序は rg → rgwrite → tagwrite の applied → transcode（D-97） |
 | 投入 | scan ジョブの完了時に食い違う全トラック × 系統、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（`(track_id, variant)` 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める。P4-1 の共通並列予算の対象 |
 | 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児（行に無いファイル。`Derived/` 全体）は GC ジョブ |
 | マルチch | どの系統も既定で対象外（チャンネル数不明も対象外）。トラック単位の `-ac 2` ダウンミックスは需要が出たら（D-51。実データは全件 2ch） |
@@ -862,7 +865,7 @@ D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に
 |---|---|
 | 対象 | 可逆（flac / alac / wav）に加え、`lossy_sources = true` なら**非可逆も**（opus / ogg / mp3 / aac → AAC。世代劣化は承知の上で、ミュージック.app が Opus を読めないため。**D-8 の例外**）。原本が AAC でも同じ経路で再エンコードする（stream copy では RG の焼き込みとリサンプルができない。D-75）。`lossy_sources` を true → false にしても既存の非可逆の行とファイルは消さない（対象外 = Skip で凍結と同じ扱い。物理削除は GC のみ） |
 | 出力 | ffmpeg **1 パス**（中間 WAV なし。FD を stdin に繋ぐのは opus と同じ）: `-i /dev/stdin -map 0:a:0 -vn -map_metadata -1 -af volume=<gain>dB [-ar 48000] -c:a aac -b:a <bitrate>k -f mp4`（内蔵エンコーダ。既定 256 kbps）。48 kHz 超は 48 kHz へ落とす（`-ar 48000`）、44.1 / 48 は据え置き。`audio_profile` は `aac:<bitrate>:48k:bake1`、`tag_profile` は `aac:sep=<区切り>:itunnorm0:v1` |
-| RG | **track gain を音声に焼き込む**（`-af volume=<gain>dB`。gain は `min(rg_track_gain, −20·log10(rg_track_peak))` で**エンコーダ入力を 0 dBTP 以下に抑える**（peak は true peak なので 1.0 超なら減衰側に倒れる。AAC 再符号化後のオーバーシュートまでは保証しない。gain が有限でなければ 0、peak は有限かつ > 0 のときだけ上限を掛ける）。album gain は使わない）。**RG 未解析のトラックは作らず待つ**（「解析済み」= `rg_scanned_at` と `rg_track_gain` / `rg_track_peak` の 3 つが揃っていること。時刻だけ残った行は対象外。`write_tags` ならタグへの書き込みも待つ（上の「RG の前提」。D-96）。書き込みの tagwrite の applied で投入される。二度エンコードの回避）。RG の解析世代（`src_rg_scanned_at`）の差分は**再エンコード**（album gain の on / off も世代を進めるので、その album の aac は作り直される。track gain しか使わないが値ベースの判定に列を足すより単純で、まれな操作なので許容。D-75）。タグには `iTunNORM` を **0 dB 相当**で書き、端末のサウンドチェック ON でも二重に掛からないようにする。値は 10 個の 8 桁 16 進を空白区切り（先頭にも空白）で、1〜2 値目（基準 1/1000）は `000003E8`、3〜4 値目（同じ量の基準 1/2500 の表現）は `000009C4`、残り 6 値は `00000000`: `" 000003E8 000003E8 000009C4 000009C4 00000000 00000000 00000000 00000000 00000000 00000000"`。`REPLAYGAIN_*` / `R128_*` は書かない |
+| RG | **track gain を音声に焼き込む**（`-af volume=<gain>dB`。gain は `min(rg_track_gain, −20·log10(rg_track_peak))` で**エンコーダ入力を 0 dBTP 以下に抑える**（peak は true peak なので 1.0 超なら減衰側に倒れる。AAC 再符号化後のオーバーシュートまでは保証しない。gain が有限でなければ 0、peak は有限かつ > 0 のときだけ上限を掛ける）。album gain は使わない）。**RG 未解析のトラックは作らず待つ**（「解析済み」= `rg_scanned_at` と `rg_track_gain` / `rg_track_peak` の 3 つが揃っていること。時刻だけ残った行は対象外。`write_tags` ならタグへの書き込みも待つ（上の「RG の前提」。D-97）。書き込みの tagwrite の applied で投入される。二度エンコードの回避）。RG の解析世代（`src_rg_scanned_at`）の差分は**再エンコード**（album gain の on / off も世代を進めるので、その album の aac は作り直される。track gain しか使わないが値ベースの判定に列を足すより単純で、まれな操作なので許容。D-75）。タグには `iTunNORM` を **0 dB 相当**で書き、端末のサウンドチェック ON でも二重に掛からないようにする。値は 10 個の 8 桁 16 進を空白区切り（先頭にも空白）で、1〜2 値目（基準 1/1000）は `000003E8`、3〜4 値目（同じ量の基準 1/2500 の表現）は `000009C4`、残り 6 値は `00000000`: `" 000003E8 000003E8 000009C4 000009C4 00000000 00000000 00000000 00000000 00000000 00000000"`。`REPLAYGAIN_*` / `R128_*` は書かない |
 | タグ | Library のタグを写す（`REPLAYGAIN_*` / `R128_*` / 既存の `ITUNNORM` は落とす）。**同じキーの複数値は出現順に `multi_value_separator`（既定 `" & "`）で 1 値に結合**（ミュージック.app は複数値の 1 つしか見せない。ARTIST / ALBUMARTIST / GENRE / COMPOSER など多値になり得る全フィールド）。写像は Library の tagwrite と同じ（§7.5「形式ごとの写像」）: Vorbis 名を lofty の `ItemKey` に写像して ilst の標準 atom（`©ART` `trkn` `disk` `©gen` 等）に書き、写像できないキーは `----:com.apple.iTunes:<KEY>` のフリーフォーム。`iTunNORM` は内部キーが大文字化されても atom 名を `iTunNORM` に固定する（大小文字を special-case） |
 | 画像 | `opus` と同じ選び方で、長辺 768 の **JPEG**（ミュージック.app は `covr` の WebP を読まない）。`thumbs/<hex>/768.jpg` をキャッシュに足す（thumbnail ジョブと同じ変換に形式を足したもの。`-pix_fmt yuvj420p -q:v 2`） |
 
@@ -1375,7 +1378,7 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
 | `rip` | **1**（物理ドライブ1台） | discid |
 | `verify` | 2 | album_id |
 | `rg` | CPU コア数 | album_id |
-| `rgwrite` | 1 | 固定（`rgwrite`。開始時にキーを外すので、実行中の投入は次のジョブになる）。`rg_write_due` の行を album ごとの編集バッチにする（D-96） |
+| `rgwrite` | 1 | 固定（`rgwrite`。開始時にキーを外すので、実行中の投入は次のジョブになる）。`rg_write_due` の行を album ごとの編集バッチにする（D-97） |
 | `transcode` | CPU コア数 - 1 | track_id + variant + audio_version（variant は P4-7 から。§7.6） |
 | `tagwrite` | 4 | track_id + tag_version（`edit_batch_id` でバッチに紐づく） |
 | `rename` | 1 | batch_id（バッチ 1 つに 1 ジョブ。2 phase の順序を守るため直列。D-43） |
@@ -1448,8 +1451,9 @@ GET    /api/tracks?filter=&sort=&cursor=&limit=   カーソルページング（
                                                   sort = album(既定) | title | artist | album_title |
                                                   albumartist | date | duration | codec | rel_path | id
                                                   （`-` 前置で降順）、limit = 1..=1000（既定 100）
-GET    /api/tracks/:id                            セッション有りは一覧と同じ行。trusted_cidrs からの
-                                                  セッション無しは限定フィールド（D-27 / D-39）
+GET    /api/tracks/:id                            セッション有りは一覧と同じ行に detail（タグ全部・物理属性・
+                                                  verifications = 手法ごとの最新の照合。D-58 / D-96）を足す。
+                                                  trusted_cidrs からのセッション無しは限定フィールド（D-27 / D-39）
 PATCH  /api/tracks/batch                          一括編集（dry_run フラグ）
 POST   /api/tracks/batch/preview                  変更プレビュー
 POST   /api/rename/preview                        テンプレート適用結果（selection_token を発行）
@@ -1462,7 +1466,7 @@ POST   /api/rg/write                              { selection, description?, ski
                                                   タグとして書く編集バッチを記録（§6、D-48）。
                                                   preview 段階は無い（値は DB から決まる）。解析後は
                                                   rgwrite が自動で書くので、これは自動で書かれなかった
-                                                  行（外部で書き換えた・巻き戻した等）の書き直し用（D-96）
+                                                  行（外部で書き換えた・巻き戻した等）の書き直し用（D-97）
 POST   /api/flaccheck                             { selection }。active な FLAC ごとに flaccheck ジョブを
                                                   投入（§7.9、D-57。読むだけで preview は無い）
 POST   /api/hirescheck                            { selection }。対象（可逆かつ >48 kHz または >16 bit）ごとに
@@ -1752,6 +1756,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "note",          // 完了時の結果 1 行（ハンドラが返す。ytdl: "Inbox に置いた: <path>" /
                                 //   "プラグインが skip: <理由>" / "取り込み済み（Library|Inbox）: <パス>" /
                                 //   "再生リストを展開した: N 件を投入、M 件は取り込み済み"。
+                                //   verify: 手法ごとの結果（"CTDB 全 12 曲一致（信頼度 34） / AccurateRip
+                                //   12 曲中 10 曲一致"、複数ディスクは "disc N: " 付きで「。」区切り。D-96）。
                                 //   playlist_sync: 同期の要約。無ければ null）
                "subject" } ],   // subject = 対象の表示用文字列（track_id → Library のパス、album_id → ディレクトリ、
                                 //   batch_id → 説明、transcode は " [<variant>]" 付き、scan は kind、ytdl は url、
@@ -1993,7 +1999,7 @@ rel_path（既定非表示）
 
 | バッジ | 条件 | 出典 |
 |---|---|---|
-| 検証 | `verification` の 5 値をアイコン色で区別。`unverifiable` は「未検証」と別の見え方 | tracks |
+| 検証 | `verification` を検証済み / 不一致 / 検証不能 / 未検証の 4 つの見え方で出す。`verified_ctdb` と `verified_ar` は同じ「検証済み」（どちらで一致したかはプロパティの General の CTDB / AccurateRip 行。D-96）。`unverifiable` は「未検証」と別の見え方 | tracks |
 | 可逆 / 非可逆 | `lossless` | tracks |
 | RG | `rg_scanned_at` の有無。書き込み未反映（`rg_written_at < rg_scanned_at`）は半透明 | tracks |
 | Derived | `derived_files` の `opus` 系統あり（= 配布ビュー）。`stale_tags` は点付き。`aac` 系統はバッジにせずプロパティの Location 列に行を出す（§7.6） | delivery |
@@ -2005,8 +2011,9 @@ rel_path（既定非表示）
 
 **選択**: クリック / Shift 範囲 / Ctrl 追加 / Ctrl+A（フィルタ結果全件）/ キーボード（下記）。
 全件選択は ID 列挙ではなく**選択した時点のフィルタ式**をサーバに渡す（`selection.filter`）。
-選択は immutable で、その後に表示フィルタやソートを変えても**選択集合は変わらない**
-（表示中の行と選択集合が食い違うことはあり、右パネルは選択集合の件数を出す）。
+選択は immutable で、その後にソートを変えても**選択集合は変わらない**。表の集合（サイドバーの
+scope・固定フィルタ・検索語・ルール編集中の DSL）が変わったら**選択を解除する**。右パネル（プロパティ・
+一括編集・操作）の対象は表示中の表の行だけにし、前の表示で選んだ行を持ち越さない（D-40）。
 プレビューでサーバが集合をスナップショットし（`selection_token`）、適用はその集合だけに
 効く。右パネル頭に「選択 N 件（うち反映待ち M 件）」、表の上に「表示 K 件」。
 
@@ -2027,7 +2034,7 @@ rel_path（既定非表示）
 
 カーソルは**読み込み済みの行の中**でだけ動く（未読込の骨組み行には id が無く選択に入れられない）。末尾に
 着くと次のページが読まれるので、End を繰り返せば先へ進める。カーソルは選択とは別の見た目上の状態で、
-表示フィルタ・ソートを変えても選択集合は変わらない（上記の immutable の規則のまま）。
+ソートを変えても選択集合は変わらない（表の集合が変われば上記のとおり解除する）。
 
 **インライン編集**: セルをダブルクリック → 1 件のバッチとして同じ経路（プレビュー省略）。
 
@@ -2316,7 +2323,7 @@ multi_value_separator = " & "  # 多値フィールドの結合
 
 [replaygain]
 reference_lufs = -18.0         # 内部表現。書き出し時に変換
-write_tags = true              # 解析後に自動でタグへ書き、Derived はその後に作る。false はタグに書かない（D-96）
+write_tags = true              # 解析後に自動でタグへ書き、Derived はその後に作る。false はタグに書かない（D-97）
 
 [normalize]
 wav_to_flac = true

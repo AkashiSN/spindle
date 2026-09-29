@@ -38,4 +38,7 @@ describe('filterToParam', () => {
     expect(toggleSort(DEFAULT_SORT, 'album')).toEqual({ key: 'album', desc: true })
     expect(toggleSort({ key: 'album', desc: true }, 'title')).toEqual({ key: 'title', desc: false })
   })
+  it('端末に未反映は device_pending で送る（キーの順は固定）', () => {
+    expect(filterToParam({ device_pending: 3, flags: ['missing'] })).toBe('{"flags":["missing"],"device_pending":3}')
+  })
 })

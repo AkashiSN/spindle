@@ -289,7 +289,7 @@ fn list_100_rows_with_badges_and_total_under_100ms_on_synthetic_60k() {
     let rows = tracks::resolve_selection(
         &conn,
         &Selection::Filter {
-            filter: Filter::default(),
+            filter: Box::new(Filter::default()),
             exclude_ids: vec![5, 9],
         },
     )
