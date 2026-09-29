@@ -2006,3 +2006,18 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
 - ~~Library の ALAC（m4a）に任意キーを書けない~~（2026-09-21 に P4-3 の実機確認で観測 → P4-11 に昇格）
 - ~~Inbox の承認画面で「Library に同名の曲がある」警告~~（2026-09-22 に P4-19 で実装。判定は
   「追記先の album の中で同じタイトル鍵」に絞った。albumartist 単位だと 720 行が該当して無視されるため）
+
+---
+
+## P5 端末への配信（D-95。仕様 docs/superpowers/specs/2026-09-29-device-delivery-design.md）
+
+完了条件: Xperia（Poweramp）を USB でつなげば差分を見てからボタンで同期でき、Mac で `spindle-agent sync` を
+実行すれば iPhone に入れる曲とプレイリストがミュージック.app に反映される。取り込みから端末までの状態が
+画面で追える。
+
+- [x] P5-1 データモデルとマニフェストの計算（0002、`domain::device`、`db::devices`、`source_hash` ジョブ）
+- [ ] P5-2 端末 API（UI 向け）・端末タブ（差分 / 選曲 / 設定）・選曲の近道・可視化 A〜D・DSL の
+      `on_device` / `device_pending` と循環の禁止
+- [ ] P5-3 adb サイドカーと Android 同期（登録 → 差分 → ボタンで同期、ジャーナル、バッチ、計画の終端）
+- [ ] P5-4 `spindle-agent` とエージェント API（pair / 計画の確定 / ファイル / 報告）
+- [ ] P5-5 文書の改訂（SPEC §1・§7.6・§7.7・§9・§10・§12・§13・§14、DSL.md、CLAUDE.md の禁止事項の注記）
