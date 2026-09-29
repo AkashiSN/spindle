@@ -547,27 +547,24 @@ pub fn source_hash_dedup_key(track_id: i64, kind: SourceKind) -> String {
     format!("source_hash:{track_id}:{}", kind.as_str())
 }
 
-/// ハッシュの無い送る元に `source_hash` ジョブを投入する。未完了の同じジョブがあれば数えない
+/// ハッシュの無い送る元に `source_hash` ジョブを投入し、投入した job id を返す。未完了の同じジョブがあれば含めない
 pub fn enqueue_source_hashes(
     conn: &Connection,
     needs: &[(i64, SourceKind)],
     now: i64,
-) -> Result<usize> {
-    let mut n = 0;
+) -> Result<Vec<i64>> {
+    let mut ids = Vec::new();
     for (track_id, kind) in needs {
         let job = NewJob::new(
             JobType::SourceHash,
             serde_json::json!({ "track_id": track_id, "source": kind.as_str() }),
         )
         .dedup_key(source_hash_dedup_key(*track_id, *kind));
-        if matches!(
-            dbjobs::enqueue(conn, &job, now)?,
-            EnqueueResult::Inserted(_)
-        ) {
-            n += 1;
+        if let EnqueueResult::Inserted(id) = dbjobs::enqueue(conn, &job, now)? {
+            ids.push(id);
         }
     }
-    Ok(n)
+    Ok(ids)
 }
 
 /// `device_errors`（kind, ref_id, reason）
@@ -675,4 +672,115 @@ pub fn snapshot(conn: &Connection) -> Result<Snapshot> {
     }
     tx.finish()?;
     Ok(Snapshot { devices: out })
+}
+
+pub struct DevicePatch {
+    pub name: Option<String>,
+    pub selection: Option<Selection>,
+    pub variant: Option<Variant>,
+}
+
+impl DevicePatch {
+    /// 名前だけの変更（open な計画があっても許す。generation を進めない）
+    pub fn only_name(&self) -> bool {
+        self.selection.is_none() && self.variant.is_none()
+    }
+}
+
+pub enum Update {
+    Ok(Device),
+    NotFound,
+    Duplicate,
+}
+
+pub fn update(conn: &Connection, id: i64, p: &DevicePatch, now: i64) -> Result<Update> {
+    atomically(conn, "device_update", || {
+        if get(conn, id)?.is_none() {
+            return Ok(Update::NotFound);
+        }
+        if let Some(name) = &p.name {
+            let key = canonical_key(name);
+            let taken: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM devices WHERE name_key = ?1 AND id <> ?2",
+                    params![key, id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if taken.is_some() {
+                return Ok(Update::Duplicate);
+            }
+            conn.execute(
+                "UPDATE devices SET name = ?2, name_key = ?3, updated_at = ?4 WHERE id = ?1",
+                params![id, name, key, now],
+            )?;
+        }
+        if let Some(s) = p.selection {
+            conn.execute(
+                "UPDATE devices SET selection = ?2 WHERE id = ?1",
+                params![id, s.as_str()],
+            )?;
+        }
+        if let Some(v) = p.variant {
+            conn.execute(
+                "UPDATE devices SET variant = ?2 WHERE id = ?1",
+                params![id, v.as_str()],
+            )?;
+        }
+        if !p.only_name() {
+            conn.execute(
+                "UPDATE devices SET generation = generation + 1, updated_at = ?2 WHERE id = ?1",
+                params![id, now],
+            )?;
+        }
+        get(conn, id)?
+            .map(Update::Ok)
+            .ok_or_else(|| crate::db::DbError::Internal("変更した端末を読めない".into()))
+    })
+}
+
+/// 端末の行を消す（端末上のファイルは消さない。表は ON DELETE CASCADE）
+pub fn delete(conn: &Connection, id: i64) -> Result<bool> {
+    Ok(conn.execute("DELETE FROM devices WHERE id = ?1", [id])? > 0)
+}
+
+/// open な計画か、queued / running の `device_sync` があるか（仕様 ③「端末の設定変更と同期の排他」）
+pub fn has_open_work(conn: &Connection, id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM device_sync_plans WHERE device_id = ?1 AND state = 'open')
+             OR EXISTS (SELECT 1 FROM jobs WHERE type = 'device_sync' AND state IN ('queued', 'running')
+                          AND json_extract(payload, '$.device_id') = ?1)",
+        [id],
+        |r| r.get::<_, i64>(0),
+    )? == 1)
+}
+
+pub enum PlaylistCheck {
+    Ok,
+    Unknown(i64),
+    Cycle(i64),
+}
+
+/// 印を付けてよいか: 実在し、端末のフィールドを使うスマートプレイリストでないこと（③ 循環の禁止）
+pub fn check_playlists(conn: &Connection, ids: &[i64]) -> Result<PlaylistCheck> {
+    for id in ids {
+        if dbpl::kind(conn, *id)?.is_none() {
+            return Ok(PlaylistCheck::Unknown(*id));
+        }
+        if crate::playlist::smart::load_rule(conn, *id)?
+            .is_some_and(|r| r.references_device_fields())
+        {
+            return Ok(PlaylistCheck::Cycle(*id));
+        }
+    }
+    Ok(PlaylistCheck::Ok)
+}
+
+/// どれかの端末の選曲に載っているか
+pub fn is_registered(conn: &Connection, playlist_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM device_playlists WHERE playlist_id = ?1)",
+        [playlist_id],
+        |r| r.get::<_, i64>(0),
+    )? == 1)
 }

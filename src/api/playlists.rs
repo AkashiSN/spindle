@@ -21,6 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::db::devices as dbdev;
 use crate::db::playlists::{self as dbpl, MoveError, Playlist, Rename};
 use crate::db::{now_epoch, tracks};
 use crate::domain::device::PendingSets;
@@ -451,6 +452,11 @@ pub async fn patch(
                     }
                 }
                 let mut changed = false;
+                if let Some((_, rule, _)) = &rule {
+                    if rule.references_device_fields() && dbdev::is_registered(c, id)? {
+                        return Ok(Err(PatchFail::Cycle));
+                    }
+                }
                 if let Some((src, rule, json)) = rule {
                     dbpl::set_rule(c, id, &src, &json, now)?;
                     changed = smart::refresh_one(c, id, &rule, now, &sets)?.1;
@@ -475,12 +481,14 @@ pub async fn patch(
         Err(PatchFail::Rename(Rename::Duplicate)) => duplicate(),
         Err(PatchFail::Rename(Rename::Ok)) => unreachable_response(),
         Err(PatchFail::Manual) => smart_only(),
+        Err(PatchFail::Cycle) => devices::cycle(id),
     })
 }
 
 enum PatchFail {
     Rename(Rename),
     Manual,
+    Cycle,
 }
 
 /// 型の上で到達しうるが論理的に起きない分岐。500 にせず 404 に倒す

@@ -1,0 +1,332 @@
+//! `/api/devices`（UI 向け端末 API、P5-2 Task 7）
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{header, Method, Request, StatusCode};
+use axum::Router;
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
+use tower::ServiceExt;
+
+use spindle::api::{self, auth, AppState};
+use spindle::config::Config;
+use spindle::db::Db;
+
+const EXAMPLE: &str = include_str!("../deploy/config.example.toml");
+const LAN: &str = "192.168.1.23:50000";
+
+struct App {
+    router: Router,
+    db: Arc<Db>,
+    cookie: String,
+    _dir: tempfile::TempDir,
+}
+
+impl App {
+    async fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
+        let root: toml::Table = toml::from_str(EXAMPLE).unwrap();
+        let config = Arc::new(Config::parse(&toml::to_string(&root).unwrap()).unwrap());
+        let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
+            .await
+            .unwrap();
+        let state = AppState::new(config, db.clone(), mode);
+        let router = api::router(state);
+        let r = req(Method::POST, "/api/auth/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::from(r#"{"password":"correct horse"}"#))
+            .unwrap();
+        let res = router.clone().oneshot(r).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cookie = res
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        Self {
+            router,
+            db,
+            cookie,
+            _dir: dir,
+        }
+    }
+
+    async fn call(&self, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let mut r = req(method, uri)
+            .header("sec-fetch-site", "same-origin")
+            .header(header::COOKIE, &self.cookie);
+        let body = match body {
+            Some(v) => {
+                r = r.header(header::CONTENT_TYPE, "application/json");
+                Body::from(v.to_string())
+            }
+            None => Body::empty(),
+        };
+        let res = self
+            .router
+            .clone()
+            .oneshot(r.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn call_without_cookie(&self, method: Method, uri: &str) -> (StatusCode, Value) {
+        let r = req(method, uri).body(Body::empty()).unwrap();
+        let res = self.router.clone().oneshot(r).await.unwrap();
+        (res.status(), Value::Null)
+    }
+}
+
+fn req(method: Method, uri: &str) -> axum::http::request::Builder {
+    let peer: SocketAddr = LAN.parse().unwrap();
+    let mut b = Request::builder().method(method).uri(uri);
+    b.extensions_mut().unwrap().insert(ConnectInfo(peer));
+    b
+}
+
+async fn create_iphone(app: &App, name: &str) -> i64 {
+    let (st, v) = app
+        .call(Method::POST, "/api/devices",
+              Some(json!({"name": name, "transport": "agent", "variant": "aac", "selection": "playlists"})))
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    v["id"].as_i64().unwrap()
+}
+
+async fn insert_playlist(app: &App, id: i64, name: &str, rule: Option<&str>) {
+    let (name, rule) = (name.to_owned(), rule.map(str::to_owned));
+    app.db
+        .write(move |c| {
+            let (kind, ast) = match &rule {
+                Some(src) => {
+                    let r = spindle::playlist::dsl::parse(src).unwrap();
+                    ("smart", Some(serde_json::to_string(&r).unwrap()))
+                }
+                None => ("manual", None),
+            };
+            c.execute(
+                "INSERT INTO playlists (id, name, name_key, kind, rule_source, rule_ast, created_at, updated_at)
+                 VALUES (?1, ?2, lower(?2), ?3, ?4, ?5, 0, 0)",
+                rusqlite::params![id, name, kind, rule, ast],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn create_list_patch_delete_round_trip() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    let (st, v) = app.call(Method::GET, "/api/devices", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["items"][0]["name"], "iPhone");
+    assert_eq!(v["items"][0]["transport"], "agent");
+    assert!(v["items"][0]["connected"].is_null());
+    assert_eq!(v["items"][0]["counts"]["add"], 0);
+    let (st, v) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/devices/{id}"),
+            Some(json!({"selection": "all"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["selection"], "all");
+    assert_eq!(v["generation"], 2);
+    let (st, _) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, _) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn create_rejects_adb_empty_and_duplicate_names() {
+    let app = App::new().await;
+    create_iphone(&app, "iPhone").await;
+    let (st, v) = app.call(Method::POST, "/api/devices",
+        Some(json!({"name": "Xperia", "transport": "adb", "variant": "opus", "selection": "all"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let (st, _) = app
+        .call(
+            Method::POST,
+            "/api/devices",
+            Some(json!({"name": "  ", "transport": "agent", "variant": "aac", "selection": "all"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, v) = app.call(Method::POST, "/api/devices",
+        Some(json!({"name": "IPHONE", "transport": "agent", "variant": "aac", "selection": "all"}))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(v["error"], "duplicate");
+}
+
+#[tokio::test]
+async fn open_plan_blocks_changes_except_name() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    insert_playlist(&app, 5, "通勤", None).await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at)
+                 VALUES (?1, 'x', '[]', 'open', 0)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for (method, uri, body) in [
+        (
+            Method::PATCH,
+            format!("/api/devices/{id}"),
+            Some(json!({"selection": "all"})),
+        ),
+        (
+            Method::PATCH,
+            format!("/api/devices/{id}"),
+            Some(json!({"variant": "opus"})),
+        ),
+        (
+            Method::PUT,
+            format!("/api/devices/{id}/playlists"),
+            Some(json!({"playlist_ids": [5]})),
+        ),
+        (Method::DELETE, format!("/api/devices/{id}"), None),
+    ] {
+        let (st, v) = app.call(method.clone(), &uri, body).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{method} {uri}: {v}");
+        assert_eq!(v["error"], "open_plan");
+    }
+    let (st, v) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/devices/{id}"),
+            Some(json!({"name": "iPhone 15"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["generation"], 1, "名前だけの変更は generation を進めない");
+}
+
+#[tokio::test]
+async fn running_device_sync_job_also_blocks_changes() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO jobs (type, payload, state, created_at) VALUES ('device_sync', json_object('device_id', ?1), 'queued', 0)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/devices/{id}"),
+            Some(json!({"selection": "all"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(v["error"], "open_plan");
+}
+
+#[tokio::test]
+async fn put_playlists_rejects_cycle_and_unknown() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    insert_playlist(&app, 5, "通勤", None).await;
+    insert_playlist(&app, 6, "未反映", Some("%device_pending% IS Xperia")).await;
+    let (st, v) = app
+        .call(
+            Method::PUT,
+            &format!("/api/devices/{id}/playlists"),
+            Some(json!({"playlist_ids": [5, 6]})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"], "cycle");
+    let (st, v) = app
+        .call(
+            Method::PUT,
+            &format!("/api/devices/{id}/playlists"),
+            Some(json!({"playlist_ids": [99]})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let (st, v) = app
+        .call(
+            Method::PUT,
+            &format!("/api/devices/{id}/playlists"),
+            Some(json!({"playlist_ids": [5]})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["playlist_ids"], json!([5]));
+}
+
+#[tokio::test]
+async fn rule_save_on_registered_playlist_rejects_cycle() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    insert_playlist(&app, 7, "新しめ", Some("%title% IS a")).await;
+    let (st, _) = app
+        .call(
+            Method::PUT,
+            &format!("/api/devices/{id}/playlists"),
+            Some(json!({"playlist_ids": [7]})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = app
+        .call(
+            Method::PATCH,
+            "/api/playlists/7",
+            Some(json!({"rule": "%on_device% IS iPhone"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"], "cycle");
+    // 載っていないプレイリストなら保存できる
+    insert_playlist(&app, 8, "別", Some("%title% IS b")).await;
+    let (st, v) = app
+        .call(
+            Method::PATCH,
+            "/api/playlists/8",
+            Some(json!({"rule": "%on_device% IS iPhone"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn endpoints_require_a_session() {
+    let app = App::new().await;
+    let (st, _) = app.call_without_cookie(Method::GET, "/api/devices").await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}

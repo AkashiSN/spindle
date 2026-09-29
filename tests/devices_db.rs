@@ -92,11 +92,15 @@ fn compute_marks_unhashed_tracks_and_enqueues_jobs_once() {
     assert!(got.diff.items.is_empty());
     assert_eq!(got.needs_hash, vec![(1, SourceKind::Master)]);
     assert_eq!(
-        devices::enqueue_source_hashes(&c, &got.needs_hash, 30).unwrap(),
+        devices::enqueue_source_hashes(&c, &got.needs_hash, 30)
+            .unwrap()
+            .len(),
         1
     );
     assert_eq!(
-        devices::enqueue_source_hashes(&c, &got.needs_hash, 31).unwrap(),
+        devices::enqueue_source_hashes(&c, &got.needs_hash, 31)
+            .unwrap()
+            .len(),
         0,
         "未完了の間は dedup"
     );
