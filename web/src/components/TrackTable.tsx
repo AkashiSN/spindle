@@ -21,6 +21,7 @@ import {
 } from '@tanstack/react-table'
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
 import type { Device, TrackRow } from '../api/types'
+import { deviceNamesFrom, deviceNamesKey, type DeviceName } from '../lib/badges'
 import type { Sort, SortKey } from '../lib/filter'
 import { formatArtistAlbum, formatDuration, formatTitleArtist, formatTrackNo } from '../lib/format'
 import { cellDiff, COLUMN_TAG, formatValues, type PreviewState } from '../lib/preview'
@@ -55,7 +56,7 @@ const SORT_OF: Partial<Record<string, SortKey>> = {
   rel_path: 'rel_path',
 }
 
-const makeColumns = (devices: readonly Device[]) => helper.columns([
+const makeColumns = (devices: readonly DeviceName[]) => helper.columns([
   helper.display({
     id: 'sel',
     header: '',
@@ -210,7 +211,9 @@ function editableValue(track: TrackRow, columnId: string): string | null {
 
 export function TrackTable(props: TrackTableProps) {
   const { rows, total, ensure, sort, onSort, selection, highlightFilterSelection, preview, onInlineEdit, devices } = props
-  const columns = useMemo(() => makeColumns(devices), [devices])
+  // 端末の一覧は取り直すたびに新しい配列になる。列定義は id と名前が変わったときだけ作り直す
+  const devicesKey = deviceNamesKey(devices)
+  const columns = useMemo(() => makeColumns(deviceNamesFrom(devicesKey)), [devicesKey])
   const [editing, setEditing] = useState<Editing | null>(null)
   const commitEdit = useCallback(
     async (e: Editing) => {

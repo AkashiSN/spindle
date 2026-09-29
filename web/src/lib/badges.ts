@@ -133,8 +133,24 @@ export function badgesOf(t: TrackRow): Badge[] {
   return out
 }
 
+/** バッジが端末から使うのは id と名前だけ */
+export type DeviceName = Pick<Device, 'id' | 'name'>
+
+/** 端末の id と名前の署名。一覧を取り直すたびに配列が作り直されても、名前が変わらなければ同じ文字列になる
+ *  （表の列定義をこの署名で memo し、取り直しのたびに作り直さない） */
+export function deviceNamesKey(devices: readonly DeviceName[]): string {
+  return JSON.stringify(devices.map((d) => [d.id, d.name]))
+}
+
+/** deviceNamesKey の逆 */
+export function deviceNamesFrom(key: string): DeviceName[] {
+  const parsed: unknown = JSON.parse(key)
+  if (!Array.isArray(parsed)) return []
+  return parsed.map((x: [number, string]) => ({ id: x[0], name: x[1] }))
+}
+
 /** 端末ごとのバッジ（key は `device:<id>`）。対象外へ向かう removing は出さない */
-export function deviceBadges(t: TrackRow, devices: readonly Device[]): Badge[] {
+export function deviceBadges(t: TrackRow, devices: readonly DeviceName[]): Badge[] {
   const out: Badge[] = []
   for (const s of t.devices ?? []) {
     const n = devices.find((d) => d.id === s.device_id)?.name ?? `端末 ${s.device_id}`

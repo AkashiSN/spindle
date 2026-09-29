@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Device, TrackRow } from '../api/types'
-import { BADGE_LEGEND, badgesOf, deviceBadges } from './badges'
+import { BADGE_LEGEND, badgesOf, deviceBadges, deviceNamesFrom, deviceNamesKey } from './badges'
 
 const base: TrackRow = {
   id: 1,
@@ -198,5 +198,15 @@ describe('端末のバッジ', () => {
     expect(got.map((b) => b.key)).toEqual(['device:1', 'device:2'])
     expect(got[0]?.label).toContain('iPhone')
     expect(got[1]?.cls).toContain('b-device-pending')
+  })
+})
+
+describe('端末の名前の署名', () => {
+  it('取り直しで配列が変わっても id と名前が同じなら同じ署名、名前が変われば別の署名', () => {
+    const a = [{ id: 1, name: 'iPhone' }, { id: 2, name: 'Xperia' }] as Device[]
+    const b = a.map((d) => ({ ...d, generation: 9 })) as Device[]
+    expect(deviceNamesKey(b)).toBe(deviceNamesKey(a))
+    expect(deviceNamesKey([{ id: 1, name: 'iPad' }])).not.toBe(deviceNamesKey(a))
+    expect(deviceNamesFrom(deviceNamesKey(a))).toEqual([{ id: 1, name: 'iPhone' }, { id: 2, name: 'Xperia' }])
   })
 })
