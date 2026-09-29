@@ -158,7 +158,7 @@ describe('cpuBudgetLabel（D-73）', () => {
       { transcode: 11, rg: 12, thumbnail: 4, flaccheck: 12 },
     )
     expect(cpuBudgetLabel(rows, 12)).toBe(
-      'CPU 系（rg / transcode / flaccheck / hirescheck）の実行中の合計 2 / 予算 12（= コア数）',
+      'CPU 系（rg / transcode / flaccheck / hirescheck / source_hash）の実行中の合計 2 / 予算 12（= コア数）',
     )
     expect(cpuBudgetLabel(rows, null)).toBeNull()
   })

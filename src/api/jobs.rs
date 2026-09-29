@@ -23,7 +23,7 @@ pub struct JobList {
     pub summary: Summary,
     /// 種別ごとの並列度（SPEC §8。ジョブ画面 §12.5 が待ち行列と並べて出す）
     pub concurrency: BTreeMap<&'static str, usize>,
-    /// CPU 系（rg / transcode / flaccheck / hirescheck）が共有する並列予算（= コア数。D-73）
+    /// CPU 系（rg / transcode / flaccheck / hirescheck / source_hash）が共有する並列予算（= コア数。D-73）
     pub cpu_budget: usize,
     /// 種別ごとの queued / running / failed（全件の集計。`items` は上限付きなので web で数えない）
     pub by_type: BTreeMap<String, TypeCounts>,

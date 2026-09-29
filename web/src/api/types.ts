@@ -156,7 +156,7 @@ export type JobList = {
   items: Job[]
   summary: JobSummary
   concurrency: Record<string, number>
-  /** CPU 系（rg / transcode / flaccheck / hirescheck）が共有する並列予算（= コア数。D-73） */
+  /** CPU 系（rg / transcode / flaccheck / hirescheck / source_hash）が共有する並列予算（= コア数。D-73） */
   cpu_budget: number
   /** 種別ごとの queued / running / failed。`items` は上限付きなのでこちらで数える */
   by_type: Record<string, TypeCounts>
