@@ -422,7 +422,8 @@ function SettingsTab({ device, devices }: { device: Device; devices: Devices }) 
           e.preventDefault()
           void devices.update(device.id, {
             ...(nameChanged ? { name: name.trim() } : {}),
-            ...(variantChanged ? { variant } : {}),
+            // 同期が途中のときは系統を送らない（名前だけの保存を 409 で弾かせない）
+            ...(variantChanged && !device.open_plan ? { variant } : {}),
           })
         }}
       >
@@ -469,7 +470,7 @@ function SettingsTab({ device, devices }: { device: Device; devices: Devices }) 
           <button
             type="submit"
             className="primary"
-            disabled={devices.busy || (!nameChanged && !variantChanged)}
+            disabled={devices.busy || (!nameChanged && !(variantChanged && !device.open_plan))}
           >
             保存
           </button>

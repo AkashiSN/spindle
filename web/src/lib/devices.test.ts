@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import type { Device, DeviceCounts, DeviceDiff, DiffItem } from '../api/types'
-import { deviceMessage, describeEvaluation, OP_LABELS, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
+import { deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
 
 const counts = (p: Partial<DeviceCounts> = {}): DeviceCounts => ({
   add: 0, update: 0, move: 0, delete: 0, waiting: 0, error: 0, synced: 0, ...p,
@@ -50,5 +50,20 @@ describe('エラーの文言', () => {
   it('open_plan と cycle を日本語にする', () => {
     expect(deviceMessage(new ApiError(409, 'open_plan', 'x'))).toContain('同期が途中')
     expect(deviceMessage(new ApiError(400, 'cycle', 'x'))).toContain('端末の状態')
+  })
+})
+
+describe('選んでいる端末', () => {
+  const diff = { generation: 1 } as unknown as DeviceDiff
+  it('差分は選んでいる端末のものだけ出す（切り替え直後に前の端末の差分を出さない）', () => {
+    expect(diffFor({ id: 1, diff }, 1)).toBe(diff)
+    expect(diffFor({ id: 1, diff }, 2)).toBeNull()
+    expect(diffFor({ id: 1, diff }, null)).toBeNull()
+    expect(diffFor(null, 1)).toBeNull()
+  })
+  it('作った端末は一覧の取り直しを待たずに一覧に入る', () => {
+    expect(withDevice([device(1, {})], device(2, {})).map((d) => d.id)).toEqual([1, 2])
+    expect(withDevice([device(1, {}), device(2, {})], device(2, {})).map((d) => d.id)).toEqual([1, 2])
+    expect(withDevice(null, device(3, {})).map((d) => d.id)).toEqual([3])
   })
 })

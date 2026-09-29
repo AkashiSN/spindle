@@ -33,6 +33,18 @@ export function sortDiffItems(items: readonly DiffItem[]): DiffItem[] {
   )
 }
 
+/** 取った差分（どの端末のものかと組）のうち、いま選んでいる端末のものだけを返す。
+ * 端末を切り替えた直後に前の端末の差分を出さない */
+export function diffFor(held: { id: number; diff: DeviceDiff } | null, selectedId: number | null): DeviceDiff | null {
+  return held != null && held.id === selectedId ? held.diff : null
+}
+
+/** 作った端末を一覧に足す（一覧の取り直しを待たずに選べるように）。既にあればそのまま */
+export function withDevice(items: readonly Device[] | null, d: Device): Device[] {
+  if (items == null) return [d]
+  return items.some((x) => x.id === d.id) ? [...items] : [...items, d]
+}
+
 /** 同期で送る件数（待ち・エラー以外）と送る量 */
 export function syncSummary(d: DeviceDiff): { count: number; bytes: number } {
   return {

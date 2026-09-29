@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPatch, apiPost } from '../api/client'
 import type { Device, DeviceDiff, DeviceList, DeviceSelection, DeviceVariant, SelectionEstimate } from '../api/types'
-import { deviceMessage } from '../lib/devices'
+import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { Latest } from '../lib/latest'
 
 const POLL_MS = 60_000
@@ -18,6 +18,18 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
   const listGen = useRef(new Latest())
   const diffGen = useRef(new Latest())
   const timer = useRef<number | null>(null)
+  // 選んでいる端末。間引きの待ちや保存の途中で端末を切り替えても、取るのは常にいま選んでいる端末の差分
+  // （作った時点の selectedId を閉じ込めた関数を後から呼ぶと、前の端末の要求が新しい端末の応答を捨てる）
+  const selectedRef = useRef(selectedId)
+  useEffect(() => {
+    selectedRef.current = selectedId
+  }, [selectedId])
+  // 端末を切り替えたら前の端末のエラーは消す（描画中の調整。effect で setState しない）
+  const [errorFor, setErrorFor] = useState(selectedId)
+  if (errorFor !== selectedId) {
+    setErrorFor(selectedId)
+    setError(null)
+  }
 
   const fetchList = useCallback(() => {
     const id = listGen.current.next()
@@ -31,11 +43,12 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
   }, [])
   const fetchDiff = useCallback(() => {
     const id = diffGen.current.next()
+    const deviceId = selectedRef.current
     // 未選択なら取らない（返す diff は選んだ端末と組が合うときだけなので、前の値は出ない）
-    if (selectedId == null) return
-    apiFetch<DeviceDiff>(`/api/devices/${selectedId}/diff`)
+    if (deviceId == null) return
+    apiFetch<DeviceDiff>(`/api/devices/${deviceId}/diff`)
       .then((d) => {
-        if (diffGen.current.isCurrent(id)) setDiffOf({ id: selectedId, diff: d })
+        if (diffGen.current.isCurrent(id)) setDiffOf({ id: deviceId, diff: d })
       })
       .catch((e: unknown) => {
         if (!diffGen.current.isCurrent(id)) return
@@ -43,7 +56,7 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
         // 消えた端末（別タブで削除など）は画面側が一覧から選び直すので、エラーには出さない
         if (!(e instanceof ApiError && e.code === 'not_found')) setError(deviceMessage(e))
       })
-  }, [selectedId])
+  }, [])
   const refresh = useCallback(() => {
     if (timer.current != null) return
     timer.current = window.setTimeout(() => {
@@ -73,7 +86,8 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     const g = diffGen.current
     fetchDiff()
     return () => g.invalidate()
-  }, [enabled, fetchDiff])
+    // selectedId は fetchDiff が ref から読む。変わったら取り直すために依存に置く
+  }, [enabled, selectedId, fetchDiff])
 
   // 選曲の見積もり（保存前の選び方で数える）。画面の effect の依存に入るので関数は固定する
   const estimate = useCallback(
@@ -105,7 +119,7 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
 
   return {
     items,
-    diff: diffOf != null && diffOf.id === selectedId ? diffOf.diff : null,
+    diff: diffFor(diffOf, selectedId),
     error,
     busy,
     refresh,
@@ -116,7 +130,11 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
       const ok = await run(async () => {
         created = await apiPost<Device>('/api/devices', { name, transport: 'agent', variant, selection })
       })
-      return ok ? created : null
+      if (!ok || created == null) return null
+      const d: Device = created
+      // 一覧の取り直しを待たずに入れる（呼び出し側がすぐ選んでも、一覧に無い端末として選び直されない）
+      setItems((cur) => withDevice(cur, d))
+      return d
     },
     update: (id: number, patch: { name?: string; selection?: DeviceSelection; variant?: DeviceVariant }) =>
       run(() => apiPatch<Device>(`/api/devices/${id}`, patch)),
