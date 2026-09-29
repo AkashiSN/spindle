@@ -522,3 +522,51 @@ async fn listing_does_not_write_when_no_new_hash_jobs() {
         "新しく投入するものが無ければ書かない"
     );
 }
+
+/// 保留（待ち）の曲に反映済みの行があれば、差分はその行き先と「端末に既にある」を出す
+#[tokio::test]
+async fn diff_shows_current_copy_of_held_tracks() {
+    let app = App::new().await;
+    app.db
+        .write(|c| {
+            c.execute(
+                "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless, channels,
+                                     audio_version, tag_version, seen_at)
+                 VALUES (1, 'A/a.flac', 'a/a.flac', 1, 0, 0, 'flac', 1, 2, 1, 1, 0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .call(Method::POST, "/api/devices",
+              Some(json!({"name": "iPhone", "transport": "agent", "variant": "aac", "selection": "all"})))
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let id = v["id"].as_i64().unwrap();
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO device_items (device_id, track_id, dest_path, dest_path_key, token, size, sha256, synced_at)
+                 VALUES (?1, 1, 'A/a.m4a', 'a/a.m4a', 't', 1, 'ab', 5)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let item = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["track_id"] == 1)
+        .unwrap();
+    assert_eq!(item["op"], "waiting", "{v}");
+    assert_eq!(item["dest_path"], "A/a.m4a");
+    assert_eq!(item["has_copy"], true);
+}

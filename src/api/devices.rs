@@ -453,6 +453,9 @@ pub async fn diff(
             ))
         })
         .await?;
+    // 反映済みの行を曲ごとに 1 回で引けるようにする（項目ごとに全行を走査しない）
+    let current_of: std::collections::HashMap<i64, &crate::domain::device::DeviceItem> =
+        d.current.iter().map(|c| (c.track_id, c)).collect();
     let reason_of = |track_id: i64| match d.states.get(&track_id) {
         Some(TrackState::Pending { reason, .. }) => reason.clone(),
         _ => None,
@@ -469,7 +472,7 @@ pub async fn diff(
             dest_path: o.to.clone().or_else(|| o.from.clone()),
             reason: reason_of(o.track_id),
             size: o.size,
-            has_copy: o.from.is_some() || d.current.iter().any(|c| c.track_id == o.track_id),
+            has_copy: o.from.is_some() || current_of.contains_key(&o.track_id),
         })
         .collect();
     for h in &diff.held {
@@ -483,11 +486,7 @@ pub async fn diff(
             title: titles.get(&h.track_id).map(|t| t.0.clone()),
             artist: titles.get(&h.track_id).map(|t| t.1.clone()),
             from: None,
-            dest_path: d
-                .current
-                .iter()
-                .find(|c| c.track_id == h.track_id)
-                .map(|c| c.dest_path.clone()),
+            dest_path: current_of.get(&h.track_id).map(|c| c.dest_path.clone()),
             reason: Some(reason),
             size: 0,
             has_copy: h.has_copy,
