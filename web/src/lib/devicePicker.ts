@@ -29,3 +29,23 @@ export function mergePending(items: readonly Device[], pending: ReadonlyMap<numb
     return ids ? { ...d, playlist_ids: ids } : d
   })
 }
+
+/** 選曲タブの印の下書きを付け外しする。`draft` が null（未編集）なら保存済みの `saved` から始める。
+ *  結果が保存済みと同じになったら null（未編集）に戻す（その後のサイドバーでの付け外しに追随させる） */
+export function toggleDraft(
+  draft: readonly number[] | null,
+  saved: readonly number[],
+  playlistId: number,
+  on: boolean,
+): number[] | null {
+  const base = draft ?? saved
+  const next = on ? (base.includes(playlistId) ? [...base] : [...base, playlistId]) : base.filter((x) => x !== playlistId)
+  return sameIdSet(next, saved) ? null : next
+}
+
+/** 順序を問わず同じ集合か */
+export function sameIdSet(a: readonly number[], b: readonly number[]): boolean {
+  if (a.length !== b.length) return false
+  const s = new Set(a)
+  return b.every((x) => s.has(x))
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Device } from '../api/types'
-import { chipsFor, mergePending, togglePlaylist, withPlaylistIds } from './devicePicker'
+import { chipsFor, mergePending, sameIdSet, toggleDraft, togglePlaylist, withPlaylistIds } from './devicePicker'
 
 const d = (id: number, name: string, playlist_ids: number[]): Device => ({
   id, name, transport: 'agent', variant: 'aac', selection: 'playlists', generation: 1, connected: null,
@@ -29,5 +29,23 @@ describe('選曲の近道', () => {
     const merged = mergePending(fetched, new Map([[1, [5, 6]]]))
     expect(merged.map((x) => x.playlist_ids)).toEqual([[5, 6], [9]])
     expect(mergePending(fetched, new Map()).map((x) => x.playlist_ids)).toEqual([[5], [9]])
+  })
+})
+
+describe('選曲タブの下書き', () => {
+  it('未編集なら保存済みから始め、保存済みと同じに戻れば未編集（null）に戻る', () => {
+    expect(toggleDraft(null, [5], 6, true)).toEqual([5, 6])
+    expect(toggleDraft([5, 6], [5], 6, false)).toBeNull()
+    expect(toggleDraft(null, [5], 5, true)).toBeNull()
+  })
+  it('編集中はサイドバーの変更（保存済みの値）ではなく下書きを使う', () => {
+    const draft = toggleDraft(null, [5], 7, true)
+    expect(draft).toEqual([5, 7])
+    // サイドバーで 6 を付けた後（保存済みが [5, 6]）も下書きは変わらない
+    expect(toggleDraft(draft, [5, 6], 8, true)).toEqual([5, 7, 8])
+  })
+  it('順序を問わず同じ集合か', () => {
+    expect(sameIdSet([1, 2], [2, 1])).toBe(true)
+    expect(sameIdSet([1, 2], [1])).toBe(false)
   })
 })

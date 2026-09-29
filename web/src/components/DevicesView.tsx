@@ -10,6 +10,7 @@ import { ApiError } from '../api/client'
 import { describeEvaluation, deviceMessage, OP_LABELS, sortDiffItems, syncSummary, unsyncedCount } from '../lib/devices'
 import { formatCount } from '../lib/format'
 import { formatDateTime } from '../lib/history'
+import { sameIdSet, toggleDraft } from '../lib/devicePicker'
 import { Latest } from '../lib/latest'
 import { formatBytes } from '../lib/settings'
 
@@ -307,15 +308,12 @@ function DiffTab({ device, diff }: { device: Device; diff: DeviceDiff | null }) 
 
 // ---------------------------------------------------------------- 選曲
 
-function sameIds(a: readonly number[], b: readonly number[]): boolean {
-  if (a.length !== b.length) return false
-  const s = new Set(a)
-  return b.every((x) => s.has(x))
-}
-
 function SelectionTab({ device, devices, playlists }: { device: Device; devices: Devices; playlists: Playlists }) {
   const [selection, setSelection] = useState<DeviceSelection>(device.selection)
-  const [ids, setIds] = useState<number[]>(device.playlist_ids)
+  // 印の下書き。null は未編集で、保存済みの値（サイドバーでの付け外しを含む）をそのまま出す。
+  // 開いた時点の値を写して持つと、開いている間のサイドバーでの変更を次の保存で黙って戻してしまう
+  const [draft, setDraft] = useState<number[] | null>(null)
+  const ids = draft ?? device.playlist_ids
   const [estimate, setEstimate] = useState<SelectionEstimate | null>(null)
   const gen = useRef(new Latest())
   const { estimate: fetchEstimate } = devices
@@ -337,11 +335,15 @@ function SelectionTab({ device, devices, playlists }: { device: Device; devices:
   }, [fetchEstimate, device.id, selection, idsKey])
 
   const selectionChanged = selection !== device.selection
-  const idsChanged = !sameIds(ids, device.playlist_ids)
-  const toggle = (id: number, on: boolean) => setIds((cur) => (on ? [...cur, id] : cur.filter((x) => x !== id)))
+  const idsChanged = !sameIdSet(ids, device.playlist_ids)
+  const toggle = (id: number, on: boolean) => setDraft((cur) => toggleDraft(cur, device.playlist_ids, id, on))
   const save = async () => {
     // 印を先に保存する（プレイリスト選曲へ切り替えるとき、空の選曲の差分を一瞬でも作らない）
-    if (idsChanged && !(await devices.setPlaylists(device.id, ids))) return
+    if (idsChanged) {
+      if (!(await devices.setPlaylists(device.id, ids))) return
+      // 保存したら未編集に戻す（以後は保存済みの値に追随する）
+      setDraft(null)
+    }
     if (selectionChanged) await devices.update(device.id, { selection })
   }
 
