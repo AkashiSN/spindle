@@ -56,6 +56,8 @@ impl App {
         let lib = dir.path().join("Library");
         let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
         common::enable_opus_variant(&dir.path().join("spindle.db"), 128);
+        // Derived は RG が揃うまで作られない（D-96）。ここでは追随だけを見るので RG 済みで登録する
+        common::settle_rg_on_insert(&dir.path().join("spindle.db"));
         let config = Arc::new(Config::parse(EXAMPLE).unwrap());
         let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
             .await

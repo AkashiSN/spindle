@@ -87,6 +87,9 @@ pub struct VariantSettings {
     pub lossy_sources: bool,
     /// `aac`: 同じキーの複数値を 1 値に結合する区切り。`opus` では使わない
     pub multi_value_separator: String,
+    /// RG が Library のタグへ書き込み済みになるまで作らない（`[replaygain].write_tags` の写し。D-96）。
+    /// false（タグに書かない運用）なら解析済みだけを待つ
+    pub rg_write_required: bool,
 }
 
 /// opus 系統の設定の世代。`opusenc --vbr --music --bitrate <bitrate>`（引数を変えるときは版を上げる）
@@ -137,8 +140,11 @@ pub struct Target {
     /// `tracks.rg_scanned_at`（未解析なら None）
     pub rg_scanned_at: Option<i64>,
     /// RG 解析済み: `rg_scanned_at` / `rg_track_gain` / `rg_track_peak` の 3 つが揃っている（時刻だけ
-    /// 残った行で 0 dB の焼き込みを確定させない。`aac` の対象条件）
+    /// 残った行で 0 dB の焼き込みを確定させない）
     pub rg_ready: bool,
+    /// RG が Library のタグへ書き込み済み: `rg_written_at >= rg_scanned_at`（ファイルの RG タグが
+    /// 解析値と一致していると確認済み。D-48 / D-96）
+    pub rg_written: bool,
 }
 
 /// `derived_files` の現在の行
@@ -158,7 +164,7 @@ pub struct Current {
 /// トラックに対して行う処理
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
-    /// 対象外（非可逆 / missing / マルチチャンネル）か系統が凍結（off）。Derived があっても触らない
+    /// 対象外（非可逆 / missing / マルチチャンネル / RG が揃っていない）か系統が凍結（off）。Derived があっても触らない
     Skip,
     /// 再エンコード（無い・音声版が古い）。パスとタグも同時に揃う
     Encode,
@@ -179,18 +185,27 @@ impl Plan {
     }
 }
 
+/// RG の準備ができているか（D-96）。解析済みで、`rg_write_required` なら Library のタグへの書き込みも
+/// 済んでいること。Derived はこれが揃ってから作る（揃う前に作ると、RG の無い・書き込み前の値の
+/// Derived が配られ、揃った後にもう一度作り直すことになる）
+pub fn rg_settled(s: &VariantSettings, t: &Target) -> bool {
+    t.rg_ready && (!s.rg_write_required || t.rg_written)
+}
+
 /// その系統の Derived を作る対象か。チャンネル数が不明（None）なのは属性を読めなかったファイルで、
 /// マルチチャンネルかもしれないので対象にしない（deep scan で埋まってから）。
 /// - `opus`: Library 内の可逆で active な 1ch / 2ch（非可逆は原本を配る。D-8）
-/// - `aac`: 可逆に加え `lossy_sources` なら非可逆も。RG を音声に焼き込むので**解析済みだけ**（未解析は
-///   待つ。rg の保存で投入される）
+/// - `aac`: 可逆に加え `lossy_sources` なら非可逆も
+///
+/// どちらも **RG が揃ってから**（[`rg_settled`]。未解析・未書き込みは待つ。書き込みの tagwrite の
+/// applied で投入される。D-96）。揃っていない間、既存の行とファイルは凍結と同じく触らない
 pub fn eligible(s: &VariantSettings, t: &Target) -> bool {
-    if t.missing || !matches!(t.channels, Some(1 | 2)) {
+    if t.missing || !matches!(t.channels, Some(1 | 2)) || !rg_settled(s, t) {
         return false;
     }
     match s.variant {
         Variant::Opus => t.lossless,
-        Variant::Aac => (t.lossless || s.lossy_sources) && t.rg_ready,
+        Variant::Aac => t.lossless || s.lossy_sources,
     }
 }
 

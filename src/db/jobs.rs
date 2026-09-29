@@ -37,10 +37,12 @@ pub enum JobType {
     PlaylistSync,
     /// 送る元のハッシュの計算（P5-1、D-95）
     SourceHash,
+    /// ReplayGain の解析値をタグへ書く編集バッチを作る（rg の後続。D-96）
+    Rgwrite,
 }
 
 impl JobType {
-    pub const ALL: [JobType; 17] = [
+    pub const ALL: [JobType; 18] = [
         JobType::Scan,
         JobType::Rip,
         JobType::Verify,
@@ -58,6 +60,7 @@ impl JobType {
         JobType::Hirescheck,
         JobType::PlaylistSync,
         JobType::SourceHash,
+        JobType::Rgwrite,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -79,6 +82,7 @@ impl JobType {
             JobType::Hirescheck => "hirescheck",
             JobType::PlaylistSync => "playlist_sync",
             JobType::SourceHash => "source_hash",
+            JobType::Rgwrite => "rgwrite",
         }
     }
 
@@ -119,6 +123,8 @@ impl JobType {
             JobType::PlaylistSync => 1,
             // SHA-256 を全曲分取るので CPU の共通予算（D-73）も取る。上限自体は控えめに
             JobType::SourceHash => 2,
+            // 編集バッチを記録するだけ（ファイルは tagwrite が書く）
+            JobType::Rgwrite => 1,
         }
     }
 
@@ -305,7 +311,7 @@ pub fn subject_of(
             let variant = text_of("variant").unwrap_or_else(|| "opus".to_owned());
             track().map(|t| format!("{t} [{variant}]"))
         }
-        JobType::Rg => track().or_else(album),
+        JobType::Rg | JobType::Rgwrite => track().or_else(album),
         JobType::Flaccheck
         | JobType::Hirescheck
         | JobType::Tagwrite
@@ -1218,6 +1224,16 @@ pub fn acquire_track_locks(
             Err(e)
         }
     }
+}
+
+/// 実行中のジョブの dedup キーを外す。以後の同じキーの投入は Duplicate にならず新しいジョブになる。
+/// 対象を実行時に DB から決めるジョブ（rgwrite。D-96）が、対象を読んだ後に立った印を取りこぼさない
+/// ように開始時に呼ぶ（running への合流は「もう読んだ」ジョブに吸われて消えるため）
+pub fn release_dedup_key(conn: &Connection, job_id: i64) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE jobs SET dedup_key = NULL WHERE id = ?1 AND state = 'running'",
+        [job_id],
+    )? > 0)
 }
 
 pub fn release_track_locks(conn: &Connection, job_id: i64) -> Result<usize> {

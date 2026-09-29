@@ -491,6 +491,7 @@ pub fn compute(conn: &Connection, device_id: i64) -> Result<Option<Computed>> {
         tag_profile: String::new(),
         lossy_sources: false,
         multi_value_separator: " & ".into(),
+        rg_write_required: true,
     });
     let tracks = track_inputs(conn, &device)?;
     let current = items(conn, device_id)?;

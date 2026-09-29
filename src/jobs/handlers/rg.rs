@@ -22,6 +22,9 @@
 //! - 無音（絶対ゲート以下）は gain 0 dB（`domain::replaygain`）
 //! - 書き込み時に `albums.album_gain` を読み直す（D-74）。album 単位の job でも off なら album の値は
 //!   書かず、track 単位の job は on の album に属する track の album 値を据え置く
+//! - 保存は確認が成り立たなくなった行に書き込み待ちの印（`rg_write_due`）を立て、`[replaygain].write_tags`
+//!   が有効なら同じトランザクションで `rgwrite` を積む（D-96。解析値をタグへ書く編集バッチは rgwrite が
+//!   作る。Derived はその書き込みの applied を待つ）
 
 use std::fs::File;
 use std::sync::Arc;
@@ -46,6 +49,7 @@ pub struct RgHandler {
     root: Arc<RootDir>,
     decoder: Decoder,
     reference_lufs: f64,
+    write_tags: bool,
 }
 
 impl RgHandler {
@@ -54,7 +58,14 @@ impl RgHandler {
             root,
             decoder,
             reference_lufs,
+            write_tags: false,
         }
+    }
+
+    /// 解析の後に `rgwrite` を積む（`[replaygain].write_tags`。D-96）
+    pub fn with_write_tags(mut self, write_tags: bool) -> Self {
+        self.write_tags = write_tags;
+        self
     }
 }
 
@@ -180,6 +191,7 @@ impl Handler for RgHandler {
         let root = Arc::clone(&self.root);
         let decoder = self.decoder.clone();
         let reference = self.reference_lufs;
+        let write_tags = self.write_tags;
         Box::pin(async move {
             let job_id = ctx.job.id;
             let int_of = |key: &str| ctx.job.payload.get(key).and_then(|v| v.as_i64());
@@ -328,11 +340,16 @@ impl Handler for RgHandler {
                             results.len()
                         )));
                     }
-                    // Derived の追随（D-51）。解析値は版に乗らないので、ここで retag を投入する
+                    // Derived の追随（D-51）。解析値は版に乗らないので、ここで retag を投入する。
+                    // 書き込みが要る設定では、タグに書かれるまで対象外なのでここでは積まれない（D-96）
                     let mut derived_jobs = Vec::new();
                     for (track_id, _) in &results {
                         derived_jobs
                             .extend(crate::db::derived::enqueue_if_stale(&tx, *track_id, now)?);
+                    }
+                    // store が書き込み待ちの印を立てた行を rgwrite が書く（D-96）
+                    if write_tags {
+                        derived_jobs.push(dbrg::enqueue_write(&tx, now)?);
                     }
                     tx.commit()?;
                     Ok(Some((n, derived_jobs)))

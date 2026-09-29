@@ -1245,7 +1245,8 @@ fn prepare_rg_write_tx(
     };
     // op になったトラック以外（DB のタグが既に変換結果と一致）は、ファイルも一致している
     // （DB はファイルのキャッシュ）ので rg_written_at だけ立てる
-    let mut written: Vec<i64> = targets.iter().map(|t| t.track_id).collect();
+    let target_ids: Vec<i64> = targets.iter().map(|t| t.track_id).collect();
+    let mut written = target_ids.clone();
     match prepare_tags_in(&tx, description, &targets, &eval, None, now) {
         Ok(p) => {
             for op in history::list_ops(&tx, p.batch_id)? {
@@ -1260,6 +1261,8 @@ fn prepare_rg_write_tx(
         Err(e) => return Err(e),
     }
     prepared.unchanged = dbrg::set_written(&tx, &written, now)?;
+    // 書き込みを記録した（または一致を確認した）行は自動書き込みの対象から外す（D-96）
+    dbrg::clear_write_due(&tx, &target_ids)?;
     tx.commit()?;
     tracing::info!(
         batch_id = ?prepared.batch_id,

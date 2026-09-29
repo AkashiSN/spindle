@@ -71,6 +71,9 @@ impl Lib {
         let db = Arc::new(Db::open(&db_path).unwrap());
         // 起動時の sync_variants と同じ（opus 系統 128k、on。エンコーダの設定と揃える）
         common::enable_opus_variant(&db_path, 128);
+        // ここでは追随の経路だけを見るので、登録した行は RG の解析と書き込みが済んだ状態にする
+        // （Derived は RG が揃うまで作られない。D-96）。gain 0 dB・peak 1.0・解析世代 0
+        common::settle_rg_on_insert(&db_path);
         let library = Arc::new(RootDir::open(&dir.path().join("Library")).unwrap());
         let derived = Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap());
         let store = Arc::new(ArtworkStore::new(dir.path().join("thumbs")));
@@ -195,7 +198,7 @@ impl Lib {
             derived::TagState {
                 src_tag_version: tv,
                 src_artwork_id: None,
-                src_rg_scanned_at: None,
+                src_rg_scanned_at: Some(0),
             },
             &derived::Profiles {
                 audio_profile: "opus:128:v1".into(),
@@ -253,6 +256,26 @@ impl Lib {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("job {id} が終端にならない");
+    }
+
+    /// 未完了の rg が無くなるまで待つ（音声の差し替えで積まれる再解析。Derived はその後に積まれる）
+    async fn wait_rg(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
+            let n: i64 = self
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM jobs WHERE type = 'rg' AND state IN ('queued', 'running')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if n == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("rg が終わらない");
     }
 
     /// 未完了の transcode が無くなるまで待つ
@@ -452,7 +475,8 @@ async fn delivery_view_follows_versions_end_to_end() {
         .unwrap();
     assert_eq!(lib.versions(a).0, 2);
     assert_eq!(lib.delivery(a), ("Library/A/01.flac".into(), 0));
-    assert_eq!(lib.scan_job().await, JobState::Done);
+    // 解析値は捨てられ、解析し直してから Derived を作り直す（D-47 追記 2、D-96）
+    lib.wait_rg().await;
     lib.wait_transcodes().await;
     assert_eq!(lib.delivery(a), ("Derived/opus/A/01.opus".into(), 0));
 }

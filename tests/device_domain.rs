@@ -75,6 +75,7 @@ fn settings(variant: Variant, enabled: bool) -> spindle::domain::derived::Varian
         tag_profile: "opus:v1".into(),
         lossy_sources: variant == Variant::Aac,
         multi_value_separator: " & ".into(),
+        rg_write_required: true,
     }
 }
 

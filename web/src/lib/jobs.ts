@@ -7,6 +7,7 @@ const TYPE_LABEL: Record<string, string> = {
   rip: 'CD リッピング',
   verify: '遡及照合',
   rg: 'ReplayGain 解析',
+  rgwrite: 'ReplayGain 書き込み',
   transcode: 'Derived 生成',
   tagwrite: 'タグ書き込み',
   rename: 'リネーム',

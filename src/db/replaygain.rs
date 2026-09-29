@@ -87,6 +87,9 @@ pub use crate::domain::replaygain::Values;
 /// 再解析が起きると `rg_written_at < rg_scanned_at` では検出できない。値が全て同じで確認が
 /// 有効（`rg_written_at >= rg_scanned_at`）なら確認は成り立ったままなので `now` へ進める。
 ///
+/// 確認が成り立たなくなった行（値が変わった・未確認）は書き込み待ちの印 `rg_write_due` を立てる
+/// （rgwrite が書く。D-96）。確認が成り立ったままの行は印を変えない。
+///
 /// どちらの分岐でも `rg_scanned_at` は**前の値より小さくしない**（同じ秒に [`set_album_gain`] が
 /// `now + 1` へ進めた直後に、その前から走っていた解析が同じ値で保存すると巻き戻り、Derived の
 /// `src_rg_scanned_at` との差分が消えて追随が抜ける。D-74）
@@ -97,7 +100,12 @@ pub fn store(conn: &Connection, results: &[(i64, Values)], now: i64) -> Result<u
                   WHEN rg_track_gain IS ?2 AND rg_track_peak IS ?3
                    AND rg_album_gain IS ?4 AND rg_album_peak IS ?5
                    AND rg_written_at IS NOT NULL AND rg_written_at >= rg_scanned_at
-                  THEN MAX(?6, rg_written_at) ELSE NULL END,
+                  THEN MAX(?6, rg_written_at, rg_scanned_at) ELSE NULL END,
+                rg_write_due = CASE
+                  WHEN rg_track_gain IS ?2 AND rg_track_peak IS ?3
+                   AND rg_album_gain IS ?4 AND rg_album_peak IS ?5
+                   AND rg_written_at IS NOT NULL AND rg_written_at >= rg_scanned_at
+                  THEN rg_write_due ELSE 1 END,
                 rg_scanned_at = CASE
                   WHEN rg_track_gain IS ?2 AND rg_track_peak IS ?3
                    AND rg_album_gain IS ?4 AND rg_album_peak IS ?5
@@ -145,7 +153,8 @@ pub struct AlbumGainChange {
 
 /// album gain の属性を変える（D-74）。off にするときは構成トラックの `rg_album_*` を NULL にし、
 /// `rg_written_at` を NULL に戻し（ファイルには album のキーが残っている）、`rg_scanned_at` を進める
-/// （Derived の `src_rg_scanned_at` との差分でタグ上書きが走る）。on にするだけでは行を触らない
+/// （Derived の `src_rg_scanned_at` との差分でタグ上書きが走る）。ファイルの album のキーを消すため
+/// 書き込み待ちの印 `rg_write_due` を立てる（呼び出し側が [`enqueue_write`] を積む。D-96）。on にするだけでは行を触らない
 /// （次の album 解析で揃う。呼び出し側が rg を投入する）。album が無ければ None
 pub fn set_album_gain(
     conn: &Connection,
@@ -186,6 +195,7 @@ pub fn set_album_gain(
         conn.execute(
             "UPDATE tracks
                 SET rg_album_gain = NULL, rg_album_peak = NULL, rg_written_at = NULL,
+                    rg_write_due = 1,
                     rg_scanned_at = MAX(?2, COALESCE(rg_scanned_at, 0) + 1)
               WHERE album_id = ?1 AND (rg_album_gain IS NOT NULL OR rg_album_peak IS NOT NULL)",
             params![album_id, now],
@@ -283,10 +293,14 @@ pub fn write_rows(conn: &Connection, track_ids: &[i64]) -> Result<Vec<WriteRow>>
     Ok(rows)
 }
 
-/// `rg_written_at` を `now` にする（ファイルが既に解析値を持つと分かった行）
+/// `rg_written_at` を `now` にする（ファイルが既に解析値を持つと分かった行）。`rg_scanned_at` より
+/// 小さくしない（album gain の切り替えや同じ秒の再解析で `rg_scanned_at` は「前の値 + 1」へ進み、
+/// 壁時計より先にありうる。確認は今の解析値に対するものなので、`rg_written_at < rg_scanned_at` の
+/// 「未書き込み」に見せると Derived が止まる。D-96）
 pub fn set_written(conn: &Connection, track_ids: &[i64], now: i64) -> Result<usize> {
     let mut st = conn.prepare_cached(
-        "UPDATE tracks SET rg_written_at = ?2 WHERE id = ?1 AND rg_scanned_at IS NOT NULL",
+        "UPDATE tracks SET rg_written_at = MAX(?2, rg_scanned_at)
+          WHERE id = ?1 AND rg_scanned_at IS NOT NULL",
     )?;
     let mut n = 0;
     for id in track_ids {
@@ -322,6 +336,122 @@ pub fn enqueue_analysis(conn: &Connection, track_ids: &[i64], now: i64) -> Resul
     Ok(ids)
 }
 
+// ---------------------------------------------------------------- 自動書き込み（D-96）
+
+/// 書き込み待ちの印の付いた行を書く `rgwrite` ジョブ（Library 全体で 1 本。dedup `rgwrite`）。
+/// 対象は payload に持たず、実行時に `rg_write_due` から決める（album の移動・missing・実行中の
+/// ジョブへの dedup 合流で書き漏れない）。実行中のジョブは開始時に dedup キーを外すので、その後の
+/// 投入は新しいジョブになる
+pub fn new_write_job() -> NewJob {
+    NewJob::new(JobType::Rgwrite, serde_json::json!({})).dedup_key("rgwrite")
+}
+
+/// `rgwrite` を積む（印を立てた書き手が同じトランザクションで呼ぶ）。返り値は投入した（または
+/// 既にあった）ジョブ id
+pub fn enqueue_write(conn: &Connection, now: i64) -> Result<i64> {
+    Ok(dbjobs::enqueue(conn, &new_write_job(), now)?.id())
+}
+
+/// 書き込み待ちの active な行があれば `rgwrite` を積む（scan の完了・起動時の取りこぼしの回収。
+/// missing から戻った行もここで拾う）
+pub fn enqueue_write_if_due(conn: &Connection, now: i64) -> Result<Option<i64>> {
+    let due: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM tracks WHERE rg_write_due = 1 AND missing_since IS NULL LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match due {
+        Some(_) => Ok(Some(enqueue_write(conn, now)?)),
+        None => Ok(None),
+    }
+}
+
+/// 書き込み待ちの 1 群（album ごと。album の無い行は 1 行ずつ）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueGroup {
+    pub album_id: Option<i64>,
+    /// 書き込み待ちの active な行（id 昇順）
+    pub due: Vec<i64>,
+    /// 解析中かを見る行（album なら active な構成トラック全部、無ければ `due` と同じ）
+    pub members: Vec<i64>,
+}
+
+/// 書き込み待ちの印の付いた active な行を album ごとにまとめる（album id 順、album の無い行は後ろに
+/// id 順）
+pub fn due_groups(conn: &Connection) -> Result<Vec<DueGroup>> {
+    let mut st = conn.prepare_cached(
+        "SELECT id, album_id FROM tracks
+          WHERE rg_write_due = 1 AND missing_since IS NULL
+          ORDER BY album_id IS NULL, album_id, id",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut groups: Vec<DueGroup> = Vec::new();
+    for (id, album_id) in rows {
+        match (album_id, groups.last_mut()) {
+            (Some(a), Some(g)) if g.album_id == Some(a) => g.due.push(id),
+            (Some(a), _) => {
+                let members = album_members(conn, a)?.into_iter().map(|m| m.id).collect();
+                groups.push(DueGroup {
+                    album_id: Some(a),
+                    due: vec![id],
+                    members,
+                });
+            }
+            (None, _) => groups.push(DueGroup {
+                album_id: None,
+                due: vec![id],
+                members: vec![id],
+            }),
+        }
+    }
+    Ok(groups)
+}
+
+/// `track_ids` のどれかを解析する rg ジョブが queued / running か（album 単位は `album_id` で見る）。
+/// 書き込みは同じ album の解析が出揃ってから 1 つのバッチにする
+pub fn analysis_active(
+    conn: &Connection,
+    album_id: Option<i64>,
+    track_ids: &[i64],
+) -> Result<bool> {
+    let mut keys: Vec<String> = track_ids
+        .iter()
+        .map(|id| format!("rg:track:{id}"))
+        .collect();
+    if let Some(a) = album_id {
+        keys.push(format!("rg:album:{a}"));
+    }
+    let json = serde_json::to_string(&keys).map_err(|e| super::DbError::Internal(e.to_string()))?;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM jobs
+              WHERE state IN ('queued', 'running')
+                AND dedup_key IN (SELECT value FROM json_each(?1))
+              LIMIT 1",
+            [json],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// 書き込み待ちの印を下ろす（書き込みの編集バッチを記録した・一致済みで確認時刻だけ立てた行）
+pub fn clear_write_due(conn: &Connection, track_ids: &[i64]) -> Result<usize> {
+    let json =
+        serde_json::to_string(track_ids).map_err(|e| super::DbError::Internal(e.to_string()))?;
+    Ok(conn.execute(
+        "UPDATE tracks SET rg_write_due = 0
+          WHERE rg_write_due = 1 AND id IN (SELECT value FROM json_each(?1))",
+        [json],
+    )?)
+}
+
 /// 音声が差し替わったトラックの解析値を捨て（[`reset_analysis`]）、解析し直すジョブを積む（P4-22。
 /// aac の Derived は RG が揃うまで作られないので、値を消すだけだと止まったままになる）。
 /// 返り値は積んだジョブ id（ワーカーを起こすのに使う）
@@ -336,11 +466,48 @@ pub fn reset_and_reanalyze(conn: &Connection, track_id: i64, now: i64) -> Result
 pub fn reset_analysis(conn: &Connection, track_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE tracks SET rg_track_gain = NULL, rg_track_peak = NULL, rg_album_gain = NULL,
-                rg_album_peak = NULL, rg_scanned_at = NULL, rg_written_at = NULL
+                rg_album_peak = NULL, rg_scanned_at = NULL, rg_written_at = NULL, rg_write_due = 0
           WHERE id = ?1",
         [track_id],
     )?;
     Ok(())
+}
+
+/// DB に取り込み済みの RG のキー（`RG_KEYS`）の値（キー順、値は出現順）
+pub fn rg_tags_of(conn: &Connection, track_id: i64) -> Result<Vec<(String, Vec<String>)>> {
+    let mut st = conn.prepare_cached(
+        "SELECT value FROM track_tags WHERE track_id = ?1 AND key = ?2 ORDER BY idx",
+    )?;
+    let mut out = Vec::with_capacity(crate::domain::replaygain::RG_KEYS.len());
+    for key in crate::domain::replaygain::RG_KEYS {
+        let values = st
+            .query_map(params![track_id, key], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        out.push((key.to_owned(), values));
+    }
+    Ok(out)
+}
+
+/// タグ集合の RG のキーの値（[`rg_tags_of`] と同じ形）
+pub fn rg_tags_in(tags: &TagSet) -> Vec<(String, Vec<String>)> {
+    crate::domain::replaygain::RG_KEYS
+        .iter()
+        .map(|key| {
+            (
+                (*key).to_owned(),
+                tags.values(key).map(str::to_owned).collect(),
+            )
+        })
+        .collect()
+}
+
+/// 外部ツールが RG のキーを書き換えた行の書き込み待ちの印を下ろす（ファイルが正。解析し直すまで自動では
+/// 書き直さない。D-96）。RG 以外のタグだけが変わった行は印を残す
+pub fn cancel_write_due(conn: &Connection, track_id: i64) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE tracks SET rg_write_due = 0 WHERE id = ?1 AND rg_write_due = 1",
+        [track_id],
+    )? > 0)
 }
 
 /// ファイルの現在のタグ集合から `rg_written_at` を判定し直す。解析値と一致していれば `now`、
@@ -360,8 +527,12 @@ pub fn sync_written_at(
         })
     });
     let written: Option<i64> = matched.then_some(now);
+    // 一致したときは rg_scanned_at より小さくしない（[`set_written`] と同じ理由）
     conn.execute(
-        "UPDATE tracks SET rg_written_at = ?2 WHERE id = ?1",
+        "UPDATE tracks
+            SET rg_written_at = CASE WHEN ?2 IS NULL THEN NULL
+                                     ELSE MAX(?2, COALESCE(rg_scanned_at, 0)) END
+          WHERE id = ?1",
         params![track_id, written],
     )?;
     Ok(matched)

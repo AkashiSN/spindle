@@ -23,17 +23,26 @@ use crate::domain::relpath::canonical_key;
 
 /// 起動時に `config.toml` の系統設定を `derived_variants` 表へ写す（opus / aac の 2 行。節を省略した
 /// 系統も既定値で行を作る。表に無い = 未設定、とは区別する）
-pub fn sync_variants(conn: &Connection, cfg: &DerivedConfig, now: i64) -> Result<()> {
+/// `rg_write_required` は `[replaygain].write_tags`（Derived を RG のタグ書き込みの後に作るか。D-96）
+pub fn sync_variants(
+    conn: &Connection,
+    cfg: &DerivedConfig,
+    rg_write_required: bool,
+    now: i64,
+) -> Result<()> {
     let mut st = conn.prepare_cached(
         "INSERT INTO derived_variants (variant, enabled, audio_profile, tag_profile, codec, bitrate,
-                                       updated_at, lossy_sources, multi_value_separator)
-         VALUES (?1, ?2, ?3, ?4, ?1, ?5, ?6, ?7, ?8)
+                                       updated_at, lossy_sources, multi_value_separator,
+                                       rg_write_required)
+         VALUES (?1, ?2, ?3, ?4, ?1, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(variant) DO UPDATE SET
            enabled = excluded.enabled, audio_profile = excluded.audio_profile,
            tag_profile = excluded.tag_profile, codec = excluded.codec, bitrate = excluded.bitrate,
            updated_at = excluded.updated_at, lossy_sources = excluded.lossy_sources,
-           multi_value_separator = excluded.multi_value_separator",
+           multi_value_separator = excluded.multi_value_separator,
+           rg_write_required = excluded.rg_write_required",
     )?;
+    let rg_write_required = i64::from(rg_write_required);
     let (audio, tag) = opus_profiles(cfg.opus.bitrate);
     st.execute(params![
         Variant::Opus.as_str(),
@@ -44,6 +53,7 @@ pub fn sync_variants(conn: &Connection, cfg: &DerivedConfig, now: i64) -> Result
         now,
         0i64,
         " & ",
+        rg_write_required,
     ])?;
     let (audio, tag) = aac_profiles(cfg.aac.bitrate, &cfg.aac.multi_value_separator);
     st.execute(params![
@@ -55,12 +65,14 @@ pub fn sync_variants(conn: &Connection, cfg: &DerivedConfig, now: i64) -> Result
         now,
         i64::from(cfg.aac.lossy_sources),
         cfg.aac.multi_value_separator,
+        rg_write_required,
     ])?;
     Ok(())
 }
 
 const SETTINGS_COLUMNS: &str =
-    "variant, enabled, audio_profile, tag_profile, lossy_sources, multi_value_separator";
+    "variant, enabled, audio_profile, tag_profile, lossy_sources, multi_value_separator,
+     rg_write_required";
 
 fn settings_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<VariantSettings>> {
     let name: String = r.get(0)?;
@@ -74,6 +86,7 @@ fn settings_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<VariantSetting
         tag_profile: r.get(3)?,
         lossy_sources: r.get::<_, i64>(4)? == 1,
         multi_value_separator: r.get(5)?,
+        rg_write_required: r.get::<_, i64>(6)? == 1,
     }))
 }
 
@@ -107,7 +120,8 @@ pub fn load_target(conn: &Connection, track_id: i64) -> Result<Option<Target>> {
                     t.audio_version, t.tag_version, coalesce(t.artwork_id, a.artwork_id),
                     t.rg_scanned_at,
                     t.rg_scanned_at IS NOT NULL AND t.rg_track_gain IS NOT NULL
-                      AND t.rg_track_peak IS NOT NULL
+                      AND t.rg_track_peak IS NOT NULL,
+                    t.rg_written_at IS NOT NULL AND t.rg_written_at >= t.rg_scanned_at
              FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
              WHERE t.id = ?1",
             [track_id],
@@ -123,6 +137,7 @@ pub fn load_target(conn: &Connection, track_id: i64) -> Result<Option<Target>> {
                     artwork_id: r.get(7)?,
                     rg_scanned_at: r.get(8)?,
                     rg_ready: r.get::<_, i64>(9)? == 1,
+                    rg_written: r.get::<_, Option<i64>>(10)? == Some(1),
                 })
             },
         )
@@ -433,7 +448,7 @@ pub fn enqueue_if_stale(conn: &Connection, track_id: i64, now: i64) -> Result<Ve
 
 /// 対象になりうる全トラック（active・1ch / 2ch）を系統ごとに見て食い違う分を一括投入する（scan 完了時）。
 /// 期待パスの比較は SQL では書きにくいので行を取ってから Rust で判定する。非可逆と RG の有無は
-/// `eligible` が系統ごとに判定する（opus は可逆のみ、aac は解析済みなら非可逆も）
+/// `eligible` が系統ごとに判定する（opus は可逆のみ、aac は非可逆も。どちらも RG が揃ってから。D-96）
 pub fn enqueue_all_stale(conn: &Connection, now: i64) -> Result<Vec<i64>> {
     let mut ids = Vec::new();
     for s in variant_settings(conn)? {
@@ -445,6 +460,7 @@ pub fn enqueue_all_stale(conn: &Connection, now: i64) -> Result<Vec<i64>> {
                     coalesce(t.artwork_id, a.artwork_id), t.rg_scanned_at,
                     t.rg_scanned_at IS NOT NULL AND t.rg_track_gain IS NOT NULL
                       AND t.rg_track_peak IS NOT NULL,
+                    t.rg_written_at IS NOT NULL AND t.rg_written_at >= t.rg_scanned_at,
                     d.rel_path, d.src_audio_version, d.src_tag_version, d.src_artwork_id,
                     d.src_rg_scanned_at, d.audio_profile, d.tag_profile
              FROM tracks t
@@ -465,17 +481,18 @@ pub fn enqueue_all_stale(conn: &Connection, now: i64) -> Result<Vec<i64>> {
                 artwork_id: r.get(6)?,
                 rg_scanned_at: r.get(7)?,
                 rg_ready: r.get::<_, i64>(8)? == 1,
+                rg_written: r.get::<_, Option<i64>>(9)? == Some(1),
             };
-            let rel: Option<String> = r.get(9)?;
+            let rel: Option<String> = r.get(10)?;
             let current = match rel {
                 Some(rel_path) => Some(Current {
                     rel_path,
-                    src_audio_version: r.get(10)?,
-                    src_tag_version: r.get(11)?,
-                    src_artwork_id: r.get(12)?,
-                    src_rg_scanned_at: r.get(13)?,
-                    audio_profile: r.get(14)?,
-                    tag_profile: r.get(15)?,
+                    src_audio_version: r.get(11)?,
+                    src_tag_version: r.get(12)?,
+                    src_artwork_id: r.get(13)?,
+                    src_rg_scanned_at: r.get(14)?,
+                    audio_profile: r.get(15)?,
+                    tag_profile: r.get(16)?,
                 }),
                 None => None,
             };

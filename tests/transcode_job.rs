@@ -175,6 +175,8 @@ impl Lib {
         assert!(st.success());
     }
 
+    /// 走査し、未解析の行を「RG の解析と書き込みが済んだ」状態にする（Derived は RG が揃うまで
+    /// 作られない。D-96）。gain 0 dB・peak 1.0・解析世代 0。RG を見るテストは `set_rg` / `clear_rg` で上書きする
     async fn scan(&self) {
         self.scanner
             .run(
@@ -183,6 +185,26 @@ impl Lib {
                 CancellationToken::new(),
             )
             .await
+            .unwrap();
+        self.conn()
+            .execute(
+                "UPDATE tracks SET rg_track_gain = 0.0, rg_track_peak = 1.0, rg_scanned_at = 0,
+                        rg_written_at = 0
+                  WHERE rg_scanned_at IS NULL",
+                [],
+            )
+            .unwrap();
+    }
+
+    /// RG を未解析に戻す
+    fn clear_rg(&self, id: i64) {
+        self.conn()
+            .execute(
+                "UPDATE tracks SET rg_track_gain = NULL, rg_track_peak = NULL, rg_album_gain = NULL,
+                        rg_album_peak = NULL, rg_scanned_at = NULL, rg_written_at = NULL
+                  WHERE id = ?1",
+                [id],
+            )
             .unwrap();
     }
 
@@ -198,6 +220,7 @@ impl Lib {
                 opus: spindle::config::OpusVariantConfig { enabled, bitrate },
                 aac: aac_config(),
             },
+            false,
             now,
         )
         .unwrap();
@@ -214,6 +237,7 @@ impl Lib {
                 },
                 aac,
             },
+            false,
             now,
         )
         .unwrap();
@@ -520,8 +544,9 @@ async fn first_run_encodes_with_tags_rg_and_cover() {
     assert!(!has_tmp(&lib.derived().join("opus/A/B")));
 }
 
+/// 画像の無い曲はタグと R128 だけを写す（RG の無い opus は作らない。D-96）
 #[tokio::test]
-async fn without_rg_and_cover_tags_only_transfer() {
+async fn without_cover_tags_and_r128_only_transfer() {
     require_tools!();
     let lib = Lib::new();
     lib.add("A/01.flac", 1, "a");
@@ -536,7 +561,9 @@ async fn without_rg_and_cover_tags_only_transfer() {
     )
     .unwrap();
     assert_eq!(af.tags.first("TITLE"), Some("a"));
-    assert!(af.tags.first("R128_TRACK_GAIN").is_none());
+    // scan() が入れた 0 dB（-18 LUFS 基準）→ -23 LUFS 基準の Q7.8
+    assert_eq!(af.tags.first("R128_TRACK_GAIN"), Some("-1280"));
+    assert!(af.tags.first("R128_ALBUM_GAIN").is_none());
     assert!(af.tags.first("PICTURE").is_none());
 }
 
@@ -649,6 +676,7 @@ async fn frozen_variant_and_unknown_variant_are_noops() {
     assert_eq!(sha256(&lib.derived().join("opus/A/01.opus")), before);
     assert_eq!(lib.derived_row(a).unwrap().2, 1, "タグ版も据え置き");
     // 別系統（aac）は RG 未解析なので待つ = 何も作らない
+    lib.clear_rg(a);
     let job = lib
         .jobs
         .enqueue(derived::new_job(a, Variant::Aac, av, tv))
@@ -657,7 +685,15 @@ async fn frozen_variant_and_unknown_variant_are_noops() {
         .id();
     assert_eq!(lib.wait_job(job).await, JobState::Done);
     assert!(!lib.derived().join("aac").exists());
-    // 戻せば追随する
+    // 戻せば追随する（RG は元の解析世代に戻す）
+    lib.conn()
+        .execute(
+            "UPDATE tracks SET rg_track_gain = 0.0, rg_track_peak = 1.0, rg_scanned_at = 0,
+                    rg_written_at = 0
+              WHERE id = ?1",
+            [a],
+        )
+        .unwrap();
     lib.sync_opus(true, 128, 2);
     assert_eq!(lib.run(a).await, JobState::Done);
     assert_eq!(lib.derived_row(a).unwrap().2, 2);
@@ -1671,6 +1707,7 @@ async fn aac_first_run_bakes_track_gain_writes_itunnorm_joined_tags_and_jpeg_cov
     lib.start();
     let id = lib.track_id("A/B/01.flac");
     // RG 未解析のうちは待つ（Skip = Done で行もファイルも無い）
+    lib.clear_rg(id);
     assert_eq!(lib.run_variant(id, Variant::Aac).await, JobState::Done);
     assert!(lib.derived_row_of(id, Variant::Aac).is_none());
     assert!(!lib.derived().join("aac/A/B/01.m4a").exists());
