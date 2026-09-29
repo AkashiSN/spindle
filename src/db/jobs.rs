@@ -16,7 +16,7 @@ use super::{DbError, Result};
 
 /// ジョブ種別。並列度と冪等キーの構成は SPEC §8 の表に従う
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum JobType {
     Scan,
     Rip,
