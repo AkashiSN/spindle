@@ -393,7 +393,8 @@ pub fn render_playlist(transport: Transport, entries: &[(i64, &str)]) -> Vec<u8>
     }
 }
 
-/// 印の付いたプレイリストを組み立てる。参照するのは**同期の後に端末に実在する曲**だけ: desired は今回の
+/// 印の付いたプレイリストを組み立てる。`manifest` は `resolve_collisions` を通したものを渡すこと。
+/// 参照するのは**同期の後に端末に実在する曲**だけ: desired は今回の
 /// パス、hold で既存の写しがある曲は `current` のパス。名前の衝突（`canonical_key`）と予約名はエラー
 /// （返り値の 2 つ目。`(playlist_id, 理由)`）
 pub fn build_playlists(
@@ -407,9 +408,10 @@ pub fn build_playlists(
         .iter()
         .map(|d| (d.track_id, d.dest_path.as_str()))
         .collect();
+    let held_ids: HashSet<i64> = manifest.hold.iter().map(|(id, _)| *id).collect();
     let held_copy: HashMap<i64, &str> = current
         .iter()
-        .filter(|c| manifest.hold_of(c.track_id).is_some())
+        .filter(|c| held_ids.contains(&c.track_id))
         .map(|c| (c.track_id, c.dest_path.as_str()))
         .collect();
     let mut name_count: BTreeMap<String, usize> = BTreeMap::new();
@@ -536,18 +538,12 @@ pub struct Diff {
     pub playlist_errors: Vec<(i64, &'static str)>,
 }
 
-/// 差分（仕様 ③「3 つの集合」「差分」）。desired と現状を track_id で突き合わせ、hold は触らず、
-/// マニフェストに無い（remove）ものを削除にする。行き先が「動かない管理下の曲」に占められていれば、
+/// 行き先の衝突を不動点まで解く（仕様 ③「差分」）。行き先が「動かない管理下の曲」に占められていれば、
 /// その曲をパス衝突で保留にし、その曲自身も動かなくなるので不動点まで繰り返す（入れ替えの片側が保留に
-/// なれば、もう片側も保留になる）
-pub fn diff(
-    manifest: &Manifest,
-    current: &[DeviceItem],
-    playlists: &[DesiredPlaylist],
-    current_playlists: &[PlaylistState],
-    playlist_errors: Vec<(i64, &'static str)>,
-) -> Diff {
-    let cur: HashMap<i64, &DeviceItem> = current.iter().map(|c| (c.track_id, c)).collect();
+/// なれば、もう片側も保留になる）。返すマニフェストの desired と hold が最終的なもの（needs_hash は
+/// そのまま）。解いた結果をもう一度渡しても変わらない（冪等）。プレイリストは解いた後の desired と
+/// hold から組み立てること（保留になった曲を行き先のパスで載せないため）
+pub fn resolve_collisions(manifest: &Manifest, current: &[DeviceItem]) -> Manifest {
     let mut held: BTreeMap<i64, Hold> = manifest.hold.iter().copied().collect();
     let mut desired: BTreeMap<i64, &DesiredItem> =
         manifest.desired.iter().map(|d| (d.track_id, d)).collect();
@@ -581,6 +577,30 @@ pub fn diff(
             held.insert(id, Hold::Error(ItemError::PathCollision));
         }
     }
+
+    Manifest {
+        desired: desired.into_values().cloned().collect(),
+        hold: held.into_iter().collect(),
+        needs_hash: manifest.needs_hash.clone(),
+    }
+}
+
+/// 差分（仕様 ③「3 つの集合」「差分」）。desired と現状を track_id で突き合わせ、hold は触らず、
+/// マニフェストに無い（remove）ものを削除にする。行き先の衝突は内部で `resolve_collisions` を通して
+/// 解く（冪等なので、解いた後のマニフェストを渡してもよい。`db::devices::compute` はプレイリストを
+/// 組み立てる前に解いたものを渡す）
+pub fn diff(
+    manifest: &Manifest,
+    current: &[DeviceItem],
+    playlists: &[DesiredPlaylist],
+    current_playlists: &[PlaylistState],
+    playlist_errors: Vec<(i64, &'static str)>,
+) -> Diff {
+    let cur: HashMap<i64, &DeviceItem> = current.iter().map(|c| (c.track_id, c)).collect();
+    let resolved = resolve_collisions(manifest, current);
+    let held: BTreeMap<i64, Hold> = resolved.hold.iter().copied().collect();
+    let desired: BTreeMap<i64, &DesiredItem> =
+        resolved.desired.iter().map(|d| (d.track_id, d)).collect();
 
     let mut items = Vec::new();
     for d in desired.values() {

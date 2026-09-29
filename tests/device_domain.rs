@@ -545,3 +545,71 @@ fn plan_token_changes_with_generation_and_ops() {
     let d2 = diff(&m, &[cur(9, "z.opus", "x")], &[], &[], vec![]);
     assert_ne!(p, plan_token(1, &d2));
 }
+
+/// 行き先が動かない保留の曲に占められて保留になった曲は、プレイリストに行き先のパスで載せない。
+/// 既存の写しがあればその現在のパス、無ければ載せない（`resolve_collisions` を通してから組み立てる）
+#[test]
+fn playlist_after_collision_uses_copy_path_or_omits_blocked_track() {
+    let s = settings(Variant::Opus, true);
+    let mut m = build_manifest(&s, 0, &[ready(1, "A/b.flac")]);
+    m.hold.push((2, Hold::Wait(Wait::NoDerived))); // 2 は A/b.opus に居続ける
+    let t1 = m.desired[0].token.clone();
+    let pl = vec![PlaylistInput {
+        playlist_id: 9,
+        name: "p".into(),
+        track_ids: vec![1, 2],
+    }];
+
+    // (a) 1 に既存の写し（A/a.opus）がある
+    let current = vec![cur(1, "A/a.opus", &t1), cur(2, "A/b.opus", "x")];
+    let resolved = resolve_collisions(&m, &current);
+    assert!(resolved.desired.is_empty());
+    assert!(resolved
+        .hold
+        .contains(&(1, Hold::Error(ItemError::PathCollision))));
+    let (out, _) = build_playlists(Transport::Adb, &pl, &resolved, &current);
+    assert_eq!(
+        String::from_utf8(out[0].body.clone()).unwrap(),
+        "#EXTM3U\n../A/a.opus\n../A/b.opus\n",
+        "1 は塞がれた行き先ではなく今の写しのパスで載る"
+    );
+
+    // (b) 1 の写しが無い
+    let current = vec![cur(2, "A/b.opus", "x")];
+    let resolved = resolve_collisions(&m, &current);
+    let (out, _) = build_playlists(Transport::Adb, &pl, &resolved, &current);
+    assert_eq!(
+        String::from_utf8(out[0].body.clone()).unwrap(),
+        "#EXTM3U\n../A/b.opus\n",
+        "写しの無い保留の曲は載せない"
+    );
+}
+
+#[test]
+fn resolve_collisions_is_idempotent_and_keeps_needs_hash() {
+    let s = settings(Variant::Opus, true);
+    let mut unhashed = ready(3, "B/c.flac");
+    unhashed.hash_derived = None;
+    let mut m = build_manifest(&s, 0, &[ready(1, "A/b.flac"), unhashed]);
+    m.hold.push((2, Hold::Wait(Wait::NoDerived)));
+    m.hold.sort_by_key(|(id, _)| *id);
+    let current = vec![cur(1, "A/a.opus", "t"), cur(2, "A/b.opus", "x")];
+    let once = resolve_collisions(&m, &current);
+    assert_eq!(once.needs_hash, m.needs_hash);
+    assert!(!once.needs_hash.is_empty());
+    assert_eq!(resolve_collisions(&once, &current), once);
+}
+
+/// 大文字小文字だけの改名は、同じ曲が同じキーを占めるので衝突ではなく移動
+#[test]
+fn case_only_rename_is_a_move_not_a_collision() {
+    let s = settings(Variant::Opus, true);
+    let m = build_manifest(&s, 0, &[ready(1, "A/X.flac")]);
+    let t1 = m.desired[0].token.clone();
+    let d = diff(&m, &[cur(1, "A/x.opus", &t1)], &[], &[], vec![]);
+    assert_eq!(ops(&d), vec![(OpKind::Move, 1)]);
+    assert!(d.held.is_empty(), "{:?}", d.held);
+    let mv = &d.items[0];
+    assert_eq!(mv.from.as_deref(), Some("A/x.opus"));
+    assert_eq!(mv.to.as_deref(), Some("A/X.opus"));
+}

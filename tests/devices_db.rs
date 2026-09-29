@@ -88,7 +88,7 @@ fn compute_marks_unhashed_tracks_and_enqueues_jobs_once() {
     let c = conn();
     let d = adb(&c, Selection::All);
     insert_track(&c, 1, "YT/a.opus", "opus"); // 原本を送る
-    let got = devices::compute(&c, d.id, 20).unwrap().unwrap();
+    let got = devices::compute(&c, d.id).unwrap().unwrap();
     assert!(got.diff.items.is_empty());
     assert_eq!(got.needs_hash, vec![(1, SourceKind::Master)]);
     assert_eq!(
@@ -134,7 +134,7 @@ fn compute_adds_hashed_tracks_and_excludes_missing() {
         50,
     )
     .unwrap();
-    let got = devices::compute(&c, d.id, 20).unwrap().unwrap();
+    let got = devices::compute(&c, d.id).unwrap().unwrap();
     let ops: Vec<_> = got
         .diff
         .items
@@ -143,6 +143,145 @@ fn compute_adds_hashed_tracks_and_excludes_missing() {
         .collect();
     assert_eq!(ops, vec![(OpKind::Delete, 2), (OpKind::Add, 1)]);
     assert_eq!(got.plan_token, plan_token(1, &got.diff));
+}
+
+/// プレイリストは衝突を解いた後の desired から組み立てる。1 は YT/b.opus に移りたいが、保留の 2 が
+/// そこに居続けるので 1 はパス衝突で保留になり、m3u8 には 1 の今の写し（YT/a.opus）が載る
+#[test]
+fn compute_builds_playlists_after_resolving_collisions() {
+    let c = conn();
+    let d = adb(&c, Selection::All);
+    insert_track_with_inode(&c, 1, "YT/b.opus", "opus", Some(1));
+    insert_track(&c, 2, "YT/c.opus", "opus"); // ハッシュが無いので保留
+    let h = SourceHash {
+        semantic: semantic_master(1, 1),
+        inode: 1,
+        size: 1,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        sha256: "s1".into(),
+    };
+    devices::put_source_hash(&c, 1, SourceKind::Master, &h, 40).unwrap();
+    let it = |id: i64, path: &str| DeviceItem {
+        track_id: id,
+        dest_path: path.into(),
+        token: "t".into(),
+        size: 1,
+        sha256: "x".into(),
+    };
+    devices::replace_items(&c, d.id, &[it(1, "YT/a.opus"), it(2, "YT/b.opus")], 50).unwrap();
+    c.execute("INSERT INTO playlists (id, name, name_key, created_at, updated_at) VALUES (5, 'p', 'p', 0, 0)", []).unwrap();
+    c.execute(
+        "INSERT INTO playlist_items (playlist_id, position, track_id) VALUES (5, 0, 1), (5, 1, 2)",
+        [],
+    )
+    .unwrap();
+    devices::set_playlists(&c, d.id, &[5], 60).unwrap();
+
+    let got = devices::compute(&c, d.id).unwrap().unwrap();
+    assert!(got.diff.items.is_empty(), "{:?}", got.diff.items);
+    assert!(got.desired.is_empty());
+    assert!(got
+        .diff
+        .held
+        .iter()
+        .any(|h| h.track_id == 1 && h.hold == Hold::Error(ItemError::PathCollision)));
+    assert_eq!(got.playlists.len(), 1);
+    assert_eq!(
+        String::from_utf8(got.playlists[0].body.clone()).unwrap(),
+        "#EXTM3U\n../YT/a.opus\n../YT/b.opus\n"
+    );
+}
+
+#[test]
+fn compute_exposes_resolved_desired_with_source() {
+    let c = conn();
+    let d = adb(&c, Selection::All);
+    insert_track_with_inode(&c, 1, "YT/a.opus", "opus", Some(1));
+    let h = SourceHash {
+        semantic: semantic_master(1, 1),
+        inode: 1,
+        size: 1,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        sha256: "s1".into(),
+    };
+    devices::put_source_hash(&c, 1, SourceKind::Master, &h, 40).unwrap();
+    let got = devices::compute(&c, d.id).unwrap().unwrap();
+    assert_eq!(got.desired.len(), 1);
+    let src = &got.desired[0].source;
+    assert_eq!(src.kind, SourceKind::Master);
+    assert_eq!(src.root_rel_path, "YT/a.opus");
+    assert_eq!(src.semantic, semantic_master(1, 1));
+}
+
+/// channels が NULL の曲は選曲の外。端末に写しがあれば削除になる
+#[test]
+fn track_with_null_channels_is_deleted_from_device() {
+    let c = conn();
+    let d = adb(&c, Selection::All);
+    insert_track(&c, 1, "YT/a.opus", "opus");
+    c.execute("UPDATE tracks SET channels = NULL WHERE id = 1", [])
+        .unwrap();
+    devices::replace_items(
+        &c,
+        d.id,
+        &[DeviceItem {
+            track_id: 1,
+            dest_path: "YT/a.opus".into(),
+            token: "t".into(),
+            size: 1,
+            sha256: "x".into(),
+        }],
+        50,
+    )
+    .unwrap();
+    let got = devices::compute(&c, d.id).unwrap().unwrap();
+    let ops: Vec<_> = got
+        .diff
+        .items
+        .iter()
+        .map(|o| (o.kind, o.track_id))
+        .collect();
+    assert_eq!(ops, vec![(OpKind::Delete, 1)]);
+    assert!(got.needs_hash.is_empty());
+}
+
+fn device_with(transport: Transport, adb: Option<(&str, &str)>) -> devices::Device {
+    devices::Device {
+        id: 1,
+        uuid: "u".into(),
+        name: "n".into(),
+        transport,
+        variant: Variant::Opus,
+        selection: Selection::All,
+        generation: 1,
+        adb_serial: adb.map(|_| "SER".to_string()),
+        adb_volume: adb.map(|(v, _)| v.to_string()),
+        adb_root: adb.map(|(_, r)| r.to_string()),
+        last_synced_at: None,
+    }
+}
+
+#[test]
+fn root_prefix_utf16_per_transport_and_volume() {
+    // /storage/emulated/0/Music/spindle/
+    assert_eq!(
+        devices::root_prefix_utf16(&device_with(
+            Transport::Adb,
+            Some(("emulated", "Music/spindle"))
+        )),
+        "/storage/emulated/0/Music/spindle/".len()
+    );
+    // SD カード: /storage/1234-ABCD/音楽/
+    assert_eq!(
+        devices::root_prefix_utf16(&device_with(Transport::Adb, Some(("1234-ABCD", "音楽")))),
+        "/storage/1234-ABCD/".len() + 2 + 1
+    );
+    assert_eq!(
+        devices::root_prefix_utf16(&device_with(Transport::Agent, None)),
+        "Music/spindle/".len()
+    );
 }
 
 #[test]
@@ -229,7 +368,7 @@ fn stale_master_identity_forces_rehash() {
     };
     devices::put_source_hash(&c, 1, SourceKind::Master, &h, 40).unwrap();
 
-    let got = devices::compute(&c, d.id, 20).unwrap().unwrap();
+    let got = devices::compute(&c, d.id).unwrap().unwrap();
     assert!(
         got.needs_hash.is_empty(),
         "identity が一致していれば再ハッシュ不要"
@@ -237,7 +376,7 @@ fn stale_master_identity_forces_rehash() {
 
     c.execute("UPDATE tracks SET mtime_ns = mtime_ns + 1 WHERE id = 1", [])
         .unwrap();
-    let got = devices::compute(&c, d.id, 20).unwrap().unwrap();
+    let got = devices::compute(&c, d.id).unwrap().unwrap();
     assert_eq!(
         got.needs_hash,
         vec![(1, SourceKind::Master)],

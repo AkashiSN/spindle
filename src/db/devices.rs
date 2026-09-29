@@ -8,8 +8,9 @@ use crate::db::jobs::{self as dbjobs, EnqueueResult, JobType, NewJob};
 use crate::db::{playlists as dbpl, Result};
 use crate::domain::derived::{Variant, VariantSettings};
 use crate::domain::device::{
-    build_manifest, build_playlists, diff, plan_token, DeviceItem, Diff, PlaylistInput,
-    PlaylistState, SourceHash, SourceKind, TrackInput, Transport,
+    build_manifest, build_playlists, diff, plan_token, resolve_collisions, utf16_len, DesiredItem,
+    DesiredPlaylist, DeviceItem, Diff, PlaylistInput, PlaylistState, SourceHash, SourceKind,
+    TrackInput, Transport,
 };
 use crate::domain::relpath::canonical_key;
 
@@ -453,15 +454,33 @@ pub struct Computed {
     pub diff: Diff,
     pub plan_token: String,
     pub needs_hash: Vec<(i64, SourceKind)>,
+    /// 衝突を解いた後の desired（送る元 `Source` を含む。同期の実行が読む）
+    pub desired: Vec<DesiredItem>,
+    /// 衝突を解いた後の desired から組み立てたプレイリスト（中身を含む）
+    pub playlists: Vec<DesiredPlaylist>,
+}
+
+/// 端末上の root の前置き（区切りの `/` を含む）の UTF-16 長。パス長の上限（SPEC §5）の計算に使う。
+/// adb は `/storage/<volume>/<root>/`（内部ストレージ `emulated` は `/storage/emulated/0/`）、
+/// agent は `Music/spindle/`
+pub fn root_prefix_utf16(device: &Device) -> usize {
+    match device.transport {
+        Transport::Adb => {
+            let volume = match device.adb_volume.as_deref() {
+                Some("emulated") | None => "emulated/0",
+                Some(v) => v,
+            };
+            let root = device.adb_root.as_deref().unwrap_or("");
+            utf16_len(&format!("/storage/{volume}/{root}/"))
+        }
+        Transport::Agent => utf16_len("Music/spindle/"),
+    }
 }
 
 /// 端末の差分を計算する（保存しない。D-78 と同じく毎回計算し直す）。端末が無ければ None。
-/// 系統が設定に無ければ凍結と同じ扱い（音声版が一致する既存の行だけ送れる）
-pub fn compute(
-    conn: &Connection,
-    device_id: i64,
-    root_prefix_utf16: usize,
-) -> Result<Option<Computed>> {
+/// 系統が設定に無ければ凍結と同じ扱い（音声版が一致する既存の行だけ送れる）。
+/// 行き先の衝突はプレイリストを組み立てる前に解く（保留になった曲を行き先のパスで載せない）
+pub fn compute(conn: &Connection, device_id: i64) -> Result<Option<Computed>> {
     let Some(device) = get(conn, device_id)? else {
         return Ok(None);
     };
@@ -474,8 +493,11 @@ pub fn compute(
         multi_value_separator: " & ".into(),
     });
     let tracks = track_inputs(conn, &device)?;
-    let manifest = build_manifest(&settings, root_prefix_utf16, &tracks);
     let current = items(conn, device_id)?;
+    let manifest = resolve_collisions(
+        &build_manifest(&settings, root_prefix_utf16(&device), &tracks),
+        &current,
+    );
     let (playlists, pl_errors) = build_playlists(
         device.transport,
         &playlist_inputs(conn, device_id)?,
@@ -495,6 +517,8 @@ pub fn compute(
         diff: d,
         plan_token: token,
         needs_hash: manifest.needs_hash,
+        desired: manifest.desired,
+        playlists,
     }))
 }
 
