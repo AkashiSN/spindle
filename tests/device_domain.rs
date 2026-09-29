@@ -338,3 +338,210 @@ fn playlist_name_collisions_and_reserved_names_are_errors() {
         vec![1, 2, 3]
     );
 }
+
+fn cur(id: i64, path: &str, token: &str) -> DeviceItem {
+    DeviceItem {
+        track_id: id,
+        dest_path: path.into(),
+        token: token.into(),
+        size: 1,
+        sha256: "s".into(),
+    }
+}
+
+fn ops(d: &Diff) -> Vec<(OpKind, i64)> {
+    d.items.iter().map(|o| (o.kind, o.track_id)).collect()
+}
+
+#[test]
+fn classifies_add_update_move_update_move_and_delete() {
+    let s = settings(Variant::Opus, true);
+    let m = build_manifest(
+        &s,
+        0,
+        &[
+            ready(1, "A/a.flac"),
+            ready(2, "A/b.flac"),
+            ready(3, "A/c.flac"),
+            ready(4, "A/d.flac"),
+        ],
+    );
+    let t = |id: i64| {
+        m.desired
+            .iter()
+            .find(|d| d.track_id == id)
+            .unwrap()
+            .token
+            .clone()
+    };
+    let current = vec![
+        cur(2, "A/b.opus", "old"),   // 更新
+        cur(3, "Old/c.opus", &t(3)), // 移動
+        cur(4, "Old/d.opus", "old"), // 更新 + 移動
+        cur(9, "Z/z.opus", "x"),     // 削除（選曲外）
+    ];
+    let d = diff(&m, &current, &[], &[], vec![]);
+    assert_eq!(
+        ops(&d),
+        vec![
+            (OpKind::Delete, 9),
+            (OpKind::Move, 3),
+            (OpKind::UpdateMove, 4),
+            (OpKind::Update, 2),
+            (OpKind::Add, 1),
+        ]
+    );
+    let um = d.items.iter().find(|o| o.track_id == 4).unwrap();
+    assert_eq!(um.from.as_deref(), Some("Old/d.opus"));
+    assert_eq!(um.to.as_deref(), Some("A/d.opus"));
+}
+
+#[test]
+fn same_semantic_new_sha_is_update() {
+    let s = settings(Variant::Opus, true);
+    let t = ready(1, "A/a.flac");
+    let m = build_manifest(&s, 0, std::slice::from_ref(&t));
+    let old = delivery_token(&t.hash_derived.as_ref().unwrap().semantic, "previous-sha");
+    let d = diff(&m, &[cur(1, "A/a.opus", &old)], &[], &[], vec![]);
+    assert_eq!(ops(&d), vec![(OpKind::Update, 1)]);
+}
+
+#[test]
+fn hold_items_are_never_deleted() {
+    let s = settings(Variant::Opus, true);
+    let mut waiting = input(1, "A/a.flac", true); // Derived 未生成
+    waiting.derived = None;
+    let m = build_manifest(&s, 0, &[waiting]);
+    let d = diff(&m, &[cur(1, "A/a.opus", "old")], &[], &[], vec![]);
+    assert!(d.items.is_empty(), "hold の写しは消さない: {:?}", d.items);
+    assert_eq!(
+        d.held,
+        vec![HeldItem {
+            track_id: 1,
+            hold: Hold::Wait(Wait::NoDerived),
+            has_copy: true
+        }]
+    );
+}
+
+#[test]
+fn destination_occupied_by_a_stationary_item_is_a_collision() {
+    let s = settings(Variant::Opus, true);
+    // 1 は A/b.opus へ移りたいが、2（hold で動かない）がそこにいる
+    let m1 = build_manifest(&s, 0, &[ready(1, "A/b.flac")]);
+    let mut m = m1.clone();
+    m.hold.push((2, Hold::Wait(Wait::NoDerived)));
+    let t1 = m.desired[0].token.clone();
+    let d = diff(
+        &m,
+        &[cur(1, "A/a.opus", &t1), cur(2, "A/b.opus", "x")],
+        &[],
+        &[],
+        vec![],
+    );
+    assert!(d.items.is_empty());
+    assert!(d.held.contains(&HeldItem {
+        track_id: 1,
+        hold: Hold::Error(ItemError::PathCollision),
+        has_copy: true
+    }));
+}
+
+#[test]
+fn swap_is_two_moves() {
+    let s = settings(Variant::Opus, true);
+    let m = build_manifest(&s, 0, &[ready(1, "A/b.flac"), ready(2, "A/a.flac")]);
+    let t = |id: i64| {
+        m.desired
+            .iter()
+            .find(|d| d.track_id == id)
+            .unwrap()
+            .token
+            .clone()
+    };
+    let d = diff(
+        &m,
+        &[cur(1, "A/a.opus", &t(1)), cur(2, "A/b.opus", &t(2))],
+        &[],
+        &[],
+        vec![],
+    );
+    assert_eq!(ops(&d), vec![(OpKind::Move, 1), (OpKind::Move, 2)]);
+}
+
+#[test]
+fn swap_with_one_side_held_holds_both() {
+    let s = settings(Variant::Opus, true);
+    // 1: a→b に移りたい。2: b→a に移りたいが、2 の新しい行き先は別の曲 3（動かない）と衝突
+    let m0 = build_manifest(&s, 0, &[ready(1, "A/b.flac"), ready(2, "A/a.flac")]);
+    let t = |id: i64| {
+        m0.desired
+            .iter()
+            .find(|d| d.track_id == id)
+            .unwrap()
+            .token
+            .clone()
+    };
+    let mut m = m0.clone();
+    // 2 をエラーで保留にする（例: 名前の衝突）
+    m.desired.retain(|d| d.track_id != 2);
+    m.hold.push((2, Hold::Error(ItemError::PathCollision)));
+    let d = diff(
+        &m,
+        &[cur(1, "A/a.opus", &t(1)), cur(2, "A/b.opus", &t(2))],
+        &[],
+        &[],
+        vec![],
+    );
+    // 2 は動かず A/b.opus に居続けるので、1 は b へ移れない
+    assert!(d.items.is_empty(), "{:?}", d.items);
+    assert!(d
+        .held
+        .iter()
+        .any(|h| h.track_id == 1 && h.hold == Hold::Error(ItemError::PathCollision)));
+}
+
+#[test]
+fn playlists_are_diffed_by_token_and_removed_marks_are_deleted() {
+    let pl = vec![DesiredPlaylist {
+        playlist_id: 1,
+        name: "a".into(),
+        dest_path: "Playlists/a.m3u8".into(),
+        body: vec![],
+        token: "new".into(),
+    }];
+    let cur_pl = vec![
+        PlaylistState {
+            playlist_id: 1,
+            dest_path: "Playlists/a.m3u8".into(),
+            token: "old".into(),
+        },
+        PlaylistState {
+            playlist_id: 2,
+            dest_path: "Playlists/b.m3u8".into(),
+            token: "t".into(),
+        },
+    ];
+    let d = diff(&Manifest::default(), &[], &pl, &cur_pl, vec![]);
+    let kinds: Vec<_> = d
+        .playlists
+        .iter()
+        .map(|p| (p.kind, p.playlist_id))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![(PlaylistOpKind::Update, 1), (PlaylistOpKind::Delete, 2)]
+    );
+}
+
+#[test]
+fn plan_token_changes_with_generation_and_ops() {
+    let s = settings(Variant::Opus, true);
+    let m = build_manifest(&s, 0, &[ready(1, "A/a.flac")]);
+    let d = diff(&m, &[], &[], &[], vec![]);
+    let p = plan_token(1, &d);
+    assert_eq!(p, plan_token(1, &d));
+    assert_ne!(p, plan_token(2, &d));
+    let d2 = diff(&m, &[cur(9, "z.opus", "x")], &[], &[], vec![]);
+    assert_ne!(p, plan_token(1, &d2));
+}

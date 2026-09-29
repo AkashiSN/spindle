@@ -453,3 +453,246 @@ pub fn build_playlists(
     errors.sort();
     (out, errors)
 }
+
+/// 差分の操作。並び順は実行順（削除 → パス変更 → 更新 → 追加。仕様 ⑤）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OpKind {
+    Delete,
+    Move,
+    UpdateMove,
+    Update,
+    Add,
+}
+
+impl OpKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OpKind::Delete => "delete",
+            OpKind::Move => "move",
+            OpKind::UpdateMove => "update_move",
+            OpKind::Update => "update",
+            OpKind::Add => "add",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemOp {
+    pub kind: OpKind,
+    pub track_id: i64,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub token: Option<String>,
+    pub size: u64,
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaylistState {
+    pub playlist_id: i64,
+    pub dest_path: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaylistOpKind {
+    Add,
+    Update,
+    Delete,
+}
+
+impl PlaylistOpKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlaylistOpKind::Add => "add",
+            PlaylistOpKind::Update => "update",
+            PlaylistOpKind::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaylistOp {
+    pub kind: PlaylistOpKind,
+    pub playlist_id: i64,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldItem {
+    pub track_id: i64,
+    pub hold: Hold,
+    /// 端末に既存の写しがある（古い版のまま残る）
+    pub has_copy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Diff {
+    pub items: Vec<ItemOp>,
+    pub playlists: Vec<PlaylistOp>,
+    pub held: Vec<HeldItem>,
+    pub playlist_errors: Vec<(i64, &'static str)>,
+}
+
+/// 差分（仕様 ③「3 つの集合」「差分」）。desired と現状を track_id で突き合わせ、hold は触らず、
+/// マニフェストに無い（remove）ものを削除にする。行き先が「動かない管理下の曲」に占められていれば、
+/// その曲をパス衝突で保留にし、その曲自身も動かなくなるので不動点まで繰り返す（入れ替えの片側が保留に
+/// なれば、もう片側も保留になる）
+pub fn diff(
+    manifest: &Manifest,
+    current: &[DeviceItem],
+    playlists: &[DesiredPlaylist],
+    current_playlists: &[PlaylistState],
+    playlist_errors: Vec<(i64, &'static str)>,
+) -> Diff {
+    let cur: HashMap<i64, &DeviceItem> = current.iter().map(|c| (c.track_id, c)).collect();
+    let mut held: BTreeMap<i64, Hold> = manifest.hold.iter().copied().collect();
+    let mut desired: BTreeMap<i64, &DesiredItem> =
+        manifest.desired.iter().map(|d| (d.track_id, d)).collect();
+
+    loop {
+        // 動かない管理下の曲が占めるパス: 現状にあり、削除されず、パスも変えない曲
+        let mut stationary: HashMap<String, i64> = HashMap::new();
+        for c in current {
+            let moving = desired
+                .get(&c.track_id)
+                .is_some_and(|d| d.dest_key != canonical_key(&c.dest_path));
+            let removed = !desired.contains_key(&c.track_id) && !held.contains_key(&c.track_id);
+            if !moving && !removed {
+                stationary.insert(canonical_key(&c.dest_path), c.track_id);
+            }
+        }
+        let blocked: Vec<i64> = desired
+            .values()
+            .filter(|d| {
+                stationary
+                    .get(&d.dest_key)
+                    .is_some_and(|owner| *owner != d.track_id)
+            })
+            .map(|d| d.track_id)
+            .collect();
+        if blocked.is_empty() {
+            break;
+        }
+        for id in blocked {
+            desired.remove(&id);
+            held.insert(id, Hold::Error(ItemError::PathCollision));
+        }
+    }
+
+    let mut items = Vec::new();
+    for d in desired.values() {
+        let op = match cur.get(&d.track_id) {
+            None => Some((OpKind::Add, None)),
+            Some(c) => {
+                let moved = c.dest_path != d.dest_path;
+                match (c.token != d.token, moved) {
+                    (false, false) => None,
+                    (true, false) => Some((OpKind::Update, None)),
+                    (false, true) => Some((OpKind::Move, Some(c.dest_path.clone()))),
+                    (true, true) => Some((OpKind::UpdateMove, Some(c.dest_path.clone()))),
+                }
+            }
+        };
+        if let Some((kind, from)) = op {
+            items.push(ItemOp {
+                kind,
+                track_id: d.track_id,
+                from,
+                to: Some(d.dest_path.clone()),
+                token: Some(d.token.clone()),
+                size: d.size,
+                sha256: Some(d.sha256.clone()),
+            });
+        }
+    }
+    for c in current {
+        if !desired.contains_key(&c.track_id) && !held.contains_key(&c.track_id) {
+            items.push(ItemOp {
+                kind: OpKind::Delete,
+                track_id: c.track_id,
+                from: Some(c.dest_path.clone()),
+                to: None,
+                token: None,
+                size: 0,
+                sha256: None,
+            });
+        }
+    }
+    items.sort_by_key(|o| (o.kind, o.track_id));
+
+    let held: Vec<HeldItem> = held
+        .into_iter()
+        .map(|(track_id, hold)| HeldItem {
+            track_id,
+            hold,
+            has_copy: cur.contains_key(&track_id),
+        })
+        .collect();
+
+    let cur_pl: HashMap<i64, &PlaylistState> = current_playlists
+        .iter()
+        .map(|p| (p.playlist_id, p))
+        .collect();
+    let mut pl_ops = Vec::new();
+    for p in playlists {
+        let kind = match cur_pl.get(&p.playlist_id) {
+            None => Some(PlaylistOpKind::Add),
+            Some(c) if c.token != p.token || c.dest_path != p.dest_path => {
+                Some(PlaylistOpKind::Update)
+            }
+            Some(_) => None,
+        };
+        if let Some(kind) = kind {
+            pl_ops.push(PlaylistOp {
+                kind,
+                playlist_id: p.playlist_id,
+                from: cur_pl.get(&p.playlist_id).map(|c| c.dest_path.clone()),
+                to: Some(p.dest_path.clone()),
+                token: Some(p.token.clone()),
+            });
+        }
+    }
+    let wanted: HashSet<i64> = playlists.iter().map(|p| p.playlist_id).collect();
+    let errored: HashSet<i64> = playlist_errors.iter().map(|e| e.0).collect();
+    for c in current_playlists {
+        // エラーのプレイリストは hold と同じく既存のものに触らない
+        if !wanted.contains(&c.playlist_id) && !errored.contains(&c.playlist_id) {
+            pl_ops.push(PlaylistOp {
+                kind: PlaylistOpKind::Delete,
+                playlist_id: c.playlist_id,
+                from: Some(c.dest_path.clone()),
+                to: None,
+                token: None,
+            });
+        }
+    }
+    pl_ops.sort_by_key(|p| p.playlist_id);
+
+    Diff {
+        items,
+        playlists: pl_ops,
+        held,
+        playlist_errors,
+    }
+}
+
+/// 計画トークン: 差分画面が表示した計画（generation・操作・トークン・パス）の正準 JSON の SHA-256
+pub fn plan_token(generation: i64, d: &Diff) -> String {
+    let items: Vec<Value> = d
+        .items
+        .iter()
+        .map(|o| json!([o.kind.as_str(), o.track_id, o.from, o.to, o.token]))
+        .collect();
+    let playlists: Vec<Value> = d
+        .playlists
+        .iter()
+        .map(|p| json!([p.kind.as_str(), p.playlist_id, p.from, p.to, p.token]))
+        .collect();
+    canonical_sha256(&json!({
+        "v": TOKEN_VERSION, "kind": "plan", "generation": generation,
+        "items": items, "playlists": playlists,
+    }))
+}
