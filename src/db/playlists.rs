@@ -214,8 +214,13 @@ pub fn smart_rules(conn: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(rows)
 }
 
-/// 評価結果で項目を置き換える。並びが変わったときだけ書き直し、変わったら true
+/// 評価結果で項目を置き換える。並びが変わったときだけ書き直し、変わったら true。
+/// 評価した時刻（`evaluated_at`）は結果が同じでも毎回進める（端末の差分画面が評価時刻を出す。D-95）
 pub fn materialize(conn: &Connection, id: i64, track_ids: &[i64], now: i64) -> Result<bool> {
+    conn.execute(
+        "UPDATE playlists SET evaluated_at = ?2 WHERE id = ?1",
+        params![id, now],
+    )?;
     let current = items(conn, id)?;
     if current == track_ids {
         return Ok(false);
