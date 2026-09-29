@@ -538,3 +538,76 @@ fn track_inputs_joins_derived_and_hashes_in_one_pass() {
     assert_eq!(got[1].hash_master.as_ref().unwrap().semantic, "m2");
     assert!(got[2].hash_master.is_none(), "identity 不一致は無効");
 }
+
+/// 選曲の見積もりは「現在の送る元」のハッシュが有効な曲だけ bytes に数える（build_manifest と同じ判定）。
+/// Derived の意味トークンが古い・Derived が無い・非可逆原本のハッシュが無いものは unhashed
+#[test]
+fn estimate_selection_counts_only_valid_current_source_hashes() {
+    let c = conn();
+    let d = adb(&c, Selection::All);
+    let profile = derived::settings_of(&c, Variant::Opus)
+        .unwrap()
+        .unwrap()
+        .audio_profile;
+    for id in 1..=5 {
+        let (rel, codec) = match id {
+            3 | 4 => (format!("YT/{id}.opus"), "opus"),
+            _ => (format!("A/{id}.flac"), "flac"),
+        };
+        insert_track_with_inode(&c, id, &rel, codec, Some(id));
+    }
+    // 1, 2 は現在の設定で作った Derived がある。5 は Derived が無い（古いハッシュの行だけ残っている）
+    for id in [1, 2] {
+        c.execute(
+            "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, src_audio_version,
+                                        src_tag_version, generated_at, src_artwork_id, src_rg_scanned_at,
+                                        audio_profile, tag_profile)
+             VALUES (?1, 'opus', ?2, lower(?2), 'opus', 1, 1, 0, NULL, NULL, ?3, 't')",
+            params![id, format!("opus/A/{id}.opus"), profile],
+        )
+        .unwrap();
+    }
+    // 3 の原本は size 300（原本のハッシュは tracks 行の identity と一致しないと無効）
+    c.execute("UPDATE tracks SET size = 300 WHERE id = 3", [])
+        .unwrap();
+    let inputs = devices::track_inputs(&c, &d).unwrap();
+    let sem_d1 = semantic_derived(Variant::Opus, inputs[0].derived.as_ref().unwrap());
+    let h = |semantic: String, inode: u64, size: u64| SourceHash {
+        semantic,
+        inode,
+        size,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        sha256: "ab".repeat(32),
+    };
+    let opus = SourceKind::Derived(Variant::Opus);
+    devices::put_source_hash(&c, 1, opus, &h(sem_d1.clone(), 11, 100), 5).unwrap();
+    devices::put_source_hash(&c, 2, opus, &h("old".into(), 12, 200), 5).unwrap();
+    devices::put_source_hash(
+        &c,
+        3,
+        SourceKind::Master,
+        &h(semantic_master(1, 1), 3, 300),
+        5,
+    )
+    .unwrap();
+    devices::put_source_hash(&c, 5, opus, &h(sem_d1, 15, 500), 5).unwrap();
+
+    let e = devices::estimate_selection(&c, &d, Selection::All, &[]).unwrap();
+    assert_eq!(e.tracks, 5);
+    assert_eq!(
+        e.bytes,
+        100 + 300,
+        "有効なハッシュ（1 の Derived、3 の原本）だけ合計"
+    );
+    assert_eq!(
+        e.unhashed, 3,
+        "2（意味トークンが古い）・4（非可逆原本のハッシュ無し）・5（Derived 無し）"
+    );
+
+    // 原本が外部で書き換えられて identity がずれたら、3 のハッシュも無効
+    c.execute("UPDATE tracks SET mtime_ns = 1 WHERE id = 3", [])
+        .unwrap();
+    let e = devices::estimate_selection(&c, &d, Selection::All, &[]).unwrap();
+    assert_eq!((e.bytes, e.unhashed), (100, 4));
+}

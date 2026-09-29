@@ -11,9 +11,9 @@ use crate::db::jobs::{self as dbjobs, EnqueueResult, JobType, NewJob};
 use crate::db::{playlists as dbpl, Result};
 use crate::domain::derived::{Variant, VariantSettings};
 use crate::domain::device::{
-    build_manifest, build_playlists, diff, plan_token, resolve_collisions, utf16_len, DesiredItem,
-    DesiredPlaylist, DeviceItem, Diff, PlaylistInput, PlaylistState, SourceHash, SourceKind,
-    TrackInput, Transport,
+    build_manifest, build_playlists, decide_source, diff, plan_token, resolve_collisions,
+    utf16_len, DesiredItem, DesiredPlaylist, DeviceItem, Diff, PlaylistInput, PlaylistState,
+    SourceHash, SourceKind, TrackInput, Transport,
 };
 use crate::domain::device::{counts, track_states, Counts, PendingSets, TrackState};
 use crate::domain::relpath::canonical_key;
@@ -302,6 +302,20 @@ const INPUT_WHERE_PLAYLISTS: &str = "
                   JOIN playlist_items pi ON pi.playlist_id = dp.playlist_id
                  WHERE dp.device_id = ?2)
  ORDER BY t.id";
+/// 仮の選曲（選曲タブの見積もり）。?2 は playlist_id の JSON 配列
+const INPUT_WHERE_PLAYLIST_IDS: &str = "
+   AND t.id IN (SELECT pi.track_id FROM playlist_items pi
+                 WHERE pi.playlist_id IN (SELECT value FROM json_each(?2)))
+ ORDER BY t.id";
+
+/// `track_inputs` の対象範囲
+enum InputScope<'a> {
+    All,
+    /// 端末に印の付いたプレイリスト
+    Device(i64),
+    /// 指定したプレイリスト（playlist_id の JSON 配列）
+    PlaylistIds(&'a str),
+}
 
 fn hash_at(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Option<SourceHash>> {
     let Some(semantic) = r.get::<_, Option<String>>(base)? else {
@@ -320,11 +334,24 @@ fn hash_at(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Option<Source
 /// 選曲に入った曲（missing とマルチチャンネルを除く。これらは差分で削除になる）。
 /// Derived・原本と系統のハッシュも 1 本の LEFT JOIN で読む（曲ごとの問い合わせにしない）
 pub fn track_inputs(conn: &Connection, device: &Device) -> Result<Vec<TrackInput>> {
-    let sql = match device.selection {
-        Selection::All => format!("{INPUT_SQL_HEAD}{INPUT_WHERE_ALL}"),
-        Selection::Playlists => format!("{INPUT_SQL_HEAD}{INPUT_WHERE_PLAYLISTS}"),
+    let scope = match device.selection {
+        Selection::All => InputScope::All,
+        Selection::Playlists => InputScope::Device(device.id),
     };
-    let mut st = conn.prepare_cached(&sql)?;
+    track_inputs_in(conn, device.variant, scope)
+}
+
+fn track_inputs_in(
+    conn: &Connection,
+    variant: Variant,
+    scope: InputScope<'_>,
+) -> Result<Vec<TrackInput>> {
+    let tail = match scope {
+        InputScope::All => INPUT_WHERE_ALL,
+        InputScope::Device(_) => INPUT_WHERE_PLAYLISTS,
+        InputScope::PlaylistIds(_) => INPUT_WHERE_PLAYLIST_IDS,
+    };
+    let mut st = conn.prepare_cached(&format!("{INPUT_SQL_HEAD}{tail}"))?;
     let map = |r: &rusqlite::Row<'_>| -> rusqlite::Result<TrackInput> {
         let identity = TrackIdentity {
             inode: r.get(7)?,
@@ -349,10 +376,12 @@ pub fn track_inputs(conn: &Connection, device: &Device) -> Result<Vec<TrackInput
             hash_derived: hash_at(r, 24)?,
         })
     };
-    let v = device.variant.as_str();
-    let rows = match device.selection {
-        Selection::All => st.query_map(params![v], map)?,
-        Selection::Playlists => st.query_map(params![v, device.id], map)?,
+    let v = variant.as_str();
+    // All のときは ?2 が SQL に現れない（rusqlite は未使用の引数を弾く）
+    let rows = match scope {
+        InputScope::All => st.query_map(params![v], map)?,
+        InputScope::Device(id) => st.query_map(params![v, id], map)?,
+        InputScope::PlaylistIds(json) => st.query_map(params![v, json], map)?,
     };
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -505,19 +534,26 @@ pub fn compute(conn: &Connection, device_id: i64) -> Result<Option<Computed>> {
     Ok(out)
 }
 
+/// 系統の設定。設定に無ければ凍結と同じ扱い（音声版が一致する既存の行だけ送れる）
+fn settings_or_frozen(conn: &Connection, variant: Variant) -> Result<VariantSettings> {
+    Ok(
+        dbderived::settings_of(conn, variant)?.unwrap_or(VariantSettings {
+            variant,
+            enabled: false,
+            audio_profile: String::new(),
+            tag_profile: String::new(),
+            lossy_sources: false,
+            multi_value_separator: " & ".into(),
+        }),
+    )
+}
+
 /// [`compute`] の本体。呼び出し側が読み取りトランザクションを持っているときに使う（入れ子にできないため）
 pub(crate) fn compute_in(conn: &Connection, device_id: i64) -> Result<Option<Computed>> {
     let Some(device) = get(conn, device_id)? else {
         return Ok(None);
     };
-    let settings = dbderived::settings_of(conn, device.variant)?.unwrap_or(VariantSettings {
-        variant: device.variant,
-        enabled: false,
-        audio_profile: String::new(),
-        tag_profile: String::new(),
-        lossy_sources: false,
-        multi_value_separator: " & ".into(),
-    });
+    let settings = settings_or_frozen(conn, device.variant)?;
     let tracks = track_inputs(conn, &device)?;
     let current = items(conn, device_id)?;
     let manifest = resolve_collisions(
@@ -905,12 +941,14 @@ pub fn smart_evaluations(
 pub struct SelectionEstimate {
     pub tracks: usize,
     pub bytes: u64,
-    /// 送る元のハッシュ（= size）がまだ無い曲の数（bytes に含まれない）
+    /// 現在の送る元の有効なハッシュ（= size）がまだ無い曲の数（Derived 待ちを含む。bytes に含まれない）
     pub unhashed: usize,
 }
 
-/// 仮の選曲の曲数と容量（選曲タブ）。size は送る元のハッシュの行から取る（Derived はエンコード後の
-/// 大きさが分からないため）。非可逆原本を送る opus は原本の size
+/// 仮の選曲の曲数と容量（選曲タブ）。差分（`build_manifest`）と同じく `decide_source` で**現在の**送る元を
+/// 決め、そのハッシュの行の意味トークンが現在のものと一致する（原本は物理同一性も一致する）曲だけ
+/// size を数える（Derived はエンコード後の大きさが分からないため、ハッシュの行から取る）。
+/// Derived が無い・古い曲、ハッシュが無い・古い曲は unhashed に数える
 pub fn estimate_selection(
     conn: &Connection,
     device: &Device,
@@ -920,29 +958,28 @@ pub fn estimate_selection(
     let json = serde_json::to_string(playlist_ids)
         .map_err(|e| crate::db::DbError::Internal(e.to_string()))?;
     let scope = match selection {
-        Selection::All => "1",
-        Selection::Playlists => {
-            "t.id IN (SELECT pi.track_id FROM playlist_items pi WHERE pi.playlist_id IN (SELECT value FROM json_each(?2)))"
+        Selection::All => InputScope::All,
+        Selection::Playlists => InputScope::PlaylistIds(&json),
+    };
+    let settings = settings_or_frozen(conn, device.variant)?;
+    let tracks = track_inputs_in(conn, device.variant, scope)?;
+    let mut out = SelectionEstimate {
+        tracks: tracks.len(),
+        bytes: 0,
+        unhashed: 0,
+    };
+    for t in &tracks {
+        let size = decide_source(&settings, t).ok().and_then(|src| {
+            let hash = match src.kind {
+                SourceKind::Master => t.hash_master.as_ref(),
+                SourceKind::Derived(_) => t.hash_derived.as_ref(),
+            };
+            hash.filter(|h| h.semantic == src.semantic).map(|h| h.size)
+        });
+        match size {
+            Some(n) => out.bytes += n,
+            None => out.unhashed += 1,
         }
-    };
-    let sql = format!(
-        "SELECT count(*),
-                coalesce(sum(CASE WHEN ?1 = 'opus' AND t.lossless = 0 THEN t.size ELSE h.size END), 0),
-                sum(CASE WHEN (?1 = 'opus' AND t.lossless = 0) OR h.size IS NOT NULL THEN 0 ELSE 1 END)
-           FROM tracks t
-           LEFT JOIN source_hashes h ON h.track_id = t.id AND h.source = ?1
-          WHERE t.missing_since IS NULL AND t.channels IN (1, 2) AND {scope}"
-    );
-    let map = |r: &rusqlite::Row<'_>| Ok((r.get(0)?, r.get(1)?, r.get(2)?));
-    let variant = device.variant.as_str();
-    // All のときは ?2 が SQL に現れない（rusqlite は未使用の引数を弾く）
-    let (tracks, bytes, unhashed): (i64, i64, Option<i64>) = match selection {
-        Selection::All => conn.query_row(&sql, params![variant], map)?,
-        Selection::Playlists => conn.query_row(&sql, params![variant, json], map)?,
-    };
-    Ok(SelectionEstimate {
-        tracks: tracks as usize,
-        bytes: bytes as u64,
-        unhashed: unhashed.unwrap_or(0) as usize,
-    })
+    }
+    Ok(out)
 }
