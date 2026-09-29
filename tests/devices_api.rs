@@ -570,3 +570,69 @@ async fn diff_shows_current_copy_of_held_tracks() {
     assert_eq!(item["dest_path"], "A/a.m4a");
     assert_eq!(item["has_copy"], true);
 }
+
+/// 反映済み（差分に操作が無い）の曲に端末から失敗の報告があれば、差分にもエラーとして理由を出す
+/// （一覧の counts.error と食い違わせない。device_domain の reported_error_on_synced_track_is_error）
+#[tokio::test]
+async fn diff_lists_reported_error_on_synced_track() {
+    use spindle::domain::device::{delivery_token, semantic_master, SourceHash, SourceKind};
+    let app = App::new().await;
+    let sha = "ab".repeat(32);
+    let token = delivery_token(&semantic_master(1, 1), &sha);
+    let h = SourceHash {
+        semantic: semantic_master(1, 1),
+        inode: 1,
+        size: 1,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        sha256: sha.clone(),
+    };
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO tracks (id, rel_path, rel_path_key, inode, size, mtime_ns, ctime_ns, codec, lossless,
+                                     channels, audio_version, tag_version, seen_at, title)
+                 VALUES (1, 'YT/a.opus', 'yt/a.opus', 1, 1, 0, 0, 'opus', 0, 2, 1, 1, 0, '群青')",
+                [],
+            )?;
+            spindle::db::devices::put_source_hash(c, 1, SourceKind::Master, &h, 5)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .call(Method::POST, "/api/devices",
+              Some(json!({"name": "Xperia", "transport": "agent", "variant": "opus", "selection": "all"})))
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let id = v["id"].as_i64().unwrap();
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO device_items (device_id, track_id, dest_path, dest_path_key, token, size, sha256, synced_at)
+                 VALUES (?1, 1, 'YT/a.opus', 'yt/a.opus', ?2, 1, ?3, 5)",
+                rusqlite::params![id, token, sha],
+            )?;
+            c.execute(
+                "INSERT INTO device_errors (device_id, kind, ref_id, reason, reported_at)
+                 VALUES (?1, 'track', 1, '転送に失敗', 6)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["counts"]["error"], 1, "{v}");
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{v}");
+    assert_eq!(items[0]["op"], "error");
+    assert_eq!(items[0]["track_id"], 1);
+    assert_eq!(items[0]["title"], "群青");
+    assert_eq!(items[0]["reason"], "転送に失敗");
+    assert_eq!(items[0]["dest_path"], "YT/a.opus");
+    assert_eq!(items[0]["has_copy"], true);
+}

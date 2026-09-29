@@ -441,6 +441,19 @@ pub async fn diff(
     let diff = &d.computed.diff;
     let mut track_ids: Vec<i64> = diff.items.iter().map(|o| o.track_id).collect();
     track_ids.extend(diff.held.iter().map(|h| h.track_id));
+    // 反映済み（差分に操作も保留も無い）の曲に端末から失敗の報告があるもの。track_states はこれを
+    // Error にして counts.error に数えるので、差分にも理由付きで載せる（件数と一覧を食い違わせない）
+    let in_diff: std::collections::HashSet<i64> = track_ids.iter().copied().collect();
+    let synced_errors: Vec<(&crate::domain::device::DeviceItem, &str)> = d
+        .current
+        .iter()
+        .filter(|c| !in_diff.contains(&c.track_id))
+        .filter_map(|c| match d.states.get(&c.track_id) {
+            Some(TrackState::Error { reason, .. }) => Some((c, reason.as_str())),
+            _ => None,
+        })
+        .collect();
+    track_ids.extend(synced_errors.iter().map(|(c, _)| c.track_id));
     let mut pl_ids: Vec<i64> = diff.playlists.iter().map(|p| p.playlist_id).collect();
     pl_ids.extend(diff.playlist_errors.iter().map(|(p, _)| *p));
     let (titles, names, evals) = state
@@ -490,6 +503,19 @@ pub async fn diff(
             reason: Some(reason),
             size: 0,
             has_copy: h.has_copy,
+        });
+    }
+    for (c, reason) in &synced_errors {
+        items.push(DiffItem {
+            op: "error",
+            track_id: c.track_id,
+            title: titles.get(&c.track_id).map(|t| t.0.clone()),
+            artist: titles.get(&c.track_id).map(|t| t.1.clone()),
+            from: None,
+            dest_path: Some(c.dest_path.clone()),
+            reason: Some((*reason).to_owned()),
+            size: 0,
+            has_copy: true,
         });
     }
     let mut playlists: Vec<DiffPlaylist> = diff
