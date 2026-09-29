@@ -244,3 +244,75 @@ fn stale_master_identity_forces_rehash() {
         "外部書き換えで identity がずれたら再ハッシュ"
     );
 }
+
+/// `set_playlists` は DELETE → INSERT → generation++ を 1 つの SAVEPOINT にまとめる。
+/// 未知の playlist_id は `INSERT OR IGNORE` では黙らせられない FK 違反になるので、
+/// 印も generation も呼び出し前のまま残らなければならない
+#[test]
+fn set_playlists_with_unknown_id_leaves_marks_and_generation_unchanged() {
+    let c = conn();
+    let d = adb(&c, Selection::Playlists);
+    c.execute("INSERT INTO playlists (id, name, name_key, created_at, updated_at) VALUES (5, 'p', 'p', 0, 0)", []).unwrap();
+    devices::set_playlists(&c, d.id, &[5], 20).unwrap();
+
+    assert!(
+        devices::set_playlists(&c, d.id, &[999], 30).is_err(),
+        "存在しない playlist_id は FK 違反で失敗する"
+    );
+
+    assert_eq!(
+        devices::playlist_ids(&c, d.id).unwrap(),
+        vec![5],
+        "印は直前のまま"
+    );
+    assert_eq!(
+        devices::get(&c, d.id).unwrap().unwrap().generation,
+        2,
+        "generation も直前のまま（失敗した呼び出し分は進まない）"
+    );
+}
+
+/// `replace_items` は DELETE → INSERT を 1 つの SAVEPOINT にまとめる。autocommit のコネクションで
+/// `dest_path_key`（`canonical_key`。casefold）の UNIQUE 違反が起きても、直前の内容が空・部分的に
+/// ならず残らなければならない
+#[test]
+fn replace_items_rejects_dest_path_collision_and_keeps_previous_items() {
+    let c = conn();
+    let d = adb(&c, Selection::All);
+    let previous = DeviceItem {
+        track_id: 1,
+        dest_path: "old.opus".into(),
+        token: "t".into(),
+        size: 1,
+        sha256: "s".into(),
+    };
+    devices::replace_items(&c, d.id, std::slice::from_ref(&previous), 1).unwrap();
+
+    // "A/x.opus" と "a/X.opus" は canonical_key で衝突する
+    let colliding = [
+        DeviceItem {
+            track_id: 2,
+            dest_path: "A/x.opus".into(),
+            token: "t".into(),
+            size: 1,
+            sha256: "s".into(),
+        },
+        DeviceItem {
+            track_id: 3,
+            dest_path: "a/X.opus".into(),
+            token: "t".into(),
+            size: 1,
+            sha256: "s".into(),
+        },
+    ];
+    assert!(
+        devices::replace_items(&c, d.id, &colliding, 2).is_err(),
+        "dest_path_key の UNIQUE 違反で失敗する"
+    );
+
+    assert_eq!(
+        devices::items(&c, d.id).unwrap(),
+        vec![previous],
+        "失敗した置換の前の内容がそのまま残る"
+    );
+}

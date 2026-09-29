@@ -89,6 +89,24 @@ fn device_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Device>> {
     }))
 }
 
+/// `f` を SAVEPOINT で囲んで原子的に実行する。呼び出し側が既にトランザクションを張っていても
+/// 張っていなくても安全（`src/db/playlists.rs` の `rewrite_items` と同じ流儀）。`name` は
+/// 固定の定数だけを渡すこと（SAVEPOINT 名はバインドパラメータにできないので直接埋め込むが、
+/// 外部からの値を差し込むことはない）
+fn atomically<T>(conn: &Connection, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+    match f() {
+        Ok(v) => {
+            conn.execute_batch(&format!("RELEASE {name}"))?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+            Err(e)
+        }
+    }
+}
+
 /// 128 bit の乱数を 16 進 32 桁で
 fn random_uuid() -> Result<String> {
     let mut raw = [0u8; 16];
@@ -144,28 +162,32 @@ pub fn list(conn: &Connection) -> Result<Vec<Device>> {
     Ok(rows.into_iter().flatten().collect())
 }
 
-/// 印の全置換。generation を進める（仕様 ③「端末の設定変更と同期の排他」。排他の検査は API 側）
+/// 印の全置換。generation を進める（仕様 ③「端末の設定変更と同期の排他」。排他の検査は API 側）。
+/// SAVEPOINT で囲むので、未知の playlist_id による FK 違反などで失敗しても、印も generation も
+/// 呼び出し前のまま（`INSERT OR IGNORE` は UNIQUE 違反は黙らせるが FK 違反は黙らせない）
 pub fn set_playlists(
     conn: &Connection,
     device_id: i64,
     playlist_ids: &[i64],
     now: i64,
 ) -> Result<()> {
-    conn.execute(
-        "DELETE FROM device_playlists WHERE device_id = ?1",
-        [device_id],
-    )?;
-    let mut st = conn.prepare_cached(
-        "INSERT OR IGNORE INTO device_playlists (device_id, playlist_id) VALUES (?1, ?2)",
-    )?;
-    for pid in playlist_ids {
-        st.execute(params![device_id, pid])?;
-    }
-    conn.execute(
-        "UPDATE devices SET generation = generation + 1, updated_at = ?2 WHERE id = ?1",
-        params![device_id, now],
-    )?;
-    Ok(())
+    atomically(conn, "device_set_playlists", || {
+        conn.execute(
+            "DELETE FROM device_playlists WHERE device_id = ?1",
+            [device_id],
+        )?;
+        let mut st = conn.prepare_cached(
+            "INSERT OR IGNORE INTO device_playlists (device_id, playlist_id) VALUES (?1, ?2)",
+        )?;
+        for pid in playlist_ids {
+            st.execute(params![device_id, pid])?;
+        }
+        conn.execute(
+            "UPDATE devices SET generation = generation + 1, updated_at = ?2 WHERE id = ?1",
+            params![device_id, now],
+        )?;
+        Ok(())
+    })
 }
 
 pub fn playlist_ids(conn: &Connection, device_id: i64) -> Result<Vec<i64>> {
@@ -355,31 +377,35 @@ pub fn items(conn: &Connection, device_id: i64) -> Result<Vec<DeviceItem>> {
     Ok(rows)
 }
 
-/// 端末側の正本を読んだ結果で全置換する（呼び出し側がトランザクションを張る）
+/// 端末側の正本を読んだ結果で全置換する。SAVEPOINT で囲むので、呼び出し側がトランザクションを
+/// 張っていない（autocommit の）場合でも、`dest_path_key` の UNIQUE 違反などで失敗すれば
+/// 直前の内容のまま残る（キャッシュが空・部分的になって次回差分が全曲送信になる事故を防ぐ）
 pub fn replace_items(
     conn: &Connection,
     device_id: i64,
     items: &[DeviceItem],
     now: i64,
 ) -> Result<()> {
-    conn.execute("DELETE FROM device_items WHERE device_id = ?1", [device_id])?;
-    let mut st = conn.prepare_cached(
-        "INSERT INTO device_items (device_id, track_id, dest_path, dest_path_key, token, size, sha256, synced_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-    )?;
-    for it in items {
-        st.execute(params![
-            device_id,
-            it.track_id,
-            it.dest_path,
-            canonical_key(&it.dest_path),
-            it.token,
-            it.size as i64,
-            it.sha256,
-            now
-        ])?;
-    }
-    Ok(())
+    atomically(conn, "device_replace_items", || {
+        conn.execute("DELETE FROM device_items WHERE device_id = ?1", [device_id])?;
+        let mut st = conn.prepare_cached(
+            "INSERT INTO device_items (device_id, track_id, dest_path, dest_path_key, token, size, sha256, synced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for it in items {
+            st.execute(params![
+                device_id,
+                it.track_id,
+                it.dest_path,
+                canonical_key(&it.dest_path),
+                it.token,
+                it.size as i64,
+                it.sha256,
+                now
+            ])?;
+        }
+        Ok(())
+    })
 }
 
 pub fn playlist_states(conn: &Connection, device_id: i64) -> Result<Vec<PlaylistState>> {
@@ -399,24 +425,27 @@ pub fn playlist_states(conn: &Connection, device_id: i64) -> Result<Vec<Playlist
     Ok(rows)
 }
 
+/// SAVEPOINT で囲むので、autocommit でも失敗時は直前の内容のまま残る（`replace_items` と同じ理由）
 pub fn replace_playlist_states(
     conn: &Connection,
     device_id: i64,
     states: &[PlaylistState],
     now: i64,
 ) -> Result<()> {
-    conn.execute(
-        "DELETE FROM device_playlist_state WHERE device_id = ?1",
-        [device_id],
-    )?;
-    let mut st = conn.prepare_cached(
-        "INSERT INTO device_playlist_state (device_id, playlist_id, dest_path, token, synced_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?;
-    for s in states {
-        st.execute(params![device_id, s.playlist_id, s.dest_path, s.token, now])?;
-    }
-    Ok(())
+    atomically(conn, "device_replace_playlist_states", || {
+        conn.execute(
+            "DELETE FROM device_playlist_state WHERE device_id = ?1",
+            [device_id],
+        )?;
+        let mut st = conn.prepare_cached(
+            "INSERT INTO device_playlist_state (device_id, playlist_id, dest_path, token, synced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for s in states {
+            st.execute(params![device_id, s.playlist_id, s.dest_path, s.token, now])?;
+        }
+        Ok(())
+    })
 }
 
 pub struct Computed {
