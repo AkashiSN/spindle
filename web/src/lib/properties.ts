@@ -2,7 +2,7 @@
 // 選択行（TrackRow、一覧に載っている）と `GET /api/tracks/:id` の detail（先頭 DETAIL_LIMIT 件だけ取る）
 // から Metadata / Location / General の 3 表を組む。複数選択は共通値、異なれば multiple
 
-import type { Derived, Device, TrackDetail, TrackDeviceState, TrackRow } from '../api/types'
+import type { Derived, Device, TrackDetail, TrackDeviceState, TrackRow, TrackVerification } from '../api/types'
 import { HIRES_LABEL, VERIFICATION, hiresMeasurements } from './badges'
 import { formatDuration } from './format'
 import { formatDateTime } from './history'
@@ -220,6 +220,20 @@ function hiresCheckLabel(r: TrackRow): string {
   return `${HIRES_LABEL[h.status]}${m ? `（${m}）` : ''}${stale}`
 }
 
+/** 手法ごとの照合の 1 行。「一致（信頼度 34、オフセット +6）」「不一致」「登録なし」「検証不能」 */
+function verificationLabel(v: TrackVerification | undefined): string {
+  if (!v) return ''
+  if (v.result === 'unverifiable') return '検証不能'
+  if (v.result === 'not_found') return '登録なし'
+  if (!v.matched) return '不一致'
+  const notes: string[] = []
+  if (v.confidence != null && v.confidence > 0) notes.push(`信頼度 ${v.confidence}`)
+  if (v.detected_offset != null && v.detected_offset !== 0) {
+    notes.push(`オフセット ${v.detected_offset > 0 ? '+' : ''}${v.detected_offset}`)
+  }
+  return notes.length > 0 ? `一致（${notes.join('、')}）` : '一致'
+}
+
 function derivedLabel(d: Derived | null): string {
   if (!d) return ''
   return `${d.codec}${d.stale_tags ? '（タグが古い）' : ''}`
@@ -263,6 +277,21 @@ export function generalRows(rows: readonly TrackRow[], details: ReadonlyMap<numb
       key: 'verification',
       label: 'Verification',
       value: commonValue(rows.map((r) => (VERIFICATION[r.verification] ?? VERIFICATION.not_attempted).label)),
+    },
+    // どちらで一致したかはバッジに出さず、ここで手法ごとに出す
+    {
+      key: 'verify_ctdb',
+      label: 'CTDB',
+      value: commonValue(
+        withDetail(rows, details, (d) => verificationLabel(d.verifications.find((v) => v.method === 'ctdb'))),
+      ),
+    },
+    {
+      key: 'verify_ar',
+      label: 'AccurateRip',
+      value: commonValue(
+        withDetail(rows, details, (d) => verificationLabel(d.verifications.find((v) => v.method === 'accuraterip'))),
+      ),
     },
     { key: 'rg', label: 'ReplayGain', value: commonValue(rows.map(rgLabel)) },
     { key: 'flac_check', label: 'FLAC check', value: commonValue(rows.map(flacCheckLabel)) },

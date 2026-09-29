@@ -21,8 +21,9 @@ export function hiresMeasurements(h: HiresCheck): string {
 }
 
 export const VERIFICATION: Record<Verification, { icon: string; label: string; cls: string }> = {
-  verified_ar: { icon: '✔', label: '検証済み（AccurateRip）', cls: 'v-ar' },
-  verified_ctdb: { icon: '✔', label: '検証済み（CTDB）', cls: 'v-ctdb' },
+  // どちらで一致したかは出さない（プロパティの CTDB / AccurateRip の行で見る）
+  verified_ar: { icon: '✔', label: '検証済み', cls: 'v-ok' },
+  verified_ctdb: { icon: '✔', label: '検証済み', cls: 'v-ok' },
   mismatch: { icon: '✘', label: '検証不一致', cls: 'v-mismatch' },
   unverifiable: { icon: '○', label: '検証不能（TOC が無い音源）', cls: 'v-unverifiable' },
   not_attempted: { icon: '·', label: '未検証', cls: 'v-none' },
@@ -183,8 +184,7 @@ export const BADGE_LEGEND: ReadonlyArray<{ title: string; items: LegendEntry[] }
   {
     title: '検証（CD 由来の照合。常に出る）',
     items: [
-      { key: 'verification', icon: '✔', cls: 'badge v-ar', label: '検証済み（AccurateRip）' },
-      { key: 'verification', icon: '✔', cls: 'badge v-ctdb', label: '検証済み（CTDB）' },
+      { key: 'verification', icon: '✔', cls: 'badge v-ok', label: '検証済み（CTDB か AccurateRip で一致。どちらかはプロパティ）' },
       { key: 'verification', icon: '✘', cls: 'badge v-mismatch', label: '検証不一致' },
       { key: 'verification', icon: '○', cls: 'badge v-unverifiable', label: '検証不能（TOC が無い音源。配信・ダウンロード）' },
       { key: 'verification', icon: '·', cls: 'badge v-none', label: '未検証' },

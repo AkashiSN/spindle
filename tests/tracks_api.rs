@@ -439,6 +439,7 @@ async fn get_track_with_session_carries_detail_but_trusted_cidr_does_not() {
     let (_, body) = get(&app, &c, &format!("/api/tracks/{id2}")).await;
     assert_eq!(body["detail"]["tags"], serde_json::json!({}));
     assert!(body["detail"]["audio_md5"].is_null());
+    assert_eq!(body["detail"]["verifications"], serde_json::json!([]));
 
     // 一覧には detail を付けない（行が重くなる）
     let (_, body) = get(&app, &c, "/api/tracks").await;
@@ -462,6 +463,59 @@ async fn get_track_with_session_carries_detail_but_trusted_cidr_does_not() {
 
 // ---------------------------------------------------------------- アルバム
 
+/// detail.verifications は手法ごとの最新の照合（プロパティで「どれで一致したか」を出す）。
+/// 古い記録は同じ手法の新しい記録に隠れ、CTDB → AccurateRip の順に並ぶ
+#[tokio::test]
+async fn get_track_detail_carries_latest_verification_per_method() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    let conn = app.raw();
+    let album = insert_album(&conn, "A/V");
+    let id = insert_track(&conn, "A/V/01.flac", "one", Some(album));
+    let other = insert_track(&conn, "A/V/02.flac", "two", Some(album));
+    let add = |method: &str,
+               result: &str,
+               offset: Option<i64>,
+               conf: Option<i64>,
+               at: i64,
+               matched: bool| {
+        conn.execute(
+            "INSERT INTO album_verifications (album_id, method, result, source, detected_offset, confidence,
+                                              verified_at, disc_no)
+             VALUES (?1, ?2, ?3, 'retro', ?4, ?5, ?6, 1)",
+            params![album, method, result, offset, conf, at],
+        )
+        .unwrap();
+        let vid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO track_verifications (track_id, verification_id, matched) VALUES (?1, ?2, ?3)",
+            params![id, vid, matched],
+        )
+        .unwrap();
+        vid
+    };
+    // 古い記録（後の記録に隠れる）
+    add("ctdb", "not_found", Some(0), Some(0), 100, false);
+    add("accuraterip", "verified", Some(0), Some(3), 100, true);
+    // 新しい記録
+    add("accuraterip", "mismatch", Some(6), Some(0), 200, false);
+    add("ctdb", "verified", Some(6), Some(34), 200, true);
+
+    let (status, body) = get(&app, &c, &format!("/api/tracks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["detail"]["verifications"],
+        serde_json::json!([
+            { "method": "ctdb", "result": "verified", "matched": true, "source": "retro",
+              "detected_offset": 6, "confidence": 34, "verified_at": 200, "disc_no": 1 },
+            { "method": "accuraterip", "result": "mismatch", "matched": false, "source": "retro",
+              "detected_offset": 6, "confidence": 0, "verified_at": 200, "disc_no": 1 },
+        ])
+    );
+    // 別のトラックの記録は混ざらない
+    let (_, body) = get(&app, &c, &format!("/api/tracks/{other}")).await;
+    assert_eq!(body["detail"]["verifications"], serde_json::json!([]));
+}
 #[tokio::test]
 async fn albums_list_and_get() {
     let app = app().await;

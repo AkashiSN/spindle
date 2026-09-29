@@ -79,6 +79,23 @@ export type TrackDetail = {
   audio_md5: string | null
   original_codec: string | null
   added_at: number
+  /** 手法ごとの最新の照合（CTDB → AccurateRip の順。記録の無い手法は無い） */
+  verifications: TrackVerification[]
+}
+
+/** トラック 1 本の、ある手法での最新の照合（プロパティがどちらで一致したかを出す） */
+export type TrackVerification = {
+  method: 'ctdb' | 'accuraterip'
+  /** ディスク単位の結論 */
+  result: 'verified' | 'mismatch' | 'not_found' | 'unverifiable'
+  /** このトラックが一致したか */
+  matched: boolean
+  source: 'rip' | 'retro'
+  detected_offset: number | null
+  /** ディスクの信頼度（全トラックの最小。不一致があれば 0） */
+  confidence: number | null
+  verified_at: number
+  disc_no: number | null
 }
 
 export type TrackWithDetail = TrackRow & { detail: TrackDetail }

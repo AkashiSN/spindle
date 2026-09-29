@@ -844,13 +844,9 @@ table.kv tr.differs td {
   color: var(--badge-fg);
   cursor: help;
 }
-.badge.v-ar {
+.badge.v-ok {
   background: var(--badge-green-bg);
   color: var(--badge-green-fg);
-}
-.badge.v-ctdb {
-  background: var(--badge-teal-bg);
-  color: var(--badge-teal-fg);
 }
 .badge.v-mismatch {
   background: var(--badge-red-bg);
@@ -3110,6 +3106,20 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 .panel-banner.ok {
   background: var(--badge-green-bg);
   color: var(--badge-green-fg);
+}
+/* 遡及照合の結果（操作タブ ④）。1 アルバム 1 行、長いパスは折り返す */
+.verify-result p {
+  margin: 4px 0;
+}
+.verify-result ul {
+  margin: 0;
+  padding-left: 16px;
+}
+.verify-result li {
+  overflow-wrap: anywhere;
+}
+.verify-result .verify-subject {
+  font-weight: 600;
 }
 .badge.warn {
   background: var(--badge-amber-bg);
