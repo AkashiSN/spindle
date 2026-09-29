@@ -492,3 +492,45 @@ fn replace_items_rejects_dest_path_collision_and_keeps_previous_items() {
         "失敗した置換の前の内容がそのまま残る"
     );
 }
+
+#[test]
+fn track_inputs_joins_derived_and_hashes_in_one_pass() {
+    let c = conn();
+    let d = adb(&c, Selection::All);
+    insert_track_with_inode(&c, 1, "A/a.flac", "flac", Some(1));
+    insert_track_with_inode(&c, 2, "YT/b.opus", "opus", Some(2));
+    insert_track_with_inode(&c, 3, "YT/c.opus", "opus", Some(3));
+    c.execute(
+        "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, src_audio_version,
+                                    src_tag_version, generated_at, src_artwork_id, src_rg_scanned_at,
+                                    audio_profile, tag_profile)
+         VALUES (1, 'opus', 'opus/A/a.opus', 'opus/a/a.opus', 'opus', 1, 1, 0, NULL, NULL, 'p', 't')",
+        [],
+    )
+    .unwrap();
+    let h = |sem: &str, inode: u64| SourceHash {
+        semantic: sem.into(),
+        inode,
+        size: 1,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        sha256: "ab".repeat(32),
+    };
+    devices::put_source_hash(&c, 1, SourceKind::Derived(Variant::Opus), &h("d1", 99), 5).unwrap();
+    devices::put_source_hash(&c, 2, SourceKind::Master, &h("m2", 2), 5).unwrap();
+    // 3 は identity が tracks 行と違う（inode 7 != 3）ので hash_master は None になる
+    devices::put_source_hash(&c, 3, SourceKind::Master, &h("m3", 7), 5).unwrap();
+
+    let got = devices::track_inputs(&c, &d).unwrap();
+    assert_eq!(
+        got.iter().map(|t| t.track_id).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(got[0].derived.as_ref().unwrap().rel_path, "opus/A/a.opus");
+    assert_eq!(got[0].derived.as_ref().unwrap().audio_profile, "p");
+    assert_eq!(got[0].hash_derived.as_ref().unwrap().semantic, "d1");
+    assert!(got[0].hash_master.is_none());
+    assert!(got[1].derived.is_none());
+    assert_eq!(got[1].hash_master.as_ref().unwrap().semantic, "m2");
+    assert!(got[2].hash_master.is_none(), "identity 不一致は無効");
+}

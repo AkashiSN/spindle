@@ -271,73 +271,81 @@ fn identity_matches(h: &SourceHash, id: &TrackIdentity) -> bool {
         && id.ctime_ns == h.ctime_ns
 }
 
-/// 選曲に入った曲（missing とマルチチャンネルを除く。これらは差分で削除になる）
-pub fn track_inputs(conn: &Connection, device: &Device) -> Result<Vec<TrackInput>> {
-    let ids: Vec<i64> = match device.selection {
-        Selection::All => {
-            let mut st = conn.prepare_cached(
-                "SELECT id FROM tracks WHERE missing_since IS NULL AND channels IN (1, 2) ORDER BY id",
-            )?;
-            let rows = st
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
-        }
-        Selection::Playlists => {
-            let mut st = conn.prepare_cached(
-                "SELECT DISTINCT t.id FROM device_playlists dp
-                 JOIN playlist_items pi ON pi.playlist_id = dp.playlist_id
-                 JOIN tracks t ON t.id = pi.track_id
-                 WHERE dp.device_id = ?1 AND t.missing_since IS NULL AND t.channels IN (1, 2)
-                 ORDER BY t.id",
-            )?;
-            let rows = st
-                .query_map([device.id], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
-        }
+/// `track_inputs` の列: tracks（0..=10）、derived_files（11..=17）、source_hashes の master（18..=23）と
+/// その系統（24..=29）
+const INPUT_SQL_HEAD: &str = "
+SELECT t.id, t.rel_path, t.lossless, t.channels, t.audio_version, t.tag_version,
+       t.rg_scanned_at IS NOT NULL AND t.rg_track_gain IS NOT NULL AND t.rg_track_peak IS NOT NULL,
+       t.inode, t.size, t.mtime_ns, t.ctime_ns,
+       d.rel_path, d.src_audio_version, d.src_tag_version, d.src_artwork_id,
+       d.src_rg_scanned_at, d.audio_profile, d.tag_profile,
+       hm.token, hm.inode, hm.size, hm.mtime_ns, hm.ctime_ns, hm.sha256,
+       hd.token, hd.inode, hd.size, hd.mtime_ns, hd.ctime_ns, hd.sha256
+  FROM tracks t
+  LEFT JOIN derived_files d ON d.track_id = t.id AND d.variant = ?1
+  LEFT JOIN source_hashes hm ON hm.track_id = t.id AND hm.source = 'master'
+  LEFT JOIN source_hashes hd ON hd.track_id = t.id AND hd.source = ?1
+ WHERE t.missing_since IS NULL AND t.channels IN (1, 2)";
+
+const INPUT_WHERE_ALL: &str = " ORDER BY t.id";
+const INPUT_WHERE_PLAYLISTS: &str = "
+   AND t.id IN (SELECT pi.track_id FROM device_playlists dp
+                  JOIN playlist_items pi ON pi.playlist_id = dp.playlist_id
+                 WHERE dp.device_id = ?2)
+ ORDER BY t.id";
+
+fn hash_at(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Option<SourceHash>> {
+    let Some(semantic) = r.get::<_, Option<String>>(base)? else {
+        return Ok(None);
     };
-    let mut out = Vec::with_capacity(ids.len());
-    let mut st = conn.prepare_cached(
-        "SELECT id, rel_path, lossless, channels, audio_version, tag_version,
-                rg_scanned_at IS NOT NULL AND rg_track_gain IS NOT NULL AND rg_track_peak IS NOT NULL,
-                inode, size, mtime_ns, ctime_ns
-         FROM tracks WHERE id = ?1",
-    )?;
-    for id in ids {
-        let Some((mut t, identity)) = st
-            .query_row([id], |r| {
-                let t = TrackInput {
-                    track_id: r.get(0)?,
-                    rel_path: r.get(1)?,
-                    lossless: r.get::<_, i64>(2)? == 1,
-                    channels: r.get(3)?,
-                    audio_version: r.get(4)?,
-                    tag_version: r.get(5)?,
-                    rg_ready: r.get::<_, i64>(6)? == 1,
-                    derived: None,
-                    hash_master: None,
-                    hash_derived: None,
-                };
-                let identity = TrackIdentity {
-                    inode: r.get(7)?,
-                    size: r.get(8)?,
-                    mtime_ns: r.get(9)?,
-                    ctime_ns: r.get(10)?,
-                };
-                Ok((t, identity))
-            })
-            .optional()?
-        else {
-            continue;
+    Ok(Some(SourceHash {
+        semantic,
+        inode: r.get::<_, i64>(base + 1)? as u64,
+        size: r.get::<_, i64>(base + 2)? as u64,
+        mtime_ns: r.get(base + 3)?,
+        ctime_ns: r.get(base + 4)?,
+        sha256: r.get(base + 5)?,
+    }))
+}
+
+/// 選曲に入った曲（missing とマルチチャンネルを除く。これらは差分で削除になる）。
+/// Derived・原本と系統のハッシュも 1 本の LEFT JOIN で読む（曲ごとの問い合わせにしない）
+pub fn track_inputs(conn: &Connection, device: &Device) -> Result<Vec<TrackInput>> {
+    let sql = match device.selection {
+        Selection::All => format!("{INPUT_SQL_HEAD}{INPUT_WHERE_ALL}"),
+        Selection::Playlists => format!("{INPUT_SQL_HEAD}{INPUT_WHERE_PLAYLISTS}"),
+    };
+    let mut st = conn.prepare_cached(&sql)?;
+    let map = |r: &rusqlite::Row<'_>| -> rusqlite::Result<TrackInput> {
+        let identity = TrackIdentity {
+            inode: r.get(7)?,
+            size: r.get(8)?,
+            mtime_ns: r.get(9)?,
+            ctime_ns: r.get(10)?,
         };
-        t.derived = dbderived::get(conn, id, device.variant)?;
-        t.hash_master =
-            source_hash(conn, id, SourceKind::Master)?.filter(|h| identity_matches(h, &identity));
-        t.hash_derived = source_hash(conn, id, SourceKind::Derived(device.variant))?;
-        out.push(t);
-    }
-    Ok(out)
+        let derived = match r.get::<_, Option<String>>(11)? {
+            Some(_) => Some(dbderived::current_at(r, 11)?),
+            None => None,
+        };
+        Ok(TrackInput {
+            track_id: r.get(0)?,
+            rel_path: r.get(1)?,
+            lossless: r.get::<_, i64>(2)? == 1,
+            channels: r.get(3)?,
+            audio_version: r.get(4)?,
+            tag_version: r.get(5)?,
+            rg_ready: r.get::<_, i64>(6)? == 1,
+            derived,
+            hash_master: hash_at(r, 18)?.filter(|h| identity_matches(h, &identity)),
+            hash_derived: hash_at(r, 24)?,
+        })
+    };
+    let v = device.variant.as_str();
+    let rows = match device.selection {
+        Selection::All => st.query_map(params![v], map)?,
+        Selection::Playlists => st.query_map(params![v, device.id], map)?,
+    };
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 pub fn playlist_inputs(conn: &Connection, device_id: i64) -> Result<Vec<PlaylistInput>> {
@@ -481,6 +489,15 @@ pub fn root_prefix_utf16(device: &Device) -> usize {
 /// 系統が設定に無ければ凍結と同じ扱い（音声版が一致する既存の行だけ送れる）。
 /// 行き先の衝突はプレイリストを組み立てる前に解く（保留になった曲を行き先のパスで載せない）
 pub fn compute(conn: &Connection, device_id: i64) -> Result<Option<Computed>> {
+    // 別の書き込みを跨いで世代の混ざった入力を読まないよう、1 つの読み取りトランザクションで読む
+    let tx = conn.unchecked_transaction()?;
+    let out = compute_in(&tx, device_id)?;
+    tx.finish()?;
+    Ok(out)
+}
+
+/// [`compute`] の本体。呼び出し側が読み取りトランザクションを持っているときに使う（入れ子にできないため）
+pub(crate) fn compute_in(conn: &Connection, device_id: i64) -> Result<Option<Computed>> {
     let Some(device) = get(conn, device_id)? else {
         return Ok(None);
     };

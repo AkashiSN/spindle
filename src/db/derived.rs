@@ -145,16 +145,21 @@ pub fn target_drifted(conn: &Connection, before: &Target) -> Result<bool> {
         || now.missing != before.missing)
 }
 
-fn current_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Current> {
+/// `derived_files` の [`CURRENT_COLUMNS`] を、`base` 列目から読む（JOIN した行でも使う）
+pub(crate) fn current_at(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Current> {
     Ok(Current {
-        rel_path: r.get(0)?,
-        src_audio_version: r.get(1)?,
-        src_tag_version: r.get(2)?,
-        src_artwork_id: r.get(3)?,
-        src_rg_scanned_at: r.get(4)?,
-        audio_profile: r.get(5)?,
-        tag_profile: r.get(6)?,
+        rel_path: r.get(base)?,
+        src_audio_version: r.get(base + 1)?,
+        src_tag_version: r.get(base + 2)?,
+        src_artwork_id: r.get(base + 3)?,
+        src_rg_scanned_at: r.get(base + 4)?,
+        audio_profile: r.get(base + 5)?,
+        tag_profile: r.get(base + 6)?,
     })
+}
+
+fn current_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Current> {
+    current_at(r, 0)
 }
 
 const CURRENT_COLUMNS: &str = "rel_path, src_audio_version, src_tag_version, src_artwork_id,
