@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyPicture,
+  nextStage,
+  stageText,
   draftChangeCount,
   itemSource,
   effectiveTag,
@@ -984,5 +986,20 @@ describe('itemSource', () => {
     // 消し損ね・差し替えで残ったサイドカーより、取り込み元のディレクトリを信じる
     expect(itemSource(item({ ...placed, rel_dir: 'foo', rip: { toc: 't', isrcs: [], mcn: null } }))).toBe('手置き')
     expect(itemSource(item({ ...placed, rel_dir: 'CD/x', tracks: [{ ...file('d/01.flac'), source: { source: 'youtube', url: null, channel: null, verdict: 'ok', message: null } }] }))).toBe('CD')
+  })
+})
+
+describe('Inbox の段', () => {
+  it('段の文言', () => {
+    expect(stageText({ key: 'rg', label: 'RG', status: 'running', done: 3, total: 10 })).toBe('進行中（3/10）')
+    expect(stageText({ key: 'opus', label: 'opus', status: 'done', done: 10, total: 10 })).toBe('完了')
+    expect(stageText({ key: 'aac', label: 'aac（無効）', status: 'na', done: 0, total: 0 })).toBe('対象外')
+    expect(stageText({ key: 'place', label: '配置', status: 'todo', done: 0, total: 0 })).toBe('未')
+  })
+  it('最初の未完了の段', () => {
+    const st = (key: string, status: 'done' | 'running' | 'todo' | 'na') => ({ key, label: key, status, done: 0, total: 0 })
+    expect(nextStage({ stages: [st('place', 'done'), st('rg', 'na'), st('opus', 'running'), st('aac', 'todo')] })?.key).toBe('opus')
+    expect(nextStage({ stages: [st('place', 'done')] })).toBeNull()
+    expect(nextStage({})).toBeNull()
   })
 })

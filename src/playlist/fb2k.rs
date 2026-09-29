@@ -38,7 +38,9 @@ pub fn field_name(field: &str) -> Option<String> {
         "channels" => "__channels",
         "verification" | "category" | "source_type" | "sourcetype" | "lossless" | "added"
         | "has_derived" | "hasderived" | "missing" | "hirescheck" | "hires_check" | "cutoff"
-        | "cliff" | "effectivebits" | "effective_bits" => return None,
+        | "cliff" | "effectivebits" | "effective_bits" | "on_device" | "device_pending" => {
+            return None
+        }
         other => other,
     };
     Some(format!("%{name}%"))

@@ -590,3 +590,28 @@ pub fn record_caa(conn: &Connection, id: i64, picture: Option<&str>, tries: i64)
     )?;
     Ok(n == 1)
 }
+
+/// その件で配置した曲を全置換で記録する（配置のトランザクションの中で呼ぶ）
+pub fn set_placed_tracks(conn: &Connection, item_id: i64, track_ids: &[i64]) -> Result<()> {
+    conn.execute(
+        "DELETE FROM inbox_item_tracks WHERE item_id = ?1",
+        [item_id],
+    )?;
+    let mut st = conn.prepare_cached(
+        "INSERT OR IGNORE INTO inbox_item_tracks (item_id, track_id) VALUES (?1, ?2)",
+    )?;
+    for t in track_ids {
+        st.execute(params![item_id, t])?;
+    }
+    Ok(())
+}
+
+pub fn placed_tracks(conn: &Connection, item_id: i64) -> Result<Vec<i64>> {
+    let mut st = conn.prepare_cached(
+        "SELECT track_id FROM inbox_item_tracks WHERE item_id = ?1 ORDER BY track_id",
+    )?;
+    let rows = st
+        .query_map([item_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}

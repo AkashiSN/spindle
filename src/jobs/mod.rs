@@ -165,6 +165,9 @@ pub struct PlaylistEvent {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct JobEvent {
     pub id: i64,
+    /// 種別（常駐タスクの判定に使う。SSE には流さない）
+    #[serde(skip)]
+    pub job_type: JobType,
     pub state: JobState,
     pub progress: Option<f64>,
     pub done: Option<i64>,
@@ -178,6 +181,7 @@ impl JobEvent {
     pub fn of(job: &Job) -> Self {
         Self {
             id: job.id,
+            job_type: job.job_type,
             state: job.state,
             progress: job.progress,
             done: job.done,

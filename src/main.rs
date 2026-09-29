@@ -38,7 +38,7 @@ use spindle::jobs::{self, EnqueueResult, JobType, Registry};
 use spindle::media::artwork::ArtworkStore;
 use spindle::media::decode::Decoder;
 use spindle::media::encode::{AacEncoder, FlacEncoder, OpusEncoder};
-use spindle::playlist::autoexport::AutoExport;
+use spindle::playlist::autoexport::{AutoExport, ReevalFlag};
 use spindle::{config::Config, logging};
 
 /// `SPINDLE_CONFIG` 未設定時の設定ファイルパス（SPEC §14 環境変数）
@@ -545,12 +545,16 @@ async fn main() -> anyhow::Result<()> {
     );
     // 定期 GC（D-56）。最後の終端 gc から 24 時間経っていれば投入する
     let gc_scheduler = gc_job::spawn_scheduler(Arc::clone(&state.jobs), shutdown.clone());
+    // スマートプレイリストの再評価待ち（D-54）。常駐タスクが全件をまとめて評価するので 1 ビット
+    let reeval = Arc::new(ReevalFlag::new_dirty());
+    state = state.with_reeval(Arc::clone(&reeval));
     // スマートプレイリストの自動再評価と、記録済みプロファイルへの自動再書き出し（P1-7、D-54）
     let autoexport = AutoExport::new(
         Arc::clone(&state.db),
         Arc::clone(&state.jobs),
         Arc::clone(&playlists_root),
         std::time::Duration::from_secs(u64::from(state.config.export.autoexport_debounce_sec)),
+        reeval,
     )
     .spawn(shutdown.clone());
     // 起動時に 1 回 incremental を投入する（停止中の外部変更を拾う。D-38）

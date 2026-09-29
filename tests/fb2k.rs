@@ -301,3 +301,14 @@ ORDER BY %date% DESC LIMIT 100",
         ]
     );
 }
+
+#[test]
+fn device_fields_are_dropped_with_notes() {
+    let q = conv("%title% IS a AND %on_device% IS iPhone AND %device_pending% IS iPhone");
+    assert!(
+        !q.query.contains("on_device") && !q.query.contains("device_pending"),
+        "{}",
+        q.query
+    );
+    assert_eq!(q.notes.len(), 2, "{:?}", q.notes);
+}

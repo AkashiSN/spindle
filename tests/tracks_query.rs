@@ -773,7 +773,7 @@ fn selection_resolves_both_forms_to_the_same_rows() {
     let by_filter = tracks::resolve_selection(
         &conn,
         &Selection::Filter {
-            filter: Filter::default(),
+            filter: Box::new(Filter::default()),
             exclude_ids: vec![b],
         },
     )
@@ -783,10 +783,10 @@ fn selection_resolves_both_forms_to_the_same_rows() {
     let missing_only = tracks::resolve_selection(
         &conn,
         &Selection::Filter {
-            filter: Filter {
+            filter: Box::new(Filter {
                 flags: vec![Flag::Missing],
                 ..Default::default()
-            },
+            }),
             exclude_ids: vec![],
         },
     )
@@ -1032,10 +1032,10 @@ fn selection_resolves_in_position_order_when_asked() {
     let order = vec![all[2], all[0], all[3]];
     let pl = insert_playlist(&conn, "p", &order);
     let sel = Selection::Filter {
-        filter: Filter {
+        filter: Box::new(Filter {
             playlist_id: Some(pl),
             ..Default::default()
-        },
+        }),
         exclude_ids: vec![],
     };
     let rows =
@@ -1103,6 +1103,42 @@ fn dsl_filter_adds_the_rule_where_clause_and_ignores_order_and_limit() {
         .unwrap(),
         2
     );
+}
+
+#[test]
+fn device_pending_filter_reads_the_attached_sets() {
+    use spindle::domain::device::PendingSets;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let conn = open_memory_connection().unwrap();
+    let a = insert(&conn, "x/a.flac", &t());
+    let _b = insert(&conn, "x/b.flac", &t());
+    let c = insert(&conn, "x/c.flac", &t());
+    let mut f = Filter::parse(r#"{"device_pending":7}"#).unwrap();
+    assert!(!f.is_empty());
+    assert!(f.uses_devices());
+    // 集合を埋めていなければ一致なし（黙って全件にしない）
+    assert_eq!(tracks::count(&conn, &f).unwrap(), 0);
+    let by_id: HashMap<i64, Vec<i64>> = [(7, vec![a, c]), (8, vec![a])].into_iter().collect();
+    f.pending = PendingSets {
+        by_key: Arc::new(HashMap::new()),
+        by_id: Arc::new(by_id),
+    };
+    let (rows, _) = walk(&conn, query(f.clone(), "id", 10));
+    assert_eq!(ids(&rows), vec![a, c]);
+    // JSON には集合を出さない
+    assert_eq!(
+        serde_json::to_string(&f).unwrap(),
+        r#"{"device_pending":7}"#
+    );
+    // DSL の端末フィールドも uses_devices で拾う
+    assert!(Filter::parse(r#"{"dsl":"%on_device% IS iPhone"}"#)
+        .unwrap()
+        .uses_devices());
+    assert!(!Filter::parse(r#"{"dsl":"%title% IS on_device"}"#)
+        .unwrap()
+        .uses_devices());
 }
 
 #[test]

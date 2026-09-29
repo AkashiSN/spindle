@@ -145,16 +145,21 @@ pub fn target_drifted(conn: &Connection, before: &Target) -> Result<bool> {
         || now.missing != before.missing)
 }
 
-fn current_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Current> {
+/// `derived_files` の [`CURRENT_COLUMNS`] を、`base` 列目から読む（JOIN した行でも使う）
+pub(crate) fn current_at(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Current> {
     Ok(Current {
-        rel_path: r.get(0)?,
-        src_audio_version: r.get(1)?,
-        src_tag_version: r.get(2)?,
-        src_artwork_id: r.get(3)?,
-        src_rg_scanned_at: r.get(4)?,
-        audio_profile: r.get(5)?,
-        tag_profile: r.get(6)?,
+        rel_path: r.get(base)?,
+        src_audio_version: r.get(base + 1)?,
+        src_tag_version: r.get(base + 2)?,
+        src_artwork_id: r.get(base + 3)?,
+        src_rg_scanned_at: r.get(base + 4)?,
+        audio_profile: r.get(base + 5)?,
+        tag_profile: r.get(base + 6)?,
     })
+}
+
+fn current_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Current> {
+    current_at(r, 0)
 }
 
 const CURRENT_COLUMNS: &str = "rel_path, src_audio_version, src_tag_version, src_artwork_id,
@@ -365,6 +370,20 @@ pub fn delete(conn: &Connection, track_id: i64, variant: Variant) -> Result<bool
         "DELETE FROM derived_files WHERE track_id = ?1 AND variant = ?2",
         params![track_id, variant.as_str()],
     )? == 1)
+}
+
+/// 行の `rel_path` が `rel_path` のままなら消す（読んだ後に transcode が動かしていれば消さない）。消したら true
+pub fn delete_if_path(
+    conn: &Connection,
+    track_id: i64,
+    variant: Variant,
+    rel_path: &str,
+) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM derived_files WHERE track_id = ?1 AND variant = ?2 AND rel_path = ?3",
+        params![track_id, variant.as_str(), rel_path],
+    )?;
+    Ok(n > 0)
 }
 
 pub fn dedup_key(track_id: i64, variant: Variant, audio_version: i64) -> String {

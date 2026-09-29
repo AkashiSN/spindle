@@ -20,7 +20,8 @@ import {
   type ColumnVisibilityState,
 } from '@tanstack/react-table'
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
-import type { TrackRow } from '../api/types'
+import type { Device, TrackRow } from '../api/types'
+import { deviceNamesFrom, deviceNamesKey, type DeviceName } from '../lib/badges'
 import type { Sort, SortKey } from '../lib/filter'
 import { formatArtistAlbum, formatDuration, formatTitleArtist, formatTrackNo } from '../lib/format'
 import { cellDiff, COLUMN_TAG, formatValues, type PreviewState } from '../lib/preview'
@@ -55,7 +56,7 @@ const SORT_OF: Partial<Record<string, SortKey>> = {
   rel_path: 'rel_path',
 }
 
-const columns = helper.columns([
+const makeColumns = (devices: readonly DeviceName[]) => helper.columns([
   helper.display({
     id: 'sel',
     header: '',
@@ -103,7 +104,7 @@ const columns = helper.columns([
     header: 'バッジ',
     size: 150,
     minSize: 80,
-    cell: (ctx) => <Badges track={ctx.row.original} />,
+    cell: (ctx) => <Badges track={ctx.row.original} devices={devices} />,
   }),
   helper.accessor('rel_path', { id: 'rel_path', header: 'rel_path', size: 400, minSize: 80 }),
 ])
@@ -148,6 +149,8 @@ const isOrder = (v: unknown): v is ColumnOrderState =>
   Array.isArray(v) && v.every((x) => typeof x === 'string')
 
 export type TrackTableProps = {
+  /** 端末の一覧（バッジ列の端末名） */
+  devices: readonly Device[]
   rows: readonly TrackRow[]
   total: number | null
   loading: boolean
@@ -207,7 +210,10 @@ function editableValue(track: TrackRow, columnId: string): string | null {
 }
 
 export function TrackTable(props: TrackTableProps) {
-  const { rows, total, ensure, sort, onSort, selection, highlightFilterSelection, preview, onInlineEdit } = props
+  const { rows, total, ensure, sort, onSort, selection, highlightFilterSelection, preview, onInlineEdit, devices } = props
+  // 端末の一覧は取り直すたびに新しい配列になる。列定義は id と名前が変わったときだけ作り直す
+  const devicesKey = deviceNamesKey(devices)
+  const columns = useMemo(() => makeColumns(deviceNamesFrom(devicesKey)), [devicesKey])
   const [editing, setEditing] = useState<Editing | null>(null)
   const commitEdit = useCallback(
     async (e: Editing) => {

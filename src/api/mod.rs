@@ -8,6 +8,7 @@ pub mod batch;
 pub mod categories;
 pub mod cd;
 pub mod config;
+pub mod devices;
 pub mod error;
 pub mod events;
 pub mod flaccheck;
@@ -35,7 +36,7 @@ pub mod ytmusic;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::response::Response;
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{middleware, Router};
 
 pub use state::AppState;
@@ -46,6 +47,14 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/session", get(auth::session))
+        .route("/devices", get(devices::list).post(devices::create))
+        .route(
+            "/devices/{id}",
+            patch(devices::patch).delete(devices::delete),
+        )
+        .route("/devices/{id}/playlists", put(devices::put_playlists))
+        .route("/devices/{id}/diff", get(devices::diff))
+        .route("/devices/{id}/estimate", get(devices::estimate))
         .route("/tracks", get(tracks::list))
         .route("/tracks/{id}", get(tracks::get))
         .route("/tracks/batch", patch(batch::apply))

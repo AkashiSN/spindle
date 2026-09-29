@@ -2439,6 +2439,7 @@ fn register_item(
     }
     // 件の placed も同じトランザクションで確定する。commit の直後に落ちても placing のまま残らず
     // （Inbox の原本が残っていれば走査が pending に戻す）、24 時間の placed 表示も失わない
+    dbinbox::set_placed_tracks(&tx, item_id, &track_ids)?;
     dbinbox::set_placed(&tx, item_id, album_id, now)?;
     tx.commit()?;
     Ok(Ok(RegisteredItem {

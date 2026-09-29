@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::{now_epoch, tracks, verify as dbv};
 use crate::domain::selection::SelectionBody;
 
+use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 
@@ -44,7 +45,7 @@ pub async fn start(
             ))
         }
     };
-    let sel = match body.selection.parse() {
+    let mut sel = match body.selection.parse() {
         Ok(s) => s,
         Err(e) => {
             return Ok(error_response_with_message(
@@ -54,6 +55,9 @@ pub async fn start(
             ))
         }
     };
+    if let Some(f) = sel.filter_mut() {
+        devices::attach_pending(&state, f).await?;
+    }
     let (job_ids, duplicates) = state
         .db
         .write(move |c| {

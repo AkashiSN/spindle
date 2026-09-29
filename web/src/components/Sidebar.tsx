@@ -2,8 +2,8 @@
 // プレイリスト / 固定フィルタ。どれを選んでも中心の表のフィルタ（scope）を差し替えるだけ。
 // ツリーのノードは配下の album id の集合（filter.album_ids）で絞る
 
-import { useMemo, useState } from 'react'
-import type { AlbumRow, Playlist } from '../api/types'
+import { useEffect, useMemo, useState } from 'react'
+import type { AlbumRow, Device, Playlist } from '../api/types'
 import type { Playlists } from '../hooks/usePlaylists'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
 import { FLAGS, FLAG_LABELS, filterToParam, type Filter, type Flag } from '../lib/filter'
@@ -32,6 +32,8 @@ export function Sidebar({
   onRefreshed,
   playlistNotice,
   onPlaylistNotice,
+  devices,
+  onToggleDevice,
 }: {
   albums: AlbumRow[]
   scope: Scope
@@ -46,6 +48,9 @@ export function Sidebar({
   onRefreshed: (playlistId: number) => void
   playlistNotice: string | null
   onPlaylistNotice: (text: string | null) => void
+  /** null は一覧をまだ取れていない（取得失敗を含む）。消えた端末の判定はしない */
+  devices: Device[] | null
+  onToggleDevice: (device: Device, playlistId: number) => void
 }) {
   // 表示形式: 組み込みのプリセット + ユーザ定義（localStorage）。選択中はパターン文字列で覚える
   const [custom, setCustom] = useLocalStorageState<TreePreset[]>('tree.custom', [], isPresetList)
@@ -73,6 +78,16 @@ export function Sidebar({
       else next.add(key)
       return next
     })
+  // 選んでいた端末が消えたら device_pending を外す（存在しない端末 id でサーバへ問い合わせない）
+  const staleDevice = scope.device_pending != null && devices != null && !devices.some((d) => d.id === scope.device_pending)
+  const staleScope = staleDevice ? scope : null
+  useEffect(() => {
+    if (staleScope == null) return
+    const { device_pending: _drop, ...rest } = staleScope
+    void _drop
+    onScope(rest)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [staleScope])
   const current = filterToParam(scope)
   const is = (s: Scope) => filterToParam(s) === current
   const activeFlags = new Set(scope.flags ?? [])
@@ -227,6 +242,8 @@ export function Sidebar({
         onRefreshed={onRefreshed}
         notice={playlistNotice}
         onNotice={onPlaylistNotice}
+        devices={devices ?? []}
+        onToggleDevice={onToggleDevice}
       />
 
       <section>
@@ -249,6 +266,28 @@ export function Sidebar({
               </button>
             </li>
           ))}
+          {devices != null && devices.length > 0 && (
+            <li>
+              <label className={`tree-node device-pending${scope.device_pending != null ? ' active' : ''}`}>
+                端末に未反映 ▾{' '}
+                <select
+                  value={scope.device_pending ?? ''}
+                  onChange={(e) => {
+                    const { device_pending: _drop, ...rest } = scope
+                    void _drop
+                    onScope(e.target.value === '' ? rest : { ...rest, device_pending: Number(e.target.value) })
+                  }}
+                >
+                  <option value="">—</option>
+                  {devices.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </li>
+          )}
         </ul>
       </section>
       </div>

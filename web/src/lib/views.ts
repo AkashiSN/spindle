@@ -1,4 +1,4 @@
-export type View = 'tracks' | 'albums' | 'inbox' | 'cd' | 'youtube' | 'jobs' | 'history' | 'settings'
+export type View = 'tracks' | 'albums' | 'inbox' | 'cd' | 'youtube' | 'devices' | 'jobs' | 'history' | 'settings'
 
 /**
  * 上部バーに並べる画面（SPEC §12.1、P4-20）。「ライブラリ」が日常の入口でホームなので先頭に置き、
@@ -11,6 +11,8 @@ export const VIEWS: Array<[View, string]> = [
   ['cd', 'CD'],
   ['youtube', 'YouTube'],
   ['inbox', 'Inbox'],
+  // 取り込みの流れの終点（仕様 ④）。端末に未反映の件数を黄色で出す
+  ['devices', '端末'],
 ]
 
 /** ☰ メニューに入れる画面（たまにしか開かない） */
@@ -22,7 +24,7 @@ export const MENU_VIEWS: Array<[View, string]> = [
 
 /**
  * 左カラム（ツリー + アルバムアート）を出す画面。ツリーは表の絞り込み（scope）を差し替えるものなので、
- * 表のある画面だけに出す。CD / YouTube / Inbox / ジョブ / 履歴 / 設定では何にも効かないので畳む
+ * 表のある画面だけに出す。CD / YouTube / Inbox / 端末 / ジョブ / 履歴 / 設定では何にも効かないので畳む
  */
 export const SIDEBAR_VIEWS: ReadonlySet<View> = new Set<View>(['tracks', 'albums'])
 

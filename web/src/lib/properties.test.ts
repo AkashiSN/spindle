@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { TrackDetail, TrackRow } from '../api/types'
+import type { Device, TrackDetail, TrackRow } from '../api/types'
 import {
   commonValue,
   generalRows,
@@ -7,7 +7,12 @@ import {
   locationRows,
   metadataRows,
   splitValues,
-  STANDARD_KEYS, canDeleteRow, newFieldKeyProblem } from './properties'
+  STANDARD_KEYS,
+  canDeleteRow,
+  newFieldKeyProblem,
+  deviceLabel,
+  deviceRows,
+} from './properties'
 
 function row(over: Partial<TrackRow> = {}): TrackRow {
   return {
@@ -240,5 +245,33 @@ describe('フィールドの追加 / 削除（P4-3、D-72）', () => {
     expect(canDeleteRow({ value: { kind: 'text', text: 'x' } })).toBe(true)
     expect(canDeleteRow({ value: { kind: 'multiple' } })).toBe(true)
     expect(canDeleteRow({ value: { kind: 'empty' } })).toBe(false)
+  })
+})
+
+describe('端末欄', () => {
+  const dev = (id: number, name: string) => ({ id, name }) as Device
+  it('状態ごとの文言', () => {
+    expect(deviceLabel({ device_id: 1, state: 'pending', op: 'update_move', reason: null })).toBe('未反映（更新 + 移動）')
+    expect(deviceLabel({ device_id: 1, state: 'waiting', reason: 'RG 未解析', has_copy: true })).toBe('待ち: RG 未解析（古い版が端末にあり）')
+    expect(deviceLabel({ device_id: 1, state: 'error', reason: 'パス衝突', has_copy: false })).toBe('エラー: パス衝突')
+    expect(deviceLabel({ device_id: 1, state: 'removing' })).toBe('対象外（次の同期で端末から削除）')
+    expect(deviceLabel(undefined)).toBe('対象外')
+    expect(deviceLabel({ device_id: 1, state: 'synced', synced_at: null })).toBe('✓ 反映済み')
+  })
+  it('全部 synced で日時だけ違えば反映済み、同じ日時ならその日時', () => {
+    const s = (at: number) => ({ devices: [{ device_id: 1, state: 'synced', synced_at: at }] }) as unknown as TrackRow
+    const d = [dev(1, 'iPhone')]
+    expect(deviceRows([s(1), s(100000)], d)[0]?.value).toEqual({ kind: 'text', text: '✓ 反映済み' })
+    const same = deviceRows([s(5), s(5)], d)[0]?.value
+    expect(same).toMatchObject({ kind: 'text' })
+    expect(same?.kind === 'text' && same.text.startsWith('✓ 反映済み（')).toBe(true)
+  })
+  it('端末ごとに 1 行、複数選択で違えば <複数の値>', () => {
+    const a = { devices: [{ device_id: 1, state: 'synced', synced_at: null }] } as unknown as TrackRow
+    const b = { devices: [] } as unknown as TrackRow
+    const rows = deviceRows([a, b], [dev(1, 'iPhone'), dev(2, 'Xperia')])
+    expect(rows.map((r) => r.label)).toEqual(['iPhone', 'Xperia'])
+    expect(rows[0]?.value).toEqual({ kind: 'multiple' })
+    expect(rows[1]?.value).toEqual({ kind: 'text', text: '対象外' })
   })
 })

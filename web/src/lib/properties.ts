@@ -2,9 +2,10 @@
 // 選択行（TrackRow、一覧に載っている）と `GET /api/tracks/:id` の detail（先頭 DETAIL_LIMIT 件だけ取る）
 // から Metadata / Location / General の 3 表を組む。複数選択は共通値、異なれば multiple
 
-import type { Derived, TrackDetail, TrackRow } from '../api/types'
+import type { Derived, Device, TrackDetail, TrackDeviceState, TrackRow } from '../api/types'
 import { HIRES_LABEL, VERIFICATION, hiresMeasurements } from './badges'
 import { formatDuration } from './format'
+import { formatDateTime } from './history'
 import { keyProblem, normKey } from './tagops'
 
 /** 詳細を取りに行く選択行の上限（それ以上は読み込み済みの行だけで判定） */
@@ -268,4 +269,40 @@ export function generalRows(rows: readonly TrackRow[], details: ReadonlyMap<numb
     { key: 'hires_check', label: 'Hi-Res check', value: commonValue(rows.map(hiresCheckLabel)) },
     { key: 'state', label: 'State', value: commonValue(rows.map(stateLabel)) },
   ]
+}
+
+const PENDING_OPS: Record<'add' | 'update' | 'move' | 'update_move', string> = {
+  add: '追加',
+  update: '更新',
+  move: '移動',
+  update_move: '更新 + 移動',
+}
+
+/** 端末欄の 1 行の文言（プロパティの「端末」節） */
+export function deviceLabel(s: TrackDeviceState | undefined): string {
+  if (!s) return '対象外'
+  switch (s.state) {
+    case 'synced':
+      return s.synced_at != null ? `✓ 反映済み（${formatDateTime(s.synced_at)}）` : '✓ 反映済み'
+    case 'pending':
+      return `未反映（${PENDING_OPS[s.op]}）${s.reason ? ` 前回: ${s.reason}` : ''}`
+    case 'waiting':
+      return `待ち: ${s.reason}${s.has_copy ? '（古い版が端末にあり）' : ''}`
+    case 'error':
+      return `エラー: ${s.reason}${s.has_copy ? '（古い版が端末にあり）' : ''}`
+    case 'removing':
+      return '対象外（次の同期で端末から削除）'
+  }
+}
+
+/** 端末ごとに 1 行。複数選択は commonValue で集計する */
+export function deviceRows(rows: readonly TrackRow[], devices: readonly Device[]): PropRow[] {
+  return devices.map((d) => {
+    const states = rows.map((r) => r.devices?.find((x) => x.device_id === d.id))
+    const labels = states.map(deviceLabel)
+    const value = commonValue(labels)
+    // 全部 synced で反映日時だけ違うときは「反映済み」にまとめる（日時は全部同じときだけ出る）
+    const allSynced = states.length > 0 && states.every((s) => s?.state === 'synced')
+    return { key: `device:${d.id}`, label: d.name, value: allSynced && value.kind === 'multiple' ? text('✓ 反映済み') : value }
+  })
 }

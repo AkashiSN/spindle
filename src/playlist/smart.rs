@@ -8,6 +8,7 @@ use rusqlite::Connection;
 
 use crate::db::playlists as dbpl;
 use crate::db::{DbError, Result};
+use crate::domain::device::PendingSets;
 
 use super::compile;
 use super::dsl::Rule;
@@ -29,8 +30,9 @@ pub fn load_rule(conn: &Connection, id: i64) -> Result<Option<Rule>> {
 /// 評価。ルールに帰責できる実行時の失敗（`regexp()` のバックトラック上限など、ユーザ定義関数の
 /// エラー）だけ [`DbError::Rule`]（API は 400）。それ以外の SQLite 障害は [`DbError::Sqlite`] のまま
 /// （サーバ側の問題として 500）
-pub fn evaluate(conn: &Connection, rule: &Rule) -> Result<Vec<i64>> {
-    compile::evaluate(conn, rule).map_err(|e| match e {
+/// `sets` は `%device_pending%` が引く未反映の集合
+pub fn evaluate(conn: &Connection, rule: &Rule, sets: &PendingSets) -> Result<Vec<i64>> {
+    compile::evaluate(conn, rule, sets).map_err(|e| match e {
         compile::EvalError::Sql(e) if compile::is_regexp_failure(&e) => {
             DbError::Rule(e.to_string())
         }
@@ -40,14 +42,20 @@ pub fn evaluate(conn: &Connection, rule: &Rule) -> Result<Vec<i64>> {
 }
 
 /// 1 本を再評価して項目を置き換える。`(件数, 書き換わったか)`
-pub fn refresh_one(conn: &Connection, id: i64, rule: &Rule, now: i64) -> Result<(usize, bool)> {
-    let ids = evaluate(conn, rule)?;
+pub fn refresh_one(
+    conn: &Connection,
+    id: i64,
+    rule: &Rule,
+    now: i64,
+    sets: &PendingSets,
+) -> Result<(usize, bool)> {
+    let ids = evaluate(conn, rule, sets)?;
     let changed = dbpl::materialize(conn, id, &ids, now)?;
     Ok((ids.len(), changed))
 }
 
 /// 全 smart を再評価する。`(評価した本数, 書き換わった id)`。1 本の失敗は他を止めない
-pub fn refresh_all(conn: &Connection, now: i64) -> Result<(usize, Vec<i64>)> {
+pub fn refresh_all(conn: &Connection, now: i64, sets: &PendingSets) -> Result<(usize, Vec<i64>)> {
     let mut evaluated = 0;
     let mut changed = Vec::new();
     for (id, json) in dbpl::smart_rules(conn)? {
@@ -58,7 +66,7 @@ pub fn refresh_all(conn: &Connection, now: i64) -> Result<(usize, Vec<i64>)> {
                 continue;
             }
         };
-        match refresh_one(conn, id, &rule, now) {
+        match refresh_one(conn, id, &rule, now, sets) {
             Ok((_, c)) => {
                 evaluated += 1;
                 if c {

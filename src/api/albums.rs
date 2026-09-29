@@ -13,6 +13,7 @@ use crate::db::{jobs as dbjobs, now_epoch, replaygain as dbrg};
 use crate::domain::filter::Filter;
 use crate::jobs::handlers::rg::new_album_job;
 
+use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 
@@ -32,10 +33,10 @@ pub async fn list(
     State(state): State<AppState>,
     QueryParams(params): QueryParams<ListParams>,
 ) -> Result<Response, ApiError> {
-    let filter = match params.filter.as_deref().map(str::trim) {
+    let mut filter = match params.filter.as_deref().map(str::trim) {
         Some(s) if !s.is_empty() => match Filter::parse(s) {
             // `{}` は条件なし = フィルタ無しと同じ（active なトラックの有無で絞らない）
-            Ok(f) => (f != Filter::default()).then_some(f),
+            Ok(f) => (!f.is_empty()).then_some(f),
             Err(e) => {
                 return Ok(error_response_with_message(
                     StatusCode::BAD_REQUEST,
@@ -46,6 +47,9 @@ pub async fn list(
         },
         _ => None,
     };
+    if let Some(f) = filter.as_mut() {
+        devices::attach_pending(&state, f).await?;
+    }
     let items = state
         .db
         .read(move |c| tracks::list_albums_filtered(c, filter.as_ref()))

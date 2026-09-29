@@ -1,5 +1,6 @@
 // 上部バー（SPEC §12.1、D-58 追記、P4-20）。ナビとプレイヤーを 1 本にまとめる:
-// 左に画面切替（「ライブラリ」がホーム。取り込みタブの右の「Inbox」に承認待ちの赤い件数）、
+// 左に画面切替（「ライブラリ」がホーム。取り込みタブの右の「Inbox」に承認待ちの赤い件数、
+// その右の「端末」に未反映の黄色い件数）、
 // 中央に ◀◀ ▶ ▶▶ ■ とシーク、その右に曲名（無ければ Not playing）、右に RG / 原本 / 音量と
 // ☰（ジョブ / 履歴 / 設定 / ログアウト。SSE の接続状態もここ）。
 //
@@ -19,6 +20,7 @@ export function TopBar({
   onView,
   summary,
   inbox,
+  devices,
   connected,
   onLogout,
   player,
@@ -28,6 +30,8 @@ export function TopBar({
   summary: JobSummary | null
   /** Inbox の承認待ち / 失敗の件数（P4-20）。取れていなければバッジを出さない */
   inbox: InboxSummary | null
+  /** 全端末の未反映の合計（P5-2。待ちは含まない）。取れていなければバッジを出さない */
+  devices: number | null
   connected: boolean
   onLogout: () => void
   player: PlayerHandle
@@ -60,6 +64,7 @@ export function TopBar({
   const inboxTitle = inbox
     ? `承認待ち ${formatCount(inbox.pending)} 件 · 失敗 ${formatCount(inbox.failed)} 件`
     : 'Inbox（取り込んだものはここに集まる）'
+  const devicesTitle = devices != null ? `端末に未反映 ${formatCount(devices)} 件（待ちは含まない）` : '端末'
 
   return (
     <header className="top-bar">
@@ -71,7 +76,7 @@ export function TopBar({
             type="button"
             className={v === view ? 'active' : ''}
             onClick={() => onView(v)}
-            title={v === 'inbox' ? inboxTitle : undefined}
+            title={v === 'inbox' ? inboxTitle : v === 'devices' ? devicesTitle : undefined}
           >
             {label}
             {v === 'inbox' && inbox ? (
@@ -80,6 +85,7 @@ export function TopBar({
                 {inbox.failed > 0 ? <span className="jobs-failed" aria-label="Inbox に失敗あり" /> : null}
               </>
             ) : null}
+            {v === 'devices' && devices ? <span className="devices-count">{formatCount(devices)}</span> : null}
           </button>
         ))}
       </nav>

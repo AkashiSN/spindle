@@ -12,10 +12,12 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 
+use crate::db::devices as dbdev;
 use crate::db::tracks::{self, TrackDetail, TrackRow};
 use crate::domain::filter::{FilterError, Query};
 
 use super::auth::Session;
+use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 
@@ -50,11 +52,31 @@ pub async fn list(
     State(state): State<AppState>,
     QueryParams(params): QueryParams<ListParams>,
 ) -> Result<Response, ApiError> {
-    let query = match build_query(&params) {
+    let mut query = match build_query(&params) {
         Ok(q) => q,
         Err(e) => return Ok(bad_request(e)),
     };
-    let page = state.db.read(move |c| tracks::list(c, &query)).await?;
+    // フィルタが端末の状態を引くときは厳密なスナップショットを 1 回だけ取り、未反映の集合と行の状態の
+    // 両方に使う。引かないときは行の状態の表示だけなので、端末があるときに限り表示用（少し古くてよい）を取る
+    let strict = if query.filter.uses_devices() {
+        let snap = state.db.device_snapshot().await?;
+        query.filter.pending = snap.pending_sets();
+        Some(snap)
+    } else {
+        None
+    };
+    let (mut page, has_devices) = state
+        .db
+        .read(move |c| Ok((tracks::list(c, &query)?, dbdev::any(c)?)))
+        .await?;
+    let snap = match strict {
+        Some(s) => Some(s),
+        None if has_devices => Some(state.db.device_snapshot_for_display().await?),
+        None => None,
+    };
+    if let Some(snap) = snap {
+        devices::annotate(&snap, &mut page.items);
+    }
     Ok(Json(page).into_response())
 }
 
@@ -131,16 +153,23 @@ pub async fn get(
         });
     }
     // 行と詳細は同じ読み取りトランザクションで取る（間にスキャンが commit しても世代が混ざらない）
-    let found =
-        state
-            .db
-            .read(move |c| {
-                Ok(tracks::get_with_detail(c, id)?
-                    .map(|(row, detail)| TrackWithDetail { row, detail }))
-            })
-            .await?;
+    let (found, has_devices) = state
+        .db
+        .read(move |c| {
+            let found = tracks::get_with_detail(c, id)?
+                .map(|(row, detail)| TrackWithDetail { row, detail });
+            Ok((found, dbdev::any(c)?))
+        })
+        .await?;
     Ok(match found {
-        Some(t) => Json(t).into_response(),
+        Some(mut t) => {
+            // 端末の状態は表示だけ（少し古くてよい）。端末が無ければスナップショットを取らない
+            if has_devices {
+                let snap = state.db.device_snapshot_for_display().await?;
+                devices::annotate(&snap, std::slice::from_mut(&mut t.row));
+            }
+            Json(t).into_response()
+        }
         None => error_response(StatusCode::NOT_FOUND, "not_found"),
     })
 }

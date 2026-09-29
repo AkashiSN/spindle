@@ -9,11 +9,12 @@
 //! 原本（`SourceKind::Master`）だけは、読み始める前にもう一段確認する: 走査がまだ `tracks` の
 //! `(inode, size, mtime_ns, ctime_ns)` を更新できていない間はハッシュを取らない。取ってしまうと
 //! `db::devices::track_inputs` の事前条件（`tracks` の現在の物理同一性と一致すること）を満たせない
-//! ハッシュを計算するだけ無駄になる。この場合は失敗ではなく `Outcome::Done`（走査が `tracks` を更新すれば
-//! 次の差分計算で改めて投入される）。**この確認は実際にハッシュを取る FD 自身の `fstat`（開いた直後、
+//! ハッシュを計算するだけ無駄になる。この場合は失敗ではなく、増分スキャンを投入して
+//! [`devices::SCAN_PENDING_NOTE`] を note に残した完了にする（走査が `tracks` を更新すれば次の差分計算で
+//! 改めて投入される。更新されるまでは `db::devices::hashes_to_enqueue` が再投入を抑える）。**この確認は実際にハッシュを取る FD 自身の `fstat`（開いた直後、
 //! 読む前）に対して行う**。別 FD で確認してから改めて開き直すと、その間に rename で入れ替わった
 //! ファイルをハッシュしてしまう恐れがある（レビュー指摘）。対象が読む前から無ければ（走査待ちの間に
-//! リネーム・削除された）同じく走査待ち扱いにする（`Outcome::Done`。再試行を消費しない）
+//! リネーム・削除された）同じく走査待ち扱いにする（再試行を消費しない）
 
 use std::fs::File;
 use std::io::{self, Read as _};
@@ -57,6 +58,8 @@ enum HashOutcome {
     /// `expected`（`tracks` の物理同一性）と、開いた FD の `fstat` が読む前から一致しない。
     /// あるいは `expected` が指定されていて対象が無い（走査待ち。失敗ではない）
     ScanPending,
+    /// Derived（`expected` が無い）の実ファイルが無い。`derived_files` の行だけが残っている drift
+    SourceMissing,
 }
 
 /// 開いて読み、途中で変わっていなければハッシュを返す。変わっていれば `Ok(None)`
@@ -78,13 +81,17 @@ pub fn hash_source_with_hook(
     match hash_source_inner(root, rel, semantic, None, hook)? {
         HashOutcome::Hashed(h) => Ok(Some(h)),
         HashOutcome::Changed | HashOutcome::ScanPending => Ok(None),
+        HashOutcome::SourceMissing => Err(failed(format!(
+            "送る元を開けない {}: 見つからない",
+            rel.as_str()
+        ))),
     }
 }
 
 /// [`hash_source_with_hook`] の内部実装。`expected` が `Some`（原本のみ）なら、開いた FD 自身の
 /// `fstat`（読む前）を `tracks` 行の物理同一性と比較し、一致しなければ読まずに [`HashOutcome::ScanPending`]
-/// を返す。対象が無い（`NotFound`）場合も `expected` があれば同じく `ScanPending`（`None` なら通常どおり
-/// エラー）。`tracks` を知らない `hash_source` / `hash_source_with_hook` からは常に `expected = None` で呼ばれる
+/// を返す。対象が無い（`NotFound`）場合も `expected` があれば同じく `ScanPending`（`None` なら
+/// [`HashOutcome::SourceMissing`]。公開関数はこれをエラーに写す）。`tracks` を知らない `hash_source` / `hash_source_with_hook` からは常に `expected = None` で呼ばれる
 fn hash_source_inner(
     root: &RootDir,
     rel: &RelPath,
@@ -97,6 +104,7 @@ fn hash_source_inner(
         Err(fsroot::FsError::NotFound) if expected.is_some() => {
             return Ok(HashOutcome::ScanPending);
         }
+        Err(fsroot::FsError::NotFound) => return Ok(HashOutcome::SourceMissing),
         Err(e) => return Err(failed(format!("送る元を開けない {}: {e}", rel.as_str()))),
     };
     let before = fsroot::fstat(&file).map_err(|e| failed(format!("fstat に失敗: {e}")))?;
@@ -254,8 +262,55 @@ impl Handler for SourceHashHandler {
             .map_err(|e| failed(format!("ハッシュのタスクが落ちた: {e}")))??;
             let hash = match outcome {
                 HashOutcome::ScanPending => {
-                    tracing::info!(track_id, source = kind.as_str(), "スキャン待ち");
-                    return Ok(Outcome::Done);
+                    // 走査で `tracks` を直してもらう（周期スキャンは無いので、ここで投入しないと
+                    // 外部の書き換えがいつまでも反映されない）。scan の dedup で二重には入らない。
+                    // 結果は note に残し、`tracks` の物理同一性が変わるまで同じジョブを再投入させない
+                    // （`db::devices::hashes_to_enqueue`）
+                    let scan = super::scan::new_scan_job(crate::db::scans::ScanKind::Incremental);
+                    ctx.jobs().enqueue(scan).await?;
+                    tracing::info!(
+                        track_id,
+                        source = kind.as_str(),
+                        "スキャン待ち（スキャンを投入した）"
+                    );
+                    return Ok(Outcome::DoneWith(devices::SCAN_PENDING_NOTE.to_owned()));
+                }
+                HashOutcome::SourceMissing => {
+                    let SourceKind::Derived(variant) = kind else {
+                        return Err(failed(format!("送る元を開けない {rel}")));
+                    };
+                    let rel_for_tx = rel.clone();
+                    let now = now_epoch();
+                    // 同じ書き込みトランザクションの中で「transcode が動いていない」「行が読んだパスのまま」を
+                    // 確かめてから消す
+                    let result = ctx
+                        .db()
+                        .transaction(move |c| {
+                            if dbderived::has_active_job(c, track_id, variant)? {
+                                return Ok(None);
+                            }
+                            if !dbderived::delete_if_path(c, track_id, variant, &rel_for_tx)? {
+                                return Ok(Some(Vec::new()));
+                            }
+                            dbderived::enqueue_if_stale(c, track_id, now).map(Some)
+                        })
+                        .await?;
+                    return match result {
+                        None => Err(failed(format!(
+                            "Derived の実ファイルが無い（transcode が動いているので待つ）: {rel}"
+                        ))),
+                        Some(ids) => {
+                            if !ids.is_empty() {
+                                ctx.jobs().notify_enqueued(&ids).await;
+                            }
+                            tracing::warn!(
+                                track_id,
+                                rel,
+                                "Derived の実ファイルが無いので作り直しを投入した（D-51 の drift）"
+                            );
+                            Ok(Outcome::Done)
+                        }
+                    };
                 }
                 HashOutcome::Changed => {
                     return Err(failed(format!(
