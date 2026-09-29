@@ -471,3 +471,53 @@ async fn estimate_counts_distinct_tracks_of_a_hypothetical_selection() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(v["tracks"], 3);
 }
+
+/// 投入する source_hash が無ければ GET /api/devices・差分は書き手に触らない（書き込みの通番を進めない）
+#[tokio::test]
+async fn listing_does_not_write_when_no_new_hash_jobs() {
+    let app = App::new().await;
+    let (st, v) = app
+        .call(Method::POST, "/api/devices",
+              Some(json!({"name": "iPhone", "transport": "agent", "variant": "opus", "selection": "all"})))
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let id = v["id"].as_i64().unwrap();
+    app.db
+        .write(|c| {
+            c.execute(
+                "INSERT INTO tracks (id, rel_path, rel_path_key, inode, size, mtime_ns, ctime_ns, codec, lossless,
+                                     channels, audio_version, tag_version, seen_at)
+                 VALUES (1, 'YT/a.opus', 'yt/a.opus', 1, 1, 0, 0, 'opus', 0, 2, 1, 1, 0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, _) = app.call(Method::GET, "/api/devices", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let jobs: i64 = app
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM jobs WHERE type = 'source_hash'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(jobs, 1, "ハッシュの無い原本に 1 件投入する");
+    let seq = app.db.write_seq();
+    let (st, _) = app.call(Method::GET, "/api/devices", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        app.db.write_seq(),
+        seq,
+        "新しく投入するものが無ければ書かない"
+    );
+}

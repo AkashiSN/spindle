@@ -355,7 +355,8 @@ pub fn cycle(playlist_id: i64) -> Response {
     )
 }
 
-/// 差分の計算で見つかった「ハッシュの無い送る元」に source_hash を投入する（dedup で既にあるものは数えない）
+/// 差分の計算で見つかった「ハッシュの無い送る元」に source_hash を投入する（未完了のもの・走査待ちで
+/// 止めているものは `dbdev::hashes_to_enqueue` が除く）
 pub async fn enqueue_hashes(state: &AppState, snap: &Snapshot) -> Result<(), ApiError> {
     let mut needs: Vec<(i64, crate::domain::device::SourceKind)> = snap
         .devices
@@ -364,6 +365,12 @@ pub async fn enqueue_hashes(state: &AppState, snap: &Snapshot) -> Result<(), Api
         .collect();
     needs.sort();
     needs.dedup();
+    // 先に読みプールで絞り込み、投入するものが無ければ書き手に触らない（書き込みの通番を進めると
+    // 端末のスナップショットのキャッシュが無効になる）
+    let needs = state
+        .db
+        .read(move |c| dbdev::hashes_to_enqueue(c, &needs))
+        .await?;
     if needs.is_empty() {
         return Ok(());
     }

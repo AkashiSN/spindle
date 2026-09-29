@@ -9,11 +9,12 @@
 //! 原本（`SourceKind::Master`）だけは、読み始める前にもう一段確認する: 走査がまだ `tracks` の
 //! `(inode, size, mtime_ns, ctime_ns)` を更新できていない間はハッシュを取らない。取ってしまうと
 //! `db::devices::track_inputs` の事前条件（`tracks` の現在の物理同一性と一致すること）を満たせない
-//! ハッシュを計算するだけ無駄になる。この場合は失敗ではなく `Outcome::Done`（走査が `tracks` を更新すれば
-//! 次の差分計算で改めて投入される）。**この確認は実際にハッシュを取る FD 自身の `fstat`（開いた直後、
+//! ハッシュを計算するだけ無駄になる。この場合は失敗ではなく、増分スキャンを投入して
+//! [`devices::SCAN_PENDING_NOTE`] を note に残した完了にする（走査が `tracks` を更新すれば次の差分計算で
+//! 改めて投入される。更新されるまでは `db::devices::hashes_to_enqueue` が再投入を抑える）。**この確認は実際にハッシュを取る FD 自身の `fstat`（開いた直後、
 //! 読む前）に対して行う**。別 FD で確認してから改めて開き直すと、その間に rename で入れ替わった
 //! ファイルをハッシュしてしまう恐れがある（レビュー指摘）。対象が読む前から無ければ（走査待ちの間に
-//! リネーム・削除された）同じく走査待ち扱いにする（`Outcome::Done`。再試行を消費しない）
+//! リネーム・削除された）同じく走査待ち扱いにする（再試行を消費しない）
 
 use std::fs::File;
 use std::io::{self, Read as _};
@@ -261,8 +262,18 @@ impl Handler for SourceHashHandler {
             .map_err(|e| failed(format!("ハッシュのタスクが落ちた: {e}")))??;
             let hash = match outcome {
                 HashOutcome::ScanPending => {
-                    tracing::info!(track_id, source = kind.as_str(), "スキャン待ち");
-                    return Ok(Outcome::Done);
+                    // 走査で `tracks` を直してもらう（周期スキャンは無いので、ここで投入しないと
+                    // 外部の書き換えがいつまでも反映されない）。scan の dedup で二重には入らない。
+                    // 結果は note に残し、`tracks` の物理同一性が変わるまで同じジョブを再投入させない
+                    // （`db::devices::hashes_to_enqueue`）
+                    let scan = super::scan::new_scan_job(crate::db::scans::ScanKind::Incremental);
+                    ctx.jobs().enqueue(scan).await?;
+                    tracing::info!(
+                        track_id,
+                        source = kind.as_str(),
+                        "スキャン待ち（スキャンを投入した）"
+                    );
+                    return Ok(Outcome::DoneWith(devices::SCAN_PENDING_NOTE.to_owned()));
                 }
                 HashOutcome::SourceMissing => {
                     let SourceKind::Derived(variant) = kind else {

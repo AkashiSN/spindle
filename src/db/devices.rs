@@ -547,24 +547,95 @@ pub fn source_hash_dedup_key(track_id: i64, kind: SourceKind) -> String {
     format!("source_hash:{track_id}:{}", kind.as_str())
 }
 
-/// ハッシュの無い送る元に `source_hash` ジョブを投入し、投入した job id を返す。未完了の同じジョブがあれば含めない
+/// 原本の `source_hash` ジョブが「走査待ち」（`tracks` の物理同一性が実ファイルと食い違う）で終わったときに
+/// `jobs.note` へ残す 1 行。[`hashes_to_enqueue`] はこの印と payload の物理同一性で再投入を抑える
+pub const SCAN_PENDING_NOTE: &str =
+    "スキャン待ち（tracks の物理同一性が実ファイルと食い違う。スキャンを投入した）";
+
+/// `needs` のうち、いま投入すべきもの。次のどちらかに当たる送る元は除く（1 本の問い合わせで引く）:
+///
+/// - 未完了（queued / running）の同じ `source_hash` ジョブがある
+/// - 同じ dedup キーの最新のジョブが [`SCAN_PENDING_NOTE`] で終わっていて、その payload の物理同一性が
+///   `tracks` の現在の値と同じ（走査がまだ `tracks` を直していない。投入しても同じ結果で終わるだけなので、
+///   `tracks` の物理同一性が変わるまで待つ。変われば再投入される）
+///
+/// 最新のジョブは `MAX(id)` の集約で選び、同じ行の列（state / note / payload）を読む（SQLite は `MAX`
+/// だけを含む集約で素の列をその最大の行から取ることを保証している）
+pub fn hashes_to_enqueue(
+    conn: &Connection,
+    needs: &[(i64, SourceKind)],
+) -> Result<Vec<(i64, SourceKind)>> {
+    if needs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut st = conn.prepare_cached(
+        "SELECT g.dedup_key
+           FROM (SELECT dedup_key, MAX(id) AS id, state, note, payload
+                   FROM jobs WHERE type = 'source_hash' AND dedup_key IS NOT NULL
+                  GROUP BY dedup_key) g
+           LEFT JOIN tracks t ON t.id = json_extract(g.payload, '$.track_id')
+          WHERE g.state IN ('queued', 'running')
+             OR (g.state = 'done' AND g.note = ?1 AND t.id IS NOT NULL
+                 AND json_extract(g.payload, '$.inode') IS t.inode
+                 AND json_extract(g.payload, '$.size') IS t.size
+                 AND json_extract(g.payload, '$.mtime_ns') IS t.mtime_ns
+                 AND json_extract(g.payload, '$.ctime_ns') IS t.ctime_ns)",
+    )?;
+    let skip = st
+        .query_map([SCAN_PENDING_NOTE], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+    Ok(needs
+        .iter()
+        .copied()
+        .filter(|(track_id, kind)| !skip.contains(&source_hash_dedup_key(*track_id, *kind)))
+        .collect())
+}
+
+/// ハッシュの無い送る元に `source_hash` ジョブを投入し、投入した job id を返す（[`hashes_to_enqueue`] で
+/// 除いたものは含めない）。原本の payload には `tracks` の現在の物理同一性（inode・size・mtime_ns・ctime_ns）
+/// を入れる（走査待ちで終わったときの再投入の抑制に使う）。投入は 1 つの SAVEPOINT でまとめて行い、
+/// 投入するものが無ければ何も書かない
 pub fn enqueue_source_hashes(
     conn: &Connection,
     needs: &[(i64, SourceKind)],
     now: i64,
 ) -> Result<Vec<i64>> {
-    let mut ids = Vec::new();
-    for (track_id, kind) in needs {
-        let job = NewJob::new(
-            JobType::SourceHash,
-            serde_json::json!({ "track_id": track_id, "source": kind.as_str() }),
-        )
-        .dedup_key(source_hash_dedup_key(*track_id, *kind));
-        if let EnqueueResult::Inserted(id) = dbjobs::enqueue(conn, &job, now)? {
-            ids.push(id);
-        }
+    let todo = hashes_to_enqueue(conn, needs)?;
+    if todo.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(ids)
+    atomically(conn, "enqueue_source_hashes", || {
+        let mut ids = Vec::new();
+        let mut identity_of = conn
+            .prepare_cached("SELECT inode, size, mtime_ns, ctime_ns FROM tracks WHERE id = ?1")?;
+        for (track_id, kind) in &todo {
+            let mut payload = serde_json::json!({ "track_id": track_id, "source": kind.as_str() });
+            if *kind == SourceKind::Master {
+                let identity = identity_of
+                    .query_row([track_id], |r| {
+                        Ok((
+                            r.get::<_, Option<i64>>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, i64>(3)?,
+                        ))
+                    })
+                    .optional()?;
+                if let Some((inode, size, mtime_ns, ctime_ns)) = identity {
+                    payload["inode"] = serde_json::json!(inode);
+                    payload["size"] = serde_json::json!(size);
+                    payload["mtime_ns"] = serde_json::json!(mtime_ns);
+                    payload["ctime_ns"] = serde_json::json!(ctime_ns);
+                }
+            }
+            let job = NewJob::new(JobType::SourceHash, payload)
+                .dedup_key(source_hash_dedup_key(*track_id, *kind));
+            if let EnqueueResult::Inserted(id) = dbjobs::enqueue(conn, &job, now)? {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    })
 }
 
 /// `device_errors`（kind, ref_id, reason）

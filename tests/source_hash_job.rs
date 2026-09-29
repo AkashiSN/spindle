@@ -285,6 +285,62 @@ async fn stale_master_identity_ends_done_without_saving_a_hash() {
         .is_none());
 }
 
+/// 走査待ちで終わったら増分スキャンを投入し、`tracks` の物理同一性が変わるまで同じ送る元を再投入しない
+/// （差分の計算のたびに source_hash が回り続けるループの防止）。物理同一性が変われば再び投入する
+#[tokio::test]
+async fn scan_pending_enqueues_scan_and_suppresses_reenqueue_until_identity_changes() {
+    let lib = Lib::new();
+    lib.insert_master_track(2, "A/b.opus", b"stale content", 1, 1);
+    lib.conn()
+        .execute("UPDATE tracks SET mtime_ns = mtime_ns + 1 WHERE id = 2", [])
+        .unwrap();
+    lib.start();
+    let needs = [(2, SourceKind::Master)];
+
+    let ids = devices::enqueue_source_hashes(&lib.conn(), &needs, 10).unwrap();
+    assert_eq!(ids.len(), 1);
+    lib.jobs.notify_enqueued(&ids).await;
+    assert_eq!(lib.wait_job(ids[0]).await, JobState::Done);
+    let note: Option<String> = lib
+        .conn()
+        .query_row("SELECT note FROM jobs WHERE id = ?1", [ids[0]], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(note.as_deref(), Some(devices::SCAN_PENDING_NOTE));
+    let scans: i64 = lib
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM jobs WHERE type = 'scan' AND state = 'queued'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(scans, 1, "走査で tracks を直してもらう");
+
+    assert!(
+        devices::enqueue_source_hashes(&lib.conn(), &needs, 11)
+            .unwrap()
+            .is_empty(),
+        "tracks の物理同一性が変わらない間は再投入しない"
+    );
+    assert!(devices::hashes_to_enqueue(&lib.conn(), &needs)
+        .unwrap()
+        .is_empty());
+
+    // 走査が tracks を直した体（物理同一性が変わる）
+    lib.conn()
+        .execute("UPDATE tracks SET mtime_ns = mtime_ns - 1 WHERE id = 2", [])
+        .unwrap();
+    let again = devices::enqueue_source_hashes(&lib.conn(), &needs, 12).unwrap();
+    assert_eq!(again.len(), 1, "物理同一性が変われば再び投入する");
+    lib.jobs.notify_enqueued(&again).await;
+    assert_eq!(lib.wait_job(again[0]).await, JobState::Done);
+    assert!(devices::source_hash(&lib.conn(), 2, SourceKind::Master)
+        .unwrap()
+        .is_some());
+}
+
 /// Derived（opus）を送る元にしたときは `derived_files` の版から意味トークンを作り、
 /// `source` 列に系統名（`opus`）で保存する
 #[tokio::test]
