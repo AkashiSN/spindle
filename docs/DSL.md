@@ -82,6 +82,12 @@ ident      = { (ASCII_ALPHANUMERIC | "_" | " ")+ }
 | `cutoff` | 数値 | 偽ハイレゾ検出のカットオフ周波数（Hz） |
 | `cliff` | 数値 | 偽ハイレゾ検出のカットオフ前後 1 kHz の落差（dB） |
 | `effectivebits` | 数値 | 偽ハイレゾ検出の実効ビット数 |
+| `on_device` | 端末名 | その端末に反映済みの写しがある（`device_items` に行がある）。`IS` だけ |
+| `device_pending` | 端末名 | その端末のマニフェストに載るが未反映（追加・更新・移動）。削除・待ち・エラーは含まない。`IS` だけ |
+
+端末名は大小文字・Unicode の正規化を無視して比べる（`canonical_key`）。知らない端末名は一致なし。
+これらを使うスマートプレイリストは端末の選曲に載せられない（循環の禁止。D-95）。
+`device_pending` は差分の計算結果を使うので、ライブラリの変更の直後は古い結果になりうる。
 
 ## AST
 
@@ -141,7 +147,8 @@ Autoplaylist はファイルとして保存できないため、クエリ文字�
 なので有無は問えない。
 
 spindle 固有のフィールド（`verification` `category` `source_type` `lossless`
-`added` `has_derived` `missing` `hirescheck` `cutoff` `cliff` `effectivebits`）は foobar 側に存在しないため、その項を落として
+`added` `has_derived` `missing` `hirescheck` `cutoff` `cliff` `effectivebits`
+`on_device` `device_pending`）は foobar 側に存在しないため、その項を落として
 `notes` に出す。`MATCHES` も同様。落ちて空になった `AND` / `OR` と、子が落ちた
 `NOT` も落とす（`OR` の 1 項が落ちると結果は狭まる。`notes` を見て手で直す）。
 

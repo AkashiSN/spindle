@@ -2016,8 +2016,9 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
 画面で追える。
 
 - [x] P5-1 データモデルとマニフェストの計算（0002、`domain::device`、`db::devices`、`source_hash` ジョブ）
-- [ ] P5-2 端末 API（UI 向け）・端末タブ（差分 / 選曲 / 設定）・選曲の近道・可視化 A〜D・DSL の
+- [x] P5-2 端末 API（UI 向け）・端末タブ（差分 / 選曲 / 設定）・選曲の近道・可視化 A〜D・DSL の
       `on_device` / `device_pending` と循環の禁止
+      （P5-2 では Android の登録・同期ボタン・接続状態・空き容量と pair-code は場所だけ。P5-3 / P5-4）
 - [ ] P5-3 adb サイドカーと Android 同期（登録 → 差分 → ボタンで同期、ジャーナル、バッチ、計画の終端）
 - [ ] P5-4 `spindle-agent` とエージェント API（pair / 計画の確定 / ファイル / 報告）
 - [ ] P5-5 文書の改訂（SPEC §1・§7.6・§7.7・§9・§10・§12・§13・§14、DSL.md、CLAUDE.md の禁止事項の注記）

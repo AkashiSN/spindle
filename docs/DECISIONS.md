@@ -4168,3 +4168,20 @@ Apple Music のライブラリ同期（契約が要り、照合で音源が差�
 - 系統が設定に無い（`derived_variants` に行が無い）端末は凍結と同じ扱いで、音声版が一致する既存の Derived と opus の非可逆原本は送る
 - パス長の上限に数える root の前置きは端末から求める（adb は `/storage/<volume>/<root>/`、内部ストレージは `/storage/emulated/0/<root>/`。agent は `Music/spindle/`）
 - P5-2 / P5-3 / P5-4 へ持ち越し: Derived の実ファイル欠損（D-51 の drift）を「送る元が無い」保留理由にし、`source_hash` の再投入を抑えて transcode へ誘導する / プレイリスト操作の順序（削除を先に）と改名の 2 段 / エラーのプレイリストが古い写しと衝突する場合 / agent のプレイリストの dest_path / プレイリストのパス長とトラックの `.spindle` 予約名 / `compute` を 1 つの読み取りトランザクションにする
+
+**実装（P5-2）**（2026-09-29）:
+- Inbox の段（B）の対象は、その件で配置した曲。マイグレーション 0003 で `inbox_item_tracks(item_id, track_id)` を足し、配置のトランザクションで書く（既存アルバムへの追記でも、前からある曲を数えない）。0003 以前に配置した件は曲の記録が無いので、段が対象外に見える
+- Derived の実ファイル欠損（D-51 の drift）は自動で作り直す。`source_hash` が Derived を開けず NotFound なら、その曲・系統の transcode が queued / running でなく、行の `rel_path` も読んだときのままであることを同じ書き込みトランザクションの中で確かめてから `derived_files` の行を消し、`enqueue_if_stale` で作り直しを投入する。差分には「Derived 未生成」と出る
+- スナップショットのキャッシュ: 全端末の差分の計算結果を `Db` が持ち、書き込みの通番（`Db::write` を通るたびに ++。読み取りの前に通番を読む）が変わるまで使い回す。通番は「読んだ時点以後の書き込みを含むかもしれないが、それ以前の書き込みは必ず含む」ので、古い結果を新しい通番で返すことは無い
+- `device_pending` の集合は呼び出し側が渡す: DSL の `compile` は DB を知らない純粋関数のままにし、`PendingSets`（端末の `name_key` / id → 未反映の track_id 列）を引数で受け取る。SQL には `t.id IN (SELECT value FROM json_each(?))` として JSON 配列をバインドする。保存前の検証（`check`）は空の集合で行う。`Selection::Filter` の filter は `Box<Filter>` にした（PendingSets を足して enum が大きくなったため）
+- `on_device` / `device_pending` の値は端末名。`canonical_key(値)` と `devices.name_key` を比べる。知らない端末名は空集合（端末の改名・削除でルールが壊れて保存できなくなるのを避ける）。演算子は `IS` だけ（それ以外は 400）。これらを使うスマートプレイリストは端末の選曲に載せられない（循環の禁止）
+- 曲ごとの状態は `synced` / `pending`（追加・更新・移動・更新 + 移動）/ `waiting` / `error` / `removing`（対象外で、次の同期で端末から消える）。対象外で端末にも無い曲は状態を持たない。同期・報告で出た `device_errors` の track 行は、その曲が未反映なら理由として添え、反映済みなら `error` にする
+- 容量の見積もり（差分の `estimate`）: `transfer_bytes` = 追加・更新・更新 + 移動の size の合計、`peak_bytes` = 仕様 ⑤ の実行順（削除 → パス変更のバッチ → 更新 → 追加）に沿って「今より増える量」の最大値（負なら 0）。`free` は P5-3 まで `null`。余裕（64 MiB など）は同期の実行時（P5-3）に足す
+- 選曲の見積もり: `GET /api/devices/:id/estimate?selection=…&playlist_ids=…` が、仮の選曲の曲数（重複除く、missing とマルチチャンネルを除く）と、送る元のハッシュが取れている分の size の合計・取れていない曲数を返す
+- PATCH で変えられるものは `name` / `selection` / `variant`。`name` 以外は generation を ++ し、open な計画・同期中は 409 `open_plan`。adb の保存先の変更は P5-3
+- ナビのバッジは `GET /api/devices` の件数（追加 + 更新 + 移動 + 削除 + エラー）の全端末の合計。60 秒のポーリングとジョブの完了で取り直す（新しい SSE イベントは P5-3 で同期の進捗と一緒に足す）
+- 端末へ送るの切り替えは端末ごとに PUT を直列にし、PUT の本文は実行時に「望む選曲」から作る（続けて押したときに先の変更を消さない）
+- 差分表は先頭 1000 行だけ描き「ほか N 件」と出す（初回同期は 9,000 行規模）
+- `JobType` の serde 名を snake_case にして `as_str` と揃えた（`playlist_sync` / `source_hash` が JSON で `playlistsync` / `sourcehash` になっていた）
+- P5-1 からの持ち越しのうち、Derived の欠損と `compute` の 1 トランザクション化は解消した
+- P5-3 / P5-4 へ持ち越し: プレイリスト操作の順序（削除を先に）と改名の 2 段 / エラーのプレイリストが古い写しと衝突する場合 / agent のプレイリストの dest_path / プレイリストのパス長とトラックの `.spindle` 予約名。加えて `has_open_work` が `device_sync` の payload の `$.device_id` を前提にしていること（P5-3 で合わせる）
