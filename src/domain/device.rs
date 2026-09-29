@@ -716,3 +716,169 @@ pub fn plan_token(generation: i64, d: &Diff) -> String {
         "items": items, "playlists": playlists,
     }))
 }
+
+/// 曲ごとの端末の状態（④ 可視化 A / D、`device_pending`）。対象外で端末にも無い曲は持たない
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TrackState {
+    Synced {
+        synced_at: Option<i64>,
+    },
+    /// 未反映（追加・更新・移動・更新 + 移動）。`reason` は前回の同期・報告のエラー
+    Pending {
+        op: &'static str,
+        reason: Option<String>,
+    },
+    Waiting {
+        reason: &'static str,
+        has_copy: bool,
+    },
+    Error {
+        reason: String,
+        has_copy: bool,
+    },
+    /// 対象外で、次の同期で端末から消える
+    Removing,
+}
+
+/// 差分と反映済みの行から曲ごとの状態を作る。`reported` は `device_errors` の track 行（ref_id, 理由）、
+/// `synced_at` は `device_items.synced_at`
+pub fn track_states(
+    diff: &Diff,
+    current: &[DeviceItem],
+    reported: &[(i64, String)],
+    synced_at: &HashMap<i64, i64>,
+) -> BTreeMap<i64, TrackState> {
+    let reported: HashMap<i64, &str> = reported.iter().map(|(id, r)| (*id, r.as_str())).collect();
+    let mut out = BTreeMap::new();
+    for c in current {
+        let state = match reported.get(&c.track_id) {
+            Some(r) => TrackState::Error {
+                reason: (*r).to_owned(),
+                has_copy: true,
+            },
+            None => TrackState::Synced {
+                synced_at: synced_at.get(&c.track_id).copied(),
+            },
+        };
+        out.insert(c.track_id, state);
+    }
+    for o in &diff.items {
+        let state = match o.kind {
+            OpKind::Delete => TrackState::Removing,
+            k => TrackState::Pending {
+                op: k.as_str(),
+                reason: reported.get(&o.track_id).map(|r| (*r).to_owned()),
+            },
+        };
+        out.insert(o.track_id, state);
+    }
+    for h in &diff.held {
+        let state = match h.hold {
+            Hold::Wait(w) => TrackState::Waiting {
+                reason: w.reason(),
+                has_copy: h.has_copy,
+            },
+            Hold::Error(e) => TrackState::Error {
+                reason: e.reason().to_owned(),
+                has_copy: h.has_copy,
+            },
+        };
+        out.insert(h.track_id, state);
+    }
+    out
+}
+
+/// 端末の件数（`GET /api/devices` の counts）。更新 + 移動は移動に数える
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Counts {
+    pub add: usize,
+    pub update: usize,
+    #[serde(rename = "move")]
+    pub r#move: usize,
+    pub delete: usize,
+    pub waiting: usize,
+    pub error: usize,
+    pub synced: usize,
+}
+
+pub fn counts(states: &BTreeMap<i64, TrackState>) -> Counts {
+    let mut c = Counts::default();
+    for s in states.values() {
+        match s {
+            TrackState::Synced { .. } => c.synced += 1,
+            TrackState::Pending { op: "add", .. } => c.add += 1,
+            TrackState::Pending { op: "update", .. } => c.update += 1,
+            TrackState::Pending { .. } => c.r#move += 1,
+            TrackState::Waiting { .. } => c.waiting += 1,
+            TrackState::Error { .. } => c.error += 1,
+            TrackState::Removing => c.delete += 1,
+        }
+    }
+    c
+}
+
+/// 送る量と、実行順（削除 → パス変更のバッチ → 更新 → 追加。仕様 ⑤）に沿った「今より増える量」の最大値
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Estimate {
+    pub transfer_bytes: u64,
+    pub peak_bytes: u64,
+}
+
+pub fn estimate(diff: &Diff, current: &[DeviceItem]) -> Estimate {
+    let old: HashMap<i64, i64> = current
+        .iter()
+        .map(|c| (c.track_id, c.size as i64))
+        .collect();
+    let old_of = |id: i64| old.get(&id).copied().unwrap_or(0);
+    let mut used: i64 = 0;
+    let mut peak: i64 = 0;
+    let mut transfer: u64 = 0;
+    let ops = |k: OpKind| diff.items.iter().filter(move |o| o.kind == k);
+    for o in ops(OpKind::Delete) {
+        used -= old_of(o.track_id);
+    }
+    // prepared: 更新 + 移動の新しい内容が旧版と並ぶ
+    for o in ops(OpKind::UpdateMove) {
+        used += o.size as i64;
+        transfer += o.size;
+        peak = peak.max(used);
+    }
+    // vacating: 更新 + 移動の旧版を消す（移動は増減なし）
+    for o in ops(OpKind::UpdateMove) {
+        used -= old_of(o.track_id);
+    }
+    for o in ops(OpKind::Update) {
+        used += o.size as i64;
+        transfer += o.size;
+        peak = peak.max(used);
+        used -= old_of(o.track_id);
+    }
+    for o in ops(OpKind::Add) {
+        used += o.size as i64;
+        transfer += o.size;
+        peak = peak.max(used);
+    }
+    Estimate {
+        transfer_bytes: transfer,
+        peak_bytes: peak.max(0) as u64,
+    }
+}
+
+/// 端末ごとの未反映（追加・更新・移動・更新 + 移動）の track_id。DSL の `device_pending` とフィルタ
+/// 「端末に未反映」が使う。`by_key` は端末名の `canonical_key`、`by_id` は端末 id
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingSets {
+    pub by_key: std::sync::Arc<HashMap<String, Vec<i64>>>,
+    pub by_id: std::sync::Arc<HashMap<i64, Vec<i64>>>,
+}
+
+impl PendingSets {
+    pub fn for_key(&self, name_key: &str) -> &[i64] {
+        self.by_key.get(name_key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn for_id(&self, id: i64) -> &[i64] {
+        self.by_id.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+}

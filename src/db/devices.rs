@@ -1,6 +1,9 @@
 //! 端末への配信の DB 層（docs/superpowers/specs/2026-09-29-device-delivery-design.md ②③、D-95）。
 //! 判定は `domain::device` の純粋関数に任せ、ここは入力を組み立てて呼ぶだけ
 
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
 use rusqlite::{params, Connection, OptionalExtension as _};
 
 use crate::db::derived as dbderived;
@@ -12,6 +15,7 @@ use crate::domain::device::{
     DesiredPlaylist, DeviceItem, Diff, PlaylistInput, PlaylistState, SourceHash, SourceKind,
     TrackInput, Transport,
 };
+use crate::domain::device::{counts, track_states, Counts, PendingSets, TrackState};
 use crate::domain::relpath::canonical_key;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,4 +568,111 @@ pub fn enqueue_source_hashes(
         }
     }
     Ok(n)
+}
+
+/// `device_errors`（kind, ref_id, reason）
+pub fn device_errors(conn: &Connection, device_id: i64) -> Result<Vec<(String, i64, String)>> {
+    let mut st = conn.prepare_cached(
+        "SELECT kind, ref_id, reason FROM device_errors WHERE device_id = ?1 ORDER BY kind, ref_id",
+    )?;
+    let rows = st
+        .query_map([device_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn synced_at_map(conn: &Connection, device_id: i64) -> Result<HashMap<i64, i64>> {
+    let mut st =
+        conn.prepare_cached("SELECT track_id, synced_at FROM device_items WHERE device_id = ?1")?;
+    let rows = st
+        .query_map([device_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok(rows)
+}
+
+pub struct DeviceSnapshot {
+    pub device: Device,
+    pub computed: Computed,
+    pub states: BTreeMap<i64, TrackState>,
+    pub counts: Counts,
+    /// `device_errors` の playlist 行（playlist_id, 理由）
+    pub playlist_errors_reported: Vec<(i64, String)>,
+    /// 反映済みの行（見積もりに使う）
+    pub current: Vec<DeviceItem>,
+}
+
+pub struct Snapshot {
+    pub devices: Vec<DeviceSnapshot>,
+}
+
+impl Snapshot {
+    pub fn get(&self, device_id: i64) -> Option<&DeviceSnapshot> {
+        self.devices.iter().find(|d| d.device.id == device_id)
+    }
+
+    pub fn pending_sets(&self) -> PendingSets {
+        let mut by_key = HashMap::new();
+        let mut by_id = HashMap::new();
+        for d in &self.devices {
+            let ids: Vec<i64> = d
+                .states
+                .iter()
+                .filter(|(_, s)| matches!(s, TrackState::Pending { .. }))
+                .map(|(id, _)| *id)
+                .collect();
+            by_key.insert(canonical_key(&d.device.name), ids.clone());
+            by_id.insert(d.device.id, ids);
+        }
+        PendingSets {
+            by_key: Arc::new(by_key),
+            by_id: Arc::new(by_id),
+        }
+    }
+
+    pub fn states_of(&self, track_id: i64) -> Vec<(i64, TrackState)> {
+        self.devices
+            .iter()
+            .filter_map(|d| d.states.get(&track_id).map(|s| (d.device.id, s.clone())))
+            .collect()
+    }
+}
+
+/// 全端末の差分と状態を 1 つの読み取りトランザクションで計算する
+pub fn snapshot(conn: &Connection) -> Result<Snapshot> {
+    let tx = conn.unchecked_transaction()?;
+    let mut out = Vec::new();
+    for device in list(&tx)? {
+        let Some(computed) = compute_in(&tx, device.id)? else {
+            continue;
+        };
+        let errors = device_errors(&tx, device.id)?;
+        let track_errors: Vec<(i64, String)> = errors
+            .iter()
+            .filter(|(k, _, _)| k == "track")
+            .map(|(_, id, r)| (*id, r.clone()))
+            .collect();
+        let playlist_errors_reported = errors
+            .into_iter()
+            .filter(|(k, _, _)| k == "playlist")
+            .map(|(_, id, r)| (id, r))
+            .collect();
+        let current = items(&tx, device.id)?;
+        let states = track_states(
+            &computed.diff,
+            &current,
+            &track_errors,
+            &synced_at_map(&tx, device.id)?,
+        );
+        let counts = counts(&states);
+        out.push(DeviceSnapshot {
+            device,
+            computed,
+            states,
+            counts,
+            playlist_errors_reported,
+            current,
+        });
+    }
+    tx.finish()?;
+    Ok(Snapshot { devices: out })
 }

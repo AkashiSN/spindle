@@ -27,6 +27,7 @@ pub mod verify;
 
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -92,12 +93,19 @@ pub fn open_memory_connection() -> Result<Connection> {
     Ok(conn)
 }
 
+/// 端末のスナップショットのキャッシュ（書き込みの通番, 結果）
+type DeviceCache = Option<(u64, Arc<devices::Snapshot>)>;
+
 /// 書き込み単一コネクション + 読み取りプール
 pub struct Db {
     writer: Arc<Mutex<Connection>>,
     readers: Arc<Mutex<Vec<Connection>>>,
     read_permits: Arc<Semaphore>,
     read_pool_size: usize,
+    /// 書き込みの通番。`write` の閉包が終わる（コミットした）たびに ++（成功・失敗を問わない。数えすぎても正しさは変わらない）
+    write_seq: Arc<AtomicU64>,
+    /// 端末のスナップショットのキャッシュ（通番, 結果）
+    device_cache: Arc<Mutex<DeviceCache>>,
 }
 
 impl Db {
@@ -149,7 +157,34 @@ impl Db {
             readers: Arc::new(Mutex::new(readers)),
             read_permits: Arc::new(Semaphore::new(read_pool_size)),
             read_pool_size,
+            write_seq: Arc::new(AtomicU64::new(0)),
+            device_cache: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn write_seq(&self) -> u64 {
+        self.write_seq.load(Ordering::SeqCst)
+    }
+
+    /// 全端末のスナップショット。書き込みが無ければ前回の結果を使い回す。
+    /// 通番は読み取りの**前**に読む（その後の書き込みを含む結果を古い通番で持つことはあっても、
+    /// 古い結果を新しい通番で持つことは無い）
+    pub async fn device_snapshot(&self) -> Result<Arc<devices::Snapshot>> {
+        let seq = self.write_seq();
+        if let Some((s, snap)) = self
+            .device_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            if *s == seq {
+                return Ok(Arc::clone(snap));
+            }
+        }
+        let snap = Arc::new(self.read(devices::snapshot).await?);
+        *self.device_cache.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((seq, Arc::clone(&snap)));
+        Ok(snap)
     }
 
     pub fn read_pool_size(&self) -> usize {
@@ -163,10 +198,15 @@ impl Db {
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         let writer = Arc::clone(&self.writer);
+        let seq = Arc::clone(&self.write_seq);
         tokio::task::spawn_blocking(move || {
             // 前の閉包が panic していてもコネクション自体は使える（未コミットは自動ロールバック）
             let mut conn = writer.lock().unwrap_or_else(|e| e.into_inner());
-            f(&mut conn)
+            let out = f(&mut conn);
+            // コミットの後に ++ する。「通番を読んでからスナップショットを取る」読み手は、
+            // 古い結果を新しい通番に結び付けない
+            seq.fetch_add(1, Ordering::SeqCst);
+            out
         })
         .await?
     }
