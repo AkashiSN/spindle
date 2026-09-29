@@ -229,6 +229,26 @@ pub fn all_have_rip_records(conn: &Connection, track_ids: &[i64]) -> Result<bool
     Ok(true)
 }
 
+/// ジョブの結果 1 行（`jobs.note`）を書く。記録と同じトランザクションで呼び、commit の後・done の前に
+/// 落ちた再実行が同じ 1 行を返せるようにする（`mark_done` は同じ値で上書きする）
+pub fn set_job_note(conn: &Connection, job_id: i64, note: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET note = ?2 WHERE id = ?1",
+        params![job_id, note],
+    )?;
+    Ok(())
+}
+
+/// ジョブの結果 1 行（`jobs.note`）。無ければ None
+pub fn job_note(conn: &Connection, job_id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT note FROM jobs WHERE id = ?1", [job_id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten())
+}
+
 /// このジョブが既に記録しているか（commit の後に落ちて再実行されたとき）
 pub fn has_records_for_job(conn: &Connection, job_id: i64) -> Result<bool> {
     let n: i64 = conn.query_row(

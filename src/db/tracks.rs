@@ -132,6 +132,27 @@ pub struct TrackDetail {
     pub audio_md5: Option<String>,
     pub original_codec: Option<String>,
     pub added_at: i64,
+    /// 手法ごとの最新の照合（CTDB → AccurateRip の順。記録の無い手法は含めない）。
+    /// バッジは一致したかだけを出すので、どちらで一致したかはプロパティがこれで出す
+    pub verifications: Vec<TrackVerification>,
+}
+
+/// トラック 1 本の、ある手法での最新の照合（`album_verifications` × `track_verifications`）
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TrackVerification {
+    /// `ctdb` / `accuraterip`
+    pub method: String,
+    /// ディスク単位の結論（`verified` / `mismatch` / `not_found` / `unverifiable`）
+    pub result: String,
+    /// このトラックが一致したか
+    pub matched: bool,
+    /// `rip`（自前の吸い出し）/ `retro`（遡及照合）
+    pub source: String,
+    pub detected_offset: Option<i64>,
+    /// ディスクの信頼度（全トラックの最小。不一致があれば 0）
+    pub confidence: Option<i64>,
+    pub verified_at: i64,
+    pub disc_no: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -601,6 +622,7 @@ pub fn detail(conn: &Connection, id: i64) -> Result<Option<TrackDetail>> {
                 audio_md5: r.get(6)?,
                 original_codec: r.get(7)?,
                 added_at: r.get(8)?,
+                verifications: Vec::new(),
             })
         })
         .optional()?
@@ -616,7 +638,42 @@ pub fn detail(conn: &Connection, id: i64) -> Result<Option<TrackDetail>> {
         let (key, value) = row?;
         d.tags.entry(key).or_default().push(value);
     }
+    d.verifications = latest_verifications(conn, id)?;
     Ok(Some(d))
+}
+
+/// 手法ごとの最新の照合（新しい順に読んで手法ごとに最初の 1 件）。履歴はトラックあたり数件なので
+/// 全部読んでよい
+fn latest_verifications(conn: &Connection, id: i64) -> Result<Vec<TrackVerification>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT av.method, av.result, tv.matched, av.source, av.detected_offset, av.confidence,
+                av.verified_at, av.disc_no
+         FROM track_verifications tv JOIN album_verifications av ON av.id = tv.verification_id
+         WHERE tv.track_id = ?1
+         ORDER BY av.verified_at DESC, av.id DESC",
+    )?;
+    let rows = stmt.query_map([id], |r| {
+        Ok(TrackVerification {
+            method: r.get(0)?,
+            result: r.get(1)?,
+            matched: r.get(2)?,
+            source: r.get(3)?,
+            detected_offset: r.get(4)?,
+            confidence: r.get(5)?,
+            verified_at: r.get(6)?,
+            disc_no: r.get(7)?,
+        })
+    })?;
+    let mut out: Vec<TrackVerification> = Vec::new();
+    for row in rows {
+        let v = row?;
+        if !out.iter().any(|o| o.method == v.method) {
+            out.push(v);
+        }
+    }
+    // CTDB を主、AccurateRip を補助として並べる（D-13）
+    out.sort_by_key(|v| v.method != "ctdb");
+    Ok(out)
 }
 
 /// `EXPLAIN QUERY PLAN` の各行（テストで temp B-tree が出ないことを固定する）

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Device, TrackDetail, TrackRow } from '../api/types'
+import type { Device, TrackDetail, TrackRow, TrackVerification } from '../api/types'
 import {
   commonValue,
   generalRows,
@@ -59,6 +59,7 @@ function detail(over: Partial<TrackDetail> = {}): TrackDetail {
     audio_md5: null,
     original_codec: null,
     added_at: 1_690_000_000,
+    verifications: [],
     ...over,
   }
 }
@@ -226,6 +227,73 @@ describe('generalRows', () => {
       new Map(),
     )
     expect(valueOf(padded, 'hires_check')).toEqual({ kind: 'text', text: 'ビット深度の水増し（実効 16 bit）（結果が古い）' })
+  })
+})
+
+describe('照合の手法ごとの結果（どちらで一致したかはプロパティだけが出す）', () => {
+  const v = (over: Partial<TrackVerification>): TrackVerification => ({
+    method: 'ctdb',
+    result: 'verified',
+    matched: true,
+    source: 'retro',
+    detected_offset: 0,
+    confidence: 34,
+    verified_at: 1,
+    disc_no: 1,
+    ...over,
+  })
+
+  it('バッジと同じく Verification は一致したかだけ。CTDB / AccurateRip の行に手法ごとの結果', () => {
+    const rows = generalRows(
+      [row({ verification: 'verified_ctdb' })],
+      new Map([
+        [
+          1,
+          detail({
+            verifications: [
+              v({ detected_offset: 6 }),
+              v({ method: 'accuraterip', result: 'mismatch', matched: false, confidence: 0, detected_offset: -3 }),
+            ],
+          }),
+        ],
+      ]),
+    )
+    expect(valueOf(rows, 'verification')).toEqual({ kind: 'text', text: '検証済み' })
+    expect(valueOf(rows, 'verify_ctdb')).toEqual({ kind: 'text', text: '一致（信頼度 34、オフセット +6）' })
+    expect(valueOf(rows, 'verify_ar')).toEqual({ kind: 'text', text: '不一致' })
+    // AccurateRip だけの一致もバッジは同じ「検証済み」
+    const ar = generalRows([row({ verification: 'verified_ar' })], new Map())
+    expect(valueOf(ar, 'verification')).toEqual({ kind: 'text', text: '検証済み' })
+  })
+
+  it('登録なし・検証不能・記録なし', () => {
+    const rows = generalRows(
+      [row()],
+      new Map([
+        [
+          1,
+          detail({
+            verifications: [
+              v({ result: 'not_found', matched: false, confidence: 0 }),
+              v({ method: 'accuraterip', result: 'unverifiable', matched: false, confidence: null, detected_offset: null }),
+            ],
+          }),
+        ],
+      ]),
+    )
+    expect(valueOf(rows, 'verify_ctdb')).toEqual({ kind: 'text', text: '登録なし' })
+    expect(valueOf(rows, 'verify_ar')).toEqual({ kind: 'text', text: '検証不能' })
+    const none = generalRows([row()], new Map([[1, detail()]]))
+    expect(valueOf(none, 'verify_ctdb')).toEqual({ kind: 'empty' })
+    expect(valueOf(none, 'verify_ar')).toEqual({ kind: 'empty' })
+  })
+
+  it('不一致のディスクで一致したトラックは信頼度を出さない（ディスクの信頼度は 0）', () => {
+    const rows = generalRows(
+      [row()],
+      new Map([[1, detail({ verifications: [v({ result: 'mismatch', matched: true, confidence: 0 })] })]]),
+    )
+    expect(valueOf(rows, 'verify_ctdb')).toEqual({ kind: 'text', text: '一致' })
   })
 })
 
