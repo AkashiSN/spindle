@@ -350,6 +350,43 @@ fn materialize_advances_evaluated_at_even_if_unchanged() {
     assert_eq!(at, 200);
 }
 
+/// `materialize` は項目の置き換えと `evaluated_at` の更新を同じ SAVEPOINT で確定する。
+/// 存在しないトラック id は FK 違反で `rewrite_items` が失敗するので、失敗全体が巻き戻り、
+/// `playlist_items` も `evaluated_at` も呼び出し前のまま残らなければならない
+#[test]
+fn materialize_rolls_back_evaluated_at_when_item_rewrite_fails() {
+    let c = conn();
+    c.execute("INSERT INTO playlists (id, name, name_key, kind, created_at, updated_at) VALUES (5, 'p', 'p', 'smart', 0, 0)", []).unwrap();
+    insert_track(&c, 1, "YT/a.opus", "opus");
+    spindle::db::playlists::materialize(&c, 5, &[1], 100).unwrap();
+
+    let before_at: i64 = c
+        .query_row("SELECT evaluated_at FROM playlists WHERE id = 5", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let before_items = spindle::db::playlists::items(&c, 5).unwrap();
+
+    // 999 は存在しないトラック id → INSERT が FK 違反で失敗する
+    let err = spindle::db::playlists::materialize(&c, 5, &[1, 999], 200);
+    assert!(err.is_err(), "存在しない track_id は FK 違反で失敗する");
+
+    assert_eq!(
+        spindle::db::playlists::items(&c, 5).unwrap(),
+        before_items,
+        "失敗した置換の前の項目がそのまま残る"
+    );
+    let after_at: i64 = c
+        .query_row("SELECT evaluated_at FROM playlists WHERE id = 5", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        after_at, before_at,
+        "評価時刻も失敗前のまま残らなければならない"
+    );
+}
+
 /// 仕様 ③「送る元のハッシュ」: ハッシュ行の identity が `tracks` の現在の物理同一性
 /// (inode, size, mtime_ns, ctime_ns。dev は見ない。D-62) とずれていれば、外部がファイルを
 /// 書き換えた可能性があるので使わず、再ハッシュを要求する

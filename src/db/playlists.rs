@@ -215,18 +215,39 @@ pub fn smart_rules(conn: &Connection) -> Result<Vec<(i64, String)>> {
 }
 
 /// 評価結果で項目を置き換える。並びが変わったときだけ書き直し、変わったら true。
-/// 評価した時刻（`evaluated_at`）は結果が同じでも毎回進める（端末の差分画面が評価時刻を出す。D-95）
+/// 評価した時刻（`evaluated_at`）は結果が同じでも毎回進める（端末の差分画面が評価時刻を出す。D-95）。
+/// 項目を書き直す場合は `evaluated_at` の更新も同じ SAVEPOINT に含める。項目の置き換えが
+/// 失敗した（FK 違反・I/O エラーなど）ときに `evaluated_at` だけ確定すると、端末の差分画面が
+/// 「新しく評価したのに選曲は古いまま」という矛盾した状態を見せてしまう
 pub fn materialize(conn: &Connection, id: i64, track_ids: &[i64], now: i64) -> Result<bool> {
-    conn.execute(
-        "UPDATE playlists SET evaluated_at = ?2 WHERE id = ?1",
-        params![id, now],
-    )?;
     let current = items(conn, id)?;
     if current == track_ids {
+        // 単一の UPDATE 文なのでこれ自体が原子的
+        conn.execute(
+            "UPDATE playlists SET evaluated_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
         return Ok(false);
     }
-    rewrite_items(conn, id, track_ids, now)?;
-    Ok(true)
+    conn.execute_batch("SAVEPOINT materialize")?;
+    let r = (|| -> Result<()> {
+        rewrite_items_inner(conn, id, track_ids, now)?;
+        conn.execute(
+            "UPDATE playlists SET evaluated_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        Ok(())
+    })();
+    match r {
+        Ok(()) => {
+            conn.execute_batch("RELEASE materialize")?;
+            Ok(true)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO materialize; RELEASE materialize");
+            Err(e)
+        }
+    }
 }
 
 /// 自動再書き出しの対象: `auto_export = 1` で書き出し記録のある `(playlist_id, profile 名)`
@@ -306,20 +327,7 @@ pub fn items(conn: &Connection, id: i64) -> Result<Vec<i64>> {
 /// SAVEPOINT で囲むので、呼び出し側のトランザクションの中でも外でも原子的
 fn rewrite_items(conn: &Connection, id: i64, order: &[i64], now: i64) -> Result<()> {
     conn.execute_batch("SAVEPOINT rewrite_items")?;
-    let r = (|| -> Result<()> {
-        conn.execute("DELETE FROM playlist_items WHERE playlist_id = ?", [id])?;
-        let mut st = conn.prepare_cached(
-            "INSERT INTO playlist_items (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
-        )?;
-        for (pos, track_id) in order.iter().enumerate() {
-            st.execute(params![id, pos as i64, track_id])?;
-        }
-        conn.execute(
-            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
-            params![now, id],
-        )?;
-        Ok(())
-    })();
+    let r = rewrite_items_inner(conn, id, order, now);
     match r {
         Ok(()) => {
             conn.execute_batch("RELEASE rewrite_items")?;
@@ -330,6 +338,23 @@ fn rewrite_items(conn: &Connection, id: i64, order: &[i64], now: i64) -> Result<
             Err(e)
         }
     }
+}
+
+/// [`rewrite_items`] の本体（SAVEPOINT なし）。呼び出し側が既に SAVEPOINT を開いている場合
+/// （[`materialize`] が `evaluated_at` の更新と一緒くたに確定したいときなど）はこちらを直接呼ぶ
+fn rewrite_items_inner(conn: &Connection, id: i64, order: &[i64], now: i64) -> Result<()> {
+    conn.execute("DELETE FROM playlist_items WHERE playlist_id = ?", [id])?;
+    let mut st = conn.prepare_cached(
+        "INSERT INTO playlist_items (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
+    )?;
+    for (pos, track_id) in order.iter().enumerate() {
+        st.execute(params![id, pos as i64, track_id])?;
+    }
+    conn.execute(
+        "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
