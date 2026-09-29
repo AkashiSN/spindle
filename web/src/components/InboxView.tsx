@@ -109,7 +109,9 @@ export function InboxView({
       {items.length > 0 && (
         <div className="inbox-body">
           <ul className="inbox-list">
-            {items.map((it) => (
+            {items.map((it) => {
+              const next = it.state === 'placed' ? nextStage(it) : null
+              return (
               <li key={it.id} className={it.id === selected?.id ? 'selected' : ''}>
                 <button
                   type="button"
@@ -122,7 +124,7 @@ export function InboxView({
                   <span className="inbox-item-text">
                   <span className="inbox-title">{itemTitle(it)}</span>
                   <span className={`badge inbox-state-${it.state}`}>{stateLabel(it.state)}</span>
-                  {nextStage(it) != null && <span className="muted small">次: {nextStage(it)?.label}</span>}
+                  {next != null && <span className="muted small">次: {next.label}</span>}
                   <span className="muted small">
                     {it.tracks.length} ファイル · {codecSummary(it.tracks)} · 検出 {formatDateTime(it.detected_at)}
                   </span>
@@ -139,7 +141,8 @@ export function InboxView({
                   </span>
                 </button>
               </li>
-            ))}
+              )
+            })}
           </ul>
           {selected != null && (
             <ItemForm key={selected.id} item={selected} inbox={inbox} onOpenAlbum={onOpenAlbum} />

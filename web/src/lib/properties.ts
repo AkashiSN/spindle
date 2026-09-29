@@ -297,9 +297,12 @@ export function deviceLabel(s: TrackDeviceState | undefined): string {
 
 /** 端末ごとに 1 行。複数選択は commonValue で集計する */
 export function deviceRows(rows: readonly TrackRow[], devices: readonly Device[]): PropRow[] {
-  return devices.map((d) => ({
-    key: `device:${d.id}`,
-    label: d.name,
-    value: commonValue(rows.map((r) => deviceLabel(r.devices?.find((x) => x.device_id === d.id)))),
-  }))
+  return devices.map((d) => {
+    const states = rows.map((r) => r.devices?.find((x) => x.device_id === d.id))
+    const labels = states.map(deviceLabel)
+    const value = commonValue(labels)
+    // 全部 synced で反映日時だけ違うときは「反映済み」にまとめる（日時は全部同じときだけ出る）
+    const allSynced = states.length > 0 && states.every((s) => s?.state === 'synced')
+    return { key: `device:${d.id}`, label: d.name, value: allSynced && value.kind === 'multiple' ? text('✓ 反映済み') : value }
+  })
 }

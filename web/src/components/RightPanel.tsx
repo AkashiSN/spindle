@@ -44,7 +44,7 @@ export function RightPanel({
 }: {
   selection: Selection
   /** 端末の一覧（プロパティの「端末」節） */
-  devices: Device[]
+  devices: readonly Device[]
   summary: SelectionSummary
   /** 読み込み済みの選択行（詳細タブの共通値に使う。filter 形は表示中の一部だけ） */
   selectedRows: TrackRow[]

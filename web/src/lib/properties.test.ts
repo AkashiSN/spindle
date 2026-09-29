@@ -258,6 +258,14 @@ describe('端末欄', () => {
     expect(deviceLabel(undefined)).toBe('対象外')
     expect(deviceLabel({ device_id: 1, state: 'synced', synced_at: null })).toBe('✓ 反映済み')
   })
+  it('全部 synced で日時だけ違えば反映済み、同じ日時ならその日時', () => {
+    const s = (at: number) => ({ devices: [{ device_id: 1, state: 'synced', synced_at: at }] }) as unknown as TrackRow
+    const d = [dev(1, 'iPhone')]
+    expect(deviceRows([s(1), s(100000)], d)[0]?.value).toEqual({ kind: 'text', text: '✓ 反映済み' })
+    const same = deviceRows([s(5), s(5)], d)[0]?.value
+    expect(same).toMatchObject({ kind: 'text' })
+    expect(same?.kind === 'text' && same.text.startsWith('✓ 反映済み（')).toBe(true)
+  })
   it('端末ごとに 1 行、複数選択で違えば <複数の値>', () => {
     const a = { devices: [{ device_id: 1, state: 'synced', synced_at: null }] } as unknown as TrackRow
     const b = { devices: [] } as unknown as TrackRow

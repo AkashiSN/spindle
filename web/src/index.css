@@ -3332,15 +3332,17 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
   font-size: 12px;
 }
 .inbox-stages li {
+  position: relative;
   display: inline-flex;
   flex-direction: column;
-  padding: 2px 8px;
+  padding: 2px 8px 2px 16px;
 }
 .inbox-stages li + li::before {
   content: '→';
-  position: relative;
-  left: -12px;
-  width: 0;
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
   color: var(--muted);
 }
 .inbox-stages .stage-label {

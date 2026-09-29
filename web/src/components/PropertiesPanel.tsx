@@ -39,7 +39,7 @@ export function PropertiesPanel({
   /** 読み込み済みの選択行 */
   rows: TrackRow[]
   /** 端末の一覧（無ければ「端末」節を出さない） */
-  devices: Device[]
+  devices: readonly Device[]
   selection: Selection
   details: ReadonlyMap<number, TrackDetail>
   loading: boolean
