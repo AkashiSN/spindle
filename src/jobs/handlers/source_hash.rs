@@ -57,6 +57,8 @@ enum HashOutcome {
     /// `expected`（`tracks` の物理同一性）と、開いた FD の `fstat` が読む前から一致しない。
     /// あるいは `expected` が指定されていて対象が無い（走査待ち。失敗ではない）
     ScanPending,
+    /// Derived（`expected` が無い）の実ファイルが無い。`derived_files` の行だけが残っている drift
+    SourceMissing,
 }
 
 /// 開いて読み、途中で変わっていなければハッシュを返す。変わっていれば `Ok(None)`
@@ -78,13 +80,17 @@ pub fn hash_source_with_hook(
     match hash_source_inner(root, rel, semantic, None, hook)? {
         HashOutcome::Hashed(h) => Ok(Some(h)),
         HashOutcome::Changed | HashOutcome::ScanPending => Ok(None),
+        HashOutcome::SourceMissing => Err(failed(format!(
+            "送る元を開けない {}: 見つからない",
+            rel.as_str()
+        ))),
     }
 }
 
 /// [`hash_source_with_hook`] の内部実装。`expected` が `Some`（原本のみ）なら、開いた FD 自身の
 /// `fstat`（読む前）を `tracks` 行の物理同一性と比較し、一致しなければ読まずに [`HashOutcome::ScanPending`]
-/// を返す。対象が無い（`NotFound`）場合も `expected` があれば同じく `ScanPending`（`None` なら通常どおり
-/// エラー）。`tracks` を知らない `hash_source` / `hash_source_with_hook` からは常に `expected = None` で呼ばれる
+/// を返す。対象が無い（`NotFound`）場合も `expected` があれば同じく `ScanPending`（`None` なら
+/// [`HashOutcome::SourceMissing`]。公開関数はこれをエラーに写す）。`tracks` を知らない `hash_source` / `hash_source_with_hook` からは常に `expected = None` で呼ばれる
 fn hash_source_inner(
     root: &RootDir,
     rel: &RelPath,
@@ -97,6 +103,7 @@ fn hash_source_inner(
         Err(fsroot::FsError::NotFound) if expected.is_some() => {
             return Ok(HashOutcome::ScanPending);
         }
+        Err(fsroot::FsError::NotFound) => return Ok(HashOutcome::SourceMissing),
         Err(e) => return Err(failed(format!("送る元を開けない {}: {e}", rel.as_str()))),
     };
     let before = fsroot::fstat(&file).map_err(|e| failed(format!("fstat に失敗: {e}")))?;
@@ -256,6 +263,43 @@ impl Handler for SourceHashHandler {
                 HashOutcome::ScanPending => {
                     tracing::info!(track_id, source = kind.as_str(), "スキャン待ち");
                     return Ok(Outcome::Done);
+                }
+                HashOutcome::SourceMissing => {
+                    let SourceKind::Derived(variant) = kind else {
+                        return Err(failed(format!("送る元を開けない {rel}")));
+                    };
+                    let rel_for_tx = rel.clone();
+                    let now = now_epoch();
+                    // 同じ書き込みトランザクションの中で「transcode が動いていない」「行が読んだパスのまま」を
+                    // 確かめてから消す
+                    let result = ctx
+                        .db()
+                        .transaction(move |c| {
+                            if dbderived::has_active_job(c, track_id, variant)? {
+                                return Ok(None);
+                            }
+                            if !dbderived::delete_if_path(c, track_id, variant, &rel_for_tx)? {
+                                return Ok(Some(Vec::new()));
+                            }
+                            dbderived::enqueue_if_stale(c, track_id, now).map(Some)
+                        })
+                        .await?;
+                    return match result {
+                        None => Err(failed(format!(
+                            "Derived の実ファイルが無い（transcode が動いているので待つ）: {rel}"
+                        ))),
+                        Some(ids) => {
+                            if !ids.is_empty() {
+                                ctx.jobs().notify_enqueued(&ids).await;
+                            }
+                            tracing::warn!(
+                                track_id,
+                                rel,
+                                "Derived の実ファイルが無いので作り直しを投入した（D-51 の drift）"
+                            );
+                            Ok(Outcome::Done)
+                        }
+                    };
                 }
                 HashOutcome::Changed => {
                     return Err(failed(format!(

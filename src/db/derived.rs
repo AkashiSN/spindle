@@ -372,6 +372,20 @@ pub fn delete(conn: &Connection, track_id: i64, variant: Variant) -> Result<bool
     )? == 1)
 }
 
+/// 行の `rel_path` が `rel_path` のままなら消す（読んだ後に transcode が動かしていれば消さない）。消したら true
+pub fn delete_if_path(
+    conn: &Connection,
+    track_id: i64,
+    variant: Variant,
+    rel_path: &str,
+) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM derived_files WHERE track_id = ?1 AND variant = ?2 AND rel_path = ?3",
+        params![track_id, variant.as_str(), rel_path],
+    )?;
+    Ok(n > 0)
+}
+
 pub fn dedup_key(track_id: i64, variant: Variant, audio_version: i64) -> String {
     format!("transcode:{track_id}:{variant}:{audio_version}")
 }

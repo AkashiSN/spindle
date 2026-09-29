@@ -10,6 +10,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection};
 use tokio_util::sync::CancellationToken;
 
+use spindle::config::{DerivedConfig, OpusVariantConfig};
 use spindle::db::{devices, open_memory_connection, Db};
 use spindle::domain::derived::{Current, Variant};
 use spindle::domain::device::{
@@ -148,6 +149,56 @@ impl Lib {
             .unwrap();
     }
 
+    /// 可逆トラックと、opus 系統を on にした設定（`enqueue_if_stale` が投入対象と見るため）
+    fn insert_lossless_track_with_opus_on(&self, id: i64, rel: &str) {
+        let c = self.conn();
+        c.execute(
+            "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                                 channels, audio_version, tag_version, seen_at)
+             VALUES (?1, ?2, lower(?2), 1, 0, 0, 'flac', 1, 2, 1, 1, 0)",
+            params![id, rel],
+        )
+        .unwrap();
+        let cfg = DerivedConfig {
+            opus: OpusVariantConfig {
+                enabled: true,
+                bitrate: 256,
+            },
+            aac: Default::default(),
+        };
+        spindle::db::derived::sync_variants(&c, &cfg, 0).unwrap();
+    }
+
+    /// 実ファイルを置かずに Derived の行だけを作る
+    fn insert_derived_row(&self, track_id: i64, rel: &str) {
+        self.conn()
+            .execute(
+                "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, bitrate,
+                                            src_audio_version, src_tag_version, generated_at,
+                                            audio_profile, tag_profile)
+                 VALUES (?1, 'opus', ?2, lower(?2), 'opus', 256, 1, 1, 0, 'ap1', 'tp1')",
+                params![track_id, rel],
+            )
+            .unwrap();
+    }
+
+    fn derived_row_exists(&self, track_id: i64) -> bool {
+        spindle::db::derived::get(&self.conn(), track_id, Variant::Opus)
+            .unwrap()
+            .is_some()
+    }
+
+    fn transcode_count(&self, track_id: i64) -> i64 {
+        self.conn()
+            .query_row(
+                "SELECT count(*) FROM jobs WHERE type = 'transcode' AND state = 'queued'
+                   AND json_extract(payload, '$.track_id') = ?1",
+                [track_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     async fn run(&self, track_id: i64, kind: SourceKind) -> JobState {
         let job = match self
             .jobs
@@ -280,6 +331,103 @@ async fn derived_source_is_saved_with_the_variant_semantic() {
         tag_profile: "tp1".into(),
     };
     assert_eq!(row.semantic, semantic_derived(Variant::Opus, &current));
+}
+
+/// Derived の実ファイルが無ければ失敗にせず、行を消して transcode を投入する（D-51 の drift）
+#[tokio::test]
+async fn missing_derived_row_is_deleted_and_transcode_enqueued() {
+    let lib = Lib::new();
+    lib.insert_lossless_track_with_opus_on(1, "A/a.flac");
+    lib.insert_derived_row(1, "opus/A/a.opus");
+    lib.start();
+    assert_eq!(
+        lib.run(1, SourceKind::Derived(Variant::Opus)).await,
+        JobState::Done
+    );
+    assert!(!lib.derived_row_exists(1), "行を消す");
+    assert_eq!(lib.transcode_count(1), 1, "作り直しを投入する");
+}
+
+/// transcode が動いている間（rename の途中かもしれない）は行を消さず、失敗（再試行）にする
+#[tokio::test]
+async fn missing_derived_is_kept_while_transcode_active() {
+    let lib = Lib::new();
+    lib.insert_lossless_track_with_opus_on(1, "A/a.flac");
+    lib.insert_derived_row(1, "opus/A/a.opus");
+    {
+        let c = lib.conn();
+        spindle::db::jobs::enqueue(
+            &c,
+            &spindle::db::derived::new_job(1, Variant::Opus, 1, 1),
+            0,
+        )
+        .unwrap();
+    }
+    lib.start();
+    // 失敗は再試行（バックオフ待ちの queued）になるので終端は待たず、失敗の記録が付くまで待つ
+    let job = match lib
+        .jobs
+        .enqueue(
+            NewJob::new(
+                JobType::SourceHash,
+                serde_json::json!({ "track_id": 1, "source": "opus" }),
+            )
+            .dedup_key(devices::source_hash_dedup_key(
+                1,
+                SourceKind::Derived(Variant::Opus),
+            )),
+        )
+        .await
+        .unwrap()
+    {
+        EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let last_error = loop {
+        let e: Option<String> = lib
+            .conn()
+            .query_row("SELECT last_error FROM jobs WHERE id = ?1", [job], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        if let Some(e) = e {
+            break e;
+        }
+        assert!(std::time::Instant::now() < deadline, "失敗が記録されない");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        last_error.contains("transcode が動いている"),
+        "{last_error}"
+    );
+    assert!(lib.derived_row_exists(1));
+}
+
+/// 行の `rel_path` が読んだ時から変わっていたら（transcode が rename を終えた）消さない
+#[test]
+fn delete_if_path_keeps_a_row_whose_path_moved() {
+    let c = open_memory_connection().unwrap();
+    c.execute(
+        "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                             channels, audio_version, tag_version, seen_at)
+         VALUES (1, 'A/a.flac', 'a/a.flac', 1, 0, 0, 'flac', 1, 2, 1, 1, 0)",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, bitrate,
+                                    src_audio_version, src_tag_version, generated_at, audio_profile,
+                                    tag_profile)
+         VALUES (1, 'opus', 'opus/A/old.opus', 'opus/a/old.opus', 'opus', 256, 1, 1, 0, 'ap1', 'tp1')",
+        [],
+    )
+    .unwrap();
+    let del = spindle::db::derived::delete_if_path;
+    assert!(!del(&c, 1, Variant::Opus, "opus/A/other.opus").unwrap());
+    assert!(spindle::db::derived::get(&c, 1, Variant::Opus)
+        .unwrap()
+        .is_some());
+    assert!(del(&c, 1, Variant::Opus, "opus/A/old.opus").unwrap());
 }
 
 // ------------------------------------------------- save_if_current（読んでいる間の版の変化に対する再確認）
