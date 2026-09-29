@@ -376,3 +376,98 @@ async fn patch_rename_to_another_devices_name_is_duplicate() {
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
     assert_eq!(v["error"], "duplicate");
 }
+
+#[tokio::test]
+async fn diff_lists_waiting_items_and_evaluations() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    app.db
+        .write(|c| {
+            c.execute(
+                "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless, channels,
+                                     audio_version, tag_version, seen_at, title, artist_display)
+                 VALUES (1, 'A/a.flac', 'a/a.flac', 1, 0, 0, 'flac', 1, 2, 1, 1, 0, '群青', 'YOASOBI')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    insert_playlist(&app, 5, "新しめ", Some("%title% IS 群青")).await;
+    // 評価済みにする（playlist_items に 1 を入れる）
+    app.db
+        .write(|c| {
+            spindle::db::playlists::materialize(c, 5, &[1], 100)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    app.call(
+        Method::PUT,
+        &format!("/api/devices/{id}/playlists"),
+        Some(json!({"playlist_ids": [5]})),
+    )
+    .await;
+    let (st, v) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["items"][0]["op"], "waiting");
+    assert_eq!(v["items"][0]["title"], "群青");
+    assert!(v["items"][0]["reason"].as_str().is_some());
+    assert_eq!(v["evaluations"][0]["playlist_id"], 5);
+    assert_eq!(v["evaluations"][0]["evaluated_at"], 100);
+    assert!(v["estimate"]["free"].is_null());
+    assert_eq!(v["plan_token"].as_str().unwrap().len(), 64);
+    let (st, _) = app.call(Method::GET, "/api/devices/999/diff", None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn estimate_counts_distinct_tracks_of_a_hypothetical_selection() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    app.db
+        .write(|c| {
+            for tid in 1..=3 {
+                c.execute(
+                    "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless, channels,
+                                         audio_version, tag_version, seen_at)
+                     VALUES (?1, ?2, ?2, 1, 0, 0, 'flac', 1, 2, 1, 1, 0)",
+                    rusqlite::params![tid, format!("a/{tid}.flac")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    insert_playlist(&app, 5, "p5", None).await;
+    insert_playlist(&app, 6, "p6", None).await;
+    app.db
+        .write(|c| {
+            spindle::db::playlists::materialize(c, 5, &[1, 2], 0)?;
+            spindle::db::playlists::materialize(c, 6, &[2, 3], 0)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .call(
+            Method::GET,
+            &format!("/api/devices/{id}/estimate?selection=playlists&playlist_ids=5,6"),
+            None,
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["tracks"], 3, "重複を除く");
+    assert_eq!(v["unhashed"], 3);
+    let (st, v) = app
+        .call(
+            Method::GET,
+            &format!("/api/devices/{id}/estimate?selection=all"),
+            None,
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["tracks"], 3);
+}

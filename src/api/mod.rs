@@ -53,6 +53,8 @@ pub fn router(state: AppState) -> Router {
             patch(devices::patch).delete(devices::delete),
         )
         .route("/devices/{id}/playlists", put(devices::put_playlists))
+        .route("/devices/{id}/diff", get(devices::diff))
+        .route("/devices/{id}/estimate", get(devices::estimate))
         .route("/tracks", get(tracks::list))
         .route("/tracks/{id}", get(tracks::get))
         .route("/tracks/batch", patch(batch::apply))

@@ -8,7 +8,7 @@ use crate::db::devices::{
 use crate::db::now_epoch;
 use crate::domain::derived::Variant;
 use crate::domain::device::PendingSets;
-use crate::domain::device::{Counts, Transport};
+use crate::domain::device::{Counts, Hold, TrackState, Transport};
 use crate::domain::filter::Filter;
 use crate::playlist::dsl::Rule;
 use axum::extract::{Path, State};
@@ -361,4 +361,218 @@ pub async fn enqueue_hashes(state: &AppState, snap: &Snapshot) -> Result<(), Api
         state.jobs.notify_enqueued(&ids).await;
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+pub struct DiffView {
+    pub generation: i64,
+    pub plan_token: String,
+    pub pending_reevaluation: bool,
+    pub items: Vec<DiffItem>,
+    pub playlists: Vec<DiffPlaylist>,
+    pub estimate: EstimateView,
+    pub evaluations: Vec<Evaluation>,
+    pub counts: Counts,
+}
+#[derive(Serialize)]
+pub struct DiffItem {
+    pub op: &'static str, // add | update | move | update_move | delete | waiting | error
+    pub track_id: i64,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub from: Option<String>,
+    pub dest_path: Option<String>,
+    pub reason: Option<String>,
+    pub size: u64,
+    pub has_copy: bool,
+}
+#[derive(Serialize)]
+pub struct DiffPlaylist {
+    pub op: &'static str,
+    pub playlist_id: i64,
+    pub name: Option<String>,
+    pub dest_path: Option<String>,
+    pub reason: Option<String>,
+}
+#[derive(Serialize)]
+pub struct EstimateView {
+    pub transfer_bytes: u64,
+    pub peak_bytes: u64,
+    pub free: Option<u64>,
+}
+#[derive(Serialize)]
+pub struct Evaluation {
+    pub playlist_id: i64,
+    pub name: String,
+    pub evaluated_at: Option<i64>,
+    pub pending: bool,
+}
+
+pub async fn diff(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let snap = state.db.device_snapshot().await?;
+    let Some(d) = snap.get(id) else {
+        return Ok(not_found());
+    };
+    let diff = &d.computed.diff;
+    let mut track_ids: Vec<i64> = diff.items.iter().map(|o| o.track_id).collect();
+    track_ids.extend(diff.held.iter().map(|h| h.track_id));
+    let mut pl_ids: Vec<i64> = diff.playlists.iter().map(|p| p.playlist_id).collect();
+    pl_ids.extend(diff.playlist_errors.iter().map(|(p, _)| *p));
+    let (titles, names, evals) = state
+        .db
+        .read(move |c| {
+            Ok((
+                dbdev::titles(c, &track_ids)?,
+                dbdev::playlist_names(c, &pl_ids)?,
+                dbdev::smart_evaluations(c, id)?,
+            ))
+        })
+        .await?;
+    let reason_of = |track_id: i64| match d.states.get(&track_id) {
+        Some(TrackState::Pending { reason, .. }) => reason.clone(),
+        _ => None,
+    };
+    let mut items: Vec<DiffItem> = diff
+        .items
+        .iter()
+        .map(|o| DiffItem {
+            op: o.kind.as_str(),
+            track_id: o.track_id,
+            title: titles.get(&o.track_id).map(|t| t.0.clone()),
+            artist: titles.get(&o.track_id).map(|t| t.1.clone()),
+            from: o.from.clone(),
+            dest_path: o.to.clone().or_else(|| o.from.clone()),
+            reason: reason_of(o.track_id),
+            size: o.size,
+            has_copy: o.from.is_some() || d.current.iter().any(|c| c.track_id == o.track_id),
+        })
+        .collect();
+    for h in &diff.held {
+        let (op, reason) = match h.hold {
+            Hold::Wait(w) => ("waiting", w.reason().to_owned()),
+            Hold::Error(e) => ("error", e.reason().to_owned()),
+        };
+        items.push(DiffItem {
+            op,
+            track_id: h.track_id,
+            title: titles.get(&h.track_id).map(|t| t.0.clone()),
+            artist: titles.get(&h.track_id).map(|t| t.1.clone()),
+            from: None,
+            dest_path: d
+                .current
+                .iter()
+                .find(|c| c.track_id == h.track_id)
+                .map(|c| c.dest_path.clone()),
+            reason: Some(reason),
+            size: 0,
+            has_copy: h.has_copy,
+        });
+    }
+    let mut playlists: Vec<DiffPlaylist> = diff
+        .playlists
+        .iter()
+        .map(|p| DiffPlaylist {
+            op: p.kind.as_str(),
+            playlist_id: p.playlist_id,
+            name: names.get(&p.playlist_id).cloned(),
+            dest_path: p.to.clone().or_else(|| p.from.clone()),
+            reason: d
+                .playlist_errors_reported
+                .iter()
+                .find(|(i, _)| *i == p.playlist_id)
+                .map(|(_, r)| r.clone()),
+        })
+        .collect();
+    for (pid, reason) in &diff.playlist_errors {
+        playlists.push(DiffPlaylist {
+            op: "error",
+            playlist_id: *pid,
+            name: names.get(pid).cloned(),
+            dest_path: None,
+            reason: Some((*reason).to_owned()),
+        });
+    }
+    let pending = state.reeval_pending();
+    let e = crate::domain::device::estimate(diff, &d.current);
+    let view = DiffView {
+        generation: d.computed.generation,
+        plan_token: d.computed.plan_token.clone(),
+        pending_reevaluation: pending,
+        items,
+        playlists,
+        estimate: EstimateView {
+            transfer_bytes: e.transfer_bytes,
+            peak_bytes: e.peak_bytes,
+            free: None,
+        },
+        evaluations: evals
+            .into_iter()
+            .map(|(playlist_id, name, evaluated_at)| Evaluation {
+                playlist_id,
+                name,
+                evaluated_at,
+                pending,
+            })
+            .collect(),
+        counts: d.counts,
+    };
+    enqueue_hashes(&state, &snap).await?;
+    Ok(Json(view).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct EstimateParams {
+    pub selection: String,
+    #[serde(default)]
+    pub playlist_ids: String,
+}
+
+#[derive(Serialize)]
+pub struct EstimateSelectionView {
+    pub tracks: usize,
+    pub bytes: u64,
+    pub unhashed: usize,
+}
+
+pub async fn estimate(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    axum::extract::Query(p): axum::extract::Query<EstimateParams>,
+) -> Result<Response, ApiError> {
+    let Some(selection) = Selection::parse(&p.selection) else {
+        return Ok(bad_request("selection が不正"));
+    };
+    let mut ids = Vec::new();
+    for s in p
+        .playlist_ids
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        match s.parse::<i64>() {
+            Ok(n) => ids.push(n),
+            Err(_) => return Ok(bad_request("playlist_ids が不正")),
+        }
+    }
+    let got = state
+        .db
+        .read(move |c| {
+            let Some(d) = dbdev::get(c, id)? else {
+                return Ok(None);
+            };
+            dbdev::estimate_selection(c, &d, selection, &ids).map(Some)
+        })
+        .await?;
+    Ok(match got {
+        Some(e) => Json(EstimateSelectionView {
+            tracks: e.tracks,
+            bytes: e.bytes,
+            unhashed: e.unhashed,
+        })
+        .into_response(),
+        None => not_found(),
+    })
 }

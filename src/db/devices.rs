@@ -784,3 +784,89 @@ pub fn is_registered(conn: &Connection, playlist_id: i64) -> Result<bool> {
         |r| r.get::<_, i64>(0),
     )? == 1)
 }
+
+/// 曲名と表示用アーティスト（差分表の「曲」列）。GC で消えた曲は含まない
+pub fn titles(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, (String, String)>> {
+    let json =
+        serde_json::to_string(ids).map_err(|e| crate::db::DbError::Internal(e.to_string()))?;
+    let mut st = conn.prepare_cached(
+        "SELECT id, coalesce(title, ''), coalesce(artist_display, '') FROM tracks
+          WHERE id IN (SELECT value FROM json_each(?1))",
+    )?;
+    let rows = st
+        .query_map([json], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok(rows)
+}
+
+pub fn playlist_names(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, String>> {
+    let json =
+        serde_json::to_string(ids).map_err(|e| crate::db::DbError::Internal(e.to_string()))?;
+    let mut st = conn.prepare_cached(
+        "SELECT id, name FROM playlists WHERE id IN (SELECT value FROM json_each(?1))",
+    )?;
+    let rows = st
+        .query_map([json], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok(rows)
+}
+
+/// 端末に載っているスマートプレイリストの評価時刻（④ 差分画面）
+pub fn smart_evaluations(
+    conn: &Connection,
+    device_id: i64,
+) -> Result<Vec<(i64, String, Option<i64>)>> {
+    let mut st = conn.prepare_cached(
+        "SELECT p.id, p.name, p.evaluated_at FROM device_playlists dp JOIN playlists p ON p.id = dp.playlist_id
+          WHERE dp.device_id = ?1 AND p.kind = 'smart' ORDER BY p.id",
+    )?;
+    let rows = st
+        .query_map([device_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub struct SelectionEstimate {
+    pub tracks: usize,
+    pub bytes: u64,
+    /// 送る元のハッシュ（= size）がまだ無い曲の数（bytes に含まれない）
+    pub unhashed: usize,
+}
+
+/// 仮の選曲の曲数と容量（選曲タブ）。size は送る元のハッシュの行から取る（Derived はエンコード後の
+/// 大きさが分からないため）。非可逆原本を送る opus は原本の size
+pub fn estimate_selection(
+    conn: &Connection,
+    device: &Device,
+    selection: Selection,
+    playlist_ids: &[i64],
+) -> Result<SelectionEstimate> {
+    let json = serde_json::to_string(playlist_ids)
+        .map_err(|e| crate::db::DbError::Internal(e.to_string()))?;
+    let scope = match selection {
+        Selection::All => "1",
+        Selection::Playlists => {
+            "t.id IN (SELECT pi.track_id FROM playlist_items pi WHERE pi.playlist_id IN (SELECT value FROM json_each(?2)))"
+        }
+    };
+    let sql = format!(
+        "SELECT count(*),
+                coalesce(sum(CASE WHEN ?1 = 'opus' AND t.lossless = 0 THEN t.size ELSE h.size END), 0),
+                sum(CASE WHEN (?1 = 'opus' AND t.lossless = 0) OR h.size IS NOT NULL THEN 0 ELSE 1 END)
+           FROM tracks t
+           LEFT JOIN source_hashes h ON h.track_id = t.id AND h.source = ?1
+          WHERE t.missing_since IS NULL AND t.channels IN (1, 2) AND {scope}"
+    );
+    let map = |r: &rusqlite::Row<'_>| Ok((r.get(0)?, r.get(1)?, r.get(2)?));
+    let variant = device.variant.as_str();
+    // All のときは ?2 が SQL に現れない（rusqlite は未使用の引数を弾く）
+    let (tracks, bytes, unhashed): (i64, i64, Option<i64>) = match selection {
+        Selection::All => conn.query_row(&sql, params![variant], map)?,
+        Selection::Playlists => conn.query_row(&sql, params![variant, json], map)?,
+    };
+    Ok(SelectionEstimate {
+        tracks: tracks as usize,
+        bytes: bytes as u64,
+        unhashed: unhashed.unwrap_or(0) as usize,
+    })
+}
