@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Device } from '../api/types'
-import { chipsFor, togglePlaylist, withPlaylistIds } from './devicePicker'
+import { chipsFor, mergePending, togglePlaylist, withPlaylistIds } from './devicePicker'
 
 const d = (id: number, name: string, playlist_ids: number[]): Device => ({
   id, name, transport: 'agent', variant: 'aac', selection: 'playlists', generation: 1, connected: null,
@@ -23,5 +23,11 @@ describe('選曲の近道', () => {
     const next = withPlaylistIds(after, 1, togglePlaylist(after![0], 6))
     expect(next!.map((x) => x.playlist_ids)).toEqual([[5, 6], [9]])
     expect(withPlaylistIds(null, 1, [1])).toBeNull()
+  })
+  it('取り直した一覧に、送信中の端末の望む印を重ねる', () => {
+    const fetched = [d(1, 'a', [5]), d(2, 'b', [9])]
+    const merged = mergePending(fetched, new Map([[1, [5, 6]]]))
+    expect(merged.map((x) => x.playlist_ids)).toEqual([[5, 6], [9]])
+    expect(mergePending(fetched, new Map()).map((x) => x.playlist_ids)).toEqual([[5], [9]])
   })
 })

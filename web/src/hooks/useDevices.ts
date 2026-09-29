@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPatch, apiPost } from '../api/client'
 import type { Device, DeviceDiff, DeviceList, DeviceSelection, DeviceVariant, SelectionEstimate } from '../api/types'
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
+import { mergePending, togglePlaylist } from '../lib/devicePicker'
 import { withPlaylistIds } from '../lib/devicePicker'
 import { Latest } from '../lib/latest'
 
@@ -32,11 +33,21 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     setError(null)
   }
 
+  // 端末の選曲（PUT は全置換）: 端末ごとに PUT を直列にし、本文は実行時点の「望む値」から作る。
+  // 送信待ち・送信中の端末は、一覧の取り直しが古い値で楽観更新を潰さないよう望む値を重ねる
+  const desired = useRef(new Map<number, number[]>())
+  const pendingCount = useRef(new Map<number, number>())
+  const chains = useRef(new Map<number, Promise<unknown>>())
+  const itemsRef = useRef<Device[] | null>(null)
+  useEffect(() => {
+    itemsRef.current = items
+  }, [items])
+
   const fetchList = useCallback(() => {
     const id = listGen.current.next()
     apiFetch<DeviceList>('/api/devices')
       .then((l) => {
-        if (listGen.current.isCurrent(id)) setItems(l.items)
+        if (listGen.current.isCurrent(id)) setItems(mergePending(l.items, desired.current))
       })
       .catch(() => {
         if (listGen.current.isCurrent(id)) setItems(null)
@@ -118,6 +129,33 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     [fetchList, fetchDiff],
   )
 
+  const sendPlaylists = (id: number, playlistIds: number[]) =>
+    apiFetch<Device>(`/api/devices/${id}/playlists`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ playlist_ids: playlistIds }),
+    })
+  const setPlaylists = (id: number, playlistIds: number[]): Promise<boolean> => {
+    desired.current.set(id, playlistIds)
+    setItems((cur) => withPlaylistIds(cur, id, playlistIds))
+    pendingCount.current.set(id, (pendingCount.current.get(id) ?? 0) + 1)
+    const task = (chains.current.get(id) ?? Promise.resolve()).then(async () => {
+      const ids = desired.current.get(id)
+      // 前の PUT が失敗して望む値が捨てられていたら、この分は送らない
+      const ok = ids == null ? false : await run(() => sendPlaylists(id, ids))
+      const left = (pendingCount.current.get(id) ?? 1) - 1
+      if (!ok) desired.current.delete(id)
+      if (left <= 0) {
+        pendingCount.current.delete(id)
+        desired.current.delete(id)
+      } else pendingCount.current.set(id, left)
+      if (!ok || left <= 0) fetchList()
+      return ok
+    })
+    chains.current.set(id, task)
+    return task
+  }
+
   return {
     items,
     diff: diffFor(diffOf, selectedId),
@@ -140,19 +178,13 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     update: (id: number, patch: { name?: string; selection?: DeviceSelection; variant?: DeviceVariant }) =>
       run(() => apiPatch<Device>(`/api/devices/${id}`, patch)),
     remove: (id: number) => run(() => apiFetch<void>(`/api/devices/${id}`, { method: 'DELETE' })),
-    setPlaylists: (id: number, playlistIds: number[]) => {
-      // PUT は全置換なので、完了前に続けて切り替えても前の印を落とさないよう、先に一覧へ反映する。失敗したら取り直して戻す
-      setItems((cur) => withPlaylistIds(cur, id, playlistIds))
-      return run(() =>
-        apiFetch<Device>(`/api/devices/${id}/playlists`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ playlist_ids: playlistIds }),
-        }),
-      ).then((ok) => {
-        if (!ok) fetchList()
-        return ok
-      })
+    setPlaylists,
+    /** 印を 1 つ付け外しする。続けて押しても、直前の望む値の上に積む */
+    toggleDevicePlaylist: (id: number, playlistId: number): Promise<boolean> => {
+      const d = itemsRef.current?.find((x) => x.id === id)
+      const base = desired.current.get(id) ?? d?.playlist_ids
+      if (!d || !base) return Promise.resolve(false)
+      return setPlaylists(id, togglePlaylist({ ...d, playlist_ids: base }, playlistId))
     },
     estimate,
   }

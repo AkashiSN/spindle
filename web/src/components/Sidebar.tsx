@@ -48,7 +48,8 @@ export function Sidebar({
   onRefreshed: (playlistId: number) => void
   playlistNotice: string | null
   onPlaylistNotice: (text: string | null) => void
-  devices: Device[]
+  /** null は一覧をまだ取れていない（取得失敗を含む）。消えた端末の判定はしない */
+  devices: Device[] | null
   onToggleDevice: (device: Device, playlistId: number) => void
 }) {
   // 表示形式: 組み込みのプリセット + ユーザ定義（localStorage）。選択中はパターン文字列で覚える
@@ -78,7 +79,7 @@ export function Sidebar({
       return next
     })
   // 選んでいた端末が消えたら device_pending を外す（存在しない端末 id でサーバへ問い合わせない）
-  const staleDevice = scope.device_pending != null && !devices.some((d) => d.id === scope.device_pending)
+  const staleDevice = scope.device_pending != null && devices != null && !devices.some((d) => d.id === scope.device_pending)
   const staleScope = staleDevice ? scope : null
   useEffect(() => {
     if (staleScope == null) return
@@ -241,7 +242,7 @@ export function Sidebar({
         onRefreshed={onRefreshed}
         notice={playlistNotice}
         onNotice={onPlaylistNotice}
-        devices={devices}
+        devices={devices ?? []}
         onToggleDevice={onToggleDevice}
       />
 
@@ -265,7 +266,7 @@ export function Sidebar({
               </button>
             </li>
           ))}
-          {devices.length > 0 && (
+          {devices != null && devices.length > 0 && (
             <li>
               <label className={`tree-node device-pending${scope.device_pending != null ? ' active' : ''}`}>
                 端末に未反映 ▾{' '}

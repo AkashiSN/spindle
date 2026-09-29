@@ -45,7 +45,6 @@ import { useInboxSummary } from './hooks/useInboxSummary'
 import { useDevices } from './hooks/useDevices'
 import { useLocalStorageState } from './hooks/useLocalStorageState'
 import { totalBadge } from './lib/devices'
-import { togglePlaylist } from './lib/devicePicker'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
 import { useSubscriptions } from './hooks/useSubscriptions'
@@ -546,11 +545,11 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           setPlaylistNotice(t)
           if (t == null) devices.clearError()
         }}
-        devices={devices.items ?? []}
+        devices={devices.items}
         onToggleDevice={(d, pid) => {
           // 失敗は devices.error（deviceMessage 済み）に入り、プレイリスト区画の notice に出る
           setPlaylistNotice(null)
-          void devices.setPlaylists(d.id, togglePlaylist(d, pid))
+          void devices.toggleDevicePlaylist(d.id, pid)
         }}
       />
       <div className="divider-h" onMouseDown={artDrag.onMouseDown} title="ドラッグで高さを変更" />

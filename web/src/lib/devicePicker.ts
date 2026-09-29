@@ -20,3 +20,12 @@ export function withPlaylistIds(items: readonly Device[] | null, id: number, pla
   if (items == null) return null
   return items.map((d) => (d.id === id ? { ...d, playlist_ids: playlistIds } : d))
 }
+
+/** 取得した一覧に、送信待ち・送信中の端末の望む playlist_ids を重ねる（取り直しが楽観更新を古い値で潰さないように） */
+export function mergePending(items: readonly Device[], pending: ReadonlyMap<number, number[]>): Device[] {
+  if (pending.size === 0) return [...items]
+  return items.map((d) => {
+    const ids = pending.get(d.id)
+    return ids ? { ...d, playlist_ids: ids } : d
+  })
+}
