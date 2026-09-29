@@ -21,6 +21,7 @@ pub mod migrations;
 pub mod playlists;
 pub mod replaygain;
 pub mod scans;
+pub mod stages;
 pub mod subscriptions;
 pub mod tracks;
 pub mod verify;

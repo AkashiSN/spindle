@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::db::inbox::{self as dbinbox, FileRow, Item, ItemState};
 use crate::db::now_epoch;
 use crate::db::scans;
+use crate::db::stages::{stages, Stage};
 use crate::import::inbox::{
     destination, embedded_picture, propose, Destination, InboxDraft, RipLookup, SameTitle,
 };
@@ -43,6 +44,9 @@ pub struct ItemView {
     pub destination: Option<Destination>,
     /// CD の件の照会の材料（P4-21）。CD でない件は null
     pub rip: Option<RipLookup>,
+    /// 承認済み以降の件の段（配置 → RG → 系統 → 端末。可視化 B）。それ以前の件は出さない
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stages: Option<Vec<Stage>>,
 }
 
 #[derive(Serialize)]
@@ -161,6 +165,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
         ));
     };
     let layout = state.config.layout.clone();
+    let snap = state.db.device_snapshot().await?;
     let (items, subscriptions) = state
         .db
         .read(move |c| {
@@ -187,6 +192,15 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
                         same_title: same.next().unwrap_or_default(),
                     })
                     .collect();
+                let stages = if matches!(
+                    item.state,
+                    ItemState::Approved | ItemState::Placing | ItemState::Placed
+                ) {
+                    let ids = dbinbox::placed_tracks(c, item.id)?;
+                    Some(stages(c, item.state, &ids, &snap)?)
+                } else {
+                    None
+                };
                 out.push(ItemView {
                     item,
                     tracks,
@@ -194,6 +208,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
                     warnings: p.warnings,
                     destination: p.destination,
                     rip: p.lookup,
+                    stages,
                 });
             }
             // 件が参照する購読だけ（購読の表は小さいので 1 回で読んで絞る。件ごとに引かない）
