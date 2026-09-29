@@ -28,6 +28,7 @@ use spindle::jobs::handlers::playlist_sync::{self, PlaylistSyncHandler, SyncEnv}
 use spindle::jobs::handlers::rename::RenameHandler;
 use spindle::jobs::handlers::rg::RgHandler;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
+use spindle::jobs::handlers::source_hash::SourceHashHandler;
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
 use spindle::jobs::handlers::thumbnail::ThumbnailHandler;
 use spindle::jobs::handlers::transcode::{self, TranscodeHandler};
@@ -415,6 +416,14 @@ async fn main() -> anyhow::Result<()> {
             )
             .with_jobs_retention(spindle::api::gc::jobs_retention(&state)),
         ),
+    );
+    // 端末配信の送る元のハッシュ（P5-1、D-95）
+    registry.register(
+        JobType::SourceHash,
+        Arc::new(SourceHashHandler::new(
+            Arc::clone(&library_root),
+            Arc::clone(&derived_root),
+        )),
     );
     registry.register(
         JobType::Transcode,

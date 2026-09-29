@@ -12,6 +12,7 @@ pub mod rename;
 pub mod rg;
 pub mod rip;
 pub mod scan;
+pub mod source_hash;
 pub mod tagwrite;
 pub mod thumbnail;
 pub mod transcode;
