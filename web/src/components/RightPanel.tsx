@@ -5,7 +5,7 @@
 // 操作（リネーム / 正規化 / RG / FLAC 検査 / プレイリストへ追加）は OperationsPanel（hooks/useOperations）。
 // 一括編集・操作は横に並ぶ番号付きの段（① 対象は PanelTargetStep。D-87）
 
-import type { Playlist, TrackDetail, TrackRow } from '../api/types'
+import type { Device, Playlist, TrackDetail, TrackRow } from '../api/types'
 import type { BatchEdit } from '../hooks/useBatchEdit'
 import { useDragSize } from '../hooks/useDragSize'
 import type { Operations } from '../hooks/useOperations'
@@ -32,6 +32,7 @@ const MAX_H = 800
 
 export function RightPanel({
   selection,
+  devices,
   summary,
   selectedRows,
   details,
@@ -42,6 +43,8 @@ export function RightPanel({
   albumGain,
 }: {
   selection: Selection
+  /** 端末の一覧（プロパティの「端末」節） */
+  devices: Device[]
   summary: SelectionSummary
   /** 読み込み済みの選択行（詳細タブの共通値に使う。filter 形は表示中の一部だけ） */
   selectedRows: TrackRow[]
@@ -160,6 +163,7 @@ export function RightPanel({
         <div className="panel-body">
           <PropertiesPanel
             rows={selectedRows}
+            devices={devices}
             selection={selection}
             details={details.details}
             loading={details.loading}

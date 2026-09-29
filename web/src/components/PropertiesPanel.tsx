@@ -6,10 +6,11 @@
 // set op（P4-3、D-72）。詳細は先頭 DETAIL_LIMIT 件だけ取る
 
 import { useEffect, useMemo, useState } from 'react'
-import type { TrackDetail, TrackRow } from '../api/types'
+import type { Device, TrackDetail, TrackRow } from '../api/types'
 import {
   DETAIL_LIMIT,
   canDeleteRow,
+  deviceRows,
   generalRows,
   locationRows,
   metadataRows,
@@ -27,6 +28,7 @@ type Editing = { mode: 'value'; key: string; text: string } | { mode: 'add'; key
 
 export function PropertiesPanel({
   rows,
+  devices,
   selection,
   details,
   loading,
@@ -36,6 +38,8 @@ export function PropertiesPanel({
 }: {
   /** 読み込み済みの選択行 */
   rows: TrackRow[]
+  /** 端末の一覧（無ければ「端末」節を出さない） */
+  devices: Device[]
   selection: Selection
   details: ReadonlyMap<number, TrackDetail>
   loading: boolean
@@ -91,6 +95,7 @@ export function PropertiesPanel({
   }, [rows, details])
   const metadata = useMemo(() => metadataRows(sampled), [sampled])
   const location = useMemo(() => locationRows(rows, details), [rows, details])
+  const deviceProps = useMemo(() => deviceRows(rows, devices), [rows, devices])
   const general = useMemo(() => generalRows(rows, details), [rows, details])
 
   if (selection.kind === 'none' || rows.length === 0) {
@@ -305,6 +310,10 @@ export function PropertiesPanel({
           <tbody>
             <Section title="Location" />
             {location.map((row) => (
+              <ValueRow key={row.key} row={row} />
+            ))}
+            {devices.length > 0 && <Section title="端末" />}
+            {deviceProps.map((row) => (
               <ValueRow key={row.key} row={row} />
             ))}
             <Section title="General" />

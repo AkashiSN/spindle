@@ -1,6 +1,6 @@
 // バッジ列の内容（SPEC §12.2）。表示は components/Badges.tsx
 
-import type { HiresCheck, TrackRow, Verification } from '../api/types'
+import type { Device, HiresCheck, TrackRow, Verification } from '../api/types'
 
 export const HIRES_LABEL: Record<HiresCheck['status'], string> = {
   ok: 'OK',
@@ -133,6 +133,32 @@ export function badgesOf(t: TrackRow): Badge[] {
   return out
 }
 
+/** 端末ごとのバッジ（key は `device:<id>`）。対象外へ向かう removing は出さない */
+export function deviceBadges(t: TrackRow, devices: readonly Device[]): Badge[] {
+  const out: Badge[] = []
+  for (const s of t.devices ?? []) {
+    const n = devices.find((d) => d.id === s.device_id)?.name ?? `端末 ${s.device_id}`
+    const key = `device:${s.device_id}`
+    switch (s.state) {
+      case 'synced':
+        out.push({ key, icon: '📱', label: `${n}: 反映済み`, cls: 'badge b-device-synced' })
+        break
+      case 'pending':
+        out.push({ key, icon: '📲', label: `${n}: 未反映`, cls: 'badge b-device-pending' })
+        break
+      case 'waiting':
+        out.push({ key, icon: '⏳', label: `${n}: 待ち（${s.reason}）`, cls: 'badge b-device-waiting' })
+        break
+      case 'error':
+        out.push({ key, icon: '⚠', label: `${n}: エラー（${s.reason}）`, cls: 'badge b-device-error' })
+        break
+      case 'removing':
+        break
+    }
+  }
+  return out
+}
+
 /** 凡例の 1 行。`key` は badgesOf が出す key と対応する（テストで突き合わせる） */
 export type LegendEntry = { key: string; icon: string; cls: string; label: string }
 
@@ -172,6 +198,15 @@ export const BADGE_LEGEND: ReadonlyArray<{ title: string; items: LegendEntry[] }
       { key: 'hires', icon: 'H', cls: 'badge b-hires-suspect', label: 'アップサンプリング / ビット深度の水増しの疑い' },
       { key: 'hires', icon: 'H', cls: 'badge b-hires-inconclusive', label: '偽ハイレゾ検出: 判定できず（計測値を見る）' },
       { key: 'hires', icon: 'H', cls: 'badge b-hires-error', label: '偽ハイレゾ検出: デコードエラー' },
+    ],
+  },
+  {
+    title: '端末（端末ごとに 1 つ。ホバーで端末名。key は device:<id>）',
+    items: [
+      { key: 'device', icon: '📱', cls: 'badge b-device-synced', label: '端末に反映済み' },
+      { key: 'device', icon: '📲', cls: 'badge b-device-pending', label: '端末へ未反映（次の同期で送る）' },
+      { key: 'device', icon: '⏳', cls: 'badge b-device-waiting', label: '待ち（RG 未解析など、条件が整うまで送らない）' },
+      { key: 'device', icon: '⚠', cls: 'badge b-device-error', label: 'エラー（端末の同期でこの曲だけ失敗）' },
     ],
   },
   {

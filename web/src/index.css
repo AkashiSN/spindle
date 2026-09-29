@@ -3306,3 +3306,53 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 .device-pending select {
   max-width: 9em;
 }
+.badge.b-device-synced {
+  background: var(--badge-green-bg);
+  color: var(--badge-green-fg);
+}
+.badge.b-device-pending {
+  background: var(--badge-amber-bg);
+  color: var(--badge-amber-fg);
+}
+.badge.b-device-waiting {
+  background: var(--badge-faint-bg);
+  color: var(--badge-faint-fg);
+}
+.badge.b-device-error {
+  background: var(--badge-red-bg);
+  color: var(--error);
+}
+.inbox-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 0;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.inbox-stages li {
+  display: inline-flex;
+  flex-direction: column;
+  padding: 2px 8px;
+}
+.inbox-stages li + li::before {
+  content: '→';
+  position: relative;
+  left: -12px;
+  width: 0;
+  color: var(--muted);
+}
+.inbox-stages .stage-label {
+  font-weight: 600;
+}
+.inbox-stages .stage-done .stage-state {
+  color: var(--accent);
+}
+.inbox-stages .stage-running .stage-state {
+  color: var(--badge-amber-fg);
+}
+.inbox-stages .stage-todo,
+.inbox-stages .stage-na {
+  color: var(--muted);
+}

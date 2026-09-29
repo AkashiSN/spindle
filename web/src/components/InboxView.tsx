@@ -35,9 +35,11 @@ import {
   itemSource,
   itemThumbUrl,
   itemTitle,
+  nextStage,
   pictureState,
   refreshedDraft,
   sameTitleCount,
+  stageText,
   stateLabel,
   syncNote,
   trackPictureUrl,
@@ -120,6 +122,7 @@ export function InboxView({
                   <span className="inbox-item-text">
                   <span className="inbox-title">{itemTitle(it)}</span>
                   <span className={`badge inbox-state-${it.state}`}>{stateLabel(it.state)}</span>
+                  {nextStage(it) != null && <span className="muted small">次: {nextStage(it)?.label}</span>}
                   <span className="muted small">
                     {it.tracks.length} ファイル · {codecSummary(it.tracks)} · 検出 {formatDateTime(it.detected_at)}
                   </span>
@@ -225,6 +228,16 @@ function ItemForm({
             <span className={`badge inbox-state-${item.state}`}>{stateLabel(item.state)}</span>
             {changes > 0 && <span className="badge inbox-changed-badge">変更 {changes} 件</span>}
           </div>
+          {item.stages != null && item.stages.length > 0 && (
+            <ol className="inbox-stages" aria-label="配置後の処理の進み">
+              {item.stages.map((s) => (
+                <li key={s.key} className={`stage-${s.status}`}>
+                  <span className="stage-label">{s.label}</span>
+                  <span className="stage-state">{stageText(s)}</span>
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
       </div>
       {item.state === 'placed' && placedAlbumId != null && (

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { TrackRow } from '../api/types'
-import { BADGE_LEGEND, badgesOf } from './badges'
+import type { Device, TrackRow } from '../api/types'
+import { BADGE_LEGEND, badgesOf, deviceBadges } from './badges'
 
 const base: TrackRow = {
   id: 1,
@@ -162,12 +162,41 @@ describe('badgesOf', () => {
       { ...base, hardlink: true },
       { ...base, missing_since: 1 },
     ]
+    // 端末のバッジ（key は device:<id>）は凡例の key `device` に寄せる。removing は出さない
+    const devs = [1, 2, 3, 4].map((id) => ({ id, name: `d${id}` })) as Device[]
+    const withDevices = {
+      ...base,
+      devices: [
+        { device_id: 1, state: 'synced', synced_at: null },
+        { device_id: 2, state: 'pending', op: 'add', reason: null },
+        { device_id: 3, state: 'waiting', reason: 'x', has_copy: false },
+        { device_id: 4, state: 'error', reason: 'x', has_copy: false },
+      ],
+    } as unknown as TrackRow
+    const norm = (b: { key: string; icon: string; cls: string }) =>
+      // stale の • は同じ意味なので凡例では 1 行にまとめる
+      `${b.key.replace(/^device:\d+$/, 'device')}|${b.icon.replace('•', '')}|${b.cls}`
     for (const r of rows) {
-      for (const b of badgesOf(r)) {
-        // stale の • は同じ意味なので凡例では 1 行にまとめる
-        const k = `${b.key}|${b.icon.replace('•', '')}|${b.cls}`
-        expect(legend.has(k), `凡例に無い: ${k}`).toBe(true)
-      }
+      for (const b of badgesOf(r)) expect(legend.has(norm(b)), `凡例に無い: ${norm(b)}`).toBe(true)
     }
+    const dbs = deviceBadges(withDevices, devs)
+    expect(dbs).toHaveLength(4)
+    for (const b of dbs) expect(legend.has(norm(b)), `凡例に無い: ${norm(b)}`).toBe(true)
+  })
+})
+
+describe('端末のバッジ', () => {
+  it('端末ごとに 1 つ、removing は出さない', () => {
+    const t = {
+      devices: [
+        { device_id: 1, state: 'synced', synced_at: null },
+        { device_id: 2, state: 'pending', op: 'add', reason: null },
+        { device_id: 3, state: 'removing' },
+      ],
+    } as unknown as TrackRow
+    const got = deviceBadges(t, [{ id: 1, name: 'iPhone' }, { id: 2, name: 'Xperia' }, { id: 3, name: 'iPad' }] as Device[])
+    expect(got.map((b) => b.key)).toEqual(['device:1', 'device:2'])
+    expect(got[0]?.label).toContain('iPhone')
+    expect(got[1]?.cls).toContain('b-device-pending')
   })
 })

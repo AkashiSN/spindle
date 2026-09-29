@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch, apiPost, onUnauthorized } from './api/client'
-import type { LibraryEvent, Playlist, TrackRow } from './api/types'
+import type { Device, LibraryEvent, Playlist, TrackRow } from './api/types'
 import { AlbumGrid } from './components/AlbumGrid'
 import { AlbumArt } from './components/AlbumArt'
 import { HistoryView } from './components/HistoryView'
@@ -90,6 +90,9 @@ export default function App() {
   if (auth === 'out') return <Login onLoggedIn={() => setAuth('in')} />
   return <Shell onLogout={() => setAuth('out')} />
 }
+
+/** 端末の一覧が未取得のときの空配列（参照を固定して表の列定義を作り直さない） */
+const NO_DEVICES: Device[] = []
 
 function Shell({ onLogout }: { onLogout: () => void }) {
   // `/youtube?url=` で開かれたら YouTube 画面から始める（ブックマークレットの受け口。hooks/useYoutube）
@@ -562,6 +565,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       {view === 'tracks' && (
       <RightPanel
         selection={selection}
+        devices={devices.items ?? NO_DEVICES}
         summary={summary}
         selectedRows={selectedRows}
         details={details}
@@ -588,6 +592,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         )}
         {view === 'tracks' ? (
           <TrackTable
+            devices={devices.items ?? NO_DEVICES}
             rows={tracks.snapshot.rows}
             total={tracks.snapshot.total}
             loading={tracks.snapshot.loading}

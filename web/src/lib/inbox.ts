@@ -185,6 +185,29 @@ export type InboxItem = {
   destination: InboxDestination | null
   /** CD の件の照会の材料（P4-21）。CD でない件は null（旧サーバでは無い） */
   rip?: RipLookup | null
+  /** 承認済み・配置中・配置済みの件の段（配置 → RG → 系統 → 端末）。旧サーバでは無い */
+  stages?: Stage[]
+}
+
+export type StageStatus = 'done' | 'running' | 'todo' | 'na'
+export type Stage = { key: string; label: string; status: StageStatus; done: number; total: number }
+
+/** 最初の未完了の段（完了・対象外を飛ばす）。全部済んでいれば null */
+export function nextStage(item: Pick<InboxItem, 'stages'>): Stage | null {
+  return item.stages?.find((s) => s.status === 'todo' || s.status === 'running') ?? null
+}
+
+export function stageText(s: Stage): string {
+  switch (s.status) {
+    case 'done':
+      return '完了'
+    case 'running':
+      return s.total > 0 ? `進行中（${s.done}/${s.total}）` : '進行中'
+    case 'todo':
+      return '未'
+    case 'na':
+      return '対象外'
+  }
 }
 
 export const STATE_LABELS: Record<InboxState, string> = {
