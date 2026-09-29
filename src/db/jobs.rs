@@ -35,10 +35,12 @@ pub enum JobType {
     Hirescheck,
     /// 再生リストの購読の同期（P4-16、D-78）
     PlaylistSync,
+    /// 送る元のハッシュの計算（P5-1、D-95）
+    SourceHash,
 }
 
 impl JobType {
-    pub const ALL: [JobType; 16] = [
+    pub const ALL: [JobType; 17] = [
         JobType::Scan,
         JobType::Rip,
         JobType::Verify,
@@ -55,6 +57,7 @@ impl JobType {
         JobType::Backup,
         JobType::Hirescheck,
         JobType::PlaylistSync,
+        JobType::SourceHash,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -75,6 +78,7 @@ impl JobType {
             JobType::Backup => "backup",
             JobType::Hirescheck => "hirescheck",
             JobType::PlaylistSync => "playlist_sync",
+            JobType::SourceHash => "source_hash",
         }
     }
 
@@ -109,6 +113,8 @@ impl JobType {
             JobType::Hirescheck => (cpus / 2).max(1),
             // 購読ごとに揃えとリネームを順に行う。yt-dlp の列挙も 1 本ずつ
             JobType::PlaylistSync => 1,
+            // 読み取りが主（CPU の共通予算は取らない）。NAS のディスクを塞がない程度に
+            JobType::SourceHash => 2,
         }
     }
 
@@ -296,9 +302,11 @@ pub fn subject_of(
             track().map(|t| format!("{t} [{variant}]"))
         }
         JobType::Rg => track().or_else(album),
-        JobType::Flaccheck | JobType::Hirescheck | JobType::Tagwrite | JobType::Normalize => {
-            track()
-        }
+        JobType::Flaccheck
+        | JobType::Hirescheck
+        | JobType::Tagwrite
+        | JobType::Normalize
+        | JobType::SourceHash => track(),
         JobType::Verify => album(),
         JobType::Rename => batch(),
         JobType::Scan => text_of("kind"),
