@@ -279,8 +279,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         // バッジは画面に関わらず更新する（Inbox を開いていなくても数字が増える）
         inboxSummary.refresh()
         if (view === 'inbox') inbox.refresh()
-        // 端末の差分はハッシュ計算・変換・評価の完了で変わる（hook 側で 250ms に間引く）
-        devices.refresh()
+        // 端末の差分はハッシュ計算・変換・評価の完了で変わる（hook 側で静かになってから取る）
+        devices.refreshAfterJob()
       }
     },
     onBatch: () => {

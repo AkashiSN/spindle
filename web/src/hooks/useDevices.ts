@@ -1,5 +1,6 @@
 // 端末タブとナビのバッジ（P5-2、D-95）。一覧は画面を開いていなくても 60 秒ごとに取る（バッジ）。
-// 差分は端末タブで選んだ端末だけ取る。どちらもジョブの完了で取り直す（250ms で間引く）
+// 差分は端末タブで選んだ端末だけ取る。どちらもジョブの完了で取り直す（完了が続く間は待ち、静かになって
+// から 3 秒後に 1 回。最長 10 秒で必ず取る。取るたびにサーバはハッシュの投入を確かめるので、完了のたびには取らない）
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPatch, apiPost } from '../api/client'
@@ -8,8 +9,11 @@ import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { mergePending, togglePlaylist } from '../lib/devicePicker'
 import { withPlaylistIds } from '../lib/devicePicker'
 import { Latest } from '../lib/latest'
+import { TrailingDebounce } from '../lib/debounce'
 
 const POLL_MS = 60_000
+const JOB_REFRESH_WAIT_MS = 3000
+const JOB_REFRESH_MAX_WAIT_MS = 10_000
 
 export function useDevices(enabled: boolean, selectedId: number | null) {
   const [items, setItems] = useState<Device[] | null>(null)
@@ -19,7 +23,6 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
   const [busy, setBusy] = useState(false)
   const listGen = useRef(new Latest())
   const diffGen = useRef(new Latest())
-  const timer = useRef<number | null>(null)
   // 選んでいる端末。間引きの待ちや保存の途中で端末を切り替えても、取るのは常にいま選んでいる端末の差分
   // （作った時点の selectedId を閉じ込めた関数を後から呼ぶと、前の端末の要求が新しい端末の応答を捨てる）
   const selectedRef = useRef(selectedId)
@@ -69,14 +72,25 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
         if (!(e instanceof ApiError && e.code === 'not_found')) setError(deviceMessage(e))
       })
   }, [])
-  const refresh = useCallback(() => {
-    if (timer.current != null) return
-    timer.current = window.setTimeout(() => {
-      timer.current = null
-      fetchList()
-      fetchDiff()
-    }, 250)
+  // ジョブの完了による取り直しの間引き。fetchList / fetchDiff は固定なので一度だけ作る
+  const jobRefresh = useRef<TrailingDebounce | null>(null)
+  const jobDebounce = useCallback(() => {
+    if (jobRefresh.current == null) {
+      jobRefresh.current = new TrailingDebounce(
+        () => {
+          fetchList()
+          fetchDiff()
+        },
+        JOB_REFRESH_WAIT_MS,
+        JOB_REFRESH_MAX_WAIT_MS,
+      )
+    }
+    return jobRefresh.current
   }, [fetchList, fetchDiff])
+  /** 今すぐ取り直す（再接続など。間引きの予約は消す） */
+  const refresh = useCallback(() => jobDebounce().flush(), [jobDebounce])
+  /** ジョブの完了で取り直す（間引く） */
+  const refreshAfterJob = useCallback(() => jobDebounce().trigger(), [jobDebounce])
 
   useEffect(() => {
     if (!enabled) return
@@ -86,10 +100,7 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     return () => {
       window.clearInterval(id)
       // 間引きの待ちが残っていたら止める（アンマウント後に走らせない）
-      if (timer.current != null) {
-        window.clearTimeout(timer.current)
-        timer.current = null
-      }
+      jobRefresh.current?.cancel()
       g.invalidate()
     }
   }, [enabled, fetchList])
@@ -162,6 +173,7 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     error,
     busy,
     refresh,
+    refreshAfterJob,
     clearError: () => setError(null),
     /** iPhone（Mac の spindle-agent 経由）を登録する。成功すれば作った端末（選び直しに使う） */
     createIphone: async (name: string, variant: DeviceVariant, selection: DeviceSelection): Promise<Device | null> => {
