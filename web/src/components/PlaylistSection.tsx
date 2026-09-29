@@ -4,8 +4,17 @@
 
 import { useCallback, useEffect, useState, type DragEvent } from 'react'
 import { ApiError } from '../api/client'
-import { EXPORT_PROFILES, type ExportProfileName, type Fb2kQuery, type ImportCandidate, type Playlist } from '../api/types'
+import {
+  EXPORT_PROFILES,
+  type Device,
+  type ExportProfileName,
+  type Fb2kQuery,
+  type ImportCandidate,
+  type Playlist,
+} from '../api/types'
 import type { Playlists } from '../hooks/usePlaylists'
+import { chipsFor } from '../lib/devicePicker'
+import { deviceMessage } from '../lib/devices'
 import { formatDuration } from '../lib/format'
 import { exportNotice, parseDragIds, TRACK_DRAG_TYPE } from '../lib/playlists'
 import { Fb2kQueryDialog } from './Fb2kQueryDialog'
@@ -20,6 +29,8 @@ export function PlaylistSection({
   onRefreshed,
   notice,
   onNotice,
+  devices,
+  onToggleDevice,
 }: {
   playlists: Playlists
   /** scope が指しているプレイリスト */
@@ -36,11 +47,30 @@ export function PlaylistSection({
   /** 直近の操作結果（App が持つ。追加・除外は表側からも起きる） */
   notice: string | null
   onNotice: (text: string | null) => void
+  /** 端末の一覧（チップと「端末へ送る」。仕様 ④ 選曲の近道） */
+  devices: Device[]
+  /** 「端末へ送る」の印を付け外しする（結果は App が notice に出す） */
+  onToggleDevice: (device: Device, playlistId: number) => void
 }) {
   const [menuFor, setMenuFor] = useState<number | null>(null)
   const [fb2k, setFb2k] = useState<{ name: string; result: Fb2kQuery } | null>(null)
   const [dropOver, setDropOver] = useState<number | null>(null)
   const [importOpen, setImportOpen] = useState(false)
+  // 右クリックのメニュー（端末へ送る）。他の場所のクリック・Escape で閉じる（PropertiesPanel の props-menu と同じ流儀）
+  const [ctx, setCtx] = useState<{ id: number; x: number; y: number } | null>(null)
+  useEffect(() => {
+    if (ctx == null) return
+    const close = () => setCtx(null)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCtx(null)
+    }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [ctx])
 
   const fail = (e: unknown) => {
     const msg = e instanceof ApiError && e.code === 'duplicate' ? '同じ名前のプレイリストがある' : e instanceof Error ? e.message : String(e)
@@ -142,6 +172,11 @@ export function PlaylistSection({
               e.dataTransfer.dropEffect = 'copy'
               if (dropOver !== p.id) setDropOver(p.id)
             }}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setMenuFor(null)
+              setCtx({ id: p.id, x: e.clientX, y: e.clientY })
+            }}
             onDragLeave={() => setDropOver((cur) => (cur === p.id ? null : cur))}
             onDrop={(e) => {
               if (!acceptsDrop(e, p)) return
@@ -162,6 +197,11 @@ export function PlaylistSection({
               {p.kind === 'smart' ? '⚙ ' : '♪ '}
               {p.name}
               <span className="muted"> {p.track_count}</span>
+              {chipsFor(p.id, devices).map((d) => (
+                <span key={d.id} className="device-chip" title={`${d.name} に送る`}>
+                  📱 {d.name}
+                </span>
+              ))}
             </button>
             <button
               type="button"
@@ -198,6 +238,14 @@ export function PlaylistSection({
                     </button>
                   </>
                 )}
+                <DeviceItems
+                  playlistId={p.id}
+                  devices={devices}
+                  onToggle={(d) => {
+                    setMenuFor(null)
+                    onToggleDevice(d, p.id)
+                  }}
+                />
                 {EXPORT_PROFILES.map((profile) => (
                   <button key={profile} type="button" role="menuitem" onClick={() => void exportTo(p, profile)}>
                     書き出し: {profile}
@@ -216,6 +264,24 @@ export function PlaylistSection({
           </li>
         )}
       </ul>
+      {ctx != null && (
+        <div
+          className="props-menu"
+          role="menu"
+          style={{ left: ctx.x, top: ctx.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <DeviceItems
+            playlistId={ctx.id}
+            devices={devices}
+            onToggle={(d) => {
+              const id = ctx.id
+              setCtx(null)
+              onToggleDevice(d, id)
+            }}
+          />
+        </div>
+      )}
       {notice && (
         <p className="notice small" onClick={() => onNotice(null)} title="クリックで消す">
           {notice}
@@ -223,6 +289,40 @@ export function PlaylistSection({
       )}
       {fb2k && <Fb2kQueryDialog name={fb2k.name} result={fb2k.result} onClose={() => setFb2k(null)} />}
     </section>
+  )
+}
+
+/** 「端末へ送る」の小見出しと端末ごとのチェック項目（右クリックと … メニューで共有） */
+function DeviceItems({
+  playlistId,
+  devices,
+  onToggle,
+}: {
+  playlistId: number
+  devices: Device[]
+  onToggle: (d: Device) => void
+}) {
+  return (
+    <>
+      <div className="menu-heading muted small">端末へ送る</div>
+      {devices.length === 0 && <div className="menu-heading muted small">端末タブで端末を追加してください</div>}
+      {devices.map((d) => {
+        const checked = d.playlist_ids.includes(playlistId)
+        return (
+          <button
+            key={d.id}
+            type="button"
+            role="menuitemcheckbox"
+            aria-checked={checked}
+            disabled={d.open_plan}
+            title={d.open_plan ? deviceMessage(new ApiError(409, 'open_plan')) : undefined}
+            onClick={() => onToggle(d)}
+          >
+            {checked ? '☑' : '☐'} {d.name}
+          </button>
+        )
+      })}
+    </>
   )
 }
 

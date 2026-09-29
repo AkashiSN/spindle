@@ -3288,3 +3288,21 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 .devices-settings button.danger {
   color: var(--error);
 }
+
+/* プレイリストの行の送り先チップ（P5-2、仕様 ④ 選曲の近道） */
+.device-chip {
+  display: inline-block;
+  margin-left: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+.menu-heading {
+  padding: 4px 12px 2px;
+}
+.device-pending select {
+  max-width: 9em;
+}

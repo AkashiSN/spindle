@@ -40,6 +40,8 @@ export type Filter = {
   album_ids?: number[]
   playlist_id?: number
   flags?: Flag[]
+  /** 端末に未反映（端末 id）。サーバの Filter.device_pending */
+  device_pending?: number
   /** スマートプレイリスト DSL（WHERE だけ。ルール編集中のプレビュー用。D-39 / D-54） */
   dsl?: string
   q?: string
@@ -57,6 +59,7 @@ export function filterToParam(f: Filter): string {
   if (f.playlist_id != null) out.playlist_id = f.playlist_id
   const flags = [...new Set(f.flags ?? [])].sort()
   if (flags.length > 0) out.flags = flags
+  if (f.device_pending != null) out.device_pending = f.device_pending
   const dsl = f.dsl?.trim()
   if (dsl) out.dsl = dsl
   const q = f.q?.trim()
