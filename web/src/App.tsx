@@ -3,7 +3,7 @@
 //
 // - 認証: GET /api/auth/session が 401 ならログイン画面。API の 401 でもログイン画面へ戻す
 // - 表の集合 = サイドバーの scope + 上部ナビの検索語（filter）+ ソート
-// - 選択は lib/selection の immutable な値。表示フィルタ・ソート・SSE では変えない
+// - 選択は lib/selection の immutable な値。表の集合（filter）が変わったら解除し、ソート・SSE では変えない
 // - SSE は一覧より先に開く（D-36）。library で表示中ページを取り直し、job / batch で下部バーを更新
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -310,6 +310,15 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     setSelection(NO_SELECTION)
     setSelectionTotal(null)
   }, [])
+  // 表の集合（scope・検索語・ルール編集中の DSL）が変わったら選択を解除する。右パネルの対象は
+  // 表示中の表の行だけにする（前の表示で選んだ行が「選択 N 件」として残らない）。ソートは集合を
+  // 変えないので解除しない。描画中の setState は上と同じ「前回描画の情報を保持する」作法
+  const [selectionView, setSelectionView] = useState(filterParam)
+  if (selectionView !== filterParam) {
+    setSelectionView(filterParam)
+    setSelection(NO_SELECTION)
+    setSelectionTotal(null)
+  }
 
   const pendingInFilter =
     selectionFilterKey != null && pendingCount?.key === selectionFilterKey ? pendingCount.total : null
