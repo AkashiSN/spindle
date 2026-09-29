@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::playlists::{self as dbpl, MoveError, Playlist, Rename};
 use crate::db::{now_epoch, tracks};
+use crate::domain::device::PendingSets;
 use crate::domain::filter::Sort;
 use crate::domain::relpath::{RelPath, RelPathError};
 use crate::domain::selection::SelectionBody;
@@ -36,6 +37,7 @@ use crate::playlist::import::{parse_m3u8, resolve_entries, Resolver};
 use crate::playlist::smart;
 use crate::playlist::writer;
 
+use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::selection::SelectionError;
 use super::AppState;
@@ -277,6 +279,10 @@ pub async fn create(
         },
         None => None,
     };
+    let sets = match &rule {
+        Some((_, rule, _)) => devices::pending_for_rule(&state, rule).await?,
+        None => PendingSets::default(),
+    };
     // 作成と評価は 1 トランザクション（評価が失敗すれば空の smart 行を残さない）
     let row = match rule_or(
         state
@@ -289,7 +295,7 @@ pub async fn create(
                         let Some(p) = dbpl::create_smart(c, &name, &src, &json, now)? else {
                             return Ok(None);
                         };
-                        smart::refresh_one(c, p.id, &rule, now)?;
+                        smart::refresh_one(c, p.id, &rule, now, &sets)?;
                         dbpl::get(c, p.id)
                     }
                 }
@@ -315,7 +321,13 @@ pub async fn preview(
         Err(r) => return Ok(*r),
     };
     let ast = rule.clone();
-    let count = match rule_or(state.db.read(move |c| smart::evaluate(c, &rule)).await)? {
+    let sets = devices::pending_for_rule(&state, &rule).await?;
+    let count = match rule_or(
+        state
+            .db
+            .read(move |c| smart::evaluate(c, &rule, &sets))
+            .await,
+    )? {
         Ok(ids) => ids.len(),
         Err(r) => return Ok(r),
     };
@@ -327,6 +339,11 @@ pub async fn refresh(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, ApiError> {
+    // 集合はトランザクションの外で取る（スナップショットは非同期）。ルールは中で読み直す
+    let sets = match state.db.read(move |c| smart::load_rule(c, id)).await? {
+        Some(rule) => devices::pending_for_rule(&state, &rule).await?,
+        None => PendingSets::default(),
+    };
     let result = match rule_or(
         state
             .db
@@ -340,7 +357,7 @@ pub async fn refresh(
                 let Some(rule) = smart::load_rule(c, id)? else {
                     return Ok(None);
                 };
-                let (count, changed) = smart::refresh_one(c, id, &rule, now_epoch())?;
+                let (count, changed) = smart::refresh_one(c, id, &rule, now_epoch(), &sets)?;
                 Ok(Some(Some(Refreshed { count, changed })))
             })
             .await,
@@ -406,6 +423,10 @@ pub async fn patch(
         },
         None => None,
     };
+    let sets = match &rule {
+        Some((_, rule, _)) => devices::pending_for_rule(&state, rule).await?,
+        None => PendingSets::default(),
+    };
     // 全フィールドを 1 トランザクションで。どれかが通らなければ何も変えない
     let result = match rule_or(
         state
@@ -432,7 +453,7 @@ pub async fn patch(
                 let mut changed = false;
                 if let Some((src, rule, json)) = rule {
                     dbpl::set_rule(c, id, &src, &json, now)?;
-                    changed = smart::refresh_one(c, id, &rule, now)?.1;
+                    changed = smart::refresh_one(c, id, &rule, now, &sets)?.1;
                 }
                 Ok(Ok((dbpl::get(c, id)?, changed)))
             })
@@ -500,10 +521,13 @@ pub async fn append(
         SelectionBody::Filter { .. } => None,
     };
     let given_order_len = given_order.as_ref().map(Vec::len);
-    let sel = match body.selection.parse() {
+    let mut sel = match body.selection.parse() {
         Ok(s) => s,
         Err(e) => return Ok(bad_request(e.to_string())),
     };
+    if let Some(f) = sel.filter_mut() {
+        devices::attach_pending(&state, f).await?;
+    }
     let rows = match state
         .db
         .read(move |c| tracks::resolve_selection_sorted(c, &sel, sort))
@@ -555,10 +579,13 @@ pub async fn remove(
     }
     let mut track_ids = body.track_ids;
     if let Some(sel) = body.selection {
-        let sel = match sel.parse() {
+        let mut sel = match sel.parse() {
             Ok(s) => s,
             Err(e) => return Ok(bad_request(e.to_string())),
         };
+        if let Some(f) = sel.filter_mut() {
+            devices::attach_pending(&state, f).await?;
+        }
         let rows = match state
             .db
             .read(move |c| tracks::resolve_selection(c, &sel))

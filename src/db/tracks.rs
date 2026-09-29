@@ -378,11 +378,19 @@ fn filter_where(f: &Filter) -> Where {
         // Filter::parse が検証済み。万一ここで失敗したら空集合（黙って全件にしない）
         match crate::playlist::dsl::parse(dsl)
             .ok()
-            .and_then(|r| crate::playlist::compile::where_clause(&r).ok())
+            .and_then(|r| crate::playlist::compile::where_clause(&r, &f.pending).ok())
         {
             Some(frag) => w.push(&frag.sql, frag.params),
             None => w.push("0", []),
         }
+    }
+    if let Some(id) = f.device_pending {
+        // 集合は API が attach_pending で埋める。埋めていなければ空集合（一致なし）
+        let json = serde_json::to_string(f.pending.for_id(id)).unwrap_or_else(|_| "[]".to_owned());
+        w.push(
+            "t.id IN (SELECT value FROM json_each(?))",
+            [Value::from(json)],
+        );
     }
     if let Some(q) = &f.q {
         if uses_fts(q) {

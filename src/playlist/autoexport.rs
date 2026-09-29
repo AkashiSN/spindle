@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::{now_epoch, playlists as dbpl, Db};
+use crate::domain::device::PendingSets;
 use crate::fsroot::RootDir;
 use crate::jobs::{Event, JobState, Jobs, PlaylistEvent};
 
@@ -86,7 +87,17 @@ impl AutoExport {
     }
 
     async fn run_once(&self) {
-        let refreshed = self.db.write(|c| smart::refresh_all(c, now_epoch())).await;
+        let sets = match self.db.device_snapshot().await {
+            Ok(s) => s.pending_sets(),
+            Err(e) => {
+                tracing::warn!(error = %e, "端末の状態を読めない（device_pending は空として評価する）");
+                PendingSets::default()
+            }
+        };
+        let refreshed = self
+            .db
+            .write(move |c| smart::refresh_all(c, now_epoch(), &sets))
+            .await;
         match refreshed {
             Ok((evaluated, changed)) => {
                 tracing::info!(

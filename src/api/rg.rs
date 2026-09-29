@@ -25,6 +25,7 @@ use crate::edit::{EditError, Editor};
 use crate::jobs::handlers::rg::{new_album_job, new_track_job};
 use crate::jobs::EnqueueResult;
 
+use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 
@@ -58,7 +59,7 @@ pub async fn start(
             ))
         }
     };
-    let sel = match body.selection.parse() {
+    let mut sel = match body.selection.parse() {
         Ok(s) => s,
         Err(e) => {
             return Ok(error_response_with_message(
@@ -68,6 +69,9 @@ pub async fn start(
             ))
         }
     };
+    if let Some(f) = sel.filter_mut() {
+        devices::attach_pending(&state, f).await?;
+    }
     // 投入単位は album の属性で分かれる（`albums.album_gain` が on なら album 単位、それ以外は
     // track 単位。D-74）
     let (albums, track_ids) = state
@@ -181,7 +185,7 @@ pub async fn write(
         Ok(e) => e,
         Err(r) => return Ok(*r),
     };
-    let sel = match body.selection.parse() {
+    let mut sel = match body.selection.parse() {
         Ok(s) => s,
         Err(e) => {
             return Ok(error_response_with_message(
@@ -191,6 +195,9 @@ pub async fn write(
             ))
         }
     };
+    if let Some(f) = sel.filter_mut() {
+        devices::attach_pending(&state, f).await?;
+    }
     let (ids, pending) = state
         .db
         .read(move |c| {

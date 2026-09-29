@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use rusqlite::types::Value;
 use rusqlite::Connection;
 
+use crate::domain::device::PendingSets;
 use crate::domain::filter::like_pattern;
+use crate::domain::relpath::canonical_key;
 
 use super::dsl::{Cmp, Expr, Order, OrderField, Rule};
 
@@ -45,6 +47,10 @@ enum Kind {
     Bool(&'static str),
     /// UNIX epoch 秒の列（日付として比較）
     Epoch(&'static str),
+    /// 端末に同期済み（値は端末名。IS だけ）
+    OnDevice,
+    /// 端末に未反映（値は端末名。IS だけ。集合は呼び出し側が [`PendingSets`] で渡す）
+    DevicePending,
     /// 任意タグ（track_tags のキー）
     Tag(String),
 }
@@ -82,6 +88,8 @@ fn resolve(field: &str) -> Kind {
         "cliff" => Kind::Float("t.hires_cliff_db"),
         "effectivebits" | "effective_bits" => Kind::Int("t.hires_effective_bits"),
         "added" => Kind::Epoch("t.added_at"),
+        "on_device" => Kind::OnDevice,
+        "device_pending" => Kind::DevicePending,
         other => Kind::Tag(other.to_ascii_uppercase()),
     }
 }
@@ -102,24 +110,25 @@ pub struct Compiled {
     pub limit: Option<u64>,
 }
 
-/// 構文木の型検査だけを行う（保存前の検証）
+/// 構文木の型検査だけを行う（保存前の検証）。端末の集合は空で検査する
 pub fn check(rule: &Rule) -> Result<(), CompileError> {
-    compile(rule).map(|_| ())
+    compile(rule, &PendingSets::default()).map(|_| ())
 }
 
-pub fn compile(rule: &Rule) -> Result<Compiled, CompileError> {
+/// `sets` は `%device_pending%` が引く未反映の集合（端末のフィールドを使わないなら空で良い）
+pub fn compile(rule: &Rule, sets: &PendingSets) -> Result<Compiled, CompileError> {
     Ok(Compiled {
-        r#where: where_clause(rule)?,
+        r#where: where_clause(rule, sets)?,
         order: order_clause(rule.order.as_ref())?,
         limit: rule.limit,
     })
 }
 
 /// WHERE 句だけ（一覧の `filter.dsl` 用）。`missing` を参照しなければ active 限定を足す
-pub fn where_clause(rule: &Rule) -> Result<Fragment, CompileError> {
+pub fn where_clause(rule: &Rule, sets: &PendingSets) -> Result<Fragment, CompileError> {
     let mut f = Fragment::default();
     f.sql.push('(');
-    expr(&rule.r#where, &mut f)?;
+    expr(&rule.r#where, &mut f, sets)?;
     f.sql.push(')');
     if !rule.fields().contains(&"missing") {
         f.sql.push_str(" AND t.missing_since IS NULL");
@@ -127,7 +136,7 @@ pub fn where_clause(rule: &Rule) -> Result<Fragment, CompileError> {
     Ok(f)
 }
 
-fn expr(e: &Expr, f: &mut Fragment) -> Result<(), CompileError> {
+fn expr(e: &Expr, f: &mut Fragment, sets: &PendingSets) -> Result<(), CompileError> {
     match e {
         Expr::And(v) | Expr::Or(v) => {
             let joiner = if matches!(e, Expr::And(_)) {
@@ -144,19 +153,19 @@ fn expr(e: &Expr, f: &mut Fragment) -> Result<(), CompileError> {
                 if i > 0 {
                     f.sql.push_str(joiner);
                 }
-                expr(x, f)?;
+                expr(x, f, sets)?;
             }
             f.sql.push(')');
         }
         Expr::Not(x) => {
             // NOT の中で NULL が出ると全体が NULL（偽）になる。coalesce で「成立しない」を偽に固定
             f.sql.push_str("NOT coalesce(");
-            expr(x, f)?;
+            expr(x, f, sets)?;
             f.sql.push_str(", 0)");
         }
-        Expr::Cmp { field, cmp, value } => compare(field, *cmp, value, f)?,
-        Expr::Present(field) => presence(field, true, f),
-        Expr::Missing(field) => presence(field, false, f),
+        Expr::Cmp { field, cmp, value } => compare(field, *cmp, value, f, sets)?,
+        Expr::Present(field) => presence(field, true, f)?,
+        Expr::Missing(field) => presence(field, false, f)?,
     }
     Ok(())
 }
@@ -174,6 +183,13 @@ fn value_err(field: &str, value: &str, what: &str) -> CompileError {
         value: value.to_owned(),
         what: what.to_owned(),
     }
+}
+
+fn device_only_is(field: &str, cmp: Cmp) -> CompileError {
+    field_err(
+        field,
+        &format!("{}（端末のフィールドは IS 端末名 だけ）", cmp_name(cmp)),
+    )
 }
 
 fn cmp_name(c: Cmp) -> &'static str {
@@ -298,7 +314,13 @@ fn text_cmp(
     Ok(())
 }
 
-fn compare(field: &str, cmp: Cmp, value: &str, f: &mut Fragment) -> Result<(), CompileError> {
+fn compare(
+    field: &str,
+    cmp: Cmp,
+    value: &str,
+    f: &mut Fragment,
+    sets: &PendingSets,
+) -> Result<(), CompileError> {
     match resolve(field) {
         Kind::Text(col) => text_cmp(field, col, cmp, value, f),
         Kind::Int(col) => match cmp {
@@ -409,6 +431,28 @@ fn compare(field: &str, cmp: Cmp, value: &str, f: &mut Fragment) -> Result<(), C
                 text_cmp(field, &format!("date({col}, 'unixepoch')"), cmp, value, f)
             }
         },
+        Kind::OnDevice => match cmp {
+            Cmp::Is => {
+                f.sql.push_str(
+                    "EXISTS (SELECT 1 FROM device_items di JOIN devices dv ON dv.id = di.device_id \
+                     WHERE di.track_id = t.id AND dv.name_key = ?)",
+                );
+                f.params.push(Value::from(canonical_key(value.trim())));
+                Ok(())
+            }
+            _ => Err(device_only_is(field, cmp)),
+        },
+        Kind::DevicePending => match cmp {
+            Cmp::Is => {
+                let ids = sets.for_key(&canonical_key(value.trim()));
+                let json = serde_json::to_string(ids)
+                    .map_err(|e| value_err(field, value, &e.to_string()))?;
+                f.sql.push_str("t.id IN (SELECT value FROM json_each(?))");
+                f.params.push(Value::from(json));
+                Ok(())
+            }
+            _ => Err(device_only_is(field, cmp)),
+        },
         Kind::Tag(key) => match cmp {
             Cmp::Greater | Cmp::Less => Err(field_err(
                 field,
@@ -427,7 +471,7 @@ fn compare(field: &str, cmp: Cmp, value: &str, f: &mut Fragment) -> Result<(), C
     }
 }
 
-fn presence(field: &str, present: bool, f: &mut Fragment) {
+fn presence(field: &str, present: bool, f: &mut Fragment) -> Result<(), CompileError> {
     let sql = match resolve(field) {
         Kind::Text(col) => format!("({col} IS NOT NULL AND {col} <> '')"),
         Kind::Int(col) | Kind::Float(col) | Kind::Seconds(col) | Kind::Epoch(col) => {
@@ -435,6 +479,12 @@ fn presence(field: &str, present: bool, f: &mut Fragment) {
         }
         // 真偽のフィールドは常に値を持つ
         Kind::Bool(_) => "1".to_owned(),
+        Kind::OnDevice | Kind::DevicePending => {
+            return Err(field_err(
+                field,
+                "PRESENT / MISSING（端末のフィールドは IS 端末名 だけ）",
+            ))
+        }
         Kind::Tag(key) => {
             f.params.push(Value::from(key));
             "EXISTS (SELECT 1 FROM track_tags tt WHERE tt.track_id = t.id AND tt.key = ?)"
@@ -446,6 +496,7 @@ fn presence(field: &str, present: bool, f: &mut Fragment) {
     } else {
         f.sql.push_str(&format!("NOT {sql}"));
     }
+    Ok(())
 }
 
 /// ORDER BY の式。無ければ id 順。NULL は末尾（昇順でも降順でも）
@@ -466,6 +517,7 @@ fn order_clause(order: Option<&Order>) -> Result<Fragment, CompileError> {
                     (col.to_owned(), "")
                 }
                 Kind::Bool(sql) => (format!("({sql})"), ""),
+                Kind::OnDevice | Kind::DevicePending => return Err(field_err(field, "ORDER BY")),
                 Kind::Tag(key) => {
                     // 式は 2 回（IS NULL と値）出るのでキーも 2 回バインドする
                     f.params.push(Value::from(key.clone()));
@@ -486,8 +538,8 @@ fn order_clause(order: Option<&Order>) -> Result<Fragment, CompileError> {
 }
 
 /// ルールを評価してトラック id を並び順で返す
-pub fn evaluate(conn: &Connection, rule: &Rule) -> Result<Vec<i64>, EvalError> {
-    let c = compile(rule)?;
+pub fn evaluate(conn: &Connection, rule: &Rule, sets: &PendingSets) -> Result<Vec<i64>, EvalError> {
+    let c = compile(rule, sets)?;
     let sql = format!(
         "SELECT t.id FROM tracks t WHERE {} ORDER BY {}{}",
         c.r#where.sql,

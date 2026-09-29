@@ -491,6 +491,7 @@ async fn autoexport_task_re_evaluates_smart_lists_and_rewrites_recorded_exports(
         app.state.jobs.clone(),
         std::sync::Arc::new(RootDir::open(&app.playlists_dir()).unwrap()),
         Duration::from_millis(100),
+        std::sync::Arc::new(spindle::playlist::autoexport::ReevalFlag::new_dirty()),
     );
     let shutdown = tokio_util::sync::CancellationToken::new();
     let handle = task.spawn(shutdown.clone());

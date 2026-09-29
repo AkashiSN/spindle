@@ -26,6 +26,7 @@ use crate::domain::filter::Sort;
 use crate::domain::selection::{SelectionBody, Snapshot, SnapshotRow};
 use crate::edit::{EditError, Editor, NormalizePlan, NormalizeTarget};
 
+use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::selection;
 use super::AppState;
@@ -120,10 +121,13 @@ pub async fn preview(
             Err(e) => return Ok(bad_request(e.to_string())),
         },
     };
-    let sel = match body.selection.parse() {
+    let mut sel = match body.selection.parse() {
         Ok(s) => s,
         Err(e) => return Ok(bad_request(e.to_string())),
     };
+    if let Some(f) = sel.filter_mut() {
+        devices::attach_pending(&state, f).await?;
+    }
     let (rows, pending) = state
         .db
         .read(move |c| {

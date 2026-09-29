@@ -44,9 +44,20 @@ pub enum SelectionBody {
 pub enum Selection {
     Ids(Vec<i64>),
     Filter {
-        filter: Filter,
+        /// Filter は端末の集合（`pending`）を抱えて大きいので箱に入れる
+        filter: Box<Filter>,
         exclude_ids: Vec<i64>,
     },
+}
+
+impl Selection {
+    /// フィルタで表した選択なら、その Filter（API が端末の集合を埋めるため）
+    pub fn filter_mut(&mut self) -> Option<&mut Filter> {
+        match self {
+            Selection::Filter { filter, .. } => Some(filter),
+            Selection::Ids(_) => None,
+        }
+    }
 }
 
 impl SelectionBody {
@@ -57,7 +68,7 @@ impl SelectionBody {
                 filter,
                 exclude_ids,
             } => Selection::Filter {
-                filter: Filter::parse(&filter)?,
+                filter: Box::new(Filter::parse(&filter)?),
                 exclude_ids,
             },
         })

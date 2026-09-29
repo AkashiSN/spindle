@@ -16,6 +16,7 @@ use crate::db::tracks::{self, TrackDetail, TrackRow};
 use crate::domain::filter::{FilterError, Query};
 
 use super::auth::Session;
+use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 
@@ -50,10 +51,11 @@ pub async fn list(
     State(state): State<AppState>,
     QueryParams(params): QueryParams<ListParams>,
 ) -> Result<Response, ApiError> {
-    let query = match build_query(&params) {
+    let mut query = match build_query(&params) {
         Ok(q) => q,
         Err(e) => return Ok(bad_request(e)),
     };
+    devices::attach_pending(&state, &mut query.filter).await?;
     let page = state.db.read(move |c| tracks::list(c, &query)).await?;
     Ok(Json(page).into_response())
 }

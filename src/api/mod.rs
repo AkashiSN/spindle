@@ -8,6 +8,7 @@ pub mod batch;
 pub mod categories;
 pub mod cd;
 pub mod config;
+pub mod devices;
 pub mod error;
 pub mod events;
 pub mod flaccheck;
