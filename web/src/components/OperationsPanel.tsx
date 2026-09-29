@@ -232,7 +232,11 @@ export function OperationsPanel({
     case 'verify':
       runLabel = label('verify', '照合を投入')
       run = () => void ops.startVerify()
-      check = <span className="muted small">アルバム単位のジョブ。結果はバッジと data/verify/ のログ</span>
+      check = (
+        <span className="muted small">
+          アルバム単位のジョブ。結果は ④ に出る（どちらで一致したかはプロパティ、詳細は data/verify/ のログ）
+        </span>
+      )
       break
     case 'albumgain':
       check =
@@ -434,8 +438,32 @@ export function OperationsPanel({
               </button>
             </p>
           )}
+          {op.id === 'verify' && ops.verifyResult && <VerifyResult result={ops.verifyResult} />}
         </div>
       </Step>
+    </div>
+  )
+}
+
+/** 遡及照合の結果（終わったアルバムから 1 行ずつ。まだのものは件数だけ） */
+function VerifyResult({ result }: { result: NonNullable<Operations['verifyResult']> }) {
+  const finished = result.total - result.pending
+  return (
+    <div className="verify-result small">
+      <p className="muted">
+        {result.pending > 0
+          ? `照合中… ${formatCount(finished)} / ${formatCount(result.total)} アルバム完了`
+          : `${formatCount(result.total)} アルバムの照合が終わった`}
+      </p>
+      {result.lines.length > 0 && (
+        <ul>
+          {result.lines.map((l) => (
+            <li key={l.id} className={l.kind === 'error' ? 'error' : l.kind === 'pending' ? 'muted' : undefined}>
+              <span className="verify-subject">{l.subject}</span>: {l.text}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

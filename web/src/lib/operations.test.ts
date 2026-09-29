@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest'
+import type { Job } from '../api/types'
 import {
   embedMessage,
   flaccheckStartedMessage,
   hirescheckStartedMessage,
   verifyStartedMessage,
+  mergeVerifyJobs,
+  verifyActive,
+  verifyResults,
   md5FillMessage,
   operationErrorMessage,
   pathPreviewSummary,
@@ -54,10 +58,12 @@ describe('開始・書き込みの結果メッセージ', () => {
       '偽ハイレゾ検出を投入した: 0 件（既に投入済み 3）',
     )
   })
-  it('遡及照合はアルバム数と重複', () => {
-    expect(verifyStartedMessage({ albums: 4, duplicates: 0, job_ids: [] })).toBe('遡及照合を投入した: アルバム 4')
+  it('遡及照合は何アルバムの照合を始めたかと、結果の出る場所', () => {
+    expect(verifyStartedMessage({ albums: 4, duplicates: 0, job_ids: [] })).toBe(
+      '4 アルバムの照合を始めた。結果はこの下に出る',
+    )
     expect(verifyStartedMessage({ albums: 1, duplicates: 2, job_ids: [] })).toBe(
-      '遡及照合を投入した: アルバム 1（既に投入済み 2）',
+      '1 アルバムの照合を始めた（2 アルバムは照合待ちなので足さなかった）。結果はこの下に出る',
     )
   })
   it('MD5 補填はバッチ・件数・対象外・反映待ち除外', () => {
@@ -106,5 +112,117 @@ describe('embedMessage', () => {
     expect(operationErrorMessage(404, { error: 'artwork_not_found' })).toBe('画像が登録されていません。もう一度アップロードしてください')
     expect(operationErrorMessage(400, { error: 'unsupported_image' })).toBe('JPEG / PNG / WebP の画像だけを受け付けます')
     expect(operationErrorMessage(503, { error: 'artwork_unavailable' })).toBe('アートワークのキャッシュが無いので画像を扱えません')
+  })
+})
+
+describe('verifyResults（遡及照合の結果を操作タブに出す）', () => {
+  const job = (over: Partial<Job>): Job => ({
+    id: 1,
+    type: 'verify',
+    state: 'queued',
+    progress: null,
+    done: null,
+    total: null,
+    attempts: 0,
+    max_attempts: 5,
+    last_error: null,
+    run_after: null,
+    edit_batch_id: null,
+    created_at: 0,
+    started_at: null,
+    finished_at: null,
+    note: null,
+    subject: 'A/Alb',
+    ...over,
+  })
+  const seen = (...jobs: Job[]) => new Map(jobs.map((j) => [j.id, j]))
+
+  it('終わったジョブは対象と結果 1 行、終わっていなければ待ちの数', () => {
+    const r = verifyResults(
+      seen(
+        job({ id: 1, state: 'done', note: 'CTDB 全 2 曲一致（信頼度 34） / AccurateRip 登録なし' }),
+        job({ id: 2, state: 'running', subject: 'B/Alb' }),
+      ),
+      [1, 2],
+      true,
+    )
+    expect(r.pending).toBe(1)
+    expect(r.lines).toEqual([
+      { id: 1, subject: 'A/Alb', text: 'CTDB 全 2 曲一致（信頼度 34） / AccurateRip 登録なし', kind: 'done' },
+    ])
+  })
+
+  it('失敗・取り消し・再試行待ち', () => {
+    const r = verifyResults(
+      seen(
+        job({ id: 1, state: 'failed', last_error: 'CTDB の照会: timeout' }),
+        job({ id: 2, state: 'cancelled', subject: null }),
+        job({ id: 3, state: 'queued', attempts: 1, last_error: 'AccurateRip の照会: 503' }),
+      ),
+      [1, 2, 3],
+      true,
+    )
+    expect(r.pending).toBe(1)
+    expect(r.lines).toEqual([
+      { id: 1, subject: 'A/Alb', text: '失敗: CTDB の照会: timeout', kind: 'error' },
+      { id: 2, subject: 'job #2', text: '取り消した', kind: 'error' },
+      { id: 3, subject: 'A/Alb', text: '再試行待ち: AccurateRip の照会: 503', kind: 'pending' },
+    ])
+  })
+
+  it('一覧に出ていないジョブは、verify が動いている間は待ち（一覧は状態ごとに件数の上限がある）', () => {
+    expect(verifyResults(seen(), [1, 2], true)).toEqual({ pending: 2, lines: [] })
+    // verify が 1 件も動いていないのに一度も見えなかった（片付けられたか上限の外）ものは取れない
+    expect(verifyResults(seen(job({ id: 1, state: 'done', note: 'x' })), [1, 2], false)).toEqual({
+      pending: 0,
+      lines: [
+        { id: 1, subject: 'A/Alb', text: 'x', kind: 'done' },
+        { id: 2, subject: 'job #2', text: '結果を取れない（ジョブ画面で確認）', kind: 'error' },
+      ],
+    })
+  })
+
+  it('待ち・実行中として見えたまま verify が 1 件も動かなくなったら（完了の上限の外へ押し出された）取れない', () => {
+    const r = verifyResults(seen(job({ id: 1, state: 'queued' }), job({ id: 2, state: 'running', subject: 'B/Alb' })), [1, 2], false)
+    expect(r).toEqual({
+      pending: 0,
+      lines: [
+        { id: 1, subject: 'A/Alb', text: '結果を取れない（ジョブ画面で確認）', kind: 'error' },
+        { id: 2, subject: 'B/Alb', text: '結果を取れない（ジョブ画面で確認）', kind: 'error' },
+      ],
+    })
+  })
+
+  it('結果の無い完了は「完了」', () => {
+    const r = verifyResults(seen(job({ id: 1, state: 'done', note: null })), [1], false)
+    expect(r).toEqual({ pending: 0, lines: [{ id: 1, subject: 'A/Alb', text: '完了', kind: 'done' }] })
+  })
+})
+
+describe('mergeVerifyJobs', () => {
+  const job = (id: number, state: Job['state']): Job =>
+    ({ id, type: 'verify', state, subject: null }) as Job
+
+  it('追っている id だけを新しい状態で上書きし、一覧から落ちたものは前の状態を残す', () => {
+    const prev = new Map([
+      [1, job(1, 'done')],
+      [2, job(2, 'queued')],
+    ])
+    const next = mergeVerifyJobs(prev, [job(2, 'running'), job(9, 'done')], new Set([1, 2, 3]))
+    expect([...next.entries()].map(([id, j]) => [id, j.state])).toEqual([
+      [1, 'done'],
+      [2, 'running'],
+    ])
+    expect(prev.get(2)!.state).toBe('queued')
+  })
+})
+
+describe('verifyActive', () => {
+  it('verify の待ちか実行中が 1 件でもあれば true', () => {
+    const counts = (queued: number, running: number) => ({ queued, running, done: 0, failed: 0, cancelled: 0 })
+    expect(verifyActive({ verify: counts(0, 1) })).toBe(true)
+    expect(verifyActive({ verify: counts(2, 0) })).toBe(true)
+    expect(verifyActive({ verify: counts(0, 0) })).toBe(false)
+    expect(verifyActive({ rg: counts(5, 5) })).toBe(false)
   })
 })
