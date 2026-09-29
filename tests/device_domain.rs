@@ -183,3 +183,158 @@ fn utf16_len_counts_surrogates() {
     assert_eq!(utf16_len("群青"), 2);
     assert_eq!(utf16_len("𝄞"), 2);
 }
+
+fn hash_for(semantic: &str, sha: &str) -> SourceHash {
+    SourceHash {
+        semantic: semantic.into(),
+        inode: 1,
+        size: 10,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        sha256: sha.into(),
+    }
+}
+
+/// 送れる状態の Derived 曲
+fn ready(id: i64, rel: &str) -> TrackInput {
+    let mut t = input(id, rel, true);
+    let mut r = row();
+    r.rel_path = format!("opus/{}", dest_path(&t, SourceKind::Derived(Variant::Opus)));
+    t.derived = Some(r.clone());
+    t.hash_derived = Some(hash_for(
+        &semantic_derived(Variant::Opus, &r),
+        &format!("sha{id}"),
+    ));
+    t
+}
+
+#[test]
+fn manifest_puts_ready_tracks_in_desired_with_delivery_token() {
+    let m = build_manifest(&settings(Variant::Opus, true), 20, &[ready(1, "A/x.flac")]);
+    assert_eq!(m.desired.len(), 1);
+    let d = &m.desired[0];
+    assert_eq!(d.dest_path, "A/x.opus");
+    assert_eq!(d.sha256, "sha1");
+    assert_eq!(d.size, 10);
+    assert_eq!(d.token, delivery_token(&d.source.semantic, "sha1"));
+    assert!(m.hold.is_empty());
+    assert!(m.needs_hash.is_empty());
+}
+
+#[test]
+fn missing_or_stale_hash_is_hashing_and_requests_a_job() {
+    let mut t = ready(1, "A/x.flac");
+    t.hash_derived = None;
+    let m = build_manifest(&settings(Variant::Opus, true), 0, &[t.clone()]);
+    assert_eq!(m.hold, vec![(1, Hold::Wait(Wait::Hashing))]);
+    assert_eq!(m.needs_hash, vec![(1, SourceKind::Derived(Variant::Opus))]);
+    // 意味トークンが違うハッシュは古い
+    t.hash_derived = Some(hash_for("old", "x"));
+    let m = build_manifest(&settings(Variant::Opus, true), 0, &[t]);
+    assert_eq!(m.hold, vec![(1, Hold::Wait(Wait::Hashing))]);
+}
+
+#[test]
+fn colliding_dest_paths_hold_both() {
+    // x.flac（Derived → x.opus）と X.opus（原本）は casefold で同じ端末パス
+    let a = ready(1, "A/x.flac");
+    let mut b = input(2, "A/X.opus", false);
+    b.hash_master = Some(hash_for(&semantic_master(3, 5), "m"));
+    let c = ready(3, "A/y.flac");
+    let m = build_manifest(&settings(Variant::Opus, true), 0, &[a, b, c]);
+    assert_eq!(
+        m.desired.iter().map(|d| d.track_id).collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert_eq!(
+        m.hold,
+        vec![
+            (1, Hold::Error(ItemError::PathCollision)),
+            (2, Hold::Error(ItemError::PathCollision))
+        ]
+    );
+}
+
+#[test]
+fn too_long_path_is_an_error() {
+    let long = format!("A/{}.flac", "あ".repeat(230));
+    let m = build_manifest(&settings(Variant::Opus, true), 20, &[ready(1, &long)]);
+    assert_eq!(m.hold, vec![(1, Hold::Error(ItemError::PathTooLong))]);
+}
+
+#[test]
+fn m3u8_is_relative_from_playlists_dir() {
+    let body = render_playlist(Transport::Adb, &[(1, "A/x.opus"), (2, "B/y.opus")]);
+    assert_eq!(
+        String::from_utf8(body).unwrap(),
+        "#EXTM3U\n../A/x.opus\n../B/y.opus\n"
+    );
+}
+
+#[test]
+fn playlist_uses_current_path_for_held_copies_and_skips_absent() {
+    let m = build_manifest(&settings(Variant::Opus, true), 0, &[ready(1, "A/x.flac")]);
+    // 2 は hold だが端末に古い写しがある、3 は端末に無い
+    let mut held = m.clone();
+    held.hold.push((2, Hold::Wait(Wait::NoDerived)));
+    held.hold.push((3, Hold::Wait(Wait::NoDerived)));
+    let current = vec![DeviceItem {
+        track_id: 2,
+        dest_path: "Old/z.opus".into(),
+        token: "t".into(),
+        size: 1,
+        sha256: "s".into(),
+    }];
+    let pl = vec![PlaylistInput {
+        playlist_id: 9,
+        name: "通勤".into(),
+        track_ids: vec![3, 2, 1],
+    }];
+    let (out, errors) = build_playlists(Transport::Adb, &pl, &held, &current);
+    assert!(errors.is_empty());
+    assert_eq!(out[0].dest_path, "Playlists/通勤.m3u8");
+    assert_eq!(
+        String::from_utf8(out[0].body.clone()).unwrap(),
+        "#EXTM3U\n../Old/z.opus\n../A/x.opus\n"
+    );
+    assert_eq!(
+        out[0].token,
+        playlist_token(9, "通勤", &sha256_hex(&out[0].body))
+    );
+}
+
+#[test]
+fn playlist_name_collisions_and_reserved_names_are_errors() {
+    let m = Manifest::default();
+    let pl = vec![
+        PlaylistInput {
+            playlist_id: 1,
+            name: "Drive".into(),
+            track_ids: vec![],
+        },
+        PlaylistInput {
+            playlist_id: 2,
+            name: "drive".into(),
+            track_ids: vec![],
+        },
+        PlaylistInput {
+            playlist_id: 3,
+            name: ".spindle".into(),
+            track_ids: vec![],
+        },
+        PlaylistInput {
+            playlist_id: 4,
+            name: "ok".into(),
+            track_ids: vec![],
+        },
+    ];
+    let (out, errors) = build_playlists(Transport::Adb, &pl, &m, &[]);
+    assert_eq!(
+        out.iter().map(|p| p.playlist_id).collect::<Vec<_>>(),
+        vec![4]
+    );
+    assert_eq!(
+        errors.iter().map(|e| e.0).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+}
