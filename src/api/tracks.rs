@@ -55,8 +55,13 @@ pub async fn list(
         Ok(q) => q,
         Err(e) => return Ok(bad_request(e)),
     };
-    devices::attach_pending(&state, &mut query.filter).await?;
-    let page = state.db.read(move |c| tracks::list(c, &query)).await?;
+    // スナップショットは 1 回だけ取り、未反映の集合と行の状態の両方に使う
+    let snap = state.db.device_snapshot().await?;
+    if query.filter.uses_devices() {
+        query.filter.pending = snap.pending_sets();
+    }
+    let mut page = state.db.read(move |c| tracks::list(c, &query)).await?;
+    devices::annotate(&snap, &mut page.items);
     Ok(Json(page).into_response())
 }
 
@@ -133,6 +138,7 @@ pub async fn get(
         });
     }
     // 行と詳細は同じ読み取りトランザクションで取る（間にスキャンが commit しても世代が混ざらない）
+    let snap = state.db.device_snapshot().await?;
     let found =
         state
             .db
@@ -142,7 +148,10 @@ pub async fn get(
             })
             .await?;
     Ok(match found {
-        Some(t) => Json(t).into_response(),
+        Some(mut t) => {
+            devices::annotate(&snap, std::slice::from_mut(&mut t.row));
+            Json(t).into_response()
+        }
         None => error_response(StatusCode::NOT_FOUND, "not_found"),
     })
 }

@@ -26,6 +26,20 @@ pub async fn attach_pending(state: &AppState, f: &mut Filter) -> Result<(), ApiE
     Ok(())
 }
 
+/// 一覧の行に端末ごとの状態を付ける（状態の無い端末 = 対象外は付けない）
+pub fn annotate(snap: &crate::db::devices::Snapshot, rows: &mut [crate::db::tracks::TrackRow]) {
+    if snap.devices.is_empty() {
+        return;
+    }
+    for r in rows {
+        r.devices = snap
+            .states_of(r.id)
+            .into_iter()
+            .map(|(device_id, state)| crate::db::tracks::TrackDevice { device_id, state })
+            .collect();
+    }
+}
+
 /// ルールの評価に渡す集合（端末のフィールドを使わないルールなら空）
 pub async fn pending_for_rule(state: &AppState, rule: &Rule) -> Result<PendingSets, ApiError> {
     if rule.references_device_fields() {

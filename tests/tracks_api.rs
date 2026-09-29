@@ -599,3 +599,130 @@ async fn rows_carry_the_tracks_own_artwork_hash() {
         "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
     );
 }
+
+/// 非可逆の opus トラックを 1 曲入れる（端末の状態を引くテスト用）
+fn insert_opus(conn: &Connection, rel: &str) -> i64 {
+    let id = insert_track(conn, rel, rel, None);
+    conn.execute(
+        "UPDATE tracks SET codec = 'opus', lossless = 0, channels = 2 WHERE id = ?1",
+        [id],
+    )
+    .unwrap();
+    id
+}
+
+/// 行と 1 件の応答に端末ごとの状態が付く（セッションあり）
+#[tokio::test]
+async fn track_rows_carry_device_states() {
+    use spindle::db::devices::{create, NewDevice, Selection};
+    use spindle::domain::derived::Variant;
+    use spindle::domain::device::Transport;
+    let app = app().await;
+    let c = cookie(&app).await;
+    let (track_id, dev) = {
+        let conn = app.raw();
+        let t = insert_opus(&conn, "YT/a.opus");
+        let d = create(
+            &conn,
+            &NewDevice {
+                name: "iPhone",
+                transport: Transport::Agent,
+                variant: Variant::Aac,
+                selection: Selection::All,
+                adb: None,
+            },
+            0,
+        )
+        .unwrap();
+        (t, d.id)
+    };
+    let (st, v) = get(&app, &c, "/api/tracks").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let row = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == track_id)
+        .unwrap();
+    assert_eq!(row["devices"][0]["device_id"], dev);
+    assert_eq!(row["devices"][0]["state"], "waiting");
+    let (_, one) = get(&app, &c, &format!("/api/tracks/{track_id}")).await;
+    assert_eq!(one["devices"][0]["state"], "waiting");
+}
+
+/// 端末が無ければ `devices` は出ない
+#[tokio::test]
+async fn track_rows_omit_devices_when_none() {
+    let app = app().await;
+    let c = cookie(&app).await;
+    let id = insert_opus(&app.raw(), "YT/a.opus");
+    let (_, v) = get(&app, &c, "/api/tracks").await;
+    assert!(v["items"][0].get("devices").is_none(), "{v}");
+    let (_, one) = get(&app, &c, &format!("/api/tracks/{id}")).await;
+    assert!(one.get("devices").is_none(), "{one}");
+}
+
+/// 「端末に未反映」（`device_pending`）と DSL の `%device_pending%` が API で通る
+#[tokio::test]
+async fn device_pending_filter_selects_pending_tracks() {
+    use spindle::db::devices::{create, put_source_hash, NewDevice, Selection};
+    use spindle::domain::derived::Variant;
+    use spindle::domain::device::{semantic_master, SourceHash, SourceKind, Transport};
+    let app = app().await;
+    let c = cookie(&app).await;
+    let (a, dev) = {
+        let conn = app.raw();
+        let a = insert_opus(&conn, "YT/a.opus");
+        let _b = insert_opus(&conn, "YT/b.opus");
+        let d = create(
+            &conn,
+            &NewDevice {
+                name: "Xperia",
+                transport: Transport::Adb,
+                variant: Variant::Opus,
+                selection: Selection::All,
+                adb: Some(("SER1", "emulated", "Music/spindle")),
+            },
+            0,
+        )
+        .unwrap();
+        // a だけハッシュ済みにして未反映（追加）にする
+        let (inode, size, mtime_ns, ctime_ns): (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT inode, size, mtime_ns, ctime_ns FROM tracks WHERE id = ?1",
+                [a],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        put_source_hash(
+            &conn,
+            a,
+            SourceKind::Master,
+            &SourceHash {
+                semantic: semantic_master(1, 1),
+                inode: inode as u64,
+                size: size as u64,
+                mtime_ns,
+                ctime_ns,
+                sha256: "ab".repeat(32),
+            },
+            0,
+        )
+        .unwrap();
+        (a, d.id)
+    };
+    let filter = urlenc(&format!(r#"{{"device_pending":{dev}}}"#));
+    let (st, v) = get(&app, &c, &format!("/api/tracks?filter={filter}")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let ids: Vec<i64> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![a]);
+    let dsl = urlenc(r#"{"dsl":"%device_pending% IS xperia"}"#);
+    let (st, v) = get(&app, &c, &format!("/api/tracks?filter={dsl}")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 1, "{v}");
+}

@@ -57,6 +57,17 @@ pub struct TrackRow {
     pub album_id: Option<i64>,
     /// トラック自身の埋め込み画像の SHA-256（hex。無ければ None。D-61）
     pub artwork_hash: Option<String>,
+    /// 端末ごとの状態（P5-2）。対象の端末が無ければ省く。`read_row` では空で、API 層が付ける
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<TrackDevice>,
+}
+
+/// トラックの 1 端末ぶんの状態（`state` とその付帯情報は `TrackState` の形で平らに出る）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrackDevice {
+    pub device_id: i64,
+    #[serde(flatten)]
+    pub state: crate::domain::device::TrackState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -232,6 +243,7 @@ fn read_row(r: &Row) -> rusqlite::Result<TrackRow> {
         rel_path: r.get(22)?,
         album_id: r.get(31)?,
         artwork_hash: r.get(32)?,
+        devices: Vec::new(),
     })
 }
 
