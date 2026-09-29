@@ -184,6 +184,31 @@ impl Lib {
             self.wait_batch_terminal(p.batch_id).await,
             BatchState::Applied
         );
+        // バッチの確定はハンドラ内（apply_op）、ジョブ行の done はハンドラが返った後の
+        // ワーカーが書く。ジョブ履歴を見るテストのため、tagwrite ジョブの終端まで待つ
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let pending: i64 = self
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM jobs
+                     WHERE type = 'tagwrite' AND state NOT IN ('done', 'failed', 'cancelled')
+                       AND json_extract(payload, '$.op_id')
+                           IN (SELECT id FROM edit_ops WHERE batch_id = ?1)",
+                    [p.batch_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if pending == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "batch {} の tagwrite ジョブが終端にならない",
+                p.batch_id
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         p.batch_id
     }
 
