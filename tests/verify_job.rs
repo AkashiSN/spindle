@@ -357,6 +357,17 @@ impl Lib {
             .unwrap()
     }
 
+    /// 最後の verify ジョブの結果 1 行（`jobs.note`）
+    fn last_note(&self) -> Option<String> {
+        self.conn()
+            .query_row(
+                "SELECT note FROM jobs WHERE type = 'verify' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     fn log_path(&self, album_id: i64) -> PathBuf {
         self.dir
             .path()
@@ -480,6 +491,11 @@ async fn verified_album_records_both_methods_and_promotes_tracks() {
     );
     let s = lib.responses.lock().await;
     assert_eq!((s.ar_hits, s.ctdb_hits), (1, 1));
+    // 結果 1 行（操作タブが出す）。手法ごとに一致数と信頼度
+    assert_eq!(
+        lib.last_note().as_deref(),
+        Some("CTDB 全 2 曲一致（信頼度 34） / AccurateRip 全 2 曲一致（信頼度 12）")
+    );
 }
 
 /// 手元が基準より 3 サンプル遅れていれば offset 3 で一致し、detected_offset に残る
@@ -531,6 +547,10 @@ async fn accuraterip_only_match_promotes_to_verified_ar() {
     assert_eq!(ar.result, "verified");
     assert_eq!(ctdb.result, "not_found");
     assert_eq!(lib.track_states(album), vec!["verified_ar"]);
+    assert_eq!(
+        lib.last_note().as_deref(),
+        Some("CTDB 登録なし / AccurateRip 全 1 曲一致（信頼度 2）")
+    );
 }
 
 /// 壊れたトラックがあれば mismatch。一致したトラックは verified、壊れたものは mismatch
@@ -561,6 +581,10 @@ async fn corrupted_track_is_a_mismatch_without_touching_the_others() {
         tv.iter().map(|t| t.4).collect::<Vec<_>>(),
         vec![true, false]
     );
+    assert_eq!(
+        lib.last_note().as_deref(),
+        Some("CTDB 2 曲中 1 曲一致 / AccurateRip 2 曲中 1 曲一致")
+    );
 }
 
 /// どちらの DB にも無い → not_found。トラックは not_attempted のまま。ログは書く
@@ -579,6 +603,10 @@ async fn unknown_disc_is_not_found_and_tracks_stay_not_attempted() {
     assert!(v.iter().all(|x| x.result == "not_found"));
     assert_eq!(lib.track_states(album), vec!["not_attempted"]);
     assert!(lib.log_path(album).is_file());
+    assert_eq!(
+        lib.last_note().as_deref(),
+        Some("CTDB 登録なし / AccurateRip 登録なし")
+    );
 }
 
 /// 588 の倍数でないサンプル数（CD 由来でない）は unverifiable
@@ -598,6 +626,10 @@ async fn non_sector_aligned_disc_is_unverifiable() {
     assert_eq!(lib.track_states(album), vec!["unverifiable"]);
     let s = lib.responses.lock().await;
     assert_eq!((s.ar_hits, s.ctdb_hits), (0, 0), "照会しない");
+    drop(s);
+    let note = lib.last_note().unwrap();
+    assert!(note.starts_with("検証不能: "), "{note}");
+    assert!(note.contains("588 の倍数でない"), "{note}");
 }
 
 /// トラック番号が抜けている（不完全なディスク）は TOC を作れないので何もしない
@@ -617,6 +649,9 @@ async fn incomplete_disc_is_skipped() {
         lib.track_states(album),
         vec!["not_attempted", "not_attempted"]
     );
+    let note = lib.last_note().unwrap();
+    assert!(note.starts_with("照合しなかった: "), "{note}");
+    assert!(note.contains("連続していない"), "{note}");
 }
 
 /// 複数ディスクはディスクごとに TOC を作って照合し、disc_no 付きで記録する
@@ -650,6 +685,14 @@ async fn multi_disc_album_is_verified_per_disc() {
     let text = read_log(&lib.log_path(album));
     assert!(text.contains(&d1.toc.musicbrainz_disc_id()), "{text}");
     assert!(text.contains(&d2.toc.musicbrainz_disc_id()), "{text}");
+    // 複数ディスクはディスクごとに前置きを付ける
+    assert_eq!(
+        lib.last_note().as_deref(),
+        Some(
+            "disc 1: CTDB 登録なし / AccurateRip 登録なし。\
+             disc 2: CTDB 全 2 曲一致（信頼度 3） / AccurateRip 登録なし"
+        )
+    );
 }
 
 /// 照会に失敗したらジョブは失敗（再試行）し、何も記録しない
@@ -908,6 +951,8 @@ async fn rerun_of_the_same_job_after_commit_keeps_history_and_log() {
     assert_eq!(first.len(), 2);
     let first_log = read_log(&lib.log_path(album));
     let hits_before = lib.responses.lock().await.ctdb_hits;
+    let first_note = "CTDB 全 1 曲一致（信頼度 9） / AccurateRip 登録なし";
+    assert_eq!(lib.last_note().as_deref(), Some(first_note));
 
     // 別の PCM に差し替えてスキャン（audio_version が進む）し、DB の応答も別のディスクに
     let other = reference(77, &[75]);
@@ -941,6 +986,8 @@ async fn rerun_of_the_same_job_after_commit_keeps_history_and_log() {
         hits_before,
         "読み直しも照会もしない"
     );
+    // 結果 1 行は記録と同じトランザクションで書いたものを返す（「記録済み」で上書きしない）
+    assert_eq!(lib.last_note().as_deref(), Some(first_note));
 }
 
 /// DB 層: 同じ job_id で 2 回記録しても 2 回目は何も書かない
