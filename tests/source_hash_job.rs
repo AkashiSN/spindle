@@ -1,11 +1,26 @@
-//! `source_hash` ジョブ（仕様 ③「送る元のハッシュ」）。実ファイルを tempdir に置いて確かめる
+//! `source_hash` ジョブ（仕様 ③「送る元のハッシュ」）。実ファイルを tempdir に置いて確かめる。
+//! 下半分（[`Lib`] 以降）はジョブシステムを実際に通す結合テスト（レビュー指摘: ハンドラの
+//! `run` 自体を試す統合テストが無かった）
 
 use std::io::Write as _;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-use spindle::domain::device::{semantic_master, sha256_hex};
+use rusqlite::{params, Connection};
+use tokio_util::sync::CancellationToken;
+
+use spindle::db::{devices, open_memory_connection, Db};
+use spindle::domain::derived::{Current, Variant};
+use spindle::domain::device::{
+    semantic_derived, semantic_master, sha256_hex, SourceHash, SourceKind,
+};
 use spindle::domain::relpath::RelPath;
 use spindle::fsroot::RootDir;
-use spindle::jobs::handlers::source_hash::{hash_source, hash_source_with_hook};
+use spindle::jobs::handlers::source_hash::{
+    hash_source, hash_source_with_hook, save_if_current, SourceHashHandler,
+};
+use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, NewJob, Registry};
 
 #[test]
 fn hash_matches_content_and_records_identity() {
@@ -50,4 +65,278 @@ fn symlinks_are_not_followed() {
     let root = RootDir::open(dir.path()).unwrap();
     let rel = RelPath::parse("link.opus").unwrap();
     assert!(hash_source(&root, &rel, "s").is_err());
+}
+
+// ------------------------------------------------------------ ハンドラをジョブ経由で試す結合テスト
+
+/// Library / Derived root と実 DB を持つ最小の環境。`SourceHashHandler` を本物のジョブとして走らせる
+struct Lib {
+    dir: tempfile::TempDir,
+    db_path: PathBuf,
+    jobs: Arc<Jobs>,
+    library: Arc<RootDir>,
+    derived: Arc<RootDir>,
+    shutdown: CancellationToken,
+}
+
+impl Lib {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Library")).unwrap();
+        std::fs::create_dir(dir.path().join("Derived")).unwrap();
+        let db_path = dir.path().join("spindle.db");
+        let db = Arc::new(Db::open(&db_path).unwrap());
+        let library = Arc::new(RootDir::open(&dir.path().join("Library")).unwrap());
+        let derived = Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap());
+        let jobs = Jobs::new(db);
+        Self {
+            dir,
+            db_path,
+            jobs,
+            library,
+            derived,
+            shutdown: CancellationToken::new(),
+        }
+    }
+
+    fn start(&self) {
+        let mut reg = Registry::new();
+        reg.register(
+            JobType::SourceHash,
+            Arc::new(SourceHashHandler::new(
+                self.library.clone(),
+                self.derived.clone(),
+            )),
+        );
+        self.jobs.start(reg, self.shutdown.clone());
+    }
+
+    fn conn(&self) -> Connection {
+        Connection::open(&self.db_path).unwrap()
+    }
+
+    /// Library 直下に `rel` を書き、実体の物理同一性（inode/size/mtime_ns/ctime_ns）で tracks 行を作る
+    fn insert_master_track(
+        &self,
+        id: i64,
+        rel: &str,
+        content: &[u8],
+        audio_version: i64,
+        tag_version: i64,
+    ) {
+        let path = self.dir.path().join("Library").join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        let rp = RelPath::parse(rel).unwrap();
+        let st = self.library.stat(&rp).unwrap();
+        self.conn()
+            .execute(
+                "INSERT INTO tracks (id, rel_path, rel_path_key, inode, size, mtime_ns, ctime_ns, codec,
+                                     lossless, channels, audio_version, tag_version, seen_at)
+                 VALUES (?1, ?2, lower(?2), ?3, ?4, ?5, ?6, 'opus', 0, 2, ?7, ?8, 0)",
+                params![
+                    id,
+                    rel,
+                    st.inode as i64,
+                    st.size as i64,
+                    st.mtime_ns,
+                    st.ctime_ns,
+                    audio_version,
+                    tag_version
+                ],
+            )
+            .unwrap();
+    }
+
+    async fn run(&self, track_id: i64, kind: SourceKind) -> JobState {
+        let job = match self
+            .jobs
+            .enqueue(
+                NewJob::new(
+                    JobType::SourceHash,
+                    serde_json::json!({ "track_id": track_id, "source": kind.as_str() }),
+                )
+                .dedup_key(devices::source_hash_dedup_key(track_id, kind)),
+            )
+            .await
+            .unwrap()
+        {
+            EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+        };
+        self.wait_job(job).await
+    }
+
+    async fn wait_job(&self, id: i64) -> JobState {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let s: String = self
+                .conn()
+                .query_row("SELECT state FROM jobs WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap();
+            let st: JobState = s.parse().unwrap();
+            if st.is_terminal() {
+                return st;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("job {id} が終端にならない");
+    }
+}
+
+impl Drop for Lib {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+/// identity が tracks の物理同一性と一致していれば、意味トークンと sha256 を保存する
+#[tokio::test]
+async fn master_hash_is_saved_when_identity_matches() {
+    let lib = Lib::new();
+    lib.insert_master_track(1, "A/a.opus", b"hello world", 3, 5);
+    lib.start();
+    assert_eq!(lib.run(1, SourceKind::Master).await, JobState::Done);
+
+    let row = devices::source_hash(&lib.conn(), 1, SourceKind::Master)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.sha256, sha256_hex(b"hello world"));
+    assert_eq!(row.semantic, semantic_master(3, 5));
+
+    let (inode, size, mtime_ns, ctime_ns): (i64, i64, i64, i64) = lib
+        .conn()
+        .query_row(
+            "SELECT inode, size, mtime_ns, ctime_ns FROM tracks WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(row.inode as i64, inode);
+    assert_eq!(row.size as i64, size);
+    assert_eq!(row.mtime_ns, mtime_ns);
+    assert_eq!(row.ctime_ns, ctime_ns);
+}
+
+/// `tracks` の物理同一性が実体とずれている（走査がまだ反映していない）間はハッシュを取らず、
+/// 失敗ではなく `Done`（走査待ち）で終わる。`source_hashes` には何も残らない
+#[tokio::test]
+async fn stale_master_identity_ends_done_without_saving_a_hash() {
+    let lib = Lib::new();
+    lib.insert_master_track(2, "A/b.opus", b"stale content", 1, 1);
+    lib.conn()
+        .execute("UPDATE tracks SET mtime_ns = mtime_ns + 1 WHERE id = 2", [])
+        .unwrap();
+    lib.start();
+
+    assert_eq!(lib.run(2, SourceKind::Master).await, JobState::Done);
+    assert!(devices::source_hash(&lib.conn(), 2, SourceKind::Master)
+        .unwrap()
+        .is_none());
+}
+
+/// Derived（opus）を送る元にしたときは `derived_files` の版から意味トークンを作り、
+/// `source` 列に系統名（`opus`）で保存する
+#[tokio::test]
+async fn derived_source_is_saved_with_the_variant_semantic() {
+    let lib = Lib::new();
+    lib.conn()
+        .execute(
+            "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                                 channels, audio_version, tag_version, seen_at)
+             VALUES (3, 'A/c.flac', 'a/c.flac', 1, 0, 0, 'flac', 1, 2, 1, 1, 0)",
+            [],
+        )
+        .unwrap();
+    let rel = "opus/A/c.opus";
+    let path = lib.dir.path().join("Derived").join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"derived bytes").unwrap();
+    lib.conn()
+        .execute(
+            "INSERT INTO derived_files (track_id, variant, rel_path, rel_path_key, codec, bitrate,
+                                        src_audio_version, src_tag_version, generated_at, audio_profile,
+                                        tag_profile)
+             VALUES (3, 'opus', ?1, lower(?1), 'opus', 256, 1, 1, 0, 'ap1', 'tp1')",
+            [rel],
+        )
+        .unwrap();
+    lib.start();
+
+    assert_eq!(
+        lib.run(3, SourceKind::Derived(Variant::Opus)).await,
+        JobState::Done
+    );
+    let row = devices::source_hash(&lib.conn(), 3, SourceKind::Derived(Variant::Opus))
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.sha256, sha256_hex(b"derived bytes"));
+    let current = Current {
+        rel_path: rel.to_owned(),
+        src_audio_version: 1,
+        src_tag_version: 1,
+        src_artwork_id: None,
+        src_rg_scanned_at: None,
+        audio_profile: "ap1".into(),
+        tag_profile: "tp1".into(),
+    };
+    assert_eq!(row.semantic, semantic_derived(Variant::Opus, &current));
+}
+
+// ------------------------------------------------- save_if_current（読んでいる間の版の変化に対する再確認）
+
+/// `save_if_current` は `resolve` した現在の意味トークンと `hash.semantic` が一致するときだけ保存する。
+/// ジョブシステム越しにハッシュ計算とタグ書き込みの競合を確定的に再現するのは難しいので、
+/// ハンドラの保存ステップを切り出したこの関数を直接叩いて確かめる（レビュー指摘のフォールバック）
+#[test]
+fn save_if_current_saves_when_matching_and_skips_when_semantic_is_stale() {
+    let c = open_memory_connection().unwrap();
+    c.execute(
+        "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                             channels, audio_version, tag_version, seen_at)
+         VALUES (1, 'a.opus', 'a.opus', 1, 0, 0, 'opus', 0, 2, 1, 1, 0)",
+        [],
+    )
+    .unwrap();
+    let hash = SourceHash {
+        semantic: semantic_master(1, 1),
+        inode: 1,
+        size: 1,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        sha256: "s1".into(),
+    };
+    assert!(
+        save_if_current(&c, 1, SourceKind::Master, &hash, 10).unwrap(),
+        "現在の意味トークンと一致するので保存する"
+    );
+    assert_eq!(
+        devices::source_hash(&c, 1, SourceKind::Master)
+            .unwrap()
+            .unwrap()
+            .sha256,
+        "s1"
+    );
+
+    // 保存前にタグが進んでいた（意味トークンが変わった）体で、古いハッシュを保存しようとする
+    c.execute(
+        "UPDATE tracks SET tag_version = tag_version + 1 WHERE id = 1",
+        [],
+    )
+    .unwrap();
+    let stale = SourceHash {
+        sha256: "s2".into(),
+        ..hash
+    };
+    assert!(
+        !save_if_current(&c, 1, SourceKind::Master, &stale, 20).unwrap(),
+        "意味トークンが変わっていれば保存しない"
+    );
+    assert_eq!(
+        devices::source_hash(&c, 1, SourceKind::Master)
+            .unwrap()
+            .unwrap()
+            .sha256,
+        "s1",
+        "古い行のまま残る"
+    );
 }

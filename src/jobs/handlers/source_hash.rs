@@ -194,6 +194,24 @@ fn resolve(
     }
 }
 
+/// 読んでいる間に意味トークンが変わっていなければ `hash` を保存する（変わっていたら次の差分計算で
+/// 再投入されるので何もしない）。保存したら `true`
+pub fn save_if_current(
+    conn: &rusqlite::Connection,
+    track_id: i64,
+    kind: SourceKind,
+    hash: &SourceHash,
+    now: i64,
+) -> crate::db::Result<bool> {
+    match resolve(conn, track_id, kind)? {
+        Some((current, _, _)) if current == hash.semantic => {
+            devices::put_source_hash(conn, track_id, kind, hash, now)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 impl Handler for SourceHashHandler {
     fn run(&self, ctx: JobContext) -> BoxFuture<'static, HandlerResult> {
         let library = Arc::clone(&self.library);
@@ -247,16 +265,9 @@ impl Handler for SourceHashHandler {
                 HashOutcome::Hashed(hash) => hash,
             };
             let now = now_epoch();
+            // 読んでいる間に版が進んでいたら保存しない（次の差分計算で再投入される）
             ctx.db()
-                .write(move |c| {
-                    // 読んでいる間に版が進んでいたら保存しない（次の差分計算で再投入される）
-                    match resolve(c, track_id, kind)? {
-                        Some((current, _, _)) if current == hash.semantic => {
-                            devices::put_source_hash(c, track_id, kind, &hash, now)
-                        }
-                        _ => Ok(()),
-                    }
-                })
+                .write(move |c| save_if_current(c, track_id, kind, &hash, now))
                 .await?;
             Ok(Outcome::Done)
         })
