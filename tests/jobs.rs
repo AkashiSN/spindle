@@ -2065,6 +2065,7 @@ async fn events_stream_signals_resync_when_lagged() {
     for i in 0..(jobs::EVENT_CAPACITY as i64 + 100) {
         app.jobs.publish(Event::Job(jobs::JobEvent {
             id: i,
+            job_type: JobType::Scan,
             state: JobState::Queued,
             progress: None,
             done: None,
