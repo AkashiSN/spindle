@@ -10,6 +10,7 @@ use crate::fsroot::RootDir;
 use crate::gc::GcRoots;
 use crate::jobs::Jobs;
 use crate::media::artwork::ArtworkStore;
+use crate::playlist::autoexport::ReevalFlag;
 use tokio_util::sync::CancellationToken;
 
 use super::auth;
@@ -42,6 +43,8 @@ pub struct AppState {
     pub inbox: Option<Arc<RootDir>>,
     /// Inbox の周期監視の状態（最後に確認した時刻。P4-18）。監視が無ければ None
     pub inbox_watch: Option<Arc<crate::jobs::handlers::inbox::WatchStatus>>,
+    /// スマートプレイリストの再評価待ち（D-54）。ハンドラが無ければ None
+    pub reeval: Option<Arc<ReevalFlag>>,
     /// オンザフライ変換の上限に足す猶予（トラック長 + これ。P1-9）
     pub transcode_grace: std::time::Duration,
     /// MusicBrainz の照会（P2-3）。無いと `/api/cd/lookup` は 503
@@ -81,6 +84,7 @@ impl AppState {
             gc: None,
             inbox: None,
             inbox_watch: None,
+            reeval: None,
             transcode_grace: super::stream::TRANSCODE_GRACE,
             musicbrainz: None,
             coverart: None,
@@ -167,5 +171,17 @@ impl AppState {
     pub fn with_editor(mut self, editor: Arc<Editor>) -> Self {
         self.editor = Some(editor);
         self
+    }
+
+    pub fn with_reeval(mut self, flag: Arc<ReevalFlag>) -> Self {
+        self.reeval = Some(flag);
+        self
+    }
+
+    pub fn reeval_pending(&self) -> bool {
+        self.reeval
+            .as_ref()
+            .map(|f| f.is_pending())
+            .unwrap_or(false)
     }
 }

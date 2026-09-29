@@ -26,15 +26,23 @@ pub struct AutoExport {
     jobs: Arc<Jobs>,
     root: Arc<RootDir>,
     debounce: Duration,
+    reeval: Arc<ReevalFlag>,
 }
 
 impl AutoExport {
-    pub fn new(db: Arc<Db>, jobs: Arc<Jobs>, root: Arc<RootDir>, debounce: Duration) -> Self {
+    pub fn new(
+        db: Arc<Db>,
+        jobs: Arc<Jobs>,
+        root: Arc<RootDir>,
+        debounce: Duration,
+        reeval: Arc<ReevalFlag>,
+    ) -> Self {
         Self {
             db,
             jobs,
             root,
             debounce,
+            reeval,
         }
     }
 
@@ -62,11 +70,13 @@ impl AutoExport {
                 }
                 ev = rx.recv() => match ev {
                     Ok(ev) if triggers(&ev) => {
+                        self.reeval.mark();
                         deadline = Some(tokio::time::Instant::now() + self.debounce);
                     }
                     Ok(_) => {}
                     // 遅れて取りこぼしたときも、何かが変わったとして 1 回走る
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        self.reeval.mark();
                         deadline = Some(tokio::time::Instant::now() + self.debounce);
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
@@ -90,6 +100,7 @@ impl AutoExport {
                         playlist_ids: changed,
                     }));
                 }
+                self.reeval.clear();
             }
             Err(e) => tracing::warn!(error = %e, "スマートプレイリストの再評価に失敗"),
         }
@@ -133,5 +144,41 @@ fn triggers(ev: &Event) -> bool {
         Event::Batch(b) => matches!(b.state.as_str(), "applied" | "partial" | "failed"),
         Event::Job(j) => j.state == JobState::Done,
         Event::Playlist(_) => false,
+    }
+}
+
+/// スマートプレイリストの再評価待ち（仕様 ③「評価待ち」）。D-54 の常駐タスクは全件をまとめて評価するので
+/// 1 ビットで持つ。永続化しない（起動時は dirty から始める）
+#[derive(Debug, Default)]
+pub struct ReevalFlag(std::sync::atomic::AtomicBool);
+
+impl ReevalFlag {
+    pub fn new_dirty() -> Self {
+        ReevalFlag(std::sync::atomic::AtomicBool::new(true))
+    }
+    pub fn is_pending(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn mark(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn clear(&self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReevalFlag;
+
+    #[test]
+    fn reeval_flag_starts_dirty_and_clears() {
+        let f = ReevalFlag::new_dirty();
+        assert!(f.is_pending());
+        f.clear();
+        assert!(!f.is_pending());
+        f.mark();
+        assert!(f.is_pending());
+        assert!(!ReevalFlag::default().is_pending());
     }
 }
