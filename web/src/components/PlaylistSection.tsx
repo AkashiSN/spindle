@@ -19,6 +19,10 @@ import { formatDuration } from '../lib/format'
 import { exportNotice, parseDragIds, TRACK_DRAG_TYPE } from '../lib/playlists'
 import { Fb2kQueryDialog } from './Fb2kQueryDialog'
 
+// 右クリックメニューの大きさの見積もり（画面の端からはみ出さないよう位置を詰める）
+const MENU_W = 240
+const menuHeight = (deviceCount: number) => 40 + 28 * Math.max(deviceCount, 1)
+
 export function PlaylistSection({
   playlists,
   activeId,
@@ -268,7 +272,10 @@ export function PlaylistSection({
         <div
           className="props-menu"
           role="menu"
-          style={{ left: ctx.x, top: ctx.y }}
+          style={{
+            left: Math.max(0, Math.min(ctx.x, window.innerWidth - MENU_W)),
+            top: Math.max(0, Math.min(ctx.y, window.innerHeight - menuHeight(devices.length))),
+          }}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <DeviceItems

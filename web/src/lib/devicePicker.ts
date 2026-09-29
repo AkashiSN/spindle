@@ -14,3 +14,9 @@ export function togglePlaylist(d: Device, playlistId: number): number[] {
   else set.add(playlistId)
   return [...set].sort((a, b) => a - b)
 }
+
+/** 一覧の 1 台の playlist_ids だけを差し替える（PUT の完了を待たずに画面と次の切り替えへ反映するため） */
+export function withPlaylistIds(items: readonly Device[] | null, id: number, playlistIds: number[]): Device[] | null {
+  if (items == null) return null
+  return items.map((d) => (d.id === id ? { ...d, playlist_ids: playlistIds } : d))
+}

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPatch, apiPost } from '../api/client'
 import type { Device, DeviceDiff, DeviceList, DeviceSelection, DeviceVariant, SelectionEstimate } from '../api/types'
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
+import { withPlaylistIds } from '../lib/devicePicker'
 import { Latest } from '../lib/latest'
 
 const POLL_MS = 60_000
@@ -139,14 +140,20 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     update: (id: number, patch: { name?: string; selection?: DeviceSelection; variant?: DeviceVariant }) =>
       run(() => apiPatch<Device>(`/api/devices/${id}`, patch)),
     remove: (id: number) => run(() => apiFetch<void>(`/api/devices/${id}`, { method: 'DELETE' })),
-    setPlaylists: (id: number, playlistIds: number[]) =>
-      run(() =>
+    setPlaylists: (id: number, playlistIds: number[]) => {
+      // PUT は全置換なので、完了前に続けて切り替えても前の印を落とさないよう、先に一覧へ反映する。失敗したら取り直して戻す
+      setItems((cur) => withPlaylistIds(cur, id, playlistIds))
+      return run(() =>
         apiFetch<Device>(`/api/devices/${id}/playlists`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ playlist_ids: playlistIds }),
         }),
-      ),
+      ).then((ok) => {
+        if (!ok) fetchList()
+        return ok
+      })
+    },
     estimate,
   }
 }

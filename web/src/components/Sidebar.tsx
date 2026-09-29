@@ -2,7 +2,7 @@
 // プレイリスト / 固定フィルタ。どれを選んでも中心の表のフィルタ（scope）を差し替えるだけ。
 // ツリーのノードは配下の album id の集合（filter.album_ids）で絞る
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { AlbumRow, Device, Playlist } from '../api/types'
 import type { Playlists } from '../hooks/usePlaylists'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
@@ -77,6 +77,16 @@ export function Sidebar({
       else next.add(key)
       return next
     })
+  // 選んでいた端末が消えたら device_pending を外す（存在しない端末 id でサーバへ問い合わせない）
+  const staleDevice = scope.device_pending != null && !devices.some((d) => d.id === scope.device_pending)
+  const staleScope = staleDevice ? scope : null
+  useEffect(() => {
+    if (staleScope == null) return
+    const { device_pending: _drop, ...rest } = staleScope
+    void _drop
+    onScope(rest)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [staleScope])
   const current = filterToParam(scope)
   const is = (s: Scope) => filterToParam(s) === current
   const activeFlags = new Set(scope.flags ?? [])
