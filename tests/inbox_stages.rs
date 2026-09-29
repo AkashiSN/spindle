@@ -27,8 +27,9 @@ fn conn_with_tracks() -> Connection {
     for id in 1..=2 {
         c.execute(
             "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless, channels,
-                                 audio_version, tag_version, seen_at, rg_scanned_at)
-             VALUES (?1, ?2, ?2, 1, 0, 0, 'flac', 1, 2, 1, 1, 0, CASE WHEN ?1 = 1 THEN 5 END)",
+                                 audio_version, tag_version, seen_at, rg_scanned_at, rg_track_gain, rg_track_peak)
+             VALUES (?1, ?2, ?2, 1, 0, 0, 'flac', 1, 2, 1, 1, 0, CASE WHEN ?1 = 1 THEN 5 END,
+                     CASE WHEN ?1 = 1 THEN -6.5 END, CASE WHEN ?1 = 1 THEN 0.9 END)",
             params![id, format!("a/{id}.flac")],
         )
         .unwrap();
@@ -46,6 +47,18 @@ fn placed_item_counts_rg_and_omits_unconfigured_variants() {
     assert_eq!((rg.done, rg.total, rg.status), (1, 2, StageStatus::Running));
     // derived_variants が空（系統が設定に無い）なら系統の段は出さない
     assert!(got.iter().all(|s| s.key != "opus" && s.key != "aac"));
+}
+
+/// RG の完了は rg_scanned_at・rg_track_gain・rg_track_peak の 3 列が揃ったとき（track_inputs の
+/// rg_ready と同じ条件）。時刻だけ残った行は完了に数えない
+#[test]
+fn rg_scanned_at_alone_is_not_done() {
+    let c = conn_with_tracks();
+    c.execute("UPDATE tracks SET rg_scanned_at = 7 WHERE id = 2", [])
+        .unwrap();
+    let got = stages(&c, ItemState::Placed, &[1, 2], &empty()).unwrap();
+    let rg = got.iter().find(|s| s.key == "rg").unwrap();
+    assert_eq!((rg.done, rg.total), (1, 2));
 }
 
 #[test]

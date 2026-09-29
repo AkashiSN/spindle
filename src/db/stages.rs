@@ -101,16 +101,18 @@ pub fn stages(
 
     let (mut rg_total, mut rg_done, mut rg_run) = (0, 0, false);
     for id in track_ids {
-        let scanned: Option<Option<i64>> = conn
+        // 完了は 3 列が揃ったとき（端末配信の track_inputs の rg_ready と同じ条件。時刻だけ残った行は未完了）
+        let ready: Option<bool> = conn
             .query_row(
-                "SELECT rg_scanned_at FROM tracks WHERE id = ?1 AND missing_since IS NULL",
+                "SELECT rg_scanned_at IS NOT NULL AND rg_track_gain IS NOT NULL AND rg_track_peak IS NOT NULL
+                   FROM tracks WHERE id = ?1 AND missing_since IS NULL",
                 [id],
                 |r| r.get(0),
             )
             .optional()?;
-        let Some(scanned) = scanned else { continue };
+        let Some(ready) = ready else { continue };
         rg_total += 1;
-        if scanned.is_some() {
+        if ready {
             rg_done += 1;
         } else if rg_running(conn, *id)? {
             rg_run = true;
