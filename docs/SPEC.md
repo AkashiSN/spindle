@@ -375,6 +375,14 @@ Inbox の取り込みのファイル（D-90）を回収する。
   `OpusHead` の output gain は 0 のまま触らない（合成すると再解析時に二重に掛かる）
 - `rg_scanned_at` と `rg_written_at` を分離。数万件のスキャン後に書き込みが中断しても
   再スキャンなしで書き込みのみ再開できる
+- **解析が済むと自動でタグに書く**（`[replaygain].write_tags = true` のとき。D-96）。書くべき行は
+  `tracks.rg_write_due` の印で持つ（rg の保存で確認が成り立たなくなった行と album gain の off で立ち、書き込みの
+  バッチを記録したときに下りる。巻き戻し・外部の変更では立たないので勝手に書き直さない。印が立った後に外部が
+  RG のキーを書き換えたら走査で下ろす）。Library 全体で 1 本の `rgwrite` ジョブが印の付いた active な行を album
+  ごとに 1 つの編集バッチにする（同じ album の rg が残っている album と反映待ちの編集がある album は後回しにし、
+  キー付きの後継を 1 本だけ積む）。`write_tags = false` はタグに一切書かない（自動も手動も）
+- `rg_written_at` は `rg_scanned_at` より小さくしない（`rg_scanned_at` は「前の値 + 1」へ進んで壁時計より先に
+  ありうる。同じ秒の確認を未書き込みに見せない。D-96）
 - **タグ書き込みは通常の編集バッチ**（`POST /api/rg/write { selection }` → tags op。旧値の
   記録・overlay・巻き戻しはタグ編集と同じ）。書くキーは形式ごとに固定で、値の無いキーは消す
   （Opus: `R128_TRACK_GAIN` / `R128_ALBUM_GAIN` を書き `REPLAYGAIN_*` を消す。他形式:
@@ -390,8 +398,10 @@ Inbox の取り込みのファイル（D-90）を回収する。
   `rg_scanned_at` / `rg_written_at` を NULL。スキャナと tagwrite の overlay 解消の両方。D-47）。
   古い解析値を Derived や再生に使わない。album の他のトラックの `rg_album_*` は次の album 解析で揃う。
   捨てた行は**同じトランザクションで rg ジョブを積んで解析し直す**（投入単位と dedup は `POST /api/rg` と
-  同じ。タグへの書き込みは `[replaygain].write_tags` に従う。aac の Derived は解析が揃ってから作られる。
-  新規トラックや未解析の行には自動で積まない。D-47 追記 2、P4-22）
+  同じ。タグへの書き込みは `[replaygain].write_tags` に従う。Derived は解析と書き込みが揃ってから作られる。
+  D-47 追記 2、P4-22）
+- **スキャンで新規に登録したトラックにも rg を積む**（album の照合の後に投入単位を決める。既存の未解析の行は
+  拾わない。Inbox を通さずに置かれた曲も漏れなく解析 → 書き込み → Derived に乗せるため。D-96）
 - album gain は `album_id` 単位で、**`albums.album_gain` が true の album だけ**計算・書き出しする（既定
   false。CD 取り込みは true、Inbox の承認画面で選ぶ。D-74、P4-5）。**2ch 以外は album 集計から除外**（判定はデコード結果の
   チャンネル数。除外されたトラックの album の値は NULL）。構成トラックが 1 本でも
@@ -831,6 +841,7 @@ D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に
 | 設定 | `[encode.derived.<variant>]` に `enabled` と `bitrate`（下記）。節を省略したときの `enabled` は **`opus` が true、`aac` が false**（既存の config をそのまま新版で起動しても aac は始まらない。RG 全件解析 → 有効化の順序を崩さない）。`enabled = false` の系統は**凍結**: 新しく作らず、既存の行とファイルは Move / Retag / Encode のどれも行わず、配布ビュー・バッジ・`has_derived` は既存行をそのまま使う。GC は系統を区別せず `Derived/` 全体で「行に無いファイル = 孤児」を回収する（凍結でも行は残るので消えない） |
 | 出力仕様の世代 | 系統ごとに 2 つの文字列を設定から作り、行に保存する。**`audio_profile`**（音声に効く設定: codec / bitrate / サンプルレート規則 / RG 焼き込み方式の版。例 `opus:256:v1`、`aac:256:48k:bake1`）と **`tag_profile`**（タグに効く設定: `multi_value_separator` / iTunNORM 規則の版。例 `aac:sep= & :itunnorm0:v1`）。エンコーダの引数や規則を変えるときは版を上げる |
 | 判定 | `audio_version` 差分・**行の `audio_profile` が設定と食い違う** → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）・**`tag_profile`** の差分のみ → タグ上書き（**`aac` は RG を音声に焼き込むので RG 世代の差分は再エンコード**）/ パスの差分のみ → rename。優先順はこの順（再エンコードは残りを兼ねる） |
+| RG の前提 | **どの系統も RG が揃ってから作る**: 解析済み（`rg_scanned_at` と `rg_track_gain` / `rg_track_peak`）で、`[replaygain].write_tags = true` なら Library のタグへの書き込みも確認済み（`rg_written_at >= rg_scanned_at`）。揃っていない間は凍結と同じく既存の行とファイルに触らない。順序は rg → rgwrite → tagwrite の applied → transcode（D-96） |
 | 投入 | scan ジョブの完了時に食い違う全トラック × 系統、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（`(track_id, variant)` 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める。P4-1 の共通並列予算の対象 |
 | 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児（行に無いファイル。`Derived/` 全体）は GC ジョブ |
 | マルチch | どの系統も既定で対象外（チャンネル数不明も対象外）。トラック単位の `-ac 2` ダウンミックスは需要が出たら（D-51。実データは全件 2ch） |
@@ -842,7 +853,7 @@ D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に
 |---|---|
 | 対象 | Library 内の可逆のみ（flac / alac / wav）。opus / aac / mp3 は原本をそのまま配布（D-8） |
 | 出力 | `opusenc --vbr --music --bitrate <bitrate>`。既定 **256 kbps**（D-9 追記。可逆 237 GB で約 58 GB） |
-| RG | 再解析しない。Library 側の解析値を `R128_*` へ変換して埋める（`REPLAYGAIN_*` は書かない） |
+| RG | 再解析しない。Library 側の解析値を `R128_*` へ変換して埋める（`REPLAYGAIN_*` は書かない）。RG が揃うまで作らない（上の「RG の前提」） |
 | 画像 | トラック自身の埋め込み画像（`tracks.artwork_id`。D-61）、無ければ album のアートワーク（§7.1）の長辺 768 の WebP を 1 枚だけ埋める（D-51） |
 
 **`aac` 系統**（Apple 向け。D-75）
@@ -851,7 +862,7 @@ D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に
 |---|---|
 | 対象 | 可逆（flac / alac / wav）に加え、`lossy_sources = true` なら**非可逆も**（opus / ogg / mp3 / aac → AAC。世代劣化は承知の上で、ミュージック.app が Opus を読めないため。**D-8 の例外**）。原本が AAC でも同じ経路で再エンコードする（stream copy では RG の焼き込みとリサンプルができない。D-75）。`lossy_sources` を true → false にしても既存の非可逆の行とファイルは消さない（対象外 = Skip で凍結と同じ扱い。物理削除は GC のみ） |
 | 出力 | ffmpeg **1 パス**（中間 WAV なし。FD を stdin に繋ぐのは opus と同じ）: `-i /dev/stdin -map 0:a:0 -vn -map_metadata -1 -af volume=<gain>dB [-ar 48000] -c:a aac -b:a <bitrate>k -f mp4`（内蔵エンコーダ。既定 256 kbps）。48 kHz 超は 48 kHz へ落とす（`-ar 48000`）、44.1 / 48 は据え置き。`audio_profile` は `aac:<bitrate>:48k:bake1`、`tag_profile` は `aac:sep=<区切り>:itunnorm0:v1` |
-| RG | **track gain を音声に焼き込む**（`-af volume=<gain>dB`。gain は `min(rg_track_gain, −20·log10(rg_track_peak))` で**エンコーダ入力を 0 dBTP 以下に抑える**（peak は true peak なので 1.0 超なら減衰側に倒れる。AAC 再符号化後のオーバーシュートまでは保証しない。gain が有限でなければ 0、peak は有限かつ > 0 のときだけ上限を掛ける）。album gain は使わない）。**RG 未解析のトラックは作らず待つ**（「解析済み」= `rg_scanned_at` と `rg_track_gain` / `rg_track_peak` の 3 つが揃っていること。時刻だけ残った行は対象外。rg の保存で投入される。二度エンコードの回避）。RG の解析世代（`src_rg_scanned_at`）の差分は**再エンコード**（album gain の on / off も世代を進めるので、その album の aac は作り直される。track gain しか使わないが値ベースの判定に列を足すより単純で、まれな操作なので許容。D-75）。タグには `iTunNORM` を **0 dB 相当**で書き、端末のサウンドチェック ON でも二重に掛からないようにする。値は 10 個の 8 桁 16 進を空白区切り（先頭にも空白）で、1〜2 値目（基準 1/1000）は `000003E8`、3〜4 値目（同じ量の基準 1/2500 の表現）は `000009C4`、残り 6 値は `00000000`: `" 000003E8 000003E8 000009C4 000009C4 00000000 00000000 00000000 00000000 00000000 00000000"`。`REPLAYGAIN_*` / `R128_*` は書かない |
+| RG | **track gain を音声に焼き込む**（`-af volume=<gain>dB`。gain は `min(rg_track_gain, −20·log10(rg_track_peak))` で**エンコーダ入力を 0 dBTP 以下に抑える**（peak は true peak なので 1.0 超なら減衰側に倒れる。AAC 再符号化後のオーバーシュートまでは保証しない。gain が有限でなければ 0、peak は有限かつ > 0 のときだけ上限を掛ける）。album gain は使わない）。**RG 未解析のトラックは作らず待つ**（「解析済み」= `rg_scanned_at` と `rg_track_gain` / `rg_track_peak` の 3 つが揃っていること。時刻だけ残った行は対象外。`write_tags` ならタグへの書き込みも待つ（上の「RG の前提」。D-96）。書き込みの tagwrite の applied で投入される。二度エンコードの回避）。RG の解析世代（`src_rg_scanned_at`）の差分は**再エンコード**（album gain の on / off も世代を進めるので、その album の aac は作り直される。track gain しか使わないが値ベースの判定に列を足すより単純で、まれな操作なので許容。D-75）。タグには `iTunNORM` を **0 dB 相当**で書き、端末のサウンドチェック ON でも二重に掛からないようにする。値は 10 個の 8 桁 16 進を空白区切り（先頭にも空白）で、1〜2 値目（基準 1/1000）は `000003E8`、3〜4 値目（同じ量の基準 1/2500 の表現）は `000009C4`、残り 6 値は `00000000`: `" 000003E8 000003E8 000009C4 000009C4 00000000 00000000 00000000 00000000 00000000 00000000"`。`REPLAYGAIN_*` / `R128_*` は書かない |
 | タグ | Library のタグを写す（`REPLAYGAIN_*` / `R128_*` / 既存の `ITUNNORM` は落とす）。**同じキーの複数値は出現順に `multi_value_separator`（既定 `" & "`）で 1 値に結合**（ミュージック.app は複数値の 1 つしか見せない。ARTIST / ALBUMARTIST / GENRE / COMPOSER など多値になり得る全フィールド）。写像は Library の tagwrite と同じ（§7.5「形式ごとの写像」）: Vorbis 名を lofty の `ItemKey` に写像して ilst の標準 atom（`©ART` `trkn` `disk` `©gen` 等）に書き、写像できないキーは `----:com.apple.iTunes:<KEY>` のフリーフォーム。`iTunNORM` は内部キーが大文字化されても atom 名を `iTunNORM` に固定する（大小文字を special-case） |
 | 画像 | `opus` と同じ選び方で、長辺 768 の **JPEG**（ミュージック.app は `covr` の WebP を読まない）。`thumbs/<hex>/768.jpg` をキャッシュに足す（thumbnail ジョブと同じ変換に形式を足したもの。`-pix_fmt yuvj420p -q:v 2`） |
 
@@ -1364,6 +1375,7 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
 | `rip` | **1**（物理ドライブ1台） | discid |
 | `verify` | 2 | album_id |
 | `rg` | CPU コア数 | album_id |
+| `rgwrite` | 1 | 固定（`rgwrite`。開始時にキーを外すので、実行中の投入は次のジョブになる）。`rg_write_due` の行を album ごとの編集バッチにする（D-96） |
 | `transcode` | CPU コア数 - 1 | track_id + variant + audio_version（variant は P4-7 から。§7.6） |
 | `tagwrite` | 4 | track_id + tag_version（`edit_batch_id` でバッチに紐づく） |
 | `rename` | 1 | batch_id（バッチ 1 つに 1 ジョブ。2 phase の順序を守るため直列。D-43） |
@@ -1448,7 +1460,9 @@ POST   /api/rg                                    { selection }。rg ジョブ�
                                                   album は album 単位（rg:album:<id>）、それ以外は track 単位（rg:track:<id>。D-74）
 POST   /api/rg/write                              { selection, description?, skip_pending? }。解析値を
                                                   タグとして書く編集バッチを記録（§6、D-48）。
-                                                  preview 段階は無い（値は DB から決まる）
+                                                  preview 段階は無い（値は DB から決まる）。解析後は
+                                                  rgwrite が自動で書くので、これは自動で書かれなかった
+                                                  行（外部で書き換えた・巻き戻した等）の書き直し用（D-96）
 POST   /api/flaccheck                             { selection }。active な FLAC ごとに flaccheck ジョブを
                                                   投入（§7.9、D-57。読むだけで preview は無い）
 POST   /api/hirescheck                            { selection }。対象（可逆かつ >48 kHz または >16 bit）ごとに
@@ -2302,7 +2316,7 @@ multi_value_separator = " & "  # 多値フィールドの結合
 
 [replaygain]
 reference_lufs = -18.0         # 内部表現。書き出し時に変換
-write_tags = true
+write_tags = true              # 解析後に自動でタグへ書き、Derived はその後に作る。false はタグに書かない（D-96）
 
 [normalize]
 wav_to_flac = true
