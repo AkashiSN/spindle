@@ -389,7 +389,7 @@ function SelectionTab({ device, devices, playlists }: { device: Device; devices:
           <>
             合計 {formatCount(estimate.tracks)} 曲・約 {formatBytes(estimate.bytes)}
             {estimate.unhashed > 0 && (
-              <span className="muted">（ハッシュ未計算 {formatCount(estimate.unhashed)} 曲は含まない）</span>
+              <span className="muted">（容量未確定 {formatCount(estimate.unhashed)} 曲（送る元の準備待ち）は含まない）</span>
             )}
           </>
         )}

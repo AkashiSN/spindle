@@ -408,6 +408,7 @@ export type DeviceDiff = {
   evaluations: { playlist_id: number; name: string; evaluated_at: number | null; pending: boolean }[]
   counts: DeviceCounts
 }
+/** unhashed: 容量が未確定の曲の数（送る元の準備待ち: Derived が無い・古い、ハッシュが無い・古い）。bytes に含まれない */
 export type SelectionEstimate = { tracks: number; bytes: number; unhashed: number }
 /** トラック行の端末ごとの状態（Task 9） */
 export type TrackDeviceState =
