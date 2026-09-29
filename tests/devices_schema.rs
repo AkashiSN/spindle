@@ -149,7 +149,7 @@ fn source_hash_job_type_properties() {
     let t: JobType = "source_hash".parse().unwrap();
     assert_eq!(t, JobType::SourceHash);
     assert_eq!(t.concurrency(8), 2);
-    assert!(!t.cpu_bound());
+    assert!(t.cpu_bound());
     assert_eq!(t.version_field(), None);
     assert!(JobType::ALL.contains(&JobType::SourceHash));
 }

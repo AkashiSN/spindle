@@ -87,7 +87,11 @@ impl JobType {
     pub fn cpu_bound(self) -> bool {
         matches!(
             self,
-            JobType::Rg | JobType::Transcode | JobType::Flaccheck | JobType::Hirescheck
+            JobType::Rg
+                | JobType::Transcode
+                | JobType::Flaccheck
+                | JobType::Hirescheck
+                | JobType::SourceHash
         )
     }
 
@@ -113,7 +117,7 @@ impl JobType {
             JobType::Hirescheck => (cpus / 2).max(1),
             // 購読ごとに揃えとリネームを順に行う。yt-dlp の列挙も 1 本ずつ
             JobType::PlaylistSync => 1,
-            // 読み取りが主（CPU の共通予算は取らない）。NAS のディスクを塞がない程度に
+            // SHA-256 を全曲分取るので CPU の共通予算（D-73）も取る。上限自体は控えめに
             JobType::SourceHash => 2,
         }
     }
