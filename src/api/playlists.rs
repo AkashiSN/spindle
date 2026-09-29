@@ -440,6 +440,11 @@ pub async fn patch(
                 if rule.is_some() && kind != "smart" {
                     return Ok(Err(PatchFail::Manual));
                 }
+                if let Some((_, rule, _)) = &rule {
+                    if rule.references_device_fields() && dbdev::is_registered(c, id)? {
+                        return Ok(Err(PatchFail::Cycle));
+                    }
+                }
                 if let Some(n) = &name {
                     match dbpl::rename(c, id, n, now)? {
                         Rename::Ok => {}
@@ -452,11 +457,6 @@ pub async fn patch(
                     }
                 }
                 let mut changed = false;
-                if let Some((_, rule, _)) = &rule {
-                    if rule.references_device_fields() && dbdev::is_registered(c, id)? {
-                        return Ok(Err(PatchFail::Cycle));
-                    }
-                }
                 if let Some((src, rule, json)) = rule {
                     dbpl::set_rule(c, id, &src, &json, now)?;
                     changed = smart::refresh_one(c, id, &rule, now, &sets)?.1;

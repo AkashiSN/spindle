@@ -330,3 +330,49 @@ async fn endpoints_require_a_session() {
     let (st, _) = app.call_without_cookie(Method::GET, "/api/devices").await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn cycle_rejection_on_rule_save_changes_nothing_else() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    insert_playlist(&app, 7, "新しめ", Some("%title% IS a")).await;
+    let (st, _) = app
+        .call(
+            Method::PUT,
+            &format!("/api/devices/{id}/playlists"),
+            Some(json!({"playlist_ids": [7]})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = app
+        .call(
+            Method::PATCH,
+            "/api/playlists/7",
+            Some(json!({"name": "x", "rule": "%on_device% IS iPhone"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"], "cycle");
+    let name: String = app
+        .db
+        .read(|c| Ok(c.query_row("SELECT name FROM playlists WHERE id = 7", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(name, "新しめ", "循環で弾いたら改名も反映しない");
+}
+
+#[tokio::test]
+async fn patch_rename_to_another_devices_name_is_duplicate() {
+    let app = App::new().await;
+    create_iphone(&app, "iPhone").await;
+    let other = create_iphone(&app, "Pixel").await;
+    let (st, v) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/devices/{other}"),
+            Some(json!({"name": "IPHONE"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"], "duplicate");
+}
