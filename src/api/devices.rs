@@ -130,7 +130,8 @@ fn validate_name(raw: &str) -> Result<String, String> {
 }
 
 pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let snap = state.db.device_snapshot().await?;
+    // 件数の表示とハッシュの投入の材料（投入は dedup と `hashes_to_enqueue` で絞るので少し古くてよい）
+    let snap = state.db.device_snapshot_for_display().await?;
     let rows = state
         .db
         .read(|c| {

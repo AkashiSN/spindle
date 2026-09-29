@@ -158,6 +158,11 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Device>> {
         .flatten())
 }
 
+/// 端末が 1 台でも登録されているか（無ければ一覧の端末の状態のためにスナップショットを取らない）
+pub fn any(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM devices)", [], |r| r.get(0))?)
+}
+
 pub fn list(conn: &Connection) -> Result<Vec<Device>> {
     let mut st =
         conn.prepare_cached(&format!("SELECT {DEVICE_COLUMNS} FROM devices ORDER BY id"))?;

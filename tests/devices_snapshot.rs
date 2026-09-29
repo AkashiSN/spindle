@@ -99,3 +99,62 @@ async fn snapshot_marks_pending_for_hashed_track() {
         )]
     );
 }
+
+/// 同時にキャッシュが外れた要求は 1 回の計算を待って同じ結果を使う（計算を並べて走らせない）
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_misses_share_one_computation() {
+    let (db, _dir) = db().await;
+    seed(&db).await;
+    let before = db.device_snapshot().await.unwrap();
+    db.write(|c| {
+        c.execute("UPDATE devices SET name = name", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let db = db.clone();
+            tokio::spawn(async move { db.device_snapshot().await.unwrap() })
+        })
+        .collect();
+    let mut snaps = Vec::new();
+    for h in handles {
+        snaps.push(h.await.unwrap());
+    }
+    assert!(!Arc::ptr_eq(&before, &snaps[0]), "書き込みの後は計算し直す");
+    for s in &snaps[1..] {
+        assert!(
+            Arc::ptr_eq(&snaps[0], s),
+            "同時に外れた要求は同じ計算の結果を使う"
+        );
+    }
+}
+
+/// 表示用は許す古さの間は書き込みの後も使い回し、厳密なものは計算し直す。古さを超えれば表示用も計算し直す
+#[tokio::test]
+async fn display_snapshot_tolerates_recent_writes_but_strict_does_not() {
+    let (db, _dir) = db().await;
+    let id = seed(&db).await;
+    let a = db.device_snapshot().await.unwrap();
+    db.write(move |c| devices::set_playlists(c, id, &[], 20))
+        .await
+        .unwrap();
+    let shown = db.device_snapshot_for_display().await.unwrap();
+    assert!(
+        Arc::ptr_eq(&a, &shown),
+        "2 秒以内なら書き込みの後も表示用は使い回す"
+    );
+    let strict = db.device_snapshot().await.unwrap();
+    assert!(!Arc::ptr_eq(&a, &strict), "厳密なものは計算し直す");
+    assert_eq!(strict.get(id).unwrap().device.generation, 2);
+    db.write(move |c| devices::set_playlists(c, id, &[], 21))
+        .await
+        .unwrap();
+    let expired = db
+        .device_snapshot_within(std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(!Arc::ptr_eq(&strict, &expired), "古さを超えれば計算し直す");
+    assert_eq!(expired.get(id).unwrap().device.generation, 3);
+}

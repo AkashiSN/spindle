@@ -165,7 +165,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
         ));
     };
     let layout = state.config.layout.clone();
-    let snap = state.db.device_snapshot().await?;
+    // 段の表示だけに使う（少し古くてよい）
+    let snap = state.db.device_snapshot_for_display().await?;
     let (items, subscriptions) = state
         .db
         .read(move |c| {

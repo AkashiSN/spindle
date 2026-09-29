@@ -476,12 +476,6 @@ async fn estimate_counts_distinct_tracks_of_a_hypothetical_selection() {
 #[tokio::test]
 async fn listing_does_not_write_when_no_new_hash_jobs() {
     let app = App::new().await;
-    let (st, v) = app
-        .call(Method::POST, "/api/devices",
-              Some(json!({"name": "iPhone", "transport": "agent", "variant": "opus", "selection": "all"})))
-        .await;
-    assert_eq!(st, StatusCode::CREATED, "{v}");
-    let id = v["id"].as_i64().unwrap();
     app.db
         .write(|c| {
             c.execute(
@@ -494,6 +488,13 @@ async fn listing_does_not_write_when_no_new_hash_jobs() {
         })
         .await
         .unwrap();
+    // 端末の作成より前に曲を入れる（一覧は表示用のスナップショットを使い、2 秒以内の書き込みは見ないことがある）
+    let (st, v) = app
+        .call(Method::POST, "/api/devices",
+              Some(json!({"name": "iPhone", "transport": "agent", "variant": "opus", "selection": "all"})))
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let id = v["id"].as_i64().unwrap();
     let (st, _) = app.call(Method::GET, "/api/devices", None).await;
     assert_eq!(st, StatusCode::OK);
     let jobs: i64 = app

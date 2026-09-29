@@ -30,7 +30,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
 use tokio::sync::Semaphore;
@@ -94,8 +94,18 @@ pub fn open_memory_connection() -> Result<Connection> {
     Ok(conn)
 }
 
-/// 端末のスナップショットのキャッシュ（書き込みの通番, 結果）
-type DeviceCache = Option<(u64, Arc<devices::Snapshot>)>;
+/// 表示だけに使うスナップショット（[`Db::device_snapshot_for_display`]）が許す古さ。
+/// ジョブが続く間は通番がほぼ毎回進むので、通番の一致だけではキャッシュがほとんど当たらない
+pub const DISPLAY_SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(2);
+
+/// 端末のスナップショットのキャッシュ
+struct DeviceCacheEntry {
+    /// 計算を始める前に読んだ書き込みの通番
+    seq: u64,
+    /// 計算を始めた時刻
+    at: Instant,
+    snap: Arc<devices::Snapshot>,
+}
 
 /// 書き込み単一コネクション + 読み取りプール
 pub struct Db {
@@ -105,8 +115,8 @@ pub struct Db {
     read_pool_size: usize,
     /// 書き込みの通番。`write` の閉包が終わる（コミットした）たびに ++（成功・失敗を問わない。数えすぎても正しさは変わらない）
     write_seq: Arc<AtomicU64>,
-    /// 端末のスナップショットのキャッシュ（通番, 結果）
-    device_cache: Arc<Mutex<DeviceCache>>,
+    /// 端末のスナップショットのキャッシュ。計算の間もロックを持つ（同時に外れた要求は 1 回の計算を待つ）
+    device_cache: Arc<tokio::sync::Mutex<Option<DeviceCacheEntry>>>,
 }
 
 impl Db {
@@ -159,7 +169,7 @@ impl Db {
             read_permits: Arc::new(Semaphore::new(read_pool_size)),
             read_pool_size,
             write_seq: Arc::new(AtomicU64::new(0)),
-            device_cache: Arc::new(Mutex::new(None)),
+            device_cache: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -167,24 +177,45 @@ impl Db {
         self.write_seq.load(Ordering::SeqCst)
     }
 
-    /// 全端末のスナップショット。書き込みが無ければ前回の結果を使い回す。
+    /// 全端末のスナップショット（厳密に新しいもの）。書き込みが無ければ前回の結果を使い回す。
+    /// 差分・plan_token・書き込みの材料（未反映の集合、スマートプレイリストの評価）と、変更 API の応答はこれを使う。
     /// 通番は読み取りの**前**に読む（その後の書き込みを含む結果を古い通番で持つことはあっても、
     /// 古い結果を新しい通番で持つことは無い）
     pub async fn device_snapshot(&self) -> Result<Arc<devices::Snapshot>> {
+        self.cached_snapshot(None).await
+    }
+
+    /// 表示だけに使うスナップショット（一覧の行の端末の状態、Inbox の段、端末一覧の件数）。
+    /// 計算から [`DISPLAY_SNAPSHOT_MAX_AGE`] 以内なら、その後に書き込みがあっても使い回す
+    pub async fn device_snapshot_for_display(&self) -> Result<Arc<devices::Snapshot>> {
+        self.cached_snapshot(Some(DISPLAY_SNAPSHOT_MAX_AGE)).await
+    }
+
+    /// [`Self::device_snapshot_for_display`] の許す古さを指定する版（試験用）
+    pub async fn device_snapshot_within(
+        &self,
+        max_age: Duration,
+    ) -> Result<Arc<devices::Snapshot>> {
+        self.cached_snapshot(Some(max_age)).await
+    }
+
+    /// キャッシュを引き、外れたら計算する。ロックを持ったまま計算するので、同時に外れた要求は
+    /// 待ってから計算済みの結果を使う（同じ計算を並べて走らせない）
+    async fn cached_snapshot(&self, max_age: Option<Duration>) -> Result<Arc<devices::Snapshot>> {
+        let mut cache = self.device_cache.lock().await;
         let seq = self.write_seq();
-        if let Some((s, snap)) = self
-            .device_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            if *s == seq {
-                return Ok(Arc::clone(snap));
+        if let Some(e) = cache.as_ref() {
+            if e.seq == seq || max_age.is_some_and(|age| e.at.elapsed() < age) {
+                return Ok(Arc::clone(&e.snap));
             }
         }
+        let at = Instant::now();
         let snap = Arc::new(self.read(devices::snapshot).await?);
-        *self.device_cache.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((seq, Arc::clone(&snap)));
+        *cache = Some(DeviceCacheEntry {
+            seq,
+            at,
+            snap: Arc::clone(&snap),
+        });
         Ok(snap)
     }
 
