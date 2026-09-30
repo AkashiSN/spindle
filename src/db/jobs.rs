@@ -958,8 +958,6 @@ pub fn mark_failed_fatally(conn: &Connection, id: i64, error: &str, now: i64) ->
     Ok(changed > 0)
 }
 
-/// ロックが取れない等で実行前に戻す。試行回数は数えない。`delay_secs` 後に再度対象になる。
-/// cancel 要求が立っていれば `cancelled`（D-36）
 /// 端末が繋がったとき、待機中の同期と検証を前倒しする（仕様 ⑤「同期」: 未接続で 300 秒後に置いたものを
 /// `track-devices` が接続を見たら `run_after = now` にする）。変えたジョブの id を返す
 pub fn wake_device_jobs(conn: &Connection, device_id: i64, now: i64) -> Result<Vec<i64>> {
@@ -977,6 +975,8 @@ pub fn wake_device_jobs(conn: &Connection, device_id: i64, now: i64) -> Result<V
     Ok(ids)
 }
 
+/// ロックが取れない等で実行前に戻す。試行回数は数えない。`delay_secs` 後に再度対象になる。
+/// cancel 要求が立っていれば `cancelled`（D-36）
 pub fn requeue(conn: &Connection, id: i64, now: i64, delay_secs: i64) -> Result<RequeueOutcome> {
     let cancelled = conn.execute(
         "UPDATE jobs SET state = 'cancelled', finished_at = ?2

@@ -140,6 +140,9 @@ async fn watcher_stops_a_long_running_track_devices_on_shutdown() {
         Arc::new(|_s: String| Box::pin(async {})),
     );
     wait_until(|| rt.is_connected("SER1")).await;
+    // sleep の pid が書かれるまで待つ（書く前に止めると pid のファイルが無い）
+    let pid_file = dir.path().join("home/sleep.pid");
+    wait_until(|| std::fs::read_to_string(&pid_file).is_ok_and(|s| s.ends_with('\n'))).await;
     shutdown.cancel();
     // sleep 30 の子を待たずに終わる（プロセスグループごと kill）
     tokio::time::timeout(Duration::from_secs(5), h)
@@ -147,7 +150,7 @@ async fn watcher_stops_a_long_running_track_devices_on_shutdown() {
         .unwrap()
         .unwrap();
     // sleep の孫までプロセスグループごと kill されている
-    let pid = std::fs::read_to_string(dir.path().join("home/sleep.pid")).unwrap();
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
     let pid = pid.trim().to_string();
     let mut gone = false;
     for _ in 0..100 {

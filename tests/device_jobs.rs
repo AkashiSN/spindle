@@ -578,3 +578,63 @@ async fn verify_waits_without_spending_attempts_until_connected() {
         .await;
     assert_eq!(job.attempts, 0);
 }
+
+#[tokio::test]
+async fn busy_job_mutex_requeues_after_a_while() {
+    let fx = Fx::new().await;
+    fx.connect();
+    fx.initialize().await;
+    fx.start();
+    // 本物の同期のハンドラに job_mutexes の `device:<id>` を握らせる（プロセス内のロックで待たせる）
+    let guard = fx.rt.device_lock(fx.device.id).lock_owned().await;
+    let plan_id = fx.confirm().await;
+    let sync = fx
+        .jobs
+        .enqueue(sync_job(fx.device.id, plan_id))
+        .await
+        .unwrap()
+        .id();
+    fx.wait(sync, JobState::Running).await;
+    // 同期がロックを持つまで少し待つ（ロックは lock_mutex_named → device_lock の順に取る）
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = now_epoch();
+    let scan = fx.jobs.enqueue(scan_job(fx.device.id)).await.unwrap().id();
+    // 1 秒ごとの空回りではなく、しばらく置いてから再び対象にする
+    let job = fx
+        .wait_until(scan, "戻された queued", |j| {
+            j.state == JobState::Queued && j.run_after.is_some_and(|t| t > before)
+        })
+        .await;
+    assert!(
+        job.run_after.is_some_and(|t| t >= before + 14),
+        "run_after {:?} before {before}",
+        job.run_after
+    );
+    assert_eq!(job.attempts, 0);
+    drop(guard);
+    fx.wait(sync, JobState::Done).await;
+}
+
+#[tokio::test]
+async fn invalid_stored_volume_fails_without_retry() {
+    let fx = Fx::new().await;
+    fx.connect();
+    fx.initialize().await;
+    let dev = fx.device.id;
+    fx.db
+        .write(move |c| {
+            c.execute(
+                "UPDATE devices SET adb_volume = 'bad/volume' WHERE id = ?1",
+                [dev],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fx.start();
+    let id = fx.jobs.enqueue(verify_job(dev)).await.unwrap().id();
+    let job = fx.wait(id, JobState::Failed).await;
+    assert_eq!(job.attempts, 1, "{:?}", job.last_error);
+    let err = job.last_error.unwrap();
+    assert!(err.contains("保存先が不正"), "{err}");
+}

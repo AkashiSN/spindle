@@ -78,6 +78,9 @@ pub async fn on_connected(db: &Arc<Db>, jobs: &Arc<Jobs>, serial: String) {
     }
 }
 
+/// 端末のロックが取れなかったときに再び対象になるまでの秒数
+const BUSY_REQUEUE_SECS: i64 = 15;
+
 fn fatal(msg: impl Into<String>) -> JobError {
     JobError::Fatal(anyhow::anyhow!(msg.into()))
 }
@@ -188,7 +191,8 @@ async fn prepare(
     };
     match ctx.lock_mutex_named(device_mutex(device_id)).await {
         Ok(true) => {}
-        Ok(false) => return Err(Ok(Outcome::Requeue)),
+        // 別のジョブが端末を使っている。同期は長いので 1 秒ごとに空回りさせない
+        Ok(false) => return Err(Ok(Outcome::RequeueAfter(BUSY_REQUEUE_SECS))),
         Err(e) => return Err(Err(e.into())),
     }
     if !env.rt.is_connected(&serial) {
@@ -199,7 +203,8 @@ async fn prepare(
     let fs = match env.rt.fs_for(&serial, &volume, &root) {
         Ok(fs) => fs,
         Err(RemoteError::NotConnected) => return Err(disconnected(kind)),
-        Err(e) => return Err(Err(JobError::Failed(anyhow::Error::new(e)))),
+        // 保存されたボリューム・root が不正。再試行しても直らない
+        Err(e) => return Err(Err(JobError::Fatal(anyhow::Error::new(e)))),
     };
     let expect = Expect {
         device_uuid: device.uuid.clone(),
