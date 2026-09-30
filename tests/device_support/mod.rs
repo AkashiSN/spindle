@@ -332,3 +332,123 @@ impl DeviceFs for FakeFs {
         Ok(())
     }
 }
+
+use std::collections::HashMap;
+use std::io::{Seek, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use spindle::device::plan::{runnable, Runnable, StoredPlan};
+use spindle::device::recover::{recover, Expect};
+use spindle::device::store::initialize;
+use spindle::device::sync::{
+    self, Control, SourceError, Sources, SyncError, SyncInput, SyncReport,
+};
+use spindle::domain::device::{delivery_token, diff, DesiredItem, Manifest, Source, SourceKind};
+
+/// track_id → 中身
+#[derive(Clone, Default)]
+pub struct MemSources(pub HashMap<i64, Vec<u8>>);
+
+impl Sources for MemSources {
+    fn open(&self, track_id: i64) -> Result<std::fs::File, SourceError> {
+        let body = self.0.get(&track_id).ok_or(SourceError::Missing)?;
+        let mut f = tempfile::tempfile().map_err(|e| SourceError::Other(e.to_string()))?;
+        f.write_all(body)
+            .map_err(|e| SourceError::Other(e.to_string()))?;
+        f.rewind().map_err(|e| SourceError::Other(e.to_string()))?;
+        Ok(f)
+    }
+}
+
+/// `cancel_from` / `stale_from` 回目以降の呼び出しでキャンセル・generation 不一致にする
+#[derive(Default)]
+pub struct TestControl {
+    pub cancel_from: Option<usize>,
+    pub stale_from: Option<usize>,
+    pub cancel_calls: AtomicUsize,
+    pub gen_calls: AtomicUsize,
+}
+
+impl Control for TestControl {
+    fn cancelled(&self) -> bool {
+        let n = self.cancel_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.cancel_from.is_some_and(|k| n >= k)
+    }
+
+    async fn generation_ok(&self) -> bool {
+        let n = self.gen_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        !self.stale_from.is_some_and(|k| n >= k)
+    }
+
+    async fn progress(&self, _done: u64, _total: u64) {}
+}
+
+pub fn expect() -> Expect {
+    Expect {
+        device_uuid: "u1".into(),
+        volume: "emulated".into(),
+    }
+}
+
+/// 目標の状態（track_id, 端末上のパス, 中身）
+pub type Want<'a> = (i64, &'a str, &'a [u8]);
+
+pub fn desired(want: &[Want]) -> Manifest {
+    let mut m = Manifest::default();
+    for (id, path, body) in want {
+        let sha = sha256_hex(body);
+        m.desired.push(DesiredItem {
+            track_id: *id,
+            source: Source {
+                kind: SourceKind::Master,
+                root_rel_path: (*path).to_owned(),
+                semantic: "s".into(),
+            },
+            dest_path: (*path).to_owned(),
+            dest_key: canonical_key(path),
+            token: delivery_token("s", &sha),
+            size: body.len() as u64,
+            sha256: sha,
+        });
+    }
+    m.desired.sort_by_key(|d| d.track_id);
+    m
+}
+
+pub fn sources(want: &[Want]) -> MemSources {
+    MemSources(want.iter().map(|(id, _, b)| (*id, b.to_vec())).collect())
+}
+
+/// 回復 → 差分 → 計画 → 部分集合 → 実行（P5-3b の device_sync ジョブと同じ流れ）
+pub async fn sync_to<C: Control>(
+    fs: &FakeFs,
+    want: &[Want<'_>],
+    control: &C,
+) -> Result<SyncReport, String> {
+    let rec = recover(fs, &expect()).await.map_err(|e| e.to_string())?;
+    let d = diff(&desired(want), &rec.items, &[], &[], Vec::new());
+    let plan = StoredPlan::from_diff(1, "tok", &d).unwrap();
+    let r: Runnable = runnable(&plan, &rec.items, &rec.playlists, &d);
+    let bodies = HashMap::new();
+    sync::run(
+        fs,
+        &sources(want),
+        control,
+        SyncInput {
+            generation: 1,
+            start: rec.manifest,
+            runnable: &r,
+            playlist_bodies: &bodies,
+        },
+    )
+    .await
+    .map_err(|e: SyncError| e.to_string())
+}
+
+/// 登録済みで `want` の状態にある端末
+pub async fn device_at(want: &[Want<'_>], capacity: u64) -> FakeFs {
+    let fs = FakeFs::new(capacity);
+    initialize(&fs, "u1", "emulated").await.unwrap();
+    sync_to(&fs, want, &TestControl::default()).await.unwrap();
+    fs
+}
