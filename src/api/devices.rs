@@ -3,13 +3,23 @@
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 use crate::db::devices::{
-    self as dbdev, Device, DevicePatch, NewDevice, PlaylistCheck, Selection, Snapshot, Update,
+    self as dbdev, Confirm, Device, DevicePatch, NewDevice, PlanEnd, PlaylistCheck, Selection,
+    Snapshot, Update,
 };
-use crate::db::now_epoch;
+use crate::db::jobs as dbjobs;
+use crate::db::{now_epoch, DbError};
+use crate::device::adb::probe_volumes_under;
+use crate::device::ondevice::is_reserved;
+use crate::device::quote::{root_abs_under, valid_serial, valid_volume, DEFAULT_ROOT};
+use crate::device::recover::{recover, Expect, RecoverError};
+use crate::device::remote::{DeviceFs as _, DirState, RemoteError};
+use crate::device::runtime::AdbRuntime;
+use crate::device::store::{self, InitError, StoreError};
 use crate::domain::derived::Variant;
 use crate::domain::device::PendingSets;
 use crate::domain::device::{Counts, Hold, TrackState, Transport};
 use crate::domain::filter::Filter;
+use crate::jobs::handlers::device::{scan_job, sync_job, verify_job};
 use crate::playlist::dsl::Rule;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -17,6 +27,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// フィルタが端末の状態を引くときだけ、スナップショットから未反映の集合を埋める
 pub async fn attach_pending(state: &AppState, f: &mut Filter) -> Result<(), ApiError> {
@@ -57,8 +68,13 @@ pub struct DeviceView {
     pub variant: &'static str,
     pub selection: &'static str,
     pub generation: i64,
-    /// 接続状態（adb は P5-3 で埋める。agent は常に null）
+    /// 接続状態（adb: 監視が見た状態が `device` か。ADB 同期が無効なら false。agent は常に null）
     pub connected: Option<bool>,
+    /// adb の生の状態（`device` / `unauthorized` / `offline` …）。見えていない・agent なら null
+    pub adb_state: Option<String>,
+    /// adb の保存先のボリュームと root（agent は null）
+    pub adb_volume: Option<String>,
+    pub adb_root: Option<String>,
     pub counts: Counts,
     pub last_synced_at: Option<i64>,
     pub playlist_ids: Vec<i64>,
@@ -71,7 +87,21 @@ pub struct DeviceList {
     pub items: Vec<DeviceView>,
 }
 
-fn view(d: &Device, snap: &Snapshot, playlist_ids: Vec<i64>, open_plan: bool) -> DeviceView {
+fn view(
+    d: &Device,
+    snap: &Snapshot,
+    playlist_ids: Vec<i64>,
+    open_plan: bool,
+    rt: Option<&AdbRuntime>,
+) -> DeviceView {
+    let (connected, adb_state) = match (d.transport, d.adb_serial.as_deref()) {
+        (Transport::Adb, Some(serial)) => (
+            Some(rt.is_some_and(|rt| rt.is_connected(serial))),
+            rt.and_then(|rt| rt.state_of(serial)),
+        ),
+        (Transport::Adb, None) => (Some(false), None),
+        (Transport::Agent, _) => (None, None),
+    };
     DeviceView {
         id: d.id,
         name: d.name.clone(),
@@ -79,7 +109,10 @@ fn view(d: &Device, snap: &Snapshot, playlist_ids: Vec<i64>, open_plan: bool) ->
         variant: d.variant.as_str(),
         selection: d.selection.as_str(),
         generation: d.generation,
-        connected: None,
+        connected,
+        adb_state,
+        adb_volume: d.adb_volume.clone(),
+        adb_root: d.adb_root.clone(),
         counts: snap.get(d.id).map(|s| s.counts).unwrap_or_default(),
         last_synced_at: d.last_synced_at,
         playlist_ids,
@@ -102,7 +135,7 @@ async fn view_of(state: &AppState, id: i64) -> Result<Option<DeviceView>, ApiErr
             )))
         })
         .await?;
-    Ok(found.map(|(d, pl, open)| view(&d, &snap, pl, open)))
+    Ok(found.map(|(d, pl, open)| view(&d, &snap, pl, open, state.adb.as_deref())))
 }
 
 fn bad_request(msg: impl Into<String>) -> Response {
@@ -118,6 +151,17 @@ fn open_plan() -> Response {
         "同期が途中か実行中なので変更できない（完了させるか、計画を破棄してから）",
     )
 }
+/// 同じ名前（大小文字・正規化の違いを含む）の端末があるか
+fn name_taken(c: &rusqlite::Connection, name: &str) -> crate::db::Result<bool> {
+    let key = crate::domain::relpath::canonical_key(name);
+    let taken: Option<i64> = c
+        .query_row("SELECT id FROM devices WHERE name_key = ?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(taken.is_some())
+}
+
 fn validate_name(raw: &str) -> Result<String, String> {
     let name = raw.trim();
     if name.is_empty() {
@@ -146,7 +190,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
         .await?;
     let items = rows
         .iter()
-        .map(|(d, pl, open)| view(d, &snap, pl.clone(), *open))
+        .map(|(d, pl, open)| view(d, &snap, pl.clone(), *open, state.adb.as_deref()))
         .collect();
     enqueue_hashes(&state, &snap).await?;
     Ok(Json(DeviceList { items }).into_response())
@@ -158,6 +202,11 @@ pub struct CreateBody {
     pub transport: String,
     pub variant: String,
     pub selection: String,
+    /// adb のみ: シリアルとボリューム（`emulated` か SD の UUID）
+    #[serde(default)]
+    pub serial: Option<String>,
+    #[serde(default)]
+    pub volume: Option<String>,
 }
 
 pub async fn create(
@@ -176,20 +225,12 @@ pub async fn create(
         return Ok(bad_request("transport / variant / selection が不正"));
     };
     if transport == Transport::Adb {
-        return Ok(bad_request(
-            "Android（USB）の登録は接続の検出から行う（P5-3 で対応）",
-        ));
+        return create_adb(&state, name, variant, selection, body.serial, body.volume).await;
     }
     let created = state
         .db
         .write(move |c| {
-            let key = crate::domain::relpath::canonical_key(&name);
-            let taken: Option<i64> = c
-                .query_row("SELECT id FROM devices WHERE name_key = ?1", [key], |r| {
-                    r.get(0)
-                })
-                .optional()?;
-            if taken.is_some() {
+            if name_taken(c, &name)? {
                 return Ok(None);
             }
             dbdev::create(
@@ -553,7 +594,7 @@ pub async fn diff(
         estimate: EstimateView {
             transfer_bytes: e.transfer_bytes,
             peak_bytes: e.peak_bytes,
-            free: None,
+            free: state.adb.as_ref().and_then(|rt| rt.free(id)),
         },
         evaluations: evals
             .into_iter()
@@ -623,4 +664,534 @@ pub async fn estimate(
         .into_response(),
         None => not_found(),
     })
+}
+
+// ---- Android（adb）: 未登録の一覧・登録・同期・再開・破棄・検証（P5-3b） ----
+
+fn adb_disabled() -> Response {
+    error_response_with_message(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "adb_disabled",
+        "Android の同期が無効（設定の [devices].adb_server が空）",
+    )
+}
+fn conflict(code: &'static str, msg: impl Into<String>) -> Response {
+    error_response_with_message(StatusCode::CONFLICT, code, msg)
+}
+fn device_failed(msg: impl Into<String>) -> Response {
+    error_response_with_message(StatusCode::BAD_GATEWAY, "device_failed", msg)
+}
+fn busy() -> Response {
+    conflict(
+        "busy",
+        "同期が実行中か、端末を別の処理が使っている。終わってからやり直してください",
+    )
+}
+fn no_open_plan() -> Response {
+    error_response_with_message(StatusCode::NOT_FOUND, "no_open_plan", "途中の計画が無い")
+}
+
+/// 端末が `device` でないときの 409。`unauthorized` なら許可を促す
+fn not_connected(rt: &AdbRuntime, serial: &str) -> Response {
+    if rt.state_of(serial).as_deref() == Some("unauthorized") {
+        conflict("not_connected", "端末で USB デバッグを許可してください")
+    } else {
+        conflict("not_connected", "端末が接続されていない")
+    }
+}
+
+/// 端末の操作の失敗を応答にする（未接続は 409、それ以外は 502）
+fn remote_failed(rt: &AdbRuntime, serial: &str, e: RemoteError) -> Response {
+    match e {
+        RemoteError::NotConnected => not_connected(rt, serial),
+        e => device_failed(e.to_string()),
+    }
+}
+
+fn store_failed(rt: &AdbRuntime, serial: &str, e: StoreError) -> Response {
+    match e {
+        StoreError::Remote(e) => remote_failed(rt, serial, e),
+        e => device_failed(e.to_string()),
+    }
+}
+
+/// adb の端末と実行時の状態を引く。無ければ 404、agent なら 400、ADB 同期が無効なら 503
+async fn adb_device(
+    state: &AppState,
+    id: i64,
+) -> Result<Result<(Device, Arc<AdbRuntime>), Response>, ApiError> {
+    let Some(d) = state.db.read(move |c| dbdev::get(c, id)).await? else {
+        return Ok(Err(not_found()));
+    };
+    if d.transport != Transport::Adb {
+        return Ok(Err(bad_request("Android（adb）の端末ではない")));
+    }
+    let Some(rt) = state.adb.clone() else {
+        return Ok(Err(adb_disabled()));
+    };
+    Ok(Ok((d, rt)))
+}
+
+#[derive(Serialize)]
+pub struct VolumeView {
+    pub volume: String,
+    pub path: String,
+    pub free: u64,
+    /// `missing` / `empty` / `nonempty`
+    pub state: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct UnregisteredItem {
+    pub serial: String,
+    pub model: Option<String>,
+    pub state: String,
+    pub volumes: Vec<VolumeView>,
+    /// ボリュームを調べられなかった理由
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct UnregisteredList {
+    pub items: Vec<UnregisteredItem>,
+}
+
+fn dir_state_str(s: DirState) -> &'static str {
+    match s {
+        DirState::Missing => "missing",
+        DirState::Empty => "empty",
+        DirState::NonEmpty => "nonempty",
+    }
+}
+
+/// 接続中で未登録の端末と、`device` のものは保存先の候補のボリューム（仕様 ⑤「登録」1〜2）
+pub async fn unregistered(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let Some(rt) = state.adb.clone() else {
+        return Ok(adb_disabled());
+    };
+    let tracked = rt.devices();
+    let serials: Vec<String> = tracked.iter().map(|d| d.serial.clone()).collect();
+    let registered: std::collections::HashSet<String> = state
+        .db
+        .read(move |c| {
+            let mut out = std::collections::HashSet::new();
+            for s in serials {
+                if dbdev::find_by_serial(c, &s)?.is_some() {
+                    out.insert(s);
+                }
+            }
+            Ok(out)
+        })
+        .await?;
+    let mut items = Vec::new();
+    for d in tracked {
+        if registered.contains(&d.serial) {
+            continue;
+        }
+        let (mut volumes, mut error) = (Vec::new(), None);
+        if d.state == "device" {
+            match probe_volumes_under(
+                rt.cfg(),
+                &d.serial,
+                rt.storage_base(),
+                DEFAULT_ROOT,
+                rt.shutdown(),
+            )
+            .await
+            {
+                Ok(v) => {
+                    volumes = v
+                        .into_iter()
+                        .map(|v| VolumeView {
+                            volume: v.volume,
+                            path: v.path,
+                            free: v.free,
+                            state: dir_state_str(v.state),
+                        })
+                        .collect();
+                }
+                Err(e) => {
+                    tracing::warn!(serial = %d.serial, error = %e, "端末のボリュームを調べられない");
+                    error = Some(e.to_string());
+                }
+            }
+        }
+        items.push(UnregisteredItem {
+            serial: d.serial,
+            model: d.model,
+            state: d.state,
+            volumes,
+            error,
+        });
+    }
+    Ok(Json(UnregisteredList { items }).into_response())
+}
+
+/// 保存先が空でないときの 409
+fn not_empty(rt: &AdbRuntime, volume: &str) -> Response {
+    let path = root_abs_under(rt.storage_base(), volume, DEFAULT_ROOT)
+        .unwrap_or_else(|| DEFAULT_ROOT.to_owned());
+    conflict(
+        "not_empty",
+        format!("保存先 {path} が空でない。中身を移すか、別のボリュームを選ぶ"),
+    )
+}
+
+/// adb の端末の登録（仕様 ⑤「登録」）: 接続を確かめ、保存先が空か前の登録の失敗の残りだけなら
+/// 行を作って端末に manifest を作り、差分の計算（`device_scan`）を投入する。端末の操作に失敗したら
+/// 行を残さない
+async fn create_adb(
+    state: &AppState,
+    name: String,
+    variant: Variant,
+    selection: Selection,
+    serial: Option<String>,
+    volume: Option<String>,
+) -> Result<Response, ApiError> {
+    let (Some(serial), Some(volume)) = (serial, volume) else {
+        return Ok(bad_request("Android の登録には serial と volume が要る"));
+    };
+    if !valid_serial(&serial) {
+        return Ok(bad_request("serial が不正"));
+    }
+    if !valid_volume(&volume) {
+        return Ok(bad_request("volume が不正"));
+    }
+    let Some(rt) = state.adb.clone() else {
+        return Ok(adb_disabled());
+    };
+    if !rt.is_connected(&serial) {
+        return Ok(not_connected(&rt, &serial));
+    }
+    let _registering = rt.register_lock().lock().await;
+
+    let (n, s) = (name.clone(), serial.clone());
+    let taken = state
+        .db
+        .read(move |c| {
+            if name_taken(c, &n)? {
+                return Ok(Some("duplicate"));
+            }
+            if dbdev::find_by_serial(c, &s)?.is_some() {
+                return Ok(Some("serial_registered"));
+            }
+            Ok(None)
+        })
+        .await?;
+    match taken {
+        Some("duplicate") => return Ok(error_response(StatusCode::CONFLICT, "duplicate")),
+        Some(_) => return Ok(conflict("serial_registered", "この端末は登録済み")),
+        None => {}
+    }
+
+    let fs = match rt.fs_for(&serial, &volume, DEFAULT_ROOT) {
+        Ok(fs) => fs,
+        Err(e) => return Ok(remote_failed(&rt, &serial, e)),
+    };
+    match fs.root_state().await {
+        Ok(DirState::NonEmpty) => {
+            // 中身が `.spindle` の下だけで、その manifest が無い・読めない・生きた登録のものでない
+            // （= 前の登録の失敗の残り）なら片付けて続ける。それ以外は推測しないで断る
+            let files = match fs.list_files().await {
+                Ok(f) => f,
+                Err(e) => return Ok(remote_failed(&rt, &serial, e)),
+            };
+            if !files.iter().all(|f| is_reserved(&f.path)) {
+                return Ok(not_empty(&rt, &volume));
+            }
+            let leftover = match store::read_manifest(&fs).await {
+                Ok(None) => true,
+                Ok(Some(m)) => {
+                    let uuid = m.device_uuid;
+                    !state.db.read(move |c| dbdev::uuid_exists(c, &uuid)).await?
+                }
+                Err(StoreError::Remote(e)) => return Ok(remote_failed(&rt, &serial, e)),
+                Err(_) => true,
+            };
+            if !leftover {
+                return Ok(not_empty(&rt, &volume));
+            }
+            tracing::info!(%serial, %volume, "前の登録の失敗の残り（.spindle）を片付ける");
+            if let Err(e) = fs.discard_init().await {
+                return Ok(remote_failed(&rt, &serial, e));
+            }
+        }
+        Ok(DirState::Missing | DirState::Empty) => {}
+        Err(e) => return Ok(remote_failed(&rt, &serial, e)),
+    }
+
+    let (s, v) = (serial.clone(), volume.clone());
+    let created = state
+        .db
+        .write(move |c| {
+            if name_taken(c, &name)? {
+                return Ok(Err("duplicate"));
+            }
+            if dbdev::find_by_serial(c, &s)?.is_some() {
+                return Ok(Err("serial_registered"));
+            }
+            dbdev::create(
+                c,
+                &NewDevice {
+                    name: &name,
+                    transport: Transport::Adb,
+                    variant,
+                    selection,
+                    adb: Some((&s, &v, DEFAULT_ROOT)),
+                },
+                now_epoch(),
+            )
+            .map(Ok)
+        })
+        .await?;
+    let d = match created {
+        Ok(d) => d,
+        Err("duplicate") => return Ok(error_response(StatusCode::CONFLICT, "duplicate")),
+        Err(_) => return Ok(conflict("serial_registered", "この端末は登録済み")),
+    };
+
+    if let Err(e) = store::initialize(&fs, &d.uuid, &volume).await {
+        tracing::warn!(%serial, %volume, error = %e, "端末の保存先を初期化できない");
+        // 空でなかった（確かめた後に何かが置かれた）なら何も書いていないので片付けない
+        if !matches!(e, InitError::NotEmpty) {
+            if let Err(e) = fs.discard_init().await {
+                tracing::warn!(%serial, error = %e, "初期化の途中の .spindle を片付けられない");
+            }
+        }
+        let id = d.id;
+        state.db.write(move |c| dbdev::delete(c, id)).await?;
+        return Ok(match e {
+            InitError::NotEmpty => not_empty(&rt, &volume),
+            InitError::Store(e) => store_failed(&rt, &serial, e),
+        });
+    }
+    state.jobs.enqueue(scan_job(d.id)).await?;
+    Ok(match view_of(state, d.id).await? {
+        Some(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        None => not_found(),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct SyncBody {
+    pub plan_token: String,
+}
+
+#[derive(Serialize)]
+pub struct JobAccepted {
+    pub job_id: i64,
+}
+
+fn accepted(job_id: i64) -> Response {
+    (StatusCode::ACCEPTED, Json(JobAccepted { job_id })).into_response()
+}
+
+fn plan_unreadable() -> Response {
+    conflict(
+        "plan_unreadable",
+        "計画を読めない。破棄してから差分を取り直してください",
+    )
+}
+
+enum SyncResult {
+    Job(i64),
+    OpenPlanExists,
+    Mismatch(String),
+    Unreadable,
+    NotFound,
+}
+
+/// 計画を確定して同期を投入する（仕様 ③「計画トークン」）。確定と投入は 1 つのトランザクション
+pub async fn sync(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<SyncBody>,
+) -> Result<Response, ApiError> {
+    if let Err(r) = adb_device(&state, id).await? {
+        return Ok(r);
+    }
+    if state.reeval_pending() {
+        return Ok(conflict(
+            "pending_reevaluation",
+            "スマートプレイリストの再評価が終わるまで待ってください",
+        ));
+    }
+    let token = body.plan_token;
+    let res = state
+        .db
+        .write(move |c| {
+            let now = now_epoch();
+            let tx = c.transaction()?;
+            let r = match dbdev::confirm_plan(&tx, id, &token, now) {
+                Ok(Confirm::Created(open) | Confirm::Existing(open)) => {
+                    let job_id = dbjobs::enqueue(&tx, &sync_job(id, open.id), now)?.id();
+                    dbdev::set_plan_job(&tx, open.id, job_id)?;
+                    SyncResult::Job(job_id)
+                }
+                Ok(Confirm::OpenPlanExists(_)) => SyncResult::OpenPlanExists,
+                Ok(Confirm::Mismatch { plan_token }) => SyncResult::Mismatch(plan_token),
+                Ok(Confirm::NotFound) => SyncResult::NotFound,
+                Err(DbError::Internal(msg)) => {
+                    tracing::warn!(device_id = id, error = %msg, "計画を確定できない");
+                    SyncResult::Unreadable
+                }
+                Err(e) => return Err(e),
+            };
+            tx.commit()?;
+            Ok(r)
+        })
+        .await?;
+    Ok(match res {
+        SyncResult::Job(job_id) => {
+            state.jobs.notify_enqueued(&[job_id]).await;
+            accepted(job_id)
+        }
+        SyncResult::OpenPlanExists => conflict(
+            "open_plan_exists",
+            "別の計画が途中にある。再開するか破棄してから",
+        ),
+        SyncResult::Mismatch(plan_token) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "plan_changed",
+                "message": "計画が変わった。差分を取り直してください",
+                "plan_token": plan_token,
+            })),
+        )
+            .into_response(),
+        SyncResult::Unreadable => plan_unreadable(),
+        SyncResult::NotFound => not_found(),
+    })
+}
+
+enum ResumeResult {
+    Job(i64),
+    NoPlan,
+    Unreadable,
+}
+
+/// open な計画の同期をもう一度投入する（同じ計画の未完了のジョブがあればそれを返す）
+pub async fn resume(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    if let Err(r) = adb_device(&state, id).await? {
+        return Ok(r);
+    }
+    let res = state
+        .db
+        .write(move |c| {
+            let now = now_epoch();
+            let tx = c.transaction()?;
+            let r = match dbdev::open_plan(&tx, id) {
+                Ok(Some(open)) => {
+                    let job_id = dbjobs::enqueue(&tx, &sync_job(id, open.id), now)?.id();
+                    dbdev::set_plan_job(&tx, open.id, job_id)?;
+                    ResumeResult::Job(job_id)
+                }
+                Ok(None) => ResumeResult::NoPlan,
+                Err(DbError::Internal(msg)) => {
+                    tracing::warn!(device_id = id, error = %msg, "計画を読めない");
+                    ResumeResult::Unreadable
+                }
+                Err(e) => return Err(e),
+            };
+            tx.commit()?;
+            Ok(r)
+        })
+        .await?;
+    Ok(match res {
+        ResumeResult::Job(job_id) => {
+            state.jobs.notify_enqueued(&[job_id]).await;
+            accepted(job_id)
+        }
+        ResumeResult::NoPlan => no_open_plan(),
+        ResumeResult::Unreadable => plan_unreadable(),
+    })
+}
+
+/// open な計画を破棄する（仕様 ③「計画の終端」）。端末で回復を済ませ（封印済みバッチの `vacating` 以降は
+/// 前進で完遂、`prepared` 以前は破棄）、キャッシュを置き換えてから計画を閉じる。同期のジョブと
+/// 直列化するため、端末のロックを持ったまま閉じる
+pub async fn abandon(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let (d, rt) = match adb_device(&state, id).await? {
+        Ok(x) => x,
+        Err(r) => return Ok(r),
+    };
+    let (Some(serial), Some(volume), Some(root)) = (
+        d.adb_serial.clone(),
+        d.adb_volume.clone(),
+        d.adb_root.clone(),
+    ) else {
+        return Err(ApiError::Internal(format!(
+            "端末 {id} の adb の設定（シリアル・ボリューム・root）が欠けている"
+        )));
+    };
+    let active = state
+        .db
+        .read(move |c| dbdev::active_device_job(c, id, "device_sync"))
+        .await?;
+    if matches!(&active, Some((_, s)) if s == "running") {
+        return Ok(busy());
+    }
+    if !rt.is_connected(&serial) {
+        return Ok(not_connected(&rt, &serial));
+    }
+    let Ok(_guard) = rt.device_lock(id).try_lock_owned() else {
+        return Ok(busy());
+    };
+    let Some(plan_id) = state.db.read(move |c| dbdev::open_plan_id(c, id)).await? else {
+        return Ok(no_open_plan());
+    };
+    let fs = match rt.fs_for(&serial, &volume, &root) {
+        Ok(fs) => fs,
+        Err(e) => return Ok(remote_failed(&rt, &serial, e)),
+    };
+    let expect = Expect {
+        device_uuid: d.uuid.clone(),
+        volume,
+    };
+    let rec = match recover(&fs, &expect).await {
+        Ok(r) => r,
+        Err(RecoverError::Store(e)) => return Ok(store_failed(&rt, &serial, e)),
+        Err(e) => return Ok(device_failed(e.to_string())),
+    };
+    let (items, playlists) = (rec.items, rec.playlists);
+    let queued = state
+        .db
+        .write(move |c| {
+            let now = now_epoch();
+            let tx = c.transaction()?;
+            dbdev::apply_device_state(&tx, id, &items, &playlists, None, false, now)?;
+            dbdev::close_plan(&tx, plan_id, PlanEnd::Abandoned, None, now)?;
+            let queued = dbdev::active_device_job(&tx, id, "device_sync")?
+                .filter(|(_, s)| s == "queued")
+                .map(|(job_id, _)| job_id);
+            tx.commit()?;
+            Ok(queued)
+        })
+        .await?;
+    // 閉じた計画のジョブは走っても何もしないが、待ちの表示を残さない
+    if let Some(job_id) = queued {
+        state.jobs.cancel(job_id).await?;
+    }
+    Ok(match view_of(&state, id).await? {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
+/// 端末の全曲の sha256 を検証するジョブを投入する
+pub async fn verify(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    if let Err(r) = adb_device(&state, id).await? {
+        return Ok(r);
+    }
+    let job_id = state.jobs.enqueue(verify_job(id)).await?.id();
+    Ok(accepted(job_id))
 }

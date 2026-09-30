@@ -22,6 +22,8 @@ pub struct AdbRuntime {
     devices: Mutex<BTreeMap<String, TrackedDevice>>,
     locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     free: Mutex<HashMap<i64, u64>>,
+    /// 登録を 1 件ずつにする（同じシリアル・保存先の二重登録を防ぐ）
+    register: tokio::sync::Mutex<()>,
     /// ボリュームを置く場所（本番は `/storage`）
     storage_base: String,
 }
@@ -48,6 +50,7 @@ impl AdbRuntime {
             devices: Mutex::default(),
             locks: Mutex::default(),
             free: Mutex::default(),
+            register: tokio::sync::Mutex::new(()),
             storage_base: base,
         })
     }
@@ -99,6 +102,11 @@ impl AdbRuntime {
 
     pub fn device_lock(&self, device_id: i64) -> Arc<tokio::sync::Mutex<()>> {
         Arc::clone(lock(&self.locks).entry(device_id).or_default())
+    }
+
+    /// 登録（API の `create` の adb 分岐）を直列化するロック
+    pub fn register_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.register
     }
 
     pub fn set_free(&self, device_id: i64, bytes: u64) {

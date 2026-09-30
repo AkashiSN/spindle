@@ -56,6 +56,8 @@ pub struct AppState {
     /// CD ドライブ（P2-1）。ポーラが `DriveMonitor` を更新し、`/api/cd/status` が読む。
     /// eject はドライブを直接叩く。無いと `/api/cd/status` / `eject` は 503
     pub cd: Option<CdDrive>,
+    /// adb の実行時の状態（P5-3b）。無い（`[devices].adb_server` が空）と Android の端末の API は 503
+    pub adb: Option<Arc<crate::device::runtime::AdbRuntime>>,
 }
 
 /// ドライブとその監視状態の組
@@ -90,6 +92,7 @@ impl AppState {
             coverart: None,
             drive_offsets: None,
             cd: None,
+            adb: None,
         }
     }
 
@@ -99,6 +102,11 @@ impl AppState {
         monitor: Arc<crate::cd::device::DriveMonitor>,
     ) -> Self {
         self.cd = Some(CdDrive { drive, monitor });
+        self
+    }
+
+    pub fn with_adb(mut self, rt: Arc<crate::device::runtime::AdbRuntime>) -> Self {
+        self.adb = Some(rt);
         self
     }
 

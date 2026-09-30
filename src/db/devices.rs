@@ -888,6 +888,42 @@ pub fn has_open_work(conn: &Connection, id: i64) -> Result<bool> {
     )? == 1)
 }
 
+/// 端末の open な計画の id（計画の JSON は読まない。壊れていても破棄できるように）
+pub fn open_plan_id(conn: &Connection, device_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM device_sync_plans WHERE device_id = ?1 AND state = 'open'",
+            [device_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// 端末の queued / running のジョブ（`job_type` の種類）のうち最新の 1 件の id と state
+pub fn active_device_job(
+    conn: &Connection,
+    device_id: i64,
+    job_type: &str,
+) -> Result<Option<(i64, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, state FROM jobs WHERE type = ?2 AND state IN ('queued', 'running')
+               AND json_extract(payload, '$.device_id') = ?1 ORDER BY id DESC LIMIT 1",
+            params![device_id, job_type],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// この uuid の端末が登録されているか（端末に残った manifest が生きた登録のものかの判定）
+pub fn uuid_exists(conn: &Connection, uuid: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM devices WHERE uuid = ?1)",
+        [uuid],
+        |r| r.get::<_, i64>(0),
+    )? == 1)
+}
+
 /// 端末の open な計画（仕様 ③「計画の終端」。端末ごとに 1 つまで）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenPlan {
