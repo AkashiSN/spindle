@@ -11,6 +11,7 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
+COPY agent-proto/ agent-proto/
 # rust-embed / include_str! でバイナリへ埋め込むものは build context に入れる
 COPY db/migrations/ db/migrations/
 COPY --from=web /web/dist/ web/dist/
