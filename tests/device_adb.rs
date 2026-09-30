@@ -19,8 +19,15 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 }
 
 /// シリアルとサーバの指定を確かめてから、スクリプトを手元の sh で実行する偽の adb
-fn fake_adb(dir: &Path) -> PathBuf {
-    let path = dir.join("adb");
+fn fake_adb(_dir: &Path) -> PathBuf {
+    // 書き込み中の fd を別スレッドの fork が引き継ぐと ETXTBSY になるので、最初に 1 度だけ書く
+    static ONCE: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
+    ONCE.get_or_init(write_fake_adb).1.clone()
+}
+
+fn write_fake_adb() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("adb");
     std::fs::write(
         &path,
         r#"#!/bin/sh
@@ -34,7 +41,7 @@ exec sh -c "$4"
     )
     .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
+    (dir, path)
 }
 
 struct Env {
@@ -307,4 +314,46 @@ fn real_device_round_trip() {
         fs.prune_empty_dirs().await.unwrap();
         fs.rescan().await.unwrap();
     });
+}
+
+#[test]
+fn prune_keeps_reserved_dir_when_root_has_glob_chars() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Music/[spindle]");
+        let cfg = AdbConfig {
+            program: fake_adb(dir.path()),
+            server: "tcp:adb:5037".into(),
+            timeout: Duration::from_secs(30),
+            transfer_timeout: Duration::from_secs(60),
+        };
+        let fs = AdbFs::new(
+            cfg,
+            "SER1",
+            root.to_str().unwrap(),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".spindle/moving")).unwrap();
+        std::fs::create_dir_all(root.join("empty/dir")).unwrap();
+        fs.prune_empty_dirs().await.unwrap();
+        assert!(root.join(".spindle/moving").exists());
+        assert!(!root.join("empty").exists());
+    });
+}
+
+#[test]
+fn odd_roots_are_refused() {
+    for root in ["/", "//", "/a//b", "/a/./b"] {
+        let cfg = AdbConfig {
+            program: "adb".into(),
+            server: "x".into(),
+            timeout: Duration::from_secs(1),
+            transfer_timeout: Duration::from_secs(1),
+        };
+        assert!(
+            AdbFs::new(cfg, "SER1", root, CancellationToken::new()).is_err(),
+            "{root}"
+        );
+    }
 }

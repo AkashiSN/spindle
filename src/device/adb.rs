@@ -58,7 +58,10 @@ impl AdbFs {
                 "adb のシリアルが不正: {serial:?}"
             )));
         }
-        if !root_abs.starts_with('/') || root_abs.split('/').any(|c| c == "..") {
+        let root_ok = root_abs
+            .strip_prefix('/')
+            .is_some_and(|r| RelPath::parse(r.trim_end_matches('/')).is_ok());
+        if !root_ok {
             return Err(RemoteError::Failed(format!(
                 "端末の root が不正: {root_abs:?}"
             )));
@@ -147,16 +150,16 @@ fn map_err(e: ProcessError) -> RemoteError {
 }
 
 fn is_disconnected(stderr: &str) -> bool {
-    [
-        "not found",
-        "no devices",
-        "device offline",
-        "unauthorized",
-        "cannot connect to daemon",
-        "closed",
-    ]
-    .iter()
-    .any(|p| stderr.contains(p))
+    stderr.lines().any(|l| {
+        let l = l.trim_start_matches("* ").trim();
+        (l.starts_with("adb: device '") && l.contains("' not found"))
+            || l.starts_with("error: no devices/emulators found")
+            || l.starts_with("error: device offline")
+            || l.starts_with("error: device unauthorized")
+            || l.starts_with("error: closed")
+            || l.starts_with("adb: error: failed to get feature set")
+            || l.contains("cannot connect to daemon")
+    })
 }
 
 /// ハッシュのスレッド（送った長さと 16 進の sha256）
@@ -191,27 +194,29 @@ fn hashing_pipe(mut src: std::fs::File) -> std::io::Result<(std::fs::File, HashH
 }
 
 /// `size\npath\0` の並びを読む（パスは NUL で終わるので改行を含んでも曖昧にならない）
-fn parse_listing(bytes: &[u8]) -> Vec<RemoteFile> {
+fn parse_listing(bytes: &[u8]) -> RemoteResult<Vec<RemoteFile>> {
+    let bad = |what: &str| RemoteError::Failed(format!("一覧の出力を読めない（{what}）"));
     let mut out = Vec::new();
     let mut rest = bytes;
     while !rest.is_empty() {
-        let Some(nl) = rest.iter().position(|b| *b == b'\n') else {
-            break;
-        };
+        let nl = rest
+            .iter()
+            .position(|b| *b == b'\n')
+            .ok_or_else(|| bad("途中で切れた"))?;
         let size = std::str::from_utf8(&rest[..nl])
             .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok());
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .ok_or_else(|| bad("サイズ"))?;
         rest = &rest[nl + 1..];
-        let Some(nul) = rest.iter().position(|b| *b == 0) else {
-            break;
-        };
-        let path = String::from_utf8(rest[..nul].to_vec()).ok();
+        let nul = rest
+            .iter()
+            .position(|b| *b == 0)
+            .ok_or_else(|| bad("途中で切れた"))?;
+        let path = String::from_utf8(rest[..nul].to_vec()).map_err(|_| bad("UTF-8 でないパス"))?;
         rest = &rest[nul + 1..];
-        if let (Some(size), Some(path)) = (size, path) {
-            out.push(RemoteFile { path, size });
-        }
+        out.push(RemoteFile { path, size });
     }
-    out
+    Ok(out)
 }
 
 impl DeviceFs for AdbFs {
@@ -277,9 +282,9 @@ impl DeviceFs for AdbFs {
     async fn list_files(&self) -> RemoteResult<Vec<RemoteFile>> {
         let r = self.quoted_root()?;
         let script = format!(
-            "cd {r} 2>/dev/null || exit 0; find . -type f -exec sh -c 'for f; do s=$(stat -c %s \"$f\") || continue; printf \"%s\\n%s\\0\" \"$s\" \"${{f#./}}\"; done' sh {{}} +"
+            "[ -e {r} ] || exit 0; cd {r} || exit 1; find . -type f -exec sh -c 'for f; do s=$(stat -c %s \"$f\") || continue; printf \"%s\\n%s\\0\" \"$s\" \"${{f#./}}\"; done' sh {{}} +"
         );
-        Ok(parse_listing(&self.shell(script).await?.stdout))
+        parse_listing(&self.shell(script).await?.stdout)
     }
 
     async fn rename(&self, from: &str, to: &str) -> RemoteResult<()> {
@@ -297,12 +302,8 @@ impl DeviceFs for AdbFs {
 
     async fn prune_empty_dirs(&self) -> RemoteResult<()> {
         let r = self.quoted_root()?;
-        let reserved = sh_quote(&format!("{}/.spindle", self.root))
-            .map_err(|e| RemoteError::Failed(e.to_string()))?;
-        let reserved_glob = sh_quote(&format!("{}/.spindle/*", self.root))
-            .map_err(|e| RemoteError::Failed(e.to_string()))?;
         self.shell(format!(
-            "[ -d {r} ] || exit 0; find {r} -mindepth 1 -depth -type d -empty ! -path {reserved} ! -path {reserved_glob} -delete"
+            "[ -d {r} ] || exit 0; cd {r} || exit 1; find . -mindepth 1 -depth -type d -empty ! -path ./.spindle ! -path './.spindle/*' -delete"
         ))
         .await?;
         Ok(())
@@ -331,7 +332,7 @@ impl DeviceFs for AdbFs {
         let r = self.quoted_root()?;
         let out = self
             .shell(format!(
-                "if [ ! -e {r} ]; then echo missing; elif [ -n \"$(ls -A {r})\" ]; then echo nonempty; else echo empty; fi"
+                "if [ ! -e {r} ]; then echo missing; else c=$(ls -A {r}) || exit 1; if [ -n \"$c\" ]; then echo nonempty; else echo empty; fi; fi"
             ))
             .await?;
         match String::from_utf8_lossy(&out.stdout).trim() {
@@ -350,5 +351,53 @@ impl DeviceFs for AdbFs {
         ))
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    fn failed(stderr: &str) -> ProcessError {
+        ProcessError::Failed {
+            program: "adb".into(),
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn only_adb_own_messages_mean_disconnected() {
+        for m in [
+            "adb: device 'X' not found",
+            "error: no devices/emulators found",
+            "error: device offline",
+            "error: closed",
+            "* cannot connect to daemon at tcp:adb:5037",
+        ] {
+            assert_eq!(map_err(failed(m)), RemoteError::NotConnected, "{m}");
+        }
+        for m in [
+            "sh: sha256sum: not found",
+            "mv: /a/closed/x: No such file",
+            "find: not found",
+        ] {
+            assert!(matches!(map_err(failed(m)), RemoteError::Failed(_)), "{m}");
+        }
+    }
+
+    #[test]
+    fn no_space_is_mapped() {
+        let e = map_err(failed("cat: write error: No space left on device"));
+        assert_eq!(e, RemoteError::NoSpace);
+    }
+
+    #[test]
+    fn broken_listing_is_an_error() {
+        assert!(parse_listing(b"5\na\0").is_ok());
+        assert!(parse_listing(b"5\na").is_err());
+        assert!(parse_listing(b"x\na\0").is_err());
+        assert!(parse_listing(b"5\n\xff\0").is_err());
     }
 }
