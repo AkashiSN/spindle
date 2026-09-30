@@ -793,6 +793,89 @@ fn playlist_changes_survive_every_crash_point() {
     });
 }
 
+/// 回復 → 今の差分 → 保存済みの `plan` の部分集合 → 実行（計画を作り直さない再開）
+async fn run_stored_plan(
+    fs: &FakeFs,
+    plan: &StoredPlan,
+    playlists: &[DesiredPlaylist],
+) -> Result<SyncReport, String> {
+    let rec = recover(fs, &expect()).await.map_err(|e| e.to_string())?;
+    let d = diff(
+        &desired(&[]),
+        &rec.items,
+        playlists,
+        &rec.playlists,
+        Vec::new(),
+    );
+    let r = runnable(plan, &rec.items, &rec.playlists, &d);
+    let bodies: HashMap<i64, Vec<u8>> = playlists
+        .iter()
+        .map(|p| (p.playlist_id, p.body.clone()))
+        .collect();
+    sync::run(
+        fs,
+        &sources(&[]),
+        &TestControl::default(),
+        SyncInput {
+            generation: 1,
+            start: rec.manifest,
+            runnable: &r,
+            playlist_bodies: &bodies,
+        },
+    )
+    .await
+    .map_err(|e: SyncError| e.to_string())
+}
+
+#[test]
+fn playlist_rename_resumes_from_the_same_plan_at_every_crash_point() {
+    block_on(async {
+        let base = device_at(&[], 1 << 30).await;
+        sync_full(
+            &base,
+            &[],
+            &[pl(5, "通勤", b"P5"), pl(6, "消す", b"P6")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        let target = [pl(5, "朝", b"P5")];
+        // 計画は 1 度だけ確定し、切断の後もそれを使って再開する
+        let rec = recover(&base, &expect()).await.unwrap();
+        let d = diff(
+            &desired(&[]),
+            &rec.items,
+            &target,
+            &rec.playlists,
+            Vec::new(),
+        );
+        let plan = StoredPlan::from_diff(1, "tok", &d).unwrap();
+        let clean = base.snapshot();
+        run_stored_plan(&clean, &plan, &target).await.unwrap();
+        let total = clean.mutations();
+        assert!(total > 0);
+        for k in 0..total {
+            let fs = base.snapshot();
+            fs.fail_after(k);
+            assert!(run_stored_plan(&fs, &plan, &target).await.is_err(), "k={k}");
+            fs.reconnect();
+            let report = run_stored_plan(&fs, &plan, &target)
+                .await
+                .unwrap_or_else(|e| panic!("k={k}: {e}"));
+            assert!(report.errors.is_empty(), "k={k}: {:?}", report.errors);
+            assert_eq!(fs.get("Playlists/朝.m3u8"), Some(b"P5".to_vec()), "k={k}");
+            assert_eq!(fs.get("Playlists/通勤.m3u8"), None, "k={k}");
+            assert_eq!(fs.get("Playlists/消す.m3u8"), None, "k={k}");
+            assert_eq!(
+                playlist_paths(&parse_manifest(&fs)),
+                vec![(5, "Playlists/朝.m3u8".to_owned())],
+                "k={k}"
+            );
+        }
+    });
+}
+
 #[test]
 fn item_errors_do_not_break_crash_recovery() {
     block_on(async {

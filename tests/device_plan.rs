@@ -202,3 +202,91 @@ fn playlists_follow_the_same_rules() {
     assert_eq!(r.satisfied, 1);
     assert_eq!(r.dropped, 1);
 }
+
+fn pl_op(
+    kind: PlaylistOpKind,
+    id: i64,
+    from: Option<&str>,
+    to: Option<&str>,
+    token: Option<&str>,
+) -> PlaylistOp {
+    PlaylistOp {
+        kind,
+        playlist_id: id,
+        from: from.map(Into::into),
+        to: to.map(Into::into),
+        token: token.map(Into::into),
+    }
+}
+
+#[test]
+fn rename_cut_after_removing_the_old_path_resumes_as_add() {
+    let d = Diff {
+        playlists: vec![pl_op(
+            PlaylistOpKind::Update,
+            5,
+            Some("Playlists/old.m3u8"),
+            Some("Playlists/new.m3u8"),
+            Some("p2"),
+        )],
+        ..Default::default()
+    };
+    let p = plan_of(&d);
+    // 旧パスを消した後・新パスを書く前に切れた。今の状態に 5 の行が無く、今の差分は追加
+    let now = Diff {
+        playlists: vec![pl_op(
+            PlaylistOpKind::Add,
+            5,
+            None,
+            Some("Playlists/new.m3u8"),
+            Some("p2"),
+        )],
+        ..Default::default()
+    };
+    let r = runnable(&p, &[], &[], &now);
+    assert_eq!(r.dropped, 0);
+    assert_eq!(
+        r.playlists,
+        vec![PlanPlaylist {
+            op_id: p.playlists[0].op_id.clone(),
+            op: PlaylistOpKind::Add,
+            playlist_id: 5,
+            from: None,
+            to: Some("Playlists/new.m3u8".into()),
+            token: Some("p2".into()),
+        }]
+    );
+    // 行き先かトークンが違う追加、または今の状態にまだ旧パスの行があれば外す
+    for now in [
+        pl_op(
+            PlaylistOpKind::Add,
+            5,
+            None,
+            Some("Playlists/x.m3u8"),
+            Some("p2"),
+        ),
+        pl_op(
+            PlaylistOpKind::Add,
+            5,
+            None,
+            Some("Playlists/new.m3u8"),
+            Some("p3"),
+        ),
+    ] {
+        let now = Diff {
+            playlists: vec![now],
+            ..Default::default()
+        };
+        let r = runnable(&p, &[], &[], &now);
+        assert!(r.playlists.is_empty());
+        assert_eq!(r.dropped, 1);
+    }
+    let still = PlaylistState {
+        playlist_id: 5,
+        dest_path: "Playlists/old.m3u8".into(),
+        token: "p1".into(),
+    };
+    let r = runnable(&p, &[], &[still], &now);
+    assert!(r.playlists.is_empty());
+    assert_eq!(r.dropped, 1);
+}

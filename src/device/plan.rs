@@ -1,7 +1,8 @@
 //! 確定した計画（`device_sync_plans.plan`）と、開始済みの計画の再開（仕様 ③）。
 //! 実行するのは計画の部分集合だけ: 今の状態で満たされている操作は飛ばし、今の差分にも同じ操作・
 //! 同じトークン・同じパスで残っているものだけを実行する。計画に無い操作（とくに新しい削除）は
-//! 実行しない。パス変更は入れ替え・循環の成分ごとに全員残すか全員外す
+//! 実行しない。パス変更は入れ替え・循環の成分ごとに全員残すか全員外す。
+//! 例外として、プレイリストの改名が旧パスの削除の後で切れた中間状態は、残りを追加として再開する
 
 use std::collections::HashMap;
 
@@ -180,18 +181,42 @@ pub fn runnable(
     let now_pl: HashMap<i64, &PlaylistOp> =
         now.playlists.iter().map(|o| (o.playlist_id, o)).collect();
     for p in &plan.playlists {
+        let now_op = now_pl.get(&p.playlist_id);
         if playlist_satisfied(p, &cur_pl) {
             out.satisfied += 1;
-        } else if now_pl
-            .get(&p.playlist_id)
-            .is_some_and(|o| same_playlist(p, o))
-        {
+        } else if now_op.is_some_and(|o| same_playlist(p, o)) {
             out.playlists.push(p.clone());
+        } else if now_op.is_some_and(|o| rename_old_path_removed(p, o, &cur_pl)) {
+            // 改名の旧パスの削除が済んだ中間状態: 残りの新パスへの書き込みを追加として実行する
+            out.playlists.push(PlanPlaylist {
+                op: PlaylistOpKind::Add,
+                from: None,
+                ..p.clone()
+            });
         } else {
             out.dropped += 1;
         }
     }
     out
+}
+
+/// プレイリストの改名（旧パスの削除 → 新パスへの書き込み）が、旧パスを消した後・新パスを書く前に
+/// 切れた中間状態か。今の状態にその行が無く、今の差分が同じ行き先・同じトークンの追加なら正当とみなす。
+/// 曲のパス変更はバッチで原子的に完遂される（回復が前進か破棄に決める）ので、同様の中間状態は無い
+fn rename_old_path_removed(
+    p: &PlanPlaylist,
+    o: &PlaylistOp,
+    cur: &HashMap<i64, &PlaylistState>,
+) -> bool {
+    p.op == PlaylistOpKind::Update
+        && p.from.is_some()
+        && p.from != p.to
+        && !cur.contains_key(&p.playlist_id)
+        && o.kind == PlaylistOpKind::Add
+        && o.playlist_id == p.playlist_id
+        && o.from.is_none()
+        && o.to == p.to
+        && o.token == p.token
 }
 
 fn find(parent: &mut [usize], i: usize) -> usize {
