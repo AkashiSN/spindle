@@ -60,6 +60,9 @@ pub struct Config {
     pub hires: HiresConfig,
     pub ytmusic: YtmusicConfig,
     pub bin: BinConfig,
+    /// 端末への配信（P5-3b）。省略時は ADB 同期が無効
+    #[serde(default)]
+    pub devices: DevicesConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -467,6 +470,10 @@ fn default_download_timeout() -> u32 {
     900
 }
 
+fn default_adb() -> String {
+    "adb".into()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BinConfig {
@@ -476,6 +483,9 @@ pub struct BinConfig {
     pub cdparanoia: String,
     pub cdrdao: String,
     pub ytdlp: String,
+    /// adb クライアント（platform-tools r37.0.1 を同梱。P5-3b、D-98）。無い既存の設定でも起動できるよう既定を持つ
+    #[serde(default = "default_adb")]
+    pub adb: String,
 }
 
 impl BinConfig {
@@ -491,6 +501,35 @@ impl BinConfig {
     }
 }
 
+/// 端末への配信（P5-3b、D-98）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DevicesConfig {
+    /// adb サーバの `ADB_SERVER_SOCKET`（サイドカーのソケット `localfilesystem:/run/adb/adb.sock`）。
+    /// 空なら ADB 同期を無効化する
+    pub adb_server: String,
+    /// adb の 1 回で終わるコマンドのタイムアウト（秒）
+    pub adb_timeout_secs: u32,
+    /// 1 曲の転送のタイムアウト（秒）
+    pub adb_transfer_timeout_secs: u32,
+}
+
+impl Default for DevicesConfig {
+    fn default() -> Self {
+        Self {
+            adb_server: String::new(),
+            adb_timeout_secs: 60,
+            adb_transfer_timeout_secs: 3600,
+        }
+    }
+}
+
+impl DevicesConfig {
+    pub fn adb_enabled(&self) -> bool {
+        !self.adb_server.trim().is_empty()
+    }
+}
+
 impl Config {
     /// yt-dlp の起動引数列（プログラム + `[ytmusic].ytdlp_args`）。dump / download の両方に付く
     pub fn ytdlp_command(&self) -> Vec<String> {
@@ -498,6 +537,11 @@ impl Config {
         v.push(self.bin.ytdlp.clone());
         v.extend(self.ytmusic.ytdlp_args.iter().cloned());
         v
+    }
+
+    /// adb の子に渡す HOME（`$HOME/.android` を作れないと adb が abort する。D-98）
+    pub fn adb_home(&self) -> PathBuf {
+        self.paths.data.join("adb")
     }
 
     /// TOML 文字列を解析し、値の妥当性を検証する。ファイルシステムは見ない
@@ -636,10 +680,34 @@ impl Config {
         }
 
         // [bin]
+        if self.bin.adb.trim().is_empty() {
+            return invalid("bin.adb は空にできない".into());
+        }
         for (key, value) in self.bin.entries() {
             if value.trim().is_empty() {
                 return invalid(format!("{key} は空にできない"));
             }
+        }
+        // [devices]
+        let server = self.devices.adb_server.trim();
+        if !server.is_empty() {
+            let ok = if let Some(p) = server.strip_prefix("localfilesystem:") {
+                p.starts_with('/') && p.len() > 1
+            } else if let Some(hp) = server.strip_prefix("tcp:") {
+                !hp.is_empty()
+            } else {
+                false
+            };
+            if !ok {
+                return invalid(format!(
+                    "devices.adb_server は localfilesystem:/絶対パス か tcp:ホスト:ポート: {server:?}"
+                ));
+            }
+        }
+        if self.devices.adb_timeout_secs == 0 || self.devices.adb_transfer_timeout_secs == 0 {
+            return invalid(
+                "devices.adb_timeout_secs / adb_transfer_timeout_secs は 1 以上".into(),
+            );
         }
 
         // [ytmusic]: 有効ならプラグインのコマンドが要る

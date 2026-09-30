@@ -106,3 +106,10 @@ opusenc = "opusenc"
 cdparanoia = "cd-paranoia"
 cdrdao = "cdrdao"
 ytdlp = "yt-dlp"
+adb = "adb"
+
+[devices]
+# adb サイドカー（deploy/compose.yaml の adb サービス）のソケット。空なら Android の同期を無効にする（D-98）
+adb_server = "localfilesystem:/run/adb/adb.sock"
+adb_timeout_secs = 60
+adb_transfer_timeout_secs = 3600

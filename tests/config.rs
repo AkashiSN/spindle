@@ -723,3 +723,66 @@ fn gc_job_retention_defaults_and_zero() {
     .unwrap();
     assert_eq!((c.gc.jobs_done_days, c.gc.jobs_failed_days), (0, 1));
 }
+
+/// サンプル設定から不要なセクションを削除した最小設定を作る
+fn base_config() -> String {
+    // devices と inbox は省略可なので削除、verify と hires も既定値を使うため削除
+    let mut root: toml::Table = toml::from_str(EXAMPLE).unwrap();
+    root.remove("devices");
+    root.remove("inbox");
+    root.remove("verify");
+    root.remove("hires");
+    toml::to_string(&root).unwrap()
+}
+
+/// 最小設定に新しいセクションを追加した TOML を作る
+fn add_section(name: &str, body: &str) -> String {
+    let cfg = base_config();
+    format!("{}\n[{}]\n{}\n", cfg, name, body)
+}
+
+#[test]
+fn devices_section_is_optional_and_disabled_by_default() {
+    let cfg = Config::parse(&base_config()).unwrap();
+    assert_eq!(cfg.bin.adb, "adb");
+    assert!(!cfg.devices.adb_enabled());
+    assert_eq!(cfg.devices.adb_timeout_secs, 60);
+    assert_eq!(cfg.devices.adb_transfer_timeout_secs, 3600);
+    assert_eq!(cfg.adb_home(), cfg.paths.data.join("adb"));
+}
+
+#[test]
+fn devices_adb_server_accepts_socket_and_tcp() {
+    for v in [
+        "localfilesystem:/run/adb/adb.sock",
+        "tcp:127.0.0.1:5037",
+        "tcp:adb:5037",
+    ] {
+        let cfg = Config::parse(&add_section("devices", &format!("adb_server = \"{v}\""))).unwrap();
+        assert!(cfg.devices.adb_enabled(), "{v}");
+    }
+}
+
+#[test]
+fn devices_rejects_bad_values() {
+    for body in [
+        "adb_server = \"localfilesystem:run/adb.sock\"", // 相対パス
+        "adb_server = \"unix:/run/adb.sock\"",           // adb の書式でない
+        "adb_server = \"tcp:\"",
+        "adb_timeout_secs = 0",
+        "adb_transfer_timeout_secs = 0",
+    ] {
+        assert!(
+            matches!(
+                Config::parse(&add_section("devices", body)),
+                Err(ConfigError::Invalid(_))
+            ),
+            "{body}"
+        );
+    }
+    let text = replace_section(
+        "bin",
+        "ffmpeg = \"ffmpeg\"\nflac = \"flac\"\nopusenc = \"opusenc\"\ncdparanoia = \"cd-paranoia\"\ncdrdao = \"cdrdao\"\nytdlp = \"yt-dlp\"\nadb = \" \"",
+    );
+    assert!(matches!(Config::parse(&text), Err(ConfigError::Invalid(_))));
+}
