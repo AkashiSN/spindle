@@ -3368,3 +3368,17 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 .inbox-stages .stage-na {
   color: var(--muted);
 }
+.devices-android {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+.devices-android fieldset {
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+.devices-add-form .devices-volume {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}

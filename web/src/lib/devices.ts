@@ -1,7 +1,7 @@
 // 端末タブの純粋ロジック（P5-2、D-95）。件数・差分表の並び・文言
 
 import { ApiError } from '../api/client'
-import type { Device, DeviceCounts, DeviceDiff, DiffItem, DiffOp } from '../api/types'
+import type { AdbVolume, Device, DeviceCounts, DeviceDiff, DiffItem, DiffOp, JobEvent, JobState } from '../api/types'
 import { formatDateTime } from './history'
 
 /** 未反映の件数（ナビのバッジ・一覧）。待ちはハッシュ計算などを待っているだけなので数えない */
@@ -60,6 +60,82 @@ export function describeEvaluation(e: DeviceDiff['evaluations'][number], _now: n
   return `${e.name}: ${formatDateTime(e.evaluated_at)} に評価`
 }
 
+const OPEN_PLAN_TITLE = '前回の同期が途中です。続きを実行するか破棄してください'
+export const ADB_DISABLED_MESSAGE = 'Android の同期が無効です（設定の [devices].adb_server）'
+
+/** 未登録の Android を取り直す間隔（前の要求が終わってから数える） */
+export const UNREGISTERED_POLL_MS = 3000
+
+/** 未登録の一覧を取った結果（`error` は失敗の理由、成功なら null）から、次を取るまでの待ち（ms）。
+ * null なら取るのをやめる。ADB 同期が無効（503 `adb_disabled`）は取り直しても変わらず、
+ * 中止（フォームを閉じた）は続ける相手がいない */
+export function nextPollDelay(error: unknown): number | null {
+  if (error instanceof ApiError && error.code === 'adb_disabled') return null
+  if (error instanceof DOMException && error.name === 'AbortError') return null
+  return UNREGISTERED_POLL_MS
+}
+
+/** Android の接続状態の説明（問題が無ければ null） */
+export function connectionNote(d: Device): string | null {
+  if (d.transport !== 'adb' || d.connected) return null
+  switch (d.adb_state) {
+    case 'unauthorized':
+      return '端末で USB デバッグを許可してください'
+    case 'offline':
+    case 'authorizing':
+      return '接続中（端末の応答待ち）'
+    default:
+      return '未接続（USB でつなぐと差分を取り直します）'
+  }
+}
+
+export function volumeLabel(v: AdbVolume): string {
+  return v.volume === 'emulated' ? '内部共有ストレージ' : `SD カード（${v.volume}）`
+}
+
+/** 保存先は空か存在しないときだけ選べる（仕様 ⑤「登録」4） */
+export function volumeUsable(v: AdbVolume): boolean {
+  return v.state !== 'nonempty'
+}
+
+/** 待ちの同期の説明。未接続なら接続を待っている（つながっていれば順番待ち） */
+export function queuedSyncText(d: Device): string {
+  return d.connected === false ? '端末の接続を待っています' : '同期の待ち'
+}
+
+export function syncButton(d: Device, diff: DeviceDiff): { enabled: boolean; title: string | null } {
+  if (d.sync_job != null) {
+    return { enabled: false, title: d.sync_job.state === 'running' ? '同期中' : queuedSyncText(d) }
+  }
+  if (d.plan_open) return { enabled: false, title: OPEN_PLAN_TITLE }
+  const tracks = diff.items.filter((i) => i.op !== 'waiting' && i.op !== 'error').length
+  const lists = diff.playlists.filter((p) => p.op !== 'error').length
+  if (tracks + lists === 0) return { enabled: false, title: '差分がありません' }
+  return { enabled: true, title: null }
+}
+
+export const FORCE_ABANDON_CONFIRM =
+  '端末がつながっていない状態で途中の計画を破棄します。端末に残った途中の移動は、次につないだときの回復で完遂または取り消しになります。よろしいですか？'
+
+/** 途中の計画の「強制破棄」（端末につながずに閉じる。D-98）を出すか。端末が未接続か、
+ * 通常の破棄が not_connected で断られたとき。同期が実行中なら出さない（サーバも 409 busy） */
+export function offerForceAbandon(d: Device, lastErrorCode: string | null): boolean {
+  if (d.transport !== 'adb' || !d.plan_open || d.sync_job?.state === 'running') return false
+  return d.connected === false || lastErrorCode === 'not_connected'
+}
+
+/** ジョブのイベントが状態の変化か（進捗だけのイベントは false）。`seen` はジョブごとの直前の状態で、
+ * 終わりの状態は覚えない（大きくならない。再試行で queued に戻っても変化として拾う） */
+export function jobStateChanged(seen: Map<number, JobState>, e: Pick<JobEvent, 'id' | 'state'>): boolean {
+  if (e.state === 'done' || e.state === 'failed' || e.state === 'cancelled') {
+    seen.delete(e.id)
+    return true
+  }
+  const changed = seen.get(e.id) !== e.state
+  seen.set(e.id, e.state)
+  return changed
+}
+
 /** 端末 API のエラーを日本語にする */
 export function deviceMessage(e: unknown): string {
   if (e instanceof ApiError) {
@@ -72,6 +148,26 @@ export function deviceMessage(e: unknown): string {
         return '同じ名前の端末があります'
       case 'not_found':
         return '端末が見つかりません（削除された可能性があります）'
+      case 'not_connected':
+        return '端末がつながっていません。USB でつないで、端末で USB デバッグを許可してください'
+      case 'not_empty':
+        return '保存先が空ではありません。空のフォルダか、まだ無い場所を選んでください'
+      case 'serial_registered':
+        return 'この端末は登録済みです'
+      case 'plan_changed':
+        return '差分が変わりました。確認し直してから同期してください'
+      case 'open_plan_exists':
+        return OPEN_PLAN_TITLE
+      case 'pending_reevaluation':
+        return 'スマートプレイリストの評価待ちです。評価が終わってから同期してください'
+      case 'busy':
+        return '端末を別の処理が使っています。しばらくしてからやり直してください'
+      case 'no_open_plan':
+        return '途中の計画はありません'
+      case 'plan_unreadable':
+        return '途中の計画を読めません。破棄してください'
+      case 'adb_disabled':
+        return ADB_DISABLED_MESSAGE
     }
     return e.message
   }

@@ -67,7 +67,7 @@ TrueNAS 上で動く単一コンテナの音楽ライブラリ管理アプリ。
 
 バージョンは `cargo add` で解決すること。この表に固定値は書かない。
 
-外部バイナリ: `ffmpeg` `flac` `opusenc` `cd-paranoia` `cdrdao` `yt-dlp`。
+外部バイナリ: `ffmpeg` `flac` `opusenc` `cd-paranoia` `cdrdao` `yt-dlp` `adb`。
 いずれも `std::process::Command` で呼ぶ。パスは設定で上書き可能にする。
 
 ## コーディング規約

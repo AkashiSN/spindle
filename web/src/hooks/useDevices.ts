@@ -4,7 +4,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPatch, apiPost } from '../api/client'
-import type { Device, DeviceDiff, DeviceList, DeviceSelection, DeviceVariant, SelectionEstimate } from '../api/types'
+import type {
+  Device,
+  DeviceDiff,
+  DeviceList,
+  DeviceSelection,
+  DeviceVariant,
+  SelectionEstimate,
+  UnregisteredList,
+} from '../api/types'
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { mergePending, togglePlaylist } from '../lib/devicePicker'
 import { withPlaylistIds } from '../lib/devicePicker'
@@ -20,6 +28,8 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
   // 差分はどの端末のものかと組で持つ（端末を切り替えた直後に前の端末の差分を出さない）
   const [diffOf, setDiffOf] = useState<{ id: number; diff: DeviceDiff } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // 直前の失敗の code（強制破棄を出すかの判断に使う）
+  const [errorCode, setErrorCode] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const listGen = useRef(new Latest())
   const diffGen = useRef(new Latest())
@@ -34,6 +44,7 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
   if (errorFor !== selectedId) {
     setErrorFor(selectedId)
     setError(null)
+    setErrorCode(null)
   }
 
   // 端末の選曲（PUT は全置換）: 端末ごとに PUT を直列にし、本文は実行時点の「望む値」から作る。
@@ -121,10 +132,16 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     [],
   )
 
+  const fetchUnregistered = useCallback(
+    (signal?: AbortSignal) => apiFetch<UnregisteredList>('/api/devices/adb/unregistered', { signal }),
+    [],
+  )
+
   const run = useCallback(
     async (f: () => Promise<unknown>): Promise<boolean> => {
       setBusy(true)
       setError(null)
+      setErrorCode(null)
       try {
         await f()
         fetchList()
@@ -132,6 +149,12 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
         return true
       } catch (e) {
         setError(deviceMessage(e))
+        setErrorCode(e instanceof ApiError ? e.code : null)
+        // 差分が変わっていたら取り直す（画面の plan_token を古いまま持たない）
+        if (e instanceof ApiError && (e.code === 'plan_changed' || e.code === 'open_plan_exists')) {
+          fetchList()
+          fetchDiff()
+        }
         return false
       } finally {
         setBusy(false)
@@ -171,10 +194,15 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     items,
     diff: diffFor(diffOf, selectedId),
     error,
+    /** 直前の失敗の code（ApiError でなければ null） */
+    errorCode,
     busy,
     refresh,
     refreshAfterJob,
-    clearError: () => setError(null),
+    clearError: () => {
+      setError(null)
+      setErrorCode(null)
+    },
     /** iPhone（Mac の spindle-agent 経由）を登録する。成功すれば作った端末（選び直しに使う） */
     createIphone: async (name: string, variant: DeviceVariant, selection: DeviceSelection): Promise<Device | null> => {
       let created: Device | null = null
@@ -187,6 +215,33 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
       setItems((cur) => withDevice(cur, d))
       return d
     },
+    /** 未登録の Android（接続中）。登録のフォームを開いている間だけ取る */
+    fetchUnregistered,
+    /** Android を登録する。成功すれば作った端末 */
+    registerAndroid: async (body: {
+      name: string
+      variant: DeviceVariant
+      selection: DeviceSelection
+      serial: string
+      volume: string
+    }): Promise<Device | null> => {
+      let created: Device | null = null
+      const ok = await run(async () => {
+        created = await apiPost<Device>('/api/devices', { ...body, transport: 'adb' })
+      })
+      if (!ok || created == null) return null
+      const d: Device = created
+      setItems((cur) => withDevice(cur, d))
+      return d
+    },
+    sync: (id: number, planToken: string) =>
+      run(() => apiPost<{ job_id: number }>(`/api/devices/${id}/sync`, { plan_token: planToken })),
+    resume: (id: number) => run(() => apiPost<{ job_id: number }>(`/api/devices/${id}/plans/open/resume`, {})),
+    abandon: (id: number) => run(() => apiPost<Device>(`/api/devices/${id}/plans/open/abandon`, {})),
+    /** 端末につながずに途中の計画を閉じる（D-98） */
+    forceAbandon: (id: number) =>
+      run(() => apiPost<Device>(`/api/devices/${id}/plans/open/abandon`, { force: true })),
+    verify: (id: number) => run(() => apiPost<{ job_id: number }>(`/api/devices/${id}/verify`, {})),
     update: (id: number, patch: { name?: string; selection?: DeviceSelection; variant?: DeviceVariant }) =>
       run(() => apiPatch<Device>(`/api/devices/${id}`, patch)),
     remove: (id: number) => run(() => apiFetch<void>(`/api/devices/${id}`, { method: 'DELETE' })),

@@ -5,7 +5,7 @@ import { chipsFor, mergePending, sameIdSet, toggleDraft, togglePlaylist, withPla
 const d = (id: number, name: string, playlist_ids: number[]): Device => ({
   id, name, transport: 'agent', variant: 'aac', selection: 'playlists', generation: 1, connected: null,
   counts: { add: 0, update: 0, move: 0, delete: 0, waiting: 0, error: 0, synced: 0 },
-  last_synced_at: null, playlist_ids, open_plan: false,
+  last_synced_at: null, playlist_ids, open_plan: false, adb_state: null, adb_volume: null, adb_root: null, plan_open: false, sync_job: null,
 })
 
 describe('選曲の近道', () => {

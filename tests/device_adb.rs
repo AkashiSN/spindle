@@ -45,7 +45,7 @@ fn fake_adb_with_silent_find() -> PathBuf {
     fakes().silent_find.clone()
 }
 
-/// `stat -c %s`（一覧のサイズ取り）だけが必ず失敗する端末の偽の adb。
+/// `stat -c '%s %n'`（一覧のサイズ取り）だけが必ず失敗する端末の偽の adb。
 /// 手置きのファイルが一覧から消えると、上書きしてよいファイルと区別できなくなる
 fn fake_adb_with_broken_stat() -> PathBuf {
     fakes().broken_stat.clone()
@@ -72,7 +72,7 @@ fn write_fakes() -> Fakes {
     write_executable(
         &bin.join("stat"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"-c\" ] && [ \"$2\" = \"%s\" ]; then echo \"stat: 読めない\" >&2; exit 1; fi\nexec {} \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-c\" ] && [ \"$2\" = \"%s %n\" ]; then echo \"stat: 読めない\" >&2; exit 1; fi\nexec {} \"$@\"\n",
             real.display()
         ),
     );
@@ -116,10 +116,20 @@ fn write_fake_adb() -> (tempfile::TempDir, PathBuf) {
         &path,
         r#"#!/bin/sh
 [ "$ADB_SERVER_SOCKET" = "tcp:adb:5037" ] || { echo "* cannot connect to daemon at $ADB_SERVER_SOCKET" >&2; exit 1; }
+[ -n "$HOME" ] && [ -d "$HOME" ] && [ -w "$HOME" ] || { echo "adb_utils.cpp:315 Cannot mkdir '$HOME/.android': Permission denied" >&2; exit 134; }
+if [ "$1" = version ]; then printf 'Android Debug Bridge version 1.0.41\nVersion 37.0.1-15733141\nInstalled as /x\n'; exit 0; fi
 [ "$1" = "-s" ] || { echo "-s が無い" >&2; exit 2; }
 [ "$2" = "SER1" ] || { echo "adb: device '$2' not found" >&2; exit 1; }
+if [ "$3" = "get-state" ]; then
+  [ "$#" -eq 3 ] || { echo "引数の数が違う: $#" >&2; exit 2; }
+  if [ -f "$HOME/offline" ]; then echo "adb: device '$2' not found" >&2; exit 1; fi
+  if [ -f "$HOME/unauthorized" ]; then echo "unauthorized"; exit 0; fi
+  echo device; exit 0
+fi
 [ "$3" = "shell" ] || { echo "未対応のサブコマンド $3" >&2; exit 2; }
 [ "$#" -eq 4 ] || { echo "引数の数が違う: $#" >&2; exit 2; }
+# 転送中に抜かれた端末: stderr を出さずに 255（spike 1）
+if [ -f "$HOME/drop" ]; then exit 255; fi
 exec sh -c "$4"
 "#,
     )
@@ -128,23 +138,33 @@ exec sh -c "$4"
     (dir, path)
 }
 
+fn home_in(dir: &Path) -> PathBuf {
+    let h = dir.join("home");
+    std::fs::create_dir_all(&h).unwrap();
+    h
+}
+
 struct Env {
     _dir: tempfile::TempDir,
     root: PathBuf,
+    home: PathBuf,
+    cfg: AdbConfig,
     fs: AdbFs,
 }
 
 fn env_with(serial: &str) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("storage/emulated/0/Music/spindle");
+    let home = home_in(dir.path());
     let cfg = AdbConfig {
         program: fake_adb(dir.path()),
         server: "tcp:adb:5037".into(),
+        home: home.clone(),
         timeout: Duration::from_secs(30),
         transfer_timeout: Duration::from_secs(60),
     };
     let fs = AdbFs::new(
-        cfg,
+        cfg.clone(),
         serial,
         root.to_str().unwrap(),
         CancellationToken::new(),
@@ -153,6 +173,8 @@ fn env_with(serial: &str) -> Env {
     Env {
         _dir: dir,
         root,
+        home,
+        cfg,
         fs,
     }
 }
@@ -162,14 +184,15 @@ fn env() -> Env {
 }
 
 /// 同じ root を、stat の壊れた端末として見る `AdbFs`
-fn broken_stat_fs(root: &Path) -> AdbFs {
-    fs_with(fake_adb_with_broken_stat(), root)
+fn broken_stat_fs(root: &Path, home: &Path) -> AdbFs {
+    fs_with(fake_adb_with_broken_stat(), root, home)
 }
 
-fn fs_with(program: PathBuf, root: &Path) -> AdbFs {
+fn fs_with(program: PathBuf, root: &Path, home: &Path) -> AdbFs {
     let cfg = AdbConfig {
         program,
         server: "tcp:adb:5037".into(),
+        home: home.to_owned(),
         timeout: Duration::from_secs(30),
         transfer_timeout: Duration::from_secs(60),
     };
@@ -267,12 +290,14 @@ fn append_of_ten_thousand_lines_goes_through_stdin() {
 }
 
 #[test]
-fn list_files_is_unambiguous_with_newlines_in_names() {
+fn list_files_reads_awkward_names() {
     block_on(async {
         let e = env();
         e.fs.write("a.opus", b"12345").await.unwrap();
         e.fs.write("Dir/b c.opus", b"1").await.unwrap();
-        std::fs::write(e.root.join("evil\n5 a.opus"), b"xy").unwrap();
+        e.fs.write("アーティスト/曲 名 (feat. x).opus", b"xy")
+            .await
+            .unwrap();
         let mut files = e.fs.list_files().await.unwrap();
         files.sort_by(|a, b| a.path.cmp(&b.path));
         let got: Vec<(String, u64)> = files.into_iter().map(|f| (f.path, f.size)).collect();
@@ -281,9 +306,23 @@ fn list_files_is_unambiguous_with_newlines_in_names() {
             vec![
                 ("Dir/b c.opus".into(), 1),
                 ("a.opus".into(), 5),
-                ("evil\n5 a.opus".into(), 2),
+                ("アーティスト/曲 名 (feat. x).opus".into(), 2),
             ]
         );
+    });
+}
+
+#[test]
+fn list_files_fails_on_a_newline_in_a_name() {
+    block_on(async {
+        // Android の FUSE では作れない名前だが、万一あっても一覧を黙って欠かさず失敗させる
+        let e = env();
+        e.fs.write("a.opus", b"12345").await.unwrap();
+        std::fs::write(e.root.join("evil\n5 a.opus"), b"xy").unwrap();
+        assert!(matches!(
+            e.fs.list_files().await,
+            Err(RemoteError::Failed(_))
+        ));
     });
 }
 
@@ -342,6 +381,7 @@ fn invalid_serial_is_refused_up_front() {
     let cfg = AdbConfig {
         program: "adb".into(),
         server: "tcp:adb:5037".into(),
+        home: std::env::temp_dir(),
         timeout: Duration::from_secs(1),
         transfer_timeout: Duration::from_secs(1),
     };
@@ -384,12 +424,15 @@ fn real_device_round_trip() {
         return;
     };
     block_on(async {
+        let home = std::env::temp_dir().join("spindle-adb-home");
+        std::fs::create_dir_all(&home).unwrap();
         let cfg = AdbConfig {
             program: std::env::var("SPINDLE_TEST_ADB")
                 .unwrap_or_else(|_| "adb".into())
                 .into(),
             server: std::env::var("ADB_SERVER_SOCKET")
                 .unwrap_or_else(|_| "tcp:localhost:5037".into()),
+            home,
             timeout: Duration::from_secs(60),
             transfer_timeout: Duration::from_secs(600),
         };
@@ -429,6 +472,7 @@ fn prune_keeps_reserved_dir_when_root_has_glob_chars() {
         let cfg = AdbConfig {
             program: fake_adb(dir.path()),
             server: "tcp:adb:5037".into(),
+            home: home_in(dir.path()),
             timeout: Duration::from_secs(30),
             transfer_timeout: Duration::from_secs(60),
         };
@@ -453,6 +497,7 @@ fn odd_roots_are_refused() {
         let cfg = AdbConfig {
             program: "adb".into(),
             server: "x".into(),
+            home: std::env::temp_dir(),
             timeout: Duration::from_secs(1),
             transfer_timeout: Duration::from_secs(1),
         };
@@ -468,7 +513,7 @@ fn list_files_fails_when_stat_fails() {
     block_on(async {
         let e = env();
         e.fs.write("hand.opus", b"hand").await.unwrap();
-        let fs = broken_stat_fs(&e.root);
+        let fs = broken_stat_fs(&e.root, &e.home);
         assert!(
             matches!(fs.list_files().await, Err(RemoteError::Failed(_))),
             "1 件でもサイズを取れなければ一覧全体を失敗させる"
@@ -484,10 +529,10 @@ fn list_files_fails_even_if_find_hides_the_failure() {
         let e = env();
         e.fs.write("hand.opus", b"hand").await.unwrap();
         e.fs.write("Dir/b.opus", b"b").await.unwrap();
-        let fs = fs_with(fake_adb_with_silent_find(), &e.root);
+        let fs = fs_with(fake_adb_with_silent_find(), &e.root, &e.home);
         assert!(
             matches!(fs.list_files().await, Err(RemoteError::Failed(_))),
-            "find の終了コードが 0 でも、失敗の印で一覧全体を失敗させる"
+            "find の終了コードが 0 でも、件数の不一致で一覧全体を失敗させる"
         );
     });
 }
@@ -530,7 +575,7 @@ fn sync_stops_before_writing_when_listing_fails() {
             }],
             ..Default::default()
         };
-        let fs = broken_stat_fs(&e.root);
+        let fs = broken_stat_fs(&e.root, &e.home);
         let bodies = std::collections::HashMap::new();
         let r = sync::run(
             &fs,
@@ -550,5 +595,185 @@ fn sync_stops_before_writing_when_listing_fails() {
         // recover も一覧の失敗で止まる（手置きを残す）
         assert!(recover(&fs, &expect()).await.is_err());
         assert_eq!(std::fs::read(e.root.join("a.opus")).unwrap(), b"hand");
+    });
+}
+
+#[test]
+fn adb_gets_a_writable_home() {
+    block_on(async {
+        let e = env();
+        // HOME を渡していなければ偽の adb は 134 で落ちる
+        e.fs.write("a.bin", b"x").await.unwrap();
+        assert_eq!(e.fs.read("a.bin").await.unwrap(), Some(b"x".to_vec()));
+    });
+}
+
+#[test]
+fn silent_255_with_the_device_gone_is_not_connected() {
+    block_on(async {
+        let e = env();
+        std::fs::write(e.home.join("drop"), b"").unwrap();
+        std::fs::write(e.home.join("offline"), b"").unwrap();
+        assert_eq!(e.fs.sync().await, Err(RemoteError::NotConnected));
+        assert_eq!(
+            e.fs.put("x.bin", tempfile::tempfile().unwrap())
+                .await
+                .map(|_| ()),
+            Err(RemoteError::NotConnected)
+        );
+    });
+}
+
+#[test]
+fn silent_255_while_the_device_is_still_there_is_a_failure() {
+    block_on(async {
+        let e = env();
+        std::fs::write(e.home.join("drop"), b"").unwrap();
+        match e.fs.sync().await {
+            Err(RemoteError::Failed(m)) => assert!(m.contains("255"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    });
+}
+
+#[test]
+fn unauthorized_state_counts_as_not_connected() {
+    block_on(async {
+        let e = env();
+        std::fs::write(e.home.join("drop"), b"").unwrap();
+        std::fs::write(e.home.join("unauthorized"), b"").unwrap();
+        assert_eq!(e.fs.sync().await, Err(RemoteError::NotConnected));
+    });
+}
+
+#[test]
+fn get_state_reports_device() {
+    block_on(async {
+        let e = env();
+        assert_eq!(e.fs.get_state().await.unwrap(), "device");
+    });
+}
+
+#[test]
+fn discard_init_removes_only_spindle_dir_and_empty_root() {
+    block_on(async {
+        let e = env();
+        spindle::device::store::initialize(&e.fs, "u1", "emulated")
+            .await
+            .unwrap();
+        assert!(e.root.join(".spindle/manifest.json").is_file());
+        e.fs.discard_init().await.unwrap();
+        assert!(!e.root.exists(), "空になった root も消える");
+
+        // 手置きのファイルがあれば root は残す
+        std::fs::create_dir_all(e.root.join(".spindle")).unwrap();
+        std::fs::write(e.root.join("keep.txt"), b"k").unwrap();
+        e.fs.discard_init().await.unwrap();
+        assert!(e.root.join("keep.txt").is_file());
+        assert!(!e.root.join(".spindle").exists());
+    });
+}
+
+#[test]
+fn probe_volumes_lists_internal_and_card_with_state() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(storage.join("emulated/0/Music/spindle")).unwrap();
+        std::fs::create_dir_all(storage.join("E1C6-6113/Music/spindle/.spindle")).unwrap();
+        std::fs::write(
+            storage.join("E1C6-6113/Music/spindle/.spindle/manifest.json"),
+            b"{}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(storage.join("self")).unwrap();
+        let cfg = AdbConfig {
+            program: fake_adb(dir.path()),
+            server: "tcp:adb:5037".into(),
+            home: home_in(dir.path()),
+            timeout: Duration::from_secs(30),
+            transfer_timeout: Duration::from_secs(60),
+        };
+        let v = spindle::device::adb::probe_volumes_under(
+            &cfg,
+            "SER1",
+            storage.to_str().unwrap(),
+            "Music/spindle",
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let got: Vec<(&str, DirState)> = v.iter().map(|x| (x.volume.as_str(), x.state)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("emulated", DirState::Empty),
+                ("E1C6-6113", DirState::NonEmpty)
+            ]
+        );
+        assert!(v.iter().all(|x| x.free > 0));
+        assert_eq!(
+            v[0].path,
+            format!("{}/emulated/0/Music/spindle", storage.display())
+        );
+    });
+}
+
+/// 実機で、登録 → 追加 → 大小文字だけの改名 → 削除 を回す。
+/// `SPINDLE_TEST_ADB_SERIAL` / `ADB_SERVER_SOCKET`（例 `localfilesystem:/run/adb/adb.sock`）/ `SPINDLE_TEST_ADB` が要る
+#[test]
+#[ignore]
+fn real_device_sync_round_trip() {
+    let Ok(serial) = std::env::var("SPINDLE_TEST_ADB_SERIAL") else {
+        return;
+    };
+    block_on(async {
+        let home = std::env::temp_dir().join("spindle-adb-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let cfg = AdbConfig {
+            program: std::env::var("SPINDLE_TEST_ADB")
+                .unwrap_or_else(|_| "adb".into())
+                .into(),
+            server: std::env::var("ADB_SERVER_SOCKET").unwrap(),
+            home,
+            timeout: Duration::from_secs(60),
+            transfer_timeout: Duration::from_secs(600),
+        };
+        let root = "/storage/emulated/0/Music/spindle-test";
+        let fs = AdbFs::new(cfg, &serial, root, CancellationToken::new()).unwrap();
+        fs.discard_init().await.unwrap();
+        let _ = fs.remove("Dir/Song.opus").await;
+        spindle::device::store::initialize(&fs, "u1", "emulated")
+            .await
+            .unwrap();
+        device_support::run_want(&fs, &[(1, "Dir/Song.opus", b"S1"), (2, "x.opus", b"X")])
+            .await
+            .unwrap();
+        device_support::run_want(&fs, &[(1, "Dir/song.opus", b"S1")])
+            .await
+            .unwrap();
+        let files: Vec<String> = fs
+            .list_files()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .filter(|p| !p.starts_with(".spindle"))
+            .collect();
+        assert_eq!(files, vec!["Dir/song.opus".to_string()]);
+        fs.remove("Dir/song.opus").await.unwrap();
+        fs.discard_init().await.unwrap();
+    });
+}
+
+#[test]
+fn probe_version_reads_the_platform_tools_version() {
+    block_on(async {
+        let e = env();
+        let cfg = e.cfg.clone();
+        assert_eq!(
+            spindle::device::adb::probe_version(&cfg).await.as_deref(),
+            Some("37.0.1-15733141")
+        );
     });
 }

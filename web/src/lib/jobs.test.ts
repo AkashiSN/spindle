@@ -141,6 +141,7 @@ describe('canCancel / canRetry', () => {
 describe('jobTypeLabel', () => {
   it('既知の種別は日本語、未知はそのまま', () => {
     expect(jobTypeLabel('transcode')).toBe('Derived 生成')
+    expect(jobTypeLabel('device_sync')).toBe('端末への同期')
     expect(jobTypeLabel('mystery')).toBe('mystery')
   })
 })

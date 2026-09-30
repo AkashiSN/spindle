@@ -40,6 +40,9 @@ pub fn valid_serial(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
 }
 
+/// 登録で使う root（ボリューム内の相対パス。仕様 ⑤「登録」2）
+pub const DEFAULT_ROOT: &str = "Music/spindle";
+
 /// 内部共有ストレージを表すボリューム名
 pub const VOLUME_EMULATED: &str = "emulated";
 
@@ -78,8 +81,19 @@ pub fn volume_dir(volume: &str) -> Option<String> {
 
 /// 端末上の root の絶対パス（`db::devices::root_prefix_utf16` と同じ形）
 pub fn root_abs(volume: &str, root: &str) -> Option<String> {
-    if !valid_root(root) {
+    root_abs_under("/storage", volume, root)
+}
+
+/// [`root_abs`] の、ボリュームを置く場所（`/storage`）を差し替えられる版（試験で手元の一時ディレクトリを
+/// 端末に見立てるため）。`emulated` は `<base>/emulated/0`
+pub fn root_abs_under(base: &str, volume: &str, root: &str) -> Option<String> {
+    if !valid_root(root) || !valid_volume(volume) {
         return None;
     }
-    volume_dir(volume).map(|v| format!("{v}/{root}"))
+    let base = base.trim_end_matches('/');
+    Some(if volume == VOLUME_EMULATED {
+        format!("{base}/emulated/0/{root}")
+    } else {
+        format!("{base}/{volume}/{root}")
+    })
 }

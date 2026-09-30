@@ -19,6 +19,18 @@ COPY --from=web /web/dist/ web/dist/
 ARG SPINDLE_VERSION
 RUN SPINDLE_VERSION="$SPINDLE_VERSION" cargo build --release --locked
 
+# ---- adb ----
+FROM debian:bookworm-slim AS platform-tools
+# Android platform-tools（adb）。版と sha256 を固定する（D-98。実機 XQ-CC44 / Android 14 で確認した版）
+ARG PLATFORM_TOOLS_VERSION=37.0.1
+ARG PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/pt.zip "https://dl.google.com/android/repository/platform-tools_r${PLATFORM_TOOLS_VERSION}-linux.zip" \
+ && echo "${PLATFORM_TOOLS_SHA256}  /tmp/pt.zip" | sha256sum -c - \
+ && unzip -q /tmp/pt.zip platform-tools/adb -d /opt \
+ && /opt/platform-tools/adb version
+
 # ---- runtime ----
 # yt-dlp は YouTube の抽出に JS ランタイムを要求する（deno 推奨）。公式の bin イメージから
 # バイナリだけ取る。version を固定し、更新はイメージの再ビルドで行う（D-70）
@@ -34,6 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG YTDLP_VERSION=2026.08.19
 ADD --chmod=755 https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_linux /usr/local/bin/yt-dlp
 COPY --from=deno /deno /usr/local/bin/deno
+# adb クライアント（spindle が使う）とサーバ（compose の adb サービスが同じイメージで起動する）
+COPY --from=platform-tools /opt/platform-tools/adb /usr/local/bin/adb
 # メタデータプラグイン（spindle-ytmusic-meta）はイメージに入れない。static バイナリをホストに置き、
 # compose で /usr/local/bin/spindle-ytmusic-meta にマウントする（D-70、deploy/compose.yaml）
 COPY --from=build /src/target/release/spindle /usr/local/bin/spindle

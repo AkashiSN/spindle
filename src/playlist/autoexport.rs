@@ -169,7 +169,15 @@ fn marks_reevaluation(ev: &Event) -> bool {
     match ev {
         Event::Job(j) => {
             j.state == JobState::Done
-                && !matches!(j.job_type, JobType::SourceHash | JobType::Thumbnail)
+                && !matches!(
+                    j.job_type,
+                    JobType::SourceHash
+                        | JobType::Thumbnail
+                        // 端末の状態だけを変えるジョブ
+                        | JobType::DeviceScan
+                        | JobType::DeviceSync
+                        | JobType::DeviceVerify
+                )
         }
         other => triggers(other),
     }
@@ -214,7 +222,13 @@ mod tests {
 
     #[test]
     fn reevaluation_mark_skips_jobs_that_only_change_device_state() {
-        for t in [JobType::SourceHash, JobType::Thumbnail] {
+        for t in [
+            JobType::SourceHash,
+            JobType::Thumbnail,
+            JobType::DeviceScan,
+            JobType::DeviceSync,
+            JobType::DeviceVerify,
+        ] {
             assert!(triggers(&job_done(t)), "再評価そのものは走る: {t:?}");
             assert!(
                 !marks_reevaluation(&job_done(t)),

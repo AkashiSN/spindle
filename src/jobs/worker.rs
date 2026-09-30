@@ -36,7 +36,7 @@ const FINISH_RETRY_DELAYS: [u64; 6] = [1, 2, 4, 8, 16, 32];
 #[derive(Debug, Clone)]
 enum Terminal {
     Done(Option<String>),
-    Requeue,
+    Requeue(i64),
     Cancelled,
     Fatal(String),
     Failed(String),
@@ -47,7 +47,8 @@ impl From<super::HandlerResult> for Terminal {
         match r {
             Ok(Outcome::Done) => Terminal::Done(None),
             Ok(Outcome::DoneWith(note)) => Terminal::Done(Some(note)),
-            Ok(Outcome::Requeue) => Terminal::Requeue,
+            Ok(Outcome::Requeue) => Terminal::Requeue(REQUEUE_DELAY_SECS),
+            Ok(Outcome::RequeueAfter(s)) => Terminal::Requeue(s.max(REQUEUE_DELAY_SECS)),
             Err(JobError::Cancelled) => Terminal::Cancelled,
             Err(JobError::Fatal(e)) => Terminal::Fatal(format!("{e:#}")),
             Err(JobError::Failed(e)) => Terminal::Failed(format!("{e:#}")),
@@ -428,7 +429,7 @@ fn finish(
             dbjobs::mark_done(&tx, id, now, note.as_deref())?;
             debug!(job_id = id, %ty, "完了");
         }
-        Terminal::Requeue => match dbjobs::requeue(&tx, id, now, REQUEUE_DELAY_SECS)? {
+        Terminal::Requeue(delay) => match dbjobs::requeue(&tx, id, now, delay)? {
             dbjobs::RequeueOutcome::Requeued { run_after } => {
                 debug!(job_id = id, %ty, run_after, "前提が取れないので再キュー")
             }

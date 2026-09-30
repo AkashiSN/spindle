@@ -39,10 +39,16 @@ pub enum JobType {
     SourceHash,
     /// ReplayGain の解析値をタグへ書く編集バッチを作る（rg の後続。D-97）
     Rgwrite,
+    /// 端末の差分の計算（回復して `device_items` を置き換える）。P5-3b
+    DeviceScan,
+    /// 端末への同期（確定した計画を実行）
+    DeviceSync,
+    /// 端末の内容の検証（全曲の sha256）
+    DeviceVerify,
 }
 
 impl JobType {
-    pub const ALL: [JobType; 18] = [
+    pub const ALL: [JobType; 21] = [
         JobType::Scan,
         JobType::Rip,
         JobType::Verify,
@@ -61,6 +67,9 @@ impl JobType {
         JobType::PlaylistSync,
         JobType::SourceHash,
         JobType::Rgwrite,
+        JobType::DeviceScan,
+        JobType::DeviceSync,
+        JobType::DeviceVerify,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -83,6 +92,9 @@ impl JobType {
             JobType::PlaylistSync => "playlist_sync",
             JobType::SourceHash => "source_hash",
             JobType::Rgwrite => "rgwrite",
+            JobType::DeviceScan => "device_scan",
+            JobType::DeviceSync => "device_sync",
+            JobType::DeviceVerify => "device_verify",
         }
     }
 
@@ -125,6 +137,8 @@ impl JobType {
             JobType::SourceHash => 2,
             // 編集バッチを記録するだけ（ファイルは tagwrite が書く）
             JobType::Rgwrite => 1,
+            // 端末ごとの排他は `job_mutexes` の `device:<id>`。別の端末なら並べてよい
+            JobType::DeviceScan | JobType::DeviceSync | JobType::DeviceVerify => 2,
         }
     }
 
@@ -323,6 +337,9 @@ pub fn subject_of(
         JobType::Ytdl => text_of("url"),
         JobType::Thumbnail => id_of("artwork_id").map(|id| format!("artwork #{id}")),
         JobType::PlaylistSync => id_of("subscription_id").map(|id| format!("subscription #{id}")),
+        JobType::DeviceScan | JobType::DeviceSync | JobType::DeviceVerify => {
+            id_of("device_id").map(|id| format!("device #{id}"))
+        }
         JobType::Rip | JobType::Inbox | JobType::Gc | JobType::Backup => None,
     }
 }
@@ -939,6 +956,23 @@ pub fn mark_failed_fatally(conn: &Connection, id: i64, error: &str, now: i64) ->
         params![id, error, now],
     )?;
     Ok(changed > 0)
+}
+
+/// 端末が繋がったとき、待機中の同期と検証を前倒しする（仕様 ⑤「同期」: 未接続で 300 秒後に置いたものを
+/// `track-devices` が接続を見たら `run_after = now` にする）。変えたジョブの id を返す
+pub fn wake_device_jobs(conn: &Connection, device_id: i64, now: i64) -> Result<Vec<i64>> {
+    let mut st = conn.prepare(
+        "UPDATE jobs SET run_after = ?2
+          WHERE state = 'queued' AND type IN ('device_sync', 'device_verify')
+            AND json_extract(payload, '$.device_id') = ?1
+            AND (run_after IS NULL OR run_after > ?2)
+          RETURNING id",
+    )?;
+    let mut ids = st
+        .query_map(params![device_id, now], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ids.sort_unstable();
+    Ok(ids)
 }
 
 /// ロックが取れない等で実行前に戻す。試行回数は数えない。`delay_secs` 後に再度対象になる。

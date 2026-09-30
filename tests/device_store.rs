@@ -180,13 +180,13 @@ fn compact_is_never_seen_as_old_manifest_with_empty_journal() {
 }
 
 #[test]
-fn case_insensitive_fs_folds_names_and_keeps_one_file_on_case_rename() {
+fn case_insensitive_fs_ignores_case_only_rename_like_the_device() {
     block_on(async {
         let fs = FakeFs::with_root(1 << 30).case_insensitive();
         fs.write("A.opus", b"x").await.unwrap();
         assert_eq!(fs.read("a.opus").await, Ok(Some(b"x".to_vec())));
         fs.rename("A.opus", "a.opus").await.unwrap();
-        assert_eq!(fs.paths(), vec!["a.opus".to_string()]);
+        assert_eq!(fs.paths(), vec!["A.opus".to_string()]);
     });
 }
 

@@ -1445,3 +1445,42 @@ fn torn_appends_in_a_swap_survive_every_crash_point() {
         torn_append_sweep(initial, target).await;
     });
 }
+
+/// 送る元の identity が `source_hashes` と違った曲は、ハッシュを取り直す対象として返す
+#[test]
+fn changed_source_is_reported_for_rehash() {
+    block_on(async {
+        struct ChangedSources;
+        impl spindle::device::sync::Sources for ChangedSources {
+            fn open(&self, _: i64) -> Result<std::fs::File, spindle::device::sync::SourceError> {
+                Err(spindle::device::sync::SourceError::Changed)
+            }
+        }
+        let fs = FakeFs::new(1 << 30);
+        spindle::device::store::initialize(&fs, "u1", "emulated")
+            .await
+            .unwrap();
+        let rec = spindle::device::recover::recover(&fs, &expect())
+            .await
+            .unwrap();
+        let want: &[Want] = &[(7, "a.opus", b"A"), (3, "b.opus", b"B")];
+        let d = spindle::domain::device::diff(&desired(want), &rec.items, &[], &[], Vec::new());
+        let plan = spindle::device::plan::StoredPlan::from_diff(1, "tok", &d).unwrap();
+        let r = spindle::device::plan::runnable(&plan, &rec.items, &rec.playlists, &d);
+        let report = spindle::device::sync::run(
+            &fs,
+            &ChangedSources,
+            &TestControl::default(),
+            spindle::device::sync::SyncInput {
+                generation: 1,
+                start: rec.manifest,
+                runnable: &r,
+                playlist_bodies: &std::collections::HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.rehash, vec![3, 7]);
+        assert_eq!(report.errors.len(), 2);
+    });
+}

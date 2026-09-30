@@ -2390,6 +2390,12 @@ opusenc = "opusenc"
 cdparanoia = "cd-paranoia"     # libcdio 版（Debian パッケージ cd-paranoia）
 cdrdao = "cdrdao"
 ytdlp = "yt-dlp"
+adb = "adb"
+
+[devices]
+adb_server = "localfilesystem:/run/adb/adb.sock"   # adb サイドカーのソケット。空なら Android 同期を無効化
+adb_timeout_secs = 60
+adb_transfer_timeout_secs = 3600
 ```
 
 実体は `deploy/config.example.toml`。両者は一致させる。

@@ -159,6 +159,15 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Device>> {
         .flatten())
 }
 
+/// adb のシリアルで端末を引く（接続した端末が登録済みかの判定）
+pub fn find_by_serial(conn: &Connection, serial: &str) -> Result<Option<Device>> {
+    let sql = format!("SELECT {DEVICE_COLUMNS} FROM devices WHERE adb_serial = ?1");
+    Ok(conn
+        .query_row(&sql, [serial], device_row)
+        .optional()?
+        .flatten())
+}
+
 /// 端末が 1 台でも登録されているか（無ければ一覧の端末の状態のためにスナップショットを取らない）
 pub fn any(conn: &Connection) -> Result<bool> {
     Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM devices)", [], |r| r.get(0))?)
@@ -260,6 +269,16 @@ pub fn put_source_hash(
             h.sha256,
             now
         ],
+    )?;
+    Ok(())
+}
+
+/// `source_hashes` の行を消す。次の差分計算で `needs_hash` に戻り、ハッシュが取り直される
+/// （同期で送る元の identity か中身が記録と違った曲。`SyncReport::rehash`）
+pub fn forget_source_hash(conn: &Connection, track_id: i64, kind: SourceKind) -> Result<()> {
+    conn.execute(
+        "DELETE FROM source_hashes WHERE track_id = ?1 AND source = ?2",
+        params![track_id, kind.as_str()],
     )?;
     Ok(())
 }
@@ -865,6 +884,71 @@ pub fn has_open_work(conn: &Connection, id: i64) -> Result<bool> {
              OR EXISTS (SELECT 1 FROM jobs WHERE type = 'device_sync' AND state IN ('queued', 'running')
                           AND json_extract(payload, '$.device_id') = ?1)",
         [id],
+        |r| r.get::<_, i64>(0),
+    )? == 1)
+}
+
+/// 端末の open な計画の id（計画の JSON は読まない。壊れていても破棄できるように）
+pub fn open_plan_id(conn: &Connection, device_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM device_sync_plans WHERE device_id = ?1 AND state = 'open'",
+            [device_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// 端末の queued / running のジョブ（`job_type` の種類）のうち最新の 1 件の id と state
+pub fn active_device_job(
+    conn: &Connection,
+    device_id: i64,
+    job_type: &str,
+) -> Result<Option<(i64, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, state FROM jobs WHERE type = ?2 AND state IN ('queued', 'running')
+               AND json_extract(payload, '$.device_id') = ?1 ORDER BY id DESC LIMIT 1",
+            params![device_id, job_type],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// 端末の `job_type` のジョブが running か（新しい queued があっても running を見落とさない）
+pub fn has_running_device_job(conn: &Connection, device_id: i64, job_type: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM jobs WHERE type = ?2 AND state = 'running'
+           AND json_extract(payload, '$.device_id') = ?1)",
+        params![device_id, job_type],
+        |r| r.get::<_, i64>(0),
+    )? == 1)
+}
+
+/// 端末の queued のジョブ（`job_types` の種類）の id
+pub fn queued_device_jobs(
+    conn: &Connection,
+    device_id: i64,
+    job_types: &[&str],
+) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM jobs WHERE type = ?2 AND state = 'queued'
+           AND json_extract(payload, '$.device_id') = ?1 ORDER BY id",
+    )?;
+    let mut ids = Vec::new();
+    for t in job_types {
+        for id in stmt.query_map(params![device_id, t], |r| r.get(0))? {
+            ids.push(id?);
+        }
+    }
+    Ok(ids)
+}
+
+/// この uuid の端末が登録されているか（端末に残った manifest が生きた登録のものかの判定）
+pub fn uuid_exists(conn: &Connection, uuid: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM devices WHERE uuid = ?1)",
+        [uuid],
         |r| r.get::<_, i64>(0),
     )? == 1)
 }

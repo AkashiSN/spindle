@@ -165,8 +165,12 @@ async fn create_list_patch_delete_round_trip() {
 async fn create_rejects_adb_empty_and_duplicate_names() {
     let app = App::new().await;
     create_iphone(&app, "iPhone").await;
+    // adb の作成には serial と volume が要る
     let (st, v) = app.call(Method::POST, "/api/devices",
         Some(json!({"name": "Xperia", "transport": "adb", "variant": "opus", "selection": "all"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let (st, v) = app.call(Method::POST, "/api/devices",
+        Some(json!({"name": "Xperia", "transport": "adb", "variant": "opus", "selection": "all", "volume": "emulated"}))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
     let (st, _) = app
         .call(
@@ -214,7 +218,6 @@ async fn open_plan_blocks_changes_except_name() {
             format!("/api/devices/{id}/playlists"),
             Some(json!({"playlist_ids": [5]})),
         ),
-        (Method::DELETE, format!("/api/devices/{id}"), None),
     ] {
         let (st, v) = app.call(method.clone(), &uri, body).await;
         assert_eq!(st, StatusCode::CONFLICT, "{method} {uri}: {v}");
@@ -229,6 +232,11 @@ async fn open_plan_blocks_changes_except_name() {
         .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["generation"], 1, "名前だけの変更は generation を進めない");
+    // 削除は途中の計画があってもできる（端末が戻らないときの逃げ道。D-98）
+    let (st, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
 }
 
 #[tokio::test]

@@ -1,13 +1,36 @@
 // 端末タブ（P5-2、D-95）。左に端末の一覧、右に選んだ端末の 差分 / 選曲 / 設定。
-// Android の登録・同期・接続と iPhone の pair は P5-3 / P5-4 で入るので、ここでは案内だけ出す
+// iPhone の pair は P5-4 で入るので、ここでは案内だけ出す
 
 import { useEffect, useRef, useState } from 'react'
-import type { Device, DeviceDiff, DeviceSelection, DeviceVariant, SelectionEstimate } from '../api/types'
+import type {
+  Device,
+  DeviceDiff,
+  DeviceSelection,
+  DeviceVariant,
+  SelectionEstimate,
+  UnregisteredAdb,
+} from '../api/types'
 import type { Devices } from '../hooks/useDevices'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
 import type { Playlists } from '../hooks/usePlaylists'
 import { ApiError } from '../api/client'
-import { describeEvaluation, deviceMessage, OP_LABELS, sortDiffItems, syncSummary, unsyncedCount } from '../lib/devices'
+import {
+  ADB_DISABLED_MESSAGE,
+  nextPollDelay,
+  connectionNote,
+  describeEvaluation,
+  deviceMessage,
+  FORCE_ABANDON_CONFIRM,
+  offerForceAbandon,
+  OP_LABELS,
+  queuedSyncText,
+  sortDiffItems,
+  syncButton,
+  syncSummary,
+  unsyncedCount,
+  volumeLabel,
+  volumeUsable,
+} from '../lib/devices'
 import { formatCount } from '../lib/format'
 import { formatDateTime } from '../lib/history'
 import { sameIdSet, toggleDraft } from '../lib/devicePicker'
@@ -77,6 +100,7 @@ export function DevicesView({
                         {d.transport === 'agent' ? 'iPhone' : 'Android'} · 未反映 {formatCount(unsyncedCount(d.counts))} /
                         待ち {formatCount(d.counts.waiting)}
                       </span>
+                      {connectionNote(d) != null && <span className="muted small">{connectionNote(d)}</span>}
                     </button>
                   </li>
                 ))}
@@ -116,7 +140,7 @@ export function DevicesView({
                   ))}
                 </div>
                 {tab === 'diff' ? (
-                  <DiffTab device={selected} diff={devices.diff} />
+                  <DiffTab device={selected} diff={devices.diff} devices={devices} />
                 ) : tab === 'selection' ? (
                   <SelectionTab key={selected.id} device={selected} devices={devices} playlists={playlists} />
                 ) : (
@@ -135,13 +159,13 @@ export function DevicesView({
 
 function AddDevice({ devices, onCreated }: { devices: Devices; onCreated: (id: number) => void }) {
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState(false)
+  const [form, setForm] = useState<'iphone' | 'android' | null>(null)
   const [name, setName] = useState('')
   const [variant, setVariant] = useState<DeviceVariant>('aac')
   const [selection, setSelection] = useState<DeviceSelection>('playlists')
   const close = () => {
     setOpen(false)
-    setForm(false)
+    setForm(null)
     setName('')
   }
 
@@ -150,17 +174,27 @@ function AddDevice({ devices, onCreated }: { devices: Devices; onCreated: (id: n
       <button type="button" className="ghost small" onClick={() => (open ? close() : setOpen(true))}>
         端末を追加 {open ? '▾' : '▸'}
       </button>
-      {open && !form && (
+      {open && form == null && (
         <div className="devices-add-menu">
-          <button type="button" onClick={() => setForm(true)}>
+          <button type="button" onClick={() => setForm('iphone')}>
             iPhone（Mac 経由）
           </button>
-          <button type="button" disabled title="USB でつないだ端末を検出して登録します（P5-3 で対応）">
+          <button type="button" onClick={() => setForm('android')} title="USB でつないだ端末を検出して登録します">
             Android（USB）
           </button>
         </div>
       )}
-      {open && form && (
+      {open && form === 'android' && (
+        <AddAndroid
+          devices={devices}
+          onCancel={close}
+          onCreated={(id) => {
+            close()
+            onCreated(id)
+          }}
+        />
+      )}
+      {open && form === 'iphone' && (
         <form
           className="devices-add-form"
           onSubmit={(e) => {
@@ -207,15 +241,160 @@ function AddDevice({ devices, onCreated }: { devices: Devices; onCreated: (id: n
   )
 }
 
+/** 接続中の未登録 Android を検出して登録する。前の要求が終わってから 3 秒おいて取り直す
+ * （開いているフォームごとに要求は高々 1 本。サーバは端末ごとに adb shell を直列に呼ぶので重ねない） */
+function AddAndroid({
+  devices,
+  onCreated,
+  onCancel,
+}: {
+  devices: Devices
+  onCreated: (id: number) => void
+  onCancel: () => void
+}) {
+  const [found, setFound] = useState<UnregisteredAdb[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const { fetchUnregistered } = devices
+
+  useEffect(() => {
+    const ac = new AbortController()
+    let timer: number | undefined
+    const load = async () => {
+      let failure: unknown = null
+      try {
+        const l = await fetchUnregistered(ac.signal)
+        if (ac.signal.aborted) return
+        setFound(l.items)
+        setError(null)
+      } catch (e) {
+        if (ac.signal.aborted) return
+        failure = e
+        setError(e instanceof ApiError && e.code === 'adb_disabled' ? ADB_DISABLED_MESSAGE : deviceMessage(e))
+      }
+      const delay = nextPollDelay(failure)
+      if (delay != null) timer = window.setTimeout(() => void load(), delay)
+    }
+    void load()
+    return () => {
+      ac.abort()
+      window.clearTimeout(timer)
+    }
+  }, [fetchUnregistered])
+
+  return (
+    <div className="devices-add-form">
+      {error != null && <p className="error small">{error}</p>}
+      {error == null && found == null && <p className="muted small">端末を探しています…</p>}
+      {error == null && found != null && found.length === 0 && (
+        <p className="muted small">USB でつなぎ、端末で USB デバッグを許可してください</p>
+      )}
+      {error == null &&
+        found?.map((f) =>
+          f.state === 'device' ? (
+            <AndroidCandidate key={f.serial} found={f} devices={devices} onCreated={onCreated} />
+          ) : (
+            <p key={f.serial} className="muted small">
+              {f.model?.replaceAll('_', ' ') ?? f.serial}: {f.state === 'unauthorized' ? '端末で許可してください' : `接続中（${f.state}）`}
+            </p>
+          ),
+        )}
+      <div className="op-row">
+        <button type="button" className="ghost" onClick={onCancel}>
+          キャンセル
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function AndroidCandidate({
+  found,
+  devices,
+  onCreated,
+}: {
+  found: UnregisteredAdb
+  devices: Devices
+  onCreated: (id: number) => void
+}) {
+  const [name, setName] = useState((found.model ?? found.serial).replaceAll('_', ' '))
+  const [variant, setVariant] = useState<DeviceVariant>('opus')
+  const [selection, setSelection] = useState<DeviceSelection>('playlists')
+  const [volume, setVolume] = useState<string | null>(null)
+  // 選んだ保存先が使えなくなった（空でなくなった・消えた）ら選び直させる
+  const chosen = found.volumes.find((v) => v.volume === volume && volumeUsable(v))?.volume ?? null
+
+  return (
+    <form
+      className="devices-add-form devices-android"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (chosen == null) return
+        void devices
+          .registerAndroid({ name: name.trim(), variant, selection, serial: found.serial, volume: chosen })
+          .then((d) => {
+            if (d != null) onCreated(d.id)
+          })
+      }}
+    >
+      <strong className="small">{found.model?.replaceAll('_', ' ') ?? found.serial}</strong>
+      {found.error != null && <span className="error small">{found.error}</span>}
+      <p className="muted small">
+        Poweramp は設定したフォルダだけをスキャンします。保存先が Poweramp の音楽フォルダの下にあることを確かめてください
+      </p>
+      <label className="small">
+        名前
+        <input value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label className="small">
+        系統
+        <select value={variant} onChange={(e) => setVariant(e.target.value === 'aac' ? 'aac' : 'opus')}>
+          <option value="opus">Opus</option>
+          <option value="aac">AAC</option>
+        </select>
+      </label>
+      <label className="small">
+        選曲
+        <select value={selection} onChange={(e) => setSelection(e.target.value === 'all' ? 'all' : 'playlists')}>
+          <option value="playlists">プレイリスト</option>
+          <option value="all">全曲</option>
+        </select>
+      </label>
+      <fieldset className="small">
+        <legend>保存先</legend>
+        {found.volumes.length === 0 && <span className="muted">保存先を検出できません</span>}
+        {found.volumes.map((v) => (
+          <label key={v.volume} className="devices-volume" title={v.path}>
+            <input
+              type="radio"
+              name={`vol-${found.serial}`}
+              checked={chosen === v.volume}
+              disabled={!volumeUsable(v)}
+              onChange={() => setVolume(v.volume)}
+            />
+            {volumeLabel(v)} <span className="muted">空き {formatBytes(v.free)}</span>
+            {!volumeUsable(v) && <span className="muted"> · 空でない</span>}
+          </label>
+        ))}
+      </fieldset>
+      <div className="op-row">
+        <button type="submit" className="primary" disabled={devices.busy || name.trim() === '' || chosen == null}>
+          登録
+        </button>
+      </div>
+    </form>
+  )
+}
+
 // ---------------------------------------------------------------- 差分
 
-function DiffTab({ device, diff }: { device: Device; diff: DeviceDiff | null }) {
+function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff | null; devices: Devices }) {
   // 評価時刻の説明の基準（描画のたびに時計を読まない）
   const [now] = useState(() => Math.floor(Date.now() / 1000))
   if (diff == null) return <p className="muted">差分を計算中…</p>
   const rows = sortDiffItems(diff.items)
   const shown = rows.slice(0, DIFF_ROW_LIMIT)
   const sync = syncSummary(diff)
+  const button = syncButton(device, diff)
 
   return (
     <div className="devices-diff">
@@ -236,11 +415,60 @@ function DiffTab({ device, diff }: { device: Device; diff: DeviceDiff | null }) 
         </ul>
       )}
       {device.transport === 'adb' ? (
-        <div className="op-row">
-          <button type="button" className="primary" disabled title="P5-3 で対応">
-            同期（{formatCount(sync.count)} 件・{formatBytes(sync.bytes)}）
-          </button>
-        </div>
+        <>
+          {connectionNote(device) != null && <p className="devices-warn small">{connectionNote(device)}</p>}
+          {device.plan_open && device.sync_job?.state !== 'running' && (
+            <div className="devices-warn small">
+              <p>前回の同期が途中です</p>
+              <div className="op-row">
+                {device.sync_job == null && (
+                  <button type="button" disabled={devices.busy} onClick={() => void devices.resume(device.id)}>
+                    続きを実行
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="danger"
+                  disabled={devices.busy}
+                  onClick={() => {
+                    if (window.confirm('途中の計画を破棄します。端末に送り終えた分はそのまま残ります。よろしいですか？')) {
+                      void devices.abandon(device.id)
+                    }
+                  }}
+                >
+                  破棄
+                </button>
+                {offerForceAbandon(device, devices.errorCode) && (
+                  <button
+                    type="button"
+                    className="danger"
+                    disabled={devices.busy}
+                    title="端末につながずに計画を閉じます"
+                    onClick={() => {
+                      if (window.confirm(FORCE_ABANDON_CONFIRM)) void devices.forceAbandon(device.id)
+                    }}
+                  >
+                    強制破棄
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+          {device.sync_job != null && (
+            <p className="small">{device.sync_job.state === 'running' ? '同期中…' : queuedSyncText(device)}</p>
+          )}
+          <div className="op-row">
+            <button
+              type="button"
+              className="primary"
+              disabled={devices.busy || !button.enabled}
+              title={button.title ?? undefined}
+              onClick={() => void devices.sync(device.id, diff.plan_token)}
+            >
+              同期（{formatCount(sync.count)} 件・{formatBytes(sync.bytes)}）
+            </button>
+          </div>
+        </>
       ) : (
         <p className="small">
           Mac で <code>spindle-agent sync</code> を実行すると反映される。最終報告:{' '}
@@ -454,7 +682,15 @@ function SettingsTab({ device, devices }: { device: Device; devices: Devices }) 
             {device.transport === 'adb' ? (
               <tr>
                 <th>保存先</th>
-                <td className="muted">P5-3 で対応</td>
+                <td>
+                  {device.adb_volume != null
+                    ? volumeLabel({ volume: device.adb_volume, path: '', free: 0, state: 'empty' })
+                    : '未設定'}
+                  {device.adb_root != null && <span className="muted"> · {device.adb_root}</span>}
+                  <p className="muted small">
+                    保存先を変えるには、この端末を削除してから登録し直します（新しい保存先は空であること）
+                  </p>
+                </td>
               </tr>
             ) : (
               <tr>
@@ -478,14 +714,31 @@ function SettingsTab({ device, devices }: { device: Device; devices: Devices }) 
           </button>
         </div>
       </form>
+      {device.transport === 'adb' && (
+        <>
+          <h2>検証</h2>
+          <div className="op-row">
+            <button
+              type="button"
+              disabled={devices.busy || device.sync_job != null}
+              title="端末上の全曲の sha256 を確かめます。食い違った曲は次の同期で送り直します"
+              onClick={() => void devices.verify(device.id)}
+            >
+              内容を検証
+            </button>
+          </div>
+        </>
+      )}
       <h2>削除</h2>
       <div className="op-row">
         <button
           type="button"
           className="danger"
-          disabled={devices.busy}
+          disabled={devices.busy || device.sync_job?.state === 'running'}
+          title={device.sync_job?.state === 'running' ? '同期中は削除できません' : undefined}
           onClick={() => {
-            if (window.confirm(`端末「${device.name}」を削除しますか？（端末上のファイルは消しません）`)) {
+            const plan = device.plan_open ? '途中の計画も破棄します。' : ''
+            if (window.confirm(`端末「${device.name}」を削除しますか？（${plan}端末上のファイルは消しません）`)) {
               void devices.remove(device.id)
             }
           }}

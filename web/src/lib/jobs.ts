@@ -19,6 +19,9 @@ const TYPE_LABEL: Record<string, string> = {
   ytdl: 'YouTube ダウンロード',
   playlist_sync: '再生リストの同期',
   source_hash: '送る元のハッシュ',
+  device_scan: '端末の差分',
+  device_sync: '端末への同期',
+  device_verify: '端末の検証',
   gc: 'GC',
   backup: 'バックアップ',
 }

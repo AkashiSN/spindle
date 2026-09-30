@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch, apiPost, onUnauthorized } from './api/client'
-import type { Device, LibraryEvent, Playlist, TrackRow } from './api/types'
+import type { Device, JobState, LibraryEvent, Playlist, TrackRow } from './api/types'
 import { AlbumGrid } from './components/AlbumGrid'
 import { AlbumArt } from './components/AlbumArt'
 import { HistoryView } from './components/HistoryView'
@@ -44,7 +44,7 @@ import { useInbox } from './hooks/useInbox'
 import { useInboxSummary } from './hooks/useInboxSummary'
 import { useDevices } from './hooks/useDevices'
 import { useLocalStorageState } from './hooks/useLocalStorageState'
-import { totalBadge } from './lib/devices'
+import { jobStateChanged, totalBadge } from './lib/devices'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
 import { useSubscriptions } from './hooks/useSubscriptions'
@@ -242,6 +242,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   // `library` イベントは scan だけが流す（SPEC §9）。done / failed のたびに表示ページを取り直すと
   // 一括の transcode で数千回になるので 3 秒に 1 回に間引く（D-58）
   const rowRefreshTimer = useRef<number | null>(null)
+  // ジョブごとの直前の状態（端末タブを状態の変化でだけ取り直す）
+  const jobStates = useRef(new Map<number, JobState>())
   const scheduleRowRefresh = useCallback(() => {
     if (rowRefreshTimer.current != null) return
     rowRefreshTimer.current = window.setTimeout(() => {
@@ -279,9 +281,11 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         // バッジは画面に関わらず更新する（Inbox を開いていなくても数字が増える）
         inboxSummary.refresh()
         if (view === 'inbox') inbox.refresh()
-        // 端末の差分はハッシュ計算・変換・評価の完了で変わる（hook 側で静かになってから取る）
-        devices.refreshAfterJob()
       }
+      // 端末の差分はハッシュ計算・変換・評価の完了で変わり、端末タブの同期の表示（待ち・実行中・取り消し）は
+      // 端末ジョブの状態で変わる。job イベントに種別は無いので、どのジョブでも状態が変わったら取り直す
+      // （進捗だけのイベントでは取らない。hook 側で静かになってから取る）
+      if (jobStateChanged(jobStates.current, e)) devices.refreshAfterJob()
     },
     onBatch: () => {
       jobs.refresh()

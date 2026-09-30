@@ -136,6 +136,16 @@ impl Jobs {
         self.db.write(|c| dbjobs::delete_failed(c)).await
     }
 
+    /// 端末が繋がったときに、その端末の待機中の同期・検証を前倒しして起こす
+    pub async fn wake_device(&self, device_id: i64) -> Result<Vec<i64>> {
+        let ids = self
+            .db
+            .write(move |c| dbjobs::wake_device_jobs(c, device_id, now_epoch()))
+            .await?;
+        self.notify_enqueued(&ids).await;
+        Ok(ids)
+    }
+
     /// 別のトランザクションで直接 `jobs` に投入した後に呼ぶ（編集バッチの prepare 等）。
     /// イベントを流してワーカーを起こす
     pub async fn notify_enqueued(&self, ids: &[i64]) {

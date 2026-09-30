@@ -12,16 +12,16 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::device::quote::{sh_quote, valid_serial};
+use crate::device::quote::{sh_quote, valid_root, valid_serial, valid_volume};
 use crate::device::remote::{DeviceFs, DirState, PutResult, RemoteError, RemoteFile, RemoteResult};
 use crate::domain::relpath::RelPath;
 use crate::jobs::process::{ExternalCommand, Output, ProcessError};
 
-/// stdin を流すサブコマンド。実機で shell v2 の stdin が使えなければここを差し替える（P5-3b の実機確認）
+/// stdin を流すサブコマンド。shell v2 の stdin がバイナリ安全に使えることは実機 spike で確かめた（D-98）
 pub const STDIN_SUBCOMMAND: &str = "shell";
 pub const POWERAMP_PACKAGE: &str = "com.maxmpz.audioplayer";
 pub const POWERAMP_SCAN_ACTION: &str = "com.maxmpz.audioplayer.ACTION_SCAN_DIRS";
-/// Poweramp の API レシーバ（P5-3b の実機確認で固定する）
+/// Poweramp の API レシーバ（Poweramp build-1025 で確認。D-98）
 pub const POWERAMP_RECEIVER: &str = "com.maxmpz.audioplayer/.player.PowerampAPIReceiver";
 /// 「ファイルが無い」を表す端末側スクリプトの終了コード
 const MISSING_EXIT: i32 = 3;
@@ -30,8 +30,17 @@ const MISSING_EXIT: i32 = 3;
 pub struct AdbConfig {
     /// adb クライアントのパス（`[bin].adb`）
     pub program: PathBuf,
-    /// `ADB_SERVER_SOCKET` の値（`[devices].adb_server`。例 `tcp:adb:5037`）
+    /// `ADB_SERVER_SOCKET` の値（`[devices].adb_server`。例 `localfilesystem:/run/adb/adb.sock`）。
+    /// 必ず渡す: 無いとクライアントが TCP 5037 に自前のサーバを起こし、サイドカーと USB を奪い合う。
+    /// ただしこれだけでは自前のサーバの起動は止まらない。`tcp:` なら起こさないが、`localfilesystem:` は
+    /// ローカルの指定とみなされ、サーバに繋がらないとクライアントが同じパスで `fork-server` を起こす
+    /// （setsid するので ChildGroup の kill も届かない）。後からサイドカーが同じパスで待ち受けると
+    /// サーバが 2 つになり、監視の `track-devices` が USB を持たない方に繋がったままになる。
+    /// 止めているのは compose でソケットのボリュームを spindle 側だけ読み取り専用にしていること
+    /// （待ち受けの作成が `Read-only file system` で失敗し、`error: cannot connect to daemon` = 未接続になる。D-98）
     pub server: String,
+    /// adb の子に渡す `HOME`（`$HOME/.android` を作れないとクライアントが abort する。呼び出し側が作っておく）
+    pub home: PathBuf,
     /// 1 回で終わるコマンドのタイムアウト
     pub timeout: Duration,
     /// 転送（`put`）のタイムアウト
@@ -98,21 +107,28 @@ impl AdbFs {
         }
     }
 
+    fn base(&self, timeout: Duration) -> ExternalCommand {
+        base_command(&self.cfg, &self.serial, timeout)
+    }
+
     fn command(&self, sub: &str, script: String, timeout: Duration) -> ExternalCommand {
-        ExternalCommand::new(&self.cfg.program)
-            .env("ADB_SERVER_SOCKET", &self.cfg.server)
-            .arg("-s")
-            .arg(&self.serial)
-            .arg(sub)
-            .arg(script)
-            .timeout(timeout)
+        self.base(timeout).arg(sub).arg(script)
     }
 
     async fn shell(&self, script: String) -> RemoteResult<Output> {
-        self.command("shell", script, self.cfg.timeout)
+        self.shell_with(script, self.cfg.timeout).await
+    }
+
+    /// タイムアウトを指定する `shell`
+    async fn shell_with(&self, script: String, timeout: Duration) -> RemoteResult<Output> {
+        match self
+            .command("shell", script, timeout)
             .run(&self.token)
             .await
-            .map_err(map_err)
+        {
+            Ok(o) => Ok(o),
+            Err(e) => Err(self.classify(e).await),
+        }
     }
 
     /// 終了コード [`MISSING_EXIT`] を None にする
@@ -126,18 +142,178 @@ impl AdbFs {
             Err(ProcessError::Failed { status, .. }) if status.code() == Some(MISSING_EXIT) => {
                 Ok(None)
             }
-            Err(e) => Err(map_err(e)),
+            Err(e) => Err(self.classify(e).await),
         }
     }
 
     async fn shell_stdin(&self, script: String, bytes: Vec<u8>) -> RemoteResult<()> {
-        self.command(STDIN_SUBCOMMAND, script, self.cfg.timeout)
+        match self
+            .command(STDIN_SUBCOMMAND, script, self.cfg.timeout)
             .stdin_bytes(bytes)
             .run(&self.token)
             .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => Err(self.classify(e).await),
+        }
+    }
+
+    /// adb の文言で決まらない失敗（転送中に抜かれると stderr 空・rc=255 になる。spike 1）は、
+    /// `get-state` で端末がまだ `device` かを確かめて分類する。`device` 以外（offline / unauthorized /
+    /// authorizing / 見つからない）はすべて未接続
+    async fn classify(&self, e: ProcessError) -> RemoteError {
+        match map_err(e) {
+            RemoteError::Failed(msg) if !self.token.is_cancelled() => {
+                match self.get_state().await {
+                    Ok(s) if s == "device" => RemoteError::Failed(msg),
+                    Ok(s) => {
+                        tracing::info!(serial = %self.serial, state = %s, "端末が device でないので未接続として扱う");
+                        RemoteError::NotConnected
+                    }
+                    Err(_) => RemoteError::NotConnected,
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// `adb -s <serial> get-state` の出力（`device` / `offline` / `unauthorized` …）
+    pub async fn get_state(&self) -> RemoteResult<String> {
+        let out = self
+            .base(self.cfg.timeout)
+            .arg("get-state")
+            .run(&self.token)
+            .await
             .map_err(map_err)?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+
+    /// 登録の途中で失敗したときの片付け: `<root>/.spindle` を消し、root が空になれば root も消す。
+    /// root 直下の他のファイル（手置き）には触らない
+    pub async fn discard_init(&self) -> RemoteResult<()> {
+        let r = self.quoted_root()?;
+        let s = self.abs(".spindle")?;
+        self.shell(format!(
+            "[ -e {r} ] || exit 0; rm -rf {s} || exit 1; rmdir {r} 2>/dev/null; exit 0"
+        ))
+        .await?;
         Ok(())
     }
+}
+
+/// `adb version` の版（`Version 37.0.1-15733141` の後ろ）。起動時診断と /health に使う
+pub async fn probe_version(cfg: &AdbConfig) -> Option<String> {
+    let out = ExternalCommand::new(&cfg.program)
+        .env("ADB_SERVER_SOCKET", &cfg.server)
+        .env("HOME", &cfg.home)
+        .arg("version")
+        .timeout(Duration::from_secs(5))
+        .run(&CancellationToken::new())
+        .await
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("Version ")
+                .map(|v| v.trim().to_owned())
+        })
+        .filter(|v| !v.is_empty())
+}
+
+/// `adb -s <serial>` までを組み立てる（サーバの指定と HOME を必ず付ける）
+fn base_command(cfg: &AdbConfig, serial: &str, timeout: Duration) -> ExternalCommand {
+    ExternalCommand::new(&cfg.program)
+        .env("ADB_SERVER_SOCKET", &cfg.server)
+        .env("HOME", &cfg.home)
+        .arg("-s")
+        .arg(serial)
+        .timeout(timeout)
+}
+
+/// 登録の候補になるボリューム（仕様 ⑤「登録」2）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeInfo {
+    /// `emulated` か SD の UUID
+    pub volume: String,
+    /// root の絶対パス
+    pub path: String,
+    /// ボリュームの空き（バイト）
+    pub free: u64,
+    /// root の状態
+    pub state: DirState,
+}
+
+/// `/storage` の下の内部共有ストレージと SD カードを調べる
+pub async fn probe_volumes(
+    cfg: &AdbConfig,
+    serial: &str,
+    root_rel: &str,
+    token: &CancellationToken,
+) -> RemoteResult<Vec<VolumeInfo>> {
+    probe_volumes_under(cfg, serial, "/storage", root_rel, token).await
+}
+
+/// [`probe_volumes`] の `/storage` を差し替えられる版（試験用）
+pub async fn probe_volumes_under(
+    cfg: &AdbConfig,
+    serial: &str,
+    storage: &str,
+    root_rel: &str,
+    token: &CancellationToken,
+) -> RemoteResult<Vec<VolumeInfo>> {
+    if !valid_serial(serial) || !valid_root(root_rel) {
+        return Err(RemoteError::Failed("シリアルか root が不正".into()));
+    }
+    let base = sh_quote(storage).map_err(|e| RemoteError::Failed(e.to_string()))?;
+    let rel = sh_quote(root_rel).map_err(|e| RemoteError::Failed(e.to_string()))?;
+    // 1 行 1 ボリューム: volume \t state \t 空きブロック数 ブロック長
+    let script = format!(
+        "b={base}; for d in \"$b\"/emulated/0 \"$b\"/????-????; do [ -d \"$d\" ] || continue; \
+         v=${{d#\"$b\"/}}; [ \"$v\" = emulated/0 ] && v=emulated; r=\"$d\"/{rel}; \
+         if [ ! -e \"$r\" ]; then s=missing; else c=$(ls -A \"$r\") || continue; \
+         if [ -n \"$c\" ]; then s=nonempty; else s=empty; fi; fi; \
+         f=$(stat -f -c '%a %S' \"$d\") || continue; printf '%s\\t%s\\t%s\\n' \"$v\" \"$s\" \"$f\"; done"
+    );
+    let out = base_command(cfg, serial, cfg.timeout)
+        .arg("shell")
+        .arg(script)
+        .run(token)
+        .await
+        .map_err(map_err)?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut v = Vec::new();
+    for line in text.lines() {
+        let mut it = line.split('\t');
+        let (Some(volume), Some(state), Some(free)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        if !valid_volume(volume) {
+            continue;
+        }
+        let state = match state {
+            "missing" => DirState::Missing,
+            "empty" => DirState::Empty,
+            "nonempty" => DirState::NonEmpty,
+            _ => continue,
+        };
+        let mut nums = free.split_whitespace().map(str::parse::<u64>);
+        let (Some(Ok(blocks)), Some(Ok(bsize))) = (nums.next(), nums.next()) else {
+            continue;
+        };
+        let dir = if volume == "emulated" {
+            format!("{storage}/emulated/0")
+        } else {
+            format!("{storage}/{volume}")
+        };
+        v.push(VolumeInfo {
+            volume: volume.to_owned(),
+            path: format!("{dir}/{root_rel}"),
+            free: blocks.saturating_mul(bsize),
+            state,
+        });
+    }
+    Ok(v)
 }
 
 fn map_err(e: ProcessError) -> RemoteError {
@@ -203,53 +379,64 @@ fn hashing_pipe(mut src: std::fs::File) -> std::io::Result<(std::fs::File, HashH
     Ok((std::fs::File::from(OwnedFd::from(reader)), handle))
 }
 
-/// 一覧の終端の印（サイズ行が `END` でパスが空のレコード）。これが無い出力は途中で切れたか find が失敗した
-const LISTING_END: &[u8] = b"END";
-/// stat に失敗したファイルの印（サイズ行の代わり）。サイズ行は数字だけなので区別できる
-const LISTING_ERROR: &[u8] = b"E";
+/// 一覧の終端の印。これが無い出力は途中で切れたか find（stat）が失敗した
+const LISTING_END: &str = "END";
+/// 一覧の先頭の件数行の接頭辞（`N <件数>`）
+const LISTING_COUNT: &str = "N ";
 
-/// `size\npath\0` の並びを読む（パスは NUL で終わるので改行を含んでも曖昧にならない）。
-/// 最後は必ず終端の印 `END\n\0` で、その後には何も無いこと。`E\npath\0`（stat の失敗）が 1 件でもあれば失敗。
-/// 終了コードに頼らず出力だけで一覧の完全さを確かめる（toybox の `find -exec … +` が子の非 0 を伝えなくても塞ぐ）
+/// `N <件数>`、`<サイズ> ./<パス>` を件数分、終端の印 `END` の順に並んだ行を読む。
+/// 出力が `END` の 1 行だけなら root が無い（空の一覧）。終端の後には何も無いこと。
+/// 終了コードに頼らず出力だけで一覧の完全さを確かめる: stat の失敗は find の非 0 で終端の印が無くなり、
+/// find が失敗を隠しても件数（`find | wc -l`）と行数が合わなくなる。
+/// パスは最初の空白の後ろ全部（空白を含んでよい）。改行を含む名前は Android の FUSE では作れず（実機で確認）、
+/// spindle 自身のパスも `sh_quote` が改行を拒むので、この形式は行の区切りに改行が使えることに頼る。
+/// 壊れた行や件数の不一致は今も失敗にするが、改行入りの名前を作り込まれた場合の検出までは保証しない
 fn parse_listing(bytes: &[u8]) -> RemoteResult<Vec<RemoteFile>> {
     let bad = |what: &str| RemoteError::Failed(format!("一覧の出力を読めない（{what}）"));
-    let mut out = Vec::new();
-    let mut rest = bytes;
-    loop {
-        if rest.is_empty() {
-            return Err(bad("終端の印が無い"));
-        }
-        let nl = rest
-            .iter()
-            .position(|b| *b == b'\n')
-            .ok_or_else(|| bad("途中で切れた"))?;
-        let head = &rest[..nl];
-        rest = &rest[nl + 1..];
-        let nul = rest
-            .iter()
-            .position(|b| *b == 0)
-            .ok_or_else(|| bad("途中で切れた"))?;
-        let path = &rest[..nul];
-        rest = &rest[nul + 1..];
-        if head == LISTING_END {
-            if !path.is_empty() || !rest.is_empty() {
-                return Err(bad("終端の印の後に続きがある"));
-            }
-            return Ok(out);
-        }
-        if head == LISTING_ERROR {
-            return Err(RemoteError::Failed(format!(
-                "一覧でサイズを取れないファイルがある: {}",
-                String::from_utf8_lossy(path)
-            )));
-        }
-        let size = std::str::from_utf8(head)
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .ok_or_else(|| bad("サイズ"))?;
-        let path = String::from_utf8(path.to_vec()).map_err(|_| bad("UTF-8 でないパス"))?;
-        out.push(RemoteFile { path, size });
+    let text = std::str::from_utf8(bytes).map_err(|_| bad("UTF-8 でないパス"))?;
+    let body = text
+        .strip_suffix(&format!("{LISTING_END}\n"))
+        .ok_or_else(|| bad("終端の印が無い"))?;
+    // 終端の印の直前は行頭（空か改行で終わる）であること
+    if !(body.is_empty() || body.ends_with('\n')) {
+        return Err(bad("終端の印が無い"));
     }
+    if body.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lines = body[..body.len() - 1].split('\n');
+    let count = lines
+        .next()
+        .and_then(|l| l.strip_prefix(LISTING_COUNT))
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|n| n.parse::<usize>().ok())
+        .ok_or_else(|| bad("件数の行"))?;
+    let mut out = Vec::with_capacity(count);
+    for line in lines {
+        let (size, path) = line
+            .split_once(' ')
+            .ok_or_else(|| bad("サイズとパスの行"))?;
+        if size.is_empty() || !size.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad("サイズ"));
+        }
+        let size = size.parse::<u64>().map_err(|_| bad("サイズ"))?;
+        let path = path
+            .strip_prefix("./")
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| bad("パス"))?;
+        out.push(RemoteFile {
+            path: path.to_string(),
+            size,
+        });
+    }
+    if out.len() != count {
+        return Err(RemoteError::Failed(format!(
+            "一覧の件数が合わない（find で {count} 件、サイズを取れたのは {} 件）",
+            out.len()
+        )));
+    }
+    Ok(out)
 }
 
 impl DeviceFs for AdbFs {
@@ -287,7 +474,9 @@ impl DeviceFs for AdbFs {
             .await
             .map_err(|e| RemoteError::Failed(e.to_string()))?
             .map_err(|_| RemoteError::Failed("ハッシュのスレッドが落ちた".into()))?;
-        run.map_err(map_err)?;
+        if let Err(e) = run {
+            return Err(self.classify(e).await);
+        }
         let (size, sha256) =
             hashed.map_err(|e| RemoteError::Failed(format!("送る元を読めない: {e}")))?;
         Ok(PutResult { size, sha256 })
@@ -313,15 +502,22 @@ impl DeviceFs for AdbFs {
     }
 
     /// 1 件でもサイズを取れなければ一覧全体を失敗させる（握り潰すと手置きのファイルが一覧から消え、
-    /// 管理外と分からずに上書きしうる）。失敗は 2 重に伝える: 内側の sh の非 0（`find -exec … +` の終了コード）と、
-    /// 出力の `E` レコード。終端の印は find が 0 で終わったときだけ書き、root が無い経路でも書く。
-    /// 列挙の後に消えたファイルでも失敗するが、同期が失敗するだけで次回やり直せる
+    /// 管理外と分からずに上書きしうる）。失敗は 2 重に塞ぐ: stat の失敗は `find -exec … +` の非 0 で
+    /// 終端の印が書かれなくなり、find が終了コードを隠しても先に数えた件数と行数が合わなくなる。
+    /// 終端の印は root が無い経路でも書く。列挙の後に消えたファイルでも失敗するが、同期が失敗するだけで
+    /// 次回やり直せる。stat はまとめて起こす（ファイルごとに起こすと実機の 9030 件で 5 分を超えた。
+    /// まとめれば 5 秒）。それでも長く走る一覧なので転送と同じ `transfer_timeout` で待つ
     async fn list_files(&self) -> RemoteResult<Vec<RemoteFile>> {
         let r = self.quoted_root()?;
         let script = format!(
-            "[ -e {r} ] || {{ printf 'END\\n\\0'; exit 0; }}; cd {r} || exit 1; find . -type f -exec sh -c 'for f; do if s=$(stat -c %s \"$f\"); then printf \"%s\\n%s\\0\" \"$s\" \"${{f#./}}\"; else printf \"E\\n%s\\0\" \"${{f#./}}\"; exit 1; fi; done' sh {{}} + && printf 'END\\n\\0'"
+            "[ -e {r} ] || {{ printf 'END\\n'; exit 0; }}; cd {r} || exit 1; n=$(find . -type f | wc -l) || exit 1; printf 'N %s\\n' \"$n\"; find . -type f -exec stat -c '%s %n' {{}} + && printf 'END\\n'"
         );
-        parse_listing(&self.shell(script).await?.stdout)
+        parse_listing(
+            &self
+                .shell_with(script, self.cfg.transfer_timeout)
+                .await?
+                .stdout,
+        )
     }
 
     async fn rename(&self, from: &str, to: &str) -> RemoteResult<()> {
@@ -382,6 +578,9 @@ impl DeviceFs for AdbFs {
         }
     }
 
+    /// extras は付けない。Poweramp API に対象パスの extra は無く、プレイリストの再解析は `eraseTags`
+    /// （全タグ消去・CUE がユーザのプレイリストから消える）しか無いため（実機 spike 4、D-98）。
+    /// スキャン範囲は Poweramp のフォルダ設定
     async fn rescan(&self) -> RemoteResult<()> {
         self.shell(format!(
             "pm path {POWERAMP_PACKAGE} >/dev/null 2>&1 || exit 0; am broadcast -a {POWERAMP_SCAN_ACTION} -n {POWERAMP_RECEIVER}"
@@ -431,6 +630,9 @@ mod tests {
             "  * cannot connect to daemon",
             "error: cannot connect to daemon",
             "adb: cannot connect to daemon at tcp:adb:5037",
+            // ソケットのボリュームが読み取り専用で、クライアントが自前のサーバを起こせなかったとき（D-98）
+            "could not install *smartsocket* listener: Read-only file system\n\
+             error: cannot connect to daemon",
         ] {
             assert_eq!(map_err(failed(m)), RemoteError::NotConnected, "{m}");
         }
@@ -450,16 +652,11 @@ mod tests {
     }
 
     #[test]
-    fn broken_listing_is_an_error() {
-        assert!(parse_listing(b"5\na\0END\n\0").is_ok());
-        assert!(parse_listing(b"5\na").is_err());
-        assert!(parse_listing(b"x\na\0END\n\0").is_err());
-        assert!(parse_listing(b"5\n\xff\0END\n\0").is_err());
-    }
-
-    #[test]
-    fn listing_needs_the_end_marker_and_no_failure_records() {
-        let ok = parse_listing(b"5\na\x002\nb c\0END\n\0").unwrap();
+    fn listing_reads_sizes_and_paths_with_spaces_and_multibyte() {
+        let ok = parse_listing(
+            "N 3\n5 ./a\n2 ./Dir/b c.opus\n7 ./アーティスト/曲 名.opus\nEND\n".as_bytes(),
+        )
+        .unwrap();
         assert_eq!(
             ok,
             vec![
@@ -468,22 +665,68 @@ mod tests {
                     size: 5
                 },
                 RemoteFile {
-                    path: "b c".into(),
+                    path: "Dir/b c.opus".into(),
                     size: 2
+                },
+                RemoteFile {
+                    path: "アーティスト/曲 名.opus".into(),
+                    size: 7
                 },
             ]
         );
+        // 0 件の一覧
+        assert_eq!(parse_listing(b"N 0\nEND\n").unwrap(), vec![]);
         // root が無い: 終端の印だけで空の一覧
-        assert_eq!(parse_listing(b"END\n\0").unwrap(), vec![]);
-        // stat に失敗した印（find が子の非 0 を伝えなくても気づく）
-        assert!(parse_listing(b"5\na\0E\nb\0END\n\0").is_err());
-        // 終端の印が無い（途中で切れた・find が失敗した）。レコードの境界で切れても失敗
-        assert!(parse_listing(b"5\na\0").is_err());
+        assert_eq!(parse_listing(b"END\n").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn listing_count_must_match() {
+        // find が stat の失敗を終了コードに伝えなくても、件数の不一致で気づく
+        assert!(parse_listing(b"N 2\n5 ./a\nEND\n").is_err());
+        assert!(parse_listing(b"N 1\n5 ./a\n2 ./b\nEND\n").is_err());
+        assert!(parse_listing(b"N 1\nEND\n").is_err());
+    }
+
+    #[test]
+    fn listing_needs_the_end_marker() {
+        // 途中で切れた・find が失敗した
+        assert!(parse_listing(b"N 1\n5 ./a\n").is_err());
+        assert!(parse_listing(b"N 1\n5 ./a").is_err());
+        assert!(parse_listing(b"N 1\n5 ./a\nEND").is_err());
+        assert!(parse_listing(b"N 0\n").is_err());
         assert!(parse_listing(b"").is_err());
         // 終端の後に何かある
-        assert!(parse_listing(b"END\n\x005\na\0").is_err());
-        assert!(parse_listing(b"END\n\0x").is_err());
-        // 終端の印にパスが付いている
-        assert!(parse_listing(b"END\nx\0").is_err());
+        assert!(parse_listing(b"END\nN 1\n5 ./a\nEND\n").is_err());
+        assert!(parse_listing(b"N 1\n5 ./a\nEND\nx").is_err());
+        assert!(parse_listing(b"END\n\n").is_err());
+    }
+
+    #[test]
+    fn malformed_listing_lines_are_errors() {
+        for bad in [
+            // 件数の行が無い・壊れている
+            &b"5 ./a\nEND\n"[..],
+            b"N x\n5 ./a\nEND\n",
+            b"N -1\nEND\n",
+            b"N\nEND\n",
+            // サイズが数字でない・空白が 1 つでない・./ で始まらない
+            b"N 1\nx ./a\nEND\n",
+            b"N 1\n-5 ./a\nEND\n",
+            b"N 1\n5  ./a\nEND\n",
+            b"N 1\n ./a\nEND\n",
+            b"N 1\n5 a\nEND\n",
+            b"N 1\n5\nEND\n",
+            b"N 1\n5 ./\nEND\n",
+            b"N 1\n\nEND\n",
+            // UTF-8 でないパス
+            b"N 1\n5 ./\xff\nEND\n",
+        ] {
+            assert!(
+                parse_listing(bad).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
     }
 }
