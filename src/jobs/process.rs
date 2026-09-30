@@ -96,6 +96,7 @@ pub struct ExternalCommand {
     current_dir: Option<PathBuf>,
     timeout: Duration,
     stdin: Option<File>,
+    envs: Vec<(OsString, OsString)>,
     /// stdin に書き込むバイト列（`stdin` より優先）。書き終えたら閉じる
     stdin_bytes: Option<Vec<u8>>,
     stdout_file: Option<File>,
@@ -113,6 +114,7 @@ impl ExternalCommand {
             current_dir: None,
             timeout: DEFAULT_TIMEOUT,
             stdin: None,
+            envs: Vec::new(),
             stdin_bytes: None,
             stdout_file: None,
             stdout_channel: None,
@@ -171,6 +173,13 @@ impl ExternalCommand {
 
     pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Self {
         self.current_dir = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// 子の環境変数を足す（`ADB_SERVER_SOCKET` など）。親の環境は引き継ぐ
+    pub fn env(mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> Self {
+        self.envs
+            .push((key.as_ref().to_os_string(), val.as_ref().to_os_string()));
         self
     }
 
@@ -237,6 +246,9 @@ impl ExternalCommand {
 
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args).stderr(Stdio::piped());
+        for (k, v) in &self.envs {
+            cmd.env(k, v);
+        }
         cmd.stdin(match (&self.stdin_bytes, self.stdin) {
             (Some(_), _) => Stdio::piped(),
             (None, Some(f)) => Stdio::from(f),

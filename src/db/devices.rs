@@ -9,13 +9,14 @@ use rusqlite::{params, Connection, OptionalExtension as _};
 use crate::db::derived as dbderived;
 use crate::db::jobs::{self as dbjobs, EnqueueResult, JobType, NewJob};
 use crate::db::{playlists as dbpl, Result};
+use crate::device::plan::StoredPlan;
 use crate::domain::derived::{Variant, VariantSettings};
 use crate::domain::device::{
     build_manifest, build_playlists, decide_source, diff, plan_token, resolve_collisions,
     utf16_len, DesiredItem, DesiredPlaylist, DeviceItem, Diff, PlaylistInput, PlaylistState,
     SourceHash, SourceKind, TrackInput, Transport,
 };
-use crate::domain::device::{counts, track_states, Counts, PendingSets, TrackState};
+use crate::domain::device::{counts, track_states, Counts, EntryKind, PendingSets, TrackState};
 use crate::domain::relpath::canonical_key;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -866,6 +867,163 @@ pub fn has_open_work(conn: &Connection, id: i64) -> Result<bool> {
         [id],
         |r| r.get::<_, i64>(0),
     )? == 1)
+}
+
+/// 端末の open な計画（仕様 ③「計画の終端」。端末ごとに 1 つまで）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPlan {
+    pub id: i64,
+    pub job_id: Option<i64>,
+    pub plan: StoredPlan,
+}
+
+pub fn open_plan(conn: &Connection, device_id: i64) -> Result<Option<OpenPlan>> {
+    let row: Option<(i64, Option<i64>, String)> = conn
+        .query_row(
+            "SELECT id, job_id, plan FROM device_sync_plans WHERE device_id = ?1 AND state = 'open'",
+            [device_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, job_id, json)) = row else {
+        return Ok(None);
+    };
+    let plan: StoredPlan = serde_json::from_str(&json)
+        .map_err(|e| crate::db::DbError::Internal(format!("計画 {id} を読めない: {e}")))?;
+    Ok(Some(OpenPlan { id, job_id, plan }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Confirm {
+    /// 新しく確定した
+    Created(OpenPlan),
+    /// 同じ `plan_token` の open な計画がある（冪等）
+    Existing(OpenPlan),
+    /// 別の open な計画がある（409 open_plan_exists）
+    OpenPlanExists(OpenPlan),
+    /// サーバが計算し直した計画と違う（409。画面は差分を取り直す）
+    Mismatch {
+        plan_token: String,
+    },
+    NotFound,
+}
+
+/// 計画を確定する（仕様 ③「計画トークン」）。計算し直した計画の `plan_token` が一致すれば
+/// `device_sync_plans` に不変のまま保存する。呼び出し側のトランザクションの中で呼べる
+/// （P5-3b はここで同じトランザクションにジョブを投入する）
+pub fn confirm_plan(
+    conn: &Connection,
+    device_id: i64,
+    plan_token: &str,
+    now: i64,
+) -> Result<Confirm> {
+    atomically(conn, "device_confirm_plan", || {
+        if let Some(open) = open_plan(conn, device_id)? {
+            return Ok(if open.plan.plan_token == plan_token {
+                Confirm::Existing(open)
+            } else {
+                Confirm::OpenPlanExists(open)
+            });
+        }
+        let Some(c) = compute_in(conn, device_id)? else {
+            return Ok(Confirm::NotFound);
+        };
+        if c.plan_token != plan_token {
+            return Ok(Confirm::Mismatch {
+                plan_token: c.plan_token,
+            });
+        }
+        let plan = StoredPlan::from_diff(c.generation, &c.plan_token, &c.diff)
+            .map_err(|e| crate::db::DbError::Internal(format!("計画の op_id を作れない: {e}")))?;
+        let json = serde_json::to_string(&plan)
+            .map_err(|e| crate::db::DbError::Internal(format!("計画を書けない: {e}")))?;
+        conn.execute(
+            "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at)
+             VALUES (?1, ?2, ?3, 'open', ?4)",
+            params![device_id, plan.plan_token, json, now],
+        )?;
+        Ok(Confirm::Created(OpenPlan {
+            id: conn.last_insert_rowid(),
+            job_id: None,
+            plan,
+        }))
+    })
+}
+
+pub fn set_plan_job(conn: &Connection, plan_id: i64, job_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE device_sync_plans SET job_id = ?2 WHERE id = ?1",
+        params![plan_id, job_id],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanEnd {
+    Completed,
+    Abandoned,
+}
+
+/// 計画を終端させる。open のときだけ変わる（CAS）。変わったら true
+pub fn close_plan(
+    conn: &Connection,
+    plan_id: i64,
+    end: PlanEnd,
+    report_digest: Option<&str>,
+    now: i64,
+) -> Result<bool> {
+    let state = match end {
+        PlanEnd::Completed => "completed",
+        PlanEnd::Abandoned => "abandoned",
+    };
+    let n = conn.execute(
+        "UPDATE device_sync_plans SET state = ?2, report_digest = ?3, closed_at = ?4
+         WHERE id = ?1 AND state = 'open'",
+        params![plan_id, state, report_digest, now],
+    )?;
+    Ok(n == 1)
+}
+
+/// 同期・報告で出た項目ごとのエラー（種類、track_id / playlist_id、理由）
+pub type ReportedError = (EntryKind, i64, String);
+
+/// 端末側の正本を読んだ結果でキャッシュを全置換する（仕様 ②）。`errors` が None なら
+/// `device_errors` は触らない（差分の計算だけの `device_scan` は前回の同期のエラーを残す）。
+/// `synced` なら `last_synced_at` を進める
+pub fn apply_device_state(
+    conn: &Connection,
+    device_id: i64,
+    items: &[DeviceItem],
+    playlists: &[PlaylistState],
+    errors: Option<&[ReportedError]>,
+    synced: bool,
+    now: i64,
+) -> Result<()> {
+    atomically(conn, "device_apply_state", || {
+        replace_items(conn, device_id, items, now)?;
+        replace_playlist_states(conn, device_id, playlists, now)?;
+        if let Some(errors) = errors {
+            conn.execute(
+                "DELETE FROM device_errors WHERE device_id = ?1",
+                [device_id],
+            )?;
+            let mut st = conn.prepare_cached(
+                "INSERT INTO device_errors (device_id, kind, ref_id, reason, reported_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (device_id, kind, ref_id) DO UPDATE SET reason = excluded.reason",
+            )?;
+            for (kind, ref_id, reason) in errors {
+                st.execute(params![device_id, kind.as_str(), ref_id, reason, now])?;
+            }
+        }
+        if synced {
+            conn.execute(
+                "UPDATE devices SET last_synced_at = ?2 WHERE id = ?1",
+                params![device_id, now],
+            )?;
+        }
+        Ok(())
+    })
 }
 
 pub enum PlaylistCheck {

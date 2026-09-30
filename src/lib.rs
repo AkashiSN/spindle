@@ -5,6 +5,7 @@ pub mod api;
 pub mod cd;
 pub mod config;
 pub mod db;
+pub mod device;
 pub mod domain;
 pub mod edit;
 pub mod fsroot;

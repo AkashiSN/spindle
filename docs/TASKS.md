@@ -2019,6 +2019,11 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
 - [x] P5-2 端末 API（UI 向け）・端末タブ（差分 / 選曲 / 設定）・選曲の近道・可視化 A〜D・DSL の
       `on_device` / `device_pending` と循環の禁止
       （P5-2 では Android の登録・同期ボタン・接続状態・空き容量と pair-code は場所だけ。P5-3 / P5-4）
-- [ ] P5-3 adb サイドカーと Android 同期（登録 → 差分 → ボタンで同期、ジャーナル、バッチ、計画の終端）
+- [x] P5-3a 端末側の正本・ジャーナル・パス変更のバッチ・回復・同期・検証のエンジンと adb クライアント
+      （`DeviceFs` を偽の端末 FS と偽の adb で試す。計画の確定・終端と再開の判定。
+      計画 docs/superpowers/plans/2026-09-30-p5-3a-adb-sync-engine.md）
+- [ ] P5-3b `device_scan` / `device_sync` / `device_verify` ジョブ、`adb track-devices` の常駐監視、
+      登録・同期・再開・破棄・検証の API、端末タブの Android 部分、`[bin].adb` / `[devices]`、
+      adb サイドカーと compose、実機での固定（shell v2 の stdin、toybox、Poweramp のレシーバ）
 - [ ] P5-4 `spindle-agent` とエージェント API（pair / 計画の確定 / ファイル / 報告）
 - [ ] P5-5 文書の改訂（SPEC §1・§7.6・§7.7・§9・§10・§12・§13・§14、DSL.md、CLAUDE.md の禁止事項の注記）

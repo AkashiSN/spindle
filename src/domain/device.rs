@@ -457,7 +457,10 @@ pub fn build_playlists(
 }
 
 /// 差分の操作。並び順は実行順（削除 → パス変更 → 更新 → 追加。仕様 ⑤）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum OpKind {
     Delete,
     Move,
@@ -496,7 +499,8 @@ pub struct PlaylistState {
     pub token: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PlaylistOpKind {
     Add,
     Update,
@@ -509,6 +513,25 @@ impl PlaylistOpKind {
             PlaylistOpKind::Add => "add",
             PlaylistOpKind::Update => "update",
             PlaylistOpKind::Delete => "delete",
+        }
+    }
+}
+
+/// 端末上の項目の種類（`device_errors.kind`、ジャーナルの `kind`）
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    Track,
+    Playlist,
+}
+
+impl EntryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntryKind::Track => "track",
+            EntryKind::Playlist => "playlist",
         }
     }
 }
@@ -825,7 +848,9 @@ pub struct Estimate {
     pub peak_bytes: u64,
 }
 
-pub fn estimate(diff: &Diff, current: &[DeviceItem]) -> Estimate {
+/// 実行順（削除 → パス変更のバッチ → 更新 → 追加。仕様 ⑤）に沿った送る量と「今より増える量」の最大値。
+/// `ops` は (操作, track_id, 新しい内容の size)
+pub fn peak_bytes(ops: &[(OpKind, i64, u64)], current: &[DeviceItem]) -> Estimate {
     let old: HashMap<i64, i64> = current
         .iter()
         .map(|c| (c.track_id, c.size as i64))
@@ -834,35 +859,44 @@ pub fn estimate(diff: &Diff, current: &[DeviceItem]) -> Estimate {
     let mut used: i64 = 0;
     let mut peak: i64 = 0;
     let mut transfer: u64 = 0;
-    let ops = |k: OpKind| diff.items.iter().filter(move |o| o.kind == k);
-    for o in ops(OpKind::Delete) {
-        used -= old_of(o.track_id);
+    let of = |k: OpKind| ops.iter().filter(move |o| o.0 == k);
+    for (_, id, _) in of(OpKind::Delete) {
+        used -= old_of(*id);
     }
     // prepared: 更新 + 移動の新しい内容が旧版と並ぶ
-    for o in ops(OpKind::UpdateMove) {
-        used += o.size as i64;
-        transfer += o.size;
+    for (_, _, size) in of(OpKind::UpdateMove) {
+        used += *size as i64;
+        transfer += size;
         peak = peak.max(used);
     }
     // vacating: 更新 + 移動の旧版を消す（移動は増減なし）
-    for o in ops(OpKind::UpdateMove) {
-        used -= old_of(o.track_id);
+    for (_, id, _) in of(OpKind::UpdateMove) {
+        used -= old_of(*id);
     }
-    for o in ops(OpKind::Update) {
-        used += o.size as i64;
-        transfer += o.size;
+    for (_, id, size) in of(OpKind::Update) {
+        used += *size as i64;
+        transfer += size;
         peak = peak.max(used);
-        used -= old_of(o.track_id);
+        used -= old_of(*id);
     }
-    for o in ops(OpKind::Add) {
-        used += o.size as i64;
-        transfer += o.size;
+    for (_, _, size) in of(OpKind::Add) {
+        used += *size as i64;
+        transfer += size;
         peak = peak.max(used);
     }
     Estimate {
         transfer_bytes: transfer,
         peak_bytes: peak.max(0) as u64,
     }
+}
+
+pub fn estimate(diff: &Diff, current: &[DeviceItem]) -> Estimate {
+    let ops: Vec<(OpKind, i64, u64)> = diff
+        .items
+        .iter()
+        .map(|o| (o.kind, o.track_id, o.size))
+        .collect();
+    peak_bytes(&ops, current)
 }
 
 /// 端末ごとの未反映（追加・更新・移動・更新 + 移動）の track_id。DSL の `device_pending` とフィルタ
