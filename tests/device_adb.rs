@@ -26,6 +26,8 @@ struct Fakes {
     _dir: tempfile::TempDir,
     adb: PathBuf,
     broken_stat: PathBuf,
+    /// stat が壊れていて、さらに find が子の非 0 を終了コードに伝えない端末
+    silent_find: PathBuf,
 }
 
 fn fakes() -> &'static Fakes {
@@ -36,6 +38,11 @@ fn fakes() -> &'static Fakes {
 /// シリアルとサーバの指定を確かめてから、スクリプトを手元の sh で実行する偽の adb
 fn fake_adb(_dir: &Path) -> PathBuf {
     fakes().adb.clone()
+}
+
+/// 終了コードに頼らず、出力の印だけで一覧の失敗に気づくかを試す偽の adb
+fn fake_adb_with_silent_find() -> PathBuf {
+    fakes().silent_find.clone()
 }
 
 /// `stat -c %s`（一覧のサイズ取り）だけが必ず失敗する端末の偽の adb。
@@ -51,12 +58,15 @@ fn write_executable(path: &Path, body: &str) {
 
 fn write_fakes() -> Fakes {
     let (dir, adb) = write_fake_adb();
-    let real = std::env::var("PATH")
-        .unwrap()
-        .split(':')
-        .map(|d| Path::new(d).join("stat"))
-        .find(|p| p.is_file())
-        .expect("stat が見つからない");
+    let which = |name: &str| {
+        std::env::var("PATH")
+            .unwrap()
+            .split(':')
+            .map(|d| Path::new(d).join(name))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("{name} が見つからない"))
+    };
+    let real = which("stat");
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     write_executable(
@@ -75,10 +85,27 @@ fn write_fakes() -> Fakes {
             adb.display()
         ),
     );
+    let quiet = dir.path().join("quiet");
+    std::fs::create_dir(&quiet).unwrap();
+    std::fs::copy(bin.join("stat"), quiet.join("stat")).unwrap();
+    write_executable(
+        &quiet.join("find"),
+        &format!("#!/bin/sh\n{} \"$@\"\nexit 0\n", which("find").display()),
+    );
+    let silent_find = dir.path().join("adb-silent-find");
+    write_executable(
+        &silent_find,
+        &format!(
+            "#!/bin/sh\nPATH={}:$PATH\nexport PATH\nexec {} \"$@\"\n",
+            quiet.display(),
+            adb.display()
+        ),
+    );
     Fakes {
         _dir: dir,
         adb,
         broken_stat,
+        silent_find,
     }
 }
 
@@ -136,8 +163,12 @@ fn env() -> Env {
 
 /// 同じ root を、stat の壊れた端末として見る `AdbFs`
 fn broken_stat_fs(root: &Path) -> AdbFs {
+    fs_with(fake_adb_with_broken_stat(), root)
+}
+
+fn fs_with(program: PathBuf, root: &Path) -> AdbFs {
     let cfg = AdbConfig {
-        program: fake_adb_with_broken_stat(),
+        program,
         server: "tcp:adb:5037".into(),
         timeout: Duration::from_secs(30),
         transfer_timeout: Duration::from_secs(60),
@@ -444,6 +475,28 @@ fn list_files_fails_when_stat_fails() {
         );
         // stat の他の使い方（空き容量）は壊していない
         assert!(fs.free_bytes().await.unwrap() > 0);
+    });
+}
+
+#[test]
+fn list_files_fails_even_if_find_hides_the_failure() {
+    block_on(async {
+        let e = env();
+        e.fs.write("hand.opus", b"hand").await.unwrap();
+        e.fs.write("Dir/b.opus", b"b").await.unwrap();
+        let fs = fs_with(fake_adb_with_silent_find(), &e.root);
+        assert!(
+            matches!(fs.list_files().await, Err(RemoteError::Failed(_))),
+            "find の終了コードが 0 でも、失敗の印で一覧全体を失敗させる"
+        );
+    });
+}
+
+#[test]
+fn list_files_of_a_missing_root_is_empty() {
+    block_on(async {
+        let e = env();
+        assert!(e.fs.list_files().await.unwrap().is_empty());
     });
 }
 

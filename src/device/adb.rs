@@ -203,30 +203,53 @@ fn hashing_pipe(mut src: std::fs::File) -> std::io::Result<(std::fs::File, HashH
     Ok((std::fs::File::from(OwnedFd::from(reader)), handle))
 }
 
-/// `size\npath\0` の並びを読む（パスは NUL で終わるので改行を含んでも曖昧にならない）
+/// 一覧の終端の印（サイズ行が `END` でパスが空のレコード）。これが無い出力は途中で切れたか find が失敗した
+const LISTING_END: &[u8] = b"END";
+/// stat に失敗したファイルの印（サイズ行の代わり）。サイズ行は数字だけなので区別できる
+const LISTING_ERROR: &[u8] = b"E";
+
+/// `size\npath\0` の並びを読む（パスは NUL で終わるので改行を含んでも曖昧にならない）。
+/// 最後は必ず終端の印 `END\n\0` で、その後には何も無いこと。`E\npath\0`（stat の失敗）が 1 件でもあれば失敗。
+/// 終了コードに頼らず出力だけで一覧の完全さを確かめる（toybox の `find -exec … +` が子の非 0 を伝えなくても塞ぐ）
 fn parse_listing(bytes: &[u8]) -> RemoteResult<Vec<RemoteFile>> {
     let bad = |what: &str| RemoteError::Failed(format!("一覧の出力を読めない（{what}）"));
     let mut out = Vec::new();
     let mut rest = bytes;
-    while !rest.is_empty() {
+    loop {
+        if rest.is_empty() {
+            return Err(bad("終端の印が無い"));
+        }
         let nl = rest
             .iter()
             .position(|b| *b == b'\n')
             .ok_or_else(|| bad("途中で切れた"))?;
-        let size = std::str::from_utf8(&rest[..nl])
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .ok_or_else(|| bad("サイズ"))?;
+        let head = &rest[..nl];
         rest = &rest[nl + 1..];
         let nul = rest
             .iter()
             .position(|b| *b == 0)
             .ok_or_else(|| bad("途中で切れた"))?;
-        let path = String::from_utf8(rest[..nul].to_vec()).map_err(|_| bad("UTF-8 でないパス"))?;
+        let path = &rest[..nul];
         rest = &rest[nul + 1..];
+        if head == LISTING_END {
+            if !path.is_empty() || !rest.is_empty() {
+                return Err(bad("終端の印の後に続きがある"));
+            }
+            return Ok(out);
+        }
+        if head == LISTING_ERROR {
+            return Err(RemoteError::Failed(format!(
+                "一覧でサイズを取れないファイルがある: {}",
+                String::from_utf8_lossy(path)
+            )));
+        }
+        let size = std::str::from_utf8(head)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .ok_or_else(|| bad("サイズ"))?;
+        let path = String::from_utf8(path.to_vec()).map_err(|_| bad("UTF-8 でないパス"))?;
         out.push(RemoteFile { path, size });
     }
-    Ok(out)
 }
 
 impl DeviceFs for AdbFs {
@@ -290,12 +313,13 @@ impl DeviceFs for AdbFs {
     }
 
     /// 1 件でもサイズを取れなければ一覧全体を失敗させる（握り潰すと手置きのファイルが一覧から消え、
-    /// 管理外と分からずに上書きしうる）。内側の sh の非 0 は `find -exec … +` の終了コードになる。
+    /// 管理外と分からずに上書きしうる）。失敗は 2 重に伝える: 内側の sh の非 0（`find -exec … +` の終了コード）と、
+    /// 出力の `E` レコード。終端の印は find が 0 で終わったときだけ書き、root が無い経路でも書く。
     /// 列挙の後に消えたファイルでも失敗するが、同期が失敗するだけで次回やり直せる
     async fn list_files(&self) -> RemoteResult<Vec<RemoteFile>> {
         let r = self.quoted_root()?;
         let script = format!(
-            "[ -e {r} ] || exit 0; cd {r} || exit 1; find . -type f -exec sh -c 'for f; do s=$(stat -c %s \"$f\") || exit 1; printf \"%s\\n%s\\0\" \"$s\" \"${{f#./}}\"; done' sh {{}} +"
+            "[ -e {r} ] || {{ printf 'END\\n\\0'; exit 0; }}; cd {r} || exit 1; find . -type f -exec sh -c 'for f; do if s=$(stat -c %s \"$f\"); then printf \"%s\\n%s\\0\" \"$s\" \"${{f#./}}\"; else printf \"E\\n%s\\0\" \"${{f#./}}\"; exit 1; fi; done' sh {{}} + && printf 'END\\n\\0'"
         );
         parse_listing(&self.shell(script).await?.stdout)
     }
@@ -427,9 +451,39 @@ mod tests {
 
     #[test]
     fn broken_listing_is_an_error() {
-        assert!(parse_listing(b"5\na\0").is_ok());
+        assert!(parse_listing(b"5\na\0END\n\0").is_ok());
         assert!(parse_listing(b"5\na").is_err());
-        assert!(parse_listing(b"x\na\0").is_err());
-        assert!(parse_listing(b"5\n\xff\0").is_err());
+        assert!(parse_listing(b"x\na\0END\n\0").is_err());
+        assert!(parse_listing(b"5\n\xff\0END\n\0").is_err());
+    }
+
+    #[test]
+    fn listing_needs_the_end_marker_and_no_failure_records() {
+        let ok = parse_listing(b"5\na\x002\nb c\0END\n\0").unwrap();
+        assert_eq!(
+            ok,
+            vec![
+                RemoteFile {
+                    path: "a".into(),
+                    size: 5
+                },
+                RemoteFile {
+                    path: "b c".into(),
+                    size: 2
+                },
+            ]
+        );
+        // root が無い: 終端の印だけで空の一覧
+        assert_eq!(parse_listing(b"END\n\0").unwrap(), vec![]);
+        // stat に失敗した印（find が子の非 0 を伝えなくても気づく）
+        assert!(parse_listing(b"5\na\0E\nb\0END\n\0").is_err());
+        // 終端の印が無い（途中で切れた・find が失敗した）。レコードの境界で切れても失敗
+        assert!(parse_listing(b"5\na\0").is_err());
+        assert!(parse_listing(b"").is_err());
+        // 終端の後に何かある
+        assert!(parse_listing(b"END\n\x005\na\0").is_err());
+        assert!(parse_listing(b"END\n\0x").is_err());
+        // 終端の印にパスが付いている
+        assert!(parse_listing(b"END\nx\0").is_err());
     }
 }
