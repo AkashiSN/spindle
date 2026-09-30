@@ -244,6 +244,33 @@ impl Fx {
             .await
     }
 
+    /// ジョブ `job` が job_mutexes の `device:<id>` を持つまで待つ
+    async fn wait_device_mutex(&self, job: i64) {
+        let (db, dev) = (self.db.clone(), self.device.id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let holder: Option<i64> = db
+                .read(move |c| {
+                    Ok(c.query_row(
+                        "SELECT job_id FROM job_mutexes WHERE name = ?1",
+                        [spindle::jobs::device_mutex(dev)],
+                        |r| r.get(0),
+                    )
+                    .optional()?)
+                })
+                .await
+                .unwrap();
+            if holder == Some(job) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ジョブ {job} が device:{dev} を取らない（{holder:?}）"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// 計画を確定して同期し、完了を待つ
     async fn sync_once(&self) -> Job {
         let plan_id = self.confirm().await;
@@ -580,6 +607,31 @@ async fn verify_waits_without_spending_attempts_until_connected() {
 }
 
 #[tokio::test]
+async fn job_waiting_for_the_device_lock_ends_quietly_if_the_device_was_deleted() {
+    let fx = Fx::new().await;
+    fx.connect();
+    fx.initialize().await;
+    fx.start();
+    // 端末の削除（API）がロックを持っている間に、走査が行を読んでロックを待つ
+    let guard = fx.rt.device_lock(fx.device.id).lock_owned().await;
+    let scan = fx.jobs.enqueue(scan_job(fx.device.id)).await.unwrap().id();
+    fx.wait(scan, JobState::Running).await;
+    fx.wait_device_mutex(scan).await;
+    let dev = fx.device.id;
+    fx.db
+        .write(move |c| {
+            devices::delete(c, dev)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(guard);
+    // ロックを取った後に行を読み直し、消えていれば端末に触らずに終わる
+    let job = fx.wait(scan, JobState::Done).await;
+    assert_eq!(job.note.as_deref(), Some("端末が削除された"));
+}
+
+#[tokio::test]
 async fn busy_job_mutex_requeues_after_a_while() {
     let fx = Fx::new().await;
     fx.connect();
@@ -596,29 +648,7 @@ async fn busy_job_mutex_requeues_after_a_while() {
         .id();
     fx.wait(sync, JobState::Running).await;
     // 同期が job_mutexes の行を持つまで待つ（ロックは lock_mutex_named → device_lock の順に取る）
-    let (db, dev) = (fx.db.clone(), fx.device.id);
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        let holder: Option<i64> = db
-            .read(move |c| {
-                Ok(c.query_row(
-                    "SELECT job_id FROM job_mutexes WHERE name = ?1",
-                    [spindle::jobs::device_mutex(dev)],
-                    |r| r.get(0),
-                )
-                .optional()?)
-            })
-            .await
-            .unwrap();
-        if holder == Some(sync) {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "同期が device:{dev} を取らない（{holder:?}）"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    fx.wait_device_mutex(sync).await;
     let before = now_epoch();
     let scan = fx.jobs.enqueue(scan_job(fx.device.id)).await.unwrap().id();
     // 1 秒ごとの空回りではなく、しばらく置いてから再び対象にする

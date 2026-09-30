@@ -899,6 +899,73 @@ async fn delete_refuses_a_running_sync_and_cancels_queued_device_jobs() {
 }
 
 #[tokio::test]
+async fn delete_refuses_a_running_scan_or_verify() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    let scan: i64 = app.query(
+        "SELECT id FROM jobs WHERE type = 'device_scan' AND state = 'queued'",
+        [],
+    );
+    let (s, v) = app
+        .call(Method::POST, &format!("/api/devices/{id}/verify"), None)
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    let verify = v["job_id"].as_i64().unwrap();
+    // 実行中の走査・検証（ワーカーは動いていない。状態だけを見る）
+    for job in [scan, verify] {
+        app.raw_exec(&format!(
+            "UPDATE jobs SET state = 'running' WHERE id = {job}"
+        ));
+        let (s, v) = app
+            .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+            .await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (StatusCode::CONFLICT, Some("busy")),
+            "job {job}"
+        );
+        assert_eq!(app.device_count(), 1);
+        app.raw_exec(&format!(
+            "UPDATE jobs SET state = 'queued' WHERE id = {job}"
+        ));
+    }
+    let (s, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{v}");
+}
+
+#[tokio::test]
+async fn delete_refuses_while_the_device_lock_is_held() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    app.disconnect();
+    let lock = app.rt.device_lock(id);
+    let g = lock.try_lock().unwrap();
+    let (s, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("busy"))
+    );
+    assert_eq!(app.device_count(), 1);
+    let queued: i64 = app.query(
+        "SELECT COUNT(*) FROM jobs WHERE type = 'device_scan' AND state = 'queued'",
+        [],
+    );
+    assert_eq!(queued, 1, "断ったときは何も取り消さない");
+    drop(g);
+    let (s, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{v}");
+    assert_eq!(app.device_count(), 0);
+}
+
+#[tokio::test]
 async fn delete_works_when_adb_is_disabled() {
     let app = App::new_without_adb().await;
     let id = app.insert_adb_device_with_open_plan().await;

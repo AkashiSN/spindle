@@ -200,6 +200,12 @@ async fn prepare(
     }
     // API の破棄などと直列化する。ジョブの終わりまで持つ
     let guard = env.rt.device_lock(device_id).lock_owned().await;
+    // ロックを待つ間に端末が削除された（削除の API はロックを持って行を消す）。端末に触らない
+    match env.db.read(move |c| dbdev::get(c, device_id)).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(Ok(Outcome::DoneWith("端末が削除された".into()))),
+        Err(e) => return Err(Err(e.into())),
+    }
     let fs = match env.rt.fs_for(&serial, &volume, &root) {
         Ok(fs) => fs,
         Err(RemoteError::NotConnected) => return Err(disconnected(kind)),

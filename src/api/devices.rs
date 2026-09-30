@@ -345,12 +345,22 @@ enum Deleted {
 }
 
 /// 端末を削除する（D-98）。途中の計画があっても消せる（計画は行と一緒に ON DELETE CASCADE で消える）。
-/// 端末に戻れない（壊れた・手放した）ときの逃げ道。実行中の同期があるときだけ 409 `busy`。
-/// 端末上のファイルには触らない。待ちの同期・検証・差分の計算は取り消す
+/// 端末に戻れない（壊れた・手放した）ときの逃げ道。端末のジョブ（同期・走査・検証）が実行中か、
+/// 端末のロックを別の処理（ジョブ・破棄）が持っていれば 409 `busy`。それらは端末上のジャーナルを
+/// 回復して行を書き戻すので、消した後に端末へ触り続けさせない。待ちのジョブは断らずに取り消す
+/// （未接続の端末を待つジョブを残さない）。端末上のファイルには触らない
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, ApiError> {
+    // 行を消して待ちのジョブを取り消すまで持つ（ADB 同期が無効なら端末のジョブは動かない）
+    let _guard = match state.adb.as_ref() {
+        Some(rt) => match rt.device_lock(id).try_lock_owned() {
+            Ok(g) => Some(g),
+            Err(_) => return Ok(busy()),
+        },
+        None => None,
+    };
     let res = state
         .db
         .write(move |c| {
@@ -358,8 +368,10 @@ pub async fn delete(
             if dbdev::get(&tx, id)?.is_none() {
                 return Ok(Deleted::NotFound);
             }
-            if dbdev::has_running_device_job(&tx, id, "device_sync")? {
-                return Ok(Deleted::Busy);
+            for t in DEVICE_JOB_TYPES {
+                if dbdev::has_running_device_job(&tx, id, t)? {
+                    return Ok(Deleted::Busy);
+                }
             }
             let queued = dbdev::queued_device_jobs(&tx, id, DEVICE_JOB_TYPES)?;
             dbdev::delete(&tx, id)?;
