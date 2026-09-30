@@ -269,16 +269,22 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
         x.put_track(op).await?;
         x.tick().await?;
     }
-    // プレイリスト: 旧パスの削除（削除と、パスの変わる更新）を全部先に、それから書き込み
+    // プレイリスト: 書き込みが成り立たないものを破壊の前に保留にし（旧パスも残す）、
+    // 旧パスの削除（削除と、パスの変わる更新）を全部先に、それから書き込み
+    let held = hold_playlists(&r.playlists, input.playlist_bodies, &x.unmanaged, &x.book);
     for p in &r.playlists {
-        let renamed = p.op == PlaylistOpKind::Update && p.from.is_some() && p.from != p.to;
-        if p.op == PlaylistOpKind::Delete || renamed {
+        if p.op == PlaylistOpKind::Delete || (renamed(p) && !held.contains_key(&p.playlist_id)) {
             x.guard().await?;
             x.remove_playlist(p).await?;
         }
     }
     for p in &r.playlists {
-        if p.op != PlaylistOpKind::Delete {
+        if let Some(reason) = held.get(&p.playlist_id) {
+            if let Some(reason) = reason {
+                x.errors
+                    .push((EntryKind::Playlist, p.playlist_id, reason.clone()));
+            }
+        } else if p.op != PlaylistOpKind::Delete {
             x.guard().await?;
             x.put_playlist(p, input.playlist_bodies).await?;
         }
@@ -670,6 +676,70 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             }
         }
         Ok(())
+    }
+}
+
+/// パスの変わるプレイリストの更新か
+fn renamed(p: &PlanPlaylist) -> bool {
+    p.op == PlaylistOpKind::Update && p.from.is_some() && p.from != p.to
+}
+
+/// 書き込み（追加・更新）が成り立たないプレイリストを、旧パスを消す前に決める。
+/// 値は項目のエラーの理由（`None` は計画の形が欠けていて黙って飛ばすもの）。
+/// 成り立たないのは: 中身が無い・行き先が管理外のファイル・行き先を今回空かない別の管理下の項目が占める。
+/// 空くのは、今回実行する削除と（保留にならない）改名の旧パスだけ。ある改名が保留になるとその旧パスは
+/// 空かなくなり、そこへ来る改名も保留になるので、不動点まで繰り返す（入れ替え・循環は全員が空けるので通る）
+fn hold_playlists(
+    ops: &[PlanPlaylist],
+    bodies: &HashMap<i64, Vec<u8>>,
+    unmanaged: &HashSet<String>,
+    book: &Book,
+) -> HashMap<i64, Option<String>> {
+    let mut held: HashMap<i64, Option<String>> = HashMap::new();
+    for p in ops.iter().filter(|p| p.op != PlaylistOpKind::Delete) {
+        let (Some(to), Some(_)) = (p.to.as_deref(), p.token.as_deref()) else {
+            held.insert(p.playlist_id, None);
+            continue;
+        };
+        if !bodies.contains_key(&p.playlist_id) {
+            held.insert(p.playlist_id, Some("プレイリストの中身が無い".to_owned()));
+        } else if unmanaged.contains(&canonical_key(to)) {
+            held.insert(p.playlist_id, Some(UNMANAGED_COLLISION.to_owned()));
+        }
+    }
+    loop {
+        // 今回空くパス（削除と、保留でない改名の旧パス）
+        let vacated: HashSet<String> = ops
+            .iter()
+            .filter(|p| {
+                p.op == PlaylistOpKind::Delete || (renamed(p) && !held.contains_key(&p.playlist_id))
+            })
+            .filter_map(|p| p.from.as_deref().map(canonical_key))
+            .collect();
+        let newly: Vec<i64> = ops
+            .iter()
+            .filter(|p| p.op != PlaylistOpKind::Delete && !held.contains_key(&p.playlist_id))
+            .filter(|p| {
+                let Some(to) = p.to.as_deref() else {
+                    return false;
+                };
+                let key = canonical_key(to);
+                let track = book.items.values().any(|i| canonical_key(&i.path) == key);
+                let playlist = book.playlists.values().any(|q| {
+                    q.playlist_id != p.playlist_id
+                        && canonical_key(&q.path) == key
+                        && !vacated.contains(&key)
+                });
+                track || playlist
+            })
+            .map(|p| p.playlist_id)
+            .collect();
+        if newly.is_empty() {
+            return held;
+        }
+        for id in newly {
+            held.insert(id, Some(PATH_OCCUPIED.to_owned()));
+        }
     }
 }
 

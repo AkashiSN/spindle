@@ -496,6 +496,179 @@ fn unmanaged_file_at_destination_is_not_overwritten() {
     });
 }
 
+fn playlist_paths(m: &DeviceManifest) -> Vec<(i64, String)> {
+    let mut v: Vec<(i64, String)> = m
+        .playlists
+        .iter()
+        .map(|p| (p.playlist_id, p.path.clone()))
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn rename_onto_unmanaged_file_keeps_the_old_copy() {
+    block_on(async {
+        let fs = device_at(&[], 1 << 30).await;
+        sync_full(
+            &fs,
+            &[],
+            &[pl(5, "old", b"OLD")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        fs.set("Playlists/new.m3u8", b"user's list");
+        let report = sync_full(
+            &fs,
+            &[],
+            &[pl(5, "new", b"NEW")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.get("Playlists/old.m3u8"), Some(b"OLD".to_vec()));
+        assert_eq!(fs.get("Playlists/new.m3u8"), Some(b"user's list".to_vec()));
+        assert_eq!(
+            report.errors,
+            vec![(EntryKind::Playlist, 5, UNMANAGED_COLLISION.to_owned())]
+        );
+        assert_eq!(
+            playlist_paths(&parse_manifest(&fs)),
+            vec![(5, "Playlists/old.m3u8".to_owned())]
+        );
+    });
+}
+
+#[test]
+fn rename_onto_a_playlist_that_stays_keeps_the_old_copy() {
+    block_on(async {
+        let fs = device_at(&[], 1 << 30).await;
+        sync_full(
+            &fs,
+            &[],
+            &[pl(5, "a", b"P5"), pl(6, "b", b"P6")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        // 6 は b → c だが c が手置きなので保留になり、b に居続ける。b へ来る 5 も保留になる
+        fs.set("Playlists/c.m3u8", b"user's list");
+        let report = sync_full(
+            &fs,
+            &[],
+            &[pl(5, "b", b"P5"), pl(6, "c", b"P6")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.get("Playlists/a.m3u8"), Some(b"P5".to_vec()));
+        assert_eq!(fs.get("Playlists/b.m3u8"), Some(b"P6".to_vec()));
+        assert_eq!(fs.get("Playlists/c.m3u8"), Some(b"user's list".to_vec()));
+        let mut errors = report.errors.clone();
+        errors.sort();
+        assert_eq!(
+            errors,
+            vec![
+                (EntryKind::Playlist, 5, PATH_OCCUPIED.to_owned()),
+                (EntryKind::Playlist, 6, UNMANAGED_COLLISION.to_owned()),
+            ]
+        );
+        assert_eq!(
+            playlist_paths(&parse_manifest(&fs)),
+            vec![
+                (5, "Playlists/a.m3u8".to_owned()),
+                (6, "Playlists/b.m3u8".to_owned())
+            ]
+        );
+    });
+}
+
+#[test]
+fn playlists_can_swap_names() {
+    block_on(async {
+        let fs = device_at(&[], 1 << 30).await;
+        sync_full(
+            &fs,
+            &[],
+            &[pl(1, "x", b"P1"), pl(2, "y", b"P2")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        let report = sync_full(
+            &fs,
+            &[],
+            &[pl(1, "y", b"P1"), pl(2, "x", b"P2")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(fs.get("Playlists/y.m3u8"), Some(b"P1".to_vec()));
+        assert_eq!(fs.get("Playlists/x.m3u8"), Some(b"P2".to_vec()));
+        assert_eq!(
+            playlist_paths(&parse_manifest(&fs)),
+            vec![
+                (1, "Playlists/y.m3u8".to_owned()),
+                (2, "Playlists/x.m3u8".to_owned())
+            ]
+        );
+    });
+}
+
+#[test]
+fn rename_without_body_keeps_the_old_copy() {
+    block_on(async {
+        let fs = device_at(&[], 1 << 30).await;
+        sync_full(
+            &fs,
+            &[],
+            &[pl(5, "old", b"OLD")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        let rec = recover(&fs, &expect()).await.unwrap();
+        let d = diff(
+            &desired(&[]),
+            &rec.items,
+            &[pl(5, "new", b"NEW")],
+            &rec.playlists,
+            Vec::new(),
+        );
+        let plan = StoredPlan::from_diff(1, "tok", &d).unwrap();
+        let r = runnable(&plan, &rec.items, &rec.playlists, &d);
+        let report = sync::run(
+            &fs,
+            &sources(&[]),
+            &TestControl::default(),
+            SyncInput {
+                generation: 1,
+                start: rec.manifest,
+                runnable: &r,
+                playlist_bodies: &HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.get("Playlists/old.m3u8"), Some(b"OLD".to_vec()));
+        assert_eq!(fs.get("Playlists/new.m3u8"), None);
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(
+            playlist_paths(&parse_manifest(&fs)),
+            vec![(5, "Playlists/old.m3u8".to_owned())]
+        );
+    });
+}
+
 fn is_compaction_write(c: &str) -> bool {
     c == "write .spindle/manifest.json.spindle-tmp"
 }
