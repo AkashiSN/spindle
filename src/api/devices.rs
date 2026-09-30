@@ -469,6 +469,13 @@ pub async fn enqueue_hashes(state: &AppState, snap: &Snapshot) -> Result<(), Api
     Ok(())
 }
 
+/// スマートプレイリストの再評価を待つ端末か。選曲がプレイリストで、スマートプレイリストが 1 つでも
+/// 載っている端末だけ（全曲・手動だけの端末は評価で中身が変わらない）。Derived の変換が終わるたびに
+/// 再評価の印が立つので、全端末で待たせると変換中はずっと同期できない（実機での確認、D-98）
+fn waits_for_reevaluation(selection: Selection, smart: &[(i64, String, Option<i64>)]) -> bool {
+    selection == Selection::Playlists && !smart.is_empty()
+}
+
 #[derive(Serialize)]
 pub struct DiffView {
     pub generation: i64,
@@ -626,7 +633,7 @@ pub async fn diff(
             reason: Some((*reason).to_owned()),
         });
     }
-    let pending = state.reeval_pending();
+    let pending = state.reeval_pending() && waits_for_reevaluation(d.device.selection, &evals);
     let e = crate::domain::device::estimate(diff, &d.current);
     let view = DiffView {
         generation: d.computed.generation,
@@ -1050,10 +1057,17 @@ pub async fn sync(
     Path(id): Path<i64>,
     Json(body): Json<SyncBody>,
 ) -> Result<Response, ApiError> {
-    if let Err(r) = adb_device(&state, id).await? {
-        return Ok(r);
-    }
-    if state.reeval_pending() {
+    let d = match adb_device(&state, id).await? {
+        Ok((d, _)) => d,
+        Err(r) => return Ok(r),
+    };
+    if state.reeval_pending() && {
+        let evals = state
+            .db
+            .read(move |c| dbdev::smart_evaluations(c, id))
+            .await?;
+        waits_for_reevaluation(d.selection, &evals)
+    } {
         return Ok(conflict(
             "pending_reevaluation",
             "スマートプレイリストの再評価が終わるまで待ってください",

@@ -22,6 +22,7 @@ use spindle::db::{now_epoch, Db};
 use spindle::device::adb::AdbConfig;
 use spindle::device::runtime::AdbRuntime;
 use spindle::device::track::TrackedDevice;
+use spindle::playlist::autoexport::ReevalFlag;
 use tokio_util::sync::CancellationToken;
 
 const EXAMPLE: &str = include_str!("../deploy/config.example.toml");
@@ -68,6 +69,8 @@ struct App {
     cookie: String,
     storage: PathBuf,
     shutdown: CancellationToken,
+    /// スマートプレイリストの再評価待ちの印（既定は済み）
+    reeval: Arc<ReevalFlag>,
     _dir: tempfile::TempDir,
 }
 
@@ -110,7 +113,9 @@ impl App {
             shutdown.clone(),
             storage.to_str().unwrap().to_owned(),
         );
-        let mut state = AppState::new(config, db.clone(), mode);
+        let reeval = Arc::new(ReevalFlag::new_dirty());
+        reeval.clear();
+        let mut state = AppState::new(config, db.clone(), mode).with_reeval(reeval.clone());
         if adb {
             state = state.with_adb(rt.clone());
         }
@@ -139,6 +144,7 @@ impl App {
             cookie,
             storage,
             shutdown,
+            reeval,
             _dir: dir,
         }
     }
@@ -1014,4 +1020,146 @@ async fn force_abandon_works_when_adb_is_disabled() {
     let (s, v) = force_abandon(&app, id).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(app.plan_state(id).as_deref(), Some("abandoned"));
+}
+
+/// 選曲に載せるプレイリストを直接作る（`rule` があればスマート）
+async fn insert_playlist(app: &App, id: i64, name: &str, rule: Option<&str>) {
+    let (name, rule) = (name.to_owned(), rule.map(str::to_owned));
+    app.db
+        .write(move |c| {
+            let (kind, ast) = match &rule {
+                Some(src) => {
+                    let r = spindle::playlist::dsl::parse(src).unwrap();
+                    ("smart", Some(serde_json::to_string(&r).unwrap()))
+                }
+                None => ("manual", None),
+            };
+            c.execute(
+                "INSERT INTO playlists (id, name, name_key, kind, rule_source, rule_ast, created_at, updated_at)
+                 VALUES (?1, ?2, lower(?2), ?3, ?4, ?5, 0, 0)",
+                rusqlite::params![id, name, kind, rule, ast],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// 端末の選曲をプレイリストにして、`ids` を載せる
+async fn select_playlists(app: &App, id: i64, ids: &[i64]) {
+    let (s, v) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/devices/{id}"),
+            Some(json!({"selection": "playlists"})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = app
+        .call(
+            Method::PUT,
+            &format!("/api/devices/{id}/playlists"),
+            Some(json!({"playlist_ids": ids})),
+        )
+        .await;
+    assert!(s.is_success(), "{s} {v}");
+}
+
+/// 再評価待ちの間に差分を見て同期を投げる。返すのは (差分の pending_reevaluation, 評価の pending, 同期の応答)
+async fn sync_while_reevaluating(app: &App, id: i64) -> (bool, Vec<bool>, StatusCode, Value) {
+    app.reeval.mark();
+    let (s, diff) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{diff}");
+    let pending = diff["pending_reevaluation"].as_bool().unwrap();
+    let evals = diff["evaluations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["pending"].as_bool().unwrap())
+        .collect();
+    let token = diff["plan_token"].as_str().unwrap().to_owned();
+    let (s, v) = app
+        .call(
+            Method::POST,
+            &format!("/api/devices/{id}/sync"),
+            Some(json!({"plan_token": token})),
+        )
+        .await;
+    (pending, evals, s, v)
+}
+
+#[tokio::test]
+async fn reevaluation_does_not_block_a_device_that_selects_all() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    let (pending, evals, s, v) = sync_while_reevaluating(&app, id).await;
+    assert!(!pending);
+    assert!(evals.is_empty());
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+}
+
+#[tokio::test]
+async fn reevaluation_blocks_a_device_with_a_smart_playlist() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    insert_playlist(&app, 5, "通勤", None).await;
+    insert_playlist(&app, 6, "新しめ", Some("%title% IS a")).await;
+    select_playlists(&app, id, &[5, 6]).await;
+    let (pending, evals, s, v) = sync_while_reevaluating(&app, id).await;
+    assert!(pending);
+    assert_eq!(evals, vec![true]);
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("pending_reevaluation"))
+    );
+    // 再評価が終われば通る
+    app.reeval.clear();
+    let token = app.diff_token(id).await;
+    let (s, v) = app
+        .call(
+            Method::POST,
+            &format!("/api/devices/{id}/sync"),
+            Some(json!({"plan_token": token})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+}
+
+#[tokio::test]
+async fn reevaluation_does_not_block_a_device_with_only_manual_playlists() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    insert_playlist(&app, 5, "通勤", None).await;
+    select_playlists(&app, id, &[5]).await;
+    let (pending, evals, s, v) = sync_while_reevaluating(&app, id).await;
+    assert!(!pending);
+    assert!(evals.is_empty());
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+}
+
+#[tokio::test]
+async fn reevaluation_does_not_block_all_even_if_smart_playlists_stay_listed() {
+    // 選曲を「全曲」に戻してもプレイリストの一覧は残る。全曲なら評価に左右されない
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    insert_playlist(&app, 6, "新しめ", Some("%title% IS a")).await;
+    select_playlists(&app, id, &[6]).await;
+    let (s, v) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/devices/{id}"),
+            Some(json!({"selection": "all"})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (pending, evals, s, v) = sync_while_reevaluating(&app, id).await;
+    assert!(!pending);
+    assert!(evals.iter().all(|p| !p), "{evals:?}");
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
 }
