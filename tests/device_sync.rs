@@ -8,8 +8,8 @@ use std::sync::Arc;
 use device_support::*;
 use spindle::device::journal::{parse, Record};
 use spindle::device::ondevice::*;
-use spindle::device::plan::{runnable, StoredPlan};
-use spindle::device::recover::recover;
+use spindle::device::plan::{runnable, Runnable, StoredPlan};
+use spindle::device::recover::{recover, STALE_TOKEN};
 use spindle::device::sync::{self, *};
 use spindle::domain::device::*;
 use spindle::domain::relpath::RelPath;
@@ -1059,5 +1059,133 @@ fn add_onto_a_move_source_dropped_on_resume_is_held() {
             vec![(EntryKind::Track, 2, PATH_OCCUPIED.to_owned())]
         );
         assert_held_then_converges(&fs, want).await;
+    });
+}
+
+#[test]
+fn stale_token_from_recovery_survives_a_sync_that_does_not_touch_it() {
+    block_on(async {
+        let fs = device_at(&[(1, "a.opus", b"A"), (2, "b.opus", b"B")], 1 << 30).await;
+        sync_full(
+            &fs,
+            &[(1, "a.opus", b"A"), (2, "b.opus", b"B")],
+            &[pl(5, "朝", b"#EXTM3U\n")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        fs.remove_for_test("a.opus");
+        fs.remove_for_test("Playlists/朝.m3u8");
+        let rec = recover(&fs, &expect()).await.unwrap();
+        // 曲 1 もプレイリストも今回の計画に入らない（hold）
+        let report = sync::run(
+            &fs,
+            &MemSources::default(),
+            &TestControl::default(),
+            SyncInput {
+                generation: 1,
+                start: rec.manifest,
+                runnable: &Runnable::default(),
+                playlist_bodies: &HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let token = |items: &[DeviceItem], id: i64| {
+            items
+                .iter()
+                .find(|i| i.track_id == id)
+                .map(|i| i.token.clone())
+        };
+        assert_eq!(token(&report.items(), 1).as_deref(), Some(STALE_TOKEN));
+        assert_ne!(token(&report.items(), 2).as_deref(), Some(STALE_TOKEN));
+        assert_eq!(report.playlists()[0].token, STALE_TOKEN);
+        let again = recover(&fs, &expect()).await.unwrap();
+        assert_eq!(token(&again.items, 1).as_deref(), Some(STALE_TOKEN));
+        assert_eq!(again.manifest.items[0].token, STALE_TOKEN);
+        assert_eq!(again.playlists[0].token, STALE_TOKEN);
+        assert_eq!(again.manifest.playlists[0].token, STALE_TOKEN);
+    });
+}
+
+#[test]
+fn sync_error_tells_a_disconnect() {
+    use spindle::device::remote::RemoteError;
+    use spindle::device::store::StoreError;
+    assert!(SyncError::from(RemoteError::NotConnected).is_not_connected());
+    assert!(!SyncError::from(RemoteError::Failed("x".into())).is_not_connected());
+    assert!(!SyncError::Cancelled.is_not_connected());
+    assert!(!SyncError::Store(StoreError::Manifest(ManifestError::TooMany(1))).is_not_connected());
+}
+
+/// `crash_sweep` の追記の部分書き版: 各切断点で、切断する操作が追記なら先頭だけ書いて切る。
+/// 回復の後の同期し直しも各点で切り、回復 → 同期し直しで目標になること
+async fn torn_append_sweep(initial: &[Want<'_>], target: &[Want<'_>]) {
+    let base = device_at(initial, 1 << 30).await;
+    base.set("手で置いた.mp3", b"keep");
+    let clean = base.snapshot();
+    sync_to(&clean, target, &TestControl::default())
+        .await
+        .unwrap();
+    let total = clean.mutations();
+    for k in 0..total {
+        let fs = base.snapshot();
+        fs.fail_append_partially_after(k, 7);
+        assert!(
+            sync_to(&fs, target, &TestControl::default()).await.is_err(),
+            "k={k}"
+        );
+        fs.reconnect();
+        let probe = fs.snapshot();
+        sync_to(&probe, target, &TestControl::default())
+            .await
+            .unwrap_or_else(|e| panic!("k={k}: {e}"));
+        check_target(&probe, target);
+        for j in 0..probe.mutations() {
+            let inner = fs.snapshot();
+            inner.fail_after(j);
+            let _ = sync_to(&inner, target, &TestControl::default()).await;
+            inner.reconnect();
+            check_recovered(&inner, initial, target, k * 1000 + j).await;
+            sync_to(&inner, target, &TestControl::default())
+                .await
+                .unwrap_or_else(|e| panic!("k={k} j={j}: {e}"));
+            check_target(&inner, target);
+        }
+    }
+}
+
+#[test]
+fn torn_appends_survive_every_crash_point() {
+    block_on(async {
+        let initial: &[Want] = &[
+            (1, "a.opus", b"A1"),
+            (2, "b.opus", b"B1"),
+            (3, "c.opus", b"C1"),
+        ];
+        let target: &[Want] = &[
+            (1, "a.opus", b"A2"),
+            (3, "c.opus", b"C1"),
+            (4, "Dir/d.opus", b"D1"),
+        ];
+        torn_append_sweep(initial, target).await;
+    });
+}
+
+#[test]
+fn torn_appends_in_a_swap_survive_every_crash_point() {
+    block_on(async {
+        let initial: &[Want] = &[
+            (1, "x.opus", b"X"),
+            (2, "y.opus", b"Y"),
+            (3, "p.opus", b"P"),
+        ];
+        let target: &[Want] = &[
+            (1, "y.opus", b"X"),
+            (2, "x.opus", b"Y2"),
+            (4, "n.opus", b"N"),
+        ];
+        torn_append_sweep(initial, target).await;
     });
 }

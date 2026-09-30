@@ -105,3 +105,23 @@ fn verify_can_be_cancelled() {
         assert!(verify(&fs, &c, rec.manifest).await.is_err());
     });
 }
+
+#[test]
+fn verify_refuses_an_unrecovered_journal() {
+    block_on(async {
+        let fs = device_at(&[(1, "a.opus", b"AAAA")], 1 << 30).await;
+        let rec = recover(&fs, &expect()).await.unwrap();
+        fs.set(
+            spindle::device::ondevice::JOURNAL_PATH,
+            b"{\"t\":\"done\",\"op_id\":\"x\"}\n",
+        );
+        assert!(verify(&fs, &TestControl::default(), rec.manifest)
+            .await
+            .is_err());
+        // 未完了の意図を圧縮で捨てない
+        assert!(!fs
+            .get(spindle::device::ondevice::JOURNAL_PATH)
+            .unwrap()
+            .is_empty());
+    });
+}

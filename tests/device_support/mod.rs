@@ -21,6 +21,8 @@ struct Inner {
     case_insensitive: bool,
     capacity: u64,
     fail_after: Option<usize>,
+    /// 切断する操作が `append` なら、先頭のこのバイト数だけ書いてから切断する
+    partial_append: Option<usize>,
     mutations: usize,
     disconnected: bool,
     rescans: usize,
@@ -106,6 +108,7 @@ impl FakeFs {
     pub fn snapshot(&self) -> FakeFs {
         let mut g = self.0.lock().unwrap().clone();
         g.fail_after = None;
+        g.partial_append = None;
         g.mutations = 0;
         g.disconnected = false;
         g.calls.clear();
@@ -141,10 +144,20 @@ impl FakeFs {
         g.mutations = 0;
     }
 
+    /// `fail_after(n)` と同じだが、切断する操作が `append` なら先頭 `keep_bytes` だけ書いてから切断する
+    /// （追記の途中で切れて、改行で終わらない断片が残る）
+    pub fn fail_append_partially_after(&self, n: usize, keep_bytes: usize) {
+        let mut g = self.0.lock().unwrap();
+        g.fail_after = Some(n);
+        g.partial_append = Some(keep_bytes);
+        g.mutations = 0;
+    }
+
     pub fn reconnect(&self) {
         let mut g = self.0.lock().unwrap();
         g.disconnected = false;
         g.fail_after = None;
+        g.partial_append = None;
     }
 
     pub fn mutations(&self) -> usize {
@@ -210,6 +223,19 @@ impl DeviceFs for FakeFs {
     }
 
     async fn append(&self, path: &str, bytes: &[u8]) -> RemoteResult<()> {
+        {
+            let mut g = self.0.lock().unwrap();
+            if !g.disconnected && g.fail_after.is_some_and(|n| g.mutations >= n) {
+                if let Some(keep) = g.partial_append {
+                    let k = g.key(path);
+                    let mut cur = g.files.get(&k).map(|(_, b)| b.clone()).unwrap_or_default();
+                    cur.extend_from_slice(&bytes[..keep.min(bytes.len())]);
+                    g.store(path, cur);
+                    g.disconnected = true;
+                    return Err(RemoteError::NotConnected);
+                }
+            }
+        }
         self.mutate(&format!("append {path}"), |g| {
             if g.used() + bytes.len() as u64 > g.capacity {
                 return Err(RemoteError::NoSpace);

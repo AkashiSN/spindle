@@ -64,10 +64,31 @@ pub async fn read_manifest<F: DeviceFs>(fs: &F) -> Result<Option<DeviceManifest>
 }
 
 pub async fn read_journal<F: DeviceFs>(fs: &F) -> Result<Vec<Record>, StoreError> {
+    Ok(read_journal_with_len(fs).await?.0)
+}
+
+/// ジャーナルのレコードと生のバイト長。切れた断片だけのとき（レコード 0 件）も長さは 0 にならない
+pub async fn read_journal_with_len<F: DeviceFs>(
+    fs: &F,
+) -> Result<(Vec<Record>, usize), StoreError> {
     match fs.read(JOURNAL_PATH).await? {
-        Some(bytes) => Ok(journal::parse(&bytes)?),
-        None => Ok(Vec::new()),
+        Some(bytes) => Ok((journal::parse(&bytes)?, bytes.len())),
+        None => Ok((Vec::new(), 0)),
     }
+}
+
+/// 末尾の切れた行（`parse` が捨てた断片）を落としたジャーナルに置き換える（tmp + `mv -f` で差し替える）。
+/// 断片を残したまま追記すると、新しいレコードが断片と 1 行に連結されて読めなくなる。
+/// 読めたレコードを書き直したものが今のバイト列と同じなら何もしない
+pub async fn drop_torn_tail<F: DeviceFs>(fs: &F, records: &[Record]) -> Result<(), StoreError> {
+    let Some(bytes) = fs.read(JOURNAL_PATH).await? else {
+        return Ok(());
+    };
+    let clean = journal::encode_all(records)?;
+    if bytes != clean {
+        write_file_durable(fs, JOURNAL_PATH, &clean).await?;
+    }
+    Ok(())
 }
 
 pub async fn write_manifest<F: DeviceFs>(fs: &F, m: &DeviceManifest) -> Result<(), StoreError> {

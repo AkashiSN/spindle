@@ -582,3 +582,40 @@ fn playlist_put_without_done_is_taken_when_sha_matches() {
         assert_eq!(r.playlists[0].token, it.token);
     });
 }
+
+#[test]
+fn a_journal_with_only_a_torn_line_is_emptied() {
+    block_on(async {
+        let fs = device_with(&[(1, "a.opus", b"A")]).await;
+        // 圧縮直後の最初の追記が途中で切れた（読めるレコードは 0 件）
+        fs.set(JOURNAL_PATH, br#"{"t":"intent","op_id":"#);
+        recover(&fs, &expect()).await.unwrap();
+        assert_eq!(fs.get(JOURNAL_PATH), Some(Vec::new()));
+        // 次の追記が断片と連結されない
+        append_durable(&fs, &[Record::Intent(rm_intent("r1", 1, "a.opus"))])
+            .await
+            .unwrap();
+        assert_eq!(read_journal(&fs).await.unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn stale_tokens_are_kept_in_the_manifest() {
+    block_on(async {
+        let fs = device_with(&[(1, "a.opus", b"A"), (2, "b.opus", b"B")]).await;
+        fs.remove_for_test("a.opus");
+        let r = recover(&fs, &expect()).await.unwrap();
+        // 結果の manifest・items・端末上の manifest が一致する（ジャーナルが空でも書き直す）
+        assert_eq!(r.manifest.items[0].token, STALE_TOKEN);
+        assert_ne!(r.manifest.items[1].token, STALE_TOKEN);
+        assert_eq!(read_manifest(&fs).await.unwrap().unwrap(), r.manifest);
+        assert_eq!(
+            r.items.iter().map(|i| i.token.clone()).collect::<Vec<_>>(),
+            r.manifest
+                .items
+                .iter()
+                .map(|i| i.token.clone())
+                .collect::<Vec<_>>()
+        );
+    });
+}

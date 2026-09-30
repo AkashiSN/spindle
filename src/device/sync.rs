@@ -134,8 +134,20 @@ pub enum SyncError {
     Cancelled,
     #[error("端末の設定が変わったので中断した")]
     GenerationChanged,
+    #[error("端末のジャーナルが回復されていない（先に回復すること）")]
+    NotRecovered,
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+impl SyncError {
+    /// 端末が切れたための失敗か（ジョブを待ちへ戻して、繋がり直したら再開する判定に使う）
+    pub fn is_not_connected(&self) -> bool {
+        matches!(
+            self,
+            SyncError::Store(StoreError::Remote(RemoteError::NotConnected))
+        )
+    }
 }
 
 impl From<RemoteError> for SyncError {

@@ -13,7 +13,9 @@ use crate::device::ondevice::{
     is_reserved, Book, DeviceManifest, ManifestItem, ManifestPlaylist, MOVING_DIR, TMP_SUFFIX,
 };
 use crate::device::remote::{DeviceFs, RemoteError, RemoteFile};
-use crate::device::store::{append_durable, compact, read_journal, read_manifest, StoreError};
+use crate::device::store::{
+    append_durable, compact, drop_torn_tail, read_journal_with_len, read_manifest, StoreError,
+};
 use crate::domain::device::{DeviceItem, EntryKind, PlaylistState};
 use crate::domain::relpath::canonical_key;
 
@@ -65,7 +67,11 @@ pub async fn recover<F: DeviceFs>(fs: &F, expect: &Expect) -> Result<Recovered, 
     if manifest.volume != expect.volume {
         return Err(RecoverError::VolumeMismatch);
     }
-    let records = read_journal(fs).await?;
+    let (records, journal_len) = read_journal_with_len(fs).await?;
+    if journal_len > 0 {
+        // バッチの終端などを追記する前に、前回の追記が途中で切れた断片を落とす
+        drop_torn_tail(fs, &records).await?;
+    }
     let mut book = Book::from(manifest);
     for step in journal::replay(&records) {
         match step {
@@ -90,45 +96,34 @@ pub async fn recover<F: DeviceFs>(fs: &F, expect: &Expect) -> Result<Recovered, 
             unmanaged += 1;
         }
     }
-    let manifest = book.manifest();
-    if !records.is_empty() {
-        compact(fs, &manifest).await?;
-    }
-
+    // 実ファイルが無い・サイズが違う項目は、manifest のトークンも空にする（結果の manifest・items と、
+    // それを起点にする同期の結果を一致させる。manifest から外すと管理外になり上書きできない）
     let sizes: HashMap<String, u64> = fs
         .list_files()
         .await?
         .into_iter()
         .map(|f| (canonical_key(&f.path), f.size))
         .collect();
-    let items = book
-        .items
-        .values()
-        .map(|i| DeviceItem {
-            track_id: i.track_id,
-            dest_path: i.path.clone(),
-            token: if sizes.get(&canonical_key(&i.path)) == Some(&i.size) {
-                i.token.clone()
-            } else {
-                STALE_TOKEN.to_owned()
-            },
-            size: i.size,
-            sha256: i.sha256.clone(),
-        })
-        .collect();
-    let playlists = book
-        .playlists
-        .values()
-        .map(|p| PlaylistState {
-            playlist_id: p.playlist_id,
-            dest_path: p.path.clone(),
-            token: if sizes.contains_key(&canonical_key(&p.path)) {
-                p.token.clone()
-            } else {
-                STALE_TOKEN.to_owned()
-            },
-        })
-        .collect();
+    let mut staled = false;
+    for i in book.items.values_mut() {
+        if sizes.get(&canonical_key(&i.path)) != Some(&i.size) && i.token != STALE_TOKEN {
+            i.token = STALE_TOKEN.to_owned();
+            staled = true;
+        }
+    }
+    for p in book.playlists.values_mut() {
+        if !sizes.contains_key(&canonical_key(&p.path)) && p.token != STALE_TOKEN {
+            p.token = STALE_TOKEN.to_owned();
+            staled = true;
+        }
+    }
+    let manifest = book.manifest();
+    // 読めるレコードが 0 件でも、切れた断片が残っていれば空にする（次の追記と連結させない）
+    if journal_len > 0 || staled {
+        compact(fs, &manifest).await?;
+    }
+    let items = book.device_items();
+    let playlists = book.playlist_states();
     Ok(Recovered {
         manifest,
         items,

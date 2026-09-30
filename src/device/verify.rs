@@ -7,7 +7,7 @@
 use crate::device::ondevice::{Book, DeviceManifest};
 use crate::device::recover::STALE_TOKEN;
 use crate::device::remote::DeviceFs;
-use crate::device::store::compact;
+use crate::device::store::{compact, read_journal_with_len};
 use crate::device::sync::{Control, SyncError};
 use crate::domain::device::{DeviceItem, PlaylistState};
 
@@ -28,11 +28,16 @@ impl VerifyReport {
     }
 }
 
+/// `start` には回復済み（ジャーナルが空）の正本を渡すこと。呼ばれた時点でジャーナルが空でなければ
+/// [`SyncError::NotRecovered`] を返す（書き直しの圧縮で未完了の意図を捨てないため）
 pub async fn verify<F: DeviceFs, C: Control>(
     fs: &F,
     control: &C,
     start: DeviceManifest,
 ) -> Result<VerifyReport, SyncError> {
+    if read_journal_with_len(fs).await?.1 > 0 {
+        return Err(SyncError::NotRecovered);
+    }
     let mut book = Book::from(start);
     let total = book.items.len() as u64;
     let mut mismatched = Vec::new();
