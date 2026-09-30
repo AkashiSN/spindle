@@ -19,16 +19,13 @@ pub struct TrackedDevice {
 pub fn parse_frame(body: &str) -> Vec<TrackedDevice> {
     body.lines()
         .filter_map(|line| {
-            // 短い形式はタブ区切り（シリアルに空白が混ざる行を「不正」として捨てるため、空白では割らない）
-            let mut it = line.split_whitespace();
-            let serial = if line.contains('\t') {
-                line.split('\t').next()?.trim()
+            // 短い形式はタブ区切り。シリアルに空白が混ざる行は「不正」として捨てたいので空白では割らない
+            let (serial, mut it) = if let Some((serial, rest)) = line.split_once('\t') {
+                (serial.trim(), rest.split_whitespace())
             } else {
-                it.next()?
+                let mut it = line.split_whitespace();
+                (it.next()?, it)
             };
-            if line.contains('\t') {
-                it = line.split_once('\t')?.1.split_whitespace();
-            }
             let state = it.next()?;
             if !valid_serial(serial) {
                 return None;

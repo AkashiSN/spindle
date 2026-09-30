@@ -17,7 +17,7 @@ fn fake_adb(dir: &Path) -> PathBuf {
          [ -d \"$HOME\" ] || exit 134\n\
          if [ \"$1\" = track-devices ] && [ \"$2\" = -l ]; then\n\
            echo run >> \"$HOME/runs\"\n cat \"$HOME/frames\"\n\
-           if [ -f \"$HOME/hold\" ]; then sleep 30; fi\n exit 0\nfi\nexit 2\n",
+           if [ -f \"$HOME/hold\" ]; then sleep 30 & echo $! > \"$HOME/sleep.pid\"; wait; fi\n exit 0\nfi\nexit 2\n",
     )
     .unwrap();
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -146,4 +146,22 @@ async fn watcher_stops_a_long_running_track_devices_on_shutdown() {
         .await
         .unwrap()
         .unwrap();
+    // sleep の孫までプロセスグループごと kill されている
+    let pid = std::fs::read_to_string(dir.path().join("home/sleep.pid")).unwrap();
+    let pid = pid.trim().to_string();
+    let mut gone = false;
+    for _ in 0..100 {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if !alive {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(gone, "sleep が残っている");
 }

@@ -163,7 +163,24 @@ async fn watch_once(rt: &AdbRuntime, on_connect: &OnConnect) -> anyhow::Result<(
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("stdout を取れない"))?;
-    let mut stderr = child.child_mut().stderr.take();
+    // stderr は動いている間ずっと吸い出す（読まないとパイプが詰まって adb が止まる）。末尾だけ持つ
+    let stderr_task = child.child_mut().stderr.take().map(|mut e| {
+        tokio::spawn(async move {
+            const KEEP: usize = 8192;
+            let mut tail: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = e.read(&mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                tail.extend_from_slice(&chunk[..n]);
+                if tail.len() > KEEP {
+                    tail.drain(..tail.len() - KEEP);
+                }
+            }
+            tail
+        })
+    });
     let mut reader = FrameReader::default();
     let mut buf = vec![0u8; 4096];
     let result = loop {
@@ -187,12 +204,15 @@ async fn watch_once(rt: &AdbRuntime, on_connect: &OnConnect) -> anyhow::Result<(
         }
     };
     child.kill_group().await;
-    if let Some(mut e) = stderr.take() {
-        let mut tail = String::new();
-        let _ = tokio::time::timeout(Duration::from_millis(200), e.read_to_string(&mut tail)).await;
-        let tail = tail.trim();
-        if !tail.is_empty() {
-            tracing::warn!(stderr = %tail.chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>(), "adb track-devices の stderr");
+    if let Some(task) = stderr_task {
+        if let Ok(Ok(bytes)) = tokio::time::timeout(Duration::from_millis(500), task).await {
+            let text = String::from_utf8_lossy(&bytes);
+            let text = text.trim();
+            let skip = text.chars().count().saturating_sub(2000);
+            let tail: String = text.chars().skip(skip).collect();
+            if !tail.is_empty() {
+                tracing::warn!(stderr = %tail, "adb track-devices の stderr");
+            }
         }
     }
     result
