@@ -31,7 +31,7 @@ fn write_fake_adb() -> (tempfile::TempDir, PathBuf) {
     std::fs::write(
         &path,
         r#"#!/bin/sh
-[ "$ADB_SERVER_SOCKET" = "tcp:adb:5037" ] || { echo "cannot connect to daemon" >&2; exit 1; }
+[ "$ADB_SERVER_SOCKET" = "tcp:adb:5037" ] || { echo "* cannot connect to daemon at $ADB_SERVER_SOCKET" >&2; exit 1; }
 [ "$1" = "-s" ] || { echo "-s が無い" >&2; exit 2; }
 [ "$2" = "SER1" ] || { echo "adb: device '$2' not found" >&2; exit 1; }
 [ "$3" = "shell" ] || { echo "未対応のサブコマンド $3" >&2; exit 2; }

@@ -153,16 +153,22 @@ fn map_err(e: ProcessError) -> RemoteError {
     }
 }
 
+/// adb 自身の文言だけで未接続を判定する。端末側コマンドの stderr（パスや `sh: ...` の行）に
+/// 同じ語が含まれても未接続とは読まないよう、trim した行の行頭が adb の書式のときだけにする
 fn is_disconnected(stderr: &str) -> bool {
     stderr.lines().any(|l| {
-        let l = l.trim_start_matches("* ").trim();
-        (l.starts_with("adb: device '") && l.contains("' not found"))
+        let l = l.trim();
+        let daemon = l.starts_with("* cannot connect to daemon")
+            || l.starts_with("error: cannot connect to daemon")
+            || l.starts_with("adb: cannot connect to daemon");
+        let l = l.trim_start_matches("* ");
+        daemon
+            || (l.starts_with("adb: device '") && l.contains("' not found"))
             || l.starts_with("error: no devices/emulators found")
             || l.starts_with("error: device offline")
             || l.starts_with("error: device unauthorized")
             || l.starts_with("error: closed")
             || l.starts_with("adb: error: failed to get feature set")
-            || l.contains("cannot connect to daemon")
     })
 }
 
@@ -386,6 +392,25 @@ mod tests {
             "sh: sha256sum: not found",
             "mv: /a/closed/x: No such file",
             "find: not found",
+        ] {
+            assert!(matches!(map_err(failed(m)), RemoteError::Failed(_)), "{m}");
+        }
+    }
+
+    #[test]
+    fn cannot_connect_is_disconnected_only_in_adb_own_format() {
+        for m in [
+            "* cannot connect to daemon at tcp:adb:5037: Connection refused",
+            "  * cannot connect to daemon",
+            "error: cannot connect to daemon",
+            "adb: cannot connect to daemon at tcp:adb:5037",
+        ] {
+            assert_eq!(map_err(failed(m)), RemoteError::NotConnected, "{m}");
+        }
+        for m in [
+            "sh: foo: cannot connect to daemon",
+            "mv: /a/cannot connect to daemon/x: No such file",
+            "cannot connect to daemon",
         ] {
             assert!(matches!(map_err(failed(m)), RemoteError::Failed(_)), "{m}");
         }
