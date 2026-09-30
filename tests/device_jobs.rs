@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension as _};
 use spindle::config::{DerivedConfig, OpusVariantConfig};
 use spindle::db::devices::{self, Confirm, Device, NewDevice, PlanEnd, Selection};
 use spindle::db::{derived, now_epoch, Db};
@@ -595,8 +595,30 @@ async fn busy_job_mutex_requeues_after_a_while() {
         .unwrap()
         .id();
     fx.wait(sync, JobState::Running).await;
-    // 同期がロックを持つまで少し待つ（ロックは lock_mutex_named → device_lock の順に取る）
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // 同期が job_mutexes の行を持つまで待つ（ロックは lock_mutex_named → device_lock の順に取る）
+    let (db, dev) = (fx.db.clone(), fx.device.id);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let holder: Option<i64> = db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT job_id FROM job_mutexes WHERE name = ?1",
+                    [spindle::jobs::device_mutex(dev)],
+                    |r| r.get(0),
+                )
+                .optional()?)
+            })
+            .await
+            .unwrap();
+        if holder == Some(sync) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "同期が device:{dev} を取らない（{holder:?}）"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let before = now_epoch();
     let scan = fx.jobs.enqueue(scan_job(fx.device.id)).await.unwrap().id();
     // 1 秒ごとの空回りではなく、しばらく置いてから再び対象にする
