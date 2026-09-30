@@ -452,3 +452,44 @@ pub async fn device_at(want: &[Want<'_>], capacity: u64) -> FakeFs {
     sync_to(&fs, want, &TestControl::default()).await.unwrap();
     fs
 }
+
+/// プレイリストと送る元の欠落を渡せる `sync_to`。`missing` の曲は送る元が無い
+pub async fn sync_full<C: Control>(
+    fs: &FakeFs,
+    want: &[Want<'_>],
+    playlists: &[spindle::domain::device::DesiredPlaylist],
+    missing: &[i64],
+    control: &C,
+) -> Result<SyncReport, String> {
+    let rec = recover(fs, &expect()).await.map_err(|e| e.to_string())?;
+    let d = diff(
+        &desired(want),
+        &rec.items,
+        playlists,
+        &rec.playlists,
+        Vec::new(),
+    );
+    let plan = StoredPlan::from_diff(1, "tok", &d).unwrap();
+    let r: Runnable = runnable(&plan, &rec.items, &rec.playlists, &d);
+    let bodies: HashMap<i64, Vec<u8>> = playlists
+        .iter()
+        .map(|p| (p.playlist_id, p.body.clone()))
+        .collect();
+    let mut src = sources(want);
+    for id in missing {
+        src.0.remove(id);
+    }
+    sync::run(
+        fs,
+        &src,
+        control,
+        SyncInput {
+            generation: 1,
+            start: rec.manifest,
+            runnable: &r,
+            playlist_bodies: &bodies,
+        },
+    )
+    .await
+    .map_err(|e: SyncError| e.to_string())
+}

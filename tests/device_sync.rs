@@ -456,3 +456,215 @@ fn check_target(fs: &FakeFs, target: &[Want<'_>]) {
     assert_eq!(fs.get("手で置いた.mp3"), Some(b"keep".to_vec()));
     let _: Vec<Record> = parse(&fs.get(JOURNAL_PATH).unwrap()).unwrap();
 }
+
+fn pl(id: i64, name: &str, body: &[u8]) -> DesiredPlaylist {
+    DesiredPlaylist {
+        playlist_id: id,
+        name: name.into(),
+        dest_path: format!("Playlists/{name}.m3u8"),
+        body: body.to_vec(),
+        token: playlist_token(id, name, &sha256_hex(body)),
+    }
+}
+
+#[test]
+fn unmanaged_file_at_destination_is_not_overwritten() {
+    block_on(async {
+        let fs = device_at(&[], 1 << 30).await;
+        fs.set("a.opus", b"user's");
+        fs.set("Playlists/通勤.m3u8", b"user's list");
+        let report = sync_full(
+            &fs,
+            &[(1, "a.opus", b"A")],
+            &[pl(5, "通勤", b"#EXTM3U\n")],
+            &[],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.get("a.opus"), Some(b"user's".to_vec()));
+        assert_eq!(fs.get("Playlists/通勤.m3u8"), Some(b"user's list".to_vec()));
+        assert_eq!(
+            report.errors,
+            vec![
+                (EntryKind::Track, 1, UNMANAGED_COLLISION.to_owned()),
+                (EntryKind::Playlist, 5, UNMANAGED_COLLISION.to_owned()),
+            ]
+        );
+        assert!(report.manifest.items.is_empty());
+        assert!(report.manifest.playlists.is_empty());
+    });
+}
+
+fn is_compaction_write(c: &str) -> bool {
+    c == "write .spindle/manifest.json.spindle-tmp"
+}
+
+#[test]
+fn compacts_midway_and_survives_crashes() {
+    block_on(async {
+        let names: Vec<(i64, String, Vec<u8>)> = (1..=60)
+            .map(|i| (i, format!("D/t{i}.opus"), format!("body{i}").into_bytes()))
+            .collect();
+        let target: Vec<Want> = names
+            .iter()
+            .map(|(i, p, b)| (*i, p.as_str(), b.as_slice()))
+            .collect();
+        let base = device_at(&[], 1 << 30).await;
+        base.set("手で置いた.mp3", b"keep");
+        let clean = base.snapshot();
+        sync_to(&clean, &target, &TestControl::default())
+            .await
+            .unwrap();
+        let calls = clean.calls();
+        let writes = calls.iter().filter(|c| is_compaction_write(c)).count();
+        assert!(writes >= 2, "途中の圧縮が無い: {writes}");
+        let m = parse_manifest(&clean);
+        assert_eq!(m.items.len(), 60);
+        assert!(parse(&clean.get(JOURNAL_PATH).unwrap()).unwrap().is_empty());
+        // 変更系の呼び出し番号（切断点）で、最初の圧縮の書き込みの位置
+        let mutating = |c: &String| {
+            ["write ", "append ", "put ", "rename ", "remove ", "prune"]
+                .iter()
+                .any(|p| c.starts_with(p))
+        };
+        let first = calls
+            .iter()
+            .filter(|c| mutating(c))
+            .position(|c| is_compaction_write(c))
+            .unwrap();
+        let total = clean.mutations();
+        // 全点だと 60 曲 × 2 回の同期で重いので、7 の倍数と最初の圧縮の前後 6 点に間引く
+        let ks: Vec<usize> = (0..total)
+            .filter(|k| k % 7 == 0 || (first.saturating_sub(6)..first + 6).contains(k))
+            .collect();
+        for k in ks {
+            let fs = base.snapshot();
+            fs.fail_after(k);
+            assert!(
+                sync_to(&fs, &target, &TestControl::default())
+                    .await
+                    .is_err(),
+                "k={k}"
+            );
+            fs.reconnect();
+            check_recovered(&fs, &[], &target, k).await;
+            sync_to(&fs, &target, &TestControl::default())
+                .await
+                .unwrap();
+            check_target(&fs, &target);
+        }
+    });
+}
+
+#[test]
+fn playlist_changes_survive_every_crash_point() {
+    block_on(async {
+        let b = b"#EXTM3U\n../a.opus\n";
+        let init_t: &[Want] = &[(1, "a.opus", b"A")];
+        let target_t: &[Want] = &[(1, "a.opus", b"A"), (2, "b.opus", b"B")];
+        let init_p = [pl(5, "通勤", b), pl(6, "消す", b)];
+        let target_p = [pl(5, "朝", b), pl(7, "新", b"#EXTM3U\n")];
+        let base = device_at(init_t, 1 << 30).await;
+        sync_full(&base, init_t, &init_p, &[], &TestControl::default())
+            .await
+            .unwrap();
+        base.set("手で置いた.mp3", b"keep");
+        let clean = base.snapshot();
+        sync_full(&clean, target_t, &target_p, &[], &TestControl::default())
+            .await
+            .unwrap();
+        let total = clean.mutations();
+        assert!(total > 0);
+        for k in 0..total {
+            let fs = base.snapshot();
+            fs.fail_after(k);
+            assert!(
+                sync_full(&fs, target_t, &target_p, &[], &TestControl::default())
+                    .await
+                    .is_err(),
+                "k={k}"
+            );
+            fs.reconnect();
+            recover(&fs, &expect())
+                .await
+                .unwrap_or_else(|e| panic!("k={k}: {e}"));
+            sync_full(&fs, target_t, &target_p, &[], &TestControl::default())
+                .await
+                .unwrap();
+            let m = parse_manifest(&fs);
+            let mut got: Vec<(i64, String)> = m
+                .playlists
+                .iter()
+                .map(|p| (p.playlist_id, p.path.clone()))
+                .collect();
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    (5, "Playlists/朝.m3u8".to_owned()),
+                    (7, "Playlists/新.m3u8".to_owned())
+                ],
+                "k={k}"
+            );
+            assert_eq!(fs.get("Playlists/朝.m3u8"), Some(b.to_vec()), "k={k}");
+            assert_eq!(
+                fs.get("Playlists/新.m3u8"),
+                Some(b"#EXTM3U\n".to_vec()),
+                "k={k}"
+            );
+            assert_eq!(fs.get("Playlists/通勤.m3u8"), None, "k={k}");
+            assert_eq!(fs.get("Playlists/消す.m3u8"), None, "k={k}");
+            check_target(&fs, target_t);
+        }
+    });
+}
+
+#[test]
+fn item_errors_do_not_break_crash_recovery() {
+    block_on(async {
+        let target: &[Want] = &[
+            (1, "a.opus", b"A"),
+            (2, "b.opus", b"B"),
+            (3, "c.opus", b"C"),
+        ];
+        let base = device_at(&[], 1 << 30).await;
+        base.set("手で置いた.mp3", b"keep");
+        let clean = base.snapshot();
+        let report = sync_full(&clean, target, &[], &[1], &TestControl::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            report.errors,
+            vec![(EntryKind::Track, 1, SourceError::Missing.reason())]
+        );
+        let total = clean.mutations();
+        for k in 0..total {
+            let fs = base.snapshot();
+            fs.fail_after(k);
+            assert!(
+                sync_full(&fs, target, &[], &[1], &TestControl::default())
+                    .await
+                    .is_err(),
+                "k={k}"
+            );
+            fs.reconnect();
+            check_recovered(&fs, &[], target, k).await;
+            let r = sync_full(&fs, target, &[], &[1], &TestControl::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                r.errors,
+                vec![(EntryKind::Track, 1, SourceError::Missing.reason())]
+            );
+            assert_eq!(
+                manifest_ids(&fs),
+                vec![(2, "b.opus".to_owned()), (3, "c.opus".to_owned())],
+                "k={k}"
+            );
+            assert_eq!(fs.get("a.opus"), None);
+            assert_eq!(fs.get("b.opus"), Some(b"B".to_vec()));
+            assert_eq!(fs.get("c.opus"), Some(b"C".to_vec()));
+        }
+    });
+}

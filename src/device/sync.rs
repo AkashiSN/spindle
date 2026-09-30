@@ -4,7 +4,7 @@
 //! 各操作は意図を耐久化してから副作用を起こす。`vacating` より前の書き込みの直前にキャンセルと
 //! generation を確かめ、封印済みバッチの `vacating` 以降はどちらでも止めずに完遂する
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::db::devices::ReportedError;
@@ -26,6 +26,8 @@ use crate::fsroot::{fstat, FsError, RootDir};
 pub const MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 /// 完了した操作がこれだけ溜まったら manifest を書き直してジャーナルを空にする
 pub const COMPACT_EVERY: usize = 50;
+/// 置き先を管理外のファイル（manifest に無い、ユーザが置いたもの）が占めているときの理由
+pub const UNMANAGED_COLLISION: &str = "管理外のファイルと衝突";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SourceError {
@@ -174,6 +176,8 @@ struct Exec<'a, F, S, C> {
     errors: Vec<ReportedError>,
     done: u64,
     total: u64,
+    /// 開始時に端末にあった管理外のファイルの `canonical_key`（上書きしない）
+    unmanaged: HashSet<String>,
 }
 
 pub async fn run<F: DeviceFs, S: Sources, C: Control>(
@@ -201,6 +205,16 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
         return Err(SyncError::NoSpace { need, free });
     }
 
+    let managed = Book::from(input.start.clone()).path_keys();
+    let unmanaged: HashSet<String> = fs
+        .list_files()
+        .await?
+        .into_iter()
+        .filter(|f| !ondevice::is_reserved(&f.path) && !f.path.ends_with(TMP_SUFFIX))
+        .map(|f| canonical_key(&f.path))
+        .filter(|k| !managed.contains(k))
+        .collect();
+
     let mut x = Exec {
         fs,
         sources,
@@ -212,6 +226,7 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
         errors: Vec::new(),
         done: 0,
         total: (r.items.len() + r.playlists.len()) as u64,
+        unmanaged,
     };
     let of = |k: OpKind| r.items.iter().filter(move |o| o.op == k);
     for op in of(OpKind::Delete) {
@@ -323,6 +338,7 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         let intent = self.rm_intent(&op.op_id, EntryKind::Track, op.track_id, from);
         self.intent(intent).await?;
         self.fs.remove(from).await?;
+        self.fs.sync().await?;
         let key = canonical_key(from);
         if self
             .book
@@ -352,7 +368,9 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         let put = match self.fs.put(path, file).await {
             Ok(p) => p,
             Err(e) => {
-                let _ = self.fs.remove(path).await;
+                if let Err(re) = self.fs.remove(path).await {
+                    tracing::warn!(error = %re, path, "送りそこねた一時ファイルを消せなかった");
+                }
                 return Err(e.into());
             }
         };
@@ -373,6 +391,14 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         else {
             return Ok(());
         };
+        if self.unmanaged.contains(&canonical_key(&to)) {
+            self.errors.push((
+                EntryKind::Track,
+                op.track_id,
+                UNMANAGED_COLLISION.to_owned(),
+            ));
+            return Ok(());
+        }
         // 先に開けるか確かめる（開けない曲に意図を書かない）
         if let Err(e) = self.sources.open(op.track_id) {
             self.errors
@@ -423,6 +449,7 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         let intent = self.rm_intent(&op_id, EntryKind::Playlist, p.playlist_id, from);
         self.intent(intent).await?;
         self.fs.remove(from).await?;
+        self.fs.sync().await?;
         let key = canonical_key(from);
         if self
             .book
@@ -452,6 +479,14 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             ));
             return Ok(());
         };
+        if self.unmanaged.contains(&canonical_key(&to)) {
+            self.errors.push((
+                EntryKind::Playlist,
+                p.playlist_id,
+                UNMANAGED_COLLISION.to_owned(),
+            ));
+            return Ok(());
+        }
         let sha = sha256_hex(body);
         self.intent(Intent {
             op_id: p.op_id.clone(),
