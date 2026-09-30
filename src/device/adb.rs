@@ -46,7 +46,11 @@ pub struct AdbFs {
 }
 
 impl AdbFs {
-    /// `root_abs` は `quote::root_abs` で作った端末上の絶対パス
+    /// `root_abs` は `quote::root_abs` で作った端末上の絶対パス。
+    /// `token` はプロセスの停止（shutdown）用で、ジョブのキャンセルトークンを渡してはならない。
+    /// これが引かれると実行中の adb を含むすべての操作が止まり、封印済みバッチの `vacating` 以降の
+    /// `mv` まで止めてしまう（次の接続の回復で前進はするが、同期の中では完遂できない）。
+    /// ジョブのキャンセルは `sync::Control::cancelled` だけで効かせる（P5-3b）
     pub fn new(
         cfg: AdbConfig,
         serial: &str,

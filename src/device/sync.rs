@@ -111,6 +111,9 @@ impl Sources for RootSources {
 /// 実行の制御（ジョブのキャンセル・端末の generation・進捗）
 #[allow(async_fn_in_trait)]
 pub trait Control {
+    /// ジョブのキャンセル。ジョブのキャンセルはここだけで効かせる（`vacating` より前の書き込みの直前にだけ
+    /// 見るので、封印済みバッチの `vacating` 以降は止めずに完遂できる）。`AdbFs` に渡すトークンは
+    /// プロセスの停止用で、ジョブのキャンセルトークンを渡さない（渡すと `vacating` 以降の `mv` まで止まる）
     fn cancelled(&self) -> bool;
     /// 開始時の generation のままか。`vacating` より前の書き込みの直前に呼ぶ
     async fn generation_ok(&self) -> bool;
