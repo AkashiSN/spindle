@@ -2379,8 +2379,15 @@ fn register_item(
             job_ids.push(crate::db::jobs::enqueue(&tx, &new_track_job(id), now)?.id());
         }
     }
+    // 新しい曲は RG が揃っていないのでここでは積まれない（rg → rgwrite → tagwrite の applied で積まれる。
+    // D-97）。album gain を off にして値が消えた既存の曲も、書き込みの後に追随する
     for &id in track_ids.iter().chain(gain_change.cleared.iter()) {
         job_ids.extend(crate::db::derived::enqueue_if_stale(&tx, id, now)?);
+    }
+    // off にして album の値を消した既存の曲は、ファイルの album のキーを消す（印は set_album_gain が
+    // 立てた。D-97）
+    if !gain_change.cleared.is_empty() {
+        job_ids.push(dbrg::enqueue_write(&tx, now)?);
     }
     // 曲自身の画像でサムネイルがまだ無いものは thumbnail ジョブを投入する（スキャナと同じ。D-61。
     // dedup は artwork_id 単位なので、album の解決が同じ画像で投入しても 1 本）

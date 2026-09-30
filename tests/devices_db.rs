@@ -16,7 +16,7 @@ fn conn() -> Connection {
         },
         aac: Default::default(),
     };
-    derived::sync_variants(&c, &cfg, 0).unwrap();
+    derived::sync_variants(&c, &cfg, false, 0).unwrap();
     c
 }
 

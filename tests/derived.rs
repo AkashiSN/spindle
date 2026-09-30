@@ -22,6 +22,7 @@ fn target() -> Target {
         artwork_id: Some(7),
         rg_scanned_at: Some(100),
         rg_ready: true,
+        rg_written: true,
     }
 }
 
@@ -47,6 +48,7 @@ fn settings() -> VariantSettings {
         tag_profile,
         lossy_sources: false,
         multi_value_separator: " & ".into(),
+        rg_write_required: true,
     }
 }
 
@@ -132,15 +134,55 @@ fn eligibility_requires_lossless_present_and_stereo_or_mono() {
             ..target()
         }
     ));
-    // opus は RG を見ない（タグ上書きで追随できる）
-    assert!(eligible(
+    // opus も RG が揃うまで待つ（D-97）
+    assert!(!eligible(
         &o,
         &Target {
             rg_ready: false,
             rg_scanned_at: None,
+            rg_written: false,
             ..target()
         }
     ));
+}
+
+/// Derived は RG の解析だけでなく Library のタグへの書き込みまで済んでから作る（D-97）。
+/// `rg_write_required = false`（タグに書かない運用）なら解析済みだけを待つ
+#[test]
+fn derived_waits_until_rg_is_written_to_library_tags() {
+    let unwritten = Target {
+        rg_written: false,
+        ..target()
+    };
+    let unscanned = Target {
+        rg_scanned_at: None,
+        rg_ready: false,
+        rg_written: false,
+        ..target()
+    };
+    for s in [settings(), aac_settings(true)] {
+        assert!(eligible(&s, &target()), "{:?}", s.variant);
+        assert!(!eligible(&s, &unwritten), "{:?}", s.variant);
+        assert!(!eligible(&s, &unscanned), "{:?}", s.variant);
+        // 書き込み待ちの間は既存の行を触らない（凍結と同じ。再解析で値が変わっても書き込み後に 1 回で揃える）
+        let c = match s.variant {
+            Variant::Opus => current(),
+            Variant::Aac => aac_current(),
+        };
+        let reanalyzed = Target {
+            rg_scanned_at: Some(101),
+            ..unwritten.clone()
+        };
+        assert_eq!(plan(&s, &reanalyzed, Some(&c)), Plan::Skip);
+        assert_eq!(plan(&s, &unwritten, None), Plan::Skip);
+
+        let no_write = VariantSettings {
+            rg_write_required: false,
+            ..s.clone()
+        };
+        assert!(eligible(&no_write, &unwritten), "{:?}", s.variant);
+        assert!(!eligible(&no_write, &unscanned), "{:?}", s.variant);
+    }
 }
 
 /// aac 系統の設定（256k、on）
@@ -153,6 +195,7 @@ fn aac_settings(lossy_sources: bool) -> VariantSettings {
         tag_profile,
         lossy_sources,
         multi_value_separator: " & ".into(),
+        rg_write_required: true,
     }
 }
 

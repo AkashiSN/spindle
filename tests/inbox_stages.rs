@@ -71,7 +71,7 @@ fn enabled_variant_counts_only_tracks_with_matching_derived_row() {
         },
         aac: Default::default(),
     };
-    derived::sync_variants(&c, &cfg, 0).unwrap();
+    derived::sync_variants(&c, &cfg, false, 0).unwrap();
     let pr = Profiles::of(&derived::settings_of(&c, Variant::Opus).unwrap().unwrap());
     // 曲 1 だけ、現在の世代（RG 解析の世代も含む）で作ってある
     let tags = TagState {
@@ -127,4 +127,29 @@ fn placed_tracks_are_replaced_and_cascade() {
     c.execute("DELETE FROM inbox_items WHERE id = 1", [])
         .unwrap();
     assert!(dbinbox::placed_tracks(&c, 1).unwrap().is_empty());
+}
+
+/// タグへの書き込みが要る設定では、RG の段は書き込みまで済んで完了。書き込み待ちの曲も系統の段の母数に
+/// 数える（RG が揃えば作る曲。D-97）
+#[test]
+fn rg_stage_waits_for_tag_write_when_required() {
+    let c = conn_with_tracks();
+    let cfg = DerivedConfig {
+        opus: OpusVariantConfig {
+            enabled: true,
+            bitrate: 256,
+        },
+        aac: Default::default(),
+    };
+    derived::sync_variants(&c, &cfg, true, 0).unwrap();
+    let got = stages(&c, ItemState::Placed, &[1, 2], &empty()).unwrap();
+    let by = |k: &str| got.iter().find(|s| s.key == k).unwrap().clone();
+    // 曲 1 は解析済みだが未書き込み
+    assert_eq!((by("rg").done, by("rg").total), (0, 2));
+    assert_eq!((by("opus").done, by("opus").total), (0, 2));
+    c.execute("UPDATE tracks SET rg_written_at = 5 WHERE id = 1", [])
+        .unwrap();
+    let got = stages(&c, ItemState::Placed, &[1, 2], &empty()).unwrap();
+    let rg = got.iter().find(|s| s.key == "rg").unwrap();
+    assert_eq!((rg.done, rg.total), (1, 2));
 }

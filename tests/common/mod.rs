@@ -189,7 +189,23 @@ pub fn enable_variants(
         },
         aac: aac.unwrap_or_default(),
     };
-    spindle::db::derived::sync_variants(&c, &cfg, 0).unwrap();
+    spindle::db::derived::sync_variants(&c, &cfg, false, 0).unwrap();
+}
+
+/// テスト用 DB にだけ置くトリガ: 新しく登録した行を「RG の解析と書き込みが済んだ」状態にする
+/// （gain 0 dB・peak 1.0・解析世代 0）。Derived は RG が揃うまで作られない（D-97）ので、RG 以外の
+/// 追随を見るテストが解析のジョブを回さずに済むように
+pub fn settle_rg_on_insert(db_path: &Path) {
+    rusqlite::Connection::open(db_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS test_settle_rg AFTER INSERT ON tracks BEGIN
+               UPDATE tracks SET rg_track_gain = 0.0, rg_track_peak = 1.0, rg_scanned_at = 0,
+                                 rg_written_at = 0
+                WHERE id = NEW.id;
+             END;",
+        )
+        .unwrap();
 }
 
 /// CD の吸い出しの記録（サイドカーの `rip`）。`files` は音声トラック順のファイル名、`ctdb_matched` は

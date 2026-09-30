@@ -544,6 +544,7 @@ fn settings_or_frozen(conn: &Connection, variant: Variant) -> Result<VariantSett
             tag_profile: String::new(),
             lossy_sources: false,
             multi_value_separator: " & ".into(),
+            rg_write_required: true,
         }),
     )
 }

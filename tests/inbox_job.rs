@@ -399,7 +399,7 @@ async fn approved_item_is_placed_registered_and_consumed() {
     let it = inbox::get(&lib.conn(), a.id).unwrap().unwrap();
     assert_eq!(it.state, ItemState::Placed);
     assert_eq!(it.placed_album_id, Some(album_id));
-    // 後続: rg はトラックごと（album gain は既定 off。D-74）+ transcode 2
+    // 後続: rg はトラックごと（album gain は既定 off。D-74）。transcode は RG の解析と書き込みの後（D-97）
     assert_eq!(
         lib.count("SELECT count(*) FROM jobs WHERE type = 'rg' AND state = 'queued'"),
         2
@@ -415,8 +415,8 @@ async fn approved_item_is_placed_registered_and_consumed() {
         0
     );
     assert_eq!(
-        lib.count("SELECT count(*) FROM jobs WHERE type = 'transcode' AND state = 'queued'"),
-        2
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'transcode'"),
+        0
     );
     // Inbox 側: 音声と同梱ファイルは消え、未知のファイルは残る（ディレクトリも残る）
     assert!(!lib.inbox_path("AlbumA/01.flac").exists());

@@ -27,6 +27,7 @@ use spindle::jobs::handlers::normalize::NormalizeHandler;
 use spindle::jobs::handlers::playlist_sync::{self, PlaylistSyncHandler, SyncEnv};
 use spindle::jobs::handlers::rename::RenameHandler;
 use spindle::jobs::handlers::rg::RgHandler;
+use spindle::jobs::handlers::rgwrite::RgwriteHandler;
 use spindle::jobs::handlers::scan::{self, ScanHandler};
 use spindle::jobs::handlers::source_hash::SourceHashHandler;
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
@@ -132,8 +133,16 @@ async fn main() -> anyhow::Result<()> {
     // Derived の系統設定は config を正とし、起動時に derived_variants へ写す（D-75）
     {
         let derived_cfg = config.encode.derived.clone();
+        let rg_write_required = config.replaygain.write_tags;
         db.write(move |c| {
-            spindle::db::derived::sync_variants(c, &derived_cfg, spindle::db::now_epoch())
+            let now = spindle::db::now_epoch();
+            spindle::db::derived::sync_variants(c, &derived_cfg, rg_write_required, now)?;
+            // RG の書き込み待ちが残っていれば rgwrite を積む（write_tags を有効にした直後・取りこぼしの
+            // 回収。D-97）。ワーカーは起動後に拾う
+            if rg_write_required {
+                spindle::db::replaygain::enqueue_write_if_due(c, now)?;
+            }
+            Ok(())
         })
         .await
         .context("derived_variants の更新に失敗")?;
@@ -222,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
         Scanner::new(Arc::clone(&state.db), Arc::clone(&library_root), cpus)
             .with_artwork(Arc::clone(&artwork))
             .with_replaygain_reference(state.config.replaygain.reference_lufs)
+            .with_analyze_new_tracks(true)
             .with_unsorted_layout(&state.config.layout.unsorted),
     );
     let mut registry = Registry::new();
@@ -281,13 +291,24 @@ async fn main() -> anyhow::Result<()> {
         JobType::Normalize,
         Arc::new(NormalizeHandler::new(Arc::clone(&editor))),
     );
-    // ReplayGain 解析（P1-1）。Opus は ffmpeg でデコードする
+    // ReplayGain 解析（P1-1）。Opus は ffmpeg でデコードする。write_tags なら解析の後に
+    // rgwrite で解析値をタグへ書く（D-97）
     registry.register(
         JobType::Rg,
-        Arc::new(RgHandler::new(
-            Arc::clone(&library_root),
-            Decoder::new(&state.config.bin.ffmpeg),
-            state.config.replaygain.reference_lufs,
+        Arc::new(
+            RgHandler::new(
+                Arc::clone(&library_root),
+                Decoder::new(&state.config.bin.ffmpeg),
+                state.config.replaygain.reference_lufs,
+            )
+            .with_write_tags(state.config.replaygain.write_tags),
+        ),
+    );
+    registry.register(
+        JobType::Rgwrite,
+        Arc::new(RgwriteHandler::new(
+            Arc::clone(&editor),
+            state.config.replaygain.write_tags,
         )),
     );
     registry.register(

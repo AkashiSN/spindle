@@ -28,7 +28,7 @@ fn sync_with_aac(c: &Connection, enabled: bool, bitrate: u32, aac: Option<AacVar
         opus: OpusVariantConfig { enabled, bitrate },
         aac: aac.unwrap_or_default(),
     };
-    derived::sync_variants(c, &cfg, 0).unwrap();
+    derived::sync_variants(c, &cfg, false, 0).unwrap();
 }
 
 #[test]
@@ -84,12 +84,15 @@ fn put(
     derived::upsert(c, id, O, rel, bitrate, av, tags, &pr, now).unwrap();
 }
 
+/// RG は解析済み・書き込み済みで入れる（Derived は RG が揃ってから。D-97）。未解析を見るテストは
+/// 自分で消す
 fn insert_track(c: &Connection, id: i64, rel: &str, codec: &str, channels: Option<i64>) {
     let lossless = i64::from(!matches!(codec, "opus" | "mp3" | "aac" | "ogg"));
     c.execute(
         "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
-                             channels, audio_version, tag_version, seen_at)
-         VALUES (?1, ?2, lower(?2), 1, 0, 0, ?3, ?4, ?5, 1, 1, 0)",
+                             channels, audio_version, tag_version, seen_at,
+                             rg_track_gain, rg_track_peak, rg_scanned_at, rg_written_at)
+         VALUES (?1, ?2, lower(?2), 1, 0, 0, ?3, ?4, ?5, 1, 1, 0, 0.0, 1.0, 0, 0)",
         params![id, rel, codec, lossless, channels],
     )
     .unwrap();
@@ -114,7 +117,8 @@ fn tags(tv: i64, art: Option<i64>) -> TagState {
     TagState {
         src_tag_version: tv,
         src_artwork_id: art,
-        src_rg_scanned_at: None,
+        // insert_track の解析世代
+        src_rg_scanned_at: Some(0),
     }
 }
 
@@ -251,6 +255,7 @@ fn enqueue_follows_profiles_and_freeze() {
                 tag_profile: "aac:sep= & :itunnorm0:v1".into(),
                 lossy_sources: true,
                 multi_value_separator: " & ".into(),
+                rg_write_required: false,
             },
             VariantSettings {
                 variant: O,
@@ -259,6 +264,7 @@ fn enqueue_follows_profiles_and_freeze() {
                 tag_profile: "opus:v1".into(),
                 lossy_sources: false,
                 multi_value_separator: " & ".into(),
+                rg_write_required: false,
             },
         ],
         "variant 名順。aac は節省略の既定（off）で行がある"
@@ -480,8 +486,11 @@ fn enqueue_all_stale_waits_for_rg_on_aac_and_includes_lossy_sources() {
         [],
     )
     .unwrap();
-    c.execute("UPDATE tracks SET rg_scanned_at = 5 WHERE id = 3", [])
-        .unwrap();
+    c.execute(
+        "UPDATE tracks SET rg_track_gain = NULL, rg_track_peak = NULL, rg_scanned_at = 5 WHERE id = 3",
+        [],
+    )
+    .unwrap();
     let ids = derived::enqueue_all_stale(&c, 10).unwrap();
     let mut keys: Vec<String> = ids
         .iter()
@@ -499,9 +508,8 @@ fn enqueue_all_stale_waits_for_rg_on_aac_and_includes_lossy_sources() {
             "transcode:1:aac:1".to_owned(),
             "transcode:1:opus:1".to_owned(),
             "transcode:2:aac:1".to_owned(),
-            "transcode:3:opus:1".to_owned(),
         ],
-        "aac は解析済みの 1・2（非可逆含む）、3 は値が無いので待つ。opus は可逆の 1・3"
+        "aac は解析済みの 1・2（非可逆含む）、opus は可逆の 1。3 は値が無いので両系統とも待つ"
     );
     // 3 の値が揃えば enqueue_if_stale が拾う
     c.execute(
@@ -510,11 +518,58 @@ fn enqueue_all_stale_waits_for_rg_on_aac_and_includes_lossy_sources() {
     )
     .unwrap();
     let ids = derived::enqueue_if_stale(&c, 3, 11).unwrap();
-    assert_eq!(ids.len(), 1);
-    let key: String = c
-        .query_row("SELECT dedup_key FROM jobs WHERE id = ?1", [ids[0]], |r| {
-            r.get(0)
+    let mut keys: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            c.query_row("SELECT dedup_key FROM jobs WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
         })
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["transcode:3:aac:1", "transcode:3:opus:1"]);
+}
+
+/// `[replaygain].write_tags` が有効なら、Derived は RG が Library のタグへ書き込まれてから作る（D-97）
+#[test]
+fn enqueue_waits_for_rg_written_when_required() {
+    let c = open_memory_connection().unwrap();
+    let cfg = DerivedConfig {
+        opus: OpusVariantConfig {
+            enabled: true,
+            bitrate: 256,
+        },
+        aac: AacVariantConfig {
+            enabled: true,
+            ..Default::default()
+        },
+    };
+    derived::sync_variants(&c, &cfg, true, 0).unwrap();
+    assert!(
+        derived::settings_of(&c, O)
+            .unwrap()
+            .unwrap()
+            .rg_write_required
+    );
+    insert_track(&c, 1, "A/1.flac", "flac", Some(2));
+    // 解析し直した（値は変わった）が、まだタグに書いていない
+    c.execute(
+        "UPDATE tracks SET rg_track_gain = -2.0, rg_scanned_at = 5, rg_written_at = NULL WHERE id = 1",
+        [],
+    )
+    .unwrap();
+    let t = derived::load_target(&c, 1).unwrap().unwrap();
+    assert!(t.rg_ready && !t.rg_written);
+    assert!(derived::enqueue_all_stale(&c, 10).unwrap().is_empty());
+    assert!(derived::enqueue_if_stale(&c, 1, 10).unwrap().is_empty());
+    // 書き込みの確認より古い解析（rg_written_at < rg_scanned_at）も未書き込み
+    c.execute("UPDATE tracks SET rg_written_at = 4 WHERE id = 1", [])
         .unwrap();
-    assert_eq!(key, "transcode:3:aac:1");
+    assert!(derived::enqueue_if_stale(&c, 1, 10).unwrap().is_empty());
+    // 書き込みを確認した（tagwrite の applied）後は両系統を投入する
+    c.execute("UPDATE tracks SET rg_written_at = 6 WHERE id = 1", [])
+        .unwrap();
+    assert!(derived::load_target(&c, 1).unwrap().unwrap().rg_written);
+    assert_eq!(derived::enqueue_if_stale(&c, 1, 11).unwrap().len(), 2);
 }

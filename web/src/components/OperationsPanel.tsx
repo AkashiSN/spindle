@@ -58,9 +58,14 @@ const GROUPS: { title: string; ops: OpDef[] }[] = [
         id: 'rg',
         label: 'ReplayGain を解析',
         nature: 'job',
-        desc: '音量を測る（タグには書かない）。album gain が on の album は album 単位、それ以外は曲ごとのジョブ',
+        desc: '音量を測る。設定でタグへの書き込みが有効（既定）なら、済んだら自動でタグに書く（巻き戻せる編集として記録）。album gain が on の album は album 単位、それ以外は曲ごとのジョブ',
       },
-      { id: 'rgwrite', label: '解析値をタグに書く', nature: 'undo', desc: '測った値を REPLAYGAIN_*（Opus は R128_*）に書く' },
+      {
+        id: 'rgwrite',
+        label: '解析値をタグに書き直す',
+        nature: 'undo',
+        desc: '自動で書かれていない曲（外部で書き換えた・巻き戻した等）に、測った値を REPLAYGAIN_*（Opus は R128_*）で書く',
+      },
       {
         id: 'albumgain',
         label: 'album gain',
@@ -207,10 +212,14 @@ export function OperationsPanel({
     case 'rg':
       runLabel = label('rg', '解析ジョブを投入')
       run = () => void ops.startRg()
-      check = <span className="muted small">済んだら「解析値をタグに書く」で書き込む</span>
+      check = (
+        <span className="muted small">
+          書き込みが有効（既定）なら、解析が済むとタグへ自動で書き、その後に Derived を作る
+        </span>
+      )
       break
     case 'rgwrite':
-      runLabel = label('rgwrite', 'タグに書く')
+      runLabel = label('rgwrite', 'タグに書き直す')
       run = () => void ops.writeRg()
       check = <span className="muted small">解析済みの曲だけに書く（未解析は飛ばす）</span>
       break

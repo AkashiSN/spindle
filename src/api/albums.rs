@@ -114,6 +114,11 @@ pub async fn patch(
                         derived_jobs
                             .extend(crate::db::derived::enqueue_if_stale(c, *track_id, now)?);
                     }
+                    // ファイルに残った album のキーを消す（書き込み待ちの印は set_album_gain が立てた。
+                    // Derived はこの書き込みの後に追随する。D-97）
+                    if !change.cleared.is_empty() {
+                        derived_jobs.push(dbrg::enqueue_write(c, now)?);
+                    }
                 }
             }
             Ok(Some((job_id, derived_jobs)))

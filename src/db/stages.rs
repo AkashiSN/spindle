@@ -7,7 +7,7 @@ use crate::db::derived as dbderived;
 use crate::db::devices::Snapshot;
 use crate::db::inbox::ItemState;
 use crate::db::Result;
-use crate::domain::derived::{eligible, plan};
+use crate::domain::derived::{covered, eligible, plan};
 use crate::domain::device::TrackState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -100,13 +100,16 @@ pub fn stages(
     let mut out = vec![place];
 
     let (mut rg_total, mut rg_done, mut rg_run) = (0, 0, false);
+    // タグへの書き込みが要る設定なら、書き込みまで済んで完了（Derived の前提と同じ。D-97）
+    let write_required = dbderived::rg_write_required(conn)?;
     for id in track_ids {
         // 完了は 3 列が揃ったとき（端末配信の track_inputs の rg_ready と同じ条件。時刻だけ残った行は未完了）
         let ready: Option<bool> = conn
             .query_row(
                 "SELECT rg_scanned_at IS NOT NULL AND rg_track_gain IS NOT NULL AND rg_track_peak IS NOT NULL
+                        AND (?2 = 0 OR (rg_written_at IS NOT NULL AND rg_written_at >= rg_scanned_at))
                    FROM tracks WHERE id = ?1 AND missing_since IS NULL",
-                [id],
+                rusqlite::params![id, i64::from(write_required)],
                 |r| r.get(0),
             )
             .optional()?;
@@ -137,12 +140,13 @@ pub fn stages(
             let Some(t) = dbderived::load_target(conn, *id)? else {
                 continue;
             };
-            if !eligible(&s, &t) {
+            // 母数は RG が揃えば作る曲（RG 待ちも「これから作る」に数える。D-97）
+            if !covered(&s, &t) {
                 continue;
             }
             total += 1;
             let current = dbderived::get(conn, *id, s.variant)?;
-            if !plan(&s, &t, current.as_ref()).needs_job() {
+            if eligible(&s, &t) && !plan(&s, &t, current.as_ref()).needs_job() {
                 done += 1;
             } else if dbderived::has_active_job(conn, *id, s.variant)? {
                 running = true;

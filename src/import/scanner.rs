@@ -147,6 +147,9 @@ pub struct Scanner {
     /// ReplayGain の内部基準（LUFS。`[replaygain].reference_lufs`）。外部のタグ変更を取り込んだときの
     /// `rg_written_at` の判定に使う（D-48）
     rg_reference: f64,
+    /// 新規に登録したトラックの RG 解析と、残った RG の書き込み待ちの rgwrite を積む（D-97。本番は常に on。
+    /// 既定 off は、ジョブの投入を数える他のテストに rg / rgwrite を混ぜないため）
+    analyze_new_tracks: bool,
     /// テスト用: Phase 5 の予約の前後で呼ぶ（[`BeforeArtworkHook`]）
     before_artwork: Mutex<Option<BeforeArtworkHook>>,
     /// category の語彙に自動で登録しない Library 直下のディレクトリ名（canonical key）。
@@ -207,6 +210,7 @@ impl Scanner {
             parallelism: parallelism.max(1),
             artwork: None,
             rg_reference: -18.0,
+            analyze_new_tracks: false,
             before_artwork: Mutex::new(None),
             category_skip: vec![canonical_key(DEFAULT_UNSORTED_DIR)],
         }
@@ -229,6 +233,13 @@ impl Scanner {
     /// ReplayGain の内部基準を設定する（既定 -18 LUFS。`Editor::with_replaygain_reference` と同じ値にする）
     pub fn with_replaygain_reference(mut self, reference_lufs: f64) -> Self {
         self.rg_reference = reference_lufs;
+        self
+    }
+
+    /// 新規に登録したトラックの RG 解析を積む（D-97。Derived は RG が揃うまで作られないので、Inbox を
+    /// 通さずに置かれた曲もここで解析に乗せる）
+    pub fn with_analyze_new_tracks(mut self, on: bool) -> Self {
+        self.analyze_new_tracks = on;
         self
     }
 
@@ -442,6 +453,7 @@ impl Scanner {
             run_id,
             deep,
             rg_reference: self.rg_reference,
+            analyze_new_tracks: self.analyze_new_tracks,
             inv,
             decisions,
             tracks,
@@ -1442,6 +1454,8 @@ struct Commit {
     deep: bool,
     /// ReplayGain の内部基準（`rg_written_at` の判定）
     rg_reference: f64,
+    /// 新規トラックの RG 解析を積む（D-97）
+    analyze_new_tracks: bool,
     inv: Inventory,
     decisions: Vec<Decision>,
     tracks: Vec<TrackSnap>,
@@ -1477,6 +1491,8 @@ impl Commit {
             ..Default::default()
         };
         let mut groups: HashMap<String, DirGroup> = HashMap::new();
+        // この走査で新規に登録したトラック（album の照合の後に RG の解析を積む。D-97）
+        let mut new_ids: Vec<i64> = Vec::new();
 
         // Phase 2 のスナップショット後に編集バッチが pending op を作っているかもしれないので、
         // pending と版・ハッシュはこのトランザクションの中で読み直す（D-24）
@@ -1731,6 +1747,7 @@ impl Commit {
                                 tracing::warn!(track_id = id, path = %e.rel, "hardlink（nlink > 1）の新規トラック");
                             }
                             group.track_ids.push(id);
+                            new_ids.push(id);
                             report.new += 1;
                             report.changed_ids.push(id);
                         }
@@ -1757,6 +1774,14 @@ impl Commit {
             self.categories = scans::load_categories(&tx)?;
         }
         self.resolve_albums(&tx, groups, now)?;
+        // 新規トラックの RG 解析を積む（D-97）。Derived は RG の解析と書き込みが揃うまで作られないので、
+        // Inbox を通さずに置かれた曲もここで解析に乗せる。投入単位は album の照合の後に決める
+        // （album gain が on の album に加わった曲は album 単位）。既存の未解析の行は拾わない
+        if self.analyze_new_tracks {
+            report
+                .enqueued_jobs
+                .extend(dbrg::enqueue_analysis(&tx, &new_ids, now)?);
+        }
         // category が NULL のまま残っている album（語彙が後から入った既存の DB・変化の無い album）を
         // 直下のディレクトリ名で埋める。人が付けた値（NULL でない）は触らない（D-92）。埋めた album の
         // トラックは `library` イベントで表へ知らせる（ファイルが変わっていなくても表の category が変わる）
@@ -1770,6 +1795,13 @@ impl Commit {
         let missing = scans::finalize_missing(&tx, run_id, now)?;
         report.missing_marked = missing.len() as u64;
         report.changed_ids.extend(missing);
+        // RG の書き込み待ちが残っていれば rgwrite を積む（missing の間に回ってきた rgwrite が飛ばした行が
+        // この走査で戻った場合など。D-97）
+        if self.analyze_new_tracks {
+            report
+                .enqueued_jobs
+                .extend(dbrg::enqueue_write_if_due(&tx, now)?);
+        }
         // edition が NULL のまま残っている album（edition を読む前の版で作った行・変化の無い album）を
         // 構成トラックの EDITION タグの最頻値で埋める（D-43 追記）。NULL だけ埋める。**finalize の後**に
         // 行う: この run で消えたトラックもその前は active なので、消えた曲の EDITION を album に残してしまう
@@ -1851,11 +1883,18 @@ impl Commit {
             } else {
                 row.tag_version
             };
+            // 外部が RG のキーを書き換えたか（取り込み前の DB の値と比べる）
+            let rg_changed_externally =
+                tags_changed && dbrg::rg_tags_of(tx, row.id)? != dbrg::rg_tags_in(&r.content.tags);
             scans::update_content(tx, row.id, &r.content, tag_version)?;
             if tags_changed {
                 // 外部のタグ変更: RG タグが消えた / 書き換わった / 解析値と一致する値が書かれた
                 // を `rg_written_at` に反映する（D-48）
                 dbrg::sync_written_at(tx, row.id, &r.content.tags, self.rg_reference, now)?;
+            }
+            if rg_changed_externally {
+                // 外部の RG の値を自動書き込みで上書きしない（ファイルが正。D-97）
+                dbrg::cancel_write_due(tx, row.id)?;
             }
         }
         let mut jobs = Vec::new();

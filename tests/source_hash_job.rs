@@ -149,13 +149,15 @@ impl Lib {
             .unwrap();
     }
 
-    /// 可逆トラックと、opus 系統を on にした設定（`enqueue_if_stale` が投入対象と見るため）
+    /// 可逆トラックと、opus 系統を on にした設定（`enqueue_if_stale` が投入対象と見るため。Derived は
+    /// RG が揃ってから作るので、RG は解析・書き込み済みで入れる。D-97）
     fn insert_lossless_track_with_opus_on(&self, id: i64, rel: &str) {
         let c = self.conn();
         c.execute(
             "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
-                                 channels, audio_version, tag_version, seen_at)
-             VALUES (?1, ?2, lower(?2), 1, 0, 0, 'flac', 1, 2, 1, 1, 0)",
+                                 channels, audio_version, tag_version, seen_at,
+                                 rg_track_gain, rg_track_peak, rg_scanned_at, rg_written_at)
+             VALUES (?1, ?2, lower(?2), 1, 0, 0, 'flac', 1, 2, 1, 1, 0, 0.0, 1.0, 0, 0)",
             params![id, rel],
         )
         .unwrap();
@@ -166,7 +168,7 @@ impl Lib {
             },
             aac: Default::default(),
         };
-        spindle::db::derived::sync_variants(&c, &cfg, 0).unwrap();
+        spindle::db::derived::sync_variants(&c, &cfg, false, 0).unwrap();
     }
 
     /// 実ファイルを置かずに Derived の行だけを作る

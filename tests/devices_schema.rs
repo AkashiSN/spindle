@@ -178,7 +178,7 @@ fn upgrade_from_0001_keeps_jobs_and_children() {
     )
     .unwrap();
 
-    assert_eq!(migrations::apply_list(&mut c, &all).unwrap(), vec![2, 3]);
+    assert_eq!(migrations::apply_list(&mut c, &all).unwrap(), vec![2, 3, 4]);
 
     let count = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
     assert_eq!(count("PRAGMA foreign_keys"), 1, "適用後は FK が ON に戻る");
