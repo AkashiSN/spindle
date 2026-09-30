@@ -80,6 +80,34 @@ pub struct DeviceView {
     pub playlist_ids: Vec<i64>,
     /// open な計画か同期ジョブがある（設定を変えられない）
     pub open_plan: bool,
+    /// open な計画がある（同期の途中。続き・破棄の対象）
+    pub plan_open: bool,
+    /// queued / running の `device_sync`（無ければ null）
+    pub sync_job: Option<SyncJobView>,
+}
+
+#[derive(Serialize)]
+pub struct SyncJobView {
+    pub id: i64,
+    pub state: String,
+}
+
+/// 端末 1 台の view の材料のうち DB から読むもの
+struct Extras {
+    playlist_ids: Vec<i64>,
+    open_plan: bool,
+    plan_open: bool,
+    sync_job: Option<SyncJobView>,
+}
+
+fn read_extras(c: &rusqlite::Connection, id: i64) -> crate::db::Result<Extras> {
+    Ok(Extras {
+        playlist_ids: dbdev::playlist_ids(c, id)?,
+        open_plan: dbdev::has_open_work(c, id)?,
+        plan_open: dbdev::open_plan_id(c, id)?.is_some(),
+        sync_job: dbdev::active_device_job(c, id, "device_sync")?
+            .map(|(id, state)| SyncJobView { id, state }),
+    })
 }
 
 #[derive(Serialize)]
@@ -87,13 +115,7 @@ pub struct DeviceList {
     pub items: Vec<DeviceView>,
 }
 
-fn view(
-    d: &Device,
-    snap: &Snapshot,
-    playlist_ids: Vec<i64>,
-    open_plan: bool,
-    rt: Option<&AdbRuntime>,
-) -> DeviceView {
+fn view(d: &Device, snap: &Snapshot, extras: Extras, rt: Option<&AdbRuntime>) -> DeviceView {
     let (connected, adb_state) = match (d.transport, d.adb_serial.as_deref()) {
         (Transport::Adb, Some(serial)) => (
             Some(rt.is_some_and(|rt| rt.is_connected(serial))),
@@ -115,8 +137,10 @@ fn view(
         adb_root: d.adb_root.clone(),
         counts: snap.get(d.id).map(|s| s.counts).unwrap_or_default(),
         last_synced_at: d.last_synced_at,
-        playlist_ids,
-        open_plan,
+        playlist_ids: extras.playlist_ids,
+        open_plan: extras.open_plan,
+        plan_open: extras.plan_open,
+        sync_job: extras.sync_job,
     }
 }
 
@@ -128,14 +152,11 @@ async fn view_of(state: &AppState, id: i64) -> Result<Option<DeviceView>, ApiErr
             let Some(d) = dbdev::get(c, id)? else {
                 return Ok(None);
             };
-            Ok(Some((
-                d,
-                dbdev::playlist_ids(c, id)?,
-                dbdev::has_open_work(c, id)?,
-            )))
+            let extras = read_extras(c, id)?;
+            Ok(Some((d, extras)))
         })
         .await?;
-    Ok(found.map(|(d, pl, open)| view(&d, &snap, pl, open, state.adb.as_deref())))
+    Ok(found.map(|(d, extras)| view(&d, &snap, extras, state.adb.as_deref())))
 }
 
 fn bad_request(msg: impl Into<String>) -> Response {
@@ -181,16 +202,15 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
         .read(|c| {
             let mut out = Vec::new();
             for d in dbdev::list(c)? {
-                let pl = dbdev::playlist_ids(c, d.id)?;
-                let open = dbdev::has_open_work(c, d.id)?;
-                out.push((d, pl, open));
+                let extras = read_extras(c, d.id)?;
+                out.push((d, extras));
             }
             Ok(out)
         })
         .await?;
     let items = rows
-        .iter()
-        .map(|(d, pl, open)| view(d, &snap, pl.clone(), *open, state.adb.as_deref()))
+        .into_iter()
+        .map(|(d, extras)| view(&d, &snap, extras, state.adb.as_deref()))
         .collect();
     enqueue_hashes(&state, &snap).await?;
     Ok(Json(DeviceList { items }).into_response())

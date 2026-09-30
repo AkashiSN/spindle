@@ -1,7 +1,7 @@
 // 端末タブの純粋ロジック（P5-2、D-95）。件数・差分表の並び・文言
 
 import { ApiError } from '../api/client'
-import type { Device, DeviceCounts, DeviceDiff, DiffItem, DiffOp } from '../api/types'
+import type { AdbVolume, Device, DeviceCounts, DeviceDiff, DiffItem, DiffOp } from '../api/types'
 import { formatDateTime } from './history'
 
 /** 未反映の件数（ナビのバッジ・一覧）。待ちはハッシュ計算などを待っているだけなので数えない */
@@ -60,6 +60,43 @@ export function describeEvaluation(e: DeviceDiff['evaluations'][number], _now: n
   return `${e.name}: ${formatDateTime(e.evaluated_at)} に評価`
 }
 
+const OPEN_PLAN_TITLE = '前回の同期が途中です。続きを実行するか破棄してください'
+export const ADB_DISABLED_MESSAGE = 'Android の同期が無効です（設定の [devices].adb_server）'
+
+/** Android の接続状態の説明（問題が無ければ null） */
+export function connectionNote(d: Device): string | null {
+  if (d.transport !== 'adb' || d.connected) return null
+  switch (d.adb_state) {
+    case 'unauthorized':
+      return '端末で USB デバッグを許可してください'
+    case 'offline':
+    case 'authorizing':
+      return '接続中（端末の応答待ち）'
+    default:
+      return '未接続（USB でつなぐと差分を取り直します）'
+  }
+}
+
+export function volumeLabel(v: AdbVolume): string {
+  return v.volume === 'emulated' ? '内部共有ストレージ' : `SD カード（${v.volume}）`
+}
+
+/** 保存先は空か存在しないときだけ選べる（仕様 ⑤「登録」4） */
+export function volumeUsable(v: AdbVolume): boolean {
+  return v.state !== 'nonempty'
+}
+
+export function syncButton(d: Device, diff: DeviceDiff): { enabled: boolean; title: string | null } {
+  if (d.sync_job != null) {
+    return { enabled: false, title: d.sync_job.state === 'running' ? '同期中' : '同期の待ち（端末の接続を待っています）' }
+  }
+  if (d.plan_open) return { enabled: false, title: OPEN_PLAN_TITLE }
+  const tracks = diff.items.filter((i) => i.op !== 'waiting' && i.op !== 'error').length
+  const lists = diff.playlists.filter((p) => p.op !== 'error').length
+  if (tracks + lists === 0) return { enabled: false, title: '差分がありません' }
+  return { enabled: true, title: null }
+}
+
 /** 端末 API のエラーを日本語にする */
 export function deviceMessage(e: unknown): string {
   if (e instanceof ApiError) {
@@ -72,6 +109,26 @@ export function deviceMessage(e: unknown): string {
         return '同じ名前の端末があります'
       case 'not_found':
         return '端末が見つかりません（削除された可能性があります）'
+      case 'not_connected':
+        return '端末がつながっていません。USB でつないで、端末で USB デバッグを許可してください'
+      case 'not_empty':
+        return '保存先が空ではありません。空のフォルダか、まだ無い場所を選んでください'
+      case 'serial_registered':
+        return 'この端末は登録済みです'
+      case 'plan_changed':
+        return '差分が変わりました。確認し直してから同期してください'
+      case 'open_plan_exists':
+        return OPEN_PLAN_TITLE
+      case 'pending_reevaluation':
+        return 'スマートプレイリストの評価待ちです。評価が終わってから同期してください'
+      case 'busy':
+        return '端末を別の処理が使っています。しばらくしてからやり直してください'
+      case 'no_open_plan':
+        return '途中の計画はありません'
+      case 'plan_unreadable':
+        return '途中の計画を読めません。破棄してください'
+      case 'adb_disabled':
+        return ADB_DISABLED_MESSAGE
     }
     return e.message
   }

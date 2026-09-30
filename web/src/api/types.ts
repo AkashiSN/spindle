@@ -387,15 +387,31 @@ export type Device = {
   variant: DeviceVariant
   selection: DeviceSelection
   generation: number
-  /** 接続状態（Android は P5-3 で埋める。iPhone は常に null） */
+  /** 接続状態（Android は監視が見た状態。iPhone は常に null） */
   connected: boolean | null
+  adb_state: string | null
+  adb_volume: string | null
+  adb_root: string | null
   counts: DeviceCounts
   last_synced_at: number | null
   playlist_ids: number[]
   /** 同期が途中か実行中（設定を変えられない） */
   open_plan: boolean
+  /** open な計画がある（続きを実行か破棄の対象） */
+  plan_open: boolean
+  /** その端末の queued / running の同期ジョブ */
+  sync_job: { id: number; state: 'queued' | 'running' } | null
 }
 export type DeviceList = { items: Device[] }
+export type AdbVolume = { volume: string; path: string; free: number; state: 'missing' | 'empty' | 'nonempty' }
+export type UnregisteredAdb = {
+  serial: string
+  model: string | null
+  state: string
+  volumes: AdbVolume[]
+  error: string | null
+}
+export type UnregisteredList = { items: UnregisteredAdb[] }
 export type DiffOp = 'add' | 'update' | 'move' | 'update_move' | 'delete' | 'waiting' | 'error'
 export type DiffItem = {
   op: DiffOp

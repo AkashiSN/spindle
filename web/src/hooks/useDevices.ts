@@ -4,7 +4,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPatch, apiPost } from '../api/client'
-import type { Device, DeviceDiff, DeviceList, DeviceSelection, DeviceVariant, SelectionEstimate } from '../api/types'
+import type {
+  Device,
+  DeviceDiff,
+  DeviceList,
+  DeviceSelection,
+  DeviceVariant,
+  SelectionEstimate,
+  UnregisteredList,
+} from '../api/types'
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { mergePending, togglePlaylist } from '../lib/devicePicker'
 import { withPlaylistIds } from '../lib/devicePicker'
@@ -121,6 +129,8 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     [],
   )
 
+  const fetchUnregistered = useCallback(() => apiFetch<UnregisteredList>('/api/devices/adb/unregistered'), [])
+
   const run = useCallback(
     async (f: () => Promise<unknown>): Promise<boolean> => {
       setBusy(true)
@@ -132,6 +142,11 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
         return true
       } catch (e) {
         setError(deviceMessage(e))
+        // 差分が変わっていたら取り直す（画面の plan_token を古いまま持たない）
+        if (e instanceof ApiError && (e.code === 'plan_changed' || e.code === 'open_plan_exists')) {
+          fetchList()
+          fetchDiff()
+        }
         return false
       } finally {
         setBusy(false)
@@ -187,6 +202,30 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
       setItems((cur) => withDevice(cur, d))
       return d
     },
+    /** 未登録の Android（接続中）。登録のフォームを開いている間だけ取る */
+    fetchUnregistered,
+    /** Android を登録する。成功すれば作った端末 */
+    registerAndroid: async (body: {
+      name: string
+      variant: DeviceVariant
+      selection: DeviceSelection
+      serial: string
+      volume: string
+    }): Promise<Device | null> => {
+      let created: Device | null = null
+      const ok = await run(async () => {
+        created = await apiPost<Device>('/api/devices', { ...body, transport: 'adb' })
+      })
+      if (!ok || created == null) return null
+      const d: Device = created
+      setItems((cur) => withDevice(cur, d))
+      return d
+    },
+    sync: (id: number, planToken: string) =>
+      run(() => apiPost<{ job_id: number }>(`/api/devices/${id}/sync`, { plan_token: planToken })),
+    resume: (id: number) => run(() => apiPost<{ job_id: number }>(`/api/devices/${id}/plans/open/resume`, {})),
+    abandon: (id: number) => run(() => apiPost<Device>(`/api/devices/${id}/plans/open/abandon`, {})),
+    verify: (id: number) => run(() => apiPost<{ job_id: number }>(`/api/devices/${id}/verify`, {})),
     update: (id: number, patch: { name?: string; selection?: DeviceSelection; variant?: DeviceVariant }) =>
       run(() => apiPatch<Device>(`/api/devices/${id}`, patch)),
     remove: (id: number) => run(() => apiFetch<void>(`/api/devices/${id}`, { method: 'DELETE' })),

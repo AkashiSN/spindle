@@ -769,3 +769,25 @@ async fn list_reports_connection_and_diff_reports_free() {
     assert_eq!(v["items"][0]["connected"], false);
     assert!(v["items"][0]["adb_state"].is_null());
 }
+
+#[tokio::test]
+async fn list_reports_open_plan_and_sync_job() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    let (_, v) = app.call(Method::GET, "/api/devices", None).await;
+    assert_eq!(v["items"][0]["plan_open"], false);
+    assert!(v["items"][0]["sync_job"].is_null());
+    let token = app.diff_token(id).await;
+    let (_, j) = app
+        .call(
+            Method::POST,
+            &format!("/api/devices/{id}/sync"),
+            Some(json!({"plan_token": token})),
+        )
+        .await;
+    let (_, v) = app.call(Method::GET, "/api/devices", None).await;
+    assert_eq!(v["items"][0]["plan_open"], true);
+    assert_eq!(v["items"][0]["sync_job"]["id"], j["job_id"]);
+    assert_eq!(v["items"][0]["sync_job"]["state"], "queued");
+}
