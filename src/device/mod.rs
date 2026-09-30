@@ -10,3 +10,4 @@ pub mod recover;
 pub mod remote;
 pub mod store;
 pub mod sync;
+pub mod verify;
