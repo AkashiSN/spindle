@@ -6,3 +6,5 @@ pub mod journal;
 pub mod ondevice;
 pub mod plan;
 pub mod quote;
+pub mod remote;
+pub mod store;
