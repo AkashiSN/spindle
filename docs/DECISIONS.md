@@ -4362,10 +4362,11 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
 - **大小文字だけの改名**: 実機の `mv` は成功扱いで何もしない。エンジンは一時名を経由するので正しく改名される。試験用の FakeFs を実機の挙動に合わせた
 - **排他**: 端末ごとに `job_mutexes` の `device:<id>` とプロセス内のロックを取る。API の破棄はロックが取れなければ 409 `busy`。**`device_sync` はロックを取った後で計画がまだ open かを確かめ直し、同期の途中で閉じられていたら巻き戻す**（`close_plan` が false なら Fatal）。ロックの前の確認だけでは、待っている間に破棄された計画を進めてしまう
 - **未接続の待ち**: `Outcome::RequeueAfter(300)`（attempts を数えない）。`track-devices` が `device` を見たら `device_scan` を投入して `run_after` を前倒しする。`track-devices` の stderr は常時読み捨てずに流し続ける（詰まると子が止まる）。`parse_frame` はタブを含む短い形式の行をタブで分割する（`serial\tstate`。実機が使う `-l` 形式は影響なし）
-- **adb を使わない構成**: `[devices].adb_server` が空なら adb の API はすべて 503 `adb_disabled` を返す。設定は前後に空白のある `adb_server` を拒否する（起動時の検証）
+- **adb を使わない構成**: `[devices].adb_server` が空なら、Android の登録・未登録の一覧・同期・再開・検証・通常の破棄は 503 `adb_disabled` を返す。強制破棄と端末の削除は adb を使わないので動く。設定は前後に空白のある `adb_server` を拒否する（起動時の検証）
 - **登録の失敗**: 行を作ってから manifest を作り、失敗したら `.spindle` を片付けて行を消す。`.spindle` だけの残り（manifest が読めない・uuid が DB に無い）は空とみなして作り直す
 - **保存先の変更**: PATCH では変えない。削除して登録し直す（既存の写しの扱いを推測しない）
 - **破棄**: 接続中に回復してから閉じる。回復は `vacating` 以降を完遂し `prepared` 以前を破棄するので、閉じた後に進みかけのバッチは残らない。計画の JSON が壊れていても行の id で破棄できる
+- **端末が戻らないときの逃げ道**（2026-10-01。最終レビューの指摘に対しユーザが両方を選んだ）: 同期の途中で端末が壊れた・手放したなどで戻らないと、計画が open のまま残り設定を変えられなくなる。そこで 2 つを用意する。(a) `DELETE /api/devices/:id` は途中の計画があっても通す。断るのは `device_sync` が running のときだけ（409 `busy`）。待ちの `device_sync` / `device_verify` / `device_scan` は取り消し、計画は `ON DELETE CASCADE` で行と一緒に消える。端末上のファイルには触らない。(b) `POST /api/devices/:id/plans/open/abandon` に `{ "force": true }` を渡すと、端末につながず回復もせずに計画を行の id で `abandoned` に閉じ、待ちの同期を取り消す。断るのは `device_sync` が running か端末のロック中のとき（409 `busy`）。ADB 同期が無効でも使える。安全なのは、次につないだときの回復が計画の状態と無関係に、端末のジャーナルから封印済みバッチを完遂または取り消すため。端末タブは、未接続か破棄が `not_connected` で断られたときに「強制破棄」を確認つきで出す。PATCH の規則は変えない
 
 **理由**: ネットワーク名前空間の分離と USB の hot-plug が両立しないのは実機で確かめた事実で、host ネットワークのサイドカーを Unix ソケット限定で公開すれば LAN に 5037 を開かずに済む。それ以外は、同期を再開できるジョブにして（不変条件 6）、端末側の破棄・回復を編集バッチと同じく巻き戻せる形に保つため。
 
@@ -4374,7 +4375,9 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
 - host ネットワーク + `-a`（LAN に 5037 が開く）
 - Poweramp の `eraseTags` 付きの再スキャン（全タグ消去と CUE の副作用）
 
-**持ち越し**（P5-3a の記録から、今回やらないもの）: 回復の在否判定の stat 化（進みかけのバッチの分だけなので件数は小さい）、成分ごと外したときの巻き添えの理由、`Book::occupied_by_other` の索引。`adb_disabled` でも端末タブの 3 秒ごとの取り直しは続く。
+**持ち越し**（P5-3a の記録から、今回やらないもの）: 回復の在否判定の stat 化（進みかけのバッチの分だけなので件数は小さい）、成分ごと外したときの巻き添えの理由、`Book::occupied_by_other` の索引。`adb_disabled` でも端末タブの 3 秒ごとの取り直しは続く。`list_files` を `transfer_timeout` で待つようにしたが、大きなライブラリでの実際の所要時間は Task 11 で測る。
+
+**配備**（本番に Android の同期を入れるとき）: 本番の config.toml には `[devices]` が無く、Android の同期は無効のまま。有効にするには `[devices] adb_server = "localfilesystem:/run/adb/adb.sock"` を足し、`/mnt/ssd/apps/spindle/adb-keys` を作り、TrueNAS のアプリの YAML に adb サービスを足す（spindle 側のソケットのボリュームは `:ro`）。
 
 **実測**: shell v2 の stdin で約 38MB/s（`adb push` は約 41MB/s）。3GB で約 73 秒。
 
