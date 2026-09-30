@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import type { Device, DeviceCounts, DeviceDiff, DiffItem } from '../api/types'
-import { connectionNote, syncButton, volumeLabel, volumeUsable, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
+import { connectionNote, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
 
 const counts = (p: Partial<DeviceCounts> = {}): DeviceCounts => ({
   add: 0, update: 0, move: 0, delete: 0, waiting: 0, error: 0, synced: 0, ...p,
@@ -102,6 +102,47 @@ describe('syncButton', () => {
     expect(syncButton({ ...base, plan_open: true }, diff)).toEqual({ enabled: false, title: '前回の同期が途中です。続きを実行するか破棄してください' })
     expect(syncButton({ ...base, sync_job: { id: 3, state: 'running' } }, diff)).toEqual({ enabled: false, title: '同期中' })
     expect(syncButton(base, { items: [], playlists: [] } as unknown as DeviceDiff)).toEqual({ enabled: false, title: '差分がありません' })
+  })
+  it('待ちの同期は接続の有無で説明を変える', () => {
+    const queued: Device = { ...base, sync_job: { id: 3, state: 'queued' } }
+    expect(syncButton(queued, diff)).toEqual({ enabled: false, title: '同期の待ち' })
+    expect(syncButton({ ...queued, connected: false }, diff)).toEqual({ enabled: false, title: '端末の接続を待っています' })
+    expect(queuedSyncText(queued)).toBe('同期の待ち')
+    expect(queuedSyncText({ ...queued, connected: false })).toBe('端末の接続を待っています')
+  })
+})
+
+describe('offerForceAbandon', () => {
+  const open: Device = { ...base, plan_open: true, open_plan: true }
+  it('未接続か、破棄が not_connected で断られたときだけ強制破棄を出す', () => {
+    expect(offerForceAbandon(open, null)).toBe(false)
+    expect(offerForceAbandon(open, 'not_connected')).toBe(true)
+    expect(offerForceAbandon({ ...open, connected: false }, null)).toBe(true)
+    expect(offerForceAbandon({ ...open, connected: false, sync_job: { id: 3, state: 'queued' } }, null)).toBe(true)
+  })
+  it('計画が無い・同期が実行中・Android でないなら出さない', () => {
+    expect(offerForceAbandon({ ...open, plan_open: false, connected: false }, null)).toBe(false)
+    expect(offerForceAbandon({ ...open, connected: false, sync_job: { id: 3, state: 'running' } }, null)).toBe(false)
+    expect(offerForceAbandon({ ...open, transport: 'agent', connected: null }, 'not_connected')).toBe(false)
+  })
+})
+
+describe('jobStateChanged', () => {
+  it('ジョブの状態が変わったときだけ true（進捗だけのイベントは false）', () => {
+    const seen = new Map()
+    expect(jobStateChanged(seen, { id: 1, state: 'queued' })).toBe(true)
+    expect(jobStateChanged(seen, { id: 1, state: 'queued' })).toBe(false)
+    expect(jobStateChanged(seen, { id: 1, state: 'running' })).toBe(true)
+    expect(jobStateChanged(seen, { id: 1, state: 'running' })).toBe(false)
+    expect(jobStateChanged(seen, { id: 1, state: 'cancelled' })).toBe(true)
+    expect(seen.size).toBe(0)
+  })
+  it('終わりの状態は毎回 true で、覚えておかない（再試行で queued に戻っても拾う）', () => {
+    const seen = new Map()
+    expect(jobStateChanged(seen, { id: 2, state: 'done' })).toBe(true)
+    expect(jobStateChanged(seen, { id: 2, state: 'failed' })).toBe(true)
+    expect(jobStateChanged(seen, { id: 2, state: 'queued' })).toBe(true)
+    expect(seen.get(2)).toBe('queued')
   })
 })
 

@@ -19,7 +19,10 @@ import {
   connectionNote,
   describeEvaluation,
   deviceMessage,
+  FORCE_ABANDON_CONFIRM,
+  offerForceAbandon,
   OP_LABELS,
+  queuedSyncText,
   sortDiffItems,
   syncButton,
   syncSummary,
@@ -332,6 +335,9 @@ function AndroidCandidate({
     >
       <strong className="small">{found.model?.replaceAll('_', ' ') ?? found.serial}</strong>
       {found.error != null && <span className="error small">{found.error}</span>}
+      <p className="muted small">
+        Poweramp は設定したフォルダだけをスキャンします。保存先が Poweramp の音楽フォルダの下にあることを確かめてください
+      </p>
       <label className="small">
         名前
         <input value={name} onChange={(e) => setName(e.target.value)} />
@@ -408,13 +414,15 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
       {device.transport === 'adb' ? (
         <>
           {connectionNote(device) != null && <p className="devices-warn small">{connectionNote(device)}</p>}
-          {device.plan_open && device.sync_job == null && (
+          {device.plan_open && device.sync_job?.state !== 'running' && (
             <div className="devices-warn small">
               <p>前回の同期が途中です</p>
               <div className="op-row">
-                <button type="button" disabled={devices.busy} onClick={() => void devices.resume(device.id)}>
-                  続きを実行
-                </button>
+                {device.sync_job == null && (
+                  <button type="button" disabled={devices.busy} onClick={() => void devices.resume(device.id)}>
+                    続きを実行
+                  </button>
+                )}
                 <button
                   type="button"
                   className="danger"
@@ -427,11 +435,24 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
                 >
                   破棄
                 </button>
+                {offerForceAbandon(device, devices.errorCode) && (
+                  <button
+                    type="button"
+                    className="danger"
+                    disabled={devices.busy}
+                    title="端末につながずに計画を閉じます"
+                    onClick={() => {
+                      if (window.confirm(FORCE_ABANDON_CONFIRM)) void devices.forceAbandon(device.id)
+                    }}
+                  >
+                    強制破棄
+                  </button>
+                )}
               </div>
             </div>
           )}
           {device.sync_job != null && (
-            <p className="small">{device.sync_job.state === 'running' ? '同期中…' : '端末の接続を待っています'}</p>
+            <p className="small">{device.sync_job.state === 'running' ? '同期中…' : queuedSyncText(device)}</p>
           )}
           <div className="op-row">
             <button
@@ -710,9 +731,11 @@ function SettingsTab({ device, devices }: { device: Device; devices: Devices }) 
         <button
           type="button"
           className="danger"
-          disabled={devices.busy}
+          disabled={devices.busy || device.sync_job?.state === 'running'}
+          title={device.sync_job?.state === 'running' ? '同期中は削除できません' : undefined}
           onClick={() => {
-            if (window.confirm(`端末「${device.name}」を削除しますか？（端末上のファイルは消しません）`)) {
+            const plan = device.plan_open ? '途中の計画も破棄します。' : ''
+            if (window.confirm(`端末「${device.name}」を削除しますか？（${plan}端末上のファイルは消しません）`)) {
               void devices.remove(device.id)
             }
           }}

@@ -1,7 +1,7 @@
 // 端末タブの純粋ロジック（P5-2、D-95）。件数・差分表の並び・文言
 
 import { ApiError } from '../api/client'
-import type { AdbVolume, Device, DeviceCounts, DeviceDiff, DiffItem, DiffOp } from '../api/types'
+import type { AdbVolume, Device, DeviceCounts, DeviceDiff, DiffItem, DiffOp, JobEvent, JobState } from '../api/types'
 import { formatDateTime } from './history'
 
 /** 未反映の件数（ナビのバッジ・一覧）。待ちはハッシュ計算などを待っているだけなので数えない */
@@ -86,15 +86,42 @@ export function volumeUsable(v: AdbVolume): boolean {
   return v.state !== 'nonempty'
 }
 
+/** 待ちの同期の説明。未接続なら接続を待っている（つながっていれば順番待ち） */
+export function queuedSyncText(d: Device): string {
+  return d.connected === false ? '端末の接続を待っています' : '同期の待ち'
+}
+
 export function syncButton(d: Device, diff: DeviceDiff): { enabled: boolean; title: string | null } {
   if (d.sync_job != null) {
-    return { enabled: false, title: d.sync_job.state === 'running' ? '同期中' : '同期の待ち（端末の接続を待っています）' }
+    return { enabled: false, title: d.sync_job.state === 'running' ? '同期中' : queuedSyncText(d) }
   }
   if (d.plan_open) return { enabled: false, title: OPEN_PLAN_TITLE }
   const tracks = diff.items.filter((i) => i.op !== 'waiting' && i.op !== 'error').length
   const lists = diff.playlists.filter((p) => p.op !== 'error').length
   if (tracks + lists === 0) return { enabled: false, title: '差分がありません' }
   return { enabled: true, title: null }
+}
+
+export const FORCE_ABANDON_CONFIRM =
+  '端末がつながっていない状態で途中の計画を破棄します。端末に残った途中の移動は、次につないだときの回復で完遂または取り消しになります。よろしいですか？'
+
+/** 途中の計画の「強制破棄」（端末につながずに閉じる。D-98）を出すか。端末が未接続か、
+ * 通常の破棄が not_connected で断られたとき。同期が実行中なら出さない（サーバも 409 busy） */
+export function offerForceAbandon(d: Device, lastErrorCode: string | null): boolean {
+  if (d.transport !== 'adb' || !d.plan_open || d.sync_job?.state === 'running') return false
+  return d.connected === false || lastErrorCode === 'not_connected'
+}
+
+/** ジョブのイベントが状態の変化か（進捗だけのイベントは false）。`seen` はジョブごとの直前の状態で、
+ * 終わりの状態は覚えない（大きくならない。再試行で queued に戻っても変化として拾う） */
+export function jobStateChanged(seen: Map<number, JobState>, e: Pick<JobEvent, 'id' | 'state'>): boolean {
+  if (e.state === 'done' || e.state === 'failed' || e.state === 'cancelled') {
+    seen.delete(e.id)
+    return true
+  }
+  const changed = seen.get(e.id) !== e.state
+  seen.set(e.id, e.state)
+  return changed
 }
 
 /** 端末 API のエラーを日本語にする */
