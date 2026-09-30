@@ -337,6 +337,16 @@ pub async fn patch(
     }
 }
 
+enum Deleted {
+    /// 消した。取り消す待ちのジョブ
+    Done(Vec<i64>),
+    NotFound,
+    Busy,
+}
+
+/// 端末を削除する（D-98）。途中の計画があっても消せる（計画は行と一緒に ON DELETE CASCADE で消える）。
+/// 端末に戻れない（壊れた・手放した）ときの逃げ道。実行中の同期があるときだけ 409 `busy`。
+/// 端末上のファイルには触らない。待ちの同期・検証・差分の計算は取り消す
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -344,21 +354,34 @@ pub async fn delete(
     let res = state
         .db
         .write(move |c| {
-            if dbdev::get(c, id)?.is_none() {
-                return Ok(Guarded::NotFound);
+            let tx = c.transaction()?;
+            if dbdev::get(&tx, id)?.is_none() {
+                return Ok(Deleted::NotFound);
             }
-            if dbdev::has_open_work(c, id)? {
-                return Ok(Guarded::OpenPlan);
+            if dbdev::has_running_device_job(&tx, id, "device_sync")? {
+                return Ok(Deleted::Busy);
             }
-            dbdev::delete(c, id).map(Guarded::Done)
+            let queued = dbdev::queued_device_jobs(&tx, id, DEVICE_JOB_TYPES)?;
+            dbdev::delete(&tx, id)?;
+            tx.commit()?;
+            Ok(Deleted::Done(queued))
         })
         .await?;
-    Ok(match res {
-        Guarded::Done(_) => StatusCode::NO_CONTENT.into_response(),
-        Guarded::NotFound => not_found(),
-        Guarded::OpenPlan => open_plan(),
-    })
+    match res {
+        Deleted::Done(queued) => {
+            // 行を消した後に取り消す。間に走り出したものは端末が無いのを見て何もせずに終わる
+            for job_id in queued {
+                state.jobs.cancel(job_id).await?;
+            }
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+        Deleted::NotFound => Ok(not_found()),
+        Deleted::Busy => Ok(busy()),
+    }
 }
+
+/// 端末に紐づくジョブの種類（payload の `device_id` で端末を指す）
+const DEVICE_JOB_TYPES: &[&str] = &["device_sync", "device_verify", "device_scan"];
 
 #[derive(Deserialize)]
 pub struct PlaylistsBody {
@@ -1130,13 +1153,24 @@ pub async fn resume(
     })
 }
 
+#[derive(Deserialize, Default)]
+pub struct AbandonBody {
+    /// 端末につながずに計画を閉じる（D-98）
+    #[serde(default)]
+    pub force: bool,
+}
+
 /// open な計画を破棄する（仕様 ③「計画の終端」）。端末で回復を済ませ（封印済みバッチの `vacating` 以降は
 /// 前進で完遂、`prepared` 以前は破棄）、キャッシュを置き換えてから計画を閉じる。同期のジョブと
-/// 直列化するため、端末のロックを持ったまま閉じる
+/// 直列化するため、端末のロックを持ったまま閉じる。`force` なら端末につながない（[`force_abandon`]）
 pub async fn abandon(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    body: Option<Json<AbandonBody>>,
 ) -> Result<Response, ApiError> {
+    if body.is_some_and(|Json(b)| b.force) {
+        return force_abandon(&state, id).await;
+    }
     let (d, rt) = match adb_device(&state, id).await? {
         Ok(x) => x,
         Err(r) => return Ok(r),
@@ -1150,11 +1184,11 @@ pub async fn abandon(
             "端末 {id} の adb の設定（シリアル・ボリューム・root）が欠けている"
         )));
     };
-    let active = state
+    let running = state
         .db
-        .read(move |c| dbdev::active_device_job(c, id, "device_sync"))
+        .read(move |c| dbdev::has_running_device_job(c, id, "device_sync"))
         .await?;
-    if matches!(&active, Some((_, s)) if s == "running") {
+    if running {
         return Ok(busy());
     }
     if !rt.is_connected(&serial) {
@@ -1187,21 +1221,74 @@ pub async fn abandon(
             let tx = c.transaction()?;
             dbdev::apply_device_state(&tx, id, &items, &playlists, None, false, now)?;
             dbdev::close_plan(&tx, plan_id, PlanEnd::Abandoned, None, now)?;
-            let queued = dbdev::active_device_job(&tx, id, "device_sync")?
-                .filter(|(_, s)| s == "queued")
-                .map(|(job_id, _)| job_id);
+            let queued = dbdev::queued_device_jobs(&tx, id, &["device_sync"])?;
             tx.commit()?;
             Ok(queued)
         })
         .await?;
+    abandoned(&state, id, queued).await
+}
+
+/// 閉じた計画の待ちの同期を取り消して、端末の view を返す
+async fn abandoned(state: &AppState, id: i64, queued: Vec<i64>) -> Result<Response, ApiError> {
     // 閉じた計画のジョブは走っても何もしないが、待ちの表示を残さない
-    if let Some(job_id) = queued {
+    for job_id in queued {
         state.jobs.cancel(job_id).await?;
     }
-    Ok(match view_of(&state, id).await? {
+    Ok(match view_of(state, id).await? {
         Some(v) => Json(v).into_response(),
         None => not_found(),
     })
+}
+
+enum ForceResult {
+    Closed(Vec<i64>),
+    NoPlan,
+    Busy,
+}
+
+/// 端末につながずに open な計画を閉じる（D-98。端末が戻らないときの逃げ道）。回復も
+/// キャッシュの置き換えもしない。次につないだときの回復が、端末のジャーナルから封印済みバッチを
+/// 計画の状態と無関係に完遂または取り消すので安全。ADB 同期が無効でも使える（adb を使わない）。
+/// 実行中の同期があるか、端末のロックを別の処理が持っていれば 409 `busy`。計画は行の id で閉じる
+/// （JSON が壊れていても閉じられる）
+async fn force_abandon(state: &AppState, id: i64) -> Result<Response, ApiError> {
+    let Some(d) = state.db.read(move |c| dbdev::get(c, id)).await? else {
+        return Ok(not_found());
+    };
+    if d.transport != Transport::Adb {
+        return Ok(bad_request("Android（adb）の端末ではない"));
+    }
+    // 同期のジョブ・通常の破棄と直列化する（ADB 同期が無効ならそれらは動かない）
+    let _guard = match state.adb.as_ref() {
+        Some(rt) => match rt.device_lock(id).try_lock_owned() {
+            Ok(g) => Some(g),
+            Err(_) => return Ok(busy()),
+        },
+        None => None,
+    };
+    let res = state
+        .db
+        .write(move |c| {
+            let tx = c.transaction()?;
+            if dbdev::has_running_device_job(&tx, id, "device_sync")? {
+                return Ok(ForceResult::Busy);
+            }
+            let Some(plan_id) = dbdev::open_plan_id(&tx, id)? else {
+                return Ok(ForceResult::NoPlan);
+            };
+            dbdev::close_plan(&tx, plan_id, PlanEnd::Abandoned, None, now_epoch())?;
+            let queued = dbdev::queued_device_jobs(&tx, id, &["device_sync"])?;
+            tx.commit()?;
+            tracing::info!(device_id = id, plan_id, "端末につながずに計画を破棄した");
+            Ok(ForceResult::Closed(queued))
+        })
+        .await?;
+    match res {
+        ForceResult::Closed(queued) => abandoned(state, id, queued).await,
+        ForceResult::NoPlan => Ok(no_open_plan()),
+        ForceResult::Busy => Ok(busy()),
+    }
 }
 
 /// 端末の全曲の sha256 を検証するジョブを投入する

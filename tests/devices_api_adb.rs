@@ -264,6 +264,33 @@ impl App {
         self.query("SELECT COUNT(*) FROM devices", [])
     }
 
+    /// ADB 同期が無効でも行が残っている端末（後から無効にした）と、その open な計画を直接作る
+    async fn insert_adb_device_with_open_plan(&self) -> i64 {
+        let id = self
+            .db
+            .write(|c| {
+                devices::create(
+                    c,
+                    &devices::NewDevice {
+                        name: "Xperia",
+                        transport: spindle::domain::device::Transport::Adb,
+                        variant: spindle::domain::derived::Variant::Opus,
+                        selection: devices::Selection::All,
+                        adb: Some(("SER1", "emulated", "Music/spindle")),
+                    },
+                    0,
+                )
+            })
+            .await
+            .unwrap()
+            .id;
+        self.raw_exec(&format!(
+            "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at)
+             VALUES ({id}, 'x', '[]', 'open', 0)"
+        ));
+        id
+    }
+
     fn uuid_of(&self, id: i64) -> String {
         self.query("SELECT uuid FROM devices WHERE id = ?1", [id])
     }
@@ -790,4 +817,201 @@ async fn list_reports_open_plan_and_sync_job() {
     assert_eq!(v["items"][0]["plan_open"], true);
     assert_eq!(v["items"][0]["sync_job"]["id"], j["job_id"]);
     assert_eq!(v["items"][0]["sync_job"]["state"], "queued");
+}
+
+// ---- 端末が戻らないときの逃げ道（F2: 削除と強制破棄。D-98） ----
+
+#[tokio::test]
+async fn delete_is_allowed_with_an_open_plan_and_leaves_device_files() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    app.confirm(id).await;
+    app.disconnect();
+    let (s, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{v}");
+    assert_eq!(app.device_count(), 0);
+    let plans: i64 = app.query("SELECT COUNT(*) FROM device_sync_plans", []);
+    assert_eq!(plans, 0, "計画は端末の行と一緒に消える");
+    assert!(
+        app.device_root("emulated").join(".spindle").exists(),
+        "端末のファイルには触らない"
+    );
+}
+
+#[tokio::test]
+async fn delete_refuses_a_running_sync_and_cancels_queued_device_jobs() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    let token = app.diff_token(id).await;
+    let (s, v) = app
+        .call(
+            Method::POST,
+            &format!("/api/devices/{id}/sync"),
+            Some(json!({"plan_token": token})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    let sync = v["job_id"].as_i64().unwrap();
+    let (s, v) = app
+        .call(Method::POST, &format!("/api/devices/{id}/verify"), None)
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    let verify = v["job_id"].as_i64().unwrap();
+    let scan: i64 = app.query(
+        "SELECT id FROM jobs WHERE type = 'device_scan' AND state = 'queued'",
+        [],
+    );
+    // 実行中の同期（ワーカーは動いていない。状態だけを見る）
+    app.raw_exec(&format!(
+        "UPDATE jobs SET state = 'running' WHERE id = {sync}"
+    ));
+    let (s, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("busy"))
+    );
+    assert_eq!(app.device_count(), 1);
+    let state: String = app.query("SELECT state FROM jobs WHERE id = ?1", [verify]);
+    assert_eq!(state, "queued", "断ったときは何も取り消さない");
+    app.raw_exec(&format!(
+        "UPDATE jobs SET state = 'queued' WHERE id = {sync}"
+    ));
+    let (s, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{v}");
+    for job in [sync, verify, scan] {
+        let state: String = app.query("SELECT state FROM jobs WHERE id = ?1", [job]);
+        assert_eq!(state, "cancelled", "job {job}");
+    }
+}
+
+#[tokio::test]
+async fn delete_works_when_adb_is_disabled() {
+    let app = App::new_without_adb().await;
+    let id = app.insert_adb_device_with_open_plan().await;
+    let (s, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{v}");
+    assert_eq!(app.device_count(), 0);
+}
+
+async fn force_abandon(app: &App, id: i64) -> (StatusCode, Value) {
+    app.call(
+        Method::POST,
+        &format!("/api/devices/{id}/plans/open/abandon"),
+        Some(json!({"force": true})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn force_abandon_closes_the_plan_while_disconnected() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    let token = app.diff_token(id).await;
+    let (s, v) = app
+        .call(
+            Method::POST,
+            &format!("/api/devices/{id}/sync"),
+            Some(json!({"plan_token": token})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    let job = v["job_id"].as_i64().unwrap();
+    app.disconnect();
+    // force が無い・false なら今までどおり接続が要る
+    for body in [None, Some(json!({})), Some(json!({"force": false}))] {
+        let (s, v) = app
+            .call(
+                Method::POST,
+                &format!("/api/devices/{id}/plans/open/abandon"),
+                body,
+            )
+            .await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (StatusCode::CONFLICT, Some("not_connected"))
+        );
+    }
+    let (s, v) = force_abandon(&app, id).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["plan_open"], false);
+    assert_eq!(app.plan_state(id).as_deref(), Some("abandoned"));
+    let state: String = app.query("SELECT state FROM jobs WHERE id = ?1", [job]);
+    assert_eq!(state, "cancelled");
+    let (s, v) = force_abandon(&app, id).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("no_open_plan"))
+    );
+}
+
+#[tokio::test]
+async fn force_abandon_works_with_unreadable_plan_json() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    app.confirm(id).await;
+    app.raw_exec(r#"UPDATE device_sync_plans SET plan = '{"broken": true}'"#);
+    app.disconnect();
+    let (s, v) = force_abandon(&app, id).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(app.plan_state(id).as_deref(), Some("abandoned"));
+}
+
+#[tokio::test]
+async fn force_abandon_refuses_a_running_sync_and_a_held_lock() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let id = app.register_ok("Xperia", "SER1", "emulated").await;
+    let token = app.diff_token(id).await;
+    let (_, v) = app
+        .call(
+            Method::POST,
+            &format!("/api/devices/{id}/sync"),
+            Some(json!({"plan_token": token})),
+        )
+        .await;
+    let job = v["job_id"].as_i64().unwrap();
+    app.disconnect();
+    app.raw_exec(&format!(
+        "UPDATE jobs SET state = 'running' WHERE id = {job}"
+    ));
+    let (s, v) = force_abandon(&app, id).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("busy"))
+    );
+    app.raw_exec(&format!(
+        "UPDATE jobs SET state = 'queued' WHERE id = {job}"
+    ));
+    let lock = app.rt.device_lock(id);
+    let g = lock.try_lock().unwrap();
+    let (s, v) = force_abandon(&app, id).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("busy"))
+    );
+    drop(g);
+    assert_eq!(app.plan_state(id).as_deref(), Some("open"));
+    let (s, v) = force_abandon(&app, id).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn force_abandon_works_when_adb_is_disabled() {
+    let app = App::new_without_adb().await;
+    let id = app.insert_adb_device_with_open_plan().await;
+    let (s, v) = force_abandon(&app, id).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(app.plan_state(id).as_deref(), Some("abandoned"));
 }

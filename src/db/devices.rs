@@ -915,6 +915,35 @@ pub fn active_device_job(
         .optional()?)
 }
 
+/// 端末の `job_type` のジョブが running か（新しい queued があっても running を見落とさない）
+pub fn has_running_device_job(conn: &Connection, device_id: i64, job_type: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM jobs WHERE type = ?2 AND state = 'running'
+           AND json_extract(payload, '$.device_id') = ?1)",
+        params![device_id, job_type],
+        |r| r.get::<_, i64>(0),
+    )? == 1)
+}
+
+/// 端末の queued のジョブ（`job_types` の種類）の id
+pub fn queued_device_jobs(
+    conn: &Connection,
+    device_id: i64,
+    job_types: &[&str],
+) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM jobs WHERE type = ?2 AND state = 'queued'
+           AND json_extract(payload, '$.device_id') = ?1 ORDER BY id",
+    )?;
+    let mut ids = Vec::new();
+    for t in job_types {
+        for id in stmt.query_map(params![device_id, t], |r| r.get(0))? {
+            ids.push(id?);
+        }
+    }
+    Ok(ids)
+}
+
 /// この uuid の端末が登録されているか（端末に残った manifest が生きた登録のものかの判定）
 pub fn uuid_exists(conn: &Connection, uuid: &str) -> Result<bool> {
     Ok(conn.query_row(
