@@ -771,6 +771,8 @@ fn devices_rejects_bad_values() {
         "adb_server = \"tcp:\"",
         "adb_timeout_secs = 0",
         "adb_transfer_timeout_secs = 0",
+        "adb_server = \" tcp:127.0.0.1:5037\"", // 前の空白
+        "adb_server = \"tcp:127.0.0.1:5037 \"", // 後ろの空白
     ] {
         assert!(
             matches!(
@@ -785,4 +787,14 @@ fn devices_rejects_bad_values() {
         "ffmpeg = \"ffmpeg\"\nflac = \"flac\"\nopusenc = \"opusenc\"\ncdparanoia = \"cd-paranoia\"\ncdrdao = \"cdrdao\"\nytdlp = \"yt-dlp\"\nadb = \" \"",
     );
     assert!(matches!(Config::parse(&text), Err(ConfigError::Invalid(_))));
+}
+
+#[test]
+fn bin_adb_defaults_when_omitted() {
+    // 既存の設定（[bin].adb が無い）との後方互換性を確認
+    let mut root: toml::Table = toml::from_str(&base_config()).unwrap();
+    let bin = root["bin"].as_table_mut().unwrap();
+    bin.remove("adb");
+    let cfg = Config::parse(&toml::to_string(&root).unwrap()).unwrap();
+    assert_eq!(cfg.bin.adb, "adb");
 }

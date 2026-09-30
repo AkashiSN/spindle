@@ -680,8 +680,8 @@ impl Config {
         }
 
         // [bin]
-        if self.bin.adb.trim().is_empty() {
-            return invalid("bin.adb は空にできない".into());
+        if self.bin.adb.trim().is_empty() || self.bin.adb != self.bin.adb.trim() {
+            return invalid("bin.adb は空にできない（前後の空白も不可）".into());
         }
         for (key, value) in self.bin.entries() {
             if value.trim().is_empty() {
@@ -689,18 +689,21 @@ impl Config {
             }
         }
         // [devices]
-        let server = self.devices.adb_server.trim();
-        if !server.is_empty() {
-            let ok = if let Some(p) = server.strip_prefix("localfilesystem:") {
+        if !self.devices.adb_server.is_empty() {
+            if self.devices.adb_server != self.devices.adb_server.trim() {
+                return invalid("devices.adb_server に前後の空白がない（無視されない）".into());
+            }
+            let ok = if let Some(p) = self.devices.adb_server.strip_prefix("localfilesystem:") {
                 p.starts_with('/') && p.len() > 1
-            } else if let Some(hp) = server.strip_prefix("tcp:") {
+            } else if let Some(hp) = self.devices.adb_server.strip_prefix("tcp:") {
                 !hp.is_empty()
             } else {
                 false
             };
             if !ok {
                 return invalid(format!(
-                    "devices.adb_server は localfilesystem:/絶対パス か tcp:ホスト:ポート: {server:?}"
+                    "devices.adb_server は localfilesystem:/絶対パス か tcp:ホスト:ポート: {:?}",
+                    self.devices.adb_server
                 ));
             }
         }
