@@ -4348,3 +4348,36 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
   RG が揃えば作る曲（`derived::covered`。RG 待ちも「これから作る」に数える）
 - 持ち越し: 端末配信の待ちの理由（`Wait::RgPending`「RG 未解析」）は aac の解析だけを見ている。hold になる点は
   同じだが、表示を「未解析・未書き込み」に揃えるのは P5-2 の `devices.rs` の改修と合わせる
+
+## D-98 Android の同期をジョブと常駐監視で組み込み、adb サーバは host ネットワークのサイドカーが Unix ソケットで待ち受ける
+
+**背景**（2026-09-30。ユーザ依頼）: P5-3a のエンジン（D-95）を spindle に組み込む（ジョブ・`adb track-devices` の常駐監視・API・端末タブ・adb サイドカー）。設計は実機 spike（2026-09-30。XQ-CC44 / Android 14 / Poweramp build-1025 / platform-tools r37.0.1）の結果で D-95 と設計文書から直した点がある。以下がその決定。
+
+**決定**:
+
+- **サイドカー**: adb サーバは別コンテナで `network_mode: host` + `adb -L localfilesystem:/run/adb/adb.sock nodaemon server` として動かす。ソケットは名前付きボリュームで spindle と共有し、TCP は開かない。独自のネットワーク名前空間では端末の挿し直しを拾わない（`/dev/bus/usb` の bind・`/dev` の bind・`ADB_LIBUSB=0` のどれでも不可。netlink の uevent が届かない）ため
+- **HOME**: adb の子プロセスに `HOME=<data>/adb` を渡す。`ANDROID_USER_HOME` は効かない
+- **切断の分類**: 端末を抜くと stderr は空で rc=255 になる。adb の文言に当たらない失敗は `get-state` で確かめ、`device` 以外は未接続とみなす
+- **Poweramp**: 再スキャンの extras は付けない。パスを指定する extra は無く、`eraseTags` は全タグ消去と CUE の副作用がある。スキャン範囲は Poweramp のフォルダ設定なので、保存先はその下に置く
+- **大小文字だけの改名**: 実機の `mv` は成功扱いで何もしない。エンジンは一時名を経由するので正しく改名される。試験用の FakeFs を実機の挙動に合わせた
+- **排他**: 端末ごとに `job_mutexes` の `device:<id>` とプロセス内のロックを取る。API の破棄はロックが取れなければ 409 `busy`。**`device_sync` はロックを取った後で計画がまだ open かを確かめ直し、同期の途中で閉じられていたら巻き戻す**（`close_plan` が false なら Fatal）。ロックの前の確認だけでは、待っている間に破棄された計画を進めてしまう
+- **未接続の待ち**: `Outcome::RequeueAfter(300)`（attempts を数えない）。`track-devices` が `device` を見たら `device_scan` を投入して `run_after` を前倒しする。`track-devices` の stderr は常時読み捨てずに流し続ける（詰まると子が止まる）。`parse_frame` はタブを含む短い形式の行をタブで分割する（`serial\tstate`。実機が使う `-l` 形式は影響なし）
+- **adb を使わない構成**: `[devices].adb_server` が空なら adb の API はすべて 503 `adb_disabled` を返す。設定は前後に空白のある `adb_server` を拒否する（起動時の検証）
+- **登録の失敗**: 行を作ってから manifest を作り、失敗したら `.spindle` を片付けて行を消す。`.spindle` だけの残り（manifest が読めない・uuid が DB に無い）は空とみなして作り直す
+- **保存先の変更**: PATCH では変えない。削除して登録し直す（既存の写しの扱いを推測しない）
+- **破棄**: 接続中に回復してから閉じる。回復は `vacating` 以降を完遂し `prepared` 以前を破棄するので、閉じた後に進みかけのバッチは残らない。計画の JSON が壊れていても行の id で破棄できる
+
+**理由**: ネットワーク名前空間の分離と USB の hot-plug が両立しないのは実機で確かめた事実で、host ネットワークのサイドカーを Unix ソケット限定で公開すれば LAN に 5037 を開かずに済む。それ以外は、同期を再開できるジョブにして（不変条件 6）、端末側の破棄・回復を編集バッチと同じく巻き戻せる形に保つため。
+
+**却下**:
+- internal ネットワーク + 再起動で拾い直す（転送中の再起動になる。仕掛けが増える）
+- host ネットワーク + `-a`（LAN に 5037 が開く）
+- Poweramp の `eraseTags` 付きの再スキャン（全タグ消去と CUE の副作用）
+
+**持ち越し**（P5-3a の記録から、今回やらないもの）: 回復の在否判定の stat 化（進みかけのバッチの分だけなので件数は小さい）、成分ごと外したときの巻き添えの理由、`Book::occupied_by_other` の索引。`adb_disabled` でも端末タブの 3 秒ごとの取り直しは続く。
+
+**実測**: shell v2 の stdin で約 38MB/s（`adb push` は約 41MB/s）。3GB で約 73 秒。
+
+### 実機での確認
+
+（Task 11 の後に追記）
