@@ -12,7 +12,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::device::quote::{sh_quote, valid_serial};
+use crate::device::quote::{sh_quote, valid_root, valid_serial, valid_volume};
 use crate::device::remote::{DeviceFs, DirState, PutResult, RemoteError, RemoteFile, RemoteResult};
 use crate::domain::relpath::RelPath;
 use crate::jobs::process::{ExternalCommand, Output, ProcessError};
@@ -21,7 +21,7 @@ use crate::jobs::process::{ExternalCommand, Output, ProcessError};
 pub const STDIN_SUBCOMMAND: &str = "shell";
 pub const POWERAMP_PACKAGE: &str = "com.maxmpz.audioplayer";
 pub const POWERAMP_SCAN_ACTION: &str = "com.maxmpz.audioplayer.ACTION_SCAN_DIRS";
-/// Poweramp の API レシーバ（P5-3b の実機確認で固定する）
+/// Poweramp の API レシーバ（Poweramp build-1025 で確認。D-98）
 pub const POWERAMP_RECEIVER: &str = "com.maxmpz.audioplayer/.player.PowerampAPIReceiver";
 /// 「ファイルが無い」を表す端末側スクリプトの終了コード
 const MISSING_EXIT: i32 = 3;
@@ -30,8 +30,11 @@ const MISSING_EXIT: i32 = 3;
 pub struct AdbConfig {
     /// adb クライアントのパス（`[bin].adb`）
     pub program: PathBuf,
-    /// `ADB_SERVER_SOCKET` の値（`[devices].adb_server`。例 `tcp:adb:5037`）
+    /// `ADB_SERVER_SOCKET` の値（`[devices].adb_server`。例 `localfilesystem:/run/adb/adb.sock`）。
+    /// 必ず渡す: 無いとクライアントが TCP 5037 に自前のサーバを起こし、サイドカーと USB を奪い合う
     pub server: String,
+    /// adb の子に渡す `HOME`（`$HOME/.android` を作れないとクライアントが abort する。呼び出し側が作っておく）
+    pub home: PathBuf,
     /// 1 回で終わるコマンドのタイムアウト
     pub timeout: Duration,
     /// 転送（`put`）のタイムアウト
@@ -98,21 +101,23 @@ impl AdbFs {
         }
     }
 
+    fn base(&self, timeout: Duration) -> ExternalCommand {
+        base_command(&self.cfg, &self.serial, timeout)
+    }
+
     fn command(&self, sub: &str, script: String, timeout: Duration) -> ExternalCommand {
-        ExternalCommand::new(&self.cfg.program)
-            .env("ADB_SERVER_SOCKET", &self.cfg.server)
-            .arg("-s")
-            .arg(&self.serial)
-            .arg(sub)
-            .arg(script)
-            .timeout(timeout)
+        self.base(timeout).arg(sub).arg(script)
     }
 
     async fn shell(&self, script: String) -> RemoteResult<Output> {
-        self.command("shell", script, self.cfg.timeout)
+        match self
+            .command("shell", script, self.cfg.timeout)
             .run(&self.token)
             .await
-            .map_err(map_err)
+        {
+            Ok(o) => Ok(o),
+            Err(e) => Err(self.classify(e).await),
+        }
     }
 
     /// 終了コード [`MISSING_EXIT`] を None にする
@@ -126,18 +131,158 @@ impl AdbFs {
             Err(ProcessError::Failed { status, .. }) if status.code() == Some(MISSING_EXIT) => {
                 Ok(None)
             }
-            Err(e) => Err(map_err(e)),
+            Err(e) => Err(self.classify(e).await),
         }
     }
 
     async fn shell_stdin(&self, script: String, bytes: Vec<u8>) -> RemoteResult<()> {
-        self.command(STDIN_SUBCOMMAND, script, self.cfg.timeout)
+        match self
+            .command(STDIN_SUBCOMMAND, script, self.cfg.timeout)
             .stdin_bytes(bytes)
             .run(&self.token)
             .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => Err(self.classify(e).await),
+        }
+    }
+
+    /// adb の文言で決まらない失敗（転送中に抜かれると stderr 空・rc=255 になる。spike 1）は、
+    /// `get-state` で端末がまだ `device` かを確かめて分類する。`device` 以外（offline / unauthorized /
+    /// authorizing / 見つからない）はすべて未接続
+    async fn classify(&self, e: ProcessError) -> RemoteError {
+        match map_err(e) {
+            RemoteError::Failed(msg) if !self.token.is_cancelled() => {
+                match self.get_state().await {
+                    Ok(s) if s == "device" => RemoteError::Failed(msg),
+                    Ok(s) => {
+                        tracing::info!(serial = %self.serial, state = %s, "端末が device でないので未接続として扱う");
+                        RemoteError::NotConnected
+                    }
+                    Err(_) => RemoteError::NotConnected,
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// `adb -s <serial> get-state` の出力（`device` / `offline` / `unauthorized` …）
+    pub async fn get_state(&self) -> RemoteResult<String> {
+        let out = self
+            .base(self.cfg.timeout)
+            .arg("get-state")
+            .run(&self.token)
+            .await
             .map_err(map_err)?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+
+    /// 登録の途中で失敗したときの片付け: `<root>/.spindle` を消し、root が空になれば root も消す。
+    /// root 直下の他のファイル（手置き）には触らない
+    pub async fn discard_init(&self) -> RemoteResult<()> {
+        let r = self.quoted_root()?;
+        let s = self.abs(".spindle")?;
+        self.shell(format!(
+            "[ -e {r} ] || exit 0; rm -rf {s} || exit 1; rmdir {r} 2>/dev/null; exit 0"
+        ))
+        .await?;
         Ok(())
     }
+}
+
+/// `adb -s <serial>` までを組み立てる（サーバの指定と HOME を必ず付ける）
+fn base_command(cfg: &AdbConfig, serial: &str, timeout: Duration) -> ExternalCommand {
+    ExternalCommand::new(&cfg.program)
+        .env("ADB_SERVER_SOCKET", &cfg.server)
+        .env("HOME", &cfg.home)
+        .arg("-s")
+        .arg(serial)
+        .timeout(timeout)
+}
+
+/// 登録の候補になるボリューム（仕様 ⑤「登録」2）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeInfo {
+    /// `emulated` か SD の UUID
+    pub volume: String,
+    /// root の絶対パス
+    pub path: String,
+    /// ボリュームの空き（バイト）
+    pub free: u64,
+    /// root の状態
+    pub state: DirState,
+}
+
+/// `/storage` の下の内部共有ストレージと SD カードを調べる
+pub async fn probe_volumes(
+    cfg: &AdbConfig,
+    serial: &str,
+    root_rel: &str,
+    token: &CancellationToken,
+) -> RemoteResult<Vec<VolumeInfo>> {
+    probe_volumes_under(cfg, serial, "/storage", root_rel, token).await
+}
+
+/// [`probe_volumes`] の `/storage` を差し替えられる版（試験用）
+pub async fn probe_volumes_under(
+    cfg: &AdbConfig,
+    serial: &str,
+    storage: &str,
+    root_rel: &str,
+    token: &CancellationToken,
+) -> RemoteResult<Vec<VolumeInfo>> {
+    if !valid_serial(serial) || !valid_root(root_rel) {
+        return Err(RemoteError::Failed("シリアルか root が不正".into()));
+    }
+    let base = sh_quote(storage).map_err(|e| RemoteError::Failed(e.to_string()))?;
+    let rel = sh_quote(root_rel).map_err(|e| RemoteError::Failed(e.to_string()))?;
+    // 1 行 1 ボリューム: volume \t state \t 空きブロック数 ブロック長
+    let script = format!(
+        "b={base}; for d in \"$b\"/emulated/0 \"$b\"/????-????; do [ -d \"$d\" ] || continue; \
+         v=${{d#\"$b\"/}}; [ \"$v\" = emulated/0 ] && v=emulated; r=\"$d\"/{rel}; \
+         if [ ! -e \"$r\" ]; then s=missing; else c=$(ls -A \"$r\") || continue; \
+         if [ -n \"$c\" ]; then s=nonempty; else s=empty; fi; fi; \
+         f=$(stat -f -c '%a %S' \"$d\") || continue; printf '%s\\t%s\\t%s\\n' \"$v\" \"$s\" \"$f\"; done"
+    );
+    let out = base_command(cfg, serial, cfg.timeout)
+        .arg("shell")
+        .arg(script)
+        .run(token)
+        .await
+        .map_err(map_err)?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut v = Vec::new();
+    for line in text.lines() {
+        let mut it = line.split('\t');
+        let (Some(volume), Some(state), Some(free)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        if !valid_volume(volume) {
+            continue;
+        }
+        let state = match state {
+            "missing" => DirState::Missing,
+            "empty" => DirState::Empty,
+            "nonempty" => DirState::NonEmpty,
+            _ => continue,
+        };
+        let mut nums = free.split_whitespace().map(str::parse::<u64>);
+        let (Some(Ok(blocks)), Some(Ok(bsize))) = (nums.next(), nums.next()) else {
+            continue;
+        };
+        let dir = if volume == "emulated" {
+            format!("{storage}/emulated/0")
+        } else {
+            format!("{storage}/{volume}")
+        };
+        v.push(VolumeInfo {
+            volume: volume.to_owned(),
+            path: format!("{dir}/{root_rel}"),
+            free: blocks.saturating_mul(bsize),
+            state,
+        });
+    }
+    Ok(v)
 }
 
 fn map_err(e: ProcessError) -> RemoteError {
@@ -287,7 +432,9 @@ impl DeviceFs for AdbFs {
             .await
             .map_err(|e| RemoteError::Failed(e.to_string()))?
             .map_err(|_| RemoteError::Failed("ハッシュのスレッドが落ちた".into()))?;
-        run.map_err(map_err)?;
+        if let Err(e) = run {
+            return Err(self.classify(e).await);
+        }
         let (size, sha256) =
             hashed.map_err(|e| RemoteError::Failed(format!("送る元を読めない: {e}")))?;
         Ok(PutResult { size, sha256 })
@@ -382,6 +529,9 @@ impl DeviceFs for AdbFs {
         }
     }
 
+    /// extras は付けない。Poweramp API に対象パスの extra は無く、プレイリストの再解析は `eraseTags`
+    /// （全タグ消去・CUE がユーザのプレイリストから消える）しか無いため（実機 spike 4、D-98）。
+    /// スキャン範囲は Poweramp のフォルダ設定
     async fn rescan(&self) -> RemoteResult<()> {
         self.shell(format!(
             "pm path {POWERAMP_PACKAGE} >/dev/null 2>&1 || exit 0; am broadcast -a {POWERAMP_SCAN_ACTION} -n {POWERAMP_RECEIVER}"

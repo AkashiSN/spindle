@@ -173,6 +173,9 @@ pub struct SyncReport {
     pub errors: Vec<ReportedError>,
     /// 同期は成功扱いの警告（Poweramp の再スキャンの失敗など）
     pub warnings: Vec<String>,
+    /// 送る元の identity か中身が `source_hashes` と違った曲（昇順・重複なし）。
+    /// 呼び出し側は `source_hashes` の行を捨ててハッシュを取り直させる
+    pub rehash: Vec<i64>,
 }
 
 impl SyncReport {
@@ -199,6 +202,8 @@ struct Exec<'a, F, S, C> {
     total: u64,
     /// 開始時に端末にあった管理外のファイルの `canonical_key`（上書きしない）
     unmanaged: HashSet<String>,
+    /// 送る元が変わっていた曲（ハッシュの取り直し対象）
+    rehash: std::collections::BTreeSet<i64>,
 }
 
 pub async fn run<F: DeviceFs, S: Sources, C: Control>(
@@ -248,6 +253,7 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
         done: 0,
         total: (r.items.len() + r.playlists.len()) as u64,
         unmanaged,
+        rehash: std::collections::BTreeSet::new(),
     };
     let of = |k: OpKind| r.items.iter().filter(move |o| o.op == k);
     for op in of(OpKind::Delete) {
@@ -302,6 +308,7 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
         manifest,
         errors: x.errors,
         warnings,
+        rehash: x.rehash.into_iter().collect(),
     })
 }
 
@@ -390,7 +397,12 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
     ) -> Result<Result<(), String>, SyncError> {
         let file = match self.sources.open(track_id) {
             Ok(f) => f,
-            Err(e) => return Ok(Err(e.reason())),
+            Err(e) => {
+                if matches!(e, SourceError::Changed) {
+                    self.rehash.insert(track_id);
+                }
+                return Ok(Err(e.reason()));
+            }
         };
         let put = match self.fs.put(path, file).await {
             Ok(p) => p,
@@ -403,6 +415,7 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         };
         if put.sha256 != sha256 || put.size != size {
             self.fs.remove(path).await?;
+            self.rehash.insert(track_id);
             return Ok(Err(SourceError::Changed.reason()));
         }
         if self.fs.sha256(path).await?.as_deref() != Some(sha256) {
@@ -437,6 +450,9 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         }
         // 先に開けるか確かめる（開けない曲に意図を書かない）
         if let Err(e) = self.sources.open(op.track_id) {
+            if matches!(e, SourceError::Changed) {
+                self.rehash.insert(op.track_id);
+            }
             self.errors
                 .push((EntryKind::Track, op.track_id, e.reason()));
             return Ok(());

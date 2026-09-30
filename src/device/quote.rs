@@ -40,6 +40,9 @@ pub fn valid_serial(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
 }
 
+/// 登録で使う root（ボリューム内の相対パス。仕様 ⑤「登録」2）
+pub const DEFAULT_ROOT: &str = "Music/spindle";
+
 /// 内部共有ストレージを表すボリューム名
 pub const VOLUME_EMULATED: &str = "emulated";
 

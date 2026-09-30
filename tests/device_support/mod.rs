@@ -286,9 +286,15 @@ impl DeviceFs for FakeFs {
 
     async fn rename(&self, from: &str, to: &str) -> RemoteResult<()> {
         self.mutate(&format!("rename {from} -> {to}"), |g| {
-            let Some((_, bytes)) = g.files.remove(&g.key(from)) else {
+            let (kf, kt) = (g.key(from), g.key(to));
+            if !g.files.contains_key(&kf) {
                 return Err(RemoteError::Failed(format!("mv: {from}: No such file")));
-            };
+            }
+            // 実機（FUSE の内部ストレージ・exFAT の SD）は大小文字だけ違う mv を成功扱いで何もしない（spike 2）
+            if kf == kt {
+                return Ok(());
+            }
+            let (_, bytes) = g.files.remove(&kf).unwrap_or_default();
             g.store(to, bytes);
             Ok(())
         })
@@ -448,6 +454,20 @@ pub fn sources(want: &[Want]) -> MemSources {
 /// 回復 → 差分 → 計画 → 部分集合 → 実行（P5-3b の device_sync ジョブと同じ流れ）
 pub async fn sync_to<C: Control>(
     fs: &FakeFs,
+    want: &[Want<'_>],
+    control: &C,
+) -> Result<SyncReport, String> {
+    run_want_with(fs, want, control).await
+}
+
+/// 既定の Control で `want` の状態へ同期する（実機の試験用。`DeviceFs` なら何でも）
+#[allow(dead_code)]
+pub async fn run_want<F: DeviceFs>(fs: &F, want: &[Want<'_>]) -> Result<SyncReport, String> {
+    run_want_with(fs, want, &TestControl::default()).await
+}
+
+async fn run_want_with<F: DeviceFs, C: Control>(
+    fs: &F,
     want: &[Want<'_>],
     control: &C,
 ) -> Result<SyncReport, String> {
