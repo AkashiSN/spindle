@@ -8,11 +8,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::db::devices::ReportedError;
-use crate::device::journal::{random_id, Intent, IntentOp, Record};
-use crate::device::ondevice::{
-    self, Book, DeviceManifest, ManifestItem, ManifestPlaylist, TMP_SUFFIX,
+use crate::device::journal::{
+    member_digest, random_id, BatchMember, Intent, IntentOp, MemberOp, Phase, Record,
 };
-use crate::device::plan::{PlanItem, PlanPlaylist, Runnable};
+use crate::device::ondevice::{
+    self, Book, DeviceManifest, ManifestItem, ManifestPlaylist, MOVING_DIR, TMP_SUFFIX,
+};
+use crate::device::plan::{path_components, PlanItem, PlanPlaylist, Runnable};
+use crate::device::recover::complete_batch;
 use crate::device::remote::{DeviceFs, RemoteError};
 use crate::device::store::{append_durable, compact, StoreError};
 use crate::domain::device::{
@@ -527,9 +530,155 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         Ok(())
     }
 
-    async fn path_batch(&mut self, _ops: Vec<PlanItem>) -> Result<(), SyncError> {
-        Err(SyncError::Store(StoreError::Remote(RemoteError::Failed(
-            "パス変更のバッチは未実装".into(),
-        ))))
+    /// パス変更を 1 つのバッチで進める（仕様 ⑤「パス変更は大域的な 2 段」）。
+    /// 記録 → prepared（更新 + 移動の新しい内容を `new` へ）→ vacating → vacated → placing → done。
+    /// 行き先を管理外のファイルが占めるメンバーは、封印の前にその成分ごと外す（上書きしない）。
+    /// 準備で失敗したメンバーがいれば、その曲を含む成分を全員外し、旧バッチを `batch_abort`
+    /// （`superseded_by` 付き）で閉じて一時ファイルを消してから、残りで新しいバッチを記録する
+    async fn path_batch(&mut self, ops: Vec<PlanItem>) -> Result<(), SyncError> {
+        let total = ops.len() as u64;
+        let blocked: HashSet<i64> = ops
+            .iter()
+            .filter(|o| {
+                o.to.as_deref()
+                    .is_some_and(|to| self.unmanaged.contains(&canonical_key(to)))
+            })
+            .map(|o| o.track_id)
+            .collect();
+        for o in ops.iter().filter(|o| blocked.contains(&o.track_id)) {
+            self.errors
+                .push((EntryKind::Track, o.track_id, UNMANAGED_COLLISION.to_owned()));
+        }
+        let mut ops = drop_components(ops, &blocked);
+        let mut superseded: Option<(String, Vec<BatchMember>)> = None;
+        loop {
+            if ops.is_empty() {
+                if let Some((old, members)) = superseded.take() {
+                    self.abort_batch(&old, None, &members).await?;
+                }
+                self.done += total;
+                self.control.progress(self.done, self.total).await;
+                return Ok(());
+            }
+            self.guard().await?;
+            let batch_id = random_id()?;
+            if let Some((old, members)) = superseded.take() {
+                self.abort_batch(&old, Some(&batch_id), &members).await?;
+            }
+            let members = batch_members(&batch_id, &ops);
+            let mut records = std::mem::take(&mut self.pending_done);
+            records.push(Record::BatchBegin {
+                batch_id: batch_id.clone(),
+            });
+            records.extend(members.iter().cloned().map(Record::BatchMember));
+            records.push(Record::BatchSealed {
+                batch_id: batch_id.clone(),
+                count: members.len(),
+                digest: member_digest(&members).map_err(StoreError::from)?,
+            });
+            append_durable(self.fs, &records).await?;
+
+            let mut failed: HashSet<i64> = HashSet::new();
+            for m in &members {
+                let Some(new) = &m.new else { continue };
+                self.guard().await?;
+                if let Err(reason) = self.transfer(m.track_id, new, m.size, &m.sha256).await? {
+                    self.errors.push((EntryKind::Track, m.track_id, reason));
+                    failed.insert(m.track_id);
+                }
+            }
+            if failed.is_empty() {
+                let phase = |phase| Record::BatchPhase {
+                    batch_id: batch_id.clone(),
+                    phase,
+                };
+                append_durable(self.fs, &[phase(Phase::Prepared)]).await?;
+                self.guard().await?;
+                append_durable(self.fs, &[phase(Phase::Vacating)]).await?;
+                // ここから先はキャンセルも generation も見ずに完遂する
+                complete_batch(
+                    self.fs,
+                    &batch_id,
+                    &members,
+                    Phase::Vacating,
+                    false,
+                    &mut self.book,
+                )
+                .await?;
+                self.done += total;
+                self.control.progress(self.done, self.total).await;
+                return Ok(());
+            }
+            ops = drop_components(ops, &failed);
+            superseded = Some((batch_id, members));
+        }
     }
+
+    /// 先に旧バッチの終端を耐久化し、その後で旧バッチの一時ファイルを消す
+    async fn abort_batch(
+        &mut self,
+        batch_id: &str,
+        superseded_by: Option<&str>,
+        members: &[BatchMember],
+    ) -> Result<(), SyncError> {
+        append_durable(
+            self.fs,
+            &[Record::BatchAbort {
+                batch_id: batch_id.to_owned(),
+                superseded_by: superseded_by.map(str::to_owned),
+            }],
+        )
+        .await?;
+        for m in members {
+            if let Some(new) = &m.new {
+                self.fs.remove(new).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `tracks` の曲を含む成分（入れ替え・循環・連鎖）を全員外す
+fn drop_components(ops: Vec<PlanItem>, tracks: &HashSet<i64>) -> Vec<PlanItem> {
+    if tracks.is_empty() {
+        return ops;
+    }
+    let drop: HashSet<usize> = path_components(&ops)
+        .into_iter()
+        .filter(|c| c.iter().any(|&i| tracks.contains(&ops[i].track_id)))
+        .flatten()
+        .collect();
+    ops.into_iter()
+        .enumerate()
+        .filter(|(i, _)| !drop.contains(i))
+        .map(|(_, o)| o)
+        .collect()
+}
+
+fn batch_members(batch_id: &str, ops: &[PlanItem]) -> Vec<BatchMember> {
+    ops.iter()
+        .filter_map(|o| {
+            let op = match o.op {
+                OpKind::Move => MemberOp::Move,
+                OpKind::UpdateMove => MemberOp::UpdateMove,
+                _ => return None,
+            };
+            // 名前に batch_id を含める: 縮めた後の新バッチが旧バッチ（中止済み）と一時ファイルを共有すると、
+            // 回復が旧バッチの掃除として新バッチの new を消してしまう（D-95 の P5-3a 追記）
+            let staging = format!("{MOVING_DIR}/{batch_id}-{}", o.op_id);
+            Some(BatchMember {
+                batch_id: batch_id.to_owned(),
+                op_id: o.op_id.clone(),
+                op,
+                track_id: o.track_id,
+                from: o.from.clone()?,
+                new: (op == MemberOp::UpdateMove).then(|| format!("{staging}.new")),
+                staging,
+                to: o.to.clone()?,
+                token: o.token.clone()?,
+                size: o.size,
+                sha256: o.sha256.clone()?,
+            })
+        })
+        .collect()
 }

@@ -668,3 +668,300 @@ fn item_errors_do_not_break_crash_recovery() {
         }
     });
 }
+
+#[test]
+fn swap_moves_without_overwriting() {
+    block_on(async {
+        let fs = device_at(&[(1, "x.opus", b"X"), (2, "y.opus", b"Y")], 1 << 30).await;
+        sync_to(
+            &fs,
+            &[(1, "y.opus", b"X"), (2, "x.opus", b"Y")],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.get("y.opus"), Some(b"X".to_vec()));
+        assert_eq!(fs.get("x.opus"), Some(b"Y".to_vec()));
+        assert!(fs
+            .paths()
+            .iter()
+            .all(|p| !p.starts_with(".spindle/moving/")));
+    });
+}
+
+#[test]
+fn update_move_prepares_new_content_before_vacating() {
+    block_on(async {
+        let fs = device_at(&[(1, "a.opus", b"OLD")], 1 << 30).await;
+        let before = fs.calls().len();
+        sync_to(&fs, &[(1, "Dir/b.opus", b"NEW")], &TestControl::default())
+            .await
+            .unwrap();
+        let calls = fs.calls()[before..].to_vec();
+        let put_new = calls
+            .iter()
+            .position(|c| c.starts_with("put .spindle/moving/") && c.ends_with(".new"))
+            .unwrap();
+        let rm_old = calls.iter().position(|c| c == "remove a.opus").unwrap();
+        assert!(put_new < rm_old, "{calls:?}");
+        assert_eq!(fs.get("a.opus"), None);
+        assert_eq!(fs.get("Dir/b.opus"), Some(b"NEW".to_vec()));
+    });
+}
+
+#[test]
+fn case_only_rename_on_a_case_insensitive_card() {
+    block_on(async {
+        let fs = FakeFs::new(1 << 30).case_insensitive();
+        spindle::device::store::initialize(&fs, "u1", "emulated")
+            .await
+            .unwrap();
+        sync_to(&fs, &[(1, "Dir/Song.opus", b"S")], &TestControl::default())
+            .await
+            .unwrap();
+        sync_to(&fs, &[(1, "Dir/song.opus", b"S")], &TestControl::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            fs.paths()
+                .iter()
+                .filter(|p| !p.starts_with(".spindle"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["Dir/song.opus".to_string()]
+        );
+        assert_eq!(fs.get("Dir/song.opus"), Some(b"S".to_vec()));
+    });
+}
+
+#[test]
+fn failed_prepare_shrinks_the_batch_by_component() {
+    block_on(async {
+        // 1 ↔ 2 の入れ替え（2 は更新 + 移動で、送る元が無い）と、無関係な移動 3
+        let fs = device_at(
+            &[
+                (1, "x.opus", b"X"),
+                (2, "y.opus", b"Y"),
+                (3, "p.opus", b"P"),
+            ],
+            1 << 30,
+        )
+        .await;
+        let want: &[Want] = &[
+            (1, "y.opus", b"X"),
+            (2, "x.opus", b"Y2"),
+            (3, "q.opus", b"P"),
+        ];
+        let rec = recover(&fs, &expect()).await.unwrap();
+        let d = diff(&desired(want), &rec.items, &[], &[], Vec::new());
+        let plan = StoredPlan::from_diff(1, "tok", &d).unwrap();
+        let r = runnable(&plan, &rec.items, &[], &d);
+        let mut src = sources(want);
+        src.0.remove(&2);
+        let report = sync::run(
+            &fs,
+            &src,
+            &TestControl::default(),
+            SyncInput {
+                generation: 1,
+                start: rec.manifest,
+                runnable: &r,
+                playlist_bodies: &HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.errors,
+            vec![(EntryKind::Track, 2, SourceError::Missing.reason())]
+        );
+        // 入れ替えは両方とも動かない。3 は動く
+        assert_eq!(fs.get("x.opus"), Some(b"X".to_vec()));
+        assert_eq!(fs.get("y.opus"), Some(b"Y".to_vec()));
+        assert_eq!(fs.get("q.opus"), Some(b"P".to_vec()));
+        assert!(fs
+            .paths()
+            .iter()
+            .all(|p| !p.starts_with(".spindle/moving/")));
+    });
+}
+
+/// 送る元 `missing` を欠いた状態で `want` へ同期する（縮めたバッチの試験用）
+async fn run_without_source(
+    fs: &FakeFs,
+    want: &[Want<'_>],
+    missing: i64,
+) -> Result<SyncReport, String> {
+    let rec = recover(fs, &expect()).await.map_err(|e| e.to_string())?;
+    let d = diff(&desired(want), &rec.items, &[], &[], Vec::new());
+    let plan = StoredPlan::from_diff(1, "tok", &d).unwrap();
+    let r = runnable(&plan, &rec.items, &[], &d);
+    let mut src = sources(want);
+    src.0.remove(&missing);
+    sync::run(
+        fs,
+        &src,
+        &TestControl::default(),
+        SyncInput {
+            generation: 1,
+            start: rec.manifest,
+            runnable: &r,
+            playlist_bodies: &HashMap::new(),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[test]
+fn shrunk_batch_survives_every_crash_point() {
+    block_on(async {
+        // 1 ↔ 2 の入れ替え（2 の送る元が無いので成分ごと外れる）と、無関係な更新 + 移動 3。
+        // 縮めた後の新バッチ（3 だけ）が途中で落ちても、回復で 3 を失わない
+        let initial: &[Want] = &[
+            (1, "x.opus", b"X"),
+            (2, "y.opus", b"Y"),
+            (3, "p.opus", b"P"),
+        ];
+        let want: &[Want] = &[
+            (1, "y.opus", b"X"),
+            (2, "x.opus", b"Y2"),
+            (3, "q.opus", b"P2"),
+        ];
+        let base = device_at(initial, 1 << 30).await;
+        let clean = base.snapshot();
+        run_without_source(&clean, want, 2).await.unwrap();
+        assert_eq!(clean.get("q.opus"), Some(b"P2".to_vec()));
+        for k in 0..clean.mutations() {
+            let fs = base.snapshot();
+            fs.fail_after(k);
+            assert!(run_without_source(&fs, want, 2).await.is_err(), "k={k}");
+            fs.reconnect();
+            let rec = recover(&fs, &expect())
+                .await
+                .unwrap_or_else(|e| panic!("k={k}: {e}"));
+            for id in [1, 2, 3] {
+                let it = rec.manifest.items.iter().find(|i| i.track_id == id);
+                let it = it.unwrap_or_else(|| panic!("k={k}: {id} を失った"));
+                assert!(fs.get(&it.path).is_some(), "k={k}: {} が無い", it.path);
+            }
+        }
+    });
+}
+
+#[test]
+fn cancel_after_vacating_completes_the_batch() {
+    block_on(async {
+        let fs = device_at(&[(1, "x.opus", b"X"), (2, "y.opus", b"Y")], 1 << 30).await;
+        // guard の呼び出し: バッチの開始(1)・vacating の前(2)・追加の前(3)
+        let c = TestControl {
+            cancel_from: Some(3),
+            ..Default::default()
+        };
+        let want: &[Want] = &[
+            (1, "y.opus", b"X"),
+            (2, "x.opus", b"Y"),
+            (3, "z.opus", b"Z"),
+        ];
+        let err = sync_to(&fs, want, &c).await.unwrap_err();
+        assert!(err.contains("キャンセル"), "{err}");
+        assert_eq!(fs.get("y.opus"), Some(b"X".to_vec()));
+        assert_eq!(fs.get("x.opus"), Some(b"Y".to_vec()));
+        assert_eq!(fs.get("z.opus"), None);
+        let rec = recover(&fs, &expect()).await.unwrap();
+        let paths: Vec<(i64, String)> = rec
+            .items
+            .iter()
+            .map(|i| (i.track_id, i.dest_path.clone()))
+            .collect();
+        assert_eq!(paths, vec![(1, "y.opus".into()), (2, "x.opus".into())]);
+    });
+}
+
+#[test]
+fn generation_change_before_vacating_aborts_nothing_placed() {
+    block_on(async {
+        let fs = device_at(&[(1, "x.opus", b"X"), (2, "y.opus", b"Y")], 1 << 30).await;
+        let c = TestControl {
+            stale_from: Some(2),
+            ..Default::default()
+        };
+        let err = sync_to(&fs, &[(1, "y.opus", b"X"), (2, "x.opus", b"Y")], &c)
+            .await
+            .unwrap_err();
+        assert!(err.contains("設定が変わった"), "{err}");
+        let rec = recover(&fs, &expect()).await.unwrap();
+        let paths: Vec<(i64, String)> = rec
+            .items
+            .iter()
+            .map(|i| (i.track_id, i.dest_path.clone()))
+            .collect();
+        assert_eq!(paths, vec![(1, "x.opus".into()), (2, "y.opus".into())]);
+    });
+}
+
+#[test]
+fn swap_cycle_and_case_rename_survive_every_crash_point() {
+    block_on(async {
+        let initial: &[Want] = &[
+            (1, "x.opus", b"X"),
+            (2, "y.opus", b"Y"),
+            (3, "p.opus", b"P"),
+            (4, "q.opus", b"Q"),
+            (5, "r.opus", b"R"),
+            (6, "Dir/Song.opus", b"S"),
+            (7, "del.opus", b"D"),
+        ];
+        let target: &[Want] = &[
+            (1, "y.opus", b"X"),  // 入れ替え
+            (2, "x.opus", b"Y2"), // 入れ替え + 更新
+            (3, "q.opus", b"P"),  // 循環 p → q → r → p
+            (4, "r.opus", b"Q2"),
+            (5, "p.opus", b"R"),
+            (6, "Dir/song.opus", b"S"), // 大小文字だけ
+            (8, "new.opus", b"N"),      // 追加
+        ];
+        crash_sweep(initial, target, true).await;
+    });
+}
+
+#[test]
+fn path_change_onto_unmanaged_file_is_not_overwritten() {
+    block_on(async {
+        // 1 ↔ 2 の入れ替えと、手で置いた z.opus へ向かう無関係な移動 3
+        let fs = device_at(
+            &[
+                (1, "x.opus", b"X"),
+                (2, "y.opus", b"Y"),
+                (3, "p.opus", b"P"),
+            ],
+            1 << 30,
+        )
+        .await;
+        fs.set("z.opus", b"user's");
+        let report = sync_to(
+            &fs,
+            &[
+                (1, "y.opus", b"X"),
+                (2, "x.opus", b"Y"),
+                (3, "z.opus", b"P"),
+            ],
+            &TestControl::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.get("z.opus"), Some(b"user's".to_vec()));
+        assert_eq!(fs.get("p.opus"), Some(b"P".to_vec()));
+        assert_eq!(
+            report.errors,
+            vec![(EntryKind::Track, 3, UNMANAGED_COLLISION.to_owned())]
+        );
+        // 入れ替えは動く
+        assert_eq!(fs.get("y.opus"), Some(b"X".to_vec()));
+        assert_eq!(fs.get("x.opus"), Some(b"Y".to_vec()));
+        assert!(fs
+            .paths()
+            .iter()
+            .all(|p| !p.starts_with(".spindle/moving/")));
+    });
+}
