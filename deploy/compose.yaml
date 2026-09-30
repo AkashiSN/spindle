@@ -18,6 +18,7 @@ services:
       - /mnt/ssd/media/Inbox:/inbox
       - /mnt/ssd/media/Playlists:/playlists
       - /mnt/ssd/apps/spindle:/data
+      - adb-run:/run/adb                    # adb サイドカーの Unix ソケット（D-98）
       - /mnt/ssd/apps/spindle/bin/spindle-ytmusic-meta:/usr/local/bin/spindle-ytmusic-meta:ro   # メタデータプラグイン（D-70）
     environment:
       # 初回起動時のみ読まれ、argon2id でハッシュして DB に保存される。以後は無視。
@@ -27,3 +28,23 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+
+  adb:
+    # adb サーバだけを動かすサイドカー（D-98）。spindle と同じイメージの adb を使う（クライアントと版を揃える）。
+    # network_mode: host にしないと、挿し直した端末を拾わない（USB のホットプラグの通知 = netlink の uevent が
+    # 別のネットワーク名前空間に届かない）。TCP は開かず、共有ボリューム上の Unix ソケットだけで待ち受ける
+    # （-a で TCP を開くと LAN から端末を操作できてしまう）
+    image: ghcr.io/akashisn/spindle:latest
+    network_mode: host
+    init: true
+    entrypoint: ["/bin/sh", "-c", "umask 000 && exec /usr/local/bin/adb -L localfilesystem:/run/adb/adb.sock nodaemon server"]
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - adb-run:/run/adb
+      - /mnt/ssd/apps/spindle/adb-keys:/root/.android   # USB デバッグの許可の鍵。消すと端末で許可し直す
+    device_cgroup_rules:
+      - 'c 189:* rmw'              # USB（/dev/bus/usb）
+    restart: unless-stopped
+
+volumes:
+  adb-run: {}
