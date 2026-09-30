@@ -75,7 +75,7 @@ pub async fn recover<F: DeviceFs>(fs: &F, expect: &Expect) -> Result<Recovered, 
     }
 
     let files = fs.list_files().await?;
-    let present: HashSet<String> = files.iter().map(|f| canonical_key(&f.path)).collect();
+    let mut present: HashSet<String> = files.iter().map(|f| canonical_key(&f.path)).collect();
     let managed = book.path_keys();
     let moving_prefix = format!("{MOVING_DIR}/");
     let mut unmanaged = 0;
@@ -83,7 +83,7 @@ pub async fn recover<F: DeviceFs>(fs: &F, expect: &Expect) -> Result<Recovered, 
         if f.path.ends_with(TMP_SUFFIX) {
             fs.remove(&f.path).await?;
         } else if f.path.starts_with(&moving_prefix) {
-            if !restore_leftover(fs, f, &book, &present).await? {
+            if !restore_leftover(fs, f, &book, &mut present).await? {
                 unmanaged += 1;
             }
         } else if !is_reserved(&f.path) && !managed.contains(&canonical_key(&f.path)) {
@@ -289,6 +289,10 @@ pub(crate) async fn complete_batch<F: DeviceFs>(
         batch_id: batch_id.to_owned(),
         phase,
     };
+    if from < Phase::Vacating {
+        // Vacating を記録しないまま旧パスを空けない
+        append_durable(fs, &[phase(Phase::Vacating)]).await?;
+    }
     if from < Phase::Vacated {
         for m in members {
             vacate(fs, m, verify).await?;
@@ -320,16 +324,18 @@ pub(crate) async fn complete_batch<F: DeviceFs>(
     Ok(())
 }
 
-/// 旧パスを空ける: 移動は `from → staging`、更新 + 移動は旧版を消す
+/// 旧パスを空ける: 移動は `from → staging`、更新 + 移動は旧版を消す。
+/// 回復（verify）の位置判定は「在るかどうか」で行う（仕様 ⑤: from にあれば未着手、staging にあれば
+/// 空け済み）。内容の食い違いはここでは見ない。最後のサイズ照合（STALE_TOKEN）と「内容を検証」に任せる
 async fn vacate<F: DeviceFs>(fs: &F, m: &BatchMember, verify: bool) -> Result<(), StoreError> {
     match m.op {
         MemberOp::UpdateMove => fs.remove(&m.from).await?,
         MemberOp::Move if !verify => fs.rename(&m.from, &m.staging).await?,
         MemberOp::Move => {
-            if fs.sha256(&m.staging).await?.as_deref() == Some(m.sha256.as_str()) {
+            if exists(fs, &m.staging).await? {
                 return Ok(()); // 空け済み
             }
-            if fs.sha256(&m.from).await?.as_deref() == Some(m.sha256.as_str()) {
+            if exists(fs, &m.from).await? {
                 fs.rename(&m.from, &m.staging).await?;
             }
             // どちらにも無い: 手で消された。place で見つからず、manifest から外れる
@@ -338,7 +344,12 @@ async fn vacate<F: DeviceFs>(fs: &F, m: &BatchMember, verify: bool) -> Result<()
     Ok(())
 }
 
-/// 行き先を埋める: 移動は `staging → to`、更新 + 移動は `new → to`。置けたら true
+async fn exists<F: DeviceFs>(fs: &F, path: &str) -> Result<bool, StoreError> {
+    Ok(fs.sha256(path).await?.is_some())
+}
+
+/// 行き先を埋める: 移動は `staging → to`、更新 + 移動は `new → to`。置けたら true。
+/// 回復では src が在れば置き、無くて to が在れば置き済みとみなす（内容は見ない）
 async fn place<F: DeviceFs>(fs: &F, m: &BatchMember, verify: bool) -> Result<bool, StoreError> {
     let src = match (m.op, &m.new) {
         (MemberOp::Move, _) => m.staging.as_str(),
@@ -349,11 +360,11 @@ async fn place<F: DeviceFs>(fs: &F, m: &BatchMember, verify: bool) -> Result<boo
         fs.rename(src, &m.to).await?;
         return Ok(true);
     }
-    if fs.sha256(src).await?.as_deref() == Some(m.sha256.as_str()) {
+    if exists(fs, src).await? {
         fs.rename(src, &m.to).await?;
         return Ok(true);
     }
-    Ok(fs.sha256(&m.to).await?.as_deref() == Some(m.sha256.as_str()))
+    exists(fs, &m.to).await
 }
 
 /// `.spindle/moving/` の残りを、実ファイルを見失った管理下の曲と sha256 で照合して戻す。戻せたら true
@@ -361,7 +372,7 @@ async fn restore_leftover<F: DeviceFs>(
     fs: &F,
     f: &RemoteFile,
     book: &Book,
-    present: &HashSet<String>,
+    present: &mut HashSet<String>,
 ) -> Result<bool, StoreError> {
     let Some(sha) = fs.sha256(&f.path).await? else {
         return Ok(false);
@@ -374,6 +385,7 @@ async fn restore_leftover<F: DeviceFs>(
         Some(i) => {
             fs.rename(&f.path, &i.path).await?;
             fs.sync().await?;
+            present.insert(canonical_key(&i.path));
             Ok(true)
         }
         None => Ok(false),

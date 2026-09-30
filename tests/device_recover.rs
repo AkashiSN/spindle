@@ -421,3 +421,164 @@ fn corrupt_journal_stops() {
         ));
     });
 }
+
+fn swap_records(upto: &[Phase]) -> Vec<Record> {
+    let ms = [
+        mv("b", "m1", 1, "x.opus", "y.opus", b"X"),
+        mv("b", "m2", 2, "y.opus", "x.opus", b"Y"),
+    ];
+    let mut recs = seal("b", &ms);
+    for p in upto {
+        recs.push(Record::BatchPhase {
+            batch_id: "b".into(),
+            phase: *p,
+        });
+    }
+    recs
+}
+
+#[test]
+fn position_is_judged_by_presence_not_content() {
+    block_on(async {
+        // x.opus は同サイズで外部から書き換えられている
+        let fs = device_with(&[(1, "x.opus", b"X"), (2, "y.opus", b"Y")]).await;
+        append_durable(&fs, &swap_records(&[Phase::Prepared, Phase::Vacating]))
+            .await
+            .unwrap();
+        fs.set("x.opus", b"Z");
+        recover(&fs, &expect()).await.unwrap();
+        assert_eq!(fs.get("y.opus"), Some(b"Z".to_vec()));
+        assert_eq!(fs.get("x.opus"), Some(b"Y".to_vec()));
+        assert!(fs
+            .paths()
+            .iter()
+            .all(|p| !p.starts_with(".spindle/moving/")));
+    });
+}
+
+#[test]
+fn move_resumes_from_vacated_and_placing() {
+    block_on(async {
+        for phases in [
+            vec![Phase::Prepared, Phase::Vacating, Phase::Vacated],
+            vec![
+                Phase::Prepared,
+                Phase::Vacating,
+                Phase::Vacated,
+                Phase::Placing,
+            ],
+        ] {
+            let fs = device_with(&[(1, "x.opus", b"X"), (2, "y.opus", b"Y")]).await;
+            append_durable(&fs, &swap_records(&phases)).await.unwrap();
+            fs.rename_for_test("x.opus", ".spindle/moving/m1");
+            fs.rename_for_test("y.opus", ".spindle/moving/m2");
+            let r = recover(&fs, &expect()).await.unwrap();
+            assert_eq!(fs.get("y.opus"), Some(b"X".to_vec()));
+            assert_eq!(fs.get("x.opus"), Some(b"Y".to_vec()));
+            assert_eq!(
+                r.items.iter().find(|i| i.track_id == 1).unwrap().dest_path,
+                "y.opus"
+            );
+        }
+    });
+}
+
+#[test]
+fn done_batch_is_taken_into_the_book() {
+    block_on(async {
+        let fs = device_with(&[(1, "x.opus", b"X"), (2, "y.opus", b"Y")]).await;
+        append_durable(
+            &fs,
+            &swap_records(&[
+                Phase::Prepared,
+                Phase::Vacating,
+                Phase::Vacated,
+                Phase::Placing,
+                Phase::Done,
+            ]),
+        )
+        .await
+        .unwrap();
+        fs.set("y.opus", b"X");
+        fs.set("x.opus", b"Y");
+        let r = recover(&fs, &expect()).await.unwrap();
+        let paths: Vec<(i64, String)> = r
+            .items
+            .iter()
+            .map(|i| (i.track_id, i.dest_path.clone()))
+            .collect();
+        assert_eq!(paths, vec![(1, "y.opus".into()), (2, "x.opus".into())]);
+        assert!(r.items.iter().all(|i| i.token != STALE_TOKEN));
+    });
+}
+
+async fn interrupted_swap() -> FakeFs {
+    let fs = device_with(&[(1, "x.opus", b"X"), (2, "y.opus", b"Y")]).await;
+    append_durable(&fs, &swap_records(&[Phase::Prepared, Phase::Vacating]))
+        .await
+        .unwrap();
+    fs.rename_for_test("x.opus", ".spindle/moving/m1");
+    fs
+}
+
+type Outcome = (Vec<(i64, String)>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn outcome(fs: &FakeFs, r: &Recovered) -> Outcome {
+    (
+        r.items
+            .iter()
+            .map(|i| (i.track_id, i.dest_path.clone()))
+            .collect(),
+        fs.get("x.opus"),
+        fs.get("y.opus"),
+    )
+}
+
+#[test]
+fn recovery_is_idempotent_under_disconnects() {
+    block_on(async {
+        let clean = interrupted_swap().await;
+        clean.fail_after(usize::MAX);
+        let r = recover(&clean, &expect()).await.unwrap();
+        let want = outcome(&clean, &r);
+        let n = clean.mutations();
+        assert!(n > 0);
+        for j in 0..=n {
+            let fs = interrupted_swap().await;
+            fs.fail_after(j);
+            let _ = recover(&fs, &expect()).await;
+            fs.reconnect();
+            let r = recover(&fs, &expect()).await.unwrap();
+            assert_eq!(outcome(&fs, &r), want, "j={j}");
+        }
+    });
+}
+
+#[test]
+fn playlist_put_without_done_is_taken_when_sha_matches() {
+    block_on(async {
+        let fs = device_with(&[]).await;
+        let body = b"#EXTM3U\n";
+        let it = item(7, "p.m3u8", body);
+        let intent = Intent {
+            op_id: "o1".into(),
+            generation: 1,
+            op: IntentOp::Put,
+            kind: EntryKind::Playlist,
+            ref_id: 7,
+            from: None,
+            to: Some("p.m3u8".into()),
+            token: Some(it.token.clone()),
+            size: Some(it.size),
+            sha256: Some(it.sha256),
+        };
+        append_durable(&fs, &[Record::Intent(intent)])
+            .await
+            .unwrap();
+        fs.set("p.m3u8", body);
+        let r = recover(&fs, &expect()).await.unwrap();
+        assert_eq!(r.playlists.len(), 1);
+        assert_eq!(r.playlists[0].playlist_id, 7);
+        assert_eq!(r.playlists[0].token, it.token);
+    });
+}
