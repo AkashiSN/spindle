@@ -18,7 +18,12 @@ services:
       - /mnt/ssd/media/Inbox:/inbox
       - /mnt/ssd/media/Playlists:/playlists
       - /mnt/ssd/apps/spindle:/data
-      - adb-run:/run/adb                    # adb サイドカーの Unix ソケット（D-98）
+      # adb サイドカーの Unix ソケット（D-98）。:ro は外さないこと。localfilesystem: のソケットは
+      # ADB_SERVER_SOCKET を渡してもクライアントが「サーバに繋がらなければ同じパスで自前のサーバを起こす」。
+      # サイドカーが落ちている間にそれが起きると、後から戻ったサイドカーとサーバが 2 つになり、端末の監視が
+      # USB を持たない方に繋がったままになる。読み取り専用なら connect() は通り、自前のサーバの起動だけが
+      # Read-only file system で失敗する（未接続として扱われる）
+      - adb-run:/run/adb:ro
       - /mnt/ssd/apps/spindle/bin/spindle-ytmusic-meta:/usr/local/bin/spindle-ytmusic-meta:ro   # メタデータプラグイン（D-70）
     environment:
       # 初回起動時のみ読まれ、argon2id でハッシュして DB に保存される。以後は無視。

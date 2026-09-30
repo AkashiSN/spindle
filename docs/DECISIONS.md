@@ -4355,7 +4355,7 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
 
 **決定**:
 
-- **サイドカー**: adb サーバは別コンテナで `network_mode: host` + `adb -L localfilesystem:/run/adb/adb.sock nodaemon server` として動かす。ソケットは名前付きボリュームで spindle と共有し、TCP は開かない。独自のネットワーク名前空間では端末の挿し直しを拾わない（`/dev/bus/usb` の bind・`/dev` の bind・`ADB_LIBUSB=0` のどれでも不可。netlink の uevent が届かない）ため
+- **サイドカー**: adb サーバは別コンテナで `network_mode: host` + `adb -L localfilesystem:/run/adb/adb.sock nodaemon server` として動かす。ソケットは名前付きボリュームで spindle と共有し、TCP は開かない。**spindle 側はそのボリュームを読み取り専用（`:ro`）でマウントする**。`ADB_SERVER_SOCKET` を渡しても自前のサーバの起動を止められるのは `tcp:` の指定だけで、`localfilesystem:` はローカルの指定とみなされ、サーバに繋がらないとクライアントが同じパスで `fork-server` を起こす（setsid するので ChildGroup の kill も届かない）。サイドカーが落ちている間にこれが起きると、戻ったサイドカーとサーバが 2 つになり、監視の `track-devices` が USB を持たない方に繋がったままになる。読み取り専用なら connect() は通り、待ち受けの作成だけが `Read-only file system` で失敗して `error: cannot connect to daemon`（未接続）になる（r37.0.1 で確認）。独自のネットワーク名前空間では端末の挿し直しを拾わない（`/dev/bus/usb` の bind・`/dev` の bind・`ADB_LIBUSB=0` のどれでも不可。netlink の uevent が届かない）ため
 - **HOME**: adb の子プロセスに `HOME=<data>/adb` を渡す。`ANDROID_USER_HOME` は効かない
 - **切断の分類**: 端末を抜くと stderr は空で rc=255 になる。adb の文言に当たらない失敗は `get-state` で確かめ、`device` 以外は未接続とみなす
 - **Poweramp**: 再スキャンの extras は付けない。パスを指定する extra は無く、`eraseTags` は全タグ消去と CUE の副作用がある。スキャン範囲は Poweramp のフォルダ設定なので、保存先はその下に置く

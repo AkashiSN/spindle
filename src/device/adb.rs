@@ -17,7 +17,7 @@ use crate::device::remote::{DeviceFs, DirState, PutResult, RemoteError, RemoteFi
 use crate::domain::relpath::RelPath;
 use crate::jobs::process::{ExternalCommand, Output, ProcessError};
 
-/// stdin を流すサブコマンド。実機で shell v2 の stdin が使えなければここを差し替える（P5-3b の実機確認）
+/// stdin を流すサブコマンド。shell v2 の stdin がバイナリ安全に使えることは実機 spike で確かめた（D-98）
 pub const STDIN_SUBCOMMAND: &str = "shell";
 pub const POWERAMP_PACKAGE: &str = "com.maxmpz.audioplayer";
 pub const POWERAMP_SCAN_ACTION: &str = "com.maxmpz.audioplayer.ACTION_SCAN_DIRS";
@@ -31,7 +31,13 @@ pub struct AdbConfig {
     /// adb クライアントのパス（`[bin].adb`）
     pub program: PathBuf,
     /// `ADB_SERVER_SOCKET` の値（`[devices].adb_server`。例 `localfilesystem:/run/adb/adb.sock`）。
-    /// 必ず渡す: 無いとクライアントが TCP 5037 に自前のサーバを起こし、サイドカーと USB を奪い合う
+    /// 必ず渡す: 無いとクライアントが TCP 5037 に自前のサーバを起こし、サイドカーと USB を奪い合う。
+    /// ただしこれだけでは自前のサーバの起動は止まらない。`tcp:` なら起こさないが、`localfilesystem:` は
+    /// ローカルの指定とみなされ、サーバに繋がらないとクライアントが同じパスで `fork-server` を起こす
+    /// （setsid するので ChildGroup の kill も届かない）。後からサイドカーが同じパスで待ち受けると
+    /// サーバが 2 つになり、監視の `track-devices` が USB を持たない方に繋がったままになる。
+    /// 止めているのは compose でソケットのボリュームを spindle 側だけ読み取り専用にしていること
+    /// （待ち受けの作成が `Read-only file system` で失敗し、`error: cannot connect to daemon` = 未接続になる。D-98）
     pub server: String,
     /// adb の子に渡す `HOME`（`$HOME/.android` を作れないとクライアントが abort する。呼び出し側が作っておく）
     pub home: PathBuf,
@@ -110,8 +116,13 @@ impl AdbFs {
     }
 
     async fn shell(&self, script: String) -> RemoteResult<Output> {
+        self.shell_with(script, self.cfg.timeout).await
+    }
+
+    /// タイムアウトを指定する `shell`
+    async fn shell_with(&self, script: String, timeout: Duration) -> RemoteResult<Output> {
         match self
-            .command("shell", script, self.cfg.timeout)
+            .command("shell", script, timeout)
             .run(&self.token)
             .await
         {
@@ -482,13 +493,20 @@ impl DeviceFs for AdbFs {
     /// 1 件でもサイズを取れなければ一覧全体を失敗させる（握り潰すと手置きのファイルが一覧から消え、
     /// 管理外と分からずに上書きしうる）。失敗は 2 重に伝える: 内側の sh の非 0（`find -exec … +` の終了コード）と、
     /// 出力の `E` レコード。終端の印は find が 0 で終わったときだけ書き、root が無い経路でも書く。
-    /// 列挙の後に消えたファイルでも失敗するが、同期が失敗するだけで次回やり直せる
+    /// 列挙の後に消えたファイルでも失敗するが、同期が失敗するだけで次回やり直せる。
+    /// ファイルごとに `stat` を起こすので、ライブラリが大きいと 1 回のコマンドのタイムアウト（`timeout`）を
+    /// 超えうる。長く走る一覧なので転送と同じ `transfer_timeout` で待つ
     async fn list_files(&self) -> RemoteResult<Vec<RemoteFile>> {
         let r = self.quoted_root()?;
         let script = format!(
             "[ -e {r} ] || {{ printf 'END\\n\\0'; exit 0; }}; cd {r} || exit 1; find . -type f -exec sh -c 'for f; do if s=$(stat -c %s \"$f\"); then printf \"%s\\n%s\\0\" \"$s\" \"${{f#./}}\"; else printf \"E\\n%s\\0\" \"${{f#./}}\"; exit 1; fi; done' sh {{}} + && printf 'END\\n\\0'"
         );
-        parse_listing(&self.shell(script).await?.stdout)
+        parse_listing(
+            &self
+                .shell_with(script, self.cfg.transfer_timeout)
+                .await?
+                .stdout,
+        )
     }
 
     async fn rename(&self, from: &str, to: &str) -> RemoteResult<()> {
@@ -601,6 +619,9 @@ mod tests {
             "  * cannot connect to daemon",
             "error: cannot connect to daemon",
             "adb: cannot connect to daemon at tcp:adb:5037",
+            // ソケットのボリュームが読み取り専用で、クライアントが自前のサーバを起こせなかったとき（D-98）
+            "could not install *smartsocket* listener: Read-only file system\n\
+             error: cannot connect to daemon",
         ] {
             assert_eq!(map_err(failed(m)), RemoteError::NotConnected, "{m}");
         }
