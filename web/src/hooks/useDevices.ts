@@ -132,7 +132,10 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     [],
   )
 
-  const fetchUnregistered = useCallback(() => apiFetch<UnregisteredList>('/api/devices/adb/unregistered'), [])
+  const fetchUnregistered = useCallback(
+    (signal?: AbortSignal) => apiFetch<UnregisteredList>('/api/devices/adb/unregistered', { signal }),
+    [],
+  )
 
   const run = useCallback(
     async (f: () => Promise<unknown>): Promise<boolean> => {

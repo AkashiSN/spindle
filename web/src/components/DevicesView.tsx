@@ -16,6 +16,7 @@ import type { Playlists } from '../hooks/usePlaylists'
 import { ApiError } from '../api/client'
 import {
   ADB_DISABLED_MESSAGE,
+  nextPollDelay,
   connectionNote,
   describeEvaluation,
   deviceMessage,
@@ -240,7 +241,8 @@ function AddDevice({ devices, onCreated }: { devices: Devices; onCreated: (id: n
   )
 }
 
-/** 接続中の未登録 Android を 3 秒ごとに検出して登録する */
+/** 接続中の未登録 Android を検出して登録する。前の要求が終わってから 3 秒おいて取り直す
+ * （開いているフォームごとに要求は高々 1 本。サーバは端末ごとに adb shell を直列に呼ぶので重ねない） */
 function AddAndroid({
   devices,
   onCreated,
@@ -255,26 +257,27 @@ function AddAndroid({
   const { fetchUnregistered } = devices
 
   useEffect(() => {
-    let alive = true
-    const g = new Latest()
-    const load = () => {
-      const id = g.next()
-      fetchUnregistered()
-        .then((l) => {
-          if (!alive || !g.isCurrent(id)) return
-          setFound(l.items)
-          setError(null)
-        })
-        .catch((e: unknown) => {
-          if (!alive || !g.isCurrent(id)) return
-          setError(e instanceof ApiError && e.code === 'adb_disabled' ? ADB_DISABLED_MESSAGE : deviceMessage(e))
-        })
+    const ac = new AbortController()
+    let timer: number | undefined
+    const load = async () => {
+      let failure: unknown = null
+      try {
+        const l = await fetchUnregistered(ac.signal)
+        if (ac.signal.aborted) return
+        setFound(l.items)
+        setError(null)
+      } catch (e) {
+        if (ac.signal.aborted) return
+        failure = e
+        setError(e instanceof ApiError && e.code === 'adb_disabled' ? ADB_DISABLED_MESSAGE : deviceMessage(e))
+      }
+      const delay = nextPollDelay(failure)
+      if (delay != null) timer = window.setTimeout(() => void load(), delay)
     }
-    load()
-    const timer = window.setInterval(load, 3000)
+    void load()
     return () => {
-      alive = false
-      window.clearInterval(timer)
+      ac.abort()
+      window.clearTimeout(timer)
     }
   }, [fetchUnregistered])
 

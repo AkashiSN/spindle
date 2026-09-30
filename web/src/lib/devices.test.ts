@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import type { Device, DeviceCounts, DeviceDiff, DiffItem } from '../api/types'
-import { connectionNote, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
+import { connectionNote, nextPollDelay, UNREGISTERED_POLL_MS, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
 
 const counts = (p: Partial<DeviceCounts> = {}): DeviceCounts => ({
   add: 0, update: 0, move: 0, delete: 0, waiting: 0, error: 0, synced: 0, ...p,
@@ -160,5 +160,19 @@ describe('deviceMessage（Android）', () => {
     ['adb_disabled', 'Android の同期が無効です（設定の [devices].adb_server）'],
   ])('%s', (code, text) => {
     expect(deviceMessage(new ApiError(409, code))).toContain(text)
+  })
+})
+
+describe('nextPollDelay', () => {
+  it('取れたとき・一時的な失敗は間を置いて取り直す', () => {
+    expect(nextPollDelay(null)).toBe(UNREGISTERED_POLL_MS)
+    expect(nextPollDelay(new ApiError(500, 'internal'))).toBe(UNREGISTERED_POLL_MS)
+    expect(nextPollDelay(new TypeError('Failed to fetch'))).toBe(UNREGISTERED_POLL_MS)
+  })
+  it('ADB 同期が無効なら取るのをやめる（何度取っても変わらない）', () => {
+    expect(nextPollDelay(new ApiError(503, 'adb_disabled'))).toBeNull()
+  })
+  it('中止（フォームを閉じた）ならやめる', () => {
+    expect(nextPollDelay(new DOMException('aborted', 'AbortError'))).toBeNull()
   })
 })

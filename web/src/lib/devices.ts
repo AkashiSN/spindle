@@ -63,6 +63,18 @@ export function describeEvaluation(e: DeviceDiff['evaluations'][number], _now: n
 const OPEN_PLAN_TITLE = '前回の同期が途中です。続きを実行するか破棄してください'
 export const ADB_DISABLED_MESSAGE = 'Android の同期が無効です（設定の [devices].adb_server）'
 
+/** 未登録の Android を取り直す間隔（前の要求が終わってから数える） */
+export const UNREGISTERED_POLL_MS = 3000
+
+/** 未登録の一覧を取った結果（`error` は失敗の理由、成功なら null）から、次を取るまでの待ち（ms）。
+ * null なら取るのをやめる。ADB 同期が無効（503 `adb_disabled`）は取り直しても変わらず、
+ * 中止（フォームを閉じた）は続ける相手がいない */
+export function nextPollDelay(error: unknown): number | null {
+  if (error instanceof ApiError && error.code === 'adb_disabled') return null
+  if (error instanceof DOMException && error.name === 'AbortError') return null
+  return UNREGISTERED_POLL_MS
+}
+
 /** Android の接続状態の説明（問題が無ければ null） */
 export function connectionNote(d: Device): string | null {
   if (d.transport !== 'adb' || d.connected) return null
