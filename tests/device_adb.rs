@@ -1,6 +1,8 @@
 //! `AdbFs` を偽の adb（`adb -s <serial> shell <script>` を手元の sh で実行するスクリプト）で試す。
 //! 端末の root の代わりに一時ディレクトリの絶対パスを渡す。実機の試験は `#[ignore]`
 
+mod device_support;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -18,11 +20,66 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
         .block_on(f)
 }
 
+/// 偽の adb 一式。書き込み中の fd を別スレッドの fork が引き継ぐと ETXTBSY になるので、
+/// どの試験も最初の実行より前に、全部を 1 度だけ書く
+struct Fakes {
+    _dir: tempfile::TempDir,
+    adb: PathBuf,
+    broken_stat: PathBuf,
+}
+
+fn fakes() -> &'static Fakes {
+    static ONCE: std::sync::OnceLock<Fakes> = std::sync::OnceLock::new();
+    ONCE.get_or_init(write_fakes)
+}
+
 /// シリアルとサーバの指定を確かめてから、スクリプトを手元の sh で実行する偽の adb
 fn fake_adb(_dir: &Path) -> PathBuf {
-    // 書き込み中の fd を別スレッドの fork が引き継ぐと ETXTBSY になるので、最初に 1 度だけ書く
-    static ONCE: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
-    ONCE.get_or_init(write_fake_adb).1.clone()
+    fakes().adb.clone()
+}
+
+/// `stat -c %s`（一覧のサイズ取り）だけが必ず失敗する端末の偽の adb。
+/// 手置きのファイルが一覧から消えると、上書きしてよいファイルと区別できなくなる
+fn fake_adb_with_broken_stat() -> PathBuf {
+    fakes().broken_stat.clone()
+}
+
+fn write_executable(path: &Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn write_fakes() -> Fakes {
+    let (dir, adb) = write_fake_adb();
+    let real = std::env::var("PATH")
+        .unwrap()
+        .split(':')
+        .map(|d| Path::new(d).join("stat"))
+        .find(|p| p.is_file())
+        .expect("stat が見つからない");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    write_executable(
+        &bin.join("stat"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"-c\" ] && [ \"$2\" = \"%s\" ]; then echo \"stat: 読めない\" >&2; exit 1; fi\nexec {} \"$@\"\n",
+            real.display()
+        ),
+    );
+    let broken_stat = dir.path().join("adb-broken-stat");
+    write_executable(
+        &broken_stat,
+        &format!(
+            "#!/bin/sh\nPATH={}:$PATH\nexport PATH\nexec {} \"$@\"\n",
+            bin.display(),
+            adb.display()
+        ),
+    );
+    Fakes {
+        _dir: dir,
+        adb,
+        broken_stat,
+    }
 }
 
 fn write_fake_adb() -> (tempfile::TempDir, PathBuf) {
@@ -75,6 +132,23 @@ fn env_with(serial: &str) -> Env {
 
 fn env() -> Env {
     env_with("SER1")
+}
+
+/// 同じ root を、stat の壊れた端末として見る `AdbFs`
+fn broken_stat_fs(root: &Path) -> AdbFs {
+    let cfg = AdbConfig {
+        program: fake_adb_with_broken_stat(),
+        server: "tcp:adb:5037".into(),
+        timeout: Duration::from_secs(30),
+        transfer_timeout: Duration::from_secs(60),
+    };
+    AdbFs::new(
+        cfg,
+        "SER1",
+        root.to_str().unwrap(),
+        CancellationToken::new(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -356,4 +430,72 @@ fn odd_roots_are_refused() {
             "{root}"
         );
     }
+}
+
+#[test]
+fn list_files_fails_when_stat_fails() {
+    block_on(async {
+        let e = env();
+        e.fs.write("hand.opus", b"hand").await.unwrap();
+        let fs = broken_stat_fs(&e.root);
+        assert!(
+            matches!(fs.list_files().await, Err(RemoteError::Failed(_))),
+            "1 件でもサイズを取れなければ一覧全体を失敗させる"
+        );
+        // stat の他の使い方（空き容量）は壊していない
+        assert!(fs.free_bytes().await.unwrap() > 0);
+    });
+}
+
+#[test]
+fn sync_stops_before_writing_when_listing_fails() {
+    block_on(async {
+        use device_support::{expect, MemSources, TestControl};
+        use spindle::device::journal::random_id;
+        use spindle::device::plan::{PlanItem, Runnable};
+        use spindle::device::recover::recover;
+        use spindle::device::store::initialize;
+        use spindle::device::sync::{self, SyncInput};
+        use spindle::domain::device::OpKind;
+        let e = env();
+        initialize(&e.fs, "u1", "emulated").await.unwrap();
+        let rec = recover(&e.fs, &expect()).await.unwrap();
+        // 手置きのファイル（manifest に無い）と同じパスへ曲を足す計画
+        std::fs::write(e.root.join("a.opus"), b"hand").unwrap();
+        let journal = std::fs::read(e.root.join(".spindle/journal")).ok();
+        let body = b"spindle".to_vec();
+        let runnable = Runnable {
+            items: vec![PlanItem {
+                op_id: random_id().unwrap(),
+                op: OpKind::Add,
+                track_id: 1,
+                from: None,
+                to: Some("a.opus".into()),
+                token: Some("t1".into()),
+                size: body.len() as u64,
+                sha256: Some(sha256_hex(&body)),
+            }],
+            ..Default::default()
+        };
+        let fs = broken_stat_fs(&e.root);
+        let bodies = std::collections::HashMap::new();
+        let r = sync::run(
+            &fs,
+            &MemSources([(1, body)].into_iter().collect()),
+            &TestControl::default(),
+            SyncInput {
+                generation: 1,
+                start: rec.manifest,
+                runnable: &runnable,
+                playlist_bodies: &bodies,
+            },
+        )
+        .await;
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(std::fs::read(e.root.join("a.opus")).unwrap(), b"hand");
+        assert_eq!(std::fs::read(e.root.join(".spindle/journal")).ok(), journal);
+        // recover も一覧の失敗で止まる（手置きを残す）
+        assert!(recover(&fs, &expect()).await.is_err());
+        assert_eq!(std::fs::read(e.root.join("a.opus")).unwrap(), b"hand");
+    });
 }

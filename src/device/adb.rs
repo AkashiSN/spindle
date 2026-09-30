@@ -289,10 +289,13 @@ impl DeviceFs for AdbFs {
         }
     }
 
+    /// 1 件でもサイズを取れなければ一覧全体を失敗させる（握り潰すと手置きのファイルが一覧から消え、
+    /// 管理外と分からずに上書きしうる）。内側の sh の非 0 は `find -exec … +` の終了コードになる。
+    /// 列挙の後に消えたファイルでも失敗するが、同期が失敗するだけで次回やり直せる
     async fn list_files(&self) -> RemoteResult<Vec<RemoteFile>> {
         let r = self.quoted_root()?;
         let script = format!(
-            "[ -e {r} ] || exit 0; cd {r} || exit 1; find . -type f -exec sh -c 'for f; do s=$(stat -c %s \"$f\") || continue; printf \"%s\\n%s\\0\" \"$s\" \"${{f#./}}\"; done' sh {{}} +"
+            "[ -e {r} ] || exit 0; cd {r} || exit 1; find . -type f -exec sh -c 'for f; do s=$(stat -c %s \"$f\") || exit 1; printf \"%s\\n%s\\0\" \"$s\" \"${{f#./}}\"; done' sh {{}} +"
         );
         parse_listing(&self.shell(script).await?.stdout)
     }
