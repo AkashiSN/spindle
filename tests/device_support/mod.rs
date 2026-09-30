@@ -62,7 +62,9 @@ impl Inner {
 }
 
 /// メモリ上の偽の端末 FS。`fail_after(n)` で n 回目以降の変更系操作を「切断」にする
-/// （その操作は反映しない）。`reconnect()` まで以後の操作はすべて `NotConnected`
+/// （その操作は反映しない）。`reconnect()` まで以後の操作はすべて `NotConnected`。
+/// 切断は操作境界でだけ起き、`sync` は何もしない（未 sync のデータの喪失は模さない）。
+/// 耐久化の順序は `calls()` の呼び出し列を確かめるテストで固定する
 pub struct FakeFs(Mutex<Inner>);
 
 impl FakeFs {
@@ -94,6 +96,8 @@ impl FakeFs {
         g.mutations = 0;
         g.disconnected = false;
         g.calls.clear();
+        g.rescans = 0;
+        g.rescan_fails = false;
         FakeFs(Mutex::new(g))
     }
 
@@ -310,6 +314,7 @@ impl DeviceFs for FakeFs {
         if g.rescan_fails {
             return Err(RemoteError::Failed("am: 失敗".into()));
         }
+        g.calls.push("rescan".to_owned());
         g.rescans += 1;
         Ok(())
     }
