@@ -379,53 +379,63 @@ fn hashing_pipe(mut src: std::fs::File) -> std::io::Result<(std::fs::File, HashH
     Ok((std::fs::File::from(OwnedFd::from(reader)), handle))
 }
 
-/// 一覧の終端の印（サイズ行が `END` でパスが空のレコード）。これが無い出力は途中で切れたか find が失敗した
-const LISTING_END: &[u8] = b"END";
-/// stat に失敗したファイルの印（サイズ行の代わり）。サイズ行は数字だけなので区別できる
-const LISTING_ERROR: &[u8] = b"E";
+/// 一覧の終端の印。これが無い出力は途中で切れたか find（stat）が失敗した
+const LISTING_END: &str = "END";
+/// 一覧の先頭の件数行の接頭辞（`N <件数>`）
+const LISTING_COUNT: &str = "N ";
 
-/// `size\npath\0` の並びを読む（パスは NUL で終わるので改行を含んでも曖昧にならない）。
-/// 最後は必ず終端の印 `END\n\0` で、その後には何も無いこと。`E\npath\0`（stat の失敗）が 1 件でもあれば失敗。
-/// 終了コードに頼らず出力だけで一覧の完全さを確かめる（toybox の `find -exec … +` が子の非 0 を伝えなくても塞ぐ）
+/// `N <件数>`、`<サイズ> ./<パス>` を件数分、終端の印 `END` の順に並んだ行を読む。
+/// 出力が `END` の 1 行だけなら root が無い（空の一覧）。終端の後には何も無いこと。
+/// 終了コードに頼らず出力だけで一覧の完全さを確かめる: stat の失敗は find の非 0 で終端の印が無くなり、
+/// find が失敗を隠しても件数（`find | wc -l`）と行数が合わなくなる。
+/// パスは最初の空白の後ろ全部（空白を含んでよい）。改行を含む名前は Android の FUSE では作れず、
+/// `sh_quote` も拒むので行の区切りに使える。万一混ざっても、`./` で始まらない行か件数の不一致で失敗する
 fn parse_listing(bytes: &[u8]) -> RemoteResult<Vec<RemoteFile>> {
     let bad = |what: &str| RemoteError::Failed(format!("一覧の出力を読めない（{what}）"));
-    let mut out = Vec::new();
-    let mut rest = bytes;
-    loop {
-        if rest.is_empty() {
-            return Err(bad("終端の印が無い"));
-        }
-        let nl = rest
-            .iter()
-            .position(|b| *b == b'\n')
-            .ok_or_else(|| bad("途中で切れた"))?;
-        let head = &rest[..nl];
-        rest = &rest[nl + 1..];
-        let nul = rest
-            .iter()
-            .position(|b| *b == 0)
-            .ok_or_else(|| bad("途中で切れた"))?;
-        let path = &rest[..nul];
-        rest = &rest[nul + 1..];
-        if head == LISTING_END {
-            if !path.is_empty() || !rest.is_empty() {
-                return Err(bad("終端の印の後に続きがある"));
-            }
-            return Ok(out);
-        }
-        if head == LISTING_ERROR {
-            return Err(RemoteError::Failed(format!(
-                "一覧でサイズを取れないファイルがある: {}",
-                String::from_utf8_lossy(path)
-            )));
-        }
-        let size = std::str::from_utf8(head)
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .ok_or_else(|| bad("サイズ"))?;
-        let path = String::from_utf8(path.to_vec()).map_err(|_| bad("UTF-8 でないパス"))?;
-        out.push(RemoteFile { path, size });
+    let text = std::str::from_utf8(bytes).map_err(|_| bad("UTF-8 でないパス"))?;
+    let body = text
+        .strip_suffix(&format!("{LISTING_END}\n"))
+        .ok_or_else(|| bad("終端の印が無い"))?;
+    // 終端の印の直前は行頭（空か改行で終わる）であること
+    if !(body.is_empty() || body.ends_with('\n')) {
+        return Err(bad("終端の印が無い"));
     }
+    if body.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lines = body[..body.len() - 1].split('\n');
+    let count = lines
+        .next()
+        .and_then(|l| l.strip_prefix(LISTING_COUNT))
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|n| n.parse::<usize>().ok())
+        .ok_or_else(|| bad("件数の行"))?;
+    let mut out = Vec::with_capacity(count);
+    for line in lines {
+        let (size, path) = line
+            .split_once(' ')
+            .ok_or_else(|| bad("サイズとパスの行"))?;
+        if size.is_empty() || !size.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad("サイズ"));
+        }
+        let size = size.parse::<u64>().map_err(|_| bad("サイズ"))?;
+        let path = path
+            .strip_prefix("./")
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| bad("パス"))?;
+        out.push(RemoteFile {
+            path: path.to_string(),
+            size,
+        });
+    }
+    if out.len() != count {
+        return Err(RemoteError::Failed(format!(
+            "一覧の件数が合わない（find で {count} 件、サイズを取れたのは {} 件）",
+            out.len()
+        )));
+    }
+    Ok(out)
 }
 
 impl DeviceFs for AdbFs {
@@ -491,15 +501,15 @@ impl DeviceFs for AdbFs {
     }
 
     /// 1 件でもサイズを取れなければ一覧全体を失敗させる（握り潰すと手置きのファイルが一覧から消え、
-    /// 管理外と分からずに上書きしうる）。失敗は 2 重に伝える: 内側の sh の非 0（`find -exec … +` の終了コード）と、
-    /// 出力の `E` レコード。終端の印は find が 0 で終わったときだけ書き、root が無い経路でも書く。
-    /// 列挙の後に消えたファイルでも失敗するが、同期が失敗するだけで次回やり直せる。
-    /// ファイルごとに `stat` を起こすので、ライブラリが大きいと 1 回のコマンドのタイムアウト（`timeout`）を
-    /// 超えうる。長く走る一覧なので転送と同じ `transfer_timeout` で待つ
+    /// 管理外と分からずに上書きしうる）。失敗は 2 重に塞ぐ: stat の失敗は `find -exec … +` の非 0 で
+    /// 終端の印が書かれなくなり、find が終了コードを隠しても先に数えた件数と行数が合わなくなる。
+    /// 終端の印は root が無い経路でも書く。列挙の後に消えたファイルでも失敗するが、同期が失敗するだけで
+    /// 次回やり直せる。stat はまとめて起こす（ファイルごとに起こすと実機の 9030 件で 5 分を超えた。
+    /// まとめれば 5 秒）。それでも長く走る一覧なので転送と同じ `transfer_timeout` で待つ
     async fn list_files(&self) -> RemoteResult<Vec<RemoteFile>> {
         let r = self.quoted_root()?;
         let script = format!(
-            "[ -e {r} ] || {{ printf 'END\\n\\0'; exit 0; }}; cd {r} || exit 1; find . -type f -exec sh -c 'for f; do if s=$(stat -c %s \"$f\"); then printf \"%s\\n%s\\0\" \"$s\" \"${{f#./}}\"; else printf \"E\\n%s\\0\" \"${{f#./}}\"; exit 1; fi; done' sh {{}} + && printf 'END\\n\\0'"
+            "[ -e {r} ] || {{ printf 'END\\n'; exit 0; }}; cd {r} || exit 1; n=$(find . -type f | wc -l) || exit 1; printf 'N %s\\n' \"$n\"; find . -type f -exec stat -c '%s %n' {{}} + && printf 'END\\n'"
         );
         parse_listing(
             &self
@@ -641,16 +651,11 @@ mod tests {
     }
 
     #[test]
-    fn broken_listing_is_an_error() {
-        assert!(parse_listing(b"5\na\0END\n\0").is_ok());
-        assert!(parse_listing(b"5\na").is_err());
-        assert!(parse_listing(b"x\na\0END\n\0").is_err());
-        assert!(parse_listing(b"5\n\xff\0END\n\0").is_err());
-    }
-
-    #[test]
-    fn listing_needs_the_end_marker_and_no_failure_records() {
-        let ok = parse_listing(b"5\na\x002\nb c\0END\n\0").unwrap();
+    fn listing_reads_sizes_and_paths_with_spaces_and_multibyte() {
+        let ok = parse_listing(
+            "N 3\n5 ./a\n2 ./Dir/b c.opus\n7 ./アーティスト/曲 名.opus\nEND\n".as_bytes(),
+        )
+        .unwrap();
         assert_eq!(
             ok,
             vec![
@@ -659,22 +664,68 @@ mod tests {
                     size: 5
                 },
                 RemoteFile {
-                    path: "b c".into(),
+                    path: "Dir/b c.opus".into(),
                     size: 2
+                },
+                RemoteFile {
+                    path: "アーティスト/曲 名.opus".into(),
+                    size: 7
                 },
             ]
         );
+        // 0 件の一覧
+        assert_eq!(parse_listing(b"N 0\nEND\n").unwrap(), vec![]);
         // root が無い: 終端の印だけで空の一覧
-        assert_eq!(parse_listing(b"END\n\0").unwrap(), vec![]);
-        // stat に失敗した印（find が子の非 0 を伝えなくても気づく）
-        assert!(parse_listing(b"5\na\0E\nb\0END\n\0").is_err());
-        // 終端の印が無い（途中で切れた・find が失敗した）。レコードの境界で切れても失敗
-        assert!(parse_listing(b"5\na\0").is_err());
+        assert_eq!(parse_listing(b"END\n").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn listing_count_must_match() {
+        // find が stat の失敗を終了コードに伝えなくても、件数の不一致で気づく
+        assert!(parse_listing(b"N 2\n5 ./a\nEND\n").is_err());
+        assert!(parse_listing(b"N 1\n5 ./a\n2 ./b\nEND\n").is_err());
+        assert!(parse_listing(b"N 1\nEND\n").is_err());
+    }
+
+    #[test]
+    fn listing_needs_the_end_marker() {
+        // 途中で切れた・find が失敗した
+        assert!(parse_listing(b"N 1\n5 ./a\n").is_err());
+        assert!(parse_listing(b"N 1\n5 ./a").is_err());
+        assert!(parse_listing(b"N 1\n5 ./a\nEND").is_err());
+        assert!(parse_listing(b"N 0\n").is_err());
         assert!(parse_listing(b"").is_err());
         // 終端の後に何かある
-        assert!(parse_listing(b"END\n\x005\na\0").is_err());
-        assert!(parse_listing(b"END\n\0x").is_err());
-        // 終端の印にパスが付いている
-        assert!(parse_listing(b"END\nx\0").is_err());
+        assert!(parse_listing(b"END\nN 1\n5 ./a\nEND\n").is_err());
+        assert!(parse_listing(b"N 1\n5 ./a\nEND\nx").is_err());
+        assert!(parse_listing(b"END\n\n").is_err());
+    }
+
+    #[test]
+    fn malformed_listing_lines_are_errors() {
+        for bad in [
+            // 件数の行が無い・壊れている
+            &b"5 ./a\nEND\n"[..],
+            b"N x\n5 ./a\nEND\n",
+            b"N -1\nEND\n",
+            b"N\nEND\n",
+            // サイズが数字でない・空白が 1 つでない・./ で始まらない
+            b"N 1\nx ./a\nEND\n",
+            b"N 1\n-5 ./a\nEND\n",
+            b"N 1\n5  ./a\nEND\n",
+            b"N 1\n ./a\nEND\n",
+            b"N 1\n5 a\nEND\n",
+            b"N 1\n5\nEND\n",
+            b"N 1\n5 ./\nEND\n",
+            b"N 1\n\nEND\n",
+            // UTF-8 でないパス
+            b"N 1\n5 ./\xff\nEND\n",
+        ] {
+            assert!(
+                parse_listing(bad).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
     }
 }

@@ -45,7 +45,7 @@ fn fake_adb_with_silent_find() -> PathBuf {
     fakes().silent_find.clone()
 }
 
-/// `stat -c %s`（一覧のサイズ取り）だけが必ず失敗する端末の偽の adb。
+/// `stat -c '%s %n'`（一覧のサイズ取り）だけが必ず失敗する端末の偽の adb。
 /// 手置きのファイルが一覧から消えると、上書きしてよいファイルと区別できなくなる
 fn fake_adb_with_broken_stat() -> PathBuf {
     fakes().broken_stat.clone()
@@ -72,7 +72,7 @@ fn write_fakes() -> Fakes {
     write_executable(
         &bin.join("stat"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"-c\" ] && [ \"$2\" = \"%s\" ]; then echo \"stat: 読めない\" >&2; exit 1; fi\nexec {} \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-c\" ] && [ \"$2\" = \"%s %n\" ]; then echo \"stat: 読めない\" >&2; exit 1; fi\nexec {} \"$@\"\n",
             real.display()
         ),
     );
@@ -290,12 +290,14 @@ fn append_of_ten_thousand_lines_goes_through_stdin() {
 }
 
 #[test]
-fn list_files_is_unambiguous_with_newlines_in_names() {
+fn list_files_reads_awkward_names() {
     block_on(async {
         let e = env();
         e.fs.write("a.opus", b"12345").await.unwrap();
         e.fs.write("Dir/b c.opus", b"1").await.unwrap();
-        std::fs::write(e.root.join("evil\n5 a.opus"), b"xy").unwrap();
+        e.fs.write("アーティスト/曲 名 (feat. x).opus", b"xy")
+            .await
+            .unwrap();
         let mut files = e.fs.list_files().await.unwrap();
         files.sort_by(|a, b| a.path.cmp(&b.path));
         let got: Vec<(String, u64)> = files.into_iter().map(|f| (f.path, f.size)).collect();
@@ -304,9 +306,23 @@ fn list_files_is_unambiguous_with_newlines_in_names() {
             vec![
                 ("Dir/b c.opus".into(), 1),
                 ("a.opus".into(), 5),
-                ("evil\n5 a.opus".into(), 2),
+                ("アーティスト/曲 名 (feat. x).opus".into(), 2),
             ]
         );
+    });
+}
+
+#[test]
+fn list_files_fails_on_a_newline_in_a_name() {
+    block_on(async {
+        // Android の FUSE では作れない名前だが、万一あっても一覧を黙って欠かさず失敗させる
+        let e = env();
+        e.fs.write("a.opus", b"12345").await.unwrap();
+        std::fs::write(e.root.join("evil\n5 a.opus"), b"xy").unwrap();
+        assert!(matches!(
+            e.fs.list_files().await,
+            Err(RemoteError::Failed(_))
+        ));
     });
 }
 
@@ -516,7 +532,7 @@ fn list_files_fails_even_if_find_hides_the_failure() {
         let fs = fs_with(fake_adb_with_silent_find(), &e.root, &e.home);
         assert!(
             matches!(fs.list_files().await, Err(RemoteError::Failed(_))),
-            "find の終了コードが 0 でも、失敗の印で一覧全体を失敗させる"
+            "find の終了コードが 0 でも、件数の不一致で一覧全体を失敗させる"
         );
     });
 }
