@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::adb::{AdbConfig, AdbFs};
-use super::quote::root_abs;
+use super::quote::root_abs_under;
 use super::remote::RemoteError;
 use super::track::{FrameReader, TrackedDevice};
 use crate::jobs::process::ChildGroup;
@@ -22,6 +22,8 @@ pub struct AdbRuntime {
     devices: Mutex<BTreeMap<String, TrackedDevice>>,
     locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     free: Mutex<HashMap<i64, u64>>,
+    /// ボリュームを置く場所（本番は `/storage`）
+    storage_base: String,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -31,13 +33,27 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl AdbRuntime {
     /// `shutdown` はプロセスの停止用。`AdbFs` に渡すのもこれ（ジョブのキャンセルは `Control` で効かせる）
     pub fn new(cfg: AdbConfig, shutdown: CancellationToken) -> Arc<Self> {
+        Self::with_storage_base(cfg, shutdown, "/storage".to_owned())
+    }
+
+    /// ボリュームを置く場所を差し替えて作る（試験用。手元の一時ディレクトリを端末に見立てる）
+    pub fn with_storage_base(
+        cfg: AdbConfig,
+        shutdown: CancellationToken,
+        base: String,
+    ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
             shutdown,
             devices: Mutex::default(),
             locks: Mutex::default(),
             free: Mutex::default(),
+            storage_base: base,
         })
+    }
+
+    pub fn storage_base(&self) -> &str {
+        &self.storage_base
     }
 
     pub fn cfg(&self) -> &AdbConfig {
@@ -95,7 +111,7 @@ impl AdbRuntime {
 
     /// 端末の保存先を操作する `AdbFs`。トークンはプロセスの停止用
     pub fn fs_for(&self, serial: &str, volume: &str, root: &str) -> Result<AdbFs, RemoteError> {
-        let abs = root_abs(volume, root)
+        let abs = root_abs_under(self.storage_base(), volume, root)
             .ok_or_else(|| RemoteError::Failed(format!("保存先が不正: {volume} / {root}")))?;
         AdbFs::new(self.cfg.clone(), serial, &abs, self.shutdown.clone())
     }

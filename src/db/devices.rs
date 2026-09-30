@@ -159,6 +159,15 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Device>> {
         .flatten())
 }
 
+/// adb のシリアルで端末を引く（接続した端末が登録済みかの判定）
+pub fn find_by_serial(conn: &Connection, serial: &str) -> Result<Option<Device>> {
+    let sql = format!("SELECT {DEVICE_COLUMNS} FROM devices WHERE adb_serial = ?1");
+    Ok(conn
+        .query_row(&sql, [serial], device_row)
+        .optional()?
+        .flatten())
+}
+
 /// 端末が 1 台でも登録されているか（無ければ一覧の端末の状態のためにスナップショットを取らない）
 pub fn any(conn: &Connection) -> Result<bool> {
     Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM devices)", [], |r| r.get(0))?)
@@ -260,6 +269,16 @@ pub fn put_source_hash(
             h.sha256,
             now
         ],
+    )?;
+    Ok(())
+}
+
+/// `source_hashes` の行を消す。次の差分計算で `needs_hash` に戻り、ハッシュが取り直される
+/// （同期で送る元の identity か中身が記録と違った曲。`SyncReport::rehash`）
+pub fn forget_source_hash(conn: &Connection, track_id: i64, kind: SourceKind) -> Result<()> {
+    conn.execute(
+        "DELETE FROM source_hashes WHERE track_id = ?1 AND source = ?2",
+        params![track_id, kind.as_str()],
     )?;
     Ok(())
 }
