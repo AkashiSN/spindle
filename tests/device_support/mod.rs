@@ -83,6 +83,19 @@ impl FakeFs {
         fs
     }
 
+    pub fn remove_for_test(&self, path: &str) {
+        let mut g = self.0.lock().unwrap();
+        let k = g.key(path);
+        g.files.remove(&k);
+    }
+
+    pub fn rename_for_test(&self, from: &str, to: &str) {
+        let mut g = self.0.lock().unwrap();
+        let k = g.key(from);
+        let (_, bytes) = g.files.remove(&k).unwrap();
+        g.store(to, bytes);
+    }
+
     /// SD カード（FAT / exFAT）のように大小文字を区別しない
     pub fn case_insensitive(self) -> Self {
         self.0.lock().unwrap().case_insensitive = true;
