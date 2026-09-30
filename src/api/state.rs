@@ -58,6 +58,8 @@ pub struct AppState {
     pub cd: Option<CdDrive>,
     /// adb の実行時の状態（P5-3b）。無い（`[devices].adb_server` が空）と Android の端末の API は 503
     pub adb: Option<Arc<crate::device::runtime::AdbRuntime>>,
+    /// 起動時の診断で取った adb（platform-tools）の版。Android の同期が無効・probe 失敗なら None（/health の `adb`）
+    pub adb_version: Option<Arc<str>>,
 }
 
 /// ドライブとその監視状態の組
@@ -93,6 +95,7 @@ impl AppState {
             drive_offsets: None,
             cd: None,
             adb: None,
+            adb_version: None,
         }
     }
 
@@ -107,6 +110,11 @@ impl AppState {
 
     pub fn with_adb(mut self, rt: Arc<crate::device::runtime::AdbRuntime>) -> Self {
         self.adb = Some(rt);
+        self
+    }
+
+    pub fn with_adb_version(mut self, version: String) -> Self {
+        self.adb_version = Some(Arc::from(version));
         self
     }
 

@@ -57,7 +57,8 @@ async fn health_returns_200_with_status_ok() {
     assert_eq!(json["version"], spindle::version::VERSION);
     assert!(!spindle::version::VERSION.is_empty());
     assert_eq!(json["ytdlp"], serde_json::Value::Null, "診断前は null");
-    assert_eq!(json.as_object().unwrap().len(), 3, "{json}");
+    assert_eq!(json["adb"], serde_json::Value::Null, "adb 無効なら null");
+    assert_eq!(json.as_object().unwrap().len(), 4, "{json}");
 }
 
 /// P4-12: yt-dlp の版は起動時診断で載せる
@@ -67,7 +68,9 @@ async fn health_reports_the_ytdlp_version_when_probed() {
     let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
     let config = Arc::new(Config::parse(include_str!("../deploy/config.example.toml")).unwrap());
     let mode = auth::bootstrap(&db, Some("pw".into())).await.unwrap();
-    let state = AppState::new(config, db, mode).with_ytdlp_version(Some("2026.08.19".to_owned()));
+    let state = AppState::new(config, db, mode)
+        .with_ytdlp_version(Some("2026.08.19".to_owned()))
+        .with_adb_version("37.0.1".to_owned());
     let res = api::router(state)
         .oneshot(
             Request::builder()
@@ -80,6 +83,7 @@ async fn health_reports_the_ytdlp_version_when_probed() {
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["ytdlp"], "2026.08.19");
+    assert_eq!(json["adb"], "37.0.1");
 }
 
 /// P4-12: `spindle --version` は版だけを出して終わる（設定を読まない）

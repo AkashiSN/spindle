@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use tracing::info;
+use tracing::{info, warn};
 
 use spindle::api::{self, auth, AppState};
 use spindle::cd::accuraterip::AccurateRipClient;
@@ -19,6 +19,7 @@ use spindle::import::scanner::Scanner;
 use spindle::import::ytmusic::downloader::DownloaderEnv;
 use spindle::import::ytmusic::MetadataProvider;
 use spindle::jobs::handlers::backup::{self, BackupHandler};
+use spindle::jobs::handlers::device as device_job;
 use spindle::jobs::handlers::flaccheck::FlaccheckHandler;
 use spindle::jobs::handlers::gc::{self as gc_job, GcHandler};
 use spindle::jobs::handlers::hirescheck::HirescheckHandler;
@@ -446,6 +447,62 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&derived_root),
         )),
     );
+    // Android の同期（P5-3b、D-98）。[devices].adb_server が空なら何もしない
+    let adb_runtime = if state.config.devices.adb_enabled() {
+        let home = state.config.adb_home();
+        std::fs::create_dir_all(&home)
+            .with_context(|| format!("adb の HOME を作れない: {}", home.display()))?;
+        let cfg = spindle::device::adb::AdbConfig {
+            program: PathBuf::from(&state.config.bin.adb),
+            server: state.config.devices.adb_server.clone(),
+            home,
+            timeout: std::time::Duration::from_secs(u64::from(
+                state.config.devices.adb_timeout_secs,
+            )),
+            transfer_timeout: std::time::Duration::from_secs(u64::from(
+                state.config.devices.adb_transfer_timeout_secs,
+            )),
+        };
+        match spindle::device::adb::probe_version(&cfg).await {
+            Some(v) => {
+                info!(adb = %v, server = %cfg.server, "Android の同期を有効にした");
+                state = state.with_adb_version(v);
+                Some(spindle::device::runtime::AdbRuntime::new(
+                    cfg,
+                    shutdown.clone(),
+                ))
+            }
+            None => {
+                warn!(program = %cfg.program.display(), "adb を起動できないので Android の同期を無効にする");
+                None
+            }
+        }
+    } else {
+        info!("[devices].adb_server が空なので Android の同期は無効");
+        None
+    };
+    if let Some(rt) = &adb_runtime {
+        state = state.with_adb(Arc::clone(rt));
+        let env = Arc::new(device_job::DeviceEnv {
+            db: Arc::clone(&state.db),
+            jobs: Arc::clone(&state.jobs),
+            rt: Arc::clone(rt),
+            library: Arc::clone(&library_root),
+            derived: Arc::clone(&derived_root),
+        });
+        registry.register(
+            JobType::DeviceScan,
+            Arc::new(device_job::ScanHandler::new(Arc::clone(&env))),
+        );
+        registry.register(
+            JobType::DeviceSync,
+            Arc::new(device_job::SyncHandler::new(Arc::clone(&env))),
+        );
+        registry.register(
+            JobType::DeviceVerify,
+            Arc::new(device_job::VerifyHandler::new(env)),
+        );
+    }
     registry.register(
         JobType::Transcode,
         Arc::new(TranscodeHandler::new(
@@ -541,6 +598,17 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let worker = state.jobs.start(registry, shutdown.clone());
+    let adb_watcher = adb_runtime.map(|rt| {
+        let (db, jobs) = (Arc::clone(&state.db), Arc::clone(&state.jobs));
+        spindle::device::runtime::spawn_watcher(
+            rt,
+            Default::default(),
+            Arc::new(move |serial: String| {
+                let (db, jobs) = (Arc::clone(&db), Arc::clone(&jobs));
+                Box::pin(async move { device_job::on_connected(&db, &jobs, serial).await })
+            }),
+        )
+    });
     // 購読の dispatcher（latch の回収と定期同期）。ytmusic が無効なら回さない
     let subscription_dispatcher = state.config.ytmusic.enabled.then(|| {
         playlist_sync::spawn_dispatcher(
@@ -603,6 +671,9 @@ async fn main() -> anyhow::Result<()> {
     let _ = inbox_scheduler.await;
     let _ = cd_poller.await;
     if let Some(h) = subscription_dispatcher {
+        let _ = h.await;
+    }
+    if let Some(h) = adb_watcher {
         let _ = h.await;
     }
     let _ = autoexport.await;

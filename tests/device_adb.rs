@@ -117,6 +117,7 @@ fn write_fake_adb() -> (tempfile::TempDir, PathBuf) {
         r#"#!/bin/sh
 [ "$ADB_SERVER_SOCKET" = "tcp:adb:5037" ] || { echo "* cannot connect to daemon at $ADB_SERVER_SOCKET" >&2; exit 1; }
 [ -n "$HOME" ] && [ -d "$HOME" ] && [ -w "$HOME" ] || { echo "adb_utils.cpp:315 Cannot mkdir '$HOME/.android': Permission denied" >&2; exit 134; }
+if [ "$1" = version ]; then printf 'Android Debug Bridge version 1.0.41\nVersion 37.0.1-15733141\nInstalled as /x\n'; exit 0; fi
 [ "$1" = "-s" ] || { echo "-s が無い" >&2; exit 2; }
 [ "$2" = "SER1" ] || { echo "adb: device '$2' not found" >&2; exit 1; }
 if [ "$3" = "get-state" ]; then
@@ -147,6 +148,7 @@ struct Env {
     _dir: tempfile::TempDir,
     root: PathBuf,
     home: PathBuf,
+    cfg: AdbConfig,
     fs: AdbFs,
 }
 
@@ -162,7 +164,7 @@ fn env_with(serial: &str) -> Env {
         transfer_timeout: Duration::from_secs(60),
     };
     let fs = AdbFs::new(
-        cfg,
+        cfg.clone(),
         serial,
         root.to_str().unwrap(),
         CancellationToken::new(),
@@ -172,6 +174,7 @@ fn env_with(serial: &str) -> Env {
         _dir: dir,
         root,
         home,
+        cfg,
         fs,
     }
 }
@@ -744,5 +747,17 @@ fn real_device_sync_round_trip() {
         assert_eq!(files, vec!["Dir/song.opus".to_string()]);
         fs.remove("Dir/song.opus").await.unwrap();
         fs.discard_init().await.unwrap();
+    });
+}
+
+#[test]
+fn probe_version_reads_the_platform_tools_version() {
+    block_on(async {
+        let e = env();
+        let cfg = e.cfg.clone();
+        assert_eq!(
+            spindle::device::adb::probe_version(&cfg).await.as_deref(),
+            Some("37.0.1-15733141")
+        );
     });
 }

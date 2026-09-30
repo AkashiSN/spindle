@@ -190,6 +190,26 @@ impl AdbFs {
     }
 }
 
+/// `adb version` の版（`Version 37.0.1-15733141` の後ろ）。起動時診断と /health に使う
+pub async fn probe_version(cfg: &AdbConfig) -> Option<String> {
+    let out = ExternalCommand::new(&cfg.program)
+        .env("ADB_SERVER_SOCKET", &cfg.server)
+        .env("HOME", &cfg.home)
+        .arg("version")
+        .timeout(Duration::from_secs(5))
+        .run(&CancellationToken::new())
+        .await
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("Version ")
+                .map(|v| v.trim().to_owned())
+        })
+        .filter(|v| !v.is_empty())
+}
+
 /// `adb -s <serial>` までを組み立てる（サーバの指定と HOME を必ず付ける）
 fn base_command(cfg: &AdbConfig, serial: &str, timeout: Duration) -> ExternalCommand {
     ExternalCommand::new(&cfg.program)
