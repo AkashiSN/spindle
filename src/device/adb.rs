@@ -388,8 +388,9 @@ const LISTING_COUNT: &str = "N ";
 /// 出力が `END` の 1 行だけなら root が無い（空の一覧）。終端の後には何も無いこと。
 /// 終了コードに頼らず出力だけで一覧の完全さを確かめる: stat の失敗は find の非 0 で終端の印が無くなり、
 /// find が失敗を隠しても件数（`find | wc -l`）と行数が合わなくなる。
-/// パスは最初の空白の後ろ全部（空白を含んでよい）。改行を含む名前は Android の FUSE では作れず、
-/// `sh_quote` も拒むので行の区切りに使える。万一混ざっても、`./` で始まらない行か件数の不一致で失敗する
+/// パスは最初の空白の後ろ全部（空白を含んでよい）。改行を含む名前は Android の FUSE では作れず（実機で確認）、
+/// spindle 自身のパスも `sh_quote` が改行を拒むので、この形式は行の区切りに改行が使えることに頼る。
+/// 壊れた行や件数の不一致は今も失敗にするが、改行入りの名前を作り込まれた場合の検出までは保証しない
 fn parse_listing(bytes: &[u8]) -> RemoteResult<Vec<RemoteFile>> {
     let bad = |what: &str| RemoteError::Failed(format!("一覧の出力を読めない（{what}）"));
     let text = std::str::from_utf8(bytes).map_err(|_| bad("UTF-8 でないパス"))?;
