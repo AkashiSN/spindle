@@ -457,7 +457,10 @@ pub fn build_playlists(
 }
 
 /// 差分の操作。並び順は実行順（削除 → パス変更 → 更新 → 追加。仕様 ⑤）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum OpKind {
     Delete,
     Move,
@@ -496,7 +499,8 @@ pub struct PlaylistState {
     pub token: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PlaylistOpKind {
     Add,
     Update,
@@ -509,6 +513,25 @@ impl PlaylistOpKind {
             PlaylistOpKind::Add => "add",
             PlaylistOpKind::Update => "update",
             PlaylistOpKind::Delete => "delete",
+        }
+    }
+}
+
+/// 端末上の項目の種類（`device_errors.kind`、ジャーナルの `kind`）
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    Track,
+    Playlist,
+}
+
+impl EntryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntryKind::Track => "track",
+            EntryKind::Playlist => "playlist",
         }
     }
 }

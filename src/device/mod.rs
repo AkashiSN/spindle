@@ -2,4 +2,5 @@
 //! 差分の判定は `domain::device`、キャッシュは `db::devices`。ここは端末側の正本（manifest・ジャーナル）を
 //! 読み書きし、確定した計画を端末へ反映する。端末の操作は [`remote::DeviceFs`] で差し替える
 
+pub mod ondevice;
 pub mod quote;
