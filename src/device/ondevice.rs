@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::device::{DeviceItem, PlaylistState, RESERVED_NAME};
+use crate::domain::device::{DeviceItem, EntryKind, PlaylistState, RESERVED_NAME};
 use crate::domain::relpath::{canonical_key, RelPath};
 
 /// manifest の形式の版
@@ -99,6 +99,12 @@ pub fn parse(bytes: &[u8]) -> Result<DeviceManifest, ManifestError> {
     }
     let m: DeviceManifest =
         serde_json::from_value(v).map_err(|e| ManifestError::Json(e.to_string()))?;
+    validate(&m)?;
+    Ok(m)
+}
+
+/// 正本として成り立つか（件数・id とパスの一意性・パスの範囲）。読むときも書くときも通す
+pub fn validate(m: &DeviceManifest) -> Result<(), ManifestError> {
     let n = m.items.len() + m.playlists.len();
     if n > MAX_ENTRIES {
         return Err(ManifestError::TooMany(n));
@@ -128,10 +134,12 @@ pub fn parse(bytes: &[u8]) -> Result<DeviceManifest, ManifestError> {
             return Err(ManifestError::DuplicatePath(p.path.clone()));
         }
     }
-    Ok(m)
+    Ok(())
 }
 
+/// 書き出す。壊れた正本（パスの重複など）は書かない: 書くと以後の回復が必ず失敗する
 pub fn render(m: &DeviceManifest) -> Result<Vec<u8>, ManifestError> {
+    validate(m)?;
     serde_json::to_vec(m).map_err(|e| ManifestError::Json(e.to_string()))
 }
 
@@ -192,6 +200,18 @@ impl Book {
                 token: p.token.clone(),
             })
             .collect()
+    }
+
+    /// `path` を `kind` / `id` 以外の管理下の項目（曲とプレイリストは同じ名前空間）が占めているか
+    pub fn occupied_by_other(&self, kind: EntryKind, id: i64, path: &str) -> bool {
+        let key = canonical_key(path);
+        let track = self.items.values().any(|i| {
+            !(kind == EntryKind::Track && i.track_id == id) && canonical_key(&i.path) == key
+        });
+        let playlist = self.playlists.values().any(|p| {
+            !(kind == EntryKind::Playlist && p.playlist_id == id) && canonical_key(&p.path) == key
+        });
+        track || playlist
     }
 
     /// 管理下のパスの `canonical_key`

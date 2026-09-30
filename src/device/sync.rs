@@ -31,6 +31,9 @@ pub const MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 pub const COMPACT_EVERY: usize = 50;
 /// 置き先を管理外のファイル（manifest に無い、ユーザが置いたもの）が占めているときの理由
 pub const UNMANAGED_COLLISION: &str = "管理外のファイルと衝突";
+/// 置き先を別の管理下の項目が占めているときの理由。差分は移動中の曲の今のパスを「空く」と扱うが、
+/// その移動が実行されなかった（行き先が管理外・準備の失敗で縮んだ・再開時に外れた）ときに出る
+pub const PATH_OCCUPIED: &str = "パス衝突（移動しなかった曲が置き先にいる）";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SourceError {
@@ -402,6 +405,15 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             ));
             return Ok(());
         }
+        // 空くはずだった置き先に、移動しなかった曲がまだいる（上書きすると manifest のパスが重複する）
+        if self
+            .book
+            .occupied_by_other(EntryKind::Track, op.track_id, &to)
+        {
+            self.errors
+                .push((EntryKind::Track, op.track_id, PATH_OCCUPIED.to_owned()));
+            return Ok(());
+        }
         // 先に開けるか確かめる（開けない曲に意図を書かない）
         if let Err(e) = self.sources.open(op.track_id) {
             self.errors
@@ -488,6 +500,14 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
                 p.playlist_id,
                 UNMANAGED_COLLISION.to_owned(),
             ));
+            return Ok(());
+        }
+        if self
+            .book
+            .occupied_by_other(EntryKind::Playlist, p.playlist_id, &to)
+        {
+            self.errors
+                .push((EntryKind::Playlist, p.playlist_id, PATH_OCCUPIED.to_owned()));
             return Ok(());
         }
         let sha = sha256_hex(body);

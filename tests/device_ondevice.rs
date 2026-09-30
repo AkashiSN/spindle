@@ -19,6 +19,11 @@ fn manifest(items: Vec<ManifestItem>) -> DeviceManifest {
     m
 }
 
+/// 検査を通さずに書いた manifest（壊れた正本を parse が拒むかの試験用）
+fn raw(m: &DeviceManifest) -> Vec<u8> {
+    serde_json::to_vec(m).unwrap()
+}
+
 #[test]
 fn round_trip() {
     let mut m = manifest(vec![item(2, "b.opus"), item(1, "a.opus")]);
@@ -50,13 +55,13 @@ fn unknown_fields_are_ignored() {
 fn duplicates_and_bad_paths_are_refused() {
     let dup_id = manifest(vec![item(1, "a.opus"), item(1, "b.opus")]);
     assert_eq!(
-        parse(&render(&dup_id).unwrap()).unwrap_err(),
+        parse(&raw(&dup_id)).unwrap_err(),
         ManifestError::DuplicateTrack(1)
     );
     // casefold + NFD で同じパス
     let dup_path = manifest(vec![item(1, "A.opus"), item(2, "a.opus")]);
     assert!(matches!(
-        parse(&render(&dup_path).unwrap()).unwrap_err(),
+        parse(&raw(&dup_path)).unwrap_err(),
         ManifestError::DuplicatePath(_)
     ));
     for bad in [
@@ -67,10 +72,7 @@ fn duplicates_and_bad_paths_are_refused() {
     ] {
         let m = manifest(vec![item(1, bad)]);
         assert!(
-            matches!(
-                parse(&render(&m).unwrap()).unwrap_err(),
-                ManifestError::BadPath(_)
-            ),
+            matches!(parse(&raw(&m)).unwrap_err(), ManifestError::BadPath(_)),
             "{bad}"
         );
     }
@@ -83,7 +85,7 @@ fn too_many_entries_are_refused() {
         .collect();
     let m = manifest(items);
     assert!(matches!(
-        parse(&render(&m).unwrap()).unwrap_err(),
+        parse(&raw(&m)).unwrap_err(),
         ManifestError::TooMany(_)
     ));
 }
@@ -126,4 +128,34 @@ fn op_kinds_serialize_as_snake_case() {
     );
     let k: OpKind = serde_json::from_str("\"delete\"").unwrap();
     assert_eq!(k, OpKind::Delete);
+}
+
+#[test]
+fn render_refuses_what_parse_would_refuse() {
+    let dup_path = manifest(vec![item(1, "A.opus"), item(2, "a.opus")]);
+    assert!(matches!(
+        render(&dup_path).unwrap_err(),
+        ManifestError::DuplicatePath(_)
+    ));
+    let dup_id = manifest(vec![item(1, "a.opus"), item(1, "b.opus")]);
+    assert_eq!(
+        render(&dup_id).unwrap_err(),
+        ManifestError::DuplicateTrack(1)
+    );
+    let reserved = manifest(vec![item(1, ".spindle/x.opus")]);
+    assert!(matches!(
+        render(&reserved).unwrap_err(),
+        ManifestError::BadPath(_)
+    ));
+    // 曲とプレイリストは同じ名前空間
+    let mut shared = manifest(vec![item(1, "x.m3u8")]);
+    shared.playlists.push(ManifestPlaylist {
+        playlist_id: 5,
+        path: "X.m3u8".into(),
+        token: "p".into(),
+    });
+    assert!(matches!(
+        render(&shared).unwrap_err(),
+        ManifestError::DuplicatePath(_)
+    ));
 }

@@ -965,3 +965,99 @@ fn path_change_onto_unmanaged_file_is_not_overwritten() {
             .all(|p| !p.starts_with(".spindle/moving/")));
     });
 }
+
+/// 移動しなかった曲が空けるはずだったパスへの追加は、上書きせず保留になる（manifest のパスが重複しない）
+async fn assert_held_then_converges(fs: &FakeFs, want: &[Want<'_>]) {
+    assert_eq!(fs.get("a.opus"), Some(b"A".to_vec()));
+    let m = parse_manifest(fs);
+    assert_eq!(
+        m.items
+            .iter()
+            .map(|i| (i.track_id, i.path.clone()))
+            .collect::<Vec<_>>(),
+        vec![(1, "a.opus".to_string())]
+    );
+    recover(fs, &expect()).await.unwrap();
+    let report = sync_to(fs, want, &TestControl::default()).await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    check_target(fs, want);
+}
+
+#[test]
+fn add_onto_a_move_source_blocked_by_an_unmanaged_file_is_held() {
+    block_on(async {
+        let fs = device_at(&[(1, "a.opus", b"A")], 1 << 30).await;
+        fs.set("手で置いた.mp3", b"keep");
+        fs.set("b.opus", b"user's");
+        let want: &[Want] = &[(1, "b.opus", b"A"), (2, "a.opus", b"B")];
+        let report = sync_to(&fs, want, &TestControl::default()).await.unwrap();
+        assert_eq!(fs.get("b.opus"), Some(b"user's".to_vec()));
+        assert_eq!(
+            report.errors,
+            vec![
+                (EntryKind::Track, 1, UNMANAGED_COLLISION.to_owned()),
+                (EntryKind::Track, 2, PATH_OCCUPIED.to_owned()),
+            ]
+        );
+        // 管理外のファイルがどけば移動も追加もできる
+        fs.remove_for_test("b.opus");
+        assert_held_then_converges(&fs, want).await;
+    });
+}
+
+#[test]
+fn add_onto_a_move_source_dropped_by_a_failed_prepare_is_held() {
+    block_on(async {
+        let fs = device_at(&[(1, "a.opus", b"A")], 1 << 30).await;
+        fs.set("手で置いた.mp3", b"keep");
+        // 1 は更新 + 移動で送る元が無い（準備で失敗して成分ごと外れる）
+        let want: &[Want] = &[(1, "b.opus", b"A2"), (2, "a.opus", b"B")];
+        let report = sync_full(&fs, want, &[], &[1], &TestControl::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            report.errors,
+            vec![
+                (EntryKind::Track, 1, SourceError::Missing.reason()),
+                (EntryKind::Track, 2, PATH_OCCUPIED.to_owned()),
+            ]
+        );
+        assert_held_then_converges(&fs, want).await;
+    });
+}
+
+#[test]
+fn add_onto_a_move_source_dropped_on_resume_is_held() {
+    block_on(async {
+        let fs = device_at(&[(1, "a.opus", b"A")], 1 << 30).await;
+        fs.set("手で置いた.mp3", b"keep");
+        // 計画を確定した後で曲 1 の中身（トークン）が変わった: 再開時に移動だけ Drop になる
+        let planned: &[Want] = &[(1, "b.opus", b"A"), (2, "a.opus", b"B")];
+        let want: &[Want] = &[(1, "b.opus", b"A2"), (2, "a.opus", b"B")];
+        let rec = recover(&fs, &expect()).await.unwrap();
+        let d0 = diff(&desired(planned), &rec.items, &[], &[], Vec::new());
+        let plan = StoredPlan::from_diff(1, "tok", &d0).unwrap();
+        let d = diff(&desired(want), &rec.items, &[], &[], Vec::new());
+        let r = runnable(&plan, &rec.items, &[], &d);
+        assert_eq!(r.dropped, 1);
+        assert_eq!(r.items.len(), 1);
+        let report = sync::run(
+            &fs,
+            &sources(want),
+            &TestControl::default(),
+            SyncInput {
+                generation: 1,
+                start: rec.manifest,
+                runnable: &r,
+                playlist_bodies: &HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.errors,
+            vec![(EntryKind::Track, 2, PATH_OCCUPIED.to_owned())]
+        );
+        assert_held_then_converges(&fs, want).await;
+    });
+}
