@@ -32,6 +32,14 @@ pub use crate::db::jobs::{
 pub use context::{JobContext, TempGuard};
 pub use queue::{Jobs, EVENT_CAPACITY, LIST_LIMITS};
 
+/// 未接続の端末ジョブを待たせる秒数（仕様 ⑤「同期」。繋がったら `Jobs::wake_device` で前倒し）
+pub const DISCONNECTED_REQUEUE_SECS: i64 = 300;
+
+/// 端末ごとの名前付き排他（scan / sync / verify を同じ端末で並べない。仕様 ③）
+pub fn device_mutex(device_id: i64) -> String {
+    format!("device:{device_id}")
+}
+
 /// ハンドラが返す future
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -44,6 +52,8 @@ pub enum Outcome {
     DoneWith(String),
     /// 前提（track_locks 等）が取れなかった。試行回数を数えずに `queued` へ戻す
     Requeue,
+    /// 前提（端末の接続など）が当分満たされない。試行回数を数えずに、指定秒後に `queued` へ戻す
+    RequeueAfter(i64),
 }
 
 /// ハンドラの異常終了

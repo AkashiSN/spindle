@@ -2252,3 +2252,113 @@ async fn terminal_jobs_can_be_deleted_one_by_one_or_all_failed() {
     let res = send(&app, del(format!("/api/jobs/{done}"))).await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 }
+
+// ---------------------------------------------------------------- 端末ジョブ（P5-3b）
+
+#[tokio::test]
+async fn requeue_after_keeps_attempts_and_delays() {
+    let h = Harness::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = Registry::new();
+    let c2 = Arc::clone(&calls);
+    registry.register_fn(JobType::DeviceSync, move |_ctx| {
+        let c = Arc::clone(&c2);
+        async move {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(Outcome::RequeueAfter(300))
+        }
+    });
+    let id = h
+        .jobs
+        .enqueue(NewJob::new(
+            JobType::DeviceSync,
+            serde_json::json!({"device_id": 1}),
+        ))
+        .await
+        .unwrap()
+        .id();
+    h.start(registry);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while calls.load(Ordering::SeqCst) < 1 {
+        assert!(std::time::Instant::now() < deadline, "ハンドラが呼ばれない");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // 再キュー後、run_after が未来のまま queued に残る（呼ばれた直後は running の可能性があるので待つ）
+    let conn = h.raw();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if state_of(&conn, id) == JobState::Queued {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "queued に戻らない");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (attempts, run_after): (i64, i64) = conn
+        .query_row(
+            "SELECT attempts, run_after FROM jobs WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(attempts, 0);
+    assert!(run_after >= now_epoch() + 299, "run_after={run_after}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn wake_device_jobs_moves_only_that_devices_queued_jobs() {
+    let h = Harness::new();
+    let later = now_epoch() + 300;
+    let a = h
+        .jobs
+        .enqueue(
+            NewJob::new(JobType::DeviceSync, serde_json::json!({"device_id": 1})).run_after(later),
+        )
+        .await
+        .unwrap()
+        .id();
+    let b = h
+        .jobs
+        .enqueue(
+            NewJob::new(JobType::DeviceSync, serde_json::json!({"device_id": 2})).run_after(later),
+        )
+        .await
+        .unwrap()
+        .id();
+    let v = h
+        .jobs
+        .enqueue(
+            NewJob::new(JobType::DeviceVerify, serde_json::json!({"device_id": 1}))
+                .run_after(later),
+        )
+        .await
+        .unwrap()
+        .id();
+    let woke = h.jobs.wake_device(1).await.unwrap();
+    assert_eq!(woke, vec![a, v]);
+    let now = now_epoch();
+    assert!(h.jobs.get(a).await.unwrap().unwrap().run_after.unwrap() <= now);
+    assert_eq!(h.jobs.get(b).await.unwrap().unwrap().run_after, Some(later));
+}
+
+#[test]
+fn device_mutex_is_per_device() {
+    assert_eq!(jobs::device_mutex(7), "device:7");
+    assert_eq!(jobs::DISCONNECTED_REQUEUE_SECS, 300);
+}
+
+#[test]
+fn device_job_types_round_trip() {
+    assert_eq!(JobType::ALL.len(), 21);
+    for (t, s) in [
+        (JobType::DeviceScan, "device_scan"),
+        (JobType::DeviceSync, "device_sync"),
+        (JobType::DeviceVerify, "device_verify"),
+    ] {
+        assert_eq!(t.as_str(), s);
+        assert_eq!(s.parse::<JobType>().unwrap(), t);
+        assert!(JobType::ALL.contains(&t));
+        assert!(!t.cpu_bound());
+        assert_eq!(t.concurrency(8), 2);
+    }
+}

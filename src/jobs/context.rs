@@ -177,6 +177,14 @@ impl JobContext {
             .await
     }
 
+    /// [`Self::lock_mutex`] の、名前を実行時に組み立てる版（端末ごとの `device:<id>` など）
+    pub async fn lock_mutex_named(&self, name: String) -> Result<bool> {
+        let id = self.job.id;
+        self.db()
+            .write(move |c| dbjobs::acquire_mutex(c, &name, id, now_epoch()))
+            .await
+    }
+
     /// drop 時に消える一時ファイルのガード。成果物として残すなら [`TempGuard::keep`]
     pub fn temp_file(&self, path: impl AsRef<Path>) -> TempGuard {
         TempGuard::new(path)
