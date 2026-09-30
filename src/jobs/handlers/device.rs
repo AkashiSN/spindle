@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rusqlite::OptionalExtension as _;
+
 use crate::db::devices::{self as dbdev, Device, PlanEnd};
 use crate::db::{now_epoch, Db, DbError};
 use crate::device::adb::AdbFs;
@@ -289,6 +291,12 @@ impl SyncHandler {
 async fn run_sync(env: Arc<DeviceEnv>, ctx: JobContext) -> HandlerResult {
     let device_id = payload_i64(&ctx, "device_id")?;
     let plan_id = payload_i64(&ctx, "plan_id")?;
+    // 端末が消えていれば計画より先にそれを伝える（計画も端末と一緒に消えている）
+    match env.db.read(move |c| dbdev::get(c, device_id)).await? {
+        Some(_) => {}
+        None => return Ok(Outcome::DoneWith("端末が削除された".into())),
+    }
+    // 安い早期の打ち切り。確定はロックを取った後でもう一度見る
     let open = match env.db.read(move |c| dbdev::open_plan(c, device_id)).await {
         Ok(Some(o)) if o.id == plan_id => o,
         Ok(_) => return Ok(Outcome::DoneWith("計画は既に終わっている".into())),
@@ -303,6 +311,21 @@ async fn run_sync(env: Arc<DeviceEnv>, ctx: JobContext) -> HandlerResult {
         Ok(p) => p,
         Err(r) => return r,
     };
+    // 端末のロックを待つ間に API が計画を破棄したかもしれない（破棄は generation を進めない）
+    let still_open: Option<i64> = env
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT id FROM device_sync_plans WHERE device_id = ?1 AND state = 'open'",
+                [device_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })
+        .await?;
+    if still_open != Some(plan_id) {
+        return Ok(Outcome::DoneWith("計画は既に終わっている".into()));
+    }
     let computed = env
         .db
         .read(move |c| dbdev::compute(c, device_id))
@@ -394,7 +417,8 @@ async fn run_sync(env: Arc<DeviceEnv>, ctx: JobContext) -> HandlerResult {
         .filter_map(|id| kinds.get(id).map(|k| (*id, *k)))
         .collect();
     let open_id = open.id;
-    env.db
+    let closed = env
+        .db
         .write(move |c| {
             let now = now_epoch();
             let tx = c.transaction()?;
@@ -410,11 +434,17 @@ async fn run_sync(env: Arc<DeviceEnv>, ctx: JobContext) -> HandlerResult {
             for (id, kind) in rehash {
                 dbdev::forget_source_hash(&tx, id, kind)?;
             }
-            dbdev::close_plan(&tx, open_id, PlanEnd::Completed, None, now)?;
+            if !dbdev::close_plan(&tx, open_id, PlanEnd::Completed, None, now)? {
+                // 同期の途中で閉じられた。キャッシュも last_synced_at も進めない（tx を落として巻き戻す）
+                return Ok(false);
+            }
             tx.commit()?;
-            Ok(())
+            Ok(true)
         })
         .await?;
+    if !closed {
+        return Err(fatal("計画が同期の途中で閉じられた"));
+    }
     measure_free(&env, &p.fs, device_id).await;
     let sent = (r.items.len() + r.playlists.len()).saturating_sub(report.errors.len());
     let warnings = if report.warnings.is_empty() {

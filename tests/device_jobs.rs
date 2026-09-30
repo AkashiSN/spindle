@@ -513,3 +513,68 @@ async fn on_connected_ignores_an_unknown_serial() {
     on_connected(&fx.db, &fx.jobs, "OTHER".into()).await;
     assert_eq!(fx.scan_jobs().await, 0);
 }
+
+#[tokio::test]
+async fn sync_of_a_plan_abandoned_while_waiting_for_the_lock_is_a_no_op() {
+    let fx = Fx::new().await;
+    fx.connect();
+    fx.initialize().await;
+    fx.start();
+    let plan_id = fx.confirm().await;
+    let guard = fx.rt.device_lock(fx.device.id).lock_owned().await;
+    let id = fx
+        .jobs
+        .enqueue(sync_job(fx.device.id, plan_id))
+        .await
+        .unwrap()
+        .id();
+    fx.wait(id, JobState::Running).await;
+    fx.db
+        .write(move |c| devices::close_plan(c, plan_id, PlanEnd::Abandoned, None, now_epoch()))
+        .await
+        .unwrap();
+    drop(guard);
+    let job = fx.wait(id, JobState::Done).await;
+    let note = job.note.unwrap();
+    assert!(note.contains("既に終わっている"), "{note}");
+    assert!(!device_file(&fx.device_root).exists());
+    let dev = fx.device.id;
+    let synced = fx
+        .db
+        .read(move |c| Ok(devices::get(c, dev)?.unwrap().last_synced_at))
+        .await
+        .unwrap();
+    assert_eq!(synced, None);
+}
+
+#[tokio::test]
+async fn sync_of_a_deleted_device_says_so() {
+    let fx = Fx::new().await;
+    fx.start();
+    let plan_id = fx.confirm().await;
+    let dev = fx.device.id;
+    fx.db.write(move |c| devices::delete(c, dev)).await.unwrap();
+    let id = fx.jobs.enqueue(sync_job(dev, plan_id)).await.unwrap().id();
+    let job = fx.wait(id, JobState::Done).await;
+    assert_eq!(job.note.as_deref(), Some("端末が削除された"));
+}
+
+#[tokio::test]
+async fn verify_waits_without_spending_attempts_until_connected() {
+    let fx = Fx::new().await;
+    fx.initialize().await;
+    fx.start();
+    let before = now_epoch();
+    let id = fx
+        .jobs
+        .enqueue(verify_job(fx.device.id))
+        .await
+        .unwrap()
+        .id();
+    let job = fx
+        .wait_until(id, "待ちへ戻る", |j| {
+            j.state == JobState::Queued && j.run_after.is_some_and(|t| t >= before + 290)
+        })
+        .await;
+    assert_eq!(job.attempts, 0);
+}
