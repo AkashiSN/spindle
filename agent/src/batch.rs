@@ -26,6 +26,8 @@ use crate::{Error, Result};
 
 /// state.json のバッチの digest が合わない（vacating 以降は前進も破棄もできない）
 pub const BROKEN_BATCH: &str = "state.json のバッチが壊れています";
+/// パス変更の行き先に、空けた後で管理外のファイルが現れた
+pub const FOREIGN_AT_DESTINATION: &str = "移動の行き先に管理外のファイルがあります";
 
 /// パス変更をまとめて 1 つのバッチで実行する。返すのは（実行した数, 実行しなかった数）。
 /// 項目のエラー（管理外と衝突・パス衝突・内容の不一致）にしたものはどちらにも数えない。
@@ -98,6 +100,24 @@ pub fn run<M: Music, S: Server>(
                 }
                 Downloaded::Mismatch => {
                     cx.error_track(m.track_id, CONTENT_MISMATCH);
+                    errored += 1;
+                    failed.insert(m.track_id);
+                }
+            }
+        }
+        cx.fp.hit("batch.prepared")?;
+        if failed.is_empty() {
+            // 管理外の鍵は実行の始めに取ったもの。空ける前（ここまでは破棄できる）に行き先を見直し、
+            // ファイルが現れていればその曲の成分を外して縮める（上書きしない）。他のメンバーの移動元は
+            // バッチの中で空くので占有ではない
+            let from_keys: HashSet<String> = batch
+                .members
+                .iter()
+                .map(|m| canonical_key(&m.from))
+                .collect();
+            for m in &batch.members {
+                if !from_keys.contains(&canonical_key(&m.to)) && cx.local.exists(&m.to)? {
+                    cx.error_track(m.track_id, UNMANAGED_COLLISION);
                     errored += 1;
                     failed.insert(m.track_id);
                 }
@@ -326,6 +346,15 @@ fn place<M: Music, S: Server>(
             return Ok(false);
         }
     } else {
+        // 全員を空けた後なので、行き先にあってよい自分のファイルは無い。空ける前の見直しの後に
+        // 管理外のファイルが現れていれば上書きしない。vacating 以降は巻き戻せないので、バッチを残して
+        // 止め、利用者が退けた後の回復で続きを置く（置き済みのメンバーは回復が在る場所で判定する）
+        if cx.local.exists(&m.to)? {
+            return Err(Error::Stop(format!(
+                "{FOREIGN_AT_DESTINATION}（{}）。そのファイルを別の場所へ移してから sync し直してください",
+                m.to
+            )));
+        }
         cx.local.rename(src, &m.to)?;
     }
     relocate(cx, m, &m.to, m.op == MemberOp::UpdateMove)?;

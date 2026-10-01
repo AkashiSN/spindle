@@ -8,10 +8,15 @@ use std::rc::Rc;
 
 use crate::{Error, Result};
 
+/// 中断点で 1 回だけ走らせる処理（試験が「その瞬間に外から何かが起きた」を作る）
+type Hook = Box<dyn FnOnce()>;
+
 #[derive(Default)]
 struct Inner {
     /// 名前 → 残り回数（1 なら次の hit で発火）
     armed: HashMap<String, u32>,
+    /// 名前 → （残り回数, 処理）。発火せずに処理を走らせて続ける
+    hooks: HashMap<String, (u32, Hook)>,
     seen: Vec<String>,
 }
 
@@ -34,10 +39,34 @@ impl Failpoints {
         }
     }
 
+    /// `name` の `nth` 回目（1 始まり）の hit で `f` を 1 回だけ走らせる（落とさずに続ける）
+    pub fn on(&self, name: &str, nth: u32, f: impl FnOnce() + 'static) {
+        if let Some(i) = &self.0 {
+            i.borrow_mut()
+                .hooks
+                .insert(name.to_owned(), (nth.max(1), Box::new(f)));
+        }
+    }
+
     pub fn hit(&self, name: &str) -> Result<()> {
         let Some(i) = &self.0 else {
             return Ok(());
         };
+        // 処理は借用を返してから走らせる（処理の中で中断点を通ってもよいように）
+        let hook = {
+            let mut i = i.borrow_mut();
+            match i.hooks.get_mut(name) {
+                Some((left, _)) if *left <= 1 => i.hooks.remove(name).map(|(_, f)| f),
+                Some((left, _)) => {
+                    *left -= 1;
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(f) = hook {
+            f();
+        }
         let mut i = i.borrow_mut();
         i.seen.push(name.to_owned());
         let fire = match i.armed.get_mut(name) {

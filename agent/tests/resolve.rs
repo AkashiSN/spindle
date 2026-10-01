@@ -90,3 +90,18 @@ fn unknown_op_id_is_refused() {
         Err(Error::Stop(_))
     ));
 }
+
+/// 候補を出して止まった後で置き先のファイルが差し替えられた: resolve はそれを消さない
+#[test]
+fn resolve_keeps_replaced_file_at_destination() {
+    let mut env = Env::new();
+    let (op_id, _pid) = stuck(&mut env);
+    env.write_local("A/a.m4a", b"mine");
+    env.with_ctx(|cx| resolve(cx, &op_id, Resolution::NoCopyCreated))
+        .unwrap();
+    assert_eq!(
+        std::fs::read(env.root.abs("A/a.m4a").unwrap()).unwrap(),
+        b"mine"
+    );
+    assert!(env.state().pending_ops.is_empty());
+}

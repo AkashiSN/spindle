@@ -67,6 +67,16 @@ pub fn check_content_range(header: &str, offset: u64) -> Option<u64> {
     (start == offset && start <= end && end < total).then_some(total)
 }
 
+/// 基底 URL のパスを `/` で終わらせる。`Url::join` は最後の `/` の後ろを置き換えるので、
+/// `https://nas/spindle` のままだと `api/...` が `https://nas/api/...` になってしまう
+pub fn normalize_base(mut u: reqwest::Url) -> reqwest::Url {
+    if !u.path().ends_with('/') {
+        let p = format!("{}/", u.path());
+        u.set_path(&p);
+    }
+    u
+}
+
 pub struct HttpServer {
     base: reqwest::Url,
     token: Option<String>,
@@ -97,10 +107,12 @@ impl HttpServer {
             // 曲の取得（fetch）だけ要求ごとに長い上限を付け、TCP keepalive で死んだ接続も切る
             .timeout(Duration::from_secs(60))
             .tcp_keepalive(Duration::from_secs(30))
+            // リダイレクトは追わない（Authorization を別の宛先へ送らない。HTTPS から HTTP へも落ちない）
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| Error::Server(e.to_string()))?;
         Ok(Self {
-            base,
+            base: normalize_base(base),
             token,
             client,
         })

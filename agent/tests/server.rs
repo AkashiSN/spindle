@@ -99,3 +99,23 @@ fn fake_server_fetch_cut_and_changed() {
         Fetch::Gone
     );
 }
+
+#[test]
+fn base_url_keeps_sub_path() {
+    use spindle_agent::server::normalize_base;
+    let u = |s: &str| normalize_base(reqwest::Url::parse(s).unwrap()).to_string();
+    assert_eq!(
+        u("https://nas.example/spindle"),
+        "https://nas.example/spindle/"
+    );
+    assert_eq!(
+        u("https://nas.example/spindle/"),
+        "https://nas.example/spindle/"
+    );
+    assert_eq!(u("https://nas.example"), "https://nas.example/");
+    let base = normalize_base(reqwest::Url::parse("https://nas.example/spindle").unwrap());
+    assert_eq!(
+        base.join("api/agent/manifest").unwrap().as_str(),
+        "https://nas.example/spindle/api/agent/manifest"
+    );
+}

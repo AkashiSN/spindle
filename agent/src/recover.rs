@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ctx::Ctx;
 use crate::exec::{entry_for, remove_pending};
-use crate::local::TMP_SUFFIX;
+use crate::local::{MOVING_DIR, TMP_SUFFIX};
 use crate::music::{Music, MusicTrack};
 use crate::pathkey::{canonical_key, to_rel};
 use crate::playlist;
@@ -22,6 +22,7 @@ use crate::{Error, Result};
 pub fn recover<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<()> {
     // バッチの途中は track の location が `.moving/` を指すので、先に片付ける（仕様 ⑥「回復の順序」）
     crate::batch::recover_batches(cx)?;
+    remove_orphaned_moving(cx)?;
     let ops = cx.state.pending_ops.clone();
     for op in &ops {
         match (op.op, op.phase) {
@@ -47,6 +48,34 @@ pub fn recover<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<()> {
                 )))
             }
         }
+    }
+    Ok(())
+}
+
+/// `.moving/` のファイルのうち、残っているどのバッチも指していないもの（破棄の途中で落ちて残った
+/// new など）を消す。`.moving/` はエージェントの予約なので、中のファイルは自分のもの
+fn remove_orphaned_moving<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<()> {
+    let referenced: BTreeSet<String> = cx
+        .state
+        .pending_batches
+        .iter()
+        .flat_map(|b| &b.members)
+        .flat_map(|m| std::iter::once(&m.staging).chain(m.new.as_ref()))
+        .map(|p| canonical_key(p))
+        .collect();
+    let prefix = format!("{MOVING_DIR}/");
+    for f in cx.local.list_files()? {
+        if f.starts_with(&prefix) && !referenced.contains(&canonical_key(&f)) {
+            cx.local.remove(&f)?;
+        }
+    }
+    Ok(())
+}
+
+/// `to` の中身が `sha` なら（自分が置いたものなら）消す。違えば管理外として残す
+fn remove_if_ours<M: Music, S: Server>(cx: &Ctx<'_, M, S>, to: &str, sha: &str) -> Result<()> {
+    if cx.local.sha256(to)?.as_deref() == Some(sha) {
+        cx.local.remove(to)?;
     }
     Ok(())
 }
@@ -101,7 +130,11 @@ fn recover_update<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, op: &PendingOp) -
     if cx.local.sha256(to)?.as_deref() == Some(sha) {
         let pid = need(&op.persistent_id, "persistent_id", op)?;
         let token = need(&op.token, "token", op)?;
-        cx.music.refresh(pid)?;
+        // track が手で消されていれば refresh しない。行は書き、再発見が「手で消された」として外す
+        // （refresh で失敗すると、この回復が毎回止まって先へ進めない）
+        if cx.music.track(pid)?.is_some() {
+            cx.music.refresh(pid)?;
+        }
         let entry = entry_for(cx, pid, token, to, op.size, sha)?;
         cx.state.tracks.insert(op.ref_id, entry);
         cx.state.needs_report = true;
@@ -129,9 +162,11 @@ fn tracks_at<M: Music, S: Server>(cx: &Ctx<'_, M, S>, to: &str) -> Result<Vec<Mu
 /// 取得中・置いた直後（`add` の前）に止まった。置いたファイルは pending にあるので自分のもの
 fn recover_add_fetching<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, op: &PendingOp) -> Result<()> {
     let to = need(&op.to, "to", op)?;
+    let sha = need(&op.sha256, "sha256", op)?;
     cx.local.remove(&format!("{to}{TMP_SUFFIX}"))?;
+    // 置いた後に差し替えられた・置く前に管理外のファイルが現れたものは消さない
     if cx.local.exists(to)? && tracks_at(cx, to)?.is_empty() {
-        cx.local.remove(to)?;
+        remove_if_ours(cx, to, sha)?;
     }
     remove_pending(cx, &op.op_id);
     cx.save()
@@ -158,7 +193,7 @@ fn recover_add_adding<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, op: &PendingO
             let cands = copy_candidates(cx, op)?;
             if cands.is_empty() {
                 // add は起きていない
-                cx.local.remove(to)?;
+                remove_if_ours(cx, to, sha)?;
                 remove_pending(cx, &op.op_id);
                 return cx.save();
             }
@@ -247,7 +282,8 @@ pub fn resolve<M: Music, S: Server>(
         }
         cx.music.delete_track(pid)?;
     }
-    cx.local.remove(to)?;
+    let sha = need(&op.sha256, "sha256", op)?;
+    remove_if_ours(cx, to, sha)?;
     remove_pending(cx, op_id);
     cx.save()
 }

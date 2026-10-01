@@ -123,6 +123,8 @@ pub fn run<M: Music, S: Server>(
     let (executed, dropped) = playlist::run(cx, &r.playlists, m)?;
     out.executed += executed;
     out.dropped += dropped;
+    // 削除・移動で空いたディレクトリ（と `.moving/`）を片付ける。root 自身は残す
+    cx.local.prune_empty_dirs()?;
     Ok(out)
 }
 
@@ -339,7 +341,10 @@ fn update<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, item: &PlanItem) -> Resul
     }
     cx.local.place(&tmp, &path)?;
     cx.fp.hit("exec.update.placed")?;
-    cx.music.refresh(&pid)?;
+    // track が手で消されていれば refresh しない。行は書き、次の再発見が「手で消された」として外す
+    if cx.music.track(&pid)?.is_some() {
+        cx.music.refresh(&pid)?;
+    }
     let entry = entry_for(cx, &pid, token, &path, item.size, sha)?;
     cx.state.tracks.insert(item.track_id, entry);
     remove_pending(cx, &item.op_id);
@@ -393,6 +398,16 @@ fn add<M: Music, S: Server>(
     let d = download(cx, item.track_id, token, item.size, sha, &tmp)?;
     if let Some(step) = after_download(cx, item, d)? {
         return Ok(step);
+    }
+    cx.fp.hit("exec.add.downloaded")?;
+    // 管理外の鍵は実行の始めに取ったもの。取得の間に置き先へファイルが現れていれば上書きしない
+    // （ここで置き先にあってよい自分のファイルは無い。削除・移動元は先に空き、管理下の曲は上で外した）
+    if cx.local.exists(to)? {
+        cx.local.remove(&tmp)?;
+        remove_pending(cx, &item.op_id);
+        cx.error_track(item.track_id, UNMANAGED_COLLISION);
+        cx.save()?;
+        return Ok(Step::Errored);
     }
     cx.local.place(&tmp, to)?;
     cx.fp.hit("exec.add.placed")?;

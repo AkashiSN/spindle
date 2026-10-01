@@ -108,6 +108,7 @@ fn swap_crash_at_every_point_completes() {
         "music.set_location",
         "music.set_location:after",
         "music.refresh:after",
+        "batch.prepared",
         "batch.vacated_one",
         "batch.placed_one",
         "batch.cleaned",
@@ -321,4 +322,92 @@ fn managed_track_at_destination_drops_component() {
     assert_eq!(s.tracks[&1].path, "x.m4a");
     assert_eq!(s.tracks[&2].path, "y.m4a");
     assert_eq!(s.tracks[&3].path, "q.m4a");
+}
+
+/// 準備の後・空ける前に行き先へ管理外のファイルが現れた: その成分ごと外して上書きしない
+#[test]
+fn file_appearing_at_destination_during_prepare_drops_component() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "x.m4a", b"one");
+    env.synced_track(2, "p.m4a", b"two");
+    env.server.put_track(1, "y.m4a", b"one-new");
+    env.server.put_track(2, "q.m4a", b"two");
+    let abs = env.root.abs("y.m4a").unwrap();
+    env.fp.on("batch.prepared", 1, move || {
+        std::fs::write(&abs, b"mine").unwrap();
+    });
+    let (_p, r, m) = env.confirm_all();
+    let errors = env.with_ctx(|cx| {
+        exec::run(cx, &r, &m).unwrap();
+        cx.errors.clone()
+    });
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].reason, exec::UNMANAGED_COLLISION);
+    assert_eq!(
+        std::fs::read(env.root.abs("y.m4a").unwrap()).unwrap(),
+        b"mine"
+    );
+    let s = env.state();
+    assert_eq!(s.tracks[&1].path, "x.m4a");
+    assert_eq!(s.tracks[&2].path, "q.m4a");
+    assert!(s.pending_batches.is_empty());
+    assert!(env
+        .root
+        .list_files()
+        .unwrap()
+        .iter()
+        .all(|f| !f.starts_with(".moving/")));
+}
+
+/// 空けた後・置く前に行き先へ管理外のファイルが現れた: 上書きせずに止め、バッチは残す。
+/// 利用者が退ければ次の回復で完遂する
+#[test]
+fn file_appearing_at_destination_while_placing_is_not_overwritten() {
+    let mut env = Env::new();
+    env.paired();
+    let a = env.synced_track(1, "x.m4a", b"one");
+    env.server.put_track(1, "y.m4a", b"one");
+    let abs = env.root.abs("y.m4a").unwrap();
+    env.fp.on("batch.vacated_one", 1, move || {
+        std::fs::write(&abs, b"mine").unwrap();
+    });
+    let res = exec_all(&mut env);
+    assert!(matches!(res, Err(Error::Stop(_))), "{res:?}");
+    assert_eq!(
+        std::fs::read(env.root.abs("y.m4a").unwrap()).unwrap(),
+        b"mine"
+    );
+    assert_eq!(env.state().pending_batches.len(), 1);
+    // 回復も上書きしない
+    assert!(matches!(env.with_ctx(recover), Err(Error::Stop(_))));
+    assert_eq!(
+        std::fs::read(env.root.abs("y.m4a").unwrap()).unwrap(),
+        b"mine"
+    );
+    std::fs::remove_file(env.root.abs("y.m4a").unwrap()).unwrap();
+    env.with_ctx(recover).unwrap();
+    let s = env.state();
+    assert!(s.pending_batches.is_empty());
+    assert_eq!(s.tracks[&1].path, "y.m4a");
+    assert_eq!(
+        snapshot(&env),
+        vec![("y.m4a".into(), b"one".to_vec(), a.persistent_id.clone())]
+    );
+}
+
+/// どのバッチにも属さない `.moving/` のファイル（破棄の途中で落ちた new など）は回復が片付ける
+#[test]
+fn orphaned_moving_files_are_removed_in_recovery() {
+    let mut env = Env::new();
+    env.paired();
+    env.write_local(".moving/deadbeef-op.new", b"junk");
+    env.write_local(".moving/deadbeef-op", b"junk");
+    env.with_ctx(recover).unwrap();
+    assert!(env
+        .root
+        .list_files()
+        .unwrap()
+        .iter()
+        .all(|f| !f.starts_with(".moving/")));
 }

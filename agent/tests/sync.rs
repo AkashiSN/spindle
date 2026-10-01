@@ -331,3 +331,36 @@ fn report_only_round_waits_for_reevaluation() {
     assert!(env.server.open().is_none());
     assert!(env.ui.shown.is_empty());
 }
+
+/// 実行の後に残った差分（保留にした操作など）は件数を知らせる。残りが無ければ知らせない
+#[test]
+fn remaining_diff_after_apply_is_noted() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.server.put_track(2, "A/b.m4a", b"bbb");
+    env.write_local("A/a.m4a", b"mine");
+    let out = env.sync().unwrap();
+    assert!(
+        matches!(out, SyncOutcome::Applied { errors: 1, .. }),
+        "{out:?}"
+    );
+    assert!(
+        env.ui
+            .log
+            .iter()
+            .any(|l| l.contains("1 件") && l.contains("次の sync")),
+        "{:?}",
+        env.ui.log
+    );
+
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.sync().unwrap();
+    assert!(
+        env.ui.log.iter().all(|l| !l.contains("次の sync")),
+        "{:?}",
+        env.ui.log
+    );
+}

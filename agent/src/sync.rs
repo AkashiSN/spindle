@@ -198,7 +198,11 @@ fn run_sync<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<SyncOutcome> 
             return Ok(SyncOutcome::Declined);
         }
         match cx.server.confirm(&m.plan_token)? {
-            Confirmed::Plan(p) => return apply(cx, &p, &m),
+            Confirmed::Plan(p) => {
+                let out = apply(cx, &p, &m)?;
+                note_remaining(cx);
+                return Ok(out);
+            }
             Confirmed::Changed { .. } if attempt == CONFIRM_ATTEMPTS => break,
             Confirmed::Changed { .. } => {
                 cx.ui.info("差分が変わりました。取り直して表示し直します");
@@ -292,6 +296,20 @@ fn apply<M: Music, S: Server>(
         dropped: out.dropped,
         errors,
     })
+}
+
+/// 報告の後に manifest を取り直し、残った差分（見送り・保留・エラーにした操作）の件数を知らせる
+/// （D-100 判断 6）。知らせるだけなので、取り直しに失敗しても実行の結果は変えない
+fn note_remaining<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) {
+    let Ok(next) = cx.server.manifest() else {
+        return;
+    };
+    let n = next.diff.items.len() + next.diff.playlists.len();
+    if n > 0 {
+        cx.ui.info(&format!(
+            "まだ {n} 件の変更が残っています。次の sync で反映します"
+        ));
+    }
 }
 
 /// 計画の generation で報告する（確定の後で端末の設定が変われば、サーバが拒否する）
