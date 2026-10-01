@@ -197,11 +197,41 @@ fn final_symlink_is_not_followed() {
     assert!(r.exists("l.m4a").unwrap());
     assert!(matches!(r.create("l.m4a"), Err(Error::Stop(_))));
     assert!(!r.list_files().unwrap().contains(&"l.m4a".to_owned()));
-    // 消すのはリンク自身だけ
-    r.remove("l.m4a").unwrap();
-    assert!(!r.exists("l.m4a").unwrap());
+    let link_intact = |r: &LocalRoot| {
+        let l = r.path().join("l.m4a");
+        assert!(l.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&l).unwrap(), outside.join("x.m4a"));
+        assert_eq!(std::fs::read(outside.join("x.m4a")).unwrap(), b"outside");
+    };
+    // リンクそのものも消さない・動かさない・上書きしない
+    assert!(matches!(r.remove("l.m4a"), Err(Error::Stop(_))));
+    assert!(matches!(r.rename("l.m4a", "m.m4a"), Err(Error::Stop(_))));
+    assert!(!r.exists("m.m4a").unwrap());
+    let (tmp, mut f) = r.create_tmp("t.m4a").unwrap();
+    f.write_all(b"new").unwrap();
+    drop(f);
+    assert!(matches!(r.place(&tmp, "l.m4a"), Err(Error::Stop(_))));
+    assert!(matches!(r.rename(&tmp, "l.m4a"), Err(Error::Stop(_))));
+    assert!(r.exists(&tmp).unwrap());
+    // tmp の名前にリンクがあっても作り直さない
+    std::os::unix::fs::symlink(outside.join("x.m4a"), r.path().join("u.m4a.spindle-tmp")).unwrap();
+    assert!(matches!(r.create_tmp("u.m4a"), Err(Error::Stop(_))));
+    link_intact(&r);
     assert_eq!(std::fs::read(outside.join("x.m4a")).unwrap(), b"outside");
     // 印がシンボリックリンクなら読まない
     std::os::unix::fs::symlink(outside.join("x.m4a"), r.path().join(MARKER)).unwrap();
     assert!(matches!(r.read_marker(), Err(Error::Stop(_))));
+    let m = Marker {
+        device_uuid: "u".into(),
+        nonce: "n".into(),
+    };
+    assert!(matches!(r.write_marker(&m), Err(Error::Stop(_))));
+    assert!(r
+        .path()
+        .join(MARKER)
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read(outside.join("x.m4a")).unwrap(), b"outside");
 }

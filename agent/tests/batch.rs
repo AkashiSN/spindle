@@ -411,3 +411,28 @@ fn orphaned_moving_files_are_removed_in_recovery() {
         .iter()
         .all(|f| !f.starts_with(".moving/")));
 }
+
+/// 移動元がシンボリックリンクに差し替わった: `.moving/` へ動かさずに止める
+#[test]
+fn vacate_does_not_move_final_symlink() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "x.m4a", b"one");
+    let outside = env.dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("t.m4a");
+    std::fs::write(&target, b"outside").unwrap();
+    let link = env.root.path().join("x.m4a");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    env.server.put_track(1, "z.m4a", b"one");
+    match exec_all(&mut env) {
+        Err(Error::Stop(msg)) => assert!(msg.contains("x.m4a"), "{msg}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_link(&link).unwrap(), target);
+    assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+    assert!(env.root.list_files().unwrap().is_empty());
+    assert!(!env.root.path().join("z.m4a").exists());
+}

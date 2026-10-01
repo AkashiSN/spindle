@@ -80,7 +80,7 @@ fn io(e: Errno) -> Error {
     Error::Io(e.into())
 }
 
-/// 辿らないシンボリックリンク（かディレクトリでないもの）が途中にあって書けない
+/// 辿らないシンボリックリンク（かディレクトリでないもの）が途中か最後にあって書けない
 fn blocked(rel: &str) -> Error {
     Error::Stop(format!(
         "root の下のシンボリックリンク（またはディレクトリでないもの）は辿らないため扱えません（{rel}）"
@@ -97,6 +97,16 @@ fn not_found(rel: &str) -> Error {
 /// 開けなかった理由がシンボリックリンク・ディレクトリでないものか
 fn is_blocked(e: Errno) -> bool {
     e == Errno::LOOP || e == Errno::NOTDIR
+}
+
+/// 書き・rename・削除の前に最後の要素を見る。シンボリックリンクならエラー、無ければ false
+fn refuse_symlink(dir: &OwnedFd, name: &str, rel: &str) -> Result<bool> {
+    match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::Symlink => Err(blocked(rel)),
+        Ok(_) => Ok(true),
+        Err(Errno::NOENT) => Ok(false),
+        Err(e) => Err(io(e)),
+    }
 }
 
 #[allow(clippy::unnecessary_cast)]
@@ -254,6 +264,7 @@ impl LocalRoot {
         f.write_all(&bytes)?;
         f.sync_all()?;
         drop(f);
+        refuse_symlink(&root, MARKER, MARKER)?;
         renameat(&root, tmp.as_str(), &root, MARKER).map_err(io)?;
         fsync(&root).map_err(io)?;
         Ok(())
@@ -352,10 +363,15 @@ impl LocalRoot {
         self.rename(tmp, rel)
     }
 
-    /// rename（行き先の親を作る）と両方の親の fsync
+    /// rename（行き先の親を作る）と両方の親の fsync。元・行き先のどの要素がシンボリックリンクでもエラー
+    /// （リンクそのものも動かさない・上書きしない）
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
         let (fd_from, n_from) = self.parent_existing(from)?;
+        if !refuse_symlink(&fd_from, &n_from, from)? {
+            return Err(not_found(from));
+        }
         let (fd_to, n_to) = self.parent_for_write(to)?;
+        refuse_symlink(&fd_to, &n_to, to)?;
         renameat(&fd_from, n_from.as_str(), &fd_to, n_to.as_str()).map_err(|e| match e {
             Errno::NOENT => not_found(from),
             e => io(e),
@@ -365,13 +381,16 @@ impl LocalRoot {
         Ok(())
     }
 
-    /// 消す（無ければ何もしない）と親の fsync。途中にシンボリックリンクがあればエラー
+    /// 消す（無ければ何もしない）と親の fsync。途中か最後の要素がシンボリックリンクならエラー
     pub fn remove(&self, rel: &str) -> Result<()> {
         let (dir, name) = match self.parent(rel, false)? {
             Parent::Dir(d, n) => (d, n),
             Parent::Missing => return Ok(()),
             Parent::Blocked => return Err(blocked(rel)),
         };
+        if !refuse_symlink(&dir, &name, rel)? {
+            return Ok(());
+        }
         match unlinkat(&dir, name.as_str(), AtFlags::empty()) {
             Ok(()) => fsync(&dir).map_err(io),
             Err(Errno::NOENT) => Ok(()),

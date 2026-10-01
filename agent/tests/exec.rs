@@ -450,3 +450,59 @@ fn assert_outside_untouched(outside: &std::path::Path) {
         .collect();
     assert_eq!(names, vec!["a.m4a"]);
 }
+
+/// 管理中の曲のパスが root の外のファイルへのシンボリックリンクに差し替わった
+fn symlink_final_outside(env: &Env, rel: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let outside = env.dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("t.m4a");
+    std::fs::write(&target, b"outside").unwrap();
+    let link = env.root.path().join(rel);
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    (link, target)
+}
+
+fn assert_link_untouched(link: &std::path::Path, target: &std::path::Path) {
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_link(link).unwrap(), target);
+    assert_eq!(std::fs::read(target).unwrap(), b"outside");
+}
+
+/// 更新: 置き先のリンクを上書きせずに止める
+#[test]
+fn update_does_not_overwrite_final_symlink() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "A/a.m4a", b"aaa");
+    let (link, target) = symlink_final_outside(&env, "A/a.m4a");
+    env.server.put_track(1, "A/a.m4a", b"bbbb");
+    assert!(matches!(exec_all(&mut env), Err(Error::Stop(_))));
+    assert_link_untouched(&link, &target);
+}
+
+/// 削除: リンクを消さずに止める
+#[test]
+fn delete_does_not_remove_final_symlink() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "A/a.m4a", b"aaa");
+    let (link, target) = symlink_final_outside(&env, "A/a.m4a");
+    env.server.remove_track(1);
+    assert!(matches!(exec_all(&mut env), Err(Error::Stop(_))));
+    assert_link_untouched(&link, &target);
+}
+
+/// 削除の途中で落ちた後にリンクへ差し替わった: 回復もリンクを消さない
+#[test]
+fn delete_recovery_does_not_remove_final_symlink() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "A/a.m4a", b"aaa");
+    env.server.remove_track(1);
+    env.fp.arm("exec.delete.track_deleted", 1);
+    assert!(matches!(exec_all(&mut env), Err(Error::Crash(_))));
+    let (link, target) = symlink_final_outside(&env, "A/a.m4a");
+    assert!(env.with_ctx(recover).is_err());
+    assert_link_untouched(&link, &target);
+}
