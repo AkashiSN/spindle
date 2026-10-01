@@ -50,7 +50,7 @@ fn changed_candidates_are_refused() {
     let (op_id, pid) = stuck(&mut env);
     // 表示の後にユーザが同じ曲をもう 1 つ足した
     let copy = env.music.tracks()[0].location.clone().unwrap();
-    let extra = env.dir.path().join("Media/extra.m4a");
+    let extra = env.base.join("Media/extra.m4a");
     std::fs::copy(&copy, &extra).unwrap();
     env.music.insert_track(&extra);
     let res = env.with_ctx(|cx| resolve(cx, &op_id, Resolution::DeleteTrack(pid)));

@@ -437,7 +437,7 @@ fn delete_does_not_follow_symlinked_parent_dir() {
 
 /// root の `A/` を外の同じ中身のディレクトリへのシンボリックリンクにする
 fn symlink_parent_outside(env: &Env) -> std::path::PathBuf {
-    let outside = env.dir.path().join("outside");
+    let outside = env.base.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("a.m4a"), b"aaa").unwrap();
     let a = env.root.path().join("A");
@@ -457,7 +457,7 @@ fn assert_outside_untouched(outside: &std::path::Path) {
 
 /// 管理中の曲のパスが root の外のファイルへのシンボリックリンクに差し替わった
 fn symlink_final_outside(env: &Env, rel: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    let outside = env.dir.path().join("outside");
+    let outside = env.base.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     let target = outside.join("t.m4a");
     std::fs::write(&target, b"outside").unwrap();

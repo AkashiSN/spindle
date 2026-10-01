@@ -422,7 +422,7 @@ fn vacate_does_not_move_final_symlink() {
     let mut env = Env::new();
     env.paired();
     env.synced_track(1, "x.m4a", b"one");
-    let outside = env.dir.path().join("outside");
+    let outside = env.base.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     let target = outside.join("t.m4a");
     std::fs::write(&target, b"outside").unwrap();

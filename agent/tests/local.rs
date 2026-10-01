@@ -3,9 +3,14 @@ use std::io::Write;
 use spindle_agent::local::*;
 use spindle_agent::Error;
 
+/// 本番の root は起動時にシンボリックリンクを解いたパス（macOS の tempdir は `/var` → `/private/var`）
+fn base(d: &tempfile::TempDir) -> std::path::PathBuf {
+    std::fs::canonicalize(d.path()).unwrap()
+}
+
 fn root() -> (tempfile::TempDir, LocalRoot) {
     let d = tempfile::tempdir().unwrap();
-    let r = LocalRoot::new(d.path().join("spindle"));
+    let r = LocalRoot::new(base(&d).join("spindle"));
     (d, r)
 }
 
@@ -252,8 +257,8 @@ fn media_folder_marks_are_detected() {
 #[test]
 fn media_folder_mark_in_ancestor_is_detected() {
     let d = tempfile::tempdir().unwrap();
-    let r = LocalRoot::new(d.path().join("home/Music/spindle"));
-    let parent = d.path().join("home/Music");
+    let r = LocalRoot::new(base(&d).join("home/Music/spindle"));
+    let parent = base(&d).join("home/Music");
     std::fs::create_dir_all(&parent).unwrap();
     // root が無くても祖先を見る
     std::fs::write(parent.join(MEDIA_FOLDER_MARKS[1]), b"x").unwrap();
@@ -351,4 +356,92 @@ fn noreplace_refuses_final_symlink_and_symlinked_dir() {
     let l = r.path().join("l.m4a");
     assert!(l.symlink_metadata().unwrap().file_type().is_symlink());
     assert_eq!(std::fs::read(outside.join("x.m4a")).unwrap(), b"outside");
+}
+
+fn is_stop(r: spindle_agent::Result<impl std::fmt::Debug>) -> bool {
+    matches!(r, Err(Error::Stop(_)))
+}
+
+/// root の祖先か root 自身がシンボリックリンクなら、読みも書きも止める（root の外へ出ない）
+fn assert_all_stop(r: &LocalRoot) {
+    assert!(is_stop(r.create_tmp("A/b.m4a")));
+    assert!(is_stop(r.exists("A/b.m4a")));
+    assert!(is_stop(r.stat("A/b.m4a")));
+    assert!(is_stop(r.sha256("A/b.m4a")));
+    assert!(is_stop(r.remove("A/b.m4a")));
+    assert!(is_stop(r.list_files()));
+    assert!(is_stop(r.read_marker()));
+    assert!(is_stop(r.is_empty_or_missing()));
+    assert!(is_stop(r.write_marker(&Marker {
+        device_uuid: "u".into(),
+        nonce: "n".into(),
+    })));
+}
+
+#[test]
+fn symlinked_ancestor_of_root_stops() {
+    let d = tempfile::tempdir().unwrap();
+    let b = base(&d);
+    std::fs::create_dir(b.join("real")).unwrap();
+    std::os::unix::fs::symlink(b.join("real"), b.join("link")).unwrap();
+    // まだ無い root（作らない）
+    let r = LocalRoot::new(b.join("link/Music/spindle"));
+    assert_all_stop(&r);
+    assert!(!b.join("real/Music").exists());
+    // 在る root
+    std::fs::create_dir_all(b.join("real/Music/spindle")).unwrap();
+    std::fs::write(b.join("real/Music/spindle/x.m4a"), b"x").unwrap();
+    assert_all_stop(&r);
+    assert!(b.join("real/Music/spindle/x.m4a").exists());
+}
+
+#[test]
+fn symlinked_root_itself_stops() {
+    let d = tempfile::tempdir().unwrap();
+    let b = base(&d);
+    std::fs::create_dir(b.join("real")).unwrap();
+    std::os::unix::fs::symlink(b.join("real"), b.join("spindle")).unwrap();
+    let r = LocalRoot::new(b.join("spindle"));
+    assert_all_stop(&r);
+    assert_eq!(std::fs::read_dir(b.join("real")).unwrap().count(), 0);
+}
+
+/// 起動時に解いた root の祖先を、後からシンボリックリンクに差し替えた
+#[test]
+fn ancestor_swapped_to_symlink_after_start_stops() {
+    let d = tempfile::tempdir().unwrap();
+    let b = base(&d);
+    let r = LocalRoot::new(b.join("Music/spindle"));
+    let (tmp, f) = r.create_tmp("A/b.m4a").unwrap();
+    drop(f);
+    r.place(&tmp, "A/b.m4a").unwrap();
+    std::fs::create_dir(b.join("outside")).unwrap();
+    std::fs::rename(b.join("Music"), b.join("moved")).unwrap();
+    std::os::unix::fs::symlink(b.join("outside"), b.join("Music")).unwrap();
+    assert_all_stop(&r);
+    assert_eq!(std::fs::read_dir(b.join("outside")).unwrap().count(), 0);
+}
+
+#[test]
+fn missing_root_and_ancestors_are_created() {
+    let d = tempfile::tempdir().unwrap();
+    let b = base(&d);
+    let r = LocalRoot::new(b.join("home/Music/spindle"));
+    assert!(r.is_empty_or_missing().unwrap());
+    assert!(!r.exists("A/b.m4a").unwrap());
+    assert!(r.list_files().unwrap().is_empty());
+    assert!(!b.join("home").exists());
+    let (tmp, f) = r.create_tmp("A/b.m4a").unwrap();
+    drop(f);
+    r.place(&tmp, "A/b.m4a").unwrap();
+    assert!(b.join("home/Music/spindle/A/b.m4a").is_file());
+    assert!(!r.is_empty_or_missing().unwrap());
+    // 祖先が通常ファイルなら止める
+    std::fs::write(b.join("file"), b"x").unwrap();
+    assert_all_stop(&LocalRoot::new(b.join("file/spindle")));
+}
+
+#[test]
+fn relative_root_stops() {
+    assert!(is_stop(LocalRoot::new("rel/spindle".into()).exists("x")));
 }
