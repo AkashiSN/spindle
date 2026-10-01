@@ -146,6 +146,15 @@ fn run_sync<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<SyncOutcome> 
     rediscover::rediscover(cx, &m)?;
     // ④ open な計画の照合
     match cx.server.open_plan()? {
+        // 再開するのは、自分が確定して plan_id を記録した計画だけ（`apply` は副作用の前に記録する）。
+        // それ以外（報告だけの回の確定の後で落ちた・別の実行が確定しただけ）は y/N を経ていないので、
+        // 実行せずに今の state を報告して閉じる
+        Some(p) if cx.state.plan_id != Some(p.plan_id) => {
+            report(cx, &p)?;
+            cx.ui
+                .info("確定だけされて実行されていない計画を、実行せずに閉じました");
+            m = cx.server.manifest()?;
+        }
         Some(p) => {
             cx.ui.info("前回の同期の続きを実行します");
             if let SyncOutcome::Applied {
@@ -170,7 +179,7 @@ fn run_sync<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<SyncOutcome> 
         None => {}
     }
     // ⑤ 表示と確認
-    for _ in 0..CONFIRM_ATTEMPTS {
+    for attempt in 1..=CONFIRM_ATTEMPTS {
         if m.diff.items.is_empty() && m.diff.playlists.is_empty() {
             cx.ui.info(&format!(
                 "変更はありません（保留 {} 件）",
@@ -190,6 +199,7 @@ fn run_sync<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<SyncOutcome> 
         }
         match cx.server.confirm(&m.plan_token)? {
             Confirmed::Plan(p) => return apply(cx, &p, &m),
+            Confirmed::Changed { .. } if attempt == CONFIRM_ATTEMPTS => break,
             Confirmed::Changed { .. } => {
                 cx.ui.info("差分が変わりました。取り直して表示し直します");
                 m = cx.server.manifest()?;
@@ -234,12 +244,13 @@ fn report_only<M: Music, S: Server>(
     cx: &mut Ctx<'_, M, S>,
     mut m: ManifestResponse,
 ) -> Result<Option<ManifestResponse>> {
-    for _ in 0..CONFIRM_ATTEMPTS {
+    for attempt in 1..=CONFIRM_ATTEMPTS {
         match cx.server.confirm(&m.plan_token)? {
             Confirmed::Plan(p) => {
                 report(cx, &p)?;
                 return Ok(Some(cx.server.manifest()?));
             }
+            Confirmed::Changed { .. } if attempt == CONFIRM_ATTEMPTS => break,
             Confirmed::Changed { .. } => m = cx.server.manifest()?,
             Confirmed::PendingReevaluation => {
                 // ⑤ が差分を表示して「再評価待ち」で終える

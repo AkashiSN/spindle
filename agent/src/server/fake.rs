@@ -33,6 +33,8 @@ struct World {
     /// track_id → この回数だけ、半分まで書いて切る
     fetch_cut: BTreeMap<i64, u32>,
     fetch_log: Vec<(i64, u64)>,
+    /// report をこの回数だけ通信エラーにする（受け付けない）
+    report_fail: u32,
 }
 
 #[derive(Clone, Default)]
@@ -114,6 +116,10 @@ impl FakeServer {
 
     pub fn cut_fetch(&self, track_id: i64, times: u32) {
         self.0.borrow_mut().fetch_cut.insert(track_id, times);
+    }
+
+    pub fn fail_report(&self, times: u32) {
+        self.0.borrow_mut().report_fail = times;
     }
 
     pub fn fetch_log(&self) -> Vec<(i64, u64)> {
@@ -368,6 +374,10 @@ impl Server for FakeServer {
 
     fn report(&self, r: &ReportRequest) -> Result<Reported> {
         let mut w = self.0.borrow_mut();
+        if w.report_fail > 0 {
+            w.report_fail -= 1;
+            return Err(Error::Server("報告の送信に失敗（偽）".to_owned()));
+        }
         w.reports.push(r.clone());
         if w.open.as_ref().map(|p| p.plan_id) != Some(r.plan_id) {
             return Ok(Reported::Closed);

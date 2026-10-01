@@ -94,7 +94,8 @@ impl Ui for StdUi {
     }
 }
 
-/// pair 済みの state の URL とトークンで spindle に繋ぐ
+/// pair 済みの state の URL とトークンで spindle に繋ぐ。読むのは URL・insecure_http・トークンだけなので
+/// ロックは取らない（state を扱う段取りは各コマンドがロックを取ってから読み直す）
 fn paired_server(paths: &Paths) -> Result<HttpServer> {
     let state = StateFile::new(&paths.state_dir).load()?;
     let Some(info) = state.server else {

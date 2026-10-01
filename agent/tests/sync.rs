@@ -268,3 +268,66 @@ fn render_diff_summarizes_and_truncates() {
     assert!(!s.contains("A/59.m4a"), "{s}");
     assert!(s.contains("ほか 10 件"), "{s}");
 }
+
+#[test]
+fn plan_confirmed_by_failed_report_only_round_is_closed_without_executing() {
+    let mut env = Env::new();
+    env.paired();
+    let e = env.synced_track(1, "A/a.m4a", b"aaa");
+    env.music.remove_track(&e.persistent_id);
+    env.server.put_track(2, "A/b.m4a", b"bbb");
+    // 報告だけの回: 確定（add 2 を含む計画）の後、報告が届かずに終わる
+    env.server.fail_report(1);
+    assert!(matches!(env.sync(), Err(Error::Server(_))));
+    assert!(env.server.open().is_some());
+    assert!(env.state().needs_report);
+    assert_eq!(env.state().plan_id, None);
+    // 次の sync は y/N の前に何も実行しない。断れば何も変わらない
+    env.ui.answers.push_back(false);
+    assert_eq!(env.sync().unwrap(), SyncOutcome::Declined);
+    assert!(env.music.tracks().is_empty());
+    assert!(!env.root.exists("A/b.m4a").unwrap());
+    assert!(env.state().tracks.is_empty());
+    assert!(env.server.open().is_none());
+    assert_eq!(env.server.reports().len(), 1);
+    assert!(env.server.reports()[0].state.tracks.is_empty());
+    assert!(env
+        .ui
+        .log
+        .iter()
+        .any(|l| l.contains("実行せずに閉じました")));
+    let shown = env.ui.shown.last().unwrap();
+    assert_eq!(shown.diff.items.len(), 2, "{:?}", shown.diff.items);
+}
+
+#[test]
+fn plan_confirmed_but_not_recorded_is_closed_without_executing() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    // 確定だけされて plan_id を記録する前に終わった計画
+    let m = spindle_agent::server::Server::manifest(&env.server).unwrap();
+    let c = spindle_agent::server::Server::confirm(&env.server, &m.plan_token).unwrap();
+    assert!(matches!(c, spindle_agent::server::Confirmed::Plan(_)));
+    env.ui.answers.push_back(false);
+    assert_eq!(env.sync().unwrap(), SyncOutcome::Declined);
+    assert!(env.music.tracks().is_empty());
+    assert!(!env.root.exists("A/a.m4a").unwrap());
+    assert!(env.server.open().is_none());
+    assert_eq!(env.server.reports().len(), 1);
+    assert_eq!(env.ui.shown.len(), 1);
+}
+
+#[test]
+fn report_only_round_waits_for_reevaluation() {
+    let mut env = Env::new();
+    env.paired();
+    let e = env.synced_track(1, "A/a.m4a", b"aaa");
+    env.music.remove_track(&e.persistent_id);
+    env.server.set_pending_reevaluation(true);
+    assert_eq!(env.sync().unwrap(), SyncOutcome::PendingReevaluation);
+    assert!(env.state().needs_report);
+    assert!(env.server.reports().is_empty());
+    assert!(env.server.open().is_none());
+    assert!(env.ui.shown.is_empty());
+}
