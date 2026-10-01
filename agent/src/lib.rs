@@ -5,6 +5,7 @@
 
 pub mod failpoint;
 pub mod local;
+pub mod music;
 pub mod pathkey;
 pub mod secrets;
 pub mod state;
