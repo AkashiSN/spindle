@@ -38,7 +38,7 @@ TrueNAS 上で動く単一コンテナの音楽ライブラリ管理アプリ。
 
 - **ユーザデータの物理削除。** 削除は `missing_since` による論理削除。
   物理削除は GC ジョブ（既定 7 日経過後。`[gc].retention_days`）のみが行う。
-  - 例外ではなく対象外: 端末上の写しと Mac の `~/Music/spindle` は Library から
+  - 明示の例外: 端末上の写しと Mac の `~/Music/spindle` は Library から
     再生成できる複製なので、これに当たらない（消えても次の同期で戻る）。端末への
     書き込みは `edit_batches` に載せない（巻き戻しは Library を巻き戻して同期し直す）。
     D-95。

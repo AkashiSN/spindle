@@ -43,7 +43,7 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 | 端末 (device) | 配信先。Android（ADB 直結）か iPhone（Mac のエージェント経由）の 1 台。系統（`opus` / `aac`）と対象（全曲 / プレイリスト）を持つ（§7.11、D-95） |
 | マニフェスト（あるべき状態） | 端末に置くべき曲とプレイリストの一覧。保存せず毎回 Library から計算する。端末側の実態が正（D-95） |
 | 写し（端末上の曲） | 端末（Mac の `~/Music/spindle` を含む）に置いた曲の複製。Library から再生成できるので、物理削除してよい（D-95） |
-| 差分 | マニフェストと端末の実態の違い。曲ごとに add / update / move / 更新+移動 / delete に分け、確認してから送る（§7.11） |
+| 差分 | マニフェストと端末の実態の違い。曲ごとに add / update / move / update_move / delete に分け、確認してから送る（§7.11） |
 | 計画 | 差分から作る、端末へ反映する操作の列。差分を見てからボタンで実行する（自動では送らない。D-95） |
 | エージェント (spindle-agent) | Mac で動く常駐しない CLI。spindle から計画を受け取り、ミュージック.app へ反映して結果を報告する（§7.11、D-95） |
 
@@ -53,7 +53,8 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 
 1. **ファイルが正、DBはキャッシュ。** DB を消してもファイルから再構築できること。
    ただし以下は DB にしか存在しないため個別にバックアップする:
-   プレイリスト / 編集履歴 / 検証結果 / ジョブ履歴
+   プレイリスト / 編集履歴 / 検証結果 / ジョブ履歴 / 端末の設定・印・計画・エージェントのトークン
+   （§6「端末への配信の表」。端末上の写しは Library から再生成できる複製で、これには含めない）
 2. **パスは識別子ではない。** リネームは日常操作。同一性は inode と audio_md5 で解決する
 3. **音声とタグを分けて版管理する。** タグ編集で再エンコードを起こさないため
 4. **すべての破壊的操作はバッチ単位で巻き戻せる。** ZFS スナップショットは最後の砦であり、
@@ -432,12 +433,14 @@ state とミュージック.app。spindle へは報告で届く）で、DB の�
 | `source_hashes` | 送る元（`master` / `opus` / `aac`）ごとの SHA-256 と、取ったときの意味トークン・物理同一性（inode・size・mtime_ns・ctime_ns。dev は持たない。D-62） | キャッシュ（`source_hash` ジョブで取り直せる） |
 | `device_sync_plans` | 確定した計画。`plan` は不変の JSON（版 `v`・`generation`・`plan_token` と、曲の操作（`op_id`・種類・`track_id`・from・to・トークン・size・sha256）とプレイリストの操作（`op_id`・種類・`playlist_id`・from・to・トークン）の列）、`state`（`open` / `completed` / `abandoned`）、`job_id`（adb）、`report_digest`（agent の報告の再送の照合）。端末ごとに `open` は 1 つまで（部分 UNIQUE 索引） | DB にしか無い |
 
-- `devices.generation` は端末の選曲に効く設定（`selection` / `variant` / 印）を変えるたびに 1 進める（名前の
-  変更では進めない）。計画とジョブと報告はそれを持ち、食い違えば実行・受理しない（§7.11「計画」）
+- `devices.generation` は端末の選曲に効く設定（`selection` / `variant` / 印）を API で変えるたびに 1 進める
+  （名前の変更では進めない。プレイリストの削除による印の消滅では進まない）。計画とジョブと報告はそれを持ち、食い違えば実行・受理しない（§7.11「計画」）
 - `device_items` / `device_playlist_state` は端末側の正本を読んだ時点で**全置換**する（adb は回復の後と同期の
   完了、agent は報告・破棄の受理）。部分的な更新はしない
-- 端末・印・計画・キャッシュの行が消えるのは端末の削除だけ（`ON DELETE CASCADE`。端末上のファイルには
-  触らない）。GC は終端した計画を回収しない
+- 端末の行と計画・キャッシュが消えるのは端末の削除（`ON DELETE CASCADE`。端末上のファイルには触らない）。
+  印はそれに加えてプレイリストの削除でも消え（`device_playlists.playlist_id` も CASCADE）、そのとき
+  `generation` は進まず、open な計画があっても止めない（残課題。§17）。`source_hashes` は `tracks` の
+  行の削除で消える。GC は終端した計画を回収しない
 - 同じマイグレーションで `playlists.evaluated_at`（スマートプレイリストを評価した時刻。差分画面に出す）を
   足し、`jobs.type` に `source_hash` / `device_scan` / `device_sync` / `device_verify` を足した
   （`playlist_sync` も同時）。0003 の `inbox_item_tracks` は Inbox の件で配置した曲で、件の「配置 → RG →
@@ -1496,7 +1499,8 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   agent は最初の副作用の前にエージェントが確定する
 - **端末ごとに open な計画は 1 つ**。同じ `plan_token` の確定は同じ計画を返し（冪等）、違えば
   409 `open_plan_exists`。open な計画か待ち・実行中の `device_sync` がある間は、名前以外の PATCH・
-  印の変更・pair コードの発行を 409 `open_plan` にする（`generation` を動かさないため）
+  印の変更（PUT）・pair コードの発行を 409 `open_plan` にする（`generation` を動かさないため。
+  プレイリストの削除による印の消滅は対象外で、§17 の残課題）
 - **開始済みの計画の再開**: 実行するのは計画の部分集合だけ。今の状態で満たされている操作は済みとして
   飛ばし、今の差分にも**同じ操作・同じトークン・同じパス**で残っているものだけを実行する。差分から消えた・
   変わった操作と、計画に無い操作（とくに新しい削除）は実行せず、次の差分に回す。パス変更は入れ替え・
@@ -1637,6 +1641,8 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   Release に置く（README に `xattr -d com.apple.quarantine` と Automation の許可を書く。D-101）
 
 **不変条件との関係（明示する例外）**
+
+（DB にしかない端末の設定・印・計画・トークンの扱いは §3・§14。）
 
 CLAUDE.md の不変条件と禁止事項は Library（ユーザデータ）を対象にしている。端末上の写しと Mac の
 `~/Music/spindle` は **Library から再生成できる複製**なので、次を例外とする（D-95）。
@@ -2022,7 +2028,7 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //                                      //   no_rg | rg_unwritten | pending | conflict | hardlink |
 //                                      //   flac_unchecked | flac_error（§7.9）| hires_unchecked | hires_suspect（§7.10）
 //     "q": "情緒",                     // 検索語（3 文字以上 FTS5 / 未満 LIKE）
-//     "device_pending": 2 }            // 端末に未反映（端末 id。追加・更新・移動。DSL の device_pending と同じ定義。§7.11）
+//     "device_pending": 2 }            // 端末に未反映（端末 id。追加・更新・移動・更新 + 移動で、前回の失敗も含む。DSL の device_pending と同じ定義。§7.11）
 //   cursor は前ページの next_cursor をそのまま返す不透明文字列（キーセット）。sort が変わったら
 //   捨てる（別ソートで発行したカーソルは 400）。
 //   total はフィルタに一致する全件数（同じ読み取りスナップショットで数える）
@@ -2296,7 +2302,7 @@ ORDER BY %date% DESC LIMIT 100
    `TRACKNUMBER` → `%tracknumber%`。写像表を持つ（docs/DSL.md）。技術情報（`codec` `samplerate`
    `bitrate` `channels` `bitdepth` `duration`）は foobar の技術フィールドへ、spindle 固有
    （`verification` `category` `source_type` `lossless` `added` `has_derived` `missing` `hirescheck`
-   `cutoff` `cliff` `effectivebits`）と `MATCHES` は
+   `cutoff` `cliff` `effectivebits` `on_device` `device_pending`）と `MATCHES` は
    変換不能としてその項を落とし `notes` に出す
 2. **`ORDER BY` は分離。** foobar の Autoplaylist はソートをクエリに書かず、
    別欄のタイトルフォーマット文字列で指定する。「クエリ」「ソートパターン」の
@@ -2402,8 +2408,8 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
     同期が途中の端末は変えられない）
   - フィルタ（固定）: 未検証 / 重複 / missing / RG なし / 反映待ち / conflict / hardlink。
     トグルで AND、ツリーの絞り込みと組み合わせられる（D-40）。端末があれば「端末に未反映 ▾」で端末を選ぶと
-    `filter.device_pending` で絞る（追加・更新・移動。DSL の `device_pending` と同じ定義。選んでいた端末が
-    消えたら外す）
+    `filter.device_pending` で絞る（追加・更新・移動・更新 + 移動。前回の失敗も含む。DSL の `device_pending` と
+    同じ定義。選んでいた端末が消えたら外す）
 - **右パネル**: 2 タブ（一括編集 / 選択の詳細）。折りたたみ可、幅は永続化
 - **下部バー**: 左が再生（再生・停止・シーク・音量・RG の off / track / album）、右がジョブ要約
   「実行中 N · 反映待ち M · 失敗 K」。右側クリックでジョブ画面へ
@@ -2868,7 +2874,8 @@ adb_transfer_timeout_secs = 3600
   空白は起動時に拒否する。子プロセスには `HOME=<data>/adb` を渡す（`$HOME/.android` を作れないと adb が止まる）
 - `[devices].adb_server`: adb サーバの場所（`ADB_SERVER_SOCKET`）。`localfilesystem:/絶対パス`（サイドカーの
   Unix ソケット。既定の構成）か `tcp:ホスト:ポート`。**空（節ごと省略を含む）なら Android の同期を無効**にし、
-  Android の端末の操作は 503 `adb_disabled`（強制破棄と端末の削除、iPhone は動く）。前後の空白は起動時に拒否する
+  ADB を使う操作（作成・未登録の一覧・同期・再開・通常の破棄・検証）は 503 `adb_disabled`（強制破棄と端末の削除、
+  iPhone、PATCH / PUT playlists / 差分 / 見積りは動く）。前後の空白は起動時に拒否する
 - `[devices].adb_timeout_secs`: 1 回で終わる adb のコマンド（状態の確認・manifest の読み書き・1 曲の
   `sha256sum` など）の上限（秒。既定 60、1 以上）
 - `[devices].adb_transfer_timeout_secs`: 1 曲の転送と、端末上の全ファイルの一覧（数千件の `stat` で長く
@@ -2905,8 +2912,8 @@ iPhone（Mac の `spindle-agent`）はサーバ側の設定を持たない（エ
 - **Mac の `spindle-agent`**（P5-4c、D-101）: CI の `agent-macos` ジョブ（`macos-latest`）が clippy・test
   （偽のミュージック.app の `fake` 機能）・release ビルドを行い、`spindle-agent-<git describe>-aarch64-apple-darwin.tar.gz`
   （バイナリと `agent/README.md`）と `.sha256` を成果物にする。publish ジョブはこれにも依存し（edge のイメージも
-  macOS ジョブの成功が要る）、`vX.Y.Z` タグでは Release に添付する。macOS（arm64）だけで、**署名・公証は
-  しない**（Developer ID が無い。必要になったら入れる）。導入は README の
+  macOS ジョブの成功が要る）、`vX.Y.Z` タグでは Release に添付する。macOS（arm64）だけで、
+  **署名・公証はしない**（Developer ID が無い。必要になったら入れる）。導入は README の
   `xattr -d com.apple.quarantine` と、初回の Automation（ミュージック.app の操作）の許可
 - **`edge` は開発用で DB の互換（マイグレーションの前進）以外は約束しない。** 本番は `latest`
   （= 最新の `vX.Y.Z`）か `X.Y` を指す。マイグレーションは起動時に自動で前進のみ = 戻すときは
@@ -3064,8 +3071,10 @@ Archive は別プールなので退避も実コピー（追記のみで速度は
 - 復元: コンテナ停止 → `spindle.db`（と `-wal` / `-shm`）を差し替え → 起動。起動時スキャンが
   ファイルとの差分を吸収する。未反映だった編集意図（pending）は失われるが、ファイルは
   旧値のままなので壊れない。手順は `docs/OPERATIONS.md`、復元ドリルは `tests/backup.rs`
-- DB は「キャッシュ」だが、プレイリスト / 編集履歴 / 検証結果 / ジョブ履歴は DB にしか
-  ない（§3）。バックアップは任意ではない
+- DB は「キャッシュ」だが、プレイリスト / 編集履歴 / 検証結果 / ジョブ履歴 / 端末の設定・印・計画・
+  エージェントのトークンは DB にしかない（§3）。バックアップは任意ではない
+- 古いバックアップへ戻すと、それより後に発行したエージェントのトークン（`devices.pair_selector` など）は
+  失われ、その端末は pair し直しになる（`devices.uuid` も同様に、後から足した端末は消える）
 
 ---
 
@@ -3245,6 +3254,8 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 
 ### 残課題
 
+- [ ] 印のついたプレイリストを削除しても `generation` が進まず、open な計画も止めない（次の差分で反映される
+      想定だが、確定済みの計画との整合は未検討。§6、§7.11）
 - [x] Discogs / VGMdb 連携（2026-09-20。作らない。D-72）
 - [x] `.fpl` 書き出し（2026-09-20。作らない。D-72）
 - [x] `HAS` 等の演算子の foobar 実機との挙動突き合わせ（2026-09-19。部分一致で一致。D-55）
