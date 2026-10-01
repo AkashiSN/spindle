@@ -1,6 +1,7 @@
 //! エージェントの報告の検証と正準ダイジェスト（純粋関数）。
 //! 報告は端末の実状態の自己申告なので、サーバが知っている材料（希望・現状・確定した計画）の
-//! どれかに 5 項目すべて（プレイリストは id・名前の鍵・トークン）一致するものだけを受け入れる
+//! どれかに 5 項目すべて（プレイリストは id・名前の鍵・トークン）一致するものだけを受け入れる。
+//! 例外として、トークンが空の曲（古い写し）は (track_id, パスの鍵) の一致だけで受け入れる（D-100）
 
 use std::collections::HashSet;
 
@@ -9,6 +10,7 @@ use serde_json::json;
 
 use crate::device::ondevice::is_reserved;
 use crate::device::plan::StoredPlan;
+use crate::device::recover::STALE_TOKEN;
 use crate::domain::device::{
     canonical_sha256, DesiredItem, DesiredPlaylist, DeviceItem, EntryKind, OpKind, PlaylistOpKind,
     PlaylistState,
@@ -78,6 +80,24 @@ pub fn validate(r: &ReportRequest, b: &Basis<'_>) -> Result<Accepted, Vec<String
             ok_tracks.insert((p.track_id, to, token, p.size, sha));
         }
     }
+    // トークンが空（古い写し）の曲は size・sha256 を問わず、(track_id, パスの鍵) だけで照合する
+    let mut ok_stale: HashSet<(i64, String)> = HashSet::new();
+    for d in b.desired {
+        ok_stale.insert((d.track_id, canonical_key(&d.dest_path)));
+    }
+    for c in b.current {
+        ok_stale.insert((c.track_id, canonical_key(&c.dest_path)));
+    }
+    for p in &b.plan.items {
+        if matches!(
+            p.op,
+            OpKind::Add | OpKind::Update | OpKind::Move | OpKind::UpdateMove
+        ) {
+            if let Some(to) = &p.to {
+                ok_stale.insert((p.track_id, canonical_key(to)));
+            }
+        }
+    }
     // 受け入れてよいプレイリストの集合
     let mut ok_pls: HashSet<(i64, String, &str)> = HashSet::new();
     for d in b.desired_playlists {
@@ -115,7 +135,12 @@ pub fn validate(r: &ReportRequest, b: &Basis<'_>) -> Result<Accepted, Vec<String
             ));
         }
         let k: TrackKey<'_> = (t.track_id, &t.dest_path, &t.token, t.size, &t.sha256);
-        if !ok_tracks.contains(&k) {
+        let known = if t.token == STALE_TOKEN {
+            ok_stale.contains(&(t.track_id, canonical_key(&t.dest_path)))
+        } else {
+            ok_tracks.contains(&k)
+        };
+        if !known {
             reasons.push(format!(
                 "曲 {} が希望・現状・計画のどれとも一致しません",
                 t.track_id

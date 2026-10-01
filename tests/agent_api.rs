@@ -763,3 +763,37 @@ async fn unreadable_plan_is_409_and_changes_nothing() {
         .unwrap();
     assert_eq!((state.as_str(), n), ("open", 0));
 }
+
+#[tokio::test]
+async fn report_with_stale_token_turns_into_update() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    let body = report_of(
+        &p,
+        json!([{"track_id": 1, "dest_path": t.dest_path, "token": t.token, "size": 1, "sha256": t.sha256}]),
+        json!([]),
+    );
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, "/api/agent/report", Some(body))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // 差分が空の計画を確定し、古い写し（トークン空）として報告する
+    let p2 = confirm(&app, &token).await;
+    let body = report_of(
+        &p2,
+        json!([{"track_id": 1, "dest_path": t.dest_path, "token": "", "size": 1, "sha256": t.sha256}]),
+        json!([]),
+    );
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, "/api/agent/report", Some(body))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, d) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(d["counts"]["update"], 1, "{d}");
+    assert_eq!(d["counts"]["synced"], 0, "{d}");
+}

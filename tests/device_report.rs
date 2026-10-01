@@ -195,3 +195,79 @@ fn errors_are_checked_and_digest_is_order_independent() {
     c.generation = 2;
     assert_ne!(digest(&a), digest(&c));
 }
+
+fn stale(id: i64, path: &str) -> ReportTrack {
+    ReportTrack {
+        track_id: id,
+        dest_path: path.into(),
+        token: String::new(),
+        size: 9,
+        sha256: "x".into(),
+    }
+}
+
+#[test]
+fn stale_track_on_current_path_is_accepted() {
+    let cur = vec![item(1, "a.m4a", "t1")];
+    let p = plan(vec![]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &cur,
+        current_playlists: &[],
+        plan: &p,
+    };
+    let ok = validate(&req(vec![stale(1, "a.m4a")]), &b).unwrap();
+    assert_eq!(ok.items[0].token, "");
+}
+
+#[test]
+fn stale_track_on_unknown_path_is_rejected() {
+    let cur = vec![item(1, "a.m4a", "t1")];
+    let p = plan(vec![]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &cur,
+        current_playlists: &[],
+        plan: &p,
+    };
+    assert!(validate(&req(vec![stale(1, "elsewhere.m4a")]), &b).is_err());
+}
+
+#[test]
+fn stale_track_for_unknown_id_is_rejected() {
+    let cur = vec![item(1, "a.m4a", "t1")];
+    let p = plan(vec![]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &cur,
+        current_playlists: &[],
+        plan: &p,
+    };
+    assert!(validate(&req(vec![stale(2, "a.m4a")]), &b).is_err());
+}
+
+#[test]
+fn stale_track_on_plan_destination_is_accepted() {
+    let cur = vec![item(1, "a.m4a", "t1")];
+    let p = plan(vec![PlanItem {
+        op_id: "m".into(),
+        op: K::Move,
+        track_id: 1,
+        from: Some("a.m4a".into()),
+        to: Some("b.m4a".into()),
+        token: Some("t1".into()),
+        size: 10,
+        sha256: Some("s1".into()),
+    }]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &cur,
+        current_playlists: &[],
+        plan: &p,
+    };
+    assert!(validate(&req(vec![stale(1, "b.m4a")]), &b).is_ok());
+}
