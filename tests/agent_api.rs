@@ -252,3 +252,32 @@ async fn locked_mode_closes_agent_routes_including_pair() {
         .await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[tokio::test]
+async fn manifest_lists_desired_items_playlists_and_diff() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "J-Pop/A/01 a.flac", b"hello").await;
+    app.seed_playlist(id, 10, "夜", &[1]).await;
+    let token = app.pair(id).await;
+    let (st, v) = app
+        .agent_call(Some(&token), Method::GET, "/api/agent/manifest", None)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let m: agent_proto::ManifestResponse = serde_json::from_value(v).unwrap();
+    assert_eq!(m.device_name, "iPhone");
+    assert_eq!(m.items.len(), 1);
+    assert_eq!(m.items[0].dest_path, t.dest_path);
+    assert_eq!(m.items[0].dest_path, "J-Pop/A/01 a.m4a");
+    assert_eq!(m.items[0].token, t.token);
+    assert_eq!(m.items[0].sha256, t.sha256);
+    assert_eq!(m.items[0].size, 5);
+    assert_eq!(m.playlists[0].name, "夜");
+    assert_eq!(m.playlists[0].tracks, vec![1]);
+    assert_eq!(m.diff.items[0].op, agent_proto::OpKind::Add);
+    assert_eq!(m.diff.playlists[0].op, agent_proto::PlaylistOpKind::Add);
+    assert_eq!(m.diff.playlists[0].to.as_deref(), Some("夜"));
+    assert!(m.diff.held.is_empty());
+    assert!(!m.pending_reevaluation);
+    assert!(!m.plan_token.is_empty());
+}

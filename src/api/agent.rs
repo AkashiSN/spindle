@@ -1,16 +1,20 @@
 //! エージェント API（`/api/agent/*`、仕様「認証と境界」、D-99）。
 //! セッション Cookie・CSRF・trusted_cidrs のどれでも通らない。コードとトークンはログに出さない
 
-use agent_proto::{PairRequest, PairResponse};
+use agent_proto::{
+    DiffView, Held, ItemOp, ManifestItem, ManifestPlaylist, ManifestResponse, PairRequest,
+    PairResponse, PlaylistError, PlaylistOp,
+};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 
 use super::auth::{self, verify_bytes};
+use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 use crate::db::devices::{self as dbdev, PairReserve};
@@ -18,6 +22,7 @@ use crate::db::{now_epoch, DbError};
 use crate::device::credential::{
     self, PAIR_SECRET_BYTES, PAIR_SELECTOR_BYTES, TOKEN_SECRET_BYTES, TOKEN_SELECTOR_BYTES,
 };
+use crate::domain::device::{Hold, OpKind, PlaylistOpKind};
 
 /// 報告（`/report`・`/plans/{id}/abandon`）の本文の上限
 pub const REPORT_BODY_LIMIT: usize = 64 * 1024 * 1024;
@@ -123,10 +128,128 @@ async fn not_found() -> Response {
     error_response(StatusCode::NOT_FOUND, "not_found")
 }
 
-// 以下は仮のハンドラ（Task 5〜8 で置き換える）
-async fn manifest() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
+pub(crate) fn to_proto_op(k: OpKind) -> agent_proto::OpKind {
+    match k {
+        OpKind::Delete => agent_proto::OpKind::Delete,
+        OpKind::Move => agent_proto::OpKind::Move,
+        OpKind::UpdateMove => agent_proto::OpKind::UpdateMove,
+        OpKind::Update => agent_proto::OpKind::Update,
+        OpKind::Add => agent_proto::OpKind::Add,
+    }
 }
+
+pub(crate) fn to_proto_pl_op(k: PlaylistOpKind) -> agent_proto::PlaylistOpKind {
+    match k {
+        PlaylistOpKind::Add => agent_proto::PlaylistOpKind::Add,
+        PlaylistOpKind::Update => agent_proto::PlaylistOpKind::Update,
+        PlaylistOpKind::Delete => agent_proto::PlaylistOpKind::Delete,
+    }
+}
+
+/// `GET /api/agent/manifest`: 端末の desired・プレイリスト・差分（UI の差分と同じスナップショットから作る）
+async fn manifest(
+    State(state): State<AppState>,
+    Extension(dev): Extension<AgentDevice>,
+) -> Result<Response, ApiError> {
+    let snap = state.db.device_snapshot().await?;
+    let Some(d) = snap.get(dev.id) else {
+        return Ok(error_response(StatusCode::NOT_FOUND, "not_found"));
+    };
+    let id = dev.id;
+    let evals = state
+        .db
+        .read(move |c| dbdev::smart_evaluations(c, id))
+        .await?;
+    let pending =
+        state.reeval_pending() && devices::waits_for_reevaluation(d.device.selection, &evals);
+    let c = &d.computed;
+    // agent のプレイリストの中身は `[[track_id, path], …]` の JSON（render_playlist）。id だけを並べる
+    let playlists = c
+        .playlists
+        .iter()
+        .map(|p| {
+            let entries: Vec<(i64, String)> = serde_json::from_slice(&p.body)
+                .map_err(|e| ApiError::Internal(format!("プレイリストの中身を読めない: {e}")))?;
+            Ok(ManifestPlaylist {
+                playlist_id: p.playlist_id,
+                name: p.name.clone(),
+                token: p.token.clone(),
+                tracks: entries.into_iter().map(|(id, _)| id).collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let body = ManifestResponse {
+        device_uuid: d.device.uuid.clone(),
+        device_name: d.device.name.clone(),
+        generation: c.generation,
+        plan_token: c.plan_token.clone(),
+        pending_reevaluation: pending,
+        items: c
+            .desired
+            .iter()
+            .map(|x| ManifestItem {
+                track_id: x.track_id,
+                dest_path: x.dest_path.clone(),
+                token: x.token.clone(),
+                size: x.size,
+                sha256: x.sha256.clone(),
+            })
+            .collect(),
+        playlists,
+        diff: DiffView {
+            items: c
+                .diff
+                .items
+                .iter()
+                .map(|o| ItemOp {
+                    op: to_proto_op(o.kind),
+                    track_id: o.track_id,
+                    from: o.from.clone(),
+                    to: o.to.clone(),
+                    token: o.token.clone(),
+                    size: o.size,
+                    sha256: o.sha256.clone(),
+                })
+                .collect(),
+            held: c
+                .diff
+                .held
+                .iter()
+                .map(|h| Held {
+                    track_id: h.track_id,
+                    reason: h.hold.reason().to_owned(),
+                    waiting: matches!(h.hold, Hold::Wait(_)),
+                    has_copy: h.has_copy,
+                })
+                .collect(),
+            playlists: c
+                .diff
+                .playlists
+                .iter()
+                .map(|p| PlaylistOp {
+                    op: to_proto_pl_op(p.kind),
+                    playlist_id: p.playlist_id,
+                    from: p.from.clone(),
+                    to: p.to.clone(),
+                    token: p.token.clone(),
+                })
+                .collect(),
+            playlist_errors: c
+                .diff
+                .playlist_errors
+                .iter()
+                .map(|(id, r)| PlaylistError {
+                    playlist_id: *id,
+                    reason: (*r).to_owned(),
+                })
+                .collect(),
+        },
+    };
+    devices::enqueue_hashes(&state, &snap).await?;
+    Ok(Json(body).into_response())
+}
+
+// 以下は仮のハンドラ（Task 6〜8 で置き換える）
 
 async fn file() -> StatusCode {
     StatusCode::NOT_IMPLEMENTED

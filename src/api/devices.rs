@@ -485,7 +485,10 @@ pub async fn enqueue_hashes(state: &AppState, snap: &Snapshot) -> Result<(), Api
 /// スマートプレイリストの再評価を待つ端末か。選曲がプレイリストで、スマートプレイリストが 1 つでも
 /// 載っている端末だけ（全曲・手動だけの端末は評価で中身が変わらない）。Derived の変換が終わるたびに
 /// 再評価の印が立つので、全端末で待たせると変換中はずっと同期できない（実機での確認、D-98）
-fn waits_for_reevaluation(selection: Selection, smart: &[(i64, String, Option<i64>)]) -> bool {
+pub(crate) fn waits_for_reevaluation(
+    selection: Selection,
+    smart: &[(i64, String, Option<i64>)],
+) -> bool {
     selection == Selection::Playlists && !smart.is_empty()
 }
 
