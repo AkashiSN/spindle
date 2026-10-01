@@ -189,11 +189,13 @@ fn basic_changes_survive_every_crash_point() {
         "music.delete_track",
         "music.delete_track:after",
         "exec.add.downloaded",
+        "exec.add.checked",
         "exec.add.placed",
         "exec.update.placed",
         "exec.delete.track_deleted",
     ];
     for name in names {
+        let mut crashed = false;
         for nth in 1..=8 {
             let mut env = Env::new();
             env.paired();
@@ -207,6 +209,7 @@ fn basic_changes_survive_every_crash_point() {
             if !matches!(first, Err(Error::Crash(_))) {
                 continue; // その名前の nth 回目は無かった
             }
+            crashed = true;
             // やり直し: 回復 → 再発見 → 同じ計画で再開（偽サーバの計画は open のまま）
             let m = env.server.manifest().unwrap();
             env.with_ctx(recover).unwrap();
@@ -241,6 +244,7 @@ fn basic_changes_survive_every_crash_point() {
                 "{name}#{nth}"
             );
         }
+        assert!(crashed, "{name} で一度も落ちなかった");
     }
 }
 

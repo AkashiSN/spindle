@@ -110,6 +110,7 @@ fn swap_crash_at_every_point_completes() {
         "music.refresh:after",
         "batch.prepared",
         "batch.vacated_one",
+        "batch.place.checked",
         "batch.placed_one",
         "batch.cleaned",
     ];
@@ -121,6 +122,7 @@ fn swap_crash_at_every_point_completes() {
         ]
     };
     for name in names {
+        let mut crashed = false;
         for nth in 1..=12 {
             let mut env = Env::new();
             env.paired();
@@ -135,6 +137,7 @@ fn swap_crash_at_every_point_completes() {
                 continue;
             }
             resume(&mut env);
+            crashed = true;
             assert_eq!(
                 snapshot(&env),
                 want(&a.persistent_id, &b.persistent_id, &c.persistent_id),
@@ -152,6 +155,7 @@ fn swap_crash_at_every_point_completes() {
                 "{name}#{nth}"
             );
         }
+        assert!(crashed, "{name} で一度も落ちなかった");
     }
 }
 
