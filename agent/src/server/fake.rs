@@ -282,7 +282,14 @@ impl Server for FakeServer {
         })
     }
 
-    fn fetch(&self, track_id: i64, token: &str, offset: u64, out: &mut dyn Write) -> Result<Fetch> {
+    fn fetch(
+        &self,
+        track_id: i64,
+        token: &str,
+        _size: u64,
+        offset: u64,
+        out: &mut dyn Write,
+    ) -> Result<Fetch> {
         let mut w = self.0.borrow_mut();
         w.fetch_log.push((track_id, offset));
         if let Some(n) = w.fetch_changed.get_mut(&track_id) {

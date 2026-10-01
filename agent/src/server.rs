@@ -50,7 +50,15 @@ pub enum Reported {
 pub trait Server {
     fn pair(&self, code: &str) -> Result<PairResponse>;
     fn manifest(&self) -> Result<ManifestResponse>;
-    fn fetch(&self, track_id: i64, token: &str, offset: u64, out: &mut dyn Write) -> Result<Fetch>;
+    /// `size` は期待する総サイズ。再開（206）の `Content-Range` の総サイズと照合する
+    fn fetch(
+        &self,
+        track_id: i64,
+        token: &str,
+        size: u64,
+        offset: u64,
+        out: &mut dyn Write,
+    ) -> Result<Fetch>;
     fn confirm(&self, plan_token: &str) -> Result<Confirmed>;
     fn open_plan(&self) -> Result<Option<Plan>>;
     fn report(&self, r: &ReportRequest) -> Result<Reported>;
@@ -65,6 +73,11 @@ pub fn check_content_range(header: &str, offset: u64) -> Option<u64> {
     let (start, end, total): (u64, u64, u64) =
         (start.parse().ok()?, end.parse().ok()?, total.parse().ok()?);
     (start == offset && start <= end && end < total).then_some(total)
+}
+
+/// 再開の 206 の `Content-Range` が、開始位置 `offset` と期待する総サイズ `size` の両方に合うか
+pub fn check_resume_range(header: &str, offset: u64, size: u64) -> bool {
+    check_content_range(header, offset) == Some(size)
 }
 
 /// 基底 URL のパスを `/` で終わらせる。`Url::join` は最後の `/` の後ろを置き換えるので、
@@ -198,7 +211,14 @@ impl Server for HttpServer {
         }
     }
 
-    fn fetch(&self, track_id: i64, token: &str, offset: u64, out: &mut dyn Write) -> Result<Fetch> {
+    fn fetch(
+        &self,
+        track_id: i64,
+        token: &str,
+        size: u64,
+        offset: u64,
+        out: &mut dyn Write,
+    ) -> Result<Fetch> {
         let mut b = self
             .auth(
                 self.client
@@ -217,8 +237,7 @@ impl Server for HttpServer {
                     .headers()
                     .get(CONTENT_RANGE)
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|v| check_content_range(v, offset))
-                    .is_some();
+                    .is_some_and(|v| check_resume_range(v, offset, size));
                 if !ok {
                     return Err(Error::Server(
                         "206 の Content-Range が手元と合わない".to_owned(),

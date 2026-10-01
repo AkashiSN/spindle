@@ -3,7 +3,6 @@
 //! 1 回の保存で行う。途中で落ちたものは `recover::recover` が片付ける
 
 use std::collections::HashSet;
-use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use agent_proto::{ManifestResponse, OpKind, PlanItem};
@@ -194,15 +193,11 @@ fn download_inner<M: Music, S: Server>(
     sha256: &str,
     dest_rel: &str,
 ) -> Result<Downloaded> {
-    let abs = cx.local.abs(dest_rel)?;
-    if let Some(p) = abs.parent() {
-        std::fs::create_dir_all(p)?;
-    }
-    let mut w = BufWriter::new(File::create(&abs)?);
+    let mut w = BufWriter::new(cx.local.create(dest_rel)?);
     let mut retries = 0;
     loop {
         let offset = w.get_ref().metadata()?.len();
-        let res = cx.server.fetch(track_id, token, offset, &mut w);
+        let res = cx.server.fetch(track_id, token, size, offset, &mut w);
         // 切れた場合も、書けた分を続きの起点にする
         w.flush()?;
         match res {

@@ -124,3 +124,84 @@ fn file_secrets_are_private() {
         .mode();
     assert_eq!(mode & 0o777, 0o600);
 }
+
+/// root の外に `x.m4a` を置き、root の `A/` をそこへのシンボリックリンクにする
+fn root_with_symlinked_dir() -> (tempfile::TempDir, LocalRoot, std::path::PathBuf) {
+    let (d, r) = root();
+    let outside = d.path().join("outside");
+    std::fs::create_dir_all(outside.join("empty")).unwrap();
+    std::fs::write(outside.join("x.m4a"), b"outside").unwrap();
+    std::fs::create_dir_all(r.path()).unwrap();
+    std::os::unix::fs::symlink(&outside, r.path().join("A")).unwrap();
+    (d, r, outside)
+}
+
+#[test]
+fn reads_do_not_follow_symlinked_intermediate_dir() {
+    let (_d, r, outside) = root_with_symlinked_dir();
+    assert_eq!(r.stat("A/x.m4a").unwrap(), None);
+    assert_eq!(r.sha256("A/x.m4a").unwrap(), None);
+    assert!(!r.exists("A/x.m4a").unwrap());
+    let st = FileStat {
+        size: 7,
+        inode: 1,
+        mtime_ns: 0,
+    };
+    assert_eq!(r.check("A/x.m4a", &st).unwrap(), Check::Missing);
+    // 一覧はシンボリックリンクのディレクトリに降りない
+    assert!(r.list_files().unwrap().is_empty());
+    // 片付けも外の空ディレクトリに手を出さない
+    r.prune_empty_dirs().unwrap();
+    assert!(outside.join("empty").is_dir());
+    assert!(r.path().join("A").symlink_metadata().is_ok());
+}
+
+#[test]
+fn writes_refuse_symlinked_intermediate_dir() {
+    let (_d, r, outside) = root_with_symlinked_dir();
+    let unchanged = |outside: &std::path::Path| {
+        assert_eq!(std::fs::read(outside.join("x.m4a")).unwrap(), b"outside");
+        let mut names: Vec<_> = std::fs::read_dir(outside)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["empty", "x.m4a"]);
+    };
+    // tmp を作れない
+    assert!(matches!(r.create_tmp("A/x.m4a"), Err(Error::Stop(_))));
+    assert!(matches!(r.create("A/y.m4a"), Err(Error::Stop(_))));
+    unchanged(&outside);
+    // root の中の tmp を外へ置けない
+    let (tmp, mut f) = r.create_tmp("t.m4a").unwrap();
+    f.write_all(b"new").unwrap();
+    drop(f);
+    assert!(matches!(r.place(&tmp, "A/x.m4a"), Err(Error::Stop(_))));
+    assert!(matches!(r.rename(&tmp, "A/x.m4a"), Err(Error::Stop(_))));
+    assert!(r.exists(&tmp).unwrap());
+    unchanged(&outside);
+    // 外のファイルを動かせない・消せない
+    assert!(matches!(r.rename("A/x.m4a", "z.m4a"), Err(Error::Stop(_))));
+    assert!(!r.exists("z.m4a").unwrap());
+    assert!(matches!(r.remove("A/x.m4a"), Err(Error::Stop(_))));
+    unchanged(&outside);
+}
+
+#[test]
+fn final_symlink_is_not_followed() {
+    let (_d, r, outside) = root_with_symlinked_dir();
+    std::os::unix::fs::symlink(outside.join("x.m4a"), r.path().join("l.m4a")).unwrap();
+    assert_eq!(r.stat("l.m4a").unwrap(), None);
+    assert_eq!(r.sha256("l.m4a").unwrap(), None);
+    // 何かがあるので、置き先としては埋まっている
+    assert!(r.exists("l.m4a").unwrap());
+    assert!(matches!(r.create("l.m4a"), Err(Error::Stop(_))));
+    assert!(!r.list_files().unwrap().contains(&"l.m4a".to_owned()));
+    // 消すのはリンク自身だけ
+    r.remove("l.m4a").unwrap();
+    assert!(!r.exists("l.m4a").unwrap());
+    assert_eq!(std::fs::read(outside.join("x.m4a")).unwrap(), b"outside");
+    // 印がシンボリックリンクなら読まない
+    std::os::unix::fs::symlink(outside.join("x.m4a"), r.path().join(MARKER)).unwrap();
+    assert!(matches!(r.read_marker(), Err(Error::Stop(_))));
+}

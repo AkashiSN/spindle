@@ -402,3 +402,51 @@ fn prune_keeps_root() {
     exec_all(&mut env).unwrap();
     assert!(env.root.path().is_dir());
 }
+
+/// 管理中の曲の親ディレクトリが root の外へのシンボリックリンクに差し替わった（更新）: 外のファイルに
+/// 手を出さずにエラーで止める
+#[test]
+fn update_does_not_follow_symlinked_parent_dir() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "A/a.m4a", b"aaa");
+    let outside = symlink_parent_outside(&env);
+    env.server.put_track(1, "A/a.m4a", b"bbbb");
+    assert!(matches!(exec_all(&mut env), Err(Error::Stop(_))));
+    assert_outside_untouched(&outside);
+}
+
+/// 同じく（削除）: 外のファイルを消さずにエラーで止める
+#[test]
+fn delete_does_not_follow_symlinked_parent_dir() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "A/a.m4a", b"aaa");
+    let outside = symlink_parent_outside(&env);
+    env.server.remove_track(1);
+    assert!(matches!(exec_all(&mut env), Err(Error::Stop(_))));
+    assert_outside_untouched(&outside);
+    // 回復も外のファイルを消さない
+    assert!(env.with_ctx(recover).is_err());
+    assert_outside_untouched(&outside);
+}
+
+/// root の `A/` を外の同じ中身のディレクトリへのシンボリックリンクにする
+fn symlink_parent_outside(env: &Env) -> std::path::PathBuf {
+    let outside = env.dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("a.m4a"), b"aaa").unwrap();
+    let a = env.root.path().join("A");
+    std::fs::remove_dir_all(&a).unwrap();
+    std::os::unix::fs::symlink(&outside, &a).unwrap();
+    outside
+}
+
+fn assert_outside_untouched(outside: &std::path::Path) {
+    assert_eq!(std::fs::read(outside.join("a.m4a")).unwrap(), b"aaa");
+    let names: Vec<_> = std::fs::read_dir(outside)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec!["a.m4a"]);
+}

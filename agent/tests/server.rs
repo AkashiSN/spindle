@@ -1,7 +1,9 @@
 #![cfg(feature = "fake")]
 mod support;
 
-use spindle_agent::server::{check_content_range, Confirmed, Fetch, HttpServer, Reported, Server};
+use spindle_agent::server::{
+    check_content_range, check_resume_range, Confirmed, Fetch, HttpServer, Reported, Server,
+};
 use spindle_agent::Error;
 use support::Env;
 
@@ -12,6 +14,17 @@ fn content_range_must_start_at_offset() {
     assert_eq!(check_content_range("bytes 5-10/10", 5), None);
     assert_eq!(check_content_range("bytes */10", 5), None);
     assert_eq!(check_content_range("garbage", 0), None);
+}
+
+#[test]
+fn resume_range_must_match_offset_and_expected_size() {
+    assert!(check_resume_range("bytes 5-9/10", 5, 10));
+    // 総サイズが手元の期待と違えば拒否する
+    assert!(!check_resume_range("bytes 5-11/12", 5, 10));
+    assert!(!check_resume_range("bytes 5-8/9", 5, 10));
+    // 開始位置が違うものも拒否する
+    assert!(!check_resume_range("bytes 4-9/10", 5, 10));
+    assert!(!check_resume_range("garbage", 5, 10));
 }
 
 #[test]
@@ -49,7 +62,7 @@ fn fake_server_diff_confirm_report_cycle() {
     assert_eq!(s.confirm("y").unwrap(), Confirmed::OpenPlanExists);
     let mut out = Vec::new();
     assert_eq!(
-        s.fetch(1, &m.items[0].token, 0, &mut out).unwrap(),
+        s.fetch(1, &m.items[0].token, 3, 0, &mut out).unwrap(),
         Fetch::Complete
     );
     assert_eq!(out, b"aaa");
@@ -80,22 +93,25 @@ fn fake_server_fetch_cut_and_changed() {
     let it = s.put_track(1, "a.m4a", b"0123456789");
     s.cut_fetch(1, 1);
     let mut out = Vec::new();
-    assert!(s.fetch(1, &it.token, 0, &mut out).is_err());
+    assert!(s.fetch(1, &it.token, 10, 0, &mut out).is_err());
     assert_eq!(out, b"01234");
-    assert_eq!(s.fetch(1, &it.token, 5, &mut out).unwrap(), Fetch::Complete);
+    assert_eq!(
+        s.fetch(1, &it.token, 10, 5, &mut out).unwrap(),
+        Fetch::Complete
+    );
     assert_eq!(out, b"0123456789");
     s.fail_fetch_changed(1, 1);
     assert_eq!(
-        s.fetch(1, &it.token, 0, &mut Vec::new()).unwrap(),
+        s.fetch(1, &it.token, 10, 0, &mut Vec::new()).unwrap(),
         Fetch::Changed
     );
     assert_eq!(
-        s.fetch(1, "other", 0, &mut Vec::new()).unwrap(),
+        s.fetch(1, "other", 10, 0, &mut Vec::new()).unwrap(),
         Fetch::Changed
     );
     s.remove_track(1);
     assert_eq!(
-        s.fetch(1, &it.token, 0, &mut Vec::new()).unwrap(),
+        s.fetch(1, &it.token, 10, 0, &mut Vec::new()).unwrap(),
         Fetch::Gone
     );
 }
