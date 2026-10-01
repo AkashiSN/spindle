@@ -20,10 +20,20 @@ pub const SETUP_PREFIX: &str = "spindle-setup-";
 const FOLDER_EXISTS: &str =
     "ミュージック.app に「spindle」フォルダが既にあります。改名してから pair し直してください";
 
+pub const MEDIA_FOLDER_STOP: &str = "ミュージックのメディアフォルダが ~/Music/spindle か、それを含むフォルダ（~/Music など）になっています。ミュージック > 設定 > ファイル の「ミュージックメディアフォルダの場所」を ~/Music/spindle を含まない別のフォルダに変えてから、やり直してください";
+
 /// 「ファイルを［ミュージック］フォルダにコピー」が ON なら止める
 pub fn check_copy_setting<M: Music, S: Server>(cx: &Ctx<'_, M, S>) -> Result<()> {
     if cx.music.copy_to_library()? == Some(true) {
         return Err(Error::Stop(COPY_ON_STOP.to_owned()));
+    }
+    Ok(())
+}
+
+/// root がミュージックのメディアフォルダかその中なら止める。削除でファイルまで消える・コピーの前提が崩れるため
+pub fn check_root_not_media_folder<M: Music, S: Server>(cx: &Ctx<'_, M, S>) -> Result<()> {
+    if cx.local.looks_like_media_folder()? {
+        return Err(Error::Stop(MEDIA_FOLDER_STOP.to_owned()));
     }
     Ok(())
 }
@@ -36,8 +46,11 @@ pub fn pair<M: Music, S: Server>(
     code: &str,
 ) -> Result<()> {
     check_copy_setting(cx)?;
+    check_root_not_media_folder(cx)?;
     // 初回の Automation 許可は、ワンタイムコードを使う前に求める
     cx.music.probe()?;
+    // トークンを保存できることも、コードを使う前に確かめる（ssh 越しの Keychain など）
+    secrets.check_writable()?;
     let resp = cx.server.pair(code)?;
     if cx.state.setup.is_some() {
         if let Some(s) = &cx.state.server {

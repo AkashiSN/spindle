@@ -325,8 +325,9 @@ fn relocate<M: Music, S: Server>(
 }
 
 /// 行き先を埋める: 移動は `staging → to`、更新 + 移動は `new → to`（と refresh）。置けたら true。
-/// 回復では src が在れば置き、無くて `to` が在れば置き済みとみなして location を付け替える。
-/// どちらにも無ければ false（track は消さない。state から外れる）
+/// 回復では src が在れば置き、無くて `to` が期待どおりの中身（大きさと sha256）で在れば置き済みとみなして
+/// location を付け替える（違う中身なら管理外として止める）。どちらにも無ければ false（track は消さない。
+/// state から外れる）
 fn place<M: Music, S: Server>(
     cx: &mut Ctx<'_, M, S>,
     m: &BatchMember,
@@ -341,21 +342,40 @@ fn place<M: Music, S: Server>(
             ))
         })?,
     };
+    // 行き先に管理外のファイルがあれば上書きも採用もしない。vacating 以降は巻き戻せないので、バッチを
+    // 残して止め、利用者が退けた後の回復で続きを置く（置き済みのメンバーは回復が在る場所で判定する）
+    let foreign = || {
+        Error::Stop(format!(
+            "{FOREIGN_AT_DESTINATION}（{}）。そのファイルを別の場所へ移してから sync し直してください",
+            m.to
+        ))
+    };
     if verify && !cx.local.exists(src)? {
         if !cx.local.exists(&m.to)? {
             return Ok(false);
         }
+        // 置いた後で落ちた。落ちている間に行き先が差し替えられていれば自分の置いたものではない。
+        // 中身で確かめてから採用する（done で記録する sha256 は計画の値なので、確かめずに採ると
+        // 管理外の内容を正しい写しとして確定してしまう）
+        let size_ok = cx.local.stat(&m.to)?.is_some_and(|st| st.size == m.size);
+        if !size_ok || cx.local.sha256(&m.to)?.as_deref() != Some(m.sha256.as_str()) {
+            return Err(foreign());
+        }
     } else {
         // 全員を空けた後なので、行き先にあってよい自分のファイルは無い。空ける前の見直しの後に
-        // 管理外のファイルが現れていれば上書きしない。vacating 以降は巻き戻せないので、バッチを残して
-        // 止め、利用者が退けた後の回復で続きを置く（置き済みのメンバーは回復が在る場所で判定する）
+        // 管理外のファイルが現れていれば上書きしない
         if cx.local.exists(&m.to)? {
-            return Err(Error::Stop(format!(
-                "{FOREIGN_AT_DESTINATION}（{}）。そのファイルを別の場所へ移してから sync し直してください",
-                m.to
-            )));
+            return Err(foreign());
         }
-        cx.local.rename(src, &m.to)?;
+        cx.fp.hit("batch.place.checked")?;
+        // 確かめてから動かすまでの間に現れたものも上書きしない（rename が断る）
+        match cx.local.rename_new(src, &m.to) {
+            Ok(()) => {}
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(foreign())
+            }
+            Err(e) => return Err(e),
+        }
     }
     relocate(cx, m, &m.to, m.op == MemberOp::UpdateMove)?;
     Ok(true)

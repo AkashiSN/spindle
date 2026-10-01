@@ -5,11 +5,11 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use rustix::fs::{
-    fstat, fsync, mkdirat, openat, renameat, statat, unlinkat, AtFlags, Dir, FileType, Mode,
-    OFlags, Stat, CWD,
+    fstat, fsync, mkdirat, openat, renameat, renameat_with, statat, unlinkat, AtFlags, Dir,
+    FileType, Mode, OFlags, RenameFlags, Stat, CWD,
 };
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,11 @@ use crate::{Error, Result};
 pub const MARKER: &str = ".spindle-device";
 pub const MOVING_DIR: &str = ".moving";
 pub const TMP_SUFFIX: &str = ".spindle-tmp";
+/// ミュージック.app のメディアフォルダが root 直下に持つ印
+pub const MEDIA_FOLDER_MARKS: [&str; 2] = [
+    "Automatically Add to Music.localized",
+    ".Media Preferences.plist",
+];
 
 /// エージェントの予約（印・バッチの置き場・取得中の一時ファイル）
 pub fn is_reserved(rel: &str) -> bool {
@@ -94,6 +99,32 @@ fn not_found(rel: &str) -> Error {
     ))
 }
 
+fn already_exists(rel: &str) -> Error {
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("行き先に既にある（{rel}）"),
+    ))
+}
+
+/// 上書きしない rename に FS が対応しない（P5-4c の最終レビュー）
+pub const NOREPLACE_UNSUPPORTED: &str = "~/Music/spindle のファイルシステムが「上書きしない rename」に対応していないため、管理外のファイルを上書きしないことを保証できません。~/Music/spindle を Mac の内蔵ディスクなどのローカルのボリューム（APFS）へ移してください";
+
+/// 上書きしない rename に対応しないときの errno（Linux では NOTSUP と OPNOTSUPP は同じ値）
+fn unsupported(e: Errno) -> bool {
+    e == Errno::INVAL || e == Errno::NOSYS || e == Errno::NOTSUP || e == Errno::OPNOTSUPP
+}
+
+/// rename の errno をエラーにする。`noreplace` で FS が対応しない errno なら止める
+/// （確かめてから普通の rename に落とすと、その間に現れたものを上書きしうる。D-101）
+fn rename_error(e: Errno, from: &str, to: &str, noreplace: bool) -> Error {
+    match e {
+        Errno::NOENT => not_found(from),
+        Errno::EXIST => already_exists(to),
+        e if noreplace && unsupported(e) => Error::Stop(format!("{NOREPLACE_UNSUPPORTED}（{to}）")),
+        e => io(e),
+    }
+}
+
 /// 開けなかった理由がシンボリックリンク・ディレクトリでないものか
 fn is_blocked(e: Errno) -> bool {
     e == Errno::LOOP || e == Errno::NOTDIR
@@ -135,27 +166,62 @@ impl LocalRoot {
         to_abs(&self.root, rel)
     }
 
-    /// root の dirfd（root 自身は設定どおりに開く）。無ければ None
-    fn open_root(&self) -> Result<Option<OwnedFd>> {
-        match openat(
-            CWD,
-            &self.root,
-            dir_flags() - OFlags::NOFOLLOW,
-            Mode::empty(),
-        ) {
-            Ok(fd) => Ok(Some(fd)),
-            Err(Errno::NOENT) => Ok(None),
-            Err(e) => Err(io(e)),
+    /// root の dirfd を `/` から 1 要素ずつシンボリックリンクを辿らずに開く。root は起動時にリンクを解いた
+    /// 絶対パス（`sync::resolve_root`）なので、途中にリンクがあれば起動後に差し替えられたもの: 止める
+    /// （開いた dirfd が root の外を指すと、その下を 1 要素ずつ辿る守りが効かない）。
+    /// `create` なら無い要素を親の dirfd からの `mkdirat` で作る。作らないで無ければ None
+    fn open_root(&self, create: bool) -> Result<Option<OwnedFd>> {
+        let blocked_root = || {
+            Error::Stop(format!(
+                "root（{}）か、その途中のフォルダがシンボリックリンク（またはフォルダでないもの）に変わりました。元に戻してから sync し直してください",
+                self.root.display()
+            ))
+        };
+        let not_resolved = || {
+            Error::Stop(format!(
+                "root は解決済みの絶対パスでなければなりません（{}）",
+                self.root.display()
+            ))
+        };
+        let mut dir: Option<OwnedFd> = None;
+        for c in self.root.components() {
+            let name = match c {
+                Component::RootDir if dir.is_none() => {
+                    dir = Some(openat(CWD, "/", dir_flags(), Mode::empty()).map_err(io)?);
+                    continue;
+                }
+                Component::Normal(name) => name,
+                _ => return Err(not_resolved()),
+            };
+            let Some(parent) = &dir else {
+                return Err(not_resolved());
+            };
+            let next = match openat(parent, name, dir_flags(), Mode::empty()) {
+                Ok(fd) => fd,
+                Err(Errno::NOENT) if create => {
+                    match mkdirat(parent, name, dir_mode()) {
+                        Ok(()) | Err(Errno::EXIST) => {}
+                        Err(e) => return Err(io(e)),
+                    }
+                    match openat(parent, name, dir_flags(), Mode::empty()) {
+                        Ok(fd) => fd,
+                        Err(e) if is_blocked(e) => return Err(blocked_root()),
+                        Err(e) => return Err(io(e)),
+                    }
+                }
+                Err(Errno::NOENT) => return Ok(None),
+                Err(e) if is_blocked(e) => return Err(blocked_root()),
+                Err(e) => return Err(io(e)),
+            };
+            dir = Some(next);
         }
+        dir.map(Some).ok_or_else(not_resolved)
     }
 
     /// `rel` の親を辿る。`create` なら無いディレクトリを作る（root も）
     fn parent(&self, rel: &str, create: bool) -> Result<Parent> {
         check_rel(rel).map_err(Error::Stop)?;
-        if create {
-            std::fs::create_dir_all(&self.root)?;
-        }
-        let Some(mut dir) = self.open_root()? else {
+        let Some(mut dir) = self.open_root(create)? else {
             return Ok(Parent::Missing);
         };
         let mut parts: Vec<&str> = rel.split('/').collect();
@@ -223,15 +289,51 @@ impl LocalRoot {
 
     /// root が無いか、中身が空か
     pub fn is_empty_or_missing(&self) -> Result<bool> {
-        match std::fs::read_dir(&self.root) {
-            Ok(mut it) => Ok(it.next().is_none()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
-            Err(e) => Err(e.into()),
+        match self.open_root(false)? {
+            Some(root) => {
+                for e in Dir::read_from(&root).map_err(io)? {
+                    let name = e.map_err(io)?.file_name().to_bytes().to_vec();
+                    if name != b"." && name != b".." {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            None => Ok(true),
         }
     }
 
+    /// root か、その祖先のどれかがミュージック.app のメディアフォルダに見えるか（直下に印があるか）。
+    /// メディアフォルダが ~/Music などの祖先でも root はその中に入る。root が無ければ祖先だけを見る。
+    /// 印は存在で判定する（シンボリックリンクでも真。辿らない）。祖先は root の外なのでパスで stat する
+    pub fn looks_like_media_folder(&self) -> Result<bool> {
+        if let Some(root) = self.open_root(false)? {
+            for name in MEDIA_FOLDER_MARKS {
+                match statat(&root, name, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(_) => return Ok(true),
+                    Err(Errno::NOENT) => {}
+                    Err(e) => return Err(io(e)),
+                }
+            }
+        }
+        for dir in self.root.ancestors().skip(1) {
+            for name in MEDIA_FOLDER_MARKS {
+                match std::fs::symlink_metadata(dir.join(name)) {
+                    Ok(_) => return Ok(true),
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        Ok(false)
+    }
+
     pub fn read_marker(&self) -> Result<Option<Marker>> {
-        let Some(root) = self.open_root()? else {
+        let Some(root) = self.open_root(false)? else {
             return Ok(None);
         };
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -348,6 +450,18 @@ impl LocalRoot {
 
     /// 書き終えた tmp を fsync → rename → 親の fsync
     pub fn place(&self, tmp: &str, rel: &str) -> Result<()> {
+        self.sync_tmp(tmp)?;
+        self.rename(tmp, rel)
+    }
+
+    /// `place` と同じだが行き先を上書きしない。行き先に何かあれば `Error::Io(AlreadyExists)`
+    pub fn place_new(&self, tmp: &str, rel: &str) -> Result<()> {
+        self.sync_tmp(tmp)?;
+        self.rename_new(tmp, rel)
+    }
+
+    /// 置く前の tmp（通常ファイル）を fsync する
+    fn sync_tmp(&self, tmp: &str) -> Result<()> {
         let (dir, name) = self.parent_existing(tmp)?;
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
         let fd = match openat(&dir, name.as_str(), flags, Mode::empty()) {
@@ -359,23 +473,35 @@ impl LocalRoot {
         if file_stat(&fstat(&fd).map_err(io)?).is_none() {
             return Err(blocked(tmp));
         }
-        fsync(&fd).map_err(io)?;
-        self.rename(tmp, rel)
+        fsync(&fd).map_err(io)
     }
 
     /// rename（行き先の親を作る）と両方の親の fsync。元・行き先のどの要素がシンボリックリンクでもエラー
     /// （リンクそのものも動かさない・上書きしない）
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
+        self.rename_impl(from, to, false)
+    }
+
+    /// `rename` と同じだが行き先を上書きしない。行き先に何か（シンボリックリンクも）あれば
+    /// `Error::Io(AlreadyExists)`。確かめてから rename する間に現れたものも上書きしない
+    pub fn rename_new(&self, from: &str, to: &str) -> Result<()> {
+        self.rename_impl(from, to, true)
+    }
+
+    fn rename_impl(&self, from: &str, to: &str, noreplace: bool) -> Result<()> {
         let (fd_from, n_from) = self.parent_existing(from)?;
         if !refuse_symlink(&fd_from, &n_from, from)? {
             return Err(not_found(from));
         }
         let (fd_to, n_to) = self.parent_for_write(to)?;
         refuse_symlink(&fd_to, &n_to, to)?;
-        renameat(&fd_from, n_from.as_str(), &fd_to, n_to.as_str()).map_err(|e| match e {
-            Errno::NOENT => not_found(from),
-            e => io(e),
-        })?;
+        // 上書きしない rename は Linux が renameat2(RENAME_NOREPLACE)、macOS が renameatx_np(RENAME_EXCL)
+        let r = if noreplace {
+            renameat_with(&fd_from, &n_from, &fd_to, &n_to, RenameFlags::NOREPLACE)
+        } else {
+            renameat(&fd_from, n_from.as_str(), &fd_to, n_to.as_str())
+        };
+        r.map_err(|e| rename_error(e, from, to, noreplace))?;
         fsync(&fd_from).map_err(io)?;
         fsync(&fd_to).map_err(io)?;
         Ok(())
@@ -402,7 +528,7 @@ impl LocalRoot {
     /// シンボリックリンクのディレクトリには降りない
     pub fn list_files(&self) -> Result<Vec<String>> {
         let mut out = Vec::new();
-        let Some(root) = self.open_root()? else {
+        let Some(root) = self.open_root(false)? else {
             return Ok(out);
         };
         walk(&root, "", &mut out)?;
@@ -412,22 +538,19 @@ impl LocalRoot {
 
     /// 空になったディレクトリを消す（root 自身は残す）
     pub fn prune_empty_dirs(&self) -> Result<()> {
-        if let Some(root) = self.open_root()? {
+        if let Some(root) = self.open_root(false)? {
             prune(&root)?;
         }
         Ok(())
     }
 
     pub fn free_bytes(&self) -> Result<u64> {
-        let probe = if self.root.exists() {
-            self.root.clone()
-        } else {
-            self.root
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default()
-        };
-        let s = rustix::fs::statvfs(&probe).map_err(|e| Error::Io(e.into()))?;
+        let s = match self.open_root(false)? {
+            Some(root) => rustix::fs::fstatvfs(&root),
+            // まだ無い root は親のボリュームに作られる（空き容量を見るだけ）
+            None => rustix::fs::statvfs(self.root.parent().unwrap_or(Path::new("/"))),
+        }
+        .map_err(io)?;
         Ok(s.f_bavail.saturating_mul(s.f_frsize))
     }
 }
@@ -528,5 +651,48 @@ pub fn lock(state_dir: &Path) -> Result<Lock> {
             "別の spindle-agent が実行中です。終わってからやり直してください".to_owned(),
         )),
         Err(e) => Err(Error::Io(e.into())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(e: &Error) -> Option<std::io::ErrorKind> {
+        match e {
+            Error::Io(io) => Some(io.kind()),
+            _ => None,
+        }
+    }
+
+    /// 上書きしない rename に対応しない FS（EINVAL など）は、確かめてからの rename に落とさず止める
+    #[test]
+    fn noreplace_unsupported_errnos_stop() {
+        for e in [Errno::INVAL, Errno::NOSYS, Errno::NOTSUP, Errno::OPNOTSUPP] {
+            match rename_error(e, "a", "b", true) {
+                Error::Stop(m) => assert!(m.contains(NOREPLACE_UNSUPPORTED), "{m}"),
+                other => panic!("{e:?}: {other:?}"),
+            }
+            // 普通の rename の EINVAL などはそのまま入出力のエラー
+            assert!(matches!(rename_error(e, "a", "b", false), Error::Io(_)));
+        }
+    }
+
+    #[test]
+    fn rename_errnos_map_to_kinds() {
+        for noreplace in [true, false] {
+            assert_eq!(
+                kind(&rename_error(Errno::EXIST, "a", "b", noreplace)),
+                Some(std::io::ErrorKind::AlreadyExists)
+            );
+            assert_eq!(
+                kind(&rename_error(Errno::NOENT, "a", "b", noreplace)),
+                Some(std::io::ErrorKind::NotFound)
+            );
+            assert!(matches!(
+                rename_error(Errno::ACCESS, "a", "b", noreplace),
+                Error::Io(_)
+            ));
+        }
     }
 }

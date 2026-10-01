@@ -4480,3 +4480,65 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
 - 報告だけの回をせず、次の sync で直す（手で消した曲が戻るまで 2 回の sync が要り、表示する差分が実状態とずれる）
 - 一時プレイリストを名前の接頭辞で片付ける（ユーザの「.tmp-」を消しうる）
 - 本体の `device::plan` を `agent-proto` の型へ書き換えて共有する（4b の範囲を超えて本体の ADB 同期を触る）
+
+## D-101 Mac エージェントのミュージック.app は JXA で操作し、実機の spike で固定する。トークンは Keychain、バイナリは署名せず Release に置く
+
+**背景**（2026-10-01。P5-4c。計画は `docs/superpowers/plans/2026-10-01-p5-4c-agent-mac.md`）: 4b（D-100）は外界を trait に閉じ込め、ミュージック.app は偽実装で試した。4c で実機の Mac（mbp14、macOS 27.0、ミュージック 1.7）に対して JXA を固定し、`Secrets` の Keychain 実装と、macOS 用バイナリの配布を入れる。D-100 が 4c に残した項目は、JXA 実装・Keychain・コピー設定の読み取り・検査と rename の間の TOCTOU。
+
+**spike で分かったこと**（実機で確認）:
+
+1. `Application('Music').add(パス文字列)` で file track ができ、`persistentID()`（16 桁の 16 進）・`databaseID()`・`location()`・`dateAdded()`・`size()` が取れる。同じファイルをもう一度 `add` すると既存の track が返る（重複しない）
+2. **location の付け替えは文字列の代入で行う**（`t.location = "/abs/path"`）。`Path(...)` の代入は -1728 で失敗する。拡張子の無いファイル（`.moving/<batch>-<op>`）へも付け替えられる。存在しないパスへの代入は「タイプを変換できません」で失敗する
+3. ミュージック.app は **mv されたファイルを自動で追う**（location が新しいパスになる）。タグの無いファイルは名前もファイル名に変わる
+4. 同じパスのファイルを tmp → rename で差し替えると、size・duration は差し替え後のものになる。`refresh` は成功し、再生回数は保たれる。location が無い（ファイルが無い）track の `refresh` は 9044 で失敗する
+5. **曲の削除**: メディアフォルダの外の曲は track だけが消えてファイルは残る。メディアフォルダの中の曲はファイルもゴミ箱へ移る
+6. **コピー設定**（「ライブラリへの追加時にファイルを［ミュージック］フォルダにコピー」）が ON だと、`add` はメディアフォルダ（`<media>/Music/<Artist>/<Album>/`）へ複製し、location は複製先になる。ただしファイルが既にメディアフォルダの中にあれば複製しない。設定はライブラリごとで、ライブラリ内の暗号化された DB にあり、外から読めない（`~/Library/Preferences/com.apple.Music.plist` には無い）
+7. メディアフォルダには `Automatically Add to Music.localized` と `.Media Preferences.plist` ができる
+8. フォルダは `make({new: 'folderPlaylist', withProperties: {name}})`、その中のプレイリストは `make({new: 'userPlaylist', at: フォルダ, withProperties: {name}})`、改名は `p.name = 新名`、中身の追加は `duplicate(track, {to: p})`、空にするのは `delete(p.tracks)`、削除は `delete(p)`。同じフォルダに同名のプレイリストを作れる。親は `p.parent().persistentID()`。`app.folderPlaylists.whose` は使えない（`app.playlists.whose({persistentID})` を使う）
+9. 一覧は `libraryPlaylists[0].fileTracks.persistentID()` のような一括取得で 1 回の Apple Event になる。一括取得は、ファイルが無い track には null を返す（実機で確認。Rust 側で欠けた曲として扱う）
+10. ssh 越しの `osascript` でも Automation の許可ダイアログは出なかった（許可済み、または ssh の親が許可を持つ）。初回の操作で出る場合に備え、pair の最初に読み取りだけの操作を行う（4b の `probe`）
+
+**決定**（spec からの変更・空白を埋める判断）:
+
+1. **コピー設定は読まない**: 外から読めないので、`copy_to_library()` は常に `None` を返し、`add` の後の location で検出する（4b で実装済みの通常経路の削除と停止）。仕様の「読めれば前提検査にする」は不可として閉じる
+2. **root がメディアフォルダなら止める**: root（`~/Music/spindle`）の直下に `Automatically Add to Music.localized` か `.Media Preferences.plist` があれば、pair と sync を `Error::Stop` で止める。メディアフォルダの中の曲は削除でファイルまで消え、コピー設定 ON でも複製されないため、前提が崩れる。検査はコピー設定の確認の直後、副作用の前に行う
+3. **JXA の呼び出し単位**: trait のメソッド 1 回 = `osascript` 1 回。一覧（`tracks_under` / `tracks_added_after` / `max_database_id`）は 1 回の一括取得で全 file track を返し、絞り込みは Rust 側で行う。名前の比較（`folders_named`）とフォルダ直下の絞り込み（`playlists_in`）も Rust 側（`canonical_key`）
+4. **タイムアウト**: 1 回の `osascript` は 120 秒（ミュージック.app の起動を含むため長め）。超えたら kill して `Error::Music`。終了コードが 0 以外なら stderr を `Error::Music` に含める
+5. **Keychain**: サービス名 `spindle-agent`、アカウント `token` の汎用パスワード（`security-framework`）。macOS 以外はファイルのまま。4b のファイルのトークンは移行しない（まだ配布していない）
+6. **上書きしない rename**: 追加の配置とバッチの置き先への rename は、行き先が無いことを OS に保証させる（macOS は `renameatx_np(RENAME_EXCL)`、Linux は `renameat2(RENAME_NOREPLACE)`。rustix の `renameat_with(.., RenameFlags::NOREPLACE)`）。D-100 で残した検査と rename の間の TOCTOU を閉じる。行き先があれば `EEXIST` を今の「管理外と衝突」/ `FOREIGN_AT_DESTINATION` と同じに扱う
+7. **配布**: バイナリは署名・公証しない。tar.gz を Release に置き、README に `xattr -d com.apple.quarantine` と Automation の許可を書く
+8. **実機の通し試験**: 本体側に `#[ignore]` の試験の台（seed した spindle を指定アドレスで待ち受け、ペアリングコードを表示）を置き、mbp14 の本物のバイナリで pair → sync → 選曲を変えて sync を手で確かめる。試験用ライブラリで行う
+
+**実装中に決めたこと**:
+
+- **osascript の起動**: trait のメソッド 1 回につき `osascript -l JavaScript -` を 1 回起動する。スクリプトは標準入力、リクエストの JSON は argv で渡す（スクリプトの文字列にパスや名前を埋め込まない。注入を防ぐ）。120 秒で kill してエラーにし、そのとき stdout / stderr の読み取りスレッドは join せず切り離す（孫プロセスがパイプを握り続けても固まらないため）。stderr は共有のバッファへ読み続け、タイムアウトと終了待ちの失敗でもそこまでに読めた分（末尾 4 KiB まで）をエラーに載せる。終了コード 0 でも stderr が空でなければエージェントの stderr へ「osascript の stderr: …」として出す（外部レビューで直した）
+- **上書きしない rename の実装**: `place_new` / `rename_new` が rustix の `renameat_with(NOREPLACE)` を呼ぶ。EINVAL / ENOSYS / ENOTSUP / EOPNOTSUPP（その FS や OS が対応しない）のときは `Error::Stop` で止め、root をローカルのボリューム（APFS）へ移すよう案内する（「行き先を stat してから rename」に落とすと、その間に現れたものを上書きしうる。外部レビューで直した）。既存の事前検査は残し、`AlreadyExists` は事前検査と同じに扱う（追加は「管理外と衝突」でその曲だけ保留、バッチは `FOREIGN_AT_DESTINATION` で止める）。試験用のフェイルポイント `exec.add.checked` / `batch.place.checked` で検査と rename の間に行き先を作って確かめる
+- **Keychain のエラー**: システムのメッセージだけを載せ、トークンは載せない。`SPINDLE_AGENT_SECRETS=file` で macOS でもファイルの保管に固定できる。**ssh 越しではログイン Keychain が使えない**（`User interaction is not allowed`）ため、Mac の Terminal.app で実行するか、`SPINDLE_AGENT_SECRETS=file` を付ける。README の「困ったとき」に書く
+- **CI**: `agent-macos` ジョブ（macos-latest）で clippy・test（`fake` 機能）・release ビルドを行い、tar.gz と `.sha256` を成果物にする。`publish` ジョブはこれに依存し、`v*` タグでは tar.gz を Release に添付する。**edge のイメージの publish も macOS ジョブの成功に依存するようになった**
+- **サーバ側**: `/api/agent/*` は Bearer トークンだけで認可する（D-99。サーバに LAN / HTTPS の検査は無い）。エージェントの側が、`--insecure-http` なしでは平文の http を拒否する
+- **JXA で実機に合わせた点**: 一括取得はファイルの無い track に null を返す（spike 9）
+
+**最終レビューで直したこと**（実機の mbp14 で確認した事実に合わせる）:
+
+1. **root をシンボリックリンクを解いたパスにする**: ミュージック.app は track の場所をシンボリックリンクを解いたパスで持つ（実機で `/tmp/x` → `/private/tmp/x`、`~/Music` 下のリンクしたディレクトリはリンク先）。root が解かれていないと `tracks_under` や root 相対への変換の前方一致が外れ、反映済みの曲を見失う。起動時（`Paths`）に、在る最も近い祖先を `canonicalize` して、まだ無い残りの要素を足す。相対パスの root は止める。root の**中**のリンクは従来どおり辿らない
+2. **メディアフォルダの検査を祖先にも広げる**: 決定 2 は root の直下だけを見ていたが、メディアフォルダが `~/Music` などの祖先なら root はその中に入る。root とその祖先のどれかの直下に印があれば止める（祖先は root の外なので、パスで `symlink_metadata` を見る）
+3. **pair はトークンを保存できるかをコードを使う前に確かめる**: ssh 越しでは Keychain の保存が `errSecInteractionNotAllowed`（-25308）で失敗し、ワンタイムコードを使った後だったので発行し直すしかなかった。`Secrets::check_writable` を足し（Keychain はトークンの項目が在れば同じ値を書き戻し、無ければ同じサービスの試しの項目 `probe` を書いて消す。ファイルは `set` と同じ tmp → fsync → rename → ディレクトリの fsync を試しの名前で行って消し、本番の `token` / `.token.tmp` が在れば通常ファイルであることも見る。外部レビューで、試しのファイルの作成だけでは本番の置き場の型や既存項目の ACL での失敗を拾えないと指摘されて広げた）、`server.pair` の前に呼ぶ。-25308 のエラーには Terminal.app か `SPINDLE_AGENT_SECRETS=file` の案内を付け、「トークンがありません」には pair のときと同じ `SPINDLE_AGENT_SECRETS` の指定で実行する案内を足す
+4. **`set_playlist_tracks` の上限を曲数で延ばす**: 実機で 1 曲あたり約 35 ms（200 曲で 7 秒）かかり、決定 4 の固定 120 秒では約 3400 曲を超えるプレイリストが毎回失敗する。この操作だけ 120 秒 + 100 ms × 曲数にする
+5. **`max_database_id` は専用の op で取る**: `add` のたびに呼ぶので、5 項目の一覧（`tracks`）ではなく databaseID の最大だけを返す `max_db` にする（決定 3 の例外）。file track が 0 件だと一括取得が -1728 で落ちるので、`tracks` と同じく件数を先に見て 0 を返す
+
+**外部レビュー（codex）で直したこと**:
+
+1. **上書きしない rename に対応しない FS では止める**（上の「上書きしない rename の実装」）
+2. **バッチの回復は行き先の中身を確かめてから採用する**: 置いた直後に落ち、落ちている間に行き先が差し替えられると、回復は src が無く `to` が在るだけで置き済みとみなし、実ファイルの stat と計画の sha256 を組にして記録していた（以後 stat が変わらない限り再検査されない）。回復で `to` を採用する前に、大きさと sha256 が計画と一致するかを見る。違えば `FOREIGN_AT_DESTINATION` で止め、ファイルも track の場所も触らず、バッチを残す（利用者が退けた後の回復で片付く）
+3. **root の dirfd は `/` から 1 要素ずつシンボリックリンクを辿らずに開く**: 最終レビューの 1 で root は起動時に解いた実パスになったが、操作のたびにそのパスをリンクを辿って開き、無ければ `create_dir_all` していたため、起動後に root か祖先をリンクへ差し替えると root の dirfd が外を指した（その下を 1 要素ずつ辿る守りが効かない）。`/` から `O_DIRECTORY | O_NOFOLLOW` で 1 要素ずつ開き、無い末尾は親の dirfd からの `mkdirat` で作る。途中にリンク（かフォルダでないもの）があれば、読みも書きも `Error::Stop` で止める。試験は root を解いた tempdir で作る（macOS の tempdir は `/var` → `/private/var` のリンクの下）
+4. **トークンの保存の確認を広げる**（最終レビューの 3 を参照）
+5. **osascript の stderr を捨てない**（上の「osascript の起動」を参照）
+
+**理由**: 実機の spike で、Apple Event の呼び方（文字列の代入、一括取得、`whose` の制限）とコピー設定の読めなさが確定した。呼び出しを 1 回ずつの `osascript` にすると、状態を持つ常駐プロセスが要らず、失敗と打ち切りの扱いが単純になる。ミュージック.app は mv を追い、メディアフォルダの外の曲は track だけが消えるため、`~/Music/spindle` を管理下の root にしてメディアフォルダと分ければ、4b の設計（track の削除は通常経路、ファイルは自分で消す）がそのまま成り立つ。上書きしない rename は OS に保証させるのが、検査と rename の間の競合に対する唯一確実な閉じ方。
+
+**却下**:
+- `security` コマンドでの Keychain 操作（トークンが引数に出て、`ps` で見える）
+- JXA のスクリプトをファイルで配置する（改ざんと版ずれの余地。バイナリに埋め込む）
+- `Path()` での location の代入（-1728 で失敗する）
+- コピー設定を plist から読む（ライブラリごとの暗号化 DB にあり読めない）
+- 署名・公証（Developer ID が無い。必要になったら）

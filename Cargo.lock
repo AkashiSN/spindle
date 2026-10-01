@@ -1867,6 +1867,7 @@ dependencies = [
  "reqwest",
  "rustix",
  "rustls",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",

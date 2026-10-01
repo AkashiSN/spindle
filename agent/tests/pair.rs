@@ -132,3 +132,103 @@ fn foreign_marker_stops() {
         .unwrap();
     assert!(matches!(do_pair(&mut env), Err(Error::Stop(_))));
 }
+
+#[test]
+fn media_folder_root_stops_before_using_the_code() {
+    let mut env = Env::new();
+    env.write_local(".Media Preferences.plist", b"x");
+    assert!(matches!(do_pair(&mut env), Err(Error::Stop(m)) if m.contains("メディアフォルダ")));
+    assert!(env.state().server.is_none());
+}
+
+/// メディアフォルダが root の親（~/Music）: root はその中なので、コードを使う前に止める
+#[test]
+fn media_folder_parent_stops_before_using_the_code() {
+    let mut env = Env::new();
+    let parent = env.root.path().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::write(parent.join(".Media Preferences.plist"), b"x").unwrap();
+    assert!(matches!(do_pair(&mut env), Err(Error::Stop(m)) if m.contains("メディアフォルダ")));
+    assert!(env.state().server.is_none());
+    assert!(!env.root.path().exists());
+}
+
+/// トークンを保存できない置き場（ssh 越しの Keychain の代わり）
+struct Unwritable;
+
+impl Secrets for Unwritable {
+    fn get(&self) -> spindle_agent::Result<Option<String>> {
+        Ok(None)
+    }
+    fn set(&self, _token: &str) -> spindle_agent::Result<()> {
+        Err(Error::Stop("保存できない".into()))
+    }
+    fn check_writable(&self) -> spindle_agent::Result<()> {
+        Err(Error::Stop("保存できない".into()))
+    }
+}
+
+#[test]
+fn unwritable_secrets_stop_before_using_the_code() {
+    let mut env = Env::new();
+    let res = env.with_ctx(|cx| pair(cx, &Unwritable, "https://music.example", false, "code"));
+    assert!(matches!(res, Err(Error::Stop(m)) if m.contains("保存できない")));
+    assert_eq!(env.server.pair_calls(), 0);
+    assert!(env.state().server.is_none());
+    // 置き場を直せば同じコードで pair できる
+    do_pair(&mut env).unwrap();
+    assert_eq!(env.server.pair_calls(), 1);
+}
+
+#[test]
+fn file_secrets_check_writable() {
+    let d = tempfile::tempdir().unwrap();
+    let s = FileSecrets::new(&d.path().join("state"));
+    s.check_writable().unwrap();
+    // 試しのファイルを残さず、トークンも作らない
+    assert_eq!(
+        std::fs::read_dir(d.path().join("state")).unwrap().count(),
+        0
+    );
+    assert_eq!(s.get().unwrap(), None);
+    // 書けないディレクトリ（ファイルが塞いでいる）なら止める
+    std::fs::write(d.path().join("blocked"), b"x").unwrap();
+    let s = FileSecrets::new(&d.path().join("blocked"));
+    assert!(matches!(s.check_writable(), Err(Error::Stop(_))));
+}
+
+/// 本番のトークンの置き場（`token` か `.token.tmp`）がディレクトリ: `set` が失敗するので、コードを使う前に止める
+#[test]
+fn file_token_path_blocked_stops_before_using_the_code() {
+    for name in ["token", ".token.tmp"] {
+        let mut env = Env::new();
+        std::fs::create_dir_all(env.state_dir.join(name)).unwrap();
+        let s = FileSecrets::new(&env.state_dir);
+        assert!(
+            matches!(s.check_writable(), Err(Error::Stop(m)) if m.contains(name)),
+            "{name}"
+        );
+        assert!(matches!(do_pair(&mut env), Err(Error::Stop(_))), "{name}");
+        assert_eq!(env.server.pair_calls(), 0, "{name}");
+        assert!(env.state().server.is_none(), "{name}");
+        // 直せば同じコードで pair できる
+        std::fs::remove_dir(env.state_dir.join(name)).unwrap();
+        do_pair(&mut env).unwrap();
+        assert_eq!(env.server.pair_calls(), 1, "{name}");
+    }
+}
+
+/// 既にトークンがあっても check_writable はそれに触らず、試しのファイルも残さない
+#[test]
+fn file_secrets_check_writable_keeps_existing_token() {
+    let d = tempfile::tempdir().unwrap();
+    let s = FileSecrets::new(d.path());
+    s.set("old.token").unwrap();
+    s.check_writable().unwrap();
+    assert_eq!(s.get().unwrap().as_deref(), Some("old.token"));
+    let names: Vec<_> = std::fs::read_dir(d.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("token")]);
+}

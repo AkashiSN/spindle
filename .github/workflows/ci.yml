@@ -215,6 +215,41 @@ jobs:
           path: image.tar.zst
           retention-days: 1
 
+  agent-macos:
+    # Mac 用の spindle-agent（P5-4c）。ミュージック.app の JXA は macOS でしか動かないので、ここで clippy / test
+    # （fake 機能のエンジン試験）まで通し、release ビルドを tar.gz にして publish ジョブが Release へ添付する
+    name: agent (macOS arm64)
+    runs-on: macos-latest
+    outputs:
+      asset: ${{ steps.pack.outputs.asset }}
+    steps:
+      # git describe（成果物の名前）にタグが要るので全履歴を取る
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p spindle-agent --all-targets --features fake --locked -- -D warnings
+      - run: cargo test -p spindle-agent --features fake --locked
+      - run: cargo build -p spindle-agent --release --locked
+      - name: tar.gz（spindle-agent-<git describe>-aarch64-apple-darwin.tar.gz）
+        id: pack
+        run: |
+          set -eu
+          v=$(git describe --tags --always)
+          name="spindle-agent-${v}-aarch64-apple-darwin"
+          mkdir "$name" && cp target/release/spindle-agent agent/README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "asset=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: agent-macos
+          path: spindle-agent-*.tar.gz*
+          retention-days: 7
+
   publish:
     # 書き込み権限（GHCR / Release）はこのジョブだけ。main への push（edge / sha-<7 桁>）と vX.Y.Z タグ
     # （X.Y.Z / X.Y / latest + Release）で走り、PR では走らない。docker ジョブが確認した同じイメージ
@@ -222,7 +257,7 @@ jobs:
     # イメージを GHCR に押すと「unknown blob」で落ちることがある
     name: publish (GHCR)
     runs-on: ubuntu-latest
-    needs: [docker]
+    needs: [docker, agent-macos]
     if: github.event_name == 'push'
     permissions:
       contents: write     # vX.Y.Z の Release
@@ -259,3 +294,12 @@ jobs:
           # このジョブは checkout しないので、gh にリポジトリを明示する（無いと「not a git repository」で落ちる）
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
             --generate-notes --notes "$notes"
+      - uses: actions/download-artifact@v8
+        if: needs.docker.outputs.release == 'true'
+        with:
+          name: agent-macos
+      - name: Release に spindle-agent（macOS）を添付
+        if: needs.docker.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" spindle-agent-*.tar.gz spindle-agent-*.tar.gz.sha256

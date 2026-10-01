@@ -8,6 +8,7 @@ use crate::{Error, Result};
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+pub mod jxa;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MusicTrack {

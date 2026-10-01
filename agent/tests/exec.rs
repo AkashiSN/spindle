@@ -189,11 +189,13 @@ fn basic_changes_survive_every_crash_point() {
         "music.delete_track",
         "music.delete_track:after",
         "exec.add.downloaded",
+        "exec.add.checked",
         "exec.add.placed",
         "exec.update.placed",
         "exec.delete.track_deleted",
     ];
     for name in names {
+        let mut crashed = false;
         for nth in 1..=8 {
             let mut env = Env::new();
             env.paired();
@@ -207,6 +209,7 @@ fn basic_changes_survive_every_crash_point() {
             if !matches!(first, Err(Error::Crash(_))) {
                 continue; // その名前の nth 回目は無かった
             }
+            crashed = true;
             // やり直し: 回復 → 再発見 → 同じ計画で再開（偽サーバの計画は open のまま）
             let m = env.server.manifest().unwrap();
             env.with_ctx(recover).unwrap();
@@ -241,6 +244,7 @@ fn basic_changes_survive_every_crash_point() {
                 "{name}#{nth}"
             );
         }
+        assert!(crashed, "{name} で一度も落ちなかった");
     }
 }
 
@@ -433,7 +437,7 @@ fn delete_does_not_follow_symlinked_parent_dir() {
 
 /// root の `A/` を外の同じ中身のディレクトリへのシンボリックリンクにする
 fn symlink_parent_outside(env: &Env) -> std::path::PathBuf {
-    let outside = env.dir.path().join("outside");
+    let outside = env.base.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("a.m4a"), b"aaa").unwrap();
     let a = env.root.path().join("A");
@@ -453,7 +457,7 @@ fn assert_outside_untouched(outside: &std::path::Path) {
 
 /// 管理中の曲のパスが root の外のファイルへのシンボリックリンクに差し替わった
 fn symlink_final_outside(env: &Env, rel: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    let outside = env.dir.path().join("outside");
+    let outside = env.base.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     let target = outside.join("t.m4a");
     std::fs::write(&target, b"outside").unwrap();
@@ -505,4 +509,33 @@ fn delete_recovery_does_not_remove_final_symlink() {
     let (link, target) = symlink_final_outside(&env, "A/a.m4a");
     assert!(env.with_ctx(recover).is_err());
     assert_link_untouched(&link, &target);
+}
+
+/// 置き先の確認の後・rename の前に管理外のファイルが現れた: rename が上書きを断り、確認と同じく
+/// 「管理外と衝突」にする
+#[test]
+fn add_does_not_overwrite_file_created_after_check() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    let abs = env.root.abs("A/a.m4a").unwrap();
+    env.fp.on("exec.add.checked", 1, move || {
+        std::fs::write(&abs, b"mine").unwrap();
+    });
+    let (_p, r, m) = env.confirm_all();
+    let errors = env.with_ctx(|cx| {
+        exec::run(cx, &r, &m).unwrap();
+        cx.errors.clone()
+    });
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].reason, UNMANAGED_COLLISION);
+    assert_eq!(
+        std::fs::read(env.root.abs("A/a.m4a").unwrap()).unwrap(),
+        b"mine"
+    );
+    assert!(!env.root.exists("A/a.m4a.spindle-tmp").unwrap());
+    let s = env.state();
+    assert!(s.pending_ops.is_empty());
+    assert!(!s.tracks.contains_key(&1));
+    assert!(env.music.tracks().is_empty());
 }

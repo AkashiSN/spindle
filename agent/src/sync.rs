@@ -1,8 +1,9 @@
 //! `sync` の段取り（仕様 ⑥「回復の順序」、D-100 判断 5）と `pair` / `resolve` / `abandon` / `status`。
 //! 各コマンドは `<state_dir>/lock` を取り、state.json を読んで `Ctx` を作ってからエンジンを呼ぶ
 
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agent_proto::{
     AbandonRequest, ManifestResponse, OpKind, Plan, PlaylistOpKind, ReportError, ReportPlaylist,
@@ -40,25 +41,82 @@ impl Paths {
     /// `SPINDLE_AGENT_STATE_DIR` / `SPINDLE_AGENT_ROOT`。無ければ
     /// `$HOME/Library/Application Support/spindle-agent` と `$HOME/Music/spindle`
     pub fn from_env() -> Result<Paths> {
+        Self::from_vars(
+            std::env::var_os("HOME"),
+            std::env::var_os("SPINDLE_AGENT_STATE_DIR"),
+            std::env::var_os("SPINDLE_AGENT_ROOT"),
+        )
+    }
+
+    /// 環境変数の値から組み立てる（空の値は無いものとする）。root は `resolve_root` で解決する
+    pub fn from_vars(
+        home: Option<OsString>,
+        state_dir: Option<OsString>,
+        root: Option<OsString>,
+    ) -> Result<Paths> {
         let home = || {
-            std::env::var_os("HOME")
+            home.clone()
                 .filter(|h| !h.is_empty())
                 .map(PathBuf::from)
                 .ok_or_else(|| Error::Stop("環境変数 HOME が設定されていません".to_owned()))
         };
-        let state_dir = match std::env::var_os("SPINDLE_AGENT_STATE_DIR").filter(|v| !v.is_empty())
-        {
+        let state_dir = match state_dir.filter(|v| !v.is_empty()) {
             Some(v) => PathBuf::from(v),
             None => home()?
                 .join("Library")
                 .join("Application Support")
                 .join("spindle-agent"),
         };
-        let root = match std::env::var_os("SPINDLE_AGENT_ROOT").filter(|v| !v.is_empty()) {
+        let root = match root.filter(|v| !v.is_empty()) {
             Some(v) => PathBuf::from(v),
             None => home()?.join("Music").join("spindle"),
         };
-        Ok(Paths { state_dir, root })
+        Ok(Paths {
+            state_dir,
+            root: resolve_root(&root)?,
+        })
+    }
+}
+
+/// root をシンボリックリンクを解いた絶対パスにする。ミュージック.app は track の場所を解いたパスで
+/// 持つ（`/tmp/x` → `/private/tmp/x`、~/Music 下のリンクはリンク先）ので、root も解いておかないと
+/// 場所との前方一致が外れる。まだ無い末尾の要素は、在る最も近い祖先を解いた後ろにそのまま足す
+pub fn resolve_root(root: &Path) -> Result<PathBuf> {
+    if !root.is_absolute() {
+        return Err(Error::Stop(format!(
+            "root は絶対パスで指定してください（{}）",
+            root.display()
+        )));
+    }
+    let mut rest: Vec<&OsStr> = Vec::new();
+    let mut cur = root;
+    loop {
+        match std::fs::canonicalize(cur) {
+            Ok(base) => {
+                let mut out = base;
+                for name in rest.iter().rev() {
+                    out.push(name);
+                }
+                return Ok(out);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // 無い要素の後ろの `..` は解けない（祖先が決まらない）
+                let (Some(name), Some(parent)) = (cur.file_name(), cur.parent()) else {
+                    return Err(Error::Stop(format!(
+                        "root を解決できません（{}）",
+                        root.display()
+                    )));
+                };
+                rest.push(name);
+                cur = parent;
+            }
+            Err(e) => {
+                return Err(Error::Stop(format!(
+                    "root を解決できません（{}）: {e}",
+                    root.display()
+                )))
+            }
+        }
     }
 }
 
@@ -124,6 +182,7 @@ pub fn sync<M: Music, S: Server>(
 fn run_sync<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<SyncOutcome> {
     require_paired(&cx.state)?;
     pair::check_copy_setting(cx)?;
+    pair::check_root_not_media_folder(cx)?;
     // ① root の印と初期化の続き。印を書く前（Started）の検証と書き込みは continue_setup が行う
     check_marker(cx)?;
     pair::continue_setup(cx)?;

@@ -20,6 +20,8 @@ pub const UUID: &str = "11111111-2222-3333-4444-555555555555";
 
 pub struct Env {
     pub dir: tempfile::TempDir,
+    /// `dir` をシンボリックリンクを解いたパス
+    pub base: PathBuf,
     pub state_dir: PathBuf,
     pub root: LocalRoot,
     pub music: FakeMusic,
@@ -48,11 +50,18 @@ impl Ui for ScriptUi {
 
 impl Env {
     pub fn new() -> Self {
+        Self::new_at(|base| base.join("Music/spindle"))
+    }
+
+    /// root を tempdir から `root_of` で決める（ディレクトリの用意も `root_of` で行える）
+    pub fn new_at(root_of: impl FnOnce(&std::path::Path) -> PathBuf) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        // 本番の root は起動時にシンボリックリンクを解いたパス（macOS の tempdir は `/var` → `/private/var`）
+        let base = std::fs::canonicalize(dir.path()).unwrap();
         let fp = Failpoints::armed();
-        let state_dir = dir.path().join("state");
-        let root = LocalRoot::new(dir.path().join("Music/spindle"));
-        let music = FakeMusic::new(dir.path().join("Media"), fp.clone());
+        let state_dir = base.join("state");
+        let root = LocalRoot::new(root_of(&base));
+        let music = FakeMusic::new(base.join("Media"), fp.clone());
         Self {
             state_dir,
             root,
@@ -60,6 +69,7 @@ impl Env {
             server: FakeServer::new(UUID),
             fp,
             ui: ScriptUi::default(),
+            base,
             dir,
         }
     }
