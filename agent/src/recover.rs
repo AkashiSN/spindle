@@ -1,6 +1,6 @@
 //! 回復（仕様 ⑥「回復」、D-100）。前回の実行が途中で止まった `pending_ops` を先頭から 1 件ずつ片付ける。
-//! 片付けと pending からの除去は 1 回の保存で行う。ここで扱うのは曲の追加・更新・削除
-//! （パス変更のバッチは先に `batch::recover_batches` が片付ける。プレイリストは Task 10 が足す）
+//! 片付けと pending からの除去は 1 回の保存で行う。ここで扱うのは曲の追加・更新・削除とプレイリスト
+//! （パス変更のバッチは先に `batch::recover_batches` が片付ける）
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -14,6 +14,7 @@ use crate::exec::{entry_for, remove_pending};
 use crate::local::TMP_SUFFIX;
 use crate::music::{Music, MusicTrack};
 use crate::pathkey::{canonical_key, to_rel};
+use crate::playlist;
 use crate::server::Server;
 use crate::state::{Candidate, OpPhase, PendingKind, PendingOp};
 use crate::{Error, Result};
@@ -28,8 +29,23 @@ pub fn recover<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<()> {
             (PendingKind::Update, OpPhase::Fetching) => recover_update(cx, op)?,
             (PendingKind::Add, OpPhase::Fetching) => recover_add_fetching(cx, op)?,
             (PendingKind::Add, OpPhase::Adding) => recover_add_adding(cx, op)?,
-            // プレイリスト（Task 10）はまだ扱わない
-            _ => {}
+            (PendingKind::PlaylistDelete, OpPhase::Deleting) => {
+                let pid = need(&op.persistent_id, "persistent_id", op)?;
+                playlist::recover_delete(cx, op, pid)?
+            }
+            (PendingKind::Playlist, OpPhase::Creating) => playlist::recover_creating(cx, op)?,
+            (PendingKind::Playlist, OpPhase::Filling) => {
+                let pid = need(&op.persistent_id, "persistent_id", op)?;
+                playlist::recover_filling(cx, op, pid)?
+            }
+            // 書く側が作らない組み合わせ。黙って飛ばすと pending が残り続けるので止める
+            (kind, phase) => {
+                return Err(Error::State(format!(
+                    "pending_ops の {} に知らない相 {phase:?} がある（op_id {}）",
+                    kind_name(kind),
+                    op.op_id
+                )))
+            }
         }
     }
     Ok(())

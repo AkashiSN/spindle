@@ -4,14 +4,16 @@
 
 use std::path::PathBuf;
 
-use agent_proto::{ManifestResponse, Plan};
+use agent_proto::{
+    ManifestResponse, Plan, ReportPlaylist, ReportRequest, ReportState, ReportTrack,
+};
 use spindle_agent::ctx::{Ctx, Ui};
 use spindle_agent::failpoint::Failpoints;
 use spindle_agent::local::LocalRoot;
 use spindle_agent::music::fake::FakeMusic;
 use spindle_agent::plan::{current_of, runnable, Runnable};
 use spindle_agent::server::fake::FakeServer;
-use spindle_agent::server::{Confirmed, Server};
+use spindle_agent::server::{Confirmed, Reported, Server};
 use spindle_agent::state::{ServerInfo, Setup, SetupPhase, State, StateFile, TrackEntry};
 
 pub const UUID: &str = "11111111-2222-3333-4444-555555555555";
@@ -181,5 +183,42 @@ impl Env {
             .collect();
         v.sort();
         v
+    }
+}
+
+impl Env {
+    /// 偽サーバの open な計画を今の state の報告で閉じる（以後の `confirm_all` は新しい差分で確定する）
+    pub fn accept_state(&self) {
+        let s = self.state();
+        let m = self.server.manifest().unwrap();
+        let plan_id = self.server.open().unwrap().plan_id;
+        let r = ReportRequest {
+            generation: m.generation,
+            plan_id,
+            state: ReportState {
+                tracks: s
+                    .tracks
+                    .iter()
+                    .map(|(id, e)| ReportTrack {
+                        track_id: *id,
+                        dest_path: e.path.clone(),
+                        token: e.token.clone(),
+                        size: e.size,
+                        sha256: e.sha256.clone(),
+                    })
+                    .collect(),
+                playlists: s
+                    .playlists
+                    .iter()
+                    .map(|(id, e)| ReportPlaylist {
+                        playlist_id: *id,
+                        name: e.name.clone(),
+                        token: e.token.clone(),
+                    })
+                    .collect(),
+            },
+            errors: vec![],
+        };
+        assert_eq!(self.server.report(&r).unwrap(), Reported::Ok);
     }
 }

@@ -11,6 +11,7 @@ pub mod local;
 pub mod music;
 pub mod pathkey;
 pub mod plan;
+pub mod playlist;
 pub mod recover;
 pub mod rediscover;
 pub mod secrets;

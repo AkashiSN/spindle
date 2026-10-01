@@ -14,6 +14,7 @@ use crate::local::{is_reserved, TMP_SUFFIX};
 use crate::music::Music;
 use crate::pathkey::{canonical_key, to_rel};
 use crate::plan::Runnable;
+use crate::playlist;
 use crate::rediscover::pending_pids;
 use crate::server::{Fetch, Server};
 use crate::state::{OpPhase, PendingKind, PendingOp, TrackEntry};
@@ -64,8 +65,7 @@ enum Step {
 pub fn run<M: Music, S: Server>(
     cx: &mut Ctx<'_, M, S>,
     r: &Runnable,
-    // プレイリストの実行（Task 10）が中身を引く
-    _m: &ManifestResponse,
+    m: &ManifestResponse,
 ) -> Result<Outcome> {
     // 空き容量（副作用の前）
     let need = r
@@ -119,8 +119,10 @@ pub fn run<M: Music, S: Server>(
             }
         }
     }
-    // プレイリスト（Task 10）。この時点では数えるだけ
-    out.dropped += r.playlists.len();
+    // プレイリスト（曲の追加の後。中身は state の曲の persistent ID に置き換える）
+    let (executed, dropped) = playlist::run(cx, &r.playlists, m)?;
+    out.executed += executed;
+    out.dropped += dropped;
     Ok(out)
 }
 
