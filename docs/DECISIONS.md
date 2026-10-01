@@ -4512,7 +4512,7 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
 **実装中に決めたこと**:
 
 - **osascript の起動**: trait のメソッド 1 回につき `osascript -l JavaScript -` を 1 回起動する。スクリプトは標準入力、リクエストの JSON は argv で渡す（スクリプトの文字列にパスや名前を埋め込まない。注入を防ぐ）。120 秒で kill してエラーにし、そのとき stdout / stderr の読み取りスレッドは join せず切り離す（孫プロセスがパイプを握り続けても固まらないため）
-- **上書きしない rename の実装**: `place_new` / `rename_new` が rustix の `renameat_with(NOREPLACE)` を呼ぶ。EINVAL / ENOSYS / ENOTSUP / EOPNOTSUPP（その FS や OS が対応しない）のときは「行き先を stat してから rename」に落とす。既存の事前検査は残し、`AlreadyExists` は事前検査と同じに扱う（追加は「管理外と衝突」でその曲だけ保留、バッチは `FOREIGN_AT_DESTINATION` で止める）。試験用のフェイルポイント `exec.add.checked` / `batch.place.checked` で検査と rename の間に行き先を作って確かめる
+- **上書きしない rename の実装**: `place_new` / `rename_new` が rustix の `renameat_with(NOREPLACE)` を呼ぶ。EINVAL / ENOSYS / ENOTSUP / EOPNOTSUPP（その FS や OS が対応しない）のときは `Error::Stop` で止め、root をローカルのボリューム（APFS）へ移すよう案内する（「行き先を stat してから rename」に落とすと、その間に現れたものを上書きしうる。外部レビューで直した）。既存の事前検査は残し、`AlreadyExists` は事前検査と同じに扱う（追加は「管理外と衝突」でその曲だけ保留、バッチは `FOREIGN_AT_DESTINATION` で止める）。試験用のフェイルポイント `exec.add.checked` / `batch.place.checked` で検査と rename の間に行き先を作って確かめる
 - **Keychain のエラー**: システムのメッセージだけを載せ、トークンは載せない。`SPINDLE_AGENT_SECRETS=file` で macOS でもファイルの保管に固定できる。**ssh 越しではログイン Keychain が使えない**（`User interaction is not allowed`）ため、Mac の Terminal.app で実行するか、`SPINDLE_AGENT_SECRETS=file` を付ける。README の「困ったとき」に書く
 - **CI**: `agent-macos` ジョブ（macos-latest）で clippy・test（`fake` 機能）・release ビルドを行い、tar.gz と `.sha256` を成果物にする。`publish` ジョブはこれに依存し、`v*` タグでは tar.gz を Release に添付する。**edge のイメージの publish も macOS ジョブの成功に依存するようになった**
 - **サーバ側**: `/api/agent/*` は Bearer トークンだけで認可する（D-99。サーバに LAN / HTTPS の検査は無い）。エージェントの側が、`--insecure-http` なしでは平文の http を拒否する

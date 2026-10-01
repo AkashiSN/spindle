@@ -106,33 +106,23 @@ fn already_exists(rel: &str) -> Error {
     ))
 }
 
-/// 行き先を上書きしない rename（Linux は renameat2(RENAME_NOREPLACE)、macOS は
-/// renameatx_np(RENAME_EXCL)）。行き先にあれば `EXIST`
-fn rename_noreplace(
-    fd_from: &OwnedFd,
-    n_from: &str,
-    fd_to: &OwnedFd,
-    n_to: &str,
-) -> std::result::Result<(), Errno> {
-    match renameat_with(fd_from, n_from, fd_to, n_to, RenameFlags::NOREPLACE) {
-        Err(e) if unsupported(e) => {
-            // ファイルシステム（古いカーネル・一部のネットワーク FS など）が上書きしない rename に
-            // 対応しない。従来どおり確かめてから rename する（間に現れたものは上書きしうるが、
-            // 対応しない FS で sync を止めるよりはよい。4b までと同じ振る舞い）
-            match statat(fd_to, n_to, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(_) => return Err(Errno::EXIST),
-                Err(Errno::NOENT) => {}
-                Err(e) => return Err(e),
-            }
-            renameat(fd_from, n_from, fd_to, n_to)
-        }
-        r => r,
-    }
-}
+/// 上書きしない rename に FS が対応しない（P5-4c の最終レビュー）
+pub const NOREPLACE_UNSUPPORTED: &str = "~/Music/spindle のファイルシステムが「上書きしない rename」に対応していないため、管理外のファイルを上書きしないことを保証できません。~/Music/spindle を Mac の内蔵ディスクなどのローカルのボリューム（APFS）へ移してください";
 
 /// 上書きしない rename に対応しないときの errno（Linux では NOTSUP と OPNOTSUPP は同じ値）
 fn unsupported(e: Errno) -> bool {
     e == Errno::INVAL || e == Errno::NOSYS || e == Errno::NOTSUP || e == Errno::OPNOTSUPP
+}
+
+/// rename の errno をエラーにする。`noreplace` で FS が対応しない errno なら止める
+/// （確かめてから普通の rename に落とすと、その間に現れたものを上書きしうる。D-101）
+fn rename_error(e: Errno, from: &str, to: &str, noreplace: bool) -> Error {
+    match e {
+        Errno::NOENT => not_found(from),
+        Errno::EXIST => already_exists(to),
+        e if noreplace && unsupported(e) => Error::Stop(format!("{NOREPLACE_UNSUPPORTED}（{to}）")),
+        e => io(e),
+    }
 }
 
 /// 開けなかった理由がシンボリックリンク・ディレクトリでないものか
@@ -463,16 +453,13 @@ impl LocalRoot {
         }
         let (fd_to, n_to) = self.parent_for_write(to)?;
         refuse_symlink(&fd_to, &n_to, to)?;
+        // 上書きしない rename は Linux が renameat2(RENAME_NOREPLACE)、macOS が renameatx_np(RENAME_EXCL)
         let r = if noreplace {
-            rename_noreplace(&fd_from, &n_from, &fd_to, &n_to)
+            renameat_with(&fd_from, &n_from, &fd_to, &n_to, RenameFlags::NOREPLACE)
         } else {
             renameat(&fd_from, n_from.as_str(), &fd_to, n_to.as_str())
         };
-        r.map_err(|e| match e {
-            Errno::NOENT => not_found(from),
-            Errno::EXIST => already_exists(to),
-            e => io(e),
-        })?;
+        r.map_err(|e| rename_error(e, from, to, noreplace))?;
         fsync(&fd_from).map_err(io)?;
         fsync(&fd_to).map_err(io)?;
         Ok(())
@@ -625,5 +612,48 @@ pub fn lock(state_dir: &Path) -> Result<Lock> {
             "別の spindle-agent が実行中です。終わってからやり直してください".to_owned(),
         )),
         Err(e) => Err(Error::Io(e.into())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(e: &Error) -> Option<std::io::ErrorKind> {
+        match e {
+            Error::Io(io) => Some(io.kind()),
+            _ => None,
+        }
+    }
+
+    /// 上書きしない rename に対応しない FS（EINVAL など）は、確かめてからの rename に落とさず止める
+    #[test]
+    fn noreplace_unsupported_errnos_stop() {
+        for e in [Errno::INVAL, Errno::NOSYS, Errno::NOTSUP, Errno::OPNOTSUPP] {
+            match rename_error(e, "a", "b", true) {
+                Error::Stop(m) => assert!(m.contains(NOREPLACE_UNSUPPORTED), "{m}"),
+                other => panic!("{e:?}: {other:?}"),
+            }
+            // 普通の rename の EINVAL などはそのまま入出力のエラー
+            assert!(matches!(rename_error(e, "a", "b", false), Error::Io(_)));
+        }
+    }
+
+    #[test]
+    fn rename_errnos_map_to_kinds() {
+        for noreplace in [true, false] {
+            assert_eq!(
+                kind(&rename_error(Errno::EXIST, "a", "b", noreplace)),
+                Some(std::io::ErrorKind::AlreadyExists)
+            );
+            assert_eq!(
+                kind(&rename_error(Errno::NOENT, "a", "b", noreplace)),
+                Some(std::io::ErrorKind::NotFound)
+            );
+            assert!(matches!(
+                rename_error(Errno::ACCESS, "a", "b", noreplace),
+                Error::Io(_)
+            ));
+        }
     }
 }
