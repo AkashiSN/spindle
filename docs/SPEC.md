@@ -430,22 +430,21 @@ state とミュージック.app。spindle へは報告で届く）で、DB の�
 | `device_playlist_state` | 反映済みのプレイリスト: `dest_path`（adb は `Playlists/<名前>.m3u8`、agent はプレイリスト名そのもの。D-99）とトークン。`playlist_id` は FK にしない | キャッシュ |
 | `device_errors` | 最後の同期・報告で出た項目（`track` / `playlist`）ごとのエラーの理由。差分表の理由に出す | キャッシュ（同期の完了・エージェントの報告と破棄で全置換。差分の計算だけの `device_scan` は前回の分を残す） |
 | `source_hashes` | 送る元（`master` / `opus` / `aac`）ごとの SHA-256 と、取ったときの意味トークン・物理同一性（inode・size・mtime_ns・ctime_ns。dev は持たない。D-62） | キャッシュ（`source_hash` ジョブで取り直せる） |
-| `device_sync_plans` | 確定した計画。`plan` は不変の JSON（操作ごとの `op_id`・種類・ref_id・from・to・トークン・size・sha256）、`state`（`open` / `completed` / `abandoned`）、`job_id`（adb）、`report_digest`（agent の報告の再送の照合）。端末ごとに `open` は 1 つまで（部分 UNIQUE 索引） | DB にしか無い |
+| `device_sync_plans` | 確定した計画。`plan` は不変の JSON（版 `v`・`generation`・`plan_token` と、曲の操作（`op_id`・種類・`track_id`・from・to・トークン・size・sha256）とプレイリストの操作（`op_id`・種類・`playlist_id`・from・to・トークン）の列）、`state`（`open` / `completed` / `abandoned`）、`job_id`（adb）、`report_digest`（agent の報告の再送の照合）。端末ごとに `open` は 1 つまで（部分 UNIQUE 索引） | DB にしか無い |
 
-- `devices.generation` は端末の選曲に効く設定（`selection` / `variant` / 印）を変えるたびに
-  ++ する（名前の変更では進めない）。計画とジョブと報告はそれを持ち、食い違えば実行・
-  受理しない（§7.11「計画」）
-- `device_items` / `device_playlist_state` は端末側の正本を読んだ時点で**全置換**する（adb は回復の後と
-  同期の完了、agent は報告・破棄の受理）。部分的な更新はしない
-- 端末・印・計画・キャッシュの行が消えるのは端末の削除だけ（`ON DELETE CASCADE`。
-  端末上のファイルには触らない）。GC は終端した計画を回収しない
-- 同じマイグレーションで `playlists.evaluated_at`（スマートプレイリストを評価した時刻。
-  差分画面に出す）を足し、`jobs.type` に `source_hash` / `device_scan` / `device_sync` /
-  `device_verify` を足した（`playlist_sync` も同時）。0003 の `inbox_item_tracks` は
-  Inbox の件で配置した曲で、件の「配置 → RG → 系統 → 端末」の段に使う（D-95 の P5-2 追記）
-- **DB を失うと `devices.uuid` も失われ**、端末側の manifest / `.spindle-device` と照合できなくなる。
-  曲のキャッシュは次の回復・報告で戻るが、端末の行は戻らない。既存の保存先を新しい行に引き継ぐ操作は
-  無いので、保存先（端末の `Music/spindle`、Mac の `~/Music/spindle`）を空にしてから登録・pair し直す
+- `devices.generation` は端末の選曲に効く設定（`selection` / `variant` / 印）を変えるたびに 1 進める（名前の
+  変更では進めない）。計画とジョブと報告はそれを持ち、食い違えば実行・受理しない（§7.11「計画」）
+- `device_items` / `device_playlist_state` は端末側の正本を読んだ時点で**全置換**する（adb は回復の後と同期の
+  完了、agent は報告・破棄の受理）。部分的な更新はしない
+- 端末・印・計画・キャッシュの行が消えるのは端末の削除だけ（`ON DELETE CASCADE`。端末上のファイルには
+  触らない）。GC は終端した計画を回収しない
+- 同じマイグレーションで `playlists.evaluated_at`（スマートプレイリストを評価した時刻。差分画面に出す）を
+  足し、`jobs.type` に `source_hash` / `device_scan` / `device_sync` / `device_verify` を足した
+  （`playlist_sync` も同時）。0003 の `inbox_item_tracks` は Inbox の件で配置した曲で、件の「配置 → RG →
+  系統 → 端末」の段に使う（D-95 の P5-2 追記）
+- **DB を失うと `devices.uuid` も失われ**、端末側の manifest / `.spindle-device` と照合できなくなる。曲の
+  キャッシュは次の回復・報告で戻るが、端末の行は戻らない。既存の保存先を新しい行に引き継ぐ操作は無いので、
+  保存先（端末の `Music/spindle`、Mac の `~/Music/spindle`）を空にしてから登録・pair し直す
 
 ---
 
@@ -1435,8 +1434,8 @@ YT ─┘                                               └─ aac ─→ spindl
 **マニフェスト（あるべき状態）**
 
 保存せず、差分を見るたびに DB から計算し直す（D-78 と同じ流儀。`domain::device` の純粋関数、
-`db::devices::compute` が 1 つの読み取りトランザクションで入力を読む）。曲ごとに **desired / hold /
-remove** のどれかに入れる。
+`db::devices::compute` が 1 つの読み取りトランザクションで入力を読む）。曲ごとに **desired / hold / remove**
+のどれかに入れる。
 
 | 項目 | 規則 |
 |---|---|
@@ -1537,29 +1536,31 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   50 件ごとと同期の最後に行う（1 曲ごとに 2 回 `sync` すると初回の全曲転送が数時間延びる。D-95 の P5-3a
   追記）
 - **パス変更（移動・更新 + 移動）は計画の全件を 1 つのバッチ**にし、大域的な 2 段で進める（入れ替え・
-  循環・大小文字だけの改名で上書きしないため。Library の一括リネームと同じ考え方）:
-  メンバー全員を記録して `sealed` → 更新 + 移動の新しい内容を一時ファイルへ転送して照合（`prepared`）→
-  全員の旧パスを空ける（`vacating` → `vacated`）→ 全員の行き先を埋める（`placing` → `done`）。
-  一時ファイルは `.spindle/moving/<batch_id>-<op_id>`（`.new`）。`prepared` 以前は副作用が
-  一時ファイルだけなので破棄・縮小できる（先に `batch_abort` を耐久化）。**`vacating` 以降はキャンセルも
-  `generation` の不一致も効かせず、記録した内容のまま完遂する**（一部だけ止めると入れ替えが壊れる）
+  循環・大小文字だけの改名で上書きしないため。Library の一括リネームと同じ考え方）: メンバー全員を記録して
+  `sealed` → 更新 + 移動の新しい内容を一時ファイルへ転送して照合（`prepared`）→ 全員の旧パスを空ける
+  （`vacating` → `vacated`）→ 全員の行き先を埋める（`placing` → `done`）。一時ファイルは
+  `.spindle/moving/<batch_id>-<op_id>`（`.new`）。`prepared` 以前は副作用が一時ファイルだけなので破棄・
+  縮小できる（先に `batch_abort` を耐久化）。
+  **`vacating` 以降はキャンセルも `generation` の不一致も効かせず、記録した内容のまま完遂する**（一部だけ
+  止めると入れ替えが壊れる）
 - **回復**（各ジョブの最初と破棄。DB は見ない）: manifest とジャーナルを読み、完了の無い `put` は置き先の
-  sha256 が意図と一致すれば反映済みとして取り込む。封印済みで `vacating` 以降のバッチは、
-  メンバーの位置をファイルの在否で判定して前進で完遂し、`prepared` 以前のバッチは破棄する。
-  実ファイルが無い・サイズが違う曲は manifest から外さずトークンを空（`STALE_TOKEN`）にする（外すと
-  管理外になって上書きも削除もできない。次の差分で「更新」に戻る）。最後に manifest を書き直して
-  ジャーナルを空にし、その結果で `device_items` / `device_playlist_state` を全置換する（D-95 の P5-3a
-  追記）
+  sha256 が意図と一致すれば反映済みとして取り込む。封印済みで `vacating` 以降のバッチは、メンバーの位置を
+  ファイルの在否で判定して前進で完遂し（`from` にも `staging` にも無いメンバーは手で消されたとみなし、
+  manifest から外す）、`prepared` 以前のバッチは破棄する。実ファイルが無い・サイズが違う曲は manifest から
+  外さずトークンを空（`STALE_TOKEN`）にする（外すと管理外になって上書きも削除もできない。次の差分で「更新」に
+  戻る）。ただし実ファイルを見失った曲は、`.spindle/moving/` に残ったファイルと sha256 で照合できれば元の
+  パスへ戻す。最後に manifest を書き直してジャーナルを空にし、その結果で `device_items` /
+  `device_playlist_state` を全置換する（D-95 の P5-3a 追記）
 - **同期**（`device_sync`、payload は端末と計画の id、dedup は端末ごと、最大 3 回）:
   端末ごとの排他（`job_mutexes` の `device:<id>` とプロセス内のロック）を取り、計画がまだ
-  open かをロックの後で確かめ直し、回復してから再開の規則で実行する計画の部分集合を決める。順序は **削除
-  → パス変更のバッチ → 更新 → 追加 → プレイリスト**（先に空きを作る。プレイリストは旧パスの削除を全部先に
-  行ってから書く）。始める前に、計画の順に見た追加量の最大値 + プレイリストと manifest の大きさ +
-  64 MiB を空き（`stat -f`）と比べ、足りなければ送らず失敗する。転送は送る元の FD を stdin に繋いで端末の
-  `<to>.spindle-tmp` へ書き、端末の `sha256sum` で照合してから `mv -f` する。`vacating` より前の書き込みの
-  直前にキャンセルと `generation` を確かめる（不一致は失敗で、再試行しない）。完了で
-  manifest からキャッシュを、この同期のエラーから `device_errors` を全置換し、計画を
-  `completed` にする（同期の途中で計画が閉じられていたら、キャッシュも `last_synced_at` も進めずに失敗）
+  open かをロックの後で確かめ直し、回復してから再開の規則で実行する計画の部分集合を決める。順序は
+  **削除 → パス変更のバッチ → 更新 → 追加 → プレイリスト**（先に空きを作る。プレイリストは旧パスの
+  削除を全部先に行ってから書く）。始める前に、計画の順に見た追加量の最大値 + プレイリストと manifest の
+  大きさ + 64 MiB を空き（`stat -f`）と比べ、足りなければ送らず失敗する。転送は送る元の FD を stdin に
+  繋いで端末の `<to>.spindle-tmp` へ書き、端末の `sha256sum` で照合してから `mv -f` する。`vacating` より
+  前の書き込みの直前にキャンセルと `generation` を確かめる（不一致は失敗で、再試行しない）。完了で manifest
+  からキャッシュを、この同期のエラーから `device_errors` を全置換し、計画を `completed` にする（同期の途中で
+  計画が閉じられていたら、キャッシュも `last_synced_at` も進めずに失敗）
 - **Poweramp**: 同期の最後に `am broadcast -a com.maxmpz.audioplayer.ACTION_SCAN_DIRS` を API
   レシーバへ明示（`-n`）で送る。extras は付けない（パスを指定する extra は無く、
   `eraseTags` は全タグ消去の副作用がある）。Poweramp が無ければ何もせず、失敗は警告に留めて同期は成功扱い
@@ -1588,12 +1589,12 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   実パスにする。ミュージック.app が track の場所をそう持つため。root の中のリンクは辿らない）。
   pair のときに**無いか空のときだけ**使い、`.spindle-device` に `device_uuid` と nonce を書いて
   sync のたびに照合する。ミュージック.app 側はエージェントが作った「spindle」フォルダで、衝突しない一時名
-  `spindle-setup-<nonce>` で作ってから改名する（既存の同名フォルダは採らずに止める）。**管理対象は
-  state と `pending_ops` / `pending_batches` にある persistent ID とパスだけ**で、管理外のファイル・
-  同名のプレイリストは上書きも削除もせず「管理外と衝突」で保留する
-- **前提の検査**（副作用の前）: ミュージック.app の「ファイルを［ミュージック］フォルダにコピー」は**オ
-  フ**が前提。外から読めないので、`add` が返した track の location が期待パスと違うことで検出し、その
-  track を消して止める。root かその祖先がミュージックのメディアフォルダ（直下に
+  `spindle-setup-<nonce>` で作ってから改名する（既存の同名フォルダは採らずに止める）。
+  **管理対象は state と `pending_ops` / `pending_batches` にある persistent ID とパスだけ**で、管理外の
+  ファイル・同名のプレイリストは上書きも削除もせず「管理外と衝突」で保留する
+- **前提の検査**（副作用の前）: ミュージック.app の「ファイルを［ミュージック］フォルダにコピー」は
+  **オフ**が前提。外から読めないので、`add` が返した track の location が期待パスと違うことで検出し、
+  その track を消して止める。root かその祖先がミュージックのメディアフォルダ（直下に
   `Automatically Add to Music.localized` か `.Media Preferences.plist` がある）なら pair も
   sync も止める（メディアフォルダの中の曲は削除でファイルまで消え、コピー設定が ON でも複製されず、
   前提が崩れる。D-101）
@@ -1624,8 +1625,8 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
 - **報告**（`POST /api/agent/report`）: `generation`・`plan_id`・再発見で確かめた state 全体・
   失敗した項目を送る。サーバは計画がその端末の open な計画で、`generation` が一致し、各項目が「現在の
   desired」「既存の `device_items` と同じ値」「その計画で許された遷移の結果」のどれかに完全一致すること
-  （トークンが空の曲は `(track_id, パスの鍵)` の一致だけ）、件数（10 万）とパスの形を確かめ、**1 件でも
-  外れれば全体を 400 で拒否**する。通れば 1 つのトランザクションでキャッシュと `device_errors` を
+  （トークンが空の曲は `(track_id, パスの鍵)` の一致だけ）、件数（10 万）とパスの形を確かめ、
+  **1 件でも外れれば全体を 400 で拒否**する。通れば 1 つのトランザクションでキャッシュと `device_errors` を
   全置換し、計画を `completed` にして `report_digest` を記録する（D-99）。`abandon` も同じ検証を通り、
   `pending_ops` と `pending_batches` が空のときだけ受ける
 - **トークンの保管**は macOS の Keychain（サービス `spindle-agent`、アカウント `token`）。ssh
