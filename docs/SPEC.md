@@ -445,9 +445,10 @@ state とミュージック.app。spindle へは報告で届く）で、DB の�
   足し、`jobs.type` に `source_hash` / `device_scan` / `device_sync` / `device_verify` を足した
   （`playlist_sync` も同時）。0003 の `inbox_item_tracks` は Inbox の件で配置した曲で、件の「配置 → RG →
   系統 → 端末」の段に使う（D-95 の P5-2 追記）
-- **DB を失うと `devices.uuid` も失われ**、端末側の manifest / `.spindle-device` と照合できなくなる。曲の
-  キャッシュは次の回復・報告で戻るが、端末の行は戻らない。既存の保存先を新しい行に引き継ぐ操作は無いので、
-  保存先（端末の `Music/spindle`、Mac の `~/Music/spindle`）を空にしてから登録・pair し直す
+- **キャッシュ表だけを失い、`devices` の行と認証情報が残った場合**は、曲とプレイリストのキャッシュは次の回復・
+  報告で戻る。**DB 全体を失うと** `devices` の行・`devices.uuid`・エージェントのトークンも失われ、端末側の
+  manifest / `.spindle-device` と照合できず、回復・報告を受ける行も無い。既存の保存先を新しい行に引き継ぐ
+  操作は無いので、保存先（端末の `Music/spindle`、Mac の `~/Music/spindle`）を空にしてから登録・pair し直す
 
 ---
 
@@ -1693,8 +1694,9 @@ CLAUDE.md の不変条件と禁止事項は Library（ユーザデータ）を�
   claim する（次の周は最後に claim した種別の次から。1 種別が予算を独占しない）。`GET /api/jobs` の `cpu_budget`
 - **端末ジョブ**（`device_scan` / `device_sync` / `device_verify`。D-98）: 端末ごとの排他（`job_mutexes` の
   `device:<id>` とプロセス内のロック）を取ってから、最初に端末側の回復を行う（別の端末なら並べてよい）。
-  ロックが取れなければ 15 秒後、未接続なら attempts を数えずに 300 秒後へ回し（`RequeueAfter`）、
-  `adb track-devices` がその端末を見たら `run_after` を前倒しする。`generation` の不一致と空き不足は
+  ロックが取れなければ 15 秒後、未接続なら `device_sync` / `device_verify` は attempts を数えずに 300 秒後へ
+  回し（`RequeueAfter`）、`adb track-devices` がその端末を見たら `run_after` を前倒しする。`device_scan` は
+  未接続なら待たずに `DoneWith("未接続")` で終わる（次の接続でまた投入される）。`generation` の不一致と空き不足は
   再試行しても変わらないので直ちに `failed`。端末が削除されていれば何もせずに終わる。詳細は §7.11
 - 起動時リカバリ: `running` を `queued` へ戻し、`track_locks` / `derived_path_locks` / `job_mutexes` を
   **全件削除**する
@@ -2050,7 +2052,7 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "rel_path": "J-Pop/…/01 ….flac",
                "devices": [ { "device_id": 2, "state": "synced", "synced_at": 1700000000 },
                             { "device_id": 3, "state": "pending", "op": "add", "reason": null } ] } ],
-                 // devices は端末ごとの状態（P5-2。対象外で端末にも無い端末は省き、端末が 1 台も無ければキーごと
+                 // devices は端末ごとの状態（P5-2。その曲が端末の対象外で端末にも無いときは、その端末の要素を省き、端末が 1 台も無ければキーごと
                  // 省く）。state = synced { synced_at } | pending { op: add | update | move | update_move, reason }
                  // | waiting { reason, has_copy } | error { reason, has_copy } | removing。バッジ列とプロパティの「端末」が使う
   "next_cursor": "…", "total": 61234 }
