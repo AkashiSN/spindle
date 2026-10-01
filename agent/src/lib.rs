@@ -18,6 +18,7 @@ pub mod rediscover;
 pub mod secrets;
 pub mod server;
 pub mod state;
+pub mod sync;
 
 /// エージェントのエラー。`Stop` はユーザへの案内付きで止めるもの（終了コード 1）
 #[derive(Debug, thiserror::Error)]

@@ -222,3 +222,18 @@ impl Env {
         assert_eq!(self.server.report(&r).unwrap(), Reported::Ok);
     }
 }
+
+impl Env {
+    pub fn paths(&self) -> spindle_agent::sync::Paths {
+        spindle_agent::sync::Paths {
+            state_dir: self.state_dir.clone(),
+            root: self.root.path().to_path_buf(),
+        }
+    }
+
+    /// `spindle-agent sync` と同じ段取りを偽のミュージック.app・偽のサーバで走らせる
+    pub fn sync(&mut self) -> spindle_agent::Result<spindle_agent::sync::SyncOutcome> {
+        let paths = self.paths();
+        spindle_agent::sync::sync(&self.music, &self.server, &paths, &self.fp, &mut self.ui)
+    }
+}
