@@ -48,10 +48,15 @@ impl Ui for ScriptUi {
 
 impl Env {
     pub fn new() -> Self {
+        Self::new_at(|base| base.join("Music/spindle"))
+    }
+
+    /// root を tempdir から `root_of` で決める（ディレクトリの用意も `root_of` で行える）
+    pub fn new_at(root_of: impl FnOnce(&std::path::Path) -> PathBuf) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let fp = Failpoints::armed();
         let state_dir = dir.path().join("state");
-        let root = LocalRoot::new(dir.path().join("Music/spindle"));
+        let root = LocalRoot::new(root_of(dir.path()));
         let music = FakeMusic::new(dir.path().join("Media"), fp.clone());
         Self {
             state_dir,

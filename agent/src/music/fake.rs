@@ -39,6 +39,8 @@ struct World {
     copy_on: bool,
     media_dir: PathBuf,
     calls: Vec<String>,
+    /// 本物のように、場所をシンボリックリンクを解いたパスで持つ
+    resolve_links: bool,
 }
 
 #[derive(Clone)]
@@ -59,6 +61,7 @@ impl FakeMusic {
                 copy_on: false,
                 media_dir,
                 calls: Vec::new(),
+                resolve_links: false,
             })),
             fp,
         }
@@ -70,6 +73,21 @@ impl FakeMusic {
 
     pub fn set_copy_on(&self, v: bool) {
         self.w.borrow_mut().copy_on = v;
+    }
+
+    /// 本物のミュージック.app のように、`add` / `set_location` の場所をシンボリックリンクを解いて持つ
+    pub fn set_resolve_symlinks(&self, v: bool) {
+        self.w.borrow_mut().resolve_links = v;
+    }
+
+    /// `resolve_links` なら解いたパス（無ければそのまま）
+    fn stored(w: &World, path: &Path) -> PathBuf {
+        if w.resolve_links {
+            if let Ok(p) = std::fs::canonicalize(path) {
+                return p;
+            }
+        }
+        path.to_path_buf()
     }
 
     fn new_pid(w: &mut World) -> String {
@@ -289,7 +307,7 @@ impl Music for FakeMusic {
                 std::fs::copy(path, &dst)?;
                 dst
             } else {
-                path.to_path_buf()
+                Self::stored(w, path)
             };
             let t = FakeTrack {
                 persistent_id: pid,
@@ -319,12 +337,13 @@ impl Music for FakeMusic {
 
     fn set_location(&self, pid: &str, path: &Path) -> Result<()> {
         self.mutate("set_location", |w| {
+            let location = Self::stored(w, path);
             let t = w
                 .tracks
                 .iter_mut()
                 .find(|t| t.persistent_id == pid)
                 .ok_or_else(|| no_track(pid))?;
-            t.location = Some(path.to_path_buf());
+            t.location = Some(location);
             Ok(())
         })
     }
