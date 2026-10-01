@@ -10,6 +10,7 @@ pub mod plan;
 pub mod quote;
 pub mod recover;
 pub mod remote;
+pub mod report;
 pub mod runtime;
 pub mod store;
 pub mod sync;
