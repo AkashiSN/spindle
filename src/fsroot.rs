@@ -452,6 +452,10 @@ mod stub {
             Err(FsError::Openat2Unsupported)
         }
 
+        pub fn open_file_nonblocking(&self, _rel: &RelPath) -> Result<File, FsError> {
+            Err(FsError::Openat2Unsupported)
+        }
+
         pub fn stat(&self, _rel: &RelPath) -> Result<Stat, FsError> {
             Err(FsError::Openat2Unsupported)
         }
