@@ -13,7 +13,9 @@ use std::collections::HashSet;
 use agent_proto::{OpKind, PlanItem};
 
 use crate::ctx::Ctx;
-use crate::exec::{download, entry_for, Downloaded, CONTENT_MISMATCH, UNMANAGED_COLLISION};
+use crate::exec::{
+    download, entry_for, Downloaded, CONTENT_MISMATCH, PATH_OCCUPIED, UNMANAGED_COLLISION,
+};
 use crate::local::MOVING_DIR;
 use crate::music::Music;
 use crate::pathkey::{canonical_key, random_id};
@@ -26,8 +28,9 @@ use crate::{Error, Result};
 pub const BROKEN_BATCH: &str = "state.json のバッチが壊れています";
 
 /// パス変更をまとめて 1 つのバッチで実行する。返すのは（実行した数, 実行しなかった数）。
-/// 項目のエラー（管理外と衝突・内容の不一致）にしたものはどちらにも数えない。
-/// 行き先を管理外のファイル・track が占めるメンバーは、封印の前にその成分ごと外す（上書きしない）。
+/// 項目のエラー（管理外と衝突・パス衝突・内容の不一致）にしたものはどちらにも数えない。
+/// 行き先を管理外のファイル・track か、動かない管理下の曲が占めるメンバーは、封印の前にその成分ごと外す
+/// （上書きしない）。
 /// 準備で失敗したメンバーがいれば、その曲を含む成分を全員外し、旧バッチを破棄してから残りで記録し直す
 pub fn run<M: Music, S: Server>(
     cx: &mut Ctx<'_, M, S>,
@@ -37,12 +40,24 @@ pub fn run<M: Music, S: Server>(
     let total = ops.len();
     let mut errored = 0;
     let mut skip: HashSet<i64> = HashSet::new();
+    // 今回動く曲。その移動元はバッチの中で空くので、行き先にあっても占有ではない
+    // （行き先が別の操作の移動元なら同じ成分に入るので、外すときは一緒に外れる）
+    let moving: HashSet<i64> = ops.iter().map(|o| o.track_id).collect();
     for o in &ops {
-        if o.to
-            .as_deref()
-            .is_some_and(|to| unmanaged.contains(&canonical_key(to)))
-        {
+        let to_key = o.to.as_deref().map(canonical_key);
+        let occupied = to_key.as_ref().is_some_and(|k| {
+            cx.state
+                .tracks
+                .iter()
+                .any(|(id, e)| !moving.contains(id) && canonical_key(&e.path) == *k)
+        });
+        if to_key.as_ref().is_some_and(|k| unmanaged.contains(k)) {
             cx.error_track(o.track_id, UNMANAGED_COLLISION);
+            errored += 1;
+            skip.insert(o.track_id);
+        } else if occupied {
+            // 動かない管理下の曲が行き先にいる。上書きしない
+            cx.error_track(o.track_id, PATH_OCCUPIED);
             errored += 1;
             skip.insert(o.track_id);
         } else if !runnable_member(cx, o) {
@@ -181,8 +196,9 @@ fn abort<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, b: &PendingBatch) -> Resul
     Ok(())
 }
 
+/// 置き場（`.moving/`）の下か。`..` を含むものは外へ出られるので認めない
 fn in_moving_dir(rel: &str) -> bool {
-    rel.starts_with(&format!("{MOVING_DIR}/"))
+    rel.starts_with(&format!("{MOVING_DIR}/")) && !rel.split('/').any(|c| c == "..")
 }
 
 /// `vacating` 以降のバッチを done まで前進させる（巻き戻さない）。`verify` は回復のとき真:
@@ -258,17 +274,34 @@ fn vacate<M: Music, S: Server>(
 ) -> Result<()> {
     if verify {
         if cx.local.exists(&m.staging)? {
-            return cx
-                .music
-                .set_location(&m.persistent_id, &cx.local.abs(&m.staging)?);
+            return relocate(cx, m, &m.staging, false);
         }
         if !cx.local.exists(&m.from)? {
             return Ok(());
         }
     }
     cx.local.rename(&m.from, &m.staging)?;
+    relocate(cx, m, &m.staging, false)
+}
+
+/// track の location を `rel` へ付け替える（`refresh` が真なら読み直させる）。track が手で消されていれば
+/// 何もしない: ファイルの移動だけ進めて置き場所を揃え、done で書いた行は次の再発見が「手で消された」として
+/// 外し、ファイルを片付ける
+fn relocate<M: Music, S: Server>(
+    cx: &Ctx<'_, M, S>,
+    m: &BatchMember,
+    rel: &str,
+    refresh: bool,
+) -> Result<()> {
+    if cx.music.track(&m.persistent_id)?.is_none() {
+        return Ok(());
+    }
     cx.music
-        .set_location(&m.persistent_id, &cx.local.abs(&m.staging)?)
+        .set_location(&m.persistent_id, &cx.local.abs(rel)?)?;
+    if refresh {
+        cx.music.refresh(&m.persistent_id)?;
+    }
+    Ok(())
 }
 
 /// 行き先を埋める: 移動は `staging → to`、更新 + 移動は `new → to`（と refresh）。置けたら true。
@@ -295,11 +328,7 @@ fn place<M: Music, S: Server>(
     } else {
         cx.local.rename(src, &m.to)?;
     }
-    cx.music
-        .set_location(&m.persistent_id, &cx.local.abs(&m.to)?)?;
-    if m.op == MemberOp::UpdateMove {
-        cx.music.refresh(&m.persistent_id)?;
-    }
+    relocate(cx, m, &m.to, m.op == MemberOp::UpdateMove)?;
     Ok(true)
 }
 

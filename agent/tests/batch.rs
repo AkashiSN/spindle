@@ -112,15 +112,12 @@ fn swap_crash_at_every_point_completes() {
         "batch.placed_one",
         "batch.cleaned",
     ];
-    let want = |env: &Env, a: &str, b: &str, c: &str| {
+    let want = |a: &str, b: &str, c: &str| -> Vec<(String, Vec<u8>, String)> {
         vec![
             ("x.m4a".to_owned(), b"two".to_vec(), b.to_owned()),
             ("y.m4a".to_owned(), b"one".to_vec(), a.to_owned()),
             ("z/w.m4a".to_owned(), b"three-new".to_vec(), c.to_owned()),
         ]
-        .into_iter()
-        .zip(snapshot(env))
-        .all(|(w, g)| w == g)
     };
     for name in names {
         for nth in 1..=12 {
@@ -137,10 +134,10 @@ fn swap_crash_at_every_point_completes() {
                 continue;
             }
             resume(&mut env);
-            assert!(
-                want(&env, &a.persistent_id, &b.persistent_id, &c.persistent_id),
-                "{name}#{nth}: {:?}",
-                snapshot(&env)
+            assert_eq!(
+                snapshot(&env),
+                want(&a.persistent_id, &b.persistent_id, &c.persistent_id),
+                "{name}#{nth}"
             );
             let s = env.state();
             assert!(s.pending_batches.is_empty(), "{name}#{nth}");
@@ -254,4 +251,74 @@ fn corrupted_digest_before_vacating_is_aborted() {
     env.file().save(&s).unwrap();
     env.with_ctx(recover).unwrap();
     assert!(env.state().pending_batches.is_empty());
+}
+
+/// バッチの途中で track が手で消された: 回復は止まらずにファイルを揃え、次の再発見が state から外す
+#[test]
+fn track_deleted_mid_batch_does_not_wedge_recovery() {
+    let mut env = Env::new();
+    env.paired();
+    let a = env.synced_track(1, "x.m4a", b"one");
+    let b = env.synced_track(2, "y.m4a", b"two");
+    env.server.put_track(1, "y.m4a", b"one");
+    env.server.put_track(2, "x.m4a", b"two");
+    env.fp.arm("batch.vacated_one", 1);
+    assert!(matches!(exec_all(&mut env), Err(Error::Crash(_))));
+    env.music.remove_track(&a.persistent_id);
+    env.with_ctx(recover).unwrap();
+    let s = env.state();
+    assert!(s.pending_batches.is_empty());
+    assert_eq!(s.tracks[&2].path, "x.m4a");
+    assert_eq!(
+        snapshot(&env),
+        vec![("x.m4a".into(), b"two".to_vec(), b.persistent_id.clone())]
+    );
+    assert!(env
+        .root
+        .list_files()
+        .unwrap()
+        .iter()
+        .all(|f| !f.starts_with(".moving/")));
+    let m = env.server.manifest().unwrap();
+    env.with_ctx(|cx| spindle_agent::rediscover::rediscover(cx, &m))
+        .unwrap();
+    let s = env.state();
+    assert!(!s.tracks.contains_key(&1));
+    assert_eq!(s.tracks[&2].path, "x.m4a");
+}
+
+/// 動かない管理下の曲が行き先にいる: 上書きせず、その成分ごと外す
+#[test]
+fn managed_track_at_destination_drops_component() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "x.m4a", b"one");
+    env.synced_track(2, "y.m4a", b"two");
+    env.synced_track(3, "p.m4a", b"three");
+    // 1 は 2 の場所へ動くが、2 は動かない（計画の外。たとえば再開で外れた削除）
+    let (_p, mut r, m) = {
+        env.server.put_track(1, "y.m4a", b"one");
+        env.server.put_track(3, "q.m4a", b"three");
+        env.confirm_all()
+    };
+    r.items.retain(|i| i.track_id != 2);
+    let errors = env.with_ctx(|cx| {
+        exec::run(cx, &r, &m).unwrap();
+        cx.errors.clone()
+    });
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].ref_id, 1);
+    assert_eq!(errors[0].reason, exec::PATH_OCCUPIED);
+    assert_eq!(
+        std::fs::read(env.root.abs("y.m4a").unwrap()).unwrap(),
+        b"two"
+    );
+    assert_eq!(
+        std::fs::read(env.root.abs("x.m4a").unwrap()).unwrap(),
+        b"one"
+    );
+    let s = env.state();
+    assert_eq!(s.tracks[&1].path, "x.m4a");
+    assert_eq!(s.tracks[&2].path, "y.m4a");
+    assert_eq!(s.tracks[&3].path, "q.m4a");
 }
