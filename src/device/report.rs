@@ -148,8 +148,9 @@ pub fn validate(r: &ReportRequest, b: &Basis<'_>) -> Result<Accepted, Vec<String
         }
     }
 
+    // 名前の重複は拒否しない: 入れ替えの途中で止まると管理下の 2 つが一時的に同名になり、拒否すると
+    // 報告が永久に通らない。ミュージック.app は同名を許し、同一性は id で見る（D-100）
     let mut pl_ids = HashSet::new();
-    let mut pl_keys = HashSet::new();
     for p in &r.state.playlists {
         if p.name.is_empty() {
             reasons.push(format!("プレイリスト {} の名前が空です", p.playlist_id));
@@ -159,12 +160,6 @@ pub fn validate(r: &ReportRequest, b: &Basis<'_>) -> Result<Accepted, Vec<String
             reasons.push(format!("プレイリスト {} が重複しています", p.playlist_id));
         }
         let key = canonical_key(&p.name);
-        if !pl_keys.insert(key.clone()) {
-            reasons.push(format!(
-                "プレイリスト {} の名前が他と衝突しています",
-                p.playlist_id
-            ));
-        }
         if !ok_pls.contains(&(p.playlist_id, key, p.token.as_str())) {
             reasons.push(format!(
                 "プレイリスト {} が希望・現状・計画のどれとも一致しません",

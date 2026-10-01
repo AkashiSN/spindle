@@ -158,6 +158,50 @@ fn playlists_match_by_name_key_and_token() {
     assert!(validate(&r, &b).is_err());
 }
 
+/// 入れ替えの途中（片方だけ改名した後）で止まると、管理下の 2 つが同じ名前になる。名前の重複は受け入れ、
+/// id の重複は拒否する（D-100）
+#[test]
+fn duplicate_playlist_names_are_accepted_but_ids_are_not() {
+    use spindle::domain::device::PlaylistState;
+    let cur = vec![
+        PlaylistState {
+            playlist_id: 5,
+            dest_path: "Drive".into(),
+            token: "p5".into(),
+        },
+        PlaylistState {
+            playlist_id: 6,
+            dest_path: "drive".into(),
+            token: "p6".into(),
+        },
+    ];
+    let p = plan(vec![]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &[],
+        current_playlists: &cur,
+        plan: &p,
+    };
+    let mut r = req(vec![]);
+    r.state.playlists = vec![
+        ReportPlaylist {
+            playlist_id: 5,
+            name: "Drive".into(),
+            token: "p5".into(),
+        },
+        ReportPlaylist {
+            playlist_id: 6,
+            name: "drive".into(),
+            token: "p6".into(),
+        },
+    ];
+    let ok = validate(&r, &b).unwrap();
+    assert_eq!(ok.playlists.len(), 2);
+    r.state.playlists[1] = r.state.playlists[0].clone();
+    assert!(validate(&r, &b).is_err(), "id の重複");
+}
+
 #[test]
 fn errors_are_checked_and_digest_is_order_independent() {
     let p = plan(vec![]);
