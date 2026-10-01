@@ -4412,7 +4412,7 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
 - **manifest の応答に差分を載せる**: 仕様の manifest は `items` / `playlists` だけだが、確定する計画はサーバの差分（`device_items` 基準）なので、エージェントが表示する差分がそれと食い違わないよう、サーバの差分（操作・保留・プレイリストの操作とエラー）と `plan_token` を同じ応答に載せる
 - **プレイリストの中身**: manifest の各プレイリストに `tracks: [track_id]`（順序どおり）を載せる。中身の同一性はトークンが表す
 - **ファイル取得の「現在のマニフェスト」は表示用スナップショット（2 秒）で引く**: 項目の有無の判定だけに使い、内容の照合は `source_hashes` の行を毎回読み直して行う。Derived の変換が続く間、要求ごとに全曲の差分を計算し直さないため。FD の中身とトークンの組がずれない性質は `source_hashes` の identity 照合が保つ
-- **ファイル取得の失敗**: `If-Match` が無い → 428 `if_match_required`。弱い ETag・`*`・並記は一致とみなさない（412）。送る元の identity が行と違う・無い → 412 `source_changed` にして `source_hashes` の行を消す（次の差分の計算で `source_hash` が再投入される）
+- **ファイル取得の失敗**: `If-Match` が無い → 428 `if_match_required`。弱い ETag・`*`・並記は一致とみなさない（412）。送る元の identity が行と違う・無い・symlink や通常ファイルでないものに差し替わった → 412 `source_changed` にして `source_hashes` の行を消す（次の差分の計算で `source_hash` が再投入される）
 - **破棄の本文**: `POST /api/agent/plans/:id/abandon` の本文は報告と同じ `{generation, plan_id, state, errors}` に `pending_ops` / `pending_batches`（件数）を足したもの。両方 0 で state の検証が通れば、報告と同じくキャッシュを全置換して計画を `abandoned` にする
 - **UI からの強制破棄を agent にも許す**: Mac が失われたときの逃げ道。`POST /api/devices/:id/plans/open/abandon {force:true}` を agent でも受け付ける（端末にもキャッシュにも触らずに閉じる）。`force` 無しの破棄は agent では 400（Mac から行う）
 - **報告の本文の上限**: 10 万件の曲を載せられるよう、report と abandon だけ本文の上限を 64 MiB にする

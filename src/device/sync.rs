@@ -23,7 +23,7 @@ use crate::domain::device::{
     SourceHash, SourceKind,
 };
 use crate::domain::relpath::{canonical_key, RelPath};
-use crate::fsroot::{fstat, FsError, RootDir};
+use crate::fsroot::{fstat, FileKind, FsError, RootDir};
 
 /// 見積もりに足す余裕（manifest・ジャーナルの分を含めた安全側の値）
 pub const MARGIN_BYTES: u64 = 64 * 1024 * 1024;
@@ -95,9 +95,16 @@ impl Sources for RootSources {
         };
         let file = root.open_file(&e.rel_path).map_err(|err| match err {
             FsError::NotFound => SourceError::Missing,
+            // symlink に差し替わった送る元は、もう読んでよい通常ファイルではない。「変わった」として扱い、
+            // ハッシュ行を消して取り直させる（Other にすると 500 のまま行が残り続ける）
+            FsError::Symlink => SourceError::Changed,
             other => SourceError::Other(other.to_string()),
         })?;
         let st = fstat(&file).map_err(|err| SourceError::Other(err.to_string()))?;
+        // ディレクトリ・デバイスなど通常ファイルでないものに差し替わった場合も「変わった」
+        if st.kind != FileKind::File {
+            return Err(SourceError::Changed);
+        }
         let h = &e.hash;
         if (st.inode, st.size, st.mtime_ns, st.ctime_ns)
             != (h.inode, h.size, h.mtime_ns, h.ctime_ns)

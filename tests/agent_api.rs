@@ -374,6 +374,36 @@ async fn resumed_range_after_source_changed_is_412() {
 }
 
 #[tokio::test]
+async fn symlinked_source_is_412_and_hash_row_is_forgotten() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"0123456789").await;
+    let token = app.pair(id).await;
+    let etag = format!("\"{}\"", t.token);
+    // 送る元が symlink に差し替わった（中身は同じコピーを指す）
+    let path = app.roots.as_ref().unwrap().derived.join(&t.derived_rel);
+    let copy = path.with_extension("copy");
+    std::fs::copy(&path, &copy).unwrap();
+    let tmp = path.with_extension("tmp");
+    std::os::unix::fs::symlink(&copy, &tmp).unwrap();
+    std::fs::rename(&tmp, &path).unwrap();
+    let (st, _, _) = get_file(&app, &token, 1, Some(&etag), None).await;
+    assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+    let gone: i64 = app
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM source_hashes WHERE track_id = 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(gone, 0);
+}
+
+#[tokio::test]
 async fn other_device_track_is_404() {
     let app = App::with_roots().await;
     let a = app.create_iphone("A").await;
