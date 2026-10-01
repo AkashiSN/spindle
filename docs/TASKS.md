@@ -2035,4 +2035,5 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
       コピー設定 / TCC）し、CI の macOS ランナーでバイナリを作って Release に置く。
       `Music` の JXA 実装、`Secrets` の Keychain 実装、コピー設定の読み取り
       （D-101。実機 mbp14 で JXA を固定、Release に macOS arm64 バイナリ）
-- [ ] P5-5 文書の改訂（SPEC §1・§7.6・§7.7・§9・§10・§12・§13・§14、DSL.md、CLAUDE.md の禁止事項の注記）
+- [x] P5-5 文書の改訂（SPEC §1・§7.6・§7.7・§9・§10・§12・§13・§14、DSL.md、CLAUDE.md の禁止事項の注記）
+      （SPEC §7.11 を新設）
