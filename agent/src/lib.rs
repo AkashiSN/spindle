@@ -4,7 +4,10 @@
 //! trait に閉じ込め、ローカルの root と state.json は本物のファイルシステムで扱う
 
 pub mod failpoint;
+pub mod local;
 pub mod pathkey;
+pub mod secrets;
+pub mod state;
 
 /// エージェントのエラー。`Stop` はユーザへの案内付きで止めるもの（終了コード 1）
 #[derive(Debug, thiserror::Error)]
