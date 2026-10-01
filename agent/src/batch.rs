@@ -1,0 +1,324 @@
+//! パス変更（移動・更新 + 移動）のバッチ（仕様 ⑥「パス変更は ADB と同じバッチ」、③「例外: 始まった
+//! パス変更のバッチ」）。本体の `device::sync` の `path_batch` / `abort_batch` / `batch_members` と
+//! `device::recover` の `complete_batch` / `vacate` / `place` の移植。ジャーナルの代わりに state.json の
+//! `pending_batches`（1 回の書き込みに全メンバーと相）を、端末の `mv` の代わりにローカルの rename と
+//! `Music::set_location` を使う。
+//!
+//! 相: sealed（記録）→ prepared（更新 + 移動の新しい内容を `new` へ）→ vacating → vacated → placing →
+//! done（バッチを外す）。vacating 以降はキャンセルも差分の変化も見ずに完遂する（巻き戻さない）。
+//! 旧ファイルは `staging` へ動かし、track の `location` も付け替えるので track（再生回数など）は残る
+
+use std::collections::HashSet;
+
+use agent_proto::{OpKind, PlanItem};
+
+use crate::ctx::Ctx;
+use crate::exec::{download, entry_for, Downloaded, CONTENT_MISMATCH, UNMANAGED_COLLISION};
+use crate::local::MOVING_DIR;
+use crate::music::Music;
+use crate::pathkey::{canonical_key, random_id};
+use crate::plan::drop_components;
+use crate::server::Server;
+use crate::state::{member_digest, BatchMember, BatchPhase, MemberOp, PendingBatch};
+use crate::{Error, Result};
+
+/// state.json のバッチの digest が合わない（vacating 以降は前進も破棄もできない）
+pub const BROKEN_BATCH: &str = "state.json のバッチが壊れています";
+
+/// パス変更をまとめて 1 つのバッチで実行する。返すのは（実行した数, 実行しなかった数）。
+/// 項目のエラー（管理外と衝突・内容の不一致）にしたものはどちらにも数えない。
+/// 行き先を管理外のファイル・track が占めるメンバーは、封印の前にその成分ごと外す（上書きしない）。
+/// 準備で失敗したメンバーがいれば、その曲を含む成分を全員外し、旧バッチを破棄してから残りで記録し直す
+pub fn run<M: Music, S: Server>(
+    cx: &mut Ctx<'_, M, S>,
+    ops: Vec<PlanItem>,
+    unmanaged: &HashSet<String>,
+) -> Result<(usize, usize)> {
+    let total = ops.len();
+    let mut errored = 0;
+    let mut skip: HashSet<i64> = HashSet::new();
+    for o in &ops {
+        if o.to
+            .as_deref()
+            .is_some_and(|to| unmanaged.contains(&canonical_key(to)))
+        {
+            cx.error_track(o.track_id, UNMANAGED_COLLISION);
+            errored += 1;
+            skip.insert(o.track_id);
+        } else if !runnable_member(cx, o) {
+            // state と食い違う（行が無い・移動元が違う）か、計画の形が欠けている。数えるだけ
+            skip.insert(o.track_id);
+        }
+    }
+    let mut ops = drop_components(ops, &skip);
+    let mut superseded: Option<PendingBatch> = None;
+    loop {
+        if ops.is_empty() {
+            if let Some(old) = superseded.take() {
+                abort(cx, &old)?;
+            }
+            return Ok((0, total - errored));
+        }
+        let batch_id = random_id()?;
+        if let Some(old) = superseded.take() {
+            abort(cx, &old)?;
+        }
+        let members = batch_members(cx, &batch_id, &ops);
+        let batch = PendingBatch {
+            batch_id: batch_id.clone(),
+            phase: BatchPhase::Sealed,
+            digest: member_digest(&members)?,
+            members,
+        };
+        cx.state.pending_batches.push(batch.clone());
+        cx.save()?;
+
+        let mut failed: HashSet<i64> = HashSet::new();
+        for m in &batch.members {
+            let Some(new) = &m.new else { continue };
+            match download(cx, m.track_id, &m.token, m.size, &m.sha256, new)? {
+                Downloaded::Ok => {}
+                Downloaded::Changed | Downloaded::Gone => {
+                    failed.insert(m.track_id);
+                }
+                Downloaded::Mismatch => {
+                    cx.error_track(m.track_id, CONTENT_MISMATCH);
+                    errored += 1;
+                    failed.insert(m.track_id);
+                }
+            }
+        }
+        if failed.is_empty() {
+            set_phase(cx, &batch_id, BatchPhase::Prepared)?;
+            set_phase(cx, &batch_id, BatchPhase::Vacating)?;
+            // ここから先はキャンセルも差分の変化も見ずに完遂する
+            complete(cx, &batch_id, false)?;
+            let n = batch.members.len();
+            return Ok((n, total - n - errored));
+        }
+        ops = drop_components(ops, &failed);
+        superseded = Some(batch);
+    }
+}
+
+/// state の行があり、その `path` が計画の移動元と同じ鍵で、計画の形が揃っているか
+fn runnable_member<M: Music, S: Server>(cx: &Ctx<'_, M, S>, o: &PlanItem) -> bool {
+    let shaped = matches!(o.op, OpKind::Move | OpKind::UpdateMove)
+        && o.to.is_some()
+        && o.token.is_some()
+        && o.sha256.is_some();
+    let from_key = o.from.as_deref().map(canonical_key);
+    shaped
+        && cx
+            .state
+            .tracks
+            .get(&o.track_id)
+            .is_some_and(|e| Some(canonical_key(&e.path)) == from_key)
+}
+
+fn batch_members<M: Music, S: Server>(
+    cx: &Ctx<'_, M, S>,
+    batch_id: &str,
+    ops: &[PlanItem],
+) -> Vec<BatchMember> {
+    ops.iter()
+        .filter_map(|o| {
+            let op = match o.op {
+                OpKind::Move => MemberOp::Move,
+                OpKind::UpdateMove => MemberOp::UpdateMove,
+                _ => return None,
+            };
+            let e = cx.state.tracks.get(&o.track_id)?;
+            // 名前に batch_id を含める: 縮めた後の新バッチが旧バッチ（破棄済み）と一時ファイルを共有すると、
+            // 旧バッチの片付けが新バッチの new を消してしまう（D-95 の P5-3a 追記）
+            let staging = format!("{MOVING_DIR}/{batch_id}-{}", o.op_id);
+            Some(BatchMember {
+                op_id: o.op_id.clone(),
+                op,
+                track_id: o.track_id,
+                persistent_id: e.persistent_id.clone(),
+                // 実際にあるファイルの名前（鍵は計画の from と同じ）
+                from: e.path.clone(),
+                new: (op == MemberOp::UpdateMove).then(|| format!("{staging}.new")),
+                staging,
+                to: o.to.clone()?,
+                token: o.token.clone()?,
+                size: o.size,
+                sha256: o.sha256.clone()?,
+            })
+        })
+        .collect()
+}
+
+fn set_phase<M: Music, S: Server>(
+    cx: &mut Ctx<'_, M, S>,
+    batch_id: &str,
+    phase: BatchPhase,
+) -> Result<()> {
+    if let Some(b) = cx
+        .state
+        .pending_batches
+        .iter_mut()
+        .find(|b| b.batch_id == batch_id)
+    {
+        b.phase = phase;
+    }
+    cx.save()
+}
+
+/// 破棄: 先にバッチを `pending_batches` から外して保存し、その後で `new` を消す
+/// （state にあるバッチの new を消さない）。消すのは置き場（`.moving/`）の下だけ
+fn abort<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, b: &PendingBatch) -> Result<()> {
+    cx.state
+        .pending_batches
+        .retain(|x| x.batch_id != b.batch_id);
+    cx.save()?;
+    for m in &b.members {
+        if let Some(new) = m.new.as_deref().filter(|n| in_moving_dir(n)) {
+            cx.local.remove(new)?;
+        }
+    }
+    Ok(())
+}
+
+fn in_moving_dir(rel: &str) -> bool {
+    rel.starts_with(&format!("{MOVING_DIR}/"))
+}
+
+/// `vacating` 以降のバッチを done まで前進させる（巻き戻さない）。`verify` は回復のとき真:
+/// メンバーごとにファイルの在る場所から進み具合を判定する。実行中（偽）は記録どおりに動かすだけ。
+/// 全メンバーが空くまで行き先を埋めない
+fn complete<M: Music, S: Server>(
+    cx: &mut Ctx<'_, M, S>,
+    batch_id: &str,
+    verify: bool,
+) -> Result<()> {
+    let Some(b) = cx
+        .state
+        .pending_batches
+        .iter()
+        .find(|b| b.batch_id == batch_id)
+        .cloned()
+    else {
+        return Err(Error::State(format!("バッチが無い（{batch_id}）")));
+    };
+    if b.phase < BatchPhase::Vacated {
+        for m in &b.members {
+            vacate(cx, m, verify)?;
+            cx.fp.hit("batch.vacated_one")?;
+        }
+        set_phase(cx, batch_id, BatchPhase::Vacated)?;
+    }
+    if b.phase < BatchPhase::Placing {
+        set_phase(cx, batch_id, BatchPhase::Placing)?;
+    }
+    let mut placed = Vec::with_capacity(b.members.len());
+    for m in &b.members {
+        placed.push(place(cx, m, verify)?);
+        cx.fp.hit("batch.placed_one")?;
+    }
+    // done の前に置き場（移動は空、更新 + 移動は旧版）と残った new を片付ける
+    for m in &b.members {
+        cx.local.remove(&m.staging)?;
+        if let Some(new) = &m.new {
+            cx.local.remove(new)?;
+        }
+    }
+    for m in &b.members {
+        for p in std::iter::once(&m.staging).chain(m.new.as_ref()) {
+            if cx.local.exists(p)? {
+                // バッチは未完了のまま残し、次回の回復で消し直す
+                return Err(Error::Io(std::io::Error::other(format!(
+                    "置き場のファイルを消せなかった（{p}）"
+                ))));
+            }
+        }
+    }
+    cx.fp.hit("batch.cleaned")?;
+    // done: バッチを外すのと tracks の更新を 1 回の書き込みで
+    for (m, ok) in b.members.iter().zip(placed) {
+        if ok {
+            let entry = entry_for(cx, &m.persistent_id, &m.token, &m.to, m.size, &m.sha256)?;
+            cx.state.tracks.insert(m.track_id, entry);
+        } else {
+            cx.state.tracks.remove(&m.track_id);
+        }
+    }
+    cx.state.pending_batches.retain(|x| x.batch_id != batch_id);
+    cx.save()
+}
+
+/// 旧パスを空ける: 旧ファイルを `staging` へ動かし、track の `location` を付け替える（track は残す）。
+/// 回復では在る場所で判定する: `staging` にあれば空け済み（location の付け替えだけやり直す）、
+/// `from` にあれば未着手、どちらにも無ければ手で消された（`place` で見つからず state から外れる）
+fn vacate<M: Music, S: Server>(
+    cx: &mut Ctx<'_, M, S>,
+    m: &BatchMember,
+    verify: bool,
+) -> Result<()> {
+    if verify {
+        if cx.local.exists(&m.staging)? {
+            return cx
+                .music
+                .set_location(&m.persistent_id, &cx.local.abs(&m.staging)?);
+        }
+        if !cx.local.exists(&m.from)? {
+            return Ok(());
+        }
+    }
+    cx.local.rename(&m.from, &m.staging)?;
+    cx.music
+        .set_location(&m.persistent_id, &cx.local.abs(&m.staging)?)
+}
+
+/// 行き先を埋める: 移動は `staging → to`、更新 + 移動は `new → to`（と refresh）。置けたら true。
+/// 回復では src が在れば置き、無くて `to` が在れば置き済みとみなして location を付け替える。
+/// どちらにも無ければ false（track は消さない。state から外れる）
+fn place<M: Music, S: Server>(
+    cx: &mut Ctx<'_, M, S>,
+    m: &BatchMember,
+    verify: bool,
+) -> Result<bool> {
+    let src = match m.op {
+        MemberOp::Move => m.staging.as_str(),
+        MemberOp::UpdateMove => m.new.as_deref().ok_or_else(|| {
+            Error::State(format!(
+                "pending_batches の更新 + 移動に new が無い（op_id {}）",
+                m.op_id
+            ))
+        })?,
+    };
+    if verify && !cx.local.exists(src)? {
+        if !cx.local.exists(&m.to)? {
+            return Ok(false);
+        }
+    } else {
+        cx.local.rename(src, &m.to)?;
+    }
+    cx.music
+        .set_location(&m.persistent_id, &cx.local.abs(&m.to)?)?;
+    if m.op == MemberOp::UpdateMove {
+        cx.music.refresh(&m.persistent_id)?;
+    }
+    Ok(true)
+}
+
+/// 前回の実行が途中で止まったバッチを先頭から片付ける（`recover::recover` が `pending_ops` より先に呼ぶ。
+/// バッチの途中は track の location が `.moving/` を指すので、仕様 ⑥「回復の順序」）。
+/// sealed / prepared は破棄（縮めない）、vacating 以降は完遂する
+pub fn recover_batches<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<()> {
+    let batches = cx.state.pending_batches.clone();
+    for b in &batches {
+        let intact = member_digest(&b.members)? == b.digest;
+        match b.phase {
+            BatchPhase::Sealed | BatchPhase::Prepared => abort(cx, b)?,
+            _ if !intact => return Err(Error::Stop(BROKEN_BATCH.to_owned())),
+            _ => {
+                // done の保存に含める
+                cx.state.needs_report = true;
+                complete(cx, &b.batch_id, true)?;
+            }
+        }
+    }
+    Ok(())
+}

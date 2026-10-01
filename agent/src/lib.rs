@@ -3,6 +3,7 @@
 //! 外界は `Music`（ミュージック.app）・`Server`（spindle の `/api/agent/*`）・`Secrets`（トークン）の
 //! trait に閉じ込め、ローカルの root と state.json は本物のファイルシステムで扱う
 
+pub mod batch;
 pub mod ctx;
 pub mod exec;
 pub mod failpoint;

@@ -8,6 +8,7 @@ use std::io::{BufWriter, Write};
 
 use agent_proto::{ManifestResponse, OpKind, PlanItem};
 
+use crate::batch;
 use crate::ctx::Ctx;
 use crate::local::{is_reserved, TMP_SUFFIX};
 use crate::music::Music;
@@ -84,21 +85,27 @@ pub fn run<M: Music, S: Server>(
         dropped: r.dropped,
         ..Outcome::default()
     };
-    let order = [
-        OpKind::Delete,
-        OpKind::Move,
-        OpKind::UpdateMove,
-        OpKind::Update,
-        OpKind::Add,
-    ];
-    for kind in order {
+    for kind in [OpKind::Delete, OpKind::Update, OpKind::Add] {
+        if kind == OpKind::Update {
+            // パス変更（移動・更新 + 移動）は削除の後・更新の前に 1 つのバッチで
+            let path_changes: Vec<PlanItem> = r
+                .items
+                .iter()
+                .filter(|i| matches!(i.op, OpKind::Move | OpKind::UpdateMove))
+                .cloned()
+                .collect();
+            if !path_changes.is_empty() {
+                let (executed, dropped) = batch::run(cx, path_changes, &unmanaged)?;
+                out.executed += executed;
+                out.dropped += dropped;
+            }
+        }
         for item in r.items.iter().filter(|i| i.op == kind) {
             let step = match kind {
                 OpKind::Delete => delete(cx, item)?,
-                // パス変更はバッチ（Task 9）で実行する。この時点では数えるだけ
-                OpKind::Move | OpKind::UpdateMove => Step::Dropped,
                 OpKind::Update => update(cx, item)?,
                 OpKind::Add => add(cx, item, &unmanaged)?,
+                OpKind::Move | OpKind::UpdateMove => continue,
             };
             match step {
                 Step::Done => out.executed += 1,
