@@ -3,11 +3,13 @@
 //! 外界は `Music`（ミュージック.app）・`Server`（spindle の `/api/agent/*`）・`Secrets`（トークン）の
 //! trait に閉じ込め、ローカルの root と state.json は本物のファイルシステムで扱う
 
+pub mod ctx;
 pub mod failpoint;
 pub mod local;
 pub mod music;
 pub mod pathkey;
 pub mod secrets;
+pub mod server;
 pub mod state;
 
 /// エージェントのエラー。`Stop` はユーザへの案内付きで止めるもの（終了コード 1）
