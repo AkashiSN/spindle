@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::ConnectInfo;
-use axum::http::{header, Request};
+use axum::http::Request;
 use axum::Router;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -27,7 +27,7 @@ use spindle::domain::device::{
 use spindle::domain::relpath::{canonical_key, RelPath};
 use spindle::fsroot::{self, RootDir};
 
-pub use axum::http::{HeaderMap, HeaderName, Method, StatusCode};
+pub use axum::http::{header, HeaderMap, HeaderName, Method, StatusCode};
 pub use serde_json::{json, Value};
 
 const EXAMPLE: &str = include_str!("../../deploy/config.example.toml");
@@ -437,5 +437,35 @@ impl App {
             })
             .await
             .unwrap();
+    }
+    /// Derived の実ファイルを tmp + rename で `bytes` に差し替える（`source_hashes` の行はそのまま残す）
+    pub async fn replace_derived_bytes(&self, track_id: i64, bytes: &[u8]) {
+        let rel: String = self
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT rel_path FROM derived_files WHERE track_id = ?1 AND variant = 'aac'",
+                    [track_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        let path = self.roots().derived.join(&rel);
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, bytes).unwrap();
+        std::fs::rename(&tmp, &path).unwrap();
+    }
+
+    /// UI の PATCH で端末の選曲を変える
+    pub async fn set_selection(&self, device_id: i64, selection: &str) {
+        let (st, v) = self
+            .call(
+                Method::PATCH,
+                &format!("/api/devices/{device_id}"),
+                Some(json!({ "selection": selection })),
+            )
+            .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
     }
 }

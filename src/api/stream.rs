@@ -287,7 +287,7 @@ async fn open_blocking(
 
 /// 開いたファイルを Range 対応で返す
 async fn serve_file(
-    mut file: File,
+    file: File,
     st: &fsroot::Stat,
     mime: &'static str,
     method: &Method,
@@ -312,21 +312,39 @@ async fn serve_file(
         return Ok(res);
     }
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
-    let (status, start, end) = match parse_range(range, size) {
-        Ok(None) => (StatusCode::OK, 0, size.saturating_sub(1)),
-        Ok(Some((a, b))) => (StatusCode::PARTIAL_CONTENT, a, b),
-        Err(Unsatisfiable) => {
-            let mut res = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
-            res.headers_mut().insert(
-                header::CONTENT_RANGE,
-                HeaderValue::from_str(&format!("bytes */{size}"))
-                    .map_err(|e| ApiError::Internal(e.to_string()))?,
-            );
-            return Ok(res);
-        }
+    match parse_range(range, size) {
+        Ok(range) => ranged_body(file, size, range, etag_value, mime, *method == Method::HEAD),
+        Err(Unsatisfiable) => range_not_satisfiable(size),
+    }
+}
+
+/// 416（`Content-Range: bytes */<size>`）
+pub(crate) fn range_not_satisfiable(size: u64) -> Result<Response, ApiError> {
+    let mut res = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+    res.headers_mut().insert(
+        header::CONTENT_RANGE,
+        HeaderValue::from_str(&format!("bytes */{size}"))
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+    );
+    Ok(res)
+}
+
+/// 開いたファイルの [start, end] を本文にした応答（status / Content-Length / Accept-Ranges / Content-Range /
+/// ETag / Content-Type / Cache-Control を付ける）。Range の解釈と If-* の判定は呼び出し側で済ませる
+pub(crate) fn ranged_body(
+    mut file: File,
+    size: u64,
+    range: Option<(u64, u64)>,
+    etag: HeaderValue,
+    mime: &'static str,
+    head: bool,
+) -> Result<Response, ApiError> {
+    let (status, start, end) = match range {
+        None => (StatusCode::OK, 0, size.saturating_sub(1)),
+        Some((a, b)) => (StatusCode::PARTIAL_CONTENT, a, b),
     };
     let len = if size == 0 { 0 } else { end - start + 1 };
-    let body = if *method == Method::HEAD || len == 0 {
+    let body = if head || len == 0 {
         Body::empty()
     } else {
         file.seek(SeekFrom::Start(start))
@@ -342,7 +360,7 @@ async fn serve_file(
         header::CONTENT_LENGTH,
         HeaderValue::from_str(&len.to_string()).map_err(|e| ApiError::Internal(e.to_string()))?,
     );
-    h.insert(header::ETAG, etag_value);
+    h.insert(header::ETAG, etag);
     h.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-cache"),

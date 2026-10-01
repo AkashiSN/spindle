@@ -6,8 +6,10 @@ use agent_proto::{
     PairResponse, PlaylistError, PlaylistOp,
 };
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use std::collections::HashMap;
+
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -16,13 +18,18 @@ use axum::{Extension, Json, Router};
 use super::auth::{self, verify_bytes};
 use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
+use super::stream::{parse_range, range_not_satisfiable, ranged_body, Unsatisfiable};
 use super::AppState;
 use crate::db::devices::{self as dbdev, PairReserve};
 use crate::db::{now_epoch, DbError};
 use crate::device::credential::{
     self, PAIR_SECRET_BYTES, PAIR_SELECTOR_BYTES, TOKEN_SECRET_BYTES, TOKEN_SELECTOR_BYTES,
 };
-use crate::domain::device::{Hold, OpKind, PlaylistOpKind};
+use crate::device::sync::{RootSources, SourceEntry, SourceError, Sources as _};
+use crate::domain::device::{
+    delivery_token, DesiredItem, Hold, OpKind, PlaylistOpKind, SourceHash,
+};
+use crate::domain::relpath::RelPath;
 
 /// 報告（`/report`・`/plans/{id}/abandon`）の本文の上限
 pub const REPORT_BODY_LIMIT: usize = 64 * 1024 * 1024;
@@ -249,11 +256,159 @@ async fn manifest(
     Ok(Json(body).into_response())
 }
 
-// 以下は仮のハンドラ（Task 6〜8 で置き換える）
-
-async fn file() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
+/// `If-Match` の値から配信トークン（`"<64 桁の小文字 16 進>"` の中身）を取り出す。
+/// 弱い ETag・`*`・並記・それ以外の形は None（412）
+fn strong_token(v: &str) -> Option<&str> {
+    let inner = v.trim().strip_prefix('"')?.strip_suffix('"')?;
+    (inner.len() == 64
+        && inner
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(inner)
 }
+
+fn precondition_failed() -> Response {
+    error_response(StatusCode::PRECONDITION_FAILED, "precondition_failed")
+}
+
+/// 端末の desired から曲を引き、記録したハッシュと合わせた結果
+enum Resolved {
+    Found(Box<DesiredItem>, SourceHash),
+    /// 端末の desired に無い（別端末の曲もここ）
+    NotDesired,
+    /// ハッシュの行が無い・送る元の意味が変わった
+    NoHash,
+}
+
+async fn resolve_source(
+    state: &AppState,
+    device_id: i64,
+    track_id: i64,
+    fresh: bool,
+) -> Result<Resolved, ApiError> {
+    let snap = if fresh {
+        state.db.device_snapshot().await?
+    } else {
+        state.db.device_snapshot_for_display().await?
+    };
+    let Some(item) = snap
+        .get(device_id)
+        .and_then(|d| d.computed.desired.iter().find(|x| x.track_id == track_id))
+        .cloned()
+    else {
+        return Ok(Resolved::NotDesired);
+    };
+    let kind = item.source.kind;
+    let hash = state
+        .db
+        .read(move |c| dbdev::source_hash(c, track_id, kind))
+        .await?;
+    Ok(match hash {
+        Some(h) if h.semantic == item.source.semantic => Resolved::Found(Box::new(item), h),
+        _ => Resolved::NoHash,
+    })
+}
+
+/// `GET /api/agent/files/{track_id}`: 配信トークンを強い `If-Match` で確かめてから、送る元を Range 対応で返す。
+/// 送る元は開いた FD の identity を `source_hashes` と照合する（違えば行を忘れて 412 `source_changed`）
+async fn file(
+    State(state): State<AppState>,
+    Extension(dev): Extension<AgentDevice>,
+    Path(track_id): Path<i64>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (Some(library), Some(derived)) = (state.library.clone(), state.derived.clone()) else {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "files_unavailable",
+        ));
+    };
+    let mut if_match = headers.get_all(header::IF_MATCH).iter();
+    let Some(first) = if_match.next() else {
+        return Ok(error_response(
+            StatusCode::PRECONDITION_REQUIRED,
+            "if_match_required",
+        ));
+    };
+    if if_match.next().is_some() {
+        return Ok(precondition_failed());
+    }
+    let Some(wanted) = first
+        .to_str()
+        .ok()
+        .and_then(strong_token)
+        .map(str::to_owned)
+    else {
+        return Ok(precondition_failed());
+    };
+
+    // 表示用のスナップショット（最大 2 秒古い）で引き、外れたときだけ最新で引き直す。
+    // 最新の manifest の直後なら表示用で当たる。古さで 404 / 412 を返さないために引き直す
+    let mut resolved = resolve_source(&state, dev.id, track_id, false).await?;
+    if !matches!(resolved, Resolved::Found(..)) {
+        resolved = resolve_source(&state, dev.id, track_id, true).await?;
+    }
+    let (item, hash) = match resolved {
+        Resolved::Found(item, hash) => (item, hash),
+        Resolved::NotDesired => return Ok(error_response(StatusCode::NOT_FOUND, "not_found")),
+        Resolved::NoHash => return Ok(precondition_failed()),
+    };
+    let kind = item.source.kind;
+    let token = delivery_token(&hash.semantic, &hash.sha256);
+    if !credential::ct_eq(wanted.as_bytes(), token.as_bytes()) {
+        return Ok(precondition_failed());
+    }
+
+    let rel_path = RelPath::parse(&item.source.root_rel_path)
+        .map_err(|e| ApiError::Internal(format!("送る元のパスが不正（{e}）")))?;
+    let size = hash.size;
+    let entry = SourceEntry {
+        kind,
+        rel_path,
+        hash,
+    };
+    let opened = tokio::task::spawn_blocking(move || {
+        RootSources::new(library, derived, HashMap::from([(track_id, entry)])).open(track_id)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("open タスクが異常終了: {e}")))?;
+    let file = match opened {
+        Ok(f) => f,
+        Err(e @ (SourceError::Changed | SourceError::Missing)) => {
+            tracing::warn!(device_id = dev.id, track_id, error = %e, "送る元が配信トークンの時点から変わった");
+            state
+                .db
+                .write(move |c| dbdev::forget_source_hash(c, track_id, kind))
+                .await?;
+            return Ok(error_response(
+                StatusCode::PRECONDITION_FAILED,
+                "source_changed",
+            ));
+        }
+        Err(SourceError::Other(e)) => return Err(ApiError::Internal(e)),
+    };
+
+    let range = match parse_range(
+        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        size,
+    ) {
+        Ok(r) => r,
+        Err(Unsatisfiable) => return range_not_satisfiable(size),
+    };
+    let etag = HeaderValue::from_str(&format!("\"{token}\""))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    ranged_body(
+        file,
+        size,
+        range,
+        etag,
+        "application/octet-stream",
+        method == Method::HEAD,
+    )
+}
+
+// 以下は仮のハンドラ（Task 7〜8 で置き換える）
 
 async fn confirm() -> StatusCode {
     StatusCode::NOT_IMPLEMENTED

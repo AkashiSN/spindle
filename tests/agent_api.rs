@@ -281,3 +281,104 @@ async fn manifest_lists_desired_items_playlists_and_diff() {
     assert!(!m.pending_reevaluation);
     assert!(!m.plan_token.is_empty());
 }
+
+async fn get_file(
+    app: &App,
+    token: &str,
+    track_id: i64,
+    if_match: Option<&str>,
+    range: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut h = vec![];
+    if let Some(m) = if_match {
+        h.push((header::IF_MATCH, m.to_owned()));
+    }
+    if let Some(r) = range {
+        h.push((header::RANGE, r.to_owned()));
+    }
+    app.agent_raw(
+        Some(token),
+        Method::GET,
+        &format!("/api/agent/files/{track_id}"),
+        &h,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn file_needs_if_match_and_serves_ranges() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"0123456789").await;
+    let token = app.pair(id).await;
+    let etag = format!("\"{}\"", t.token);
+    let (st, _, _) = get_file(&app, &token, 1, None, None).await;
+    assert_eq!(st, StatusCode::PRECONDITION_REQUIRED);
+    let (st, h, body) = get_file(&app, &token, 1, Some(&etag), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(h[header::ETAG], etag.as_str());
+    assert_eq!(body, b"0123456789");
+    let (st, h, body) = get_file(&app, &token, 1, Some(&etag), Some("bytes=4-")).await;
+    assert_eq!(st, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(h[header::CONTENT_RANGE], "bytes 4-9/10");
+    assert_eq!(body, b"456789");
+    let (st, _, _) = get_file(&app, &token, 1, Some(&etag), Some("bytes=99-")).await;
+    assert_eq!(st, StatusCode::RANGE_NOT_SATISFIABLE);
+}
+
+#[tokio::test]
+async fn weak_star_or_wrong_etag_is_412() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    for m in [
+        format!("W/\"{}\"", t.token),
+        "*".to_owned(),
+        format!("\"{}\"", "0".repeat(64)),
+        format!("\"{}\", \"{}\"", t.token, t.token),
+    ] {
+        let (st, _, _) = get_file(&app, &token, 1, Some(&m), None).await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{m}");
+    }
+}
+
+#[tokio::test]
+async fn resumed_range_after_source_changed_is_412() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"0123456789").await;
+    let token = app.pair(id).await;
+    let etag = format!("\"{}\"", t.token);
+    // 送る元が差し替わった（同じ長さで中身が違う → identity が変わる）
+    app.replace_derived_bytes(1, b"abcdefghij").await;
+    let (st, _, body) = get_file(&app, &token, 1, Some(&etag), Some("bytes=4-")).await;
+    assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+    assert!(body.is_empty() || !body.starts_with(b"efgh"));
+    // 行は消え、次の差分でハッシュが取り直される
+    let gone: i64 = app
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM source_hashes WHERE track_id = 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(gone, 0);
+}
+
+#[tokio::test]
+async fn other_device_track_is_404() {
+    let app = App::with_roots().await;
+    let a = app.create_iphone("A").await;
+    let b = app.create_iphone("B").await;
+    app.set_selection(a, "playlists").await; // A は空の選曲
+    app.set_selection(b, "all").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token_a = app.pair(a).await;
+    let (st, _, _) = get_file(&app, &token_a, 1, Some(&format!("\"{}\"", t.token)), None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
