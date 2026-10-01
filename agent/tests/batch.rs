@@ -472,3 +472,71 @@ fn file_appearing_at_destination_after_check_is_not_overwritten() {
         vec![("y.m4a".into(), b"one".to_vec(), a.persistent_id.clone())]
     );
 }
+
+/// 置き先へ rename した直後（location を付け替える前）に落ちた: 1 回目の set_location は空けるとき、
+/// 2 回目は置いた後
+fn crash_right_after_place_rename(env: &mut Env) -> String {
+    env.paired();
+    let a = env.synced_track(1, "x.m4a", b"one");
+    env.server.put_track(1, "y.m4a", b"one");
+    env.fp.arm("music.set_location", 2);
+    assert!(matches!(exec_all(env), Err(Error::Crash(_))));
+    assert_eq!(
+        std::fs::read(env.root.abs("y.m4a").unwrap()).unwrap(),
+        b"one"
+    );
+    a.persistent_id
+}
+
+fn location_of(env: &Env, pid: &str) -> String {
+    env.music_paths()
+        .into_iter()
+        .find(|(_, p)| p == pid)
+        .map(|(rel, _)| rel)
+        .unwrap()
+}
+
+/// 置いた後で落ち、行き先が別の中身に差し替えられた: 回復は置き済みとみなさず止め、ファイルも
+/// track の場所も変えない。バッチは残り、利用者が退けた後の回復で片付く
+#[test]
+fn recovery_does_not_adopt_replaced_destination() {
+    let mut env = Env::new();
+    let pid = crash_right_after_place_rename(&mut env);
+    let staging = location_of(&env, &pid);
+    assert!(staging.starts_with(".moving/"), "{staging}");
+    std::fs::write(env.root.abs("y.m4a").unwrap(), b"mine").unwrap();
+    let res = env.with_ctx(recover);
+    assert!(
+        matches!(&res, Err(Error::Stop(msg)) if msg.contains(spindle_agent::batch::FOREIGN_AT_DESTINATION)),
+        "{res:?}"
+    );
+    assert_eq!(
+        std::fs::read(env.root.abs("y.m4a").unwrap()).unwrap(),
+        b"mine"
+    );
+    assert_eq!(location_of(&env, &pid), staging);
+    assert!(!env.music.calls().contains(&"refresh".to_owned()));
+    assert_eq!(env.state().pending_batches.len(), 1);
+    // 同じ大きさの別の中身でも採用しない
+    std::fs::write(env.root.abs("y.m4a").unwrap(), b"two").unwrap();
+    assert!(matches!(env.with_ctx(recover), Err(Error::Stop(_))));
+    assert_eq!(location_of(&env, &pid), staging);
+    // 退ければ回復は片付く（中身は失われたので state から外れ、次の sync が取り直す）
+    std::fs::remove_file(env.root.abs("y.m4a").unwrap()).unwrap();
+    env.with_ctx(recover).unwrap();
+    let s = env.state();
+    assert!(s.pending_batches.is_empty());
+    assert!(!s.tracks.contains_key(&1));
+}
+
+/// 置いた後で落ち、行き先がそのまま: 回復は中身を確かめて完遂する
+#[test]
+fn recovery_adopts_destination_with_expected_content() {
+    let mut env = Env::new();
+    let pid = crash_right_after_place_rename(&mut env);
+    env.with_ctx(recover).unwrap();
+    let s = env.state();
+    assert!(s.pending_batches.is_empty());
+    assert_eq!(s.tracks[&1].path, "y.m4a");
+    assert_eq!(location_of(&env, &pid), "y.m4a");
+}
