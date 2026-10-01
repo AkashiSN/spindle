@@ -2356,7 +2356,7 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
-│ spindle  ライブラリ アルバム CD YouTube Inbox❷ │ ⏮ ▶ ⏭ ■ 0:38 ━━━━━━━━ 3:37 曲名 — アーティスト │ RG track ☐原本 🔊━ │ ☰ │
+│ spindle  ライブラリ アルバム CD YouTube Inbox❷ 端末❸ │ ⏮ ▶ ⏭ ■ 0:38 ━━━━━━━━ 3:37 曲名 — アーティスト │ RG track ☐原本 🔊━ │ ☰ │
 ├──────────────┬───────────────────────────────────────────────────────────────────────┤
 │ [検索 _____] │ プロパティ │ 一括編集 │ 操作                         選択 1,204 件 ▴ │ ← 右パネル
 │ ▾ All Music  │ Metadata                 │ Location                                   │
@@ -2874,6 +2874,8 @@ adb_transfer_timeout_secs = 3600
 - `[devices].adb_transfer_timeout_secs`: 1 曲の転送と、端末上の全ファイルの一覧（数千件の `stat` で長く
   かかる）の上限（秒。既定 3600、1 以上）
 
+`[bin].cdparanoia` の `cd-paranoia` は libcdio 版（Debian パッケージ cd-paranoia）で、xiph の `cdparanoia` ではない。
+
 iPhone（Mac の `spindle-agent`）はサーバ側の設定を持たない（エージェントは pair のときに spindle の URL を
 受け取る。§7.11、`agent/README.md`）。
 
@@ -2923,6 +2925,7 @@ iPhone（Mac の `spindle-agent`）はサーバ側の設定を持たない（エ
 services:
   spindle:
     image: ghcr.io/akashisn/spindle:latest
+    init: true                   # PID 1 を tini にする（取り消しで kill した孫プロセスをゾンビにしない）
     devices:
       - /dev/sr0:/dev/sr0        # CD ドライブ。ioctl / SG_IO とも sr0 に直接通る（/dev/sg* は不要）
     group_add:
@@ -3180,9 +3183,12 @@ agent/                   ワークスペースのクレート `spindle-agent`（
 ├── src/recover.rs  rediscover.rs  plan.rs  exec.rs  batch.rs  playlist.rs
 │                        回復・再発見・再開の照合・実行・パス変更のバッチ・プレイリストの入れ替え
 ├── src/local.rs  pathkey.rs   ローカルの root（`~/Music/spindle`）と canonical_key
+├── src/failpoint.rs     試験の中断点（state の保存・ミュージック.app の操作・配置の前後で落とす。本番は何もしない）
 ├── src/music.rs + music/ ミュージック.app の trait と JXA 実装（`osascript -l JavaScript`）・偽実装
+├── src/music/music.js   バイナリに埋め込む JXA（要求は argv の JSON、応答は 1 行の JSON）
 ├── src/server.rs + server/   `/api/agent/*` のクライアント（reqwest blocking）・偽実装
 ├── src/secrets.rs + secrets/ トークンの保管（Keychain / ファイル）
+├── tests/               エンジンの試験（偽のミュージック.app・サーバ、中断点からの回復。実機の JXA・Keychain は #[ignore]）
 └── README.md            導入・前提・困ったとき
 ```
 
