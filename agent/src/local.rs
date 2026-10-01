@@ -8,8 +8,8 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
-    fstat, fsync, mkdirat, openat, renameat, statat, unlinkat, AtFlags, Dir, FileType, Mode,
-    OFlags, Stat, CWD,
+    fstat, fsync, mkdirat, openat, renameat, renameat_with, statat, unlinkat, AtFlags, Dir,
+    FileType, Mode, OFlags, RenameFlags, Stat, CWD,
 };
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,42 @@ fn not_found(rel: &str) -> Error {
         std::io::ErrorKind::NotFound,
         format!("ファイルが無い（{rel}）"),
     ))
+}
+
+fn already_exists(rel: &str) -> Error {
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("行き先に既にある（{rel}）"),
+    ))
+}
+
+/// 行き先を上書きしない rename（Linux は renameat2(RENAME_NOREPLACE)、macOS は
+/// renameatx_np(RENAME_EXCL)）。行き先にあれば `EXIST`
+fn rename_noreplace(
+    fd_from: &OwnedFd,
+    n_from: &str,
+    fd_to: &OwnedFd,
+    n_to: &str,
+) -> std::result::Result<(), Errno> {
+    match renameat_with(fd_from, n_from, fd_to, n_to, RenameFlags::NOREPLACE) {
+        Err(e) if unsupported(e) => {
+            // ファイルシステム（古いカーネル・一部のネットワーク FS など）が上書きしない rename に
+            // 対応しない。従来どおり確かめてから rename する（間に現れたものは上書きしうるが、
+            // 対応しない FS で sync を止めるよりはよい。4b までと同じ振る舞い）
+            match statat(fd_to, n_to, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => return Err(Errno::EXIST),
+                Err(Errno::NOENT) => {}
+                Err(e) => return Err(e),
+            }
+            renameat(fd_from, n_from, fd_to, n_to)
+        }
+        r => r,
+    }
+}
+
+/// 上書きしない rename に対応しないときの errno（Linux では NOTSUP と OPNOTSUPP は同じ値）
+fn unsupported(e: Errno) -> bool {
+    e == Errno::INVAL || e == Errno::NOSYS || e == Errno::NOTSUP || e == Errno::OPNOTSUPP
 }
 
 /// 開けなかった理由がシンボリックリンク・ディレクトリでないものか
@@ -369,6 +405,18 @@ impl LocalRoot {
 
     /// 書き終えた tmp を fsync → rename → 親の fsync
     pub fn place(&self, tmp: &str, rel: &str) -> Result<()> {
+        self.sync_tmp(tmp)?;
+        self.rename(tmp, rel)
+    }
+
+    /// `place` と同じだが行き先を上書きしない。行き先に何かあれば `Error::Io(AlreadyExists)`
+    pub fn place_new(&self, tmp: &str, rel: &str) -> Result<()> {
+        self.sync_tmp(tmp)?;
+        self.rename_new(tmp, rel)
+    }
+
+    /// 置く前の tmp（通常ファイル）を fsync する
+    fn sync_tmp(&self, tmp: &str) -> Result<()> {
         let (dir, name) = self.parent_existing(tmp)?;
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
         let fd = match openat(&dir, name.as_str(), flags, Mode::empty()) {
@@ -380,21 +428,36 @@ impl LocalRoot {
         if file_stat(&fstat(&fd).map_err(io)?).is_none() {
             return Err(blocked(tmp));
         }
-        fsync(&fd).map_err(io)?;
-        self.rename(tmp, rel)
+        fsync(&fd).map_err(io)
     }
 
     /// rename（行き先の親を作る）と両方の親の fsync。元・行き先のどの要素がシンボリックリンクでもエラー
     /// （リンクそのものも動かさない・上書きしない）
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
+        self.rename_impl(from, to, false)
+    }
+
+    /// `rename` と同じだが行き先を上書きしない。行き先に何か（シンボリックリンクも）あれば
+    /// `Error::Io(AlreadyExists)`。確かめてから rename する間に現れたものも上書きしない
+    pub fn rename_new(&self, from: &str, to: &str) -> Result<()> {
+        self.rename_impl(from, to, true)
+    }
+
+    fn rename_impl(&self, from: &str, to: &str, noreplace: bool) -> Result<()> {
         let (fd_from, n_from) = self.parent_existing(from)?;
         if !refuse_symlink(&fd_from, &n_from, from)? {
             return Err(not_found(from));
         }
         let (fd_to, n_to) = self.parent_for_write(to)?;
         refuse_symlink(&fd_to, &n_to, to)?;
-        renameat(&fd_from, n_from.as_str(), &fd_to, n_to.as_str()).map_err(|e| match e {
+        let r = if noreplace {
+            rename_noreplace(&fd_from, &n_from, &fd_to, &n_to)
+        } else {
+            renameat(&fd_from, n_from.as_str(), &fd_to, n_to.as_str())
+        };
+        r.map_err(|e| match e {
             Errno::NOENT => not_found(from),
+            Errno::EXIST => already_exists(to),
             e => io(e),
         })?;
         fsync(&fd_from).map_err(io)?;

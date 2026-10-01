@@ -506,3 +506,32 @@ fn delete_recovery_does_not_remove_final_symlink() {
     assert!(env.with_ctx(recover).is_err());
     assert_link_untouched(&link, &target);
 }
+
+/// 置き先の確認の後・rename の前に管理外のファイルが現れた: rename が上書きを断り、確認と同じく
+/// 「管理外と衝突」にする
+#[test]
+fn add_does_not_overwrite_file_created_after_check() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    let abs = env.root.abs("A/a.m4a").unwrap();
+    env.fp.on("exec.add.checked", 1, move || {
+        std::fs::write(&abs, b"mine").unwrap();
+    });
+    let (_p, r, m) = env.confirm_all();
+    let errors = env.with_ctx(|cx| {
+        exec::run(cx, &r, &m).unwrap();
+        cx.errors.clone()
+    });
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].reason, UNMANAGED_COLLISION);
+    assert_eq!(
+        std::fs::read(env.root.abs("A/a.m4a").unwrap()).unwrap(),
+        b"mine"
+    );
+    assert!(!env.root.exists("A/a.m4a.spindle-tmp").unwrap());
+    let s = env.state();
+    assert!(s.pending_ops.is_empty());
+    assert!(!s.tracks.contains_key(&1));
+    assert!(env.music.tracks().is_empty());
+}

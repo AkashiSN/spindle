@@ -263,3 +263,74 @@ fn media_folder_mark_symlink_counts_by_existence() {
     std::os::unix::fs::symlink("/nonexistent", r.path().join(MEDIA_FOLDER_MARKS[1])).unwrap();
     assert!(r.looks_like_media_folder().unwrap());
 }
+
+fn is_already_exists(e: &Error) -> bool {
+    matches!(e, Error::Io(io) if io.kind() == std::io::ErrorKind::AlreadyExists)
+}
+
+#[test]
+fn noreplace_refuses_existing_destination() {
+    let (_d, r) = root();
+    // place_new: 行き先にあれば AlreadyExists で、tmp も行き先も変わらない
+    std::fs::create_dir_all(r.path().join("A")).unwrap();
+    std::fs::write(r.path().join("A/b.m4a"), b"mine").unwrap();
+    let (tmp, mut f) = r.create_tmp("A/b.m4a").unwrap();
+    f.write_all(b"new").unwrap();
+    drop(f);
+    let e = r.place_new(&tmp, "A/b.m4a").unwrap_err();
+    assert!(is_already_exists(&e), "{e:?}");
+    assert_eq!(std::fs::read(r.path().join("A/b.m4a")).unwrap(), b"mine");
+    assert_eq!(std::fs::read(r.abs(&tmp).unwrap()).unwrap(), b"new");
+    // rename_new も同じ
+    let e = r.rename_new(&tmp, "A/b.m4a").unwrap_err();
+    assert!(is_already_exists(&e), "{e:?}");
+    assert_eq!(std::fs::read(r.path().join("A/b.m4a")).unwrap(), b"mine");
+    assert_eq!(std::fs::read(r.abs(&tmp).unwrap()).unwrap(), b"new");
+}
+
+#[test]
+fn noreplace_moves_when_free() {
+    let (_d, r) = root();
+    let (tmp, mut f) = r.create_tmp("A/b.m4a").unwrap();
+    f.write_all(b"abc").unwrap();
+    drop(f);
+    r.place_new(&tmp, "A/b.m4a").unwrap();
+    assert!(!r.exists(&tmp).unwrap());
+    assert_eq!(std::fs::read(r.path().join("A/b.m4a")).unwrap(), b"abc");
+    // rename_new は行き先の親を作る
+    r.rename_new("A/b.m4a", "C/D/e.m4a").unwrap();
+    assert!(!r.exists("A/b.m4a").unwrap());
+    assert_eq!(std::fs::read(r.path().join("C/D/e.m4a")).unwrap(), b"abc");
+    // 元が無ければ NotFound
+    let e = r.rename_new("A/b.m4a", "z.m4a").unwrap_err();
+    assert!(
+        matches!(&e, Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn noreplace_refuses_final_symlink_and_symlinked_dir() {
+    let (_d, r, outside) = root_with_symlinked_dir();
+    std::os::unix::fs::symlink(outside.join("x.m4a"), r.path().join("l.m4a")).unwrap();
+    let (tmp, mut f) = r.create_tmp("t.m4a").unwrap();
+    f.write_all(b"new").unwrap();
+    drop(f);
+    // 行き先の最後の要素がシンボリックリンク
+    assert!(matches!(r.place_new(&tmp, "l.m4a"), Err(Error::Stop(_))));
+    assert!(matches!(r.rename_new(&tmp, "l.m4a"), Err(Error::Stop(_))));
+    // 行き先の途中がシンボリックリンクのディレクトリ
+    assert!(matches!(r.place_new(&tmp, "A/y.m4a"), Err(Error::Stop(_))));
+    assert!(matches!(r.rename_new(&tmp, "A/y.m4a"), Err(Error::Stop(_))));
+    // 元がシンボリックリンク
+    assert!(matches!(
+        r.rename_new("l.m4a", "m.m4a"),
+        Err(Error::Stop(_))
+    ));
+    assert!(r.exists(&tmp).unwrap());
+    assert!(!r.exists("m.m4a").unwrap());
+    assert!(!outside.join("y.m4a").exists());
+    let l = r.path().join("l.m4a");
+    assert!(l.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read(outside.join("x.m4a")).unwrap(), b"outside");
+}

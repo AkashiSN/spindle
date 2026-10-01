@@ -436,3 +436,35 @@ fn vacate_does_not_move_final_symlink() {
     assert!(env.root.list_files().unwrap().is_empty());
     assert!(!env.root.path().join("z.m4a").exists());
 }
+
+/// 行き先の確認の後・rename の前に管理外のファイルが現れた: rename が上書きを断り、確認と同じく止める
+#[test]
+fn file_appearing_at_destination_after_check_is_not_overwritten() {
+    let mut env = Env::new();
+    env.paired();
+    let a = env.synced_track(1, "x.m4a", b"one");
+    env.server.put_track(1, "y.m4a", b"one");
+    let abs = env.root.abs("y.m4a").unwrap();
+    env.fp.on("batch.place.checked", 1, move || {
+        std::fs::write(&abs, b"mine").unwrap();
+    });
+    let res = exec_all(&mut env);
+    assert!(
+        matches!(&res, Err(Error::Stop(msg)) if msg.contains(spindle_agent::batch::FOREIGN_AT_DESTINATION)),
+        "{res:?}"
+    );
+    assert_eq!(
+        std::fs::read(env.root.abs("y.m4a").unwrap()).unwrap(),
+        b"mine"
+    );
+    assert_eq!(env.state().pending_batches.len(), 1);
+    std::fs::remove_file(env.root.abs("y.m4a").unwrap()).unwrap();
+    env.with_ctx(recover).unwrap();
+    let s = env.state();
+    assert!(s.pending_batches.is_empty());
+    assert_eq!(s.tracks[&1].path, "y.m4a");
+    assert_eq!(
+        snapshot(&env),
+        vec![("y.m4a".into(), b"one".to_vec(), a.persistent_id.clone())]
+    );
+}

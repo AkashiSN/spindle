@@ -349,13 +349,24 @@ fn place<M: Music, S: Server>(
         // 全員を空けた後なので、行き先にあってよい自分のファイルは無い。空ける前の見直しの後に
         // 管理外のファイルが現れていれば上書きしない。vacating 以降は巻き戻せないので、バッチを残して
         // 止め、利用者が退けた後の回復で続きを置く（置き済みのメンバーは回復が在る場所で判定する）
-        if cx.local.exists(&m.to)? {
-            return Err(Error::Stop(format!(
+        let foreign = || {
+            Error::Stop(format!(
                 "{FOREIGN_AT_DESTINATION}（{}）。そのファイルを別の場所へ移してから sync し直してください",
                 m.to
-            )));
+            ))
+        };
+        if cx.local.exists(&m.to)? {
+            return Err(foreign());
         }
-        cx.local.rename(src, &m.to)?;
+        cx.fp.hit("batch.place.checked")?;
+        // 確かめてから動かすまでの間に現れたものも上書きしない（rename が断る）
+        match cx.local.rename_new(src, &m.to) {
+            Ok(()) => {}
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(foreign())
+            }
+            Err(e) => return Err(e),
+        }
     }
     relocate(cx, m, &m.to, m.op == MemberOp::UpdateMove)?;
     Ok(true)

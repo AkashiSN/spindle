@@ -397,14 +397,23 @@ fn add<M: Music, S: Server>(
     cx.fp.hit("exec.add.downloaded")?;
     // 管理外の鍵は実行の始めに取ったもの。取得の間に置き先へファイルが現れていれば上書きしない
     // （ここで置き先にあってよい自分のファイルは無い。削除・移動元は先に空き、管理下の曲は上で外した）
-    if cx.local.exists(to)? {
+    let mut collided = cx.local.exists(to)?;
+    if !collided {
+        cx.fp.hit("exec.add.checked")?;
+        // 確かめてから置くまでの間に現れたものも上書きしない（rename が断る）
+        match cx.local.place_new(&tmp, to) {
+            Ok(()) => {}
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => collided = true,
+            Err(e) => return Err(e),
+        }
+    }
+    if collided {
         cx.local.remove(&tmp)?;
         remove_pending(cx, &item.op_id);
         cx.error_track(item.track_id, UNMANAGED_COLLISION);
         cx.save()?;
         return Ok(Step::Errored);
     }
-    cx.local.place(&tmp, to)?;
     cx.fp.hit("exec.add.placed")?;
     let max_db = cx.music.max_database_id()?;
     if let Some(o) = cx
