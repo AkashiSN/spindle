@@ -1201,6 +1201,17 @@ pub async fn abandon(
     if body.is_some_and(|Json(b)| b.force) {
         return force_abandon(&state, id).await;
     }
+    // iPhone の計画は Mac の spindle-agent が持つ端末の状態と対で閉じる。サーバ側の通常の破棄は無い
+    let transport = state
+        .db
+        .read(move |c| dbdev::get(c, id))
+        .await?
+        .map(|d| d.transport);
+    if transport == Some(Transport::Agent) {
+        return Ok(bad_request(
+            "iPhone の計画は Mac の spindle-agent から破棄する（Mac が使えなければ強制破棄）",
+        ));
+    }
     let (d, rt) = match adb_device(&state, id).await? {
         Ok(x) => x,
         Err(r) => return Ok(r),
@@ -1281,16 +1292,14 @@ enum ForceResult {
 /// キャッシュの置き換えもしない。次につないだときの回復が、端末のジャーナルから封印済みバッチを
 /// 計画の状態と無関係に完遂または取り消すので安全。ADB 同期が無効でも使える（adb を使わない）。
 /// 実行中の同期があるか、端末のロックを別の処理が持っていれば 409 `busy`。計画は行の id で閉じる
-/// （JSON が壊れていても閉じられる）
+/// （JSON が壊れていても閉じられる）。iPhone（agent）の計画も、Mac が使えないときはこれで閉じる
 async fn force_abandon(state: &AppState, id: i64) -> Result<Response, ApiError> {
     let Some(d) = state.db.read(move |c| dbdev::get(c, id)).await? else {
         return Ok(not_found());
     };
-    if d.transport != Transport::Adb {
-        return Ok(bad_request("Android（adb）の端末ではない"));
-    }
-    // 同期のジョブ・通常の破棄と直列化する（ADB 同期が無効ならそれらは動かない）
-    let _guard = match state.adb.as_ref() {
+    // 同期のジョブ・通常の破棄と直列化する（ADB 同期が無効ならそれらは動かない）。
+    // agent の端末は adb のロックを取らない（同期は Mac 側。実行中の同期の検査だけで足りる）
+    let _guard = match state.adb.as_ref().filter(|_| d.transport == Transport::Adb) {
         Some(rt) => match rt.device_lock(id).try_lock_owned() {
             Ok(g) => Some(g),
             Err(_) => return Ok(busy()),

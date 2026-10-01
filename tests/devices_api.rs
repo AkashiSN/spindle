@@ -678,3 +678,27 @@ async fn pair_code_rules() {
         .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn agent_plan_force_abandon_only() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at) VALUES (?1, 't', '{}', 'open', 0)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let uri = format!("/api/devices/{id}/plans/open/abandon");
+    let (st, _) = app.call(Method::POST, &uri, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, v) = app
+        .call(Method::POST, &uri, Some(json!({"force": true})))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["plan_open"], false);
+}

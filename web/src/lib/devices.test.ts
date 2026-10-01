@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import type { Device, DeviceCounts, DeviceDiff, DiffItem } from '../api/types'
-import { connectionNote, nextPollDelay, UNREGISTERED_POLL_MS, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
+import { agentPlanText, pairCommand, connectionNote, nextPollDelay, UNREGISTERED_POLL_MS, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
 
 const counts = (p: Partial<DeviceCounts> = {}): DeviceCounts => ({
   add: 0, update: 0, move: 0, delete: 0, waiting: 0, error: 0, synced: 0, ...p,
@@ -174,5 +174,19 @@ describe('nextPollDelay', () => {
   })
   it('中止（フォームを閉じた）ならやめる', () => {
     expect(nextPollDelay(new DOMException('aborted', 'AbortError'))).toBeNull()
+  })
+})
+
+describe('agentPlanText', () => {
+  it('iPhone の途中の計画だけ案内する', () => {
+    expect(agentPlanText({ ...device(1, {}), transport: 'agent', plan_open: true })).toMatch('Mac で同期が途中')
+    expect(agentPlanText({ ...device(1, {}), transport: 'agent', plan_open: false })).toBeNull()
+    expect(agentPlanText({ ...device(1, {}), transport: 'adb', plan_open: true })).toBeNull()
+  })
+})
+
+describe('pairCommand', () => {
+  it('この画面の origin とコードを並べる', () => {
+    expect(pairCommand('https://musics.example', 'abc.def')).toBe('spindle-agent pair https://musics.example abc.def')
   })
 })

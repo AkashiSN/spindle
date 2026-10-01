@@ -1,5 +1,5 @@
 // 端末タブ（P5-2、D-95）。左に端末の一覧、右に選んだ端末の 差分 / 選曲 / 設定。
-// iPhone の pair は P5-4 で入るので、ここでは案内だけ出す
+// iPhone は pair コードの発行と、途中の計画の案内・強制破棄だけを持つ（同期は Mac の spindle-agent）
 
 import { useEffect, useRef, useState } from 'react'
 import type {
@@ -7,6 +7,7 @@ import type {
   DeviceDiff,
   DeviceSelection,
   DeviceVariant,
+  PairCode,
   SelectionEstimate,
   UnregisteredAdb,
 } from '../api/types'
@@ -16,6 +17,8 @@ import type { Playlists } from '../hooks/usePlaylists'
 import { ApiError } from '../api/client'
 import {
   ADB_DISABLED_MESSAGE,
+  AGENT_FORCE_ABANDON_CONFIRM,
+  agentPlanText,
   nextPollDelay,
   connectionNote,
   describeEvaluation,
@@ -23,6 +26,7 @@ import {
   FORCE_ABANDON_CONFIRM,
   offerForceAbandon,
   OP_LABELS,
+  pairCommand,
   queuedSyncText,
   sortDiffItems,
   syncButton,
@@ -470,10 +474,30 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
           </div>
         </>
       ) : (
-        <p className="small">
-          Mac で <code>spindle-agent sync</code> を実行すると反映される。最終報告:{' '}
-          {device.last_synced_at != null ? formatDateTime(device.last_synced_at) : 'まだ報告なし'}
-        </p>
+        <>
+          {agentPlanText(device) != null && (
+            <div className="devices-warn small">
+              <p>{agentPlanText(device)}</p>
+              <div className="op-row">
+                <button
+                  type="button"
+                  className="danger"
+                  disabled={devices.busy}
+                  title="Mac につながずに計画を閉じます"
+                  onClick={() => {
+                    if (window.confirm(AGENT_FORCE_ABANDON_CONFIRM)) void devices.forceAbandon(device.id)
+                  }}
+                >
+                  強制破棄
+                </button>
+              </div>
+            </div>
+          )}
+          <p className="small">
+            Mac で <code>spindle-agent sync</code> を実行すると反映される。最終報告:{' '}
+            {device.last_synced_at != null ? formatDateTime(device.last_synced_at) : 'まだ報告なし'}
+          </p>
+        </>
       )}
       {rows.length === 0 ? (
         <p className="muted">差分はない（反映済み {formatCount(diff.counts.synced)} 曲）</p>
@@ -696,9 +720,7 @@ function SettingsTab({ device, devices }: { device: Device; devices: Devices }) 
               <tr>
                 <th>pair</th>
                 <td>
-                  <button type="button" disabled title="P5-4 で対応">
-                    pair をやり直す
-                  </button>
+                  <PairCodeCell device={device} devices={devices} />
                 </td>
               </tr>
             )}
@@ -747,6 +769,53 @@ function SettingsTab({ device, devices }: { device: Device; devices: Devices }) 
         </button>
         <span className="muted small">端末上のファイルは消しません</span>
       </div>
+    </div>
+  )
+}
+
+/** iPhone のエージェントの pair コードを発行して出す。コードはこの画面の state にだけ持ち、再読み込みで消える */
+function PairCodeCell({ device, devices }: { device: Device; devices: Devices }) {
+  const [issued, setIssued] = useState<PairCode | null>(null)
+  const [copied, setCopied] = useState(false)
+  const command = issued != null ? pairCommand(window.location.origin, issued.code) : null
+  const issue = async () => {
+    if (!window.confirm('発行すると今の Mac のトークンは使えなくなります。よろしいですか？')) return
+    setCopied(false)
+    const p = await devices.pairCode(device.id)
+    if (p != null) setIssued(p)
+  }
+  const copy = async () => {
+    if (command == null) return
+    try {
+      await navigator.clipboard.writeText(command)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }
+  return (
+    <div className="devices-pair">
+      <button
+        type="button"
+        disabled={devices.busy || device.open_plan}
+        title={device.open_plan ? '同期が途中なので発行できない' : undefined}
+        onClick={() => void issue()}
+      >
+        pair コードを発行
+      </button>
+      {issued != null && command != null && (
+        <div className="small">
+          <p>
+            コード <code>{issued.code}</code>（期限 {formatDateTime(issued.expires_at)}、1 回限り）。Mac で次を実行する
+          </p>
+          <p>
+            <code>{command}</code>{' '}
+            <button type="button" onClick={() => void copy()}>
+              {copied ? 'コピーした' : 'コピー'}
+            </button>
+          </p>
+        </div>
+      )}
     </div>
   )
 }
