@@ -35,6 +35,8 @@ struct World {
     fetch_log: Vec<(i64, u64)>,
     /// report をこの回数だけ通信エラーにする（受け付けない）
     report_fail: u32,
+    /// pair が呼ばれた回数（ワンタイムコードを使った回数）
+    pair_calls: u32,
 }
 
 #[derive(Clone, Default)]
@@ -124,6 +126,11 @@ impl FakeServer {
 
     pub fn fetch_log(&self) -> Vec<(i64, u64)> {
         self.0.borrow().fetch_log.clone()
+    }
+
+    /// pair（ワンタイムコードの消費）が呼ばれた回数
+    pub fn pair_calls(&self) -> u32 {
+        self.0.borrow().pair_calls
     }
 
     pub fn reports(&self) -> Vec<ReportRequest> {
@@ -258,7 +265,8 @@ impl FakeServer {
 
 impl Server for FakeServer {
     fn pair(&self, _code: &str) -> Result<PairResponse> {
-        let w = self.0.borrow();
+        let mut w = self.0.borrow_mut();
+        w.pair_calls += 1;
         Ok(PairResponse {
             device_uuid: w.device_uuid.clone(),
             device_name: "iPhone".to_owned(),

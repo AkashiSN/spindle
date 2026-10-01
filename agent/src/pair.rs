@@ -49,6 +49,8 @@ pub fn pair<M: Music, S: Server>(
     check_root_not_media_folder(cx)?;
     // 初回の Automation 許可は、ワンタイムコードを使う前に求める
     cx.music.probe()?;
+    // トークンを保存できることも、コードを使う前に確かめる（ssh 越しの Keychain など）
+    secrets.check_writable()?;
     let resp = cx.server.pair(code)?;
     if cx.state.setup.is_some() {
         if let Some(s) = &cx.state.server {

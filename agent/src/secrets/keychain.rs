@@ -11,9 +11,14 @@ use crate::{Error, Result};
 
 pub const SERVICE: &str = "spindle-agent";
 pub const ACCOUNT: &str = "token";
+/// 書けるかを確かめる試しの項目のアカウント名（トークンの項目には触らない）
+pub const PROBE_ACCOUNT: &str = "probe";
 
 /// `errSecItemNotFound`
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+/// `errSecInteractionNotAllowed`（ssh 越しなど、Keychain の解錠を求められないとき）
+const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
+const INTERACTION_HINT: &str = "ssh 越しでは Keychain を使えません。Mac の「ターミナル」で実行するか、SPINDLE_AGENT_SECRETS=file を付けて実行してください（以後の sync も同じ指定で）";
 
 pub struct KeychainSecrets {
     service: String,
@@ -40,6 +45,9 @@ impl KeychainSecrets {
 
 /// エラーにはコードとシステムのメッセージだけを入れる（トークンは入れない）
 fn keychain_error(op: &str, e: &SecError) -> Error {
+    if e.code() == ERR_SEC_INTERACTION_NOT_ALLOWED {
+        return Error::Stop(format!("Keychain の{op}に失敗: {e}。{INTERACTION_HINT}"));
+    }
     Error::Stop(format!("Keychain の{op}に失敗: {e}"))
 }
 
@@ -57,5 +65,16 @@ impl Secrets for KeychainSecrets {
     fn set(&self, token: &str) -> Result<()> {
         set_generic_password(&self.service, &self.account, token.as_bytes())
             .map_err(|e| keychain_error("保存", &e))
+    }
+
+    /// 同じサービスの試しの項目（アカウント `probe`）を書いて消す
+    fn check_writable(&self) -> Result<()> {
+        set_generic_password(&self.service, PROBE_ACCOUNT, b"probe")
+            .map_err(|e| keychain_error("保存の確認", &e))?;
+        match delete_generic_password(&self.service, PROBE_ACCOUNT) {
+            Ok(()) => Ok(()),
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+            Err(e) => Err(keychain_error("保存の確認の後始末", &e)),
+        }
     }
 }

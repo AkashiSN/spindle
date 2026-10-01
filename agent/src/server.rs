@@ -142,7 +142,7 @@ impl HttpServer {
         b: reqwest::blocking::RequestBuilder,
     ) -> Result<reqwest::blocking::RequestBuilder> {
         let t = self.token.as_deref().ok_or_else(|| {
-            Error::Stop("トークンがありません。spindle-agent pair を実行してください".to_owned())
+            Error::Stop("トークンがありません。spindle-agent pair を実行してください（pair のときと同じ SPINDLE_AGENT_SECRETS の指定で実行しているかも確かめてください）".to_owned())
         })?;
         Ok(b.header(AUTHORIZATION, format!("Bearer {t}")))
     }

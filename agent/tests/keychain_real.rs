@@ -26,3 +26,14 @@ fn set_get_overwrite_delete() {
     // 無いものを消しても失敗しない
     s.delete().unwrap();
 }
+
+#[test]
+#[ignore]
+fn check_writable_leaves_no_items() {
+    let service = format!("spindle-agent-test-{}", random_hex());
+    let s = KeychainSecrets::new(&service, "token");
+    s.check_writable().unwrap();
+    // トークンの項目も試しの項目も残らない
+    assert_eq!(s.get().unwrap(), None);
+    assert_eq!(KeychainSecrets::new(&service, "probe").get().unwrap(), None);
+}

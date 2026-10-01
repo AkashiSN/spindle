@@ -152,3 +152,47 @@ fn media_folder_parent_stops_before_using_the_code() {
     assert!(env.state().server.is_none());
     assert!(!env.root.path().exists());
 }
+
+/// トークンを保存できない置き場（ssh 越しの Keychain の代わり）
+struct Unwritable;
+
+impl Secrets for Unwritable {
+    fn get(&self) -> spindle_agent::Result<Option<String>> {
+        Ok(None)
+    }
+    fn set(&self, _token: &str) -> spindle_agent::Result<()> {
+        Err(Error::Stop("保存できない".into()))
+    }
+    fn check_writable(&self) -> spindle_agent::Result<()> {
+        Err(Error::Stop("保存できない".into()))
+    }
+}
+
+#[test]
+fn unwritable_secrets_stop_before_using_the_code() {
+    let mut env = Env::new();
+    let res = env.with_ctx(|cx| pair(cx, &Unwritable, "https://music.example", false, "code"));
+    assert!(matches!(res, Err(Error::Stop(m)) if m.contains("保存できない")));
+    assert_eq!(env.server.pair_calls(), 0);
+    assert!(env.state().server.is_none());
+    // 置き場を直せば同じコードで pair できる
+    do_pair(&mut env).unwrap();
+    assert_eq!(env.server.pair_calls(), 1);
+}
+
+#[test]
+fn file_secrets_check_writable() {
+    let d = tempfile::tempdir().unwrap();
+    let s = FileSecrets::new(&d.path().join("state"));
+    s.check_writable().unwrap();
+    // 試しのファイルを残さず、トークンも作らない
+    assert_eq!(
+        std::fs::read_dir(d.path().join("state")).unwrap().count(),
+        0
+    );
+    assert_eq!(s.get().unwrap(), None);
+    // 書けないディレクトリ（ファイルが塞いでいる）なら止める
+    std::fs::write(d.path().join("blocked"), b"x").unwrap();
+    let s = FileSecrets::new(&d.path().join("blocked"));
+    assert!(matches!(s.check_writable(), Err(Error::Stop(_))));
+}
