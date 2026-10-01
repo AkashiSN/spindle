@@ -4511,7 +4511,7 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
 
 **実装中に決めたこと**:
 
-- **osascript の起動**: trait のメソッド 1 回につき `osascript -l JavaScript -` を 1 回起動する。スクリプトは標準入力、リクエストの JSON は argv で渡す（スクリプトの文字列にパスや名前を埋め込まない。注入を防ぐ）。120 秒で kill してエラーにし、そのとき stdout / stderr の読み取りスレッドは join せず切り離す（孫プロセスがパイプを握り続けても固まらないため）
+- **osascript の起動**: trait のメソッド 1 回につき `osascript -l JavaScript -` を 1 回起動する。スクリプトは標準入力、リクエストの JSON は argv で渡す（スクリプトの文字列にパスや名前を埋め込まない。注入を防ぐ）。120 秒で kill してエラーにし、そのとき stdout / stderr の読み取りスレッドは join せず切り離す（孫プロセスがパイプを握り続けても固まらないため）。stderr は共有のバッファへ読み続け、タイムアウトと終了待ちの失敗でもそこまでに読めた分（末尾 4 KiB まで）をエラーに載せる。終了コード 0 でも stderr が空でなければエージェントの stderr へ「osascript の stderr: …」として出す（外部レビューで直した）
 - **上書きしない rename の実装**: `place_new` / `rename_new` が rustix の `renameat_with(NOREPLACE)` を呼ぶ。EINVAL / ENOSYS / ENOTSUP / EOPNOTSUPP（その FS や OS が対応しない）のときは `Error::Stop` で止め、root をローカルのボリューム（APFS）へ移すよう案内する（「行き先を stat してから rename」に落とすと、その間に現れたものを上書きしうる。外部レビューで直した）。既存の事前検査は残し、`AlreadyExists` は事前検査と同じに扱う（追加は「管理外と衝突」でその曲だけ保留、バッチは `FOREIGN_AT_DESTINATION` で止める）。試験用のフェイルポイント `exec.add.checked` / `batch.place.checked` で検査と rename の間に行き先を作って確かめる
 - **Keychain のエラー**: システムのメッセージだけを載せ、トークンは載せない。`SPINDLE_AGENT_SECRETS=file` で macOS でもファイルの保管に固定できる。**ssh 越しではログイン Keychain が使えない**（`User interaction is not allowed`）ため、Mac の Terminal.app で実行するか、`SPINDLE_AGENT_SECRETS=file` を付ける。README の「困ったとき」に書く
 - **CI**: `agent-macos` ジョブ（macos-latest）で clippy・test（`fake` 機能）・release ビルドを行い、tar.gz と `.sha256` を成果物にする。`publish` ジョブはこれに依存し、`v*` タグでは tar.gz を Release に添付する。**edge のイメージの publish も macOS ジョブの成功に依存するようになった**
@@ -4531,6 +4531,8 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
 1. **上書きしない rename に対応しない FS では止める**（上の「上書きしない rename の実装」）
 2. **バッチの回復は行き先の中身を確かめてから採用する**: 置いた直後に落ち、落ちている間に行き先が差し替えられると、回復は src が無く `to` が在るだけで置き済みとみなし、実ファイルの stat と計画の sha256 を組にして記録していた（以後 stat が変わらない限り再検査されない）。回復で `to` を採用する前に、大きさと sha256 が計画と一致するかを見る。違えば `FOREIGN_AT_DESTINATION` で止め、ファイルも track の場所も触らず、バッチを残す（利用者が退けた後の回復で片付く）
 3. **root の dirfd は `/` から 1 要素ずつシンボリックリンクを辿らずに開く**: 最終レビューの 1 で root は起動時に解いた実パスになったが、操作のたびにそのパスをリンクを辿って開き、無ければ `create_dir_all` していたため、起動後に root か祖先をリンクへ差し替えると root の dirfd が外を指した（その下を 1 要素ずつ辿る守りが効かない）。`/` から `O_DIRECTORY | O_NOFOLLOW` で 1 要素ずつ開き、無い末尾は親の dirfd からの `mkdirat` で作る。途中にリンク（かフォルダでないもの）があれば、読みも書きも `Error::Stop` で止める。試験は root を解いた tempdir で作る（macOS の tempdir は `/var` → `/private/var` のリンクの下）
+4. **トークンの保存の確認を広げる**（最終レビューの 3 を参照）
+5. **osascript の stderr を捨てない**（上の「osascript の起動」を参照）
 
 **理由**: 実機の spike で、Apple Event の呼び方（文字列の代入、一括取得、`whose` の制限）とコピー設定の読めなさが確定した。呼び出しを 1 回ずつの `osascript` にすると、状態を持つ常駐プロセスが要らず、失敗と打ち切りの扱いが単純になる。ミュージック.app は mv を追い、メディアフォルダの外の曲は track だけが消えるため、`~/Music/spindle` を管理下の root にしてメディアフォルダと分ければ、4b の設計（track の削除は通常経路、ファイルは自分で消す）がそのまま成り立つ。上書きしない rename は OS に保証させるのが、検査と rename の間の競合に対する唯一確実な閉じ方。
 

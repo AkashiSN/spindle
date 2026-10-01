@@ -220,6 +220,39 @@ fn timeout_kills_and_errors() {
     assert!(t0.elapsed() < Duration::from_secs(5));
 }
 
+/// タイムアウトでも、それまでに読めた stderr をエラーに含める（TCC・Apple Event の診断が要る）
+#[test]
+fn timeout_includes_stderr_written_so_far() {
+    let _serial = serial();
+    let d = tempfile::tempdir().unwrap();
+    let prog = fake_program(
+        d.path(),
+        "#!/bin/sh\ncat >/dev/null\necho 'boom: not authorized' >&2\nexec sleep 30\n",
+    );
+    let r = ProcessOsascript::with_program(prog);
+    let t0 = std::time::Instant::now();
+    let res = r.run("x", "{}", Duration::from_millis(1000));
+    assert!(
+        matches!(&res, Err(Error::Music(m)) if m.contains("応答しない") && m.contains("boom: not authorized")),
+        "{res:?}"
+    );
+    assert!(t0.elapsed() < Duration::from_secs(5));
+}
+
+/// 終了コード 0 で stderr があっても成功として標準出力を返す（stderr はエージェントの stderr へ出す）
+#[test]
+fn success_with_stderr_returns_ok() {
+    let _serial = serial();
+    let d = tempfile::tempdir().unwrap();
+    let prog = fake_program(
+        d.path(),
+        "#!/bin/sh\ncat >/dev/null\necho 'warning: something' >&2\necho '{\"ok\":1}'\n",
+    );
+    let r = ProcessOsascript::with_program(prog);
+    let out = r.run("x", "{}", Duration::from_secs(5)).unwrap();
+    assert_eq!(out, "{\"ok\":1}");
+}
+
 #[test]
 fn nonzero_exit_includes_stderr() {
     let _serial = serial();

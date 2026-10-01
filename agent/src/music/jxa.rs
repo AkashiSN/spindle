@@ -5,6 +5,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -76,6 +77,62 @@ fn join_output(h: JoinHandle<Vec<u8>>) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+/// エラーに載せる stderr の上限（末尾を残す）
+const STDERR_LIMIT: usize = 4096;
+
+/// stderr を別スレッドで共有のバッファへ読み続ける。タイムアウトでスレッドを手放しても、
+/// そこまでに読めた分をいつでも取り出せる
+fn drain_shared<R: Read + Send + 'static>(
+    pipe: Option<R>,
+) -> (Arc<Mutex<Vec<u8>>>, JoinHandle<()>) {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::clone(&buf);
+    let h = thread::spawn(move || {
+        let Some(mut p) = pipe else { return };
+        let mut chunk = [0u8; 4096];
+        loop {
+            match p.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => match shared.lock() {
+                    Ok(mut b) => b.extend_from_slice(&chunk[..n]),
+                    Err(e) => e.into_inner().extend_from_slice(&chunk[..n]),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                // 読み取りの失敗はそこまでの内容で扱う（終了コードの検査で失敗は拾う）
+                Err(_) => break,
+            }
+        }
+    });
+    (buf, h)
+}
+
+/// 読めた分の stderr（前後の空白を除く。長ければ末尾 `STDERR_LIMIT` バイトほど）
+fn snapshot(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+    let bytes = match buf.lock() {
+        Ok(b) => b.clone(),
+        Err(e) => e.into_inner().clone(),
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let text = text.trim();
+    if text.len() <= STDERR_LIMIT {
+        return text.to_owned();
+    }
+    let mut start = text.len() - STDERR_LIMIT;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &text[start..])
+}
+
+/// エラーの文に stderr を添える（空なら何も足さない）
+fn with_stderr(msg: String, stderr: &str) -> String {
+    if stderr.is_empty() {
+        msg
+    } else {
+        format!("{msg}: {stderr}")
+    }
+}
+
 /// タイムアウトまで終了を待つ。超えたら None
 fn wait_until(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>> {
     let start = Instant::now();
@@ -114,36 +171,44 @@ impl Osascript for ProcessOsascript {
             }
         });
         let out = drain(child.stdout.take());
-        let err = drain(child.stderr.take());
+        let (err, err_reader) = drain_shared(child.stderr.take());
 
+        // 孫プロセスがパイプを握ったままだと読み取りが終わらないので、タイムアウトと待ちの失敗では
+        // スレッドは待たずに手放し、そこまでに読めた stderr を載せる
         let status = match wait_until(&mut child, timeout) {
             Ok(Some(status)) => status,
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                // 孫プロセスがパイプを握ったままだと読み取りが終わらないので、スレッドは待たずに手放す
-                return Err(Error::Music(format!(
-                    "ミュージック.app が応答しない（{} 秒）",
-                    timeout.as_secs()
+                return Err(Error::Music(with_stderr(
+                    format!("ミュージック.app が応答しない（{} 秒）", timeout.as_secs()),
+                    &snapshot(&err),
                 )));
             }
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(e);
+                return Err(Error::Music(with_stderr(
+                    format!("osascript の終了を待てない: {e}"),
+                    &snapshot(&err),
+                )));
             }
         };
         let _ = writer.join();
         let stdout = join_output(out);
-        let stderr = join_output(err);
+        let _ = err_reader.join();
+        let stderr = snapshot(&err);
         if !status.success() {
             let code = status
                 .code()
                 .map_or_else(|| status.to_string(), |c| c.to_string());
             return Err(Error::Music(format!(
-                "osascript が失敗（{code}）: {}",
-                stderr.trim_end()
+                "osascript が失敗（{code}）: {stderr}"
             )));
+        }
+        if !stderr.is_empty() {
+            // 成功でも stderr は捨てない（エージェントにはログの仕組みが無いので自分の stderr へ）
+            eprintln!("osascript の stderr: {stderr}");
         }
         Ok(stdout.trim_end_matches(['\n', '\r']).to_owned())
     }
@@ -367,5 +432,21 @@ impl<R: Osascript> Music for JxaMusic<R> {
 
     fn delete_playlist(&self, persistent_id: &str) -> Result<()> {
         self.call_unit(json!({"op": "delete_playlist", "pid": persistent_id}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_trims_and_keeps_the_tail() {
+        let buf = Arc::new(Mutex::new(b"  short\n".to_vec()));
+        assert_eq!(snapshot(&buf), "short");
+        let long = format!("{}末尾", "あ".repeat(STDERR_LIMIT));
+        let buf = Arc::new(Mutex::new(long.into_bytes()));
+        let s = snapshot(&buf);
+        assert!(s.starts_with('…') && s.ends_with("末尾"), "{s}");
+        assert!(s.len() <= STDERR_LIMIT + '…'.len_utf8());
     }
 }
