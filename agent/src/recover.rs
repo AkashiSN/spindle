@@ -2,6 +2,7 @@
 //! 片付けと pending からの除去は 1 回の保存で行う。ここで扱うのは曲の追加・更新・削除
 //! （パス変更のバッチは Task 9、プレイリストは Task 10 が足す）
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -143,23 +144,7 @@ fn recover_add_adding<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, op: &PendingO
                 remove_pending(cx, &op.op_id);
                 return cx.save();
             }
-            if let Some(o) = cx
-                .state
-                .pending_ops
-                .iter_mut()
-                .find(|o| o.op_id == op.op_id)
-            {
-                o.candidates = Some(
-                    cands
-                        .iter()
-                        .map(|(t, sha)| Candidate {
-                            persistent_id: t.persistent_id.clone(),
-                            sha256: sha.clone(),
-                        })
-                        .collect(),
-                );
-            }
-            cx.save()?;
+            record_candidates(cx, &op.op_id, &cands)?;
             Err(Error::Stop(candidates_message(op, to, &cands)))
         }
         _ => Err(Error::Stop(format!(
@@ -167,6 +152,86 @@ fn recover_add_adding<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, op: &PendingO
             crate::rediscover::DUPLICATE_LOCATION
         ))),
     }
+}
+
+/// 見つけた候補を pending の add に記録して保存する
+fn record_candidates<M: Music, S: Server>(
+    cx: &mut Ctx<'_, M, S>,
+    op_id: &str,
+    cands: &[(MusicTrack, String)],
+) -> Result<()> {
+    if let Some(o) = cx.state.pending_ops.iter_mut().find(|o| o.op_id == op_id) {
+        o.candidates = Some(
+            cands
+                .iter()
+                .map(|(t, sha)| Candidate {
+                    persistent_id: t.persistent_id.clone(),
+                    sha256: sha.clone(),
+                })
+                .collect(),
+        );
+    }
+    cx.save()
+}
+
+/// `resolve` でユーザが選ぶ結論
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// この persistent ID の曲が spindle の複製なので消す
+    DeleteTrack(String),
+    /// 複製は作られなかった
+    NoCopyCreated,
+}
+
+/// コピー設定 ON の `add` の候補についての、ユーザの明示的な選択を適用する。
+/// 候補は取り直して、表示した時と違えば何も消さずに止める
+pub fn resolve<M: Music, S: Server>(
+    cx: &mut Ctx<'_, M, S>,
+    op_id: &str,
+    choice: Resolution,
+) -> Result<()> {
+    let op = cx
+        .state
+        .pending_ops
+        .iter()
+        .find(|o| o.op_id == op_id && o.op == PendingKind::Add && o.phase == OpPhase::Adding)
+        .cloned();
+    let (Some(op), true) = (
+        op.as_ref(),
+        op.as_ref().is_some_and(|o| o.candidates.is_some()),
+    ) else {
+        return Err(Error::Stop("その op_id の保留はありません".into()));
+    };
+    let to = need(&op.to, "to", op)?;
+    let recorded: BTreeSet<(String, String)> = op
+        .candidates
+        .iter()
+        .flatten()
+        .map(|c| (c.persistent_id.clone(), c.sha256.clone()))
+        .collect();
+    let cands = copy_candidates(cx, op)?;
+    let now: BTreeSet<(String, String)> = cands
+        .iter()
+        .map(|(t, sha)| (t.persistent_id.clone(), sha.clone()))
+        .collect();
+    if now != recorded {
+        record_candidates(cx, op_id, &cands)?;
+        return Err(Error::Stop(format!(
+            "候補が変わりました。もう一度確かめてください。\n{}",
+            candidates_message(op, to, &cands)
+        )));
+    }
+    if let Resolution::DeleteTrack(pid) = &choice {
+        if !cands.iter().any(|(t, _)| &t.persistent_id == pid) {
+            return Err(Error::Stop(format!(
+                "{pid} は候補にありません。候補以外の曲は消せません"
+            )));
+        }
+        cx.music.delete_track(pid)?;
+    }
+    cx.local.remove(to)?;
+    remove_pending(cx, op_id);
+    cx.save()
 }
 
 fn candidates_message(op: &PendingOp, to: &str, cands: &[(MusicTrack, String)]) -> String {
