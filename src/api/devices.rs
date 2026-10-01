@@ -3,12 +3,13 @@
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 use crate::db::devices::{
-    self as dbdev, Confirm, Device, DevicePatch, NewDevice, PlanEnd, PlaylistCheck, Selection,
-    Snapshot, Update,
+    self as dbdev, Confirm, Device, DevicePatch, NewDevice, PairCodeIssue, PlanEnd, PlaylistCheck,
+    Selection, Snapshot, Update,
 };
 use crate::db::jobs as dbjobs;
 use crate::db::{now_epoch, DbError};
 use crate::device::adb::probe_volumes_under;
+use crate::device::credential::{self, PAIR_SECRET_BYTES, PAIR_SELECTOR_BYTES};
 use crate::device::ondevice::is_reserved;
 use crate::device::quote::{root_abs_under, valid_serial, valid_volume, DEFAULT_ROOT};
 use crate::device::recover::{recover, Expect, RecoverError};
@@ -484,7 +485,10 @@ pub async fn enqueue_hashes(state: &AppState, snap: &Snapshot) -> Result<(), Api
 /// スマートプレイリストの再評価を待つ端末か。選曲がプレイリストで、スマートプレイリストが 1 つでも
 /// 載っている端末だけ（全曲・手動だけの端末は評価で中身が変わらない）。Derived の変換が終わるたびに
 /// 再評価の印が立つので、全端末で待たせると変換中はずっと同期できない（実機での確認、D-98）
-fn waits_for_reevaluation(selection: Selection, smart: &[(i64, String, Option<i64>)]) -> bool {
+pub(crate) fn waits_for_reevaluation(
+    selection: Selection,
+    smart: &[(i64, String, Option<i64>)],
+) -> bool {
     selection == Selection::Playlists && !smart.is_empty()
 }
 
@@ -1197,6 +1201,17 @@ pub async fn abandon(
     if body.is_some_and(|Json(b)| b.force) {
         return force_abandon(&state, id).await;
     }
+    // iPhone の計画は Mac の spindle-agent が持つ端末の状態と対で閉じる。サーバ側の通常の破棄は無い
+    let transport = state
+        .db
+        .read(move |c| dbdev::get(c, id))
+        .await?
+        .map(|d| d.transport);
+    if transport == Some(Transport::Agent) {
+        return Ok(bad_request(
+            "iPhone の計画は Mac の spindle-agent から破棄する（Mac が使えなければ強制破棄）",
+        ));
+    }
     let (d, rt) = match adb_device(&state, id).await? {
         Ok(x) => x,
         Err(r) => return Ok(r),
@@ -1277,16 +1292,14 @@ enum ForceResult {
 /// キャッシュの置き換えもしない。次につないだときの回復が、端末のジャーナルから封印済みバッチを
 /// 計画の状態と無関係に完遂または取り消すので安全。ADB 同期が無効でも使える（adb を使わない）。
 /// 実行中の同期があるか、端末のロックを別の処理が持っていれば 409 `busy`。計画は行の id で閉じる
-/// （JSON が壊れていても閉じられる）
+/// （JSON が壊れていても閉じられる）。iPhone（agent）の計画も、Mac が使えないときはこれで閉じる
 async fn force_abandon(state: &AppState, id: i64) -> Result<Response, ApiError> {
     let Some(d) = state.db.read(move |c| dbdev::get(c, id)).await? else {
         return Ok(not_found());
     };
-    if d.transport != Transport::Adb {
-        return Ok(bad_request("Android（adb）の端末ではない"));
-    }
-    // 同期のジョブ・通常の破棄と直列化する（ADB 同期が無効ならそれらは動かない）
-    let _guard = match state.adb.as_ref() {
+    // 同期のジョブ・通常の破棄と直列化する（ADB 同期が無効ならそれらは動かない）。
+    // agent の端末は adb のロックを取らない（同期は Mac 側。実行中の同期の検査だけで足りる）
+    let _guard = match state.adb.as_ref().filter(|_| d.transport == Transport::Adb) {
         Some(rt) => match rt.device_lock(id).try_lock_owned() {
             Ok(g) => Some(g),
             Err(_) => return Ok(busy()),
@@ -1327,4 +1340,37 @@ pub async fn verify(
     }
     let job_id = state.jobs.enqueue(verify_job(id)).await?.id();
     Ok(accepted(job_id))
+}
+
+/// `POST /api/devices/{id}/pair-code`: エージェントのワンタイムコードを発行する（旧トークンは即失効）
+pub async fn pair_code(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let issued = credential::issue(PAIR_SELECTOR_BYTES, PAIR_SECRET_BYTES)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let secret = credential::base32_decode(&issued.secret)
+        .ok_or_else(|| ApiError::Internal("コードを作れない".into()))?;
+    let hash = tokio::task::spawn_blocking(move || crate::api::auth::hash_bytes(&secret))
+        .await
+        .map_err(DbError::from)??;
+    let (sel, code) = (issued.selector.clone(), issued.text());
+    let res = state
+        .db
+        .write(move |c| dbdev::issue_pair_code(c, id, &sel, &hash, now_epoch()))
+        .await?;
+    Ok(match res {
+        PairCodeIssue::Issued { expires_at } => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"code": code, "expires_at": expires_at})),
+        )
+            .into_response(),
+        PairCodeIssue::NotFound => not_found(),
+        PairCodeIssue::NotAgent => error_response_with_message(
+            StatusCode::BAD_REQUEST,
+            "not_agent",
+            "iPhone（Mac 経由）の端末ではない",
+        ),
+        PairCodeIssue::OpenPlan => open_plan(),
+    })
 }

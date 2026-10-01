@@ -142,7 +142,8 @@ pub async fn bootstrap(db: &Db, initial_password: Option<String>) -> Result<Mode
     } else {
         match initial_password.filter(|p| !p.is_empty()) {
             Some(password) => {
-                let hash = tokio::task::spawn_blocking(move || hash_password(&password)).await??;
+                let hash =
+                    tokio::task::spawn_blocking(move || hash_bytes(password.as_bytes())).await??;
                 db.write(move |c| {
                     c.execute(
                         "INSERT INTO auth (id, password_hash, updated_at) VALUES (1, ?1, ?2)",
@@ -166,20 +167,20 @@ pub async fn bootstrap(db: &Db, initial_password: Option<String>) -> Result<Mode
     Ok(mode)
 }
 
-fn hash_password(password: &str) -> Result<String, DbError> {
+/// 秘密（パスワードの UTF-8 バイト列・エージェントのコードのシークレット）を argon2id でハッシュ化し、
+/// PHC 文字列を返す
+pub(crate) fn hash_bytes(secret: &[u8]) -> Result<String, DbError> {
     Argon2::default()
-        .hash_password(password.as_bytes())
+        .hash_password(secret)
         .map(|h| h.to_string())
         .map_err(|e| DbError::Internal(format!("argon2id のハッシュ化に失敗: {e}")))
 }
 
-fn verify_password(password: &str, hash: &str) -> bool {
+/// `secret` が argon2id の PHC 文字列 `hash` と一致するか
+pub(crate) fn verify_bytes(secret: &[u8], hash: &str) -> bool {
     // 壊れたハッシュ文字列も「不一致」として扱う（DB を手で触った場合など）
-    PasswordHash::new(hash).is_ok_and(|parsed| {
-        Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .is_ok()
-    })
+    PasswordHash::new(hash)
+        .is_ok_and(|parsed| Argon2::default().verify_password(secret, &parsed).is_ok())
 }
 
 async fn purge_expired_sessions(db: &Db) -> Result<(), DbError> {
@@ -486,7 +487,7 @@ pub async fn login(
         return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, "locked"));
     };
     let password = body.password;
-    let ok = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+    let ok = tokio::task::spawn_blocking(move || verify_bytes(password.as_bytes(), &hash))
         .await
         .map_err(DbError::from)?;
     if !ok {

@@ -365,6 +365,26 @@ fn root_sources_rejects_identity_mismatch() {
     assert!(matches!(changed.open(1), Err(SourceError::Changed)));
     std::fs::remove_file(dir.path().join("a.flac")).unwrap();
     assert!(matches!(ok.open(1), Err(SourceError::Missing)));
+    // symlink や通常ファイルでないものに差し替わったら「変わった」
+    std::fs::write(dir.path().join("b.flac"), b"AAAA").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("b.flac"), dir.path().join("a.flac")).unwrap();
+    assert!(matches!(ok.open(1), Err(SourceError::Changed)));
+    std::fs::remove_file(dir.path().join("a.flac")).unwrap();
+    std::fs::create_dir(dir.path().join("a.flac")).unwrap();
+    assert!(matches!(ok.open(1), Err(SourceError::Changed)));
+    // FIFO は書き手を待たずに「変わった」になる（回帰したら別スレッドが返らず失敗する）
+    std::fs::remove_dir(dir.path().join("a.flac")).unwrap();
+    let c = std::ffi::CString::new(dir.path().join("a.flac").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ok2 = ok;
+    std::thread::spawn(move || {
+        let _ = tx.send(matches!(ok2.open(1), Err(SourceError::Changed)));
+    });
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok(true)
+    );
 }
 
 /// 同期の各変更操作の直後で切断し、回復した状態が壊れていないこと、同期し直すと目標になることを

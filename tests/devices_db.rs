@@ -611,3 +611,89 @@ fn estimate_selection_counts_only_valid_current_source_hashes() {
     let e = devices::estimate_selection(&c, &d, Selection::All, &[]).unwrap();
     assert_eq!((e.bytes, e.unhashed), (100, 4));
 }
+
+#[test]
+fn pair_code_lifecycle() {
+    use spindle::db::devices::{PairCodeIssue, PairReserve};
+    let c = conn();
+    let x = adb(&c, Selection::All);
+    assert_eq!(
+        devices::issue_pair_code(&c, x.id, "sel", "h", 100).unwrap(),
+        PairCodeIssue::NotAgent
+    );
+    assert_eq!(
+        devices::issue_pair_code(&c, 999, "sel", "h", 100).unwrap(),
+        PairCodeIssue::NotFound
+    );
+    let d = devices::create(
+        &c,
+        &NewDevice {
+            name: "iPhone",
+            transport: Transport::Agent,
+            variant: Variant::Aac,
+            selection: Selection::All,
+            adb: None,
+        },
+        10,
+    )
+    .unwrap();
+    assert_eq!(
+        devices::issue_pair_code(&c, d.id, "sel", "h", 100).unwrap(),
+        PairCodeIssue::Issued { expires_at: 700 }
+    );
+    // 引けないセレクタは何も書かない
+    assert_eq!(
+        devices::reserve_pair_attempt(&c, "nope", 100).unwrap(),
+        PairReserve::Rejected
+    );
+    // 上限まで予約でき、上限で失効する
+    for _ in 0..5 {
+        assert_eq!(
+            devices::reserve_pair_attempt(&c, "sel", 100).unwrap(),
+            PairReserve::Reserved {
+                device_id: d.id,
+                code_hash: "h".into()
+            }
+        );
+    }
+    assert_eq!(
+        devices::reserve_pair_attempt(&c, "sel", 100).unwrap(),
+        PairReserve::Rejected
+    );
+    devices::fail_pair_attempt(&c, d.id, "sel").unwrap();
+    let sel: Option<String> = c
+        .query_row(
+            "SELECT pair_selector FROM devices WHERE id = ?1",
+            [d.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sel, None, "上限に達したコードは失効");
+    // 期限切れはコードを消す
+    devices::issue_pair_code(&c, d.id, "sel2", "h2", 100).unwrap();
+    assert_eq!(
+        devices::reserve_pair_attempt(&c, "sel2", 700).unwrap(),
+        PairReserve::Rejected
+    );
+    let sel: Option<String> = c
+        .query_row(
+            "SELECT pair_selector FROM devices WHERE id = ?1",
+            [d.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sel, None, "期限切れのコードは消える");
+    // 消費は同じコードが載っているときだけ（CAS）。トークンを載せ、引ける
+    devices::issue_pair_code(&c, d.id, "sel3", "h3", 100).unwrap();
+    assert!(!devices::consume_pair_code(&c, d.id, "sel3", "other", "tsel", "th", 101).unwrap());
+    assert!(devices::consume_pair_code(&c, d.id, "sel3", "h3", "tsel", "th", 101).unwrap());
+    assert!(!devices::consume_pair_code(&c, d.id, "sel3", "h3", "tsel", "th", 101).unwrap());
+    let a = devices::agent_by_selector(&c, "tsel").unwrap().unwrap();
+    assert_eq!(
+        (a.device_id, a.name.as_str(), a.secret_hash.as_str()),
+        (d.id, "iPhone", "th")
+    );
+    // 発行し直すと旧トークンは引けない
+    devices::issue_pair_code(&c, d.id, "sel4", "h4", 200).unwrap();
+    assert!(devices::agent_by_selector(&c, "tsel").unwrap().is_none());
+}

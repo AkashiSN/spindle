@@ -403,6 +403,11 @@ export type Device = {
   sync_job: { id: number; state: 'queued' | 'running' } | null
 }
 export type DeviceList = { items: Device[] }
+/** iPhone のエージェントのワンタイムコード（`POST /api/devices/{id}/pair-code`）。画面の state にだけ持つ */
+export interface PairCode {
+  code: string
+  expires_at: number
+}
 export type AdbVolume = { volume: string; path: string; free: number; state: 'missing' | 'empty' | 'nonempty' }
 export type UnregisteredAdb = {
   serial: string

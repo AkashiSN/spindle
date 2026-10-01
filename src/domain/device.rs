@@ -446,7 +446,11 @@ pub fn build_playlists(
         out.push(DesiredPlaylist {
             playlist_id: p.playlist_id,
             name: p.name.clone(),
-            dest_path: format!("{PLAYLIST_DIR}/{}.m3u8", p.name),
+            dest_path: match transport {
+                Transport::Adb => format!("{PLAYLIST_DIR}/{}.m3u8", p.name),
+                // ミュージック.app の「spindle」フォルダの下に同名で作る（D-99）
+                Transport::Agent => p.name.clone(),
+            },
             body,
             token,
         });

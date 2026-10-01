@@ -273,6 +273,21 @@ fn m3u8_is_relative_from_playlists_dir() {
 }
 
 #[test]
+fn agent_playlist_dest_path_is_the_name() {
+    let m = Manifest::default();
+    let pls = vec![PlaylistInput {
+        playlist_id: 1,
+        name: "Drive/夜".into(),
+        track_ids: vec![],
+    }];
+    let (out, errs) = build_playlists(Transport::Agent, &pls, &m, &[]);
+    assert!(errs.is_empty());
+    assert_eq!(out[0].dest_path, "Drive/夜");
+    let (out, _) = build_playlists(Transport::Adb, &pls, &m, &[]);
+    assert_eq!(out[0].dest_path, "Playlists/Drive/夜.m3u8");
+}
+
+#[test]
 fn playlist_uses_current_path_for_held_copies_and_skips_absent() {
     let m = build_manifest(&settings(Variant::Opus, true), 0, &[ready(1, "A/x.flac")]);
     // 2 は hold だが端末に古い写しがある、3 は端末に無い

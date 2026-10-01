@@ -99,7 +99,8 @@ fn hash_source_inner(
     expected: Option<&MasterIdentity>,
     hook: &mut dyn FnMut(),
 ) -> Result<HashOutcome, JobError> {
-    let mut file = match root.open_file(rel) {
+    // O_NONBLOCK: FIFO に差し替わっていても止まらず、fstat の種別で弾く
+    let mut file = match root.open_file_nonblocking(rel) {
         Ok(f) => f,
         Err(fsroot::FsError::NotFound) if expected.is_some() => {
             return Ok(HashOutcome::ScanPending);
@@ -108,6 +109,14 @@ fn hash_source_inner(
         Err(e) => return Err(failed(format!("送る元を開けない {}: {e}", rel.as_str()))),
     };
     let before = fsroot::fstat(&file).map_err(|e| failed(format!("fstat に失敗: {e}")))?;
+    if before.kind != fsroot::FileKind::File {
+        // 通常ファイルでないものに差し替わっている。identity が変わったのと同じ扱い
+        return Ok(if expected.is_some() {
+            HashOutcome::ScanPending
+        } else {
+            HashOutcome::Changed
+        });
+    }
     if let Some(expected) = expected {
         if !identity_matches(&before, expected) {
             return Ok(HashOutcome::ScanPending);

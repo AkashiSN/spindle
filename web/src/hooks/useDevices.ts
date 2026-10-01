@@ -10,6 +10,7 @@ import type {
   DeviceList,
   DeviceSelection,
   DeviceVariant,
+  PairCode,
   SelectionEstimate,
   UnregisteredList,
 } from '../api/types'
@@ -241,6 +242,14 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     /** 端末につながずに途中の計画を閉じる（D-98） */
     forceAbandon: (id: number) =>
       run(() => apiPost<Device>(`/api/devices/${id}/plans/open/abandon`, { force: true })),
+    /** iPhone のエージェントのワンタイムコードを発行する（今の Mac のトークンは即失効）。失敗なら null */
+    pairCode: async (id: number): Promise<PairCode | null> => {
+      let issued: PairCode | null = null
+      const ok = await run(async () => {
+        issued = await apiPost<PairCode>(`/api/devices/${id}/pair-code`, {})
+      })
+      return ok ? issued : null
+    },
     verify: (id: number) => run(() => apiPost<{ job_id: number }>(`/api/devices/${id}/verify`, {})),
     update: (id: number, patch: { name?: string; selection?: DeviceSelection; variant?: DeviceVariant }) =>
       run(() => apiPatch<Device>(`/api/devices/${id}`, patch)),

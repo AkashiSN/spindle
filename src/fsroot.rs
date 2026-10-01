@@ -206,6 +206,13 @@ mod linux {
             Ok(File::from(fd))
         }
 
+        /// [`open_file`](Self::open_file) の `O_NONBLOCK` 版。通常ファイルでは効果が無く、FIFO などに
+        /// 差し替わっていても書き手を待たずに開けるので、呼び出し側が `fstat` の種別で弾ける
+        pub fn open_file_nonblocking(&self, rel: &RelPath) -> Result<File, FsError> {
+            let fd = self.open_at(rel.as_str(), OFlags::RDONLY | OFlags::NONBLOCK)?;
+            Ok(File::from(fd))
+        }
+
         /// symlink を辿らない stat。末尾が symlink なら symlink 自身の属性を返す
         pub fn stat(&self, rel: &RelPath) -> Result<Stat, FsError> {
             let parent = self.open_parent(rel)?;
@@ -442,6 +449,10 @@ mod stub {
         }
 
         pub fn open_file(&self, _rel: &RelPath) -> Result<File, FsError> {
+            Err(FsError::Openat2Unsupported)
+        }
+
+        pub fn open_file_nonblocking(&self, _rel: &RelPath) -> Result<File, FsError> {
             Err(FsError::Openat2Unsupported)
         }
 

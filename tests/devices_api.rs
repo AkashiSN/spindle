@@ -644,3 +644,61 @@ async fn diff_lists_reported_error_on_synced_track() {
     assert_eq!(items[0]["dest_path"], "YT/a.opus");
     assert_eq!(items[0]["has_copy"], true);
 }
+
+#[tokio::test]
+async fn pair_code_rules() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    let (st, v) = app
+        .call(Method::POST, &format!("/api/devices/{id}/pair-code"), None)
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    assert!(v["code"].as_str().unwrap().contains('.'));
+    assert!(v["expires_at"].as_i64().unwrap() > 0);
+    // open な計画がある間は 409
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at) VALUES (?1, 't', '{}', 'open', 0)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .call(Method::POST, &format!("/api/devices/{id}/pair-code"), None)
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("open_plan"))
+    );
+    let (st, _) = app
+        .call(Method::POST, "/api/devices/999/pair-code", None)
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn agent_plan_force_abandon_only() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at) VALUES (?1, 't', '{}', 'open', 0)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let uri = format!("/api/devices/{id}/plans/open/abandon");
+    let (st, _) = app.call(Method::POST, &uri, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, v) = app
+        .call(Method::POST, &uri, Some(json!({"force": true})))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["plan_open"], false);
+}

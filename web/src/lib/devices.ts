@@ -124,6 +124,21 @@ export function offerForceAbandon(d: Device, lastErrorCode: string | null): bool
   return d.connected === false || lastErrorCode === 'not_connected'
 }
 
+/** iPhone（agent）の強制破棄の確認。Mac にも iPhone にもキャッシュにも触らずに計画を閉じる */
+export const AGENT_FORCE_ABANDON_CONFIRM =
+  'Mac につながずに途中の計画を破棄します。iPhone 側の状態とキャッシュには触りません。よろしいですか？'
+
+/** iPhone の途中の計画の案内（P5-4a）。計画は Mac の spindle-agent が閉じるので、ここでは案内と強制破棄だけ */
+export function agentPlanText(d: Device): string | null {
+  if (d.transport !== 'agent' || !d.plan_open) return null
+  return 'Mac で同期が途中です。Mac で spindle-agent sync をもう一度実行するか、Mac が使えなければ強制破棄します'
+}
+
+/** Mac で実行する pair のコマンド。origin はこの画面の origin（spindle の URL） */
+export function pairCommand(origin: string, code: string): string {
+  return `spindle-agent pair ${origin} ${code}`
+}
+
 /** ジョブのイベントが状態の変化か（進捗だけのイベントは false）。`seen` はジョブごとの直前の状態で、
  * 終わりの状態は覚えない（大きくならない。再試行で queued に戻っても変化として拾う） */
 export function jobStateChanged(seen: Map<number, JobState>, e: Pick<JobEvent, 'id' | 'state'>): boolean {
@@ -168,6 +183,8 @@ export function deviceMessage(e: unknown): string {
         return '途中の計画を読めません。破棄してください'
       case 'adb_disabled':
         return ADB_DISABLED_MESSAGE
+      case 'not_agent':
+        return 'iPhone（Mac 経由）の端末ではありません'
     }
     return e.message
   }

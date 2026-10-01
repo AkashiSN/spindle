@@ -1,5 +1,7 @@
-//! HTTP API。`/health` 以外の全ルート（SPA 配信を含む）は `auth::guard` の配下に置く
+//! HTTP API。`/health` と `/api/agent/*` 以外の全ルート（SPA 配信を含む）は `auth::guard` の配下に置く。
+//! `/api/agent/*` は `agent::guard`（Bearer）で守る
 
+pub mod agent;
 pub mod albums;
 pub mod archive;
 pub mod artwork;
@@ -60,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/{id}/plans/open/resume", post(devices::resume))
         .route("/devices/{id}/plans/open/abandon", post(devices::abandon))
         .route("/devices/{id}/verify", post(devices::verify))
+        .route("/devices/{id}/pair-code", post(devices::pair_code))
         .route("/tracks", get(tracks::list))
         .route("/tracks/{id}", get(tracks::get))
         .route("/tracks/batch", patch(batch::apply))
@@ -169,8 +172,19 @@ pub fn router(state: AppState) -> Router {
         .fallback(spa::serve)
         .layer(middleware::from_fn_with_state(state.clone(), auth::guard));
 
+    // エージェントの経路は auth::guard の外（Cookie・CSRF・trusted_cidrs のどれでも通らない）。
+    // pair 以外は agent::guard（Bearer）、pair はロックモードの判定だけを通す
+    let agent = agent::router(state.clone());
     Router::new()
         .route("/health", get(health::get))
+        .route(
+            "/api/agent/pair",
+            post(agent::pair).route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                agent::locked_guard,
+            )),
+        )
+        .nest("/api/agent", agent)
         .merge(protected)
         .with_state(state)
 }

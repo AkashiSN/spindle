@@ -2026,5 +2026,10 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
       登録・同期・再開・破棄・検証の API、端末タブの Android 部分、`[bin].adb` / `[devices]`、
       adb サイドカーと compose、実機での固定（shell v2 の stdin、toybox、Poweramp のレシーバ）
       （実機の通し確認は D-98）
-- [ ] P5-4 `spindle-agent` とエージェント API（pair / 計画の確定 / ファイル / 報告）
+- [x] P5-4a エージェント API（pair-code・pair・manifest・ファイル・計画の確定 / 再開 / 破棄・報告）と
+      端末タブの iPhone 部分（計画 docs/superpowers/plans/2026-10-01-p5-4a-agent-api.md、D-99）
+- [ ] P5-4b `spindle-agent`（`agent/` クレート）: state・回復・再発見・バッチ・プレイリストの入れ替え・
+      resolve を、ミュージック.app の操作を trait で差し替えて試す
+- [ ] P5-4c 実機の Mac で JXA を固定（`add` / `refresh` / `location` の付け替え / persistent ID /
+      コピー設定 / TCC）し、CI の macOS ランナーでバイナリを作って Release に置く
 - [ ] P5-5 文書の改訂（SPEC §1・§7.6・§7.7・§9・§10・§12・§13・§14、DSL.md、CLAUDE.md の禁止事項の注記）
