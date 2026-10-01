@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -159,6 +160,13 @@ fn runner_error_propagates() {
     assert!(matches!(m.probe(), Err(Error::Music(_))));
 }
 
+/// 偽のプロセスを起動する試験を直列にする。macOS の `pipe()` は CLOEXEC の付与が原子的でなく、
+/// 並行して起動した別の試験の子（`sleep 30` など）がこちらのパイプの書き端を継いで読み取りが終わらないことがある
+fn serial() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 偽の osascript（シェルスクリプト）を置き、実行ビットを付ける
 fn fake_program(dir: &Path, body: &str) -> PathBuf {
     let prog = dir.join("fake-osascript");
@@ -169,8 +177,9 @@ fn fake_program(dir: &Path, body: &str) -> PathBuf {
 
 #[test]
 fn timeout_kills_and_errors() {
+    let _serial = serial();
     let d = tempfile::tempdir().unwrap();
-    let prog = fake_program(d.path(), "#!/bin/sh\ncat >/dev/null\nsleep 30\n");
+    let prog = fake_program(d.path(), "#!/bin/sh\ncat >/dev/null\nexec sleep 30\n");
     let r = ProcessOsascript::with_program(prog);
     let t0 = std::time::Instant::now();
     let res = r.run("x", "{}", Duration::from_millis(300));
@@ -180,6 +189,7 @@ fn timeout_kills_and_errors() {
 
 #[test]
 fn nonzero_exit_includes_stderr() {
+    let _serial = serial();
     let d = tempfile::tempdir().unwrap();
     let prog = fake_program(
         d.path(),
@@ -192,6 +202,7 @@ fn nonzero_exit_includes_stderr() {
 
 #[test]
 fn stdout_and_stdin_are_wired() {
+    let _serial = serial();
     let d = tempfile::tempdir().unwrap();
     // 引数の最後（要求）と標準入力（スクリプト）の長さを返す。要求の `"` は JSON の文字列用に `\"` へ直す
     let prog = fake_program(

@@ -48,6 +48,9 @@ function dispatch(q) {
     case 'probe': return M.version();
     case 'tracks': {
       const ts = lib.fileTracks;
+      // file track が 0 件だと一括取得（ts.persistentID() など）が空配列を返さず
+      // 「オブジェクトを取得できません」（-1728）で例外になる。件数を先に見て空を返す
+      if (ts.length === 0) return [];
       const pids = ts.persistentID(), dbs = ts.databaseID(), locs = ts.location();
       const added = ts.dateAdded(), sizes = ts.size();
       return pids.map((pid, i) => ({

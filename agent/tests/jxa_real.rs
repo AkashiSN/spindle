@@ -97,6 +97,10 @@ fn real_music_round_trip() {
 
     c.music.probe().unwrap();
 
+    // 追加前: 一時 root の下には何も無い（ライブラリ全体の一括取得が通ること）
+    assert!(c.music.tracks_under(&root).unwrap().is_empty());
+    let max_before = c.music.max_database_id().unwrap();
+
     // add 2 曲
     let a_path = root.join("a.m4a");
     let b_path = root.join("b.m4a");
@@ -111,6 +115,8 @@ fn real_music_round_trip() {
     let under = c.music.tracks_under(&root).unwrap();
     assert_eq!(under.len(), 2);
     assert!(c.music.max_database_id().unwrap() >= a.database_id.max(b.database_id));
+    assert!(a.database_id > max_before && b.database_id > max_before);
+    assert_eq!(c.music.tracks_added_after(max_before).unwrap().len(), 2);
 
     // 同じファイルの add は同じ pid
     let a2 = c.music.add(&a_path).unwrap();
