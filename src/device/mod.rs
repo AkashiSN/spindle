@@ -3,6 +3,7 @@
 //! 読み書きし、確定した計画を端末へ反映する。端末の操作は [`remote::DeviceFs`] で差し替える
 
 pub mod adb;
+pub mod credential;
 pub mod journal;
 pub mod ondevice;
 pub mod plan;
