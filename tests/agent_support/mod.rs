@@ -40,19 +40,51 @@ pub fn req(method: Method, uri: &str) -> axum::http::request::Builder {
 
 impl App {
     pub async fn new() -> Self {
+        Self::build(Some("correct horse"), "").await
+    }
+
+    /// `[auth].trusted_cidrs` に接続元の LAN（192.168.1.0/24）を入れた App
+    pub async fn with_trusted_lan() -> Self {
+        Self::build(
+            Some("correct horse"),
+            r#"trusted_cidrs = ["192.168.1.0/24"]"#,
+        )
+        .await
+    }
+
+    /// パスワード未設定のロックモードの App（ログインできないので Cookie は空）
+    pub async fn locked() -> Self {
+        Self::build(None, "").await
+    }
+
+    /// `[auth]` を `auth_override` で上書きして組み立てる。パスワードがあればログインして Cookie を持つ
+    async fn build(password: Option<&str>, auth_override: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
-        let root: toml::Table = toml::from_str(EXAMPLE).unwrap();
+        let mut root: toml::Table = toml::from_str(EXAMPLE).unwrap();
+        let patch: toml::Table = toml::from_str(auth_override).unwrap();
+        let section = root.get_mut("auth").unwrap().as_table_mut().unwrap();
+        for (k, v) in patch {
+            section.insert(k, v);
+        }
         let config = Arc::new(Config::parse(&toml::to_string(&root).unwrap()).unwrap());
-        let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
+        let mode = auth::bootstrap(&db, password.map(str::to_owned))
             .await
             .unwrap();
         let state = AppState::new(config, db.clone(), mode);
         let router = api::router(state);
+        let Some(password) = password else {
+            return Self {
+                router,
+                db,
+                cookie: String::new(),
+                _dir: dir,
+            };
+        };
         let r = req(Method::POST, "/api/auth/login")
             .header(header::CONTENT_TYPE, "application/json")
             .header("sec-fetch-site", "same-origin")
-            .body(Body::from(r#"{"password":"correct horse"}"#))
+            .body(Body::from(json!({ "password": password }).to_string()))
             .unwrap();
         let res = router.clone().oneshot(r).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);

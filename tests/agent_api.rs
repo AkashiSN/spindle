@@ -129,7 +129,6 @@ async fn expired_code_is_rejected() {
 }
 
 #[tokio::test]
-#[ignore = "Task 5 で manifest が入る"]
 async fn reissuing_code_revokes_old_token_and_code() {
     let app = App::new().await;
     let id = app.create_iphone("iPhone").await;
@@ -149,4 +148,107 @@ async fn reissuing_code_revokes_old_token_and_code() {
         )
         .await;
     assert_eq!(st, StatusCode::UNAUTHORIZED, "旧コードも失効");
+}
+
+// ---------------------------------------------------------------- Bearer と経路の分離
+
+#[tokio::test]
+async fn session_cookie_does_not_open_agent_routes() {
+    let app = App::new().await;
+    let (st, _) = app.call(Method::GET, "/api/agent/manifest", None).await; // Cookie のみ
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn bearer_does_not_open_session_routes() {
+    let app = App::new().await;
+    let id = app.create_iphone("iPhone").await;
+    let token = app.pair(id).await;
+    let (st, _) = app
+        .agent_call(Some(&token), Method::GET, "/api/devices", None)
+        .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn trusted_cidr_does_not_open_agent_files() {
+    let app = App::with_trusted_lan().await;
+    // 前提: この App では trusted_cidrs が効いている（allowlist の経路は 401 にならない）
+    let (st, _) = app
+        .agent_call(None, Method::GET, "/api/stream/1", None)
+        .await;
+    assert_ne!(st, StatusCode::UNAUTHORIZED);
+    let (st, _) = app
+        .agent_call(None, Method::GET, "/api/agent/files/1", None)
+        .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn bearer_post_needs_no_csrf_headers() {
+    let app = App::new().await;
+    let id = app.create_iphone("iPhone").await;
+    let token = app.pair(id).await;
+    // agent_call は sec-fetch-site / Origin を付けない
+    let (st, _) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/plans",
+            Some(json!({"plan_token": "x"})),
+        )
+        .await;
+    assert_ne!(st, StatusCode::FORBIDDEN);
+    assert_ne!(st, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn malformed_and_wrong_tokens_are_401() {
+    let app = App::new().await;
+    let id = app.create_iphone("iPhone").await;
+    let token = app.pair(id).await;
+    let (sel, _) = token.split_once('.').unwrap();
+    for bad in [
+        "",
+        "abc",
+        &format!("{sel}.{}", "a".repeat(52)),
+        &format!("{sel}."),
+    ] {
+        let (st, _) = app
+            .agent_call(Some(bad), Method::GET, "/api/agent/manifest", None)
+            .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{bad:?}");
+    }
+    let (st, _) = app
+        .agent_call(Some(&token), Method::GET, "/api/agent/nope", None)
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn unauthorized_carries_www_authenticate_bearer() {
+    let app = App::new().await;
+    let (st, h, _) = app
+        .agent_raw(None, Method::GET, "/api/agent/manifest", &[])
+        .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(h.get("www-authenticate").unwrap(), "Bearer");
+}
+
+#[tokio::test]
+async fn locked_mode_closes_agent_routes_including_pair() {
+    let app = App::locked().await;
+    let (st, _) = app
+        .agent_call(
+            None,
+            Method::POST,
+            "/api/agent/pair",
+            Some(json!({"code": "x.y"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+    let (st, _) = app
+        .agent_call(Some("x.y"), Method::GET, "/api/agent/manifest", None)
+        .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
 }
