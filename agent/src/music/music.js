@@ -59,7 +59,12 @@ function dispatch(q) {
       }));
     }
     case 'track': { const t = trackOf(q.pid); return t ? info(t) : null; }
-    case 'add': return info(M.add(q.path));
+    case 'add': {
+      // 音声でないファイルなどは add が undefined を返す（例外にならない）
+      const t = M.add(q.path);
+      if (!t) throw new Error('ミュージック.app が追加しなかった（音声ファイルでない？）: ' + q.path);
+      return info(t);
+    }
     case 'delete_track': M.delete(mustTrack(q.pid)); return null;
     case 'refresh': M.refresh(mustTrack(q.pid)); return null;
     case 'set_location': mustTrack(q.pid).location = q.path; return null;

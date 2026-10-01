@@ -217,3 +217,16 @@ fn stdout_and_stdin_are_wired() {
     assert_eq!(v["ok"][0], "{\"op\":\"probe\"}");
     assert_eq!(v["ok"][1], 4);
 }
+
+#[test]
+fn add_refused_maps_to_music_error() {
+    let s = Scripted::default();
+    s.replies.borrow_mut().push(Ok(json!({
+        "err": "Error: ミュージック.app が追加しなかった（音声ファイルでない？）: /r/x.m4a"
+    })
+    .to_string()));
+    let m = JxaMusic::new(&s);
+    assert!(
+        matches!(m.add(Path::new("/r/x.m4a")), Err(Error::Music(msg)) if msg.contains("追加しなかった"))
+    );
+}

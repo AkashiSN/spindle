@@ -14,6 +14,8 @@
 mod agent_support;
 
 use std::net::SocketAddr;
+use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use agent_support::*;
@@ -24,6 +26,22 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
         Ok(v) => v.parse().unwrap_or_else(|_| panic!("{key} が不正: {v}")),
         Err(_) => default,
     }
+}
+
+/// ffmpeg で `freq` Hz・2 秒の AAC（m4a）を作り、中身を返す。曲ごとに周波数と title を変えて区別する
+fn make_aac(dir: &Path, freq: u32, title: &str) -> Vec<u8> {
+    let out = dir.join(format!("{freq}.m4a"));
+    let status = Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!("sine=frequency={freq}:duration=2"))
+        .args(["-c:a", "aac", "-b:a", "64k", "-metadata"])
+        .arg(format!("title={title}"))
+        .args(["-f", "ipod"])
+        .arg(&out)
+        .status()
+        .unwrap_or_else(|e| panic!("ffmpeg を起動できない（この台には ffmpeg が要る）: {e}"));
+    assert!(status.success(), "ffmpeg が失敗: {status}");
+    std::fs::read(&out).unwrap()
 }
 
 /// 選曲を `playlists` に変える。sync の途中（開いた計画がある）なら 409 なので、通るまで待つ
@@ -58,12 +76,16 @@ async fn serve_for_mac() {
 
     let app = App::with_roots().await;
     let dev = app.create_iphone("Mac 実機").await;
-    app.seed_track(1, "J-Pop/Artist/1-01 first.flac", b"first-aac")
+    // ミュージック.app は音声でないファイルを追加しないので、本物の AAC を置く
+    let audio = tempfile::tempdir().unwrap();
+    let first = make_aac(audio.path(), 440, "first");
+    let second = make_aac(audio.path(), 550, "Don't 止まれ");
+    let third = make_aac(audio.path(), 660, "third");
+    app.seed_track(1, "J-Pop/Artist/1-01 first.flac", &first)
         .await;
-    app.seed_track(2, "J-Pop/歌手/1-02 Don't 止まれ.flac", b"second-aac")
+    app.seed_track(2, "J-Pop/歌手/1-02 Don't 止まれ.flac", &second)
         .await;
-    app.seed_track(3, "Rock/Band/1-03 third.flac", b"third-aac")
-        .await;
+    app.seed_track(3, "Rock/Band/1-03 third.flac", &third).await;
     app.seed_playlist(dev, 10, "お気に入り", &[2, 1]).await;
     let code = app.pair_code(dev).await;
 
