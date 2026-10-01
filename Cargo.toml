@@ -7,7 +7,7 @@ license = "MIT"
 publish = false
 
 [workspace]
-members = [".", "agent-proto"]
+members = [".", "agent-proto", "agent"]
 
 [lib]
 name = "spindle"
@@ -67,4 +67,5 @@ lofty = "0.25.2"
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
+spindle-agent = { path = "agent", features = ["fake"] }
 tower = { version = "0.5.3", features = ["util"] }

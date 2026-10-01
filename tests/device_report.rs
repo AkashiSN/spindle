@@ -158,6 +158,50 @@ fn playlists_match_by_name_key_and_token() {
     assert!(validate(&r, &b).is_err());
 }
 
+/// 入れ替えの途中（片方だけ改名した後）で止まると、管理下の 2 つが同じ名前になる。名前の重複は受け入れ、
+/// id の重複は拒否する（D-100）
+#[test]
+fn duplicate_playlist_names_are_accepted_but_ids_are_not() {
+    use spindle::domain::device::PlaylistState;
+    let cur = vec![
+        PlaylistState {
+            playlist_id: 5,
+            dest_path: "Drive".into(),
+            token: "p5".into(),
+        },
+        PlaylistState {
+            playlist_id: 6,
+            dest_path: "drive".into(),
+            token: "p6".into(),
+        },
+    ];
+    let p = plan(vec![]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &[],
+        current_playlists: &cur,
+        plan: &p,
+    };
+    let mut r = req(vec![]);
+    r.state.playlists = vec![
+        ReportPlaylist {
+            playlist_id: 5,
+            name: "Drive".into(),
+            token: "p5".into(),
+        },
+        ReportPlaylist {
+            playlist_id: 6,
+            name: "drive".into(),
+            token: "p6".into(),
+        },
+    ];
+    let ok = validate(&r, &b).unwrap();
+    assert_eq!(ok.playlists.len(), 2);
+    r.state.playlists[1] = r.state.playlists[0].clone();
+    assert!(validate(&r, &b).is_err(), "id の重複");
+}
+
 #[test]
 fn errors_are_checked_and_digest_is_order_independent() {
     let p = plan(vec![]);
@@ -194,4 +238,80 @@ fn errors_are_checked_and_digest_is_order_independent() {
     assert_eq!(digest(&a), digest(&c));
     c.generation = 2;
     assert_ne!(digest(&a), digest(&c));
+}
+
+fn stale(id: i64, path: &str) -> ReportTrack {
+    ReportTrack {
+        track_id: id,
+        dest_path: path.into(),
+        token: String::new(),
+        size: 9,
+        sha256: "x".into(),
+    }
+}
+
+#[test]
+fn stale_track_on_current_path_is_accepted() {
+    let cur = vec![item(1, "a.m4a", "t1")];
+    let p = plan(vec![]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &cur,
+        current_playlists: &[],
+        plan: &p,
+    };
+    let ok = validate(&req(vec![stale(1, "a.m4a")]), &b).unwrap();
+    assert_eq!(ok.items[0].token, "");
+}
+
+#[test]
+fn stale_track_on_unknown_path_is_rejected() {
+    let cur = vec![item(1, "a.m4a", "t1")];
+    let p = plan(vec![]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &cur,
+        current_playlists: &[],
+        plan: &p,
+    };
+    assert!(validate(&req(vec![stale(1, "elsewhere.m4a")]), &b).is_err());
+}
+
+#[test]
+fn stale_track_for_unknown_id_is_rejected() {
+    let cur = vec![item(1, "a.m4a", "t1")];
+    let p = plan(vec![]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &cur,
+        current_playlists: &[],
+        plan: &p,
+    };
+    assert!(validate(&req(vec![stale(2, "a.m4a")]), &b).is_err());
+}
+
+#[test]
+fn stale_track_on_plan_destination_is_accepted() {
+    let cur = vec![item(1, "a.m4a", "t1")];
+    let p = plan(vec![PlanItem {
+        op_id: "m".into(),
+        op: K::Move,
+        track_id: 1,
+        from: Some("a.m4a".into()),
+        to: Some("b.m4a".into()),
+        token: Some("t1".into()),
+        size: 10,
+        sha256: Some("s1".into()),
+    }]);
+    let b = Basis {
+        desired: &[],
+        desired_playlists: &[],
+        current: &cur,
+        current_playlists: &[],
+        plan: &p,
+    };
+    assert!(validate(&req(vec![stale(1, "b.m4a")]), &b).is_ok());
 }
