@@ -167,6 +167,16 @@ impl FakeMusic {
         pid
     }
 
+    /// フォルダ・プレイリストの現在の名前（試験の補助）
+    pub fn folder_name(&self, pid: &str) -> Option<String> {
+        self.w
+            .borrow()
+            .playlists
+            .iter()
+            .find(|p| p.persistent_id == pid)
+            .map(|p| p.name.clone())
+    }
+
     pub fn playlists(&self) -> Vec<FakePlaylist> {
         self.w.borrow().playlists.clone()
     }

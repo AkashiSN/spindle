@@ -9,6 +9,7 @@ pub mod exec;
 pub mod failpoint;
 pub mod local;
 pub mod music;
+pub mod pair;
 pub mod pathkey;
 pub mod plan;
 pub mod playlist;
