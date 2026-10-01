@@ -4,11 +4,13 @@
 //! trait に閉じ込め、ローカルの root と state.json は本物のファイルシステムで扱う
 
 pub mod ctx;
+pub mod exec;
 pub mod failpoint;
 pub mod local;
 pub mod music;
 pub mod pathkey;
 pub mod plan;
+pub mod recover;
 pub mod rediscover;
 pub mod secrets;
 pub mod server;

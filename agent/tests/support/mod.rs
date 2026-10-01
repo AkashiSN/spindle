@@ -4,12 +4,14 @@
 
 use std::path::PathBuf;
 
-use agent_proto::ManifestResponse;
+use agent_proto::{ManifestResponse, Plan};
 use spindle_agent::ctx::{Ctx, Ui};
 use spindle_agent::failpoint::Failpoints;
 use spindle_agent::local::LocalRoot;
 use spindle_agent::music::fake::FakeMusic;
+use spindle_agent::plan::{current_of, runnable, Runnable};
 use spindle_agent::server::fake::FakeServer;
+use spindle_agent::server::{Confirmed, Server};
 use spindle_agent::state::{ServerInfo, Setup, SetupPhase, State, StateFile, TrackEntry};
 
 pub const UUID: &str = "11111111-2222-3333-4444-555555555555";
@@ -151,5 +153,33 @@ impl Env {
         });
         self.server.set_current(cur, vec![]);
         e
+    }
+}
+
+impl Env {
+    /// 今の差分で計画を確定し、runnable を作る
+    pub fn confirm_all(&self) -> (Plan, Runnable, ManifestResponse) {
+        let m = self.server.manifest().unwrap();
+        let Confirmed::Plan(p) = self.server.confirm(&m.plan_token).unwrap() else {
+            panic!("確定できない")
+        };
+        let (c, cp) = current_of(&self.state());
+        let r = runnable(&p, &c, &cp, &m.diff);
+        (p, r, m)
+    }
+
+    /// 偽のミュージック.app の track の (location の root 相対, persistent ID)
+    pub fn music_paths(&self) -> Vec<(String, String)> {
+        let mut v: Vec<_> = self
+            .music
+            .tracks()
+            .into_iter()
+            .filter_map(|t| {
+                let rel = spindle_agent::pathkey::to_rel(self.root.path(), t.location.as_deref()?)?;
+                Some((rel, t.persistent_id))
+            })
+            .collect();
+        v.sort();
+        v
     }
 }
