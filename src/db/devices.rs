@@ -9,6 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension as _};
 use crate::db::derived as dbderived;
 use crate::db::jobs::{self as dbjobs, EnqueueResult, JobType, NewJob};
 use crate::db::{playlists as dbpl, Result};
+use crate::device::credential::{PAIR_CODE_TTL_SECS, PAIR_MAX_ATTEMPTS};
 use crate::device::plan::StoredPlan;
 use crate::domain::derived::{Variant, VariantSettings};
 use crate::domain::device::{
@@ -951,6 +952,160 @@ pub fn uuid_exists(conn: &Connection, uuid: &str) -> Result<bool> {
         [uuid],
         |r| r.get::<_, i64>(0),
     )? == 1)
+}
+
+// ---------------------------------------------------------------- エージェントの pair（D-99）
+
+/// ワンタイムコードの発行の結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairCodeIssue {
+    Issued { expires_at: i64 },
+    NotFound,
+    NotAgent,
+    OpenPlan,
+}
+
+/// コードを発行する。旧トークン（agent_selector / agent_secret_hash）と旧コードを同じ書き込みで消す。
+/// `code_hash` は呼び出し側が argon2id で作った PHC 文字列（書き込みの外で計算する）。
+/// open な計画・実行待ちの同期があれば `OpenPlan`（pair のやり直しも設定変更と同じく排他）
+pub fn issue_pair_code(
+    conn: &Connection,
+    device_id: i64,
+    selector: &str,
+    code_hash: &str,
+    now: i64,
+) -> Result<PairCodeIssue> {
+    atomically(conn, "issue_pair_code", || {
+        let Some(d) = get(conn, device_id)? else {
+            return Ok(PairCodeIssue::NotFound);
+        };
+        if d.transport != Transport::Agent {
+            return Ok(PairCodeIssue::NotAgent);
+        }
+        if has_open_work(conn, device_id)? {
+            return Ok(PairCodeIssue::OpenPlan);
+        }
+        let expires_at = now + PAIR_CODE_TTL_SECS;
+        conn.execute(
+            "UPDATE devices SET pair_selector = ?2, pair_code_hash = ?3, pair_code_expires = ?4,
+                   pair_code_attempts = 0, agent_selector = NULL, agent_secret_hash = NULL, updated_at = ?5
+             WHERE id = ?1",
+            params![device_id, selector, code_hash, expires_at, now],
+        )?;
+        Ok(PairCodeIssue::Issued { expires_at })
+    })
+}
+
+/// 試行の枠の予約の結果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairReserve {
+    Reserved { device_id: i64, code_hash: String },
+    Rejected,
+}
+
+/// 試行の枠を予約する: セレクタで行を引き、期限内・ハッシュあり・attempts < 上限なら attempts を 1 増やす。
+/// 引けない・期限切れ・上限到達は Rejected（引けないセレクタは何も書かない。期限切れはコードを消す）
+pub fn reserve_pair_attempt(conn: &Connection, selector: &str, now: i64) -> Result<PairReserve> {
+    atomically(conn, "reserve_pair_attempt", || {
+        let row: Option<(i64, Option<String>, Option<i64>, i64)> = conn
+            .query_row(
+                "SELECT id, pair_code_hash, pair_code_expires, pair_code_attempts FROM devices
+                 WHERE pair_selector = ?1 AND transport = 'agent'",
+                [selector],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((device_id, hash, expires, attempts)) = row else {
+            return Ok(PairReserve::Rejected);
+        };
+        if expires.is_none_or(|e| e <= now) {
+            conn.execute(
+                "UPDATE devices SET pair_selector = NULL, pair_code_hash = NULL, pair_code_expires = NULL
+                 WHERE id = ?1",
+                [device_id],
+            )?;
+            return Ok(PairReserve::Rejected);
+        }
+        let Some(code_hash) = hash else {
+            return Ok(PairReserve::Rejected);
+        };
+        if attempts >= PAIR_MAX_ATTEMPTS {
+            return Ok(PairReserve::Rejected);
+        }
+        conn.execute(
+            "UPDATE devices SET pair_code_attempts = pair_code_attempts + 1 WHERE id = ?1",
+            [device_id],
+        )?;
+        Ok(PairReserve::Reserved {
+            device_id,
+            code_hash,
+        })
+    })
+}
+
+/// 検証に失敗した: attempts が上限に達していればコードを失効させる
+pub fn fail_pair_attempt(conn: &Connection, device_id: i64, selector: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE devices SET pair_selector = NULL, pair_code_hash = NULL, pair_code_expires = NULL
+         WHERE id = ?1 AND pair_selector = ?2 AND pair_code_attempts >= ?3",
+        params![device_id, selector, PAIR_MAX_ATTEMPTS],
+    )?;
+    Ok(())
+}
+
+/// 検証に成功した: まだ同じコード（selector と hash）が載っていることを条件に（CAS）コードを消し、
+/// トークンを載せる。載っていなければ false（並行して別の試行が消費した・発行し直された）
+pub fn consume_pair_code(
+    conn: &Connection,
+    device_id: i64,
+    selector: &str,
+    code_hash: &str,
+    token_selector: &str,
+    token_hash: &str,
+    now: i64,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE devices SET pair_selector = NULL, pair_code_hash = NULL, pair_code_expires = NULL,
+               pair_code_attempts = 0, agent_selector = ?4, agent_secret_hash = ?5, updated_at = ?6
+         WHERE id = ?1 AND pair_selector = ?2 AND pair_code_hash = ?3 AND pair_code_expires > ?6",
+        params![
+            device_id,
+            selector,
+            code_hash,
+            token_selector,
+            token_hash,
+            now
+        ],
+    )?;
+    Ok(n == 1)
+}
+
+/// トークンで引いたエージェントの端末
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAuth {
+    pub device_id: i64,
+    pub uuid: String,
+    pub name: String,
+    pub secret_hash: String,
+}
+
+/// トークンのセレクタで agent の端末を 1 行引く
+pub fn agent_by_selector(conn: &Connection, selector: &str) -> Result<Option<AgentAuth>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, uuid, name, agent_secret_hash FROM devices
+             WHERE agent_selector = ?1 AND transport = 'agent' AND agent_secret_hash IS NOT NULL",
+            [selector],
+            |r| {
+                Ok(AgentAuth {
+                    device_id: r.get(0)?,
+                    uuid: r.get(1)?,
+                    name: r.get(2)?,
+                    secret_hash: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 /// 端末の open な計画（仕様 ③「計画の終端」。端末ごとに 1 つまで）

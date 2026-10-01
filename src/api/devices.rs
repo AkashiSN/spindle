@@ -3,12 +3,13 @@
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::AppState;
 use crate::db::devices::{
-    self as dbdev, Confirm, Device, DevicePatch, NewDevice, PlanEnd, PlaylistCheck, Selection,
-    Snapshot, Update,
+    self as dbdev, Confirm, Device, DevicePatch, NewDevice, PairCodeIssue, PlanEnd, PlaylistCheck,
+    Selection, Snapshot, Update,
 };
 use crate::db::jobs as dbjobs;
 use crate::db::{now_epoch, DbError};
 use crate::device::adb::probe_volumes_under;
+use crate::device::credential::{self, PAIR_SECRET_BYTES, PAIR_SELECTOR_BYTES};
 use crate::device::ondevice::is_reserved;
 use crate::device::quote::{root_abs_under, valid_serial, valid_volume, DEFAULT_ROOT};
 use crate::device::recover::{recover, Expect, RecoverError};
@@ -1327,4 +1328,37 @@ pub async fn verify(
     }
     let job_id = state.jobs.enqueue(verify_job(id)).await?.id();
     Ok(accepted(job_id))
+}
+
+/// `POST /api/devices/{id}/pair-code`: エージェントのワンタイムコードを発行する（旧トークンは即失効）
+pub async fn pair_code(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let issued = credential::issue(PAIR_SELECTOR_BYTES, PAIR_SECRET_BYTES)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let secret = credential::base32_decode(&issued.secret)
+        .ok_or_else(|| ApiError::Internal("コードを作れない".into()))?;
+    let hash = tokio::task::spawn_blocking(move || crate::api::auth::hash_bytes(&secret))
+        .await
+        .map_err(DbError::from)??;
+    let (sel, code) = (issued.selector.clone(), issued.text());
+    let res = state
+        .db
+        .write(move |c| dbdev::issue_pair_code(c, id, &sel, &hash, now_epoch()))
+        .await?;
+    Ok(match res {
+        PairCodeIssue::Issued { expires_at } => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"code": code, "expires_at": expires_at})),
+        )
+            .into_response(),
+        PairCodeIssue::NotFound => not_found(),
+        PairCodeIssue::NotAgent => error_response_with_message(
+            StatusCode::BAD_REQUEST,
+            "not_agent",
+            "iPhone（Mac 経由）の端末ではない",
+        ),
+        PairCodeIssue::OpenPlan => open_plan(),
+    })
 }
