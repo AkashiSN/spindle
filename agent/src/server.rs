@@ -17,8 +17,12 @@ use crate::{Error, Result};
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 
+/// 曲 1 本の取得の上限（止まった接続がいつまでも残らないように）
+const FETCH_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fetch {
+    /// 本体のストリームが通信エラーなく終わった。サイズと sha256 は呼び出し側が確かめる
     Complete,
     /// 412（版が変わった・送る元が変わった）
     Changed,
@@ -89,7 +93,10 @@ impl HttpServer {
         let client = Client::builder()
             .user_agent(concat!("spindle-agent/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
-            .timeout(None)
+            // blocking の ClientBuilder に read_timeout は無い。API 呼び出しは全体 60 秒、
+            // 曲の取得（fetch）だけ要求ごとに長い上限を付け、TCP keepalive で死んだ接続も切る
+            .timeout(Duration::from_secs(60))
+            .tcp_keepalive(Duration::from_secs(30))
             .build()
             .map_err(|e| Error::Server(e.to_string()))?;
         Ok(Self {
@@ -185,7 +192,8 @@ impl Server for HttpServer {
                 self.client
                     .get(self.url(&format!("api/agent/files/{track_id}"))?),
             )?
-            .header(IF_MATCH, format!("\"{token}\""));
+            .header(IF_MATCH, format!("\"{token}\""))
+            .timeout(FETCH_TIMEOUT);
         if offset > 0 {
             b = b.header(RANGE, format!("bytes={offset}-"));
         }
@@ -274,6 +282,8 @@ impl Server for HttpServer {
     }
 }
 
+/// report / abandon の応答。409 は `plan_closed` と `generation_mismatch` だけを区別し、
+/// それ以外（`plan_unreadable` など）はエラーにする
 fn reported(res: Response) -> Result<Reported> {
     match res.status() {
         StatusCode::OK => Ok(Reported::Ok),
@@ -286,7 +296,8 @@ fn reported(res: Response) -> Result<Reported> {
             let b = error_body(res);
             Ok(match b.error.as_str() {
                 "generation_mismatch" => Reported::GenerationMismatch,
-                _ => Reported::Closed,
+                "plan_closed" => Reported::Closed,
+                other => return Err(Error::Server(format!("409: {other}"))),
             })
         }
         _ => Err(unexpected(res)),

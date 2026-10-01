@@ -304,15 +304,15 @@ impl Server for FakeServer {
     }
 
     fn confirm(&self, plan_token: &str) -> Result<Confirmed> {
+        if self.0.borrow().pending_reevaluation {
+            return Ok(Confirmed::PendingReevaluation);
+        }
         if let Some(open) = self.open() {
             return Ok(if open.plan_token == plan_token {
                 Confirmed::Plan(open)
             } else {
                 Confirmed::OpenPlanExists
             });
-        }
-        if self.0.borrow().pending_reevaluation {
-            return Ok(Confirmed::PendingReevaluation);
         }
         let diff = self.diff();
         let now = self.plan_token(&diff);
