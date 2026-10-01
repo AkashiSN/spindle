@@ -248,6 +248,24 @@ fn media_folder_marks_are_detected() {
     assert!(r.looks_like_media_folder().unwrap());
 }
 
+/// メディアフォルダが root の祖先（~/Music など）でも、root はその中にある
+#[test]
+fn media_folder_mark_in_ancestor_is_detected() {
+    let d = tempfile::tempdir().unwrap();
+    let r = LocalRoot::new(d.path().join("home/Music/spindle"));
+    let parent = d.path().join("home/Music");
+    std::fs::create_dir_all(&parent).unwrap();
+    // root が無くても祖先を見る
+    std::fs::write(parent.join(MEDIA_FOLDER_MARKS[1]), b"x").unwrap();
+    assert!(r.looks_like_media_folder().unwrap());
+    std::fs::remove_file(parent.join(MEDIA_FOLDER_MARKS[1])).unwrap();
+    assert!(!r.looks_like_media_folder().unwrap());
+    // 2 つ上の印ディレクトリも
+    std::fs::create_dir(d.path().join("home").join(MEDIA_FOLDER_MARKS[0])).unwrap();
+    std::fs::create_dir_all(r.path()).unwrap();
+    assert!(r.looks_like_media_folder().unwrap());
+}
+
 #[test]
 fn media_folder_mark_file_is_detected() {
     let (_d, r) = root();

@@ -140,3 +140,15 @@ fn media_folder_root_stops_before_using_the_code() {
     assert!(matches!(do_pair(&mut env), Err(Error::Stop(m)) if m.contains("メディアフォルダ")));
     assert!(env.state().server.is_none());
 }
+
+/// メディアフォルダが root の親（~/Music）: root はその中なので、コードを使う前に止める
+#[test]
+fn media_folder_parent_stops_before_using_the_code() {
+    let mut env = Env::new();
+    let parent = env.root.path().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::write(parent.join(".Media Preferences.plist"), b"x").unwrap();
+    assert!(matches!(do_pair(&mut env), Err(Error::Stop(m)) if m.contains("メディアフォルダ")));
+    assert!(env.state().server.is_none());
+    assert!(!env.root.path().exists());
+}

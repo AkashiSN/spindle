@@ -271,17 +271,30 @@ impl LocalRoot {
         }
     }
 
-    /// root 直下にミュージック.app のメディアフォルダの印があるか。root が無ければ偽。
-    /// 印は存在で判定する（シンボリックリンクでも真。辿らない）
+    /// root か、その祖先のどれかがミュージック.app のメディアフォルダに見えるか（直下に印があるか）。
+    /// メディアフォルダが ~/Music などの祖先でも root はその中に入る。root が無ければ祖先だけを見る。
+    /// 印は存在で判定する（シンボリックリンクでも真。辿らない）。祖先は root の外なのでパスで stat する
     pub fn looks_like_media_folder(&self) -> Result<bool> {
-        let Some(root) = self.open_root()? else {
-            return Ok(false);
-        };
-        for name in MEDIA_FOLDER_MARKS {
-            match statat(&root, name, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(_) => return Ok(true),
-                Err(Errno::NOENT) => {}
-                Err(e) => return Err(io(e)),
+        if let Some(root) = self.open_root()? {
+            for name in MEDIA_FOLDER_MARKS {
+                match statat(&root, name, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(_) => return Ok(true),
+                    Err(Errno::NOENT) => {}
+                    Err(e) => return Err(io(e)),
+                }
+            }
+        }
+        for dir in self.root.ancestors().skip(1) {
+            for name in MEDIA_FOLDER_MARKS {
+                match std::fs::symlink_metadata(dir.join(name)) {
+                    Ok(_) => return Ok(true),
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) => {}
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
         Ok(false)

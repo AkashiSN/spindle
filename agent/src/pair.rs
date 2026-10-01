@@ -20,7 +20,7 @@ pub const SETUP_PREFIX: &str = "spindle-setup-";
 const FOLDER_EXISTS: &str =
     "ミュージック.app に「spindle」フォルダが既にあります。改名してから pair し直してください";
 
-pub const MEDIA_FOLDER_STOP: &str = "~/Music/spindle がミュージックのメディアフォルダになっています。ミュージック > 設定 > ファイル の「ミュージックメディアフォルダの場所」を別のフォルダに変えてから、やり直してください";
+pub const MEDIA_FOLDER_STOP: &str = "ミュージックのメディアフォルダが ~/Music/spindle か、それを含むフォルダ（~/Music など）になっています。ミュージック > 設定 > ファイル の「ミュージックメディアフォルダの場所」を ~/Music/spindle を含まない別のフォルダに変えてから、やり直してください";
 
 /// 「ファイルを［ミュージック］フォルダにコピー」が ON なら止める
 pub fn check_copy_setting<M: Music, S: Server>(cx: &Ctx<'_, M, S>) -> Result<()> {
@@ -30,7 +30,7 @@ pub fn check_copy_setting<M: Music, S: Server>(cx: &Ctx<'_, M, S>) -> Result<()>
     Ok(())
 }
 
-/// root がミュージックのメディアフォルダなら止める。削除でファイルまで消える・コピーの前提が崩れるため
+/// root がミュージックのメディアフォルダかその中なら止める。削除でファイルまで消える・コピーの前提が崩れるため
 pub fn check_root_not_media_folder<M: Music, S: Server>(cx: &Ctx<'_, M, S>) -> Result<()> {
     if cx.local.looks_like_media_folder()? {
         return Err(Error::Stop(MEDIA_FOLDER_STOP.to_owned()));
