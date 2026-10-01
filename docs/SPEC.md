@@ -1672,14 +1672,23 @@ CLAUDE.md の不変条件と禁止事項は Library（ユーザデータ）を�
 | `inbox` | 1 | 固定 |
 | `ytdl` | 1 | `ytdl:<url>`（playlist の展開・購読の同期で投入する分も同じ。D-70、D-78） |
 | `playlist_sync` | 1 | `playlist_sync:<subscription_id>`（列挙 → 番号揃え → ytdl 投入。§7.7「再生リストの購読と同期」、D-78） |
+| `source_hash` | 2（CPU 系の共通予算も取る） | `source_hash:<track_id>:<source>`（source = `master` / `opus` / `aac`。送る元の SHA-256。§7.11、D-95） |
+| `device_scan` | 2（同じ端末は排他。下記） | `device_scan:<device_id>`（回復してキャッシュを置き換える。未接続なら待たずに終わる。§7.11） |
+| `device_sync` | 2（同上） | `device_sync:<device_id>`（payload に `plan_id`。最大 3 回。確定した計画を実行。§7.11「同期」） |
+| `device_verify` | 2（同上） | `device_verify:<device_id>`（全曲の sha256。§7.11「内容の検証」） |
 | `gc` | 1 | 固定（scan と同じ排他 `library` を取れなければ Requeue。D-56） |
 | `backup` | 1 | 固定 |
 
-- **CPU 系の共通予算**（`rg` / `transcode` / `flaccheck` / `hirescheck`。D-73、P4-1）: 種別の並列度に加えて
-  共有の予算（= CPU コア数）を取ってから走る。種別単独なら今までどおり、複数種別が同時に走るときだけ
-  実行中の合計がコア数に収まる。取得順は種別 → 共通で、共通が取れなければ claim せず次の周回で試す
+- **CPU 系の共通予算**（`rg` / `transcode` / `flaccheck` / `hirescheck` / `source_hash`。D-73、P4-1）:
+  種別の並列度に加えて共有の予算（= CPU コア数）を取ってから走る。種別単独なら今までどおり、複数種別が
+  同時に走るときだけ実行中の合計がコア数に収まる。取得順は種別 → 共通で、共通が取れなければ claim せず次の周回で試す
   （ジョブは queued のまま。種別内の順序は変えない）。予算を分け合う種別は 1 件ずつラウンドロビンで
   claim する（次の周は最後に claim した種別の次から。1 種別が予算を独占しない）。`GET /api/jobs` の `cpu_budget`
+- **端末ジョブ**（`device_scan` / `device_sync` / `device_verify`。D-98）: 端末ごとの排他（`job_mutexes` の
+  `device:<id>` とプロセス内のロック）を取ってから、最初に端末側の回復を行う（別の端末なら並べてよい）。
+  ロックが取れなければ 15 秒後、未接続なら attempts を数えずに 300 秒後へ回し（`RequeueAfter`）、
+  `adb track-devices` がその端末を見たら `run_after` を前倒しする。`generation` の不一致と空き不足は
+  再試行しても変わらないので直ちに `failed`。端末が削除されていれば何もせずに終わる。詳細は §7.11
 - 起動時リカバリ: `running` を `queued` へ戻し、`track_locks` / `derived_path_locks` / `job_mutexes` を
   **全件削除**する
   （ロックはプロセス生存中しか意味を持たない）。単一インスタンス前提。同じ DB を
@@ -1815,6 +1824,71 @@ POST   /api/playlists/:id/export?profile=         Playlists/<profile>/<name>.m3u
 GET    /api/playlists/import, POST                Playlists root 下の m3u8 の一覧 / { path, name? } で取り込み
 GET    /api/playlists/:id/fb2k_query              foobar Autoplaylist 用の { query, sort, notes }（smart のみ。D-55）
 
+GET    /api/devices                               端末の一覧 → { items: [Device] }（下の「レスポンス形」。P5-2、D-95）。ハッシュの無い送る元の
+                                                  source_hash をここと差分で投入する（§7.11）
+POST   /api/devices                               { name, transport: adb | agent, variant: opus | aac, selection: all | playlists, serial?, volume? }
+                                                  → 201 Device。agent は行を作るだけ。adb は serial と volume（`emulated` か SD の UUID）が要り、
+                                                  接続を確かめ、保存先 `Music/spindle` が無いか空（`.spindle` だけの前の登録の失敗の残りは
+                                                  片付ける）なら manifest を作って device_scan を投入する（§7.11「登録」）。400 bad_request、
+                                                  409 duplicate（名前）| serial_registered | not_empty | not_connected、502 device_failed、503 adb_disabled
+PATCH  /api/devices/:id                           { name?, selection?, variant? } → 200 Device。名前以外は open な計画か待ち・実行中の
+                                                  device_sync がある間 409 open_plan。409 duplicate。保存先は変えない（削除して登録し直す）
+DELETE /api/devices/:id                           → 204。端末上のファイルには触らない。open な計画も行と一緒に消え、待ちの端末ジョブは
+                                                  取り消す。404 / 409 busy（端末のジョブが実行中か端末のロック中。D-98）
+PUT    /api/devices/:id/playlists                 { playlist_ids }（印の全置換）→ 200 Device。400 bad_request（無いプレイリスト）|
+                                                  cycle（on_device / device_pending を使うスマート）、409 open_plan
+GET    /api/devices/:id/diff                      差分・見積もり・評価時刻と plan_token（下の「レスポンス形」）
+GET    /api/devices/:id/estimate?selection=&playlist_ids=1,2
+                                                  選曲タブの見積もり（保存しない）→ { tracks, bytes, unhashed }（unhashed = 送る元の準備待ちで
+                                                  bytes に含まない曲数）
+GET    /api/devices/adb/unregistered              接続中で未登録の Android → { items: [{ serial, model, state, volumes: [{ volume, path, free,
+                                                  state: missing | empty | nonempty }], error }] }（volumes は state = device の端末だけ調べる）。
+                                                  503 adb_disabled
+POST   /api/devices/:id/sync                      { plan_token }（adb のみ）。計画の確定と device_sync の投入を 1 トランザクションで行う →
+                                                  202 { job_id }（同じ plan_token の open な計画があればそれで投入し直す。未接続でも 202 で、
+                                                  ジョブが接続を待つ）。409 plan_changed（本文に今の plan_token）| open_plan_exists |
+                                                  pending_reevaluation | plan_unreadable、400（agent の端末）、503 adb_disabled
+POST   /api/devices/:id/plans/open/resume         adb の open な計画の同期を投入し直す → 202 { job_id }。404 no_open_plan、409 plan_unreadable
+POST   /api/devices/:id/plans/open/abandon        { force? }。adb は接続して回復し、キャッシュを置き換えてから計画を abandoned にする →
+                                                  200 Device。409 not_connected | busy、404 no_open_plan。agent は force 無しでは 400
+                                                  （Mac の spindle-agent から破棄する）。force: true は端末につながず回復もせずに閉じる
+                                                  （agent も可。adb_disabled でも動く。409 busy。D-98 / D-99）
+POST   /api/devices/:id/verify                    adb のみ。device_verify を投入 → 202 { job_id }
+POST   /api/devices/:id/pair-code                 agent のみ。10 分・1 回限り・5 回まで試せるコードを発行 → 201 { code, expires_at }
+                                                  （旧トークンと旧コードは即失効）。400 not_agent、409 open_plan
+// Android の操作（登録・未登録の一覧・同期・再開・通常の破棄・検証）は `[devices].adb_server` が空なら
+// 503 adb_disabled（強制破棄と端末の削除は adb を使わないので動く。D-98）
+
+// エージェントの経路（認証は下の「認証」。セッション・CSRF・trusted_cidrs は通らない。D-99）
+POST   /api/agent/pair                            { code }（Bearer なし。端末タブで発行した `<selector>.<secret>`）→ 200 { device_uuid,
+                                                  device_name, token }。不一致・期限切れ・試行超過・引けないセレクタは一律 401 invalid_code
+GET    /api/agent/manifest                        → { device_uuid, device_name, generation, plan_token, pending_reevaluation,
+                                                  items: [{ track_id, dest_path, token, size, sha256 }],
+                                                  playlists: [{ playlist_id, name, token, tracks: [track_id] }],
+                                                  diff: { items: [{ op, track_id, from, to, token, size, sha256 }],
+                                                  held: [{ track_id, reason, waiting, has_copy }],
+                                                  playlists: [{ op, playlist_id, from, to, token }], playlist_errors: [{ playlist_id, reason }] } }
+                                                  （差分は UI と同じスナップショットから作る。D-99）
+GET    /api/agent/files/:track_id                 If-Match: "<配信トークン>"（強い ETag）必須、続きは Range を足す（HEAD も可）→ 200 / 206。
+                                                  428 if_match_required、412 precondition_failed（トークン不一致・弱い ETag・`*`・並記・
+                                                  ハッシュ未計算）| source_changed（送る元が変わった。行を捨てて次の差分で取り直させる）、
+                                                  404（その端末の desired に無い）、416、503 files_unavailable。パスはクライアントから受け取らない
+POST   /api/agent/plans                           { plan_token } → 201 Plan（新しく確定）| 200 Plan（同じ plan_token の open な計画）。
+                                                  409 plan_changed（本文に今の plan_token）| open_plan_exists | pending_reevaluation | plan_unreadable
+GET    /api/agent/plans/open                      → 200 Plan | 404 no_open_plan | 409 plan_unreadable
+POST   /api/agent/plans/:id/abandon               Report に { pending_ops, pending_batches }（件数）を足した本文 → 200 {}。報告と同じ検証を通り、
+                                                  キャッシュを全置換して計画を abandoned にする。409 pending_work（どちらかが 0 でない）、
+                                                  ほかは report と同じ
+POST   /api/agent/report                          Report → 200 {}（計画を completed にする。同じ報告の再送も 200）。400 invalid_report
+                                                  （1 件でも外れれば全体を拒否。§7.11「報告」）| bad_request、404 no_plan、409 generation_mismatch |
+                                                  plan_closed | plan_unreadable。本文の上限は report と abandon だけ 64 MiB
+// Report = { generation, plan_id, state: { tracks: [{ track_id, dest_path, token, size, sha256 }],
+//            playlists: [{ playlist_id, name, token }] }, errors: [{ kind: track | playlist, ref_id, reason }] }
+// Plan   = { plan_id, generation, plan_token, items: [{ op_id, op, track_id, from, to, token, size, sha256 }],
+//            playlists: [{ op_id, op, playlist_id, from, to, token }] }
+//          op = add | update | move | update_move | delete（プレイリストは add | update | delete）
+//          ワイヤ型は agent-proto クレートで本体とエージェントが共有する
+
 POST   /api/auth/login, POST /api/auth/logout
 GET    /api/auth/session
 
@@ -1883,6 +1957,8 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   項 { source, url, channel, verdict, message, subscription_id?, position? } | null。
                                                   destination.numbers は宛先の既存の番号 [[disc, track], …]（昇順）。subscriptions は
                                                   取り込みのトラックが参照する購読の直近の同期の要約（last_result の align から。1 回で読む））
+                                                  承認済み（approved / placing / placed）の件には stages: [{ key, label, status: done | running |
+                                                  todo | na, done, total }]（配置 → RG → 系統 → 端末の段。§12.6、P5-2）
 GET    /api/inbox/:id/artwork/:hash               取り込みのファイルの埋め込み画像（PICTURE の sha256 で実体を照合してから ETag / 304。
                                                   原寸、MIME は sniff、immutable。取り込みに無い / 実体消失 / 不一致は 404。状態非依存。
                                                   セッション必須。§7.8、P4-4）
@@ -1944,7 +2020,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //     "flags": ["missing", "pending"], // 固定フィルタ（AND）: unverified | duplicate | missing |
 //                                      //   no_rg | rg_unwritten | pending | conflict | hardlink |
 //                                      //   flac_unchecked | flac_error（§7.9）| hires_unchecked | hires_suspect（§7.10）
-//     "q": "情緒" }                    // 検索語（3 文字以上 FTS5 / 未満 LIKE）
+//     "q": "情緒",                     // 検索語（3 文字以上 FTS5 / 未満 LIKE）
+//     "device_pending": 2 }            // 端末に未反映（端末 id。追加・更新・移動。DSL の device_pending と同じ定義。§7.11）
 //   cursor は前ページの next_cursor をそのまま返す不透明文字列（キーセット）。sort が変わったら
 //   捨てる（別ソートで発行したカーソルは 400）。
 //   total はフィルタに一致する全件数（同じ読み取りスナップショットで数える）
@@ -1963,7 +2040,12 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "conflict_batch_id": 41,                               // または null
                "duplicate_group": "a1b2…",                            // audio_md5 hex または null
                "hardlink": false, "missing_since": null,
-               "rel_path": "J-Pop/…/01 ….flac" } ],
+               "rel_path": "J-Pop/…/01 ….flac",
+               "devices": [ { "device_id": 2, "state": "synced", "synced_at": 1700000000 },
+                            { "device_id": 3, "state": "pending", "op": "add", "reason": null } ] } ],
+                 // devices は端末ごとの状態（P5-2。対象外で端末にも無い端末は省き、端末が 1 台も無ければキーごと
+                 // 省く）。state = synced { synced_at } | pending { op: add | update | move | update_move, reason }
+                 // | waiting { reason, has_copy } | error { reason, has_copy } | removing。バッジ列とプロパティの「端末」が使う
   "next_cursor": "…", "total": 61234 }
 
 // 選択は 2 形。Ctrl+A はフィルタ形で送る（ID 列挙にしない）
@@ -2044,7 +2126,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                                 //   playlist_sync: 同期の要約。無ければ null）
                "subject" } ],   // subject = 対象の表示用文字列（track_id → Library のパス、album_id → ディレクトリ、
                                 //   batch_id → 説明、transcode は " [<variant>]" 付き、scan は kind、ytdl は url、
-                                //   thumbnail は "artwork #id"。行が消えていれば "track #id"、対象の無い種別は null）
+                                //   thumbnail は "artwork #id"、端末ジョブは "device #id"（source_hash は track_id と同じ）。
+                                //   行が消えていれば "track #id"、対象の無い種別は null）
                  // 状態ごとに上限付き（`limits`）: 実行中・待ち 1,000（実行中 → 待ち。取り出し順 = priority 降順・
                  // 作成順・id 昇順）→ 完了 300（新しい順）→ 失敗・取り消し 300（新しい順）。1 本の並びで切ると
                  // 待ちが数千件のとき完了・失敗が届かない
@@ -2089,6 +2172,38 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                "track_count": 12, "duration_ms": 2800000, "missing_since": null } ] }
 // GET /api/albums/:id  → 上の 1 要素 | 404
 
+```jsonc
+// GET /api/devices → { "items": [Device] }。POST / PATCH / PUT playlists / 破棄も Device を返す（端末タブ。§12.6）
+{ "id": 2, "name": "Xperia", "transport": "adb", "variant": "opus", "selection": "playlists",
+  "generation": 5,
+  "connected": true,             // adb: 監視が見た状態が device か（adb 無効なら false）。agent は null
+  "adb_state": "device",         // adb の生の状態（unauthorized / offline …）。見えていない・agent は null
+  "adb_volume": "E1C6-6113", "adb_root": "Music/spindle",   // agent は null
+  "counts": { "add": 3, "update": 0, "move": 1, "delete": 0, "waiting": 12, "error": 0, "synced": 210 },
+                                 // 曲ごとの状態の件数。更新 + 移動は move に数える。ナビの黄色い件数は
+                                 // add + update + move + delete + error の全端末の合計（待ちは含めない）
+  "last_synced_at": 1700000000,  // adb は同期の完了、agent は報告の受理
+  "playlist_ids": [1, 4],        // 印（device_playlists）
+  "open_plan": false,            // open な計画か待ち・実行中の device_sync がある（設定を変えられない）
+  "plan_open": false,            // open な計画がある（「続きを実行」「破棄」の対象）
+  "sync_job": null }             // 待ち・実行中の device_sync { id, state } か null
+
+// GET /api/devices/:id/diff
+{ "generation": 5, "plan_token": "…",          // 同期（adb）と計画の確定（agent）に添える
+  "pending_reevaluation": false,               // 印の付いたスマートの評価待ち（確定は 409）
+  "items": [ { "op": "add", "track_id": 1, "title": "…", "artist": "…", "from": null,
+               "dest_path": "J-Pop/…/1-01 群青.opus", "reason": null, "size": 8123456, "has_copy": false } ],
+             // op = add | update | move | update_move | delete | waiting | error。waiting / error は hold
+             // （reason に理由、has_copy は既存の写しが残るか）と、反映済みで前回の同期・報告が失敗した曲
+  "playlists": [ { "op": "update", "playlist_id": 4, "name": "通勤", "dest_path": "Playlists/通勤.m3u8",
+                   "reason": null } ],         // op = add | update | delete | error
+  "estimate": { "transfer_bytes": 25000000, "peak_bytes": 24000000, "free": 51200000000 },
+             // 送る量、実行順に見た「今より増える量」の最大値、端末の空き（adb が最後に測った値。無ければ null）
+  "evaluations": [ { "playlist_id": 4, "name": "通勤", "evaluated_at": 1700000000, "pending": false } ],
+             // 印の付いたスマートプレイリストの評価時刻
+  "counts": { … } }                            // Device の counts と同じ
+```
+
 ### 認証
 
 LAN 限定でも必須とする。攻撃者対策というより事故対策で、この API は 300GB の
@@ -2119,7 +2234,17 @@ LAN 限定でも必須とする。攻撃者対策というより事故対策で�
   ストリーム参照であり、履歴やジョブのエラー文（パスを含む）を LAN 全体に見せる理由はない。
   判定に使うのは接続元 socket のアドレスで、`X-Forwarded-For` は `trusted_proxies` に列挙した
   proxy からのものだけ採用する
-- `/health` 以外の全ルート（SSE / stream / artwork 含む）が同じ認証ミドルウェアを通る
+- `/health` と `/api/agent/*` 以外の全ルート（SSE / stream / artwork 含む）が同じ認証ミドルウェアを通る
+- **エージェントの経路**（`/api/agent/*`。Mac の `spindle-agent`、D-99）: セッションの認証ミドルウェアの
+  **外**に置き、`Authorization: Bearer <selector>.<secret>` だけで通す専用のミドルウェアを載せる。
+  Cookie・CSRF・`trusted_cidrs` はどれも見ず、逆にセッション側は Bearer では通らない（同じ経路に分岐を
+  足すと、どちらかの検査が緩む事故が起きやすい）。セレクタで端末の行を 1 つ引き、シークレットの SHA-256 を
+  定数時間で比べる（256 bit の乱数なので argon2id は要らない）。外れれば 401 `unauthenticated` と
+  `WWW-Authenticate: Bearer`。トークンは端末タブの「pair コードを発行」（`POST /api/devices/:id/pair-code`。
+  セッション必須）で出したワンタイムコード（`<selector>.<secret>`、10 分・1 回限り、argon2id で保存、
+  試行は検証の前に予約して 5 回まで）を `POST /api/agent/pair` で引き換えて受け取る。pair だけは Bearer を
+  要らない明示的な例外。コードを発行し直すと旧トークンは即失効する。ロックモードでは pair を含めて 503。
+  トークンとコードはログに出さない
 - Subsonic 非対応が確定したため、salt+md5 方式との併存を考慮する必要はない
 
 ---
@@ -2143,7 +2268,9 @@ ORDER BY %date% DESC LIMIT 100
 - 論理: `AND` / `OR` / `NOT` / 括弧
 - 拡張フィールド: `verification` `lossless` `codec` `samplerate` `bitdepth`
   `channels` `category` `added` `duration` `has_derived` `missing` `hirescheck` `cutoff` `cliff`
-  `effectivebits`
+  `effectivebits`、端末の状態を引く `on_device` / `device_pending`（値は端末名、`IS` だけ。端末名はバインドし、
+  未反映の集合は JSON 配列をバインドして `json_each` で展開する。これらを使うスマートプレイリストは端末の
+  選曲に載せられない。§7.11、docs/DSL.md）
 - 独自拡張（foobar に無い）: `MATCHES` / `LIMIT` / `ORDER BY random`
 - SQL 生成はホワイトリスト列へのマッピング。任意タグは
   `EXISTS (SELECT 1 FROM track_tags ...)` に展開。値は全てバインドパラメータ
@@ -2250,24 +2377,32 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 - **上部バー**（ナビとプレイヤーを 1 本に。D-58 追記）: 左に画面の切替、中央に ⏮ ▶ ⏭ ■ とシーク、
   曲名（無ければ Not playing）、右に RG モード / 原本 / 音量、☰（ジョブ / 履歴 / 設定 / ログアウト。
   SSE の接続状態の点もここ）
-- **ナビの並び**（P4-20）: `ライブラリ / アルバム / CD / YouTube / Inbox`。ジョブ・履歴・設定は ☰ の中。
+- **ナビの並び**（P4-20）: `ライブラリ / アルバム / CD / YouTube / Inbox / 端末`。ジョブ・履歴・設定は ☰ の中。
   **タブは取り込みの流れ順には並べない。** ものは 入力（CD / YouTube）→ Inbox → ライブラリ と流れるが、
   ライブラリが日常の入口なので先頭（ホーム）に置く。導線は「取り込みタブのすぐ右に Inbox があり、
   そこに赤い数字が増える」ことで示す（CD を取り込み終えたら右隣の Inbox を見る）。
   Inbox のバッジは承認待ちの件数（`GET /api/inbox/summary`）で、失敗があれば赤点も出す。
   ジョブが ☰ に入るので、実行中 + 待ちの件数は ☰ のメニュー内の「ジョブ」に添え、失敗の赤点は
-  ☰ のボタン自体に出す（SSE の点と合わせて 2 つまで。3 つ並べると読めない）
+  ☰ のボタン自体に出す（SSE の点と合わせて 2 つまで。3 つ並べると読めない）。
+  **端末**（P5-2、D-95）は取り込みの流れの終点として Inbox の右に置き、全端末の未反映（追加 + 更新 + 移動 +
+  削除 + エラー。待ちは含めない。同じ曲が 2 端末で未反映なら 2）の件数を黄色で出す（`GET /api/devices` の
+  `counts` の合計。一覧は画面に関わらず取る）
 - **左サイドバーを出す画面**（P4-20）: ツリーの選択が表の絞り込みに効く画面（ライブラリ / アルバム）だけ。
-  CD / YouTube / Inbox / ジョブ / 履歴 / 設定では左カラムごと畳んで全幅にする（ツリーが何にも効かないため。
+  CD / YouTube / Inbox / 端末 / ジョブ / 履歴 / 設定では左カラムごと畳んで全幅にする（ツリーが何にも効かないため。
   左カラム下のアルバムアートも一緒に隠れるが、曲名は上部バーに残る）
 - **検索ボックス**は左サイドバーの先頭（スクロールしない）。表の `filter.q`（入力から 250ms 後に
   反映。3 文字以上で FTS、未満は LIKE。D-39 / D-40）
 - **左サイドバー**: 3 区画（ツリー / プレイリスト / フィルタ）。どれを選んでも
   **中心の表の集合を差し替えるだけ**で、列・ソート・選択の仕組みは共通
   - ツリー: Category → AlbumArtist → Album（`GET /api/albums` から構築。選ぶと scope を置き換える）
-  - プレイリスト: 手動 / スマート。表からドラッグで追加
+  - プレイリスト: 手動 / スマート。表からドラッグで追加。**選曲の近道**（P5-2、D-95）: 印の付いた端末を行に
+    チップ（`📱 <端末名>`）で出し、右クリックと … のメニューの「端末へ送る」に端末ごとのチェックを並べる
+    （端末タブの選曲と同じ `PUT /api/devices/:id/playlists` を触る。端末が 1 台も無ければ追加を案内する。
+    同期が途中の端末は変えられない）
   - フィルタ（固定）: 未検証 / 重複 / missing / RG なし / 反映待ち / conflict / hardlink。
-    トグルで AND、ツリーの絞り込みと組み合わせられる（D-40）
+    トグルで AND、ツリーの絞り込みと組み合わせられる（D-40）。端末があれば「端末に未反映 ▾」で端末を選ぶと
+    `filter.device_pending` で絞る（追加・更新・移動。DSL の `device_pending` と同じ定義。選んでいた端末が
+    消えたら外す）
 - **右パネル**: 2 タブ（一括編集 / 選択の詳細）。折りたたみ可、幅は永続化
 - **下部バー**: 左が再生（再生・停止・シーク・音量・RG の off / track / album）、右がジョブ要約
   「実行中 N · 反映待ち M · 失敗 K」。右側クリックでジョブ画面へ
@@ -2291,6 +2426,7 @@ rel_path（既定非表示）
 | 重複 | `duplicate_groups` に属する | view |
 | hardlink | `nlink > 1` | tracks |
 | missing | `missing_since` あり。行全体をグレー | tracks |
+| 端末 | 端末ごとに 1 つ（ホバーで端末名）: 📱 反映済み / 📲 未反映（追加・更新・移動・更新 + 移動）/ ⏳ 待ち（理由）/ ⚠ エラー（理由）。対象外（removing）と、その端末に関係しない曲は出さない（P5-2、D-95 の可視化 D） | `/api/tracks` の `devices` |
 
 **選択**: クリック / Shift 範囲 / Ctrl 追加 / Ctrl+A（フィルタ結果全件）/ キーボード（下記）。
 全件選択は ID 列挙ではなく**選択した時点のフィルタ式**をサーバに渡す（`selection.filter`）。
@@ -2326,6 +2462,12 @@ foobar2000 の Properties と同じく、行末の × か右クリックのメ�
 `delete` op。値の無い行は消せない）、表の下の「フィールドを追加」で**新しいキー**に `set`（キーは大文字化、
 `=` と制御文字は不可、`PICTURE` 不可、表に既にあるキーはその行の編集を案内、空の値は追加しない）。
 どれも 1 op のバッチ（preview → apply、履歴から巻き戻せる）。サーバの変更は無い。
+
+**プロパティタブの「端末」節**（P5-2、D-95 の可視化 A）: Location の下に、端末が 1 台でもあれば端末ごとに
+1 行: `✓ 反映済み（日時）` / `未反映（追加・更新・移動・更新 + 移動）`（前回の失敗があれば理由）/
+`待ち: <理由>` / `エラー: <理由>`（既存の写しがあれば「（古い版が端末にあり）」）/ `対象外`
+（次の同期で端末から消えるものは「次の同期で端末から削除」）。複数選択は他の行と同じく集計し、
+全部反映済みなら `✓ 反映済み`（日時は畳む）。
 
 ### 12.3 右パネル: 一括編集
 
@@ -2528,6 +2670,10 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   写す（複数枚組のときだけ「写す先」のディスクを選ぶ）。アーティストの無い行は既存の値を保ち、
   アーティストを貼った行は「そのまま保つ」を外す。取り込みに無い番号・同じ番号の行が複数あるもの・行数の違い・
   未設定の行と、解析の警告（飛ばした見出し・番号の重複 / 飛び）を節の中に出す。写した後もフォームで直せる
+- **Inbox の段**（P5-2、D-95 の可視化 B）: 承認した件（approved / placing / placed）の見出しの下に、その後の段を
+  横並びで出す: `配置 → RG → opus → aac → <端末…>`（`GET /api/inbox` の `stages`）。段ごとに 完了 / 進行中
+  （n/m）/ 未 / 対象外。RG は書き込みが要る設定なら書き込みまで、系統は無効なら「（無効）」で対象外、端末は
+  その端末の選曲に入る曲の数を母数に反映済みを数える（対象外へ向かう曲は数えない）
 - **操作タブの「album gain」**（P4-5、D-74）: 「ReplayGain / FLAC」節に、選択行が属する album ごとの
   チェックボックス（`PATCH /api/albums/:id`。20 album を超えたら絞るよう促す）。アルバム画面は無く
   アルバム一覧は表を絞るだけなので、切り替えはここに置く
@@ -2560,6 +2706,32 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
   `/youtube?url=<URL>` で開くと欄に入れた状態で開く（ブックマークレットの
   受け口。同一 origin の GET なので CORS / CSRF を触らない。http / https 以外は受けない。USERGUIDE §11.3）。
   操作タブの YouTube 節は廃止
+- **端末**（P5-2〜P5-4、D-95 / D-98 / D-99。§7.11）: 左カラム（ツリー）は出さず、代わりに左に端末の一覧
+  （名前・接続状態の点（adb のみ）・Android / iPhone・未反映 / 待ちの件数、未接続や USB デバッグの許可待ちの
+  一言）と「端末を追加 ▸ iPhone（Mac 経由）/ Android（USB）」、右に選んだ端末のサブタブ **差分 / 選曲 / 設定**
+  （選んだタブは localStorage）。一覧は 60 秒ごとに、一覧と差分はジョブの状態が変わるたびに（間引いて）
+  取り直す（ハッシュ計算・変換・評価の完了で差分が変わり、SSE の job イベントには種別が無いため）
+  - **追加**: iPhone は名前・系統（既定 AAC）・選曲で行を作るだけ（Mac は設定タブの pair で結ぶ）。Android は
+    `GET /api/devices/adb/unregistered` を前の要求の 3 秒後ごとに取り直し、許可待ちの端末には「端末で許可して
+    ください」、`device` の端末には名前（機種名）・系統（既定 Opus）・選曲・保存先（内部共有ストレージ /
+    SD カード。空き容量付き。空でないものは選べない）のフォームを出して登録する。Poweramp の音楽フォルダの
+    下に置くよう添える
+  - **差分**: 上に送る量・一時的に増える量・端末の空き、評価待ちの警告と印の付いたスマートの評価時刻。表は
+    操作（追加・更新・移動・更新 + 移動・削除・待ち・エラー）/ 曲 / 理由で、待ちとエラーに既存の写しがあれば
+    「保留: 既存の写しは残す」を添える（先頭 1,000 行まで）。下にプレイリストの差分。Android は未接続・許可待ちの
+    一言と「同期（N 件・M バイト）」ボタン（`plan_token` を添えて `POST /api/devices/:id/sync`。差分が無い・
+    同期が待ち / 実行中・途中の計画があれば押せない）、途中の計画があれば「前回の同期が途中です」に
+    「続きを実行」「破棄」、未接続か通常の破棄が `not_connected` なら「強制破棄」。iPhone はボタンを出さず
+    「Mac で `spindle-agent sync` を実行する」の案内とエージェントの最終報告時刻、途中の計画があれば Mac で
+    続けるかの案内と「強制破棄」
+  - **選曲**: 全曲 / プレイリストの切り替えと、プレイリストのチェック一覧（スマートは ⚙、曲数）。選び方を
+    変えるたびに `GET /api/devices/:id/estimate` で合計曲数と容量（送る元の準備待ちで容量未確定の曲数を
+    添える）を出す。保存は印を先に、選び方を後に（プレイリスト選曲へ切り替えるとき空の選曲の差分を作らない）。
+    途中の計画があれば保存できない
+  - **設定**: 名前・系統（途中の計画があれば系統は変えられない）、Android は保存先の表示（変えるには削除して
+    登録し直す）と「内容を検証」、iPhone は「pair コードを発行」（確認のうえ発行し、コードと期限と
+    `spindle-agent pair <この画面の origin> <コード>` をコピーできる形で出す。コードは画面の state にだけ
+    持つ）。最後に「端末を削除」（端末上のファイルは消さない。途中の計画があればそれも破棄する旨を確認に出す）
 - **設定**: 「表示」（配色: OS に従う / ライト / ダーク。localStorage に保存。P4-10、D-58 追記）、
   `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
   退避 WAV（`archived_files`）の一覧と復元
@@ -2570,15 +2742,15 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
 
 ```toml
 [server]
-listen = "0.0.0.0:8080"        # 待ち受けアドレス。省略時はこの値。ポート公開は compose 側で行う
+listen = "0.0.0.0:8080"         # 待ち受けアドレス。省略時はこの値。ポート公開は compose 側で行う
 
 [paths]
-library  = "/library"
-derived  = "/derived"
-archive  = "/archive"
-inbox    = "/inbox"
+library   = "/library"
+derived   = "/derived"
+archive   = "/archive"
+inbox     = "/inbox"
 playlists = "/playlists"
-data     = "/data"
+data      = "/data"
 
 [layout]
 multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02}. {title}"
@@ -2587,7 +2759,7 @@ unsorted    = "_Unsorted/{albumartist}/{album}/{track:02}. {title}"
 
 [rip]
 device = "/dev/sr0"
-drive_offset = "auto"          # auto | 整数
+drive_offset = "auto"           # auto | 整数
 retry_on_mismatch = 2
 prefer_ctdb = true
 
@@ -2605,32 +2777,31 @@ lossy_sources = true           # 非可逆原本も AAC へ（D-8 の例外。aa
 multi_value_separator = " & "  # 多値フィールドの結合
 
 [replaygain]
-reference_lufs = -18.0         # 内部表現。書き出し時に変換
-write_tags = true              # 解析後に自動でタグへ書き、Derived はその後に作る。false はタグに書かない（D-97）
+reference_lufs = -18.0          # 内部表現。Opus のみ書き出し時に -23 へ変換
+write_tags = true
 
 [normalize]
 wav_to_flac = true
 flac_verify_on_import = true
 flac_fix_missing_md5 = true
-flac_recompress_all = false   # 圧縮レベル統一のための一括再エンコードは行わない
+flac_recompress_all = false     # 圧縮レベル統一のための一括再エンコードはしない
 
 [scan]
-deep_interval_days = 30        # deep scan（tag_hash / audio_md5 全再計算）の間隔。0 で自動実行なし
+deep_interval_days = 30         # tag_hash / audio_md5 を全件再計算する deep scan の間隔。0 で自動実行なし
 
 [inbox]
-poll_interval_secs = 60        # Inbox の確認間隔（変化があったときだけ走査を投入。inotify は使わない: D-68 追記）。0 で自動なし
+poll_interval_secs = 60         # Inbox の確認間隔（秒。変化があったときだけ走査を投入）。0 で自動なし（UI の「今すぐ確認」だけ）
 
 [gc]
-retention_days = 7             # 物理削除までの猶予（missing_since / 退避 WAV / Derived 孤児）
-jobs_done_days = 7             # 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない（P4-18）
-jobs_failed_days = 30          # failed のジョブ行を消すまでの日数。0 で消さない
+retention_days = 7              # missing_since / 退避 WAV / Derived 孤児 / 却下して削除した Inbox の取り込みを物理削除するまでの日数
+jobs_done_days = 7              # 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない
+jobs_failed_days = 30           # failed のジョブ行を消すまでの日数。0 で消さない
 
-[auth]                         # 認証は常に有効。無効化する設定は置かない。
-                               # パスワードハッシュは DB の auth 表に持つ。
-                               # 初期値は環境変数 SPINDLE_INITIAL_PASSWORD（初回起動時のみ読む）
+[auth]                          # 認証は常に有効（無効化する設定は無い）
+                                # 初期パスワードは環境変数 SPINDLE_INITIAL_PASSWORD（初回起動時のみ）
 session_days = 30
-trusted_cidrs = []             # 例: ["192.168.1.0/24"]。stream / artwork / tracks/:id / playlist export のみ認証スキップ
-trusted_proxies = []           # ここに列挙した proxy からの X-Forwarded-* だけを信用する
+trusted_cidrs = []              # 例: ["192.168.1.0/24"]。stream / artwork / tracks/:id / playlist export だけ認証スキップ
+trusted_proxies = []            # ここからの X-Forwarded-* だけを信用する
 
 [backup]
 interval_hours = 24
@@ -2656,32 +2827,54 @@ enabled = true
 metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
 metadata_timeout_secs = 30
 download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
-ytdlp_args = ["--extractor-args", "youtube:lang=ja"]   # 翻訳タイトルでなく日本語のタイトル・チャンネル名を取る。弾かれたときの口にもなる（P4-13）。UA / Referer は付けない
+# yt-dlp に毎回付ける追加引数（省略時は無し）。UA / Referer は付けない。
+# youtube:lang=ja: 言語を指定しないと、投稿者が翻訳タイトルを付けた動画は英語のタイトルが返り、日本語の曲名が
+# 取れない（メタデータプラグインのルールにも合わない）。チャンネル名も言語で変わる
+ytdlp_args = ["--extractor-args", "youtube:lang=ja"]
+# YouTube に弾かれるときは extractor-args を足す（同じキーは ; で並べる）か cookies を渡す
+# ytdlp_args = ["--extractor-args", "youtube:lang=ja;player_client=web_safari"]
+# ytdlp_args = ["--extractor-args", "youtube:lang=ja", "--cookies", "/data/cookies.txt"]
 sync_interval_hours = 0        # 再生リストの購読を定期同期する間隔（時間）。0 = 手動と承認の後続だけ（D-78）
 
-[hires]                        # 偽ハイレゾ検出（§7.10、D-71）
+[hires]                        # 偽ハイレゾ検出（D-71）
 check_on_import = true         # スキャン完了時に未検査の対象（可逆かつ >48 kHz または >16 bit）を自動投入
-cutoff_hz = 25000              # カットオフがこれ以下なら「上げただけ」の疑い（44.1k の 22.05 kHz と 48k の 24 kHz を
-                               # 窓の漏れ込みの余裕込みで拾う。本物の 96k は 30 kHz 以上まで伸びるのが普通）
+cutoff_hz = 25000              # カットオフがこれ以下なら「上げただけ」の疑い（44.1k の 22.05 kHz と 48k の 24 kHz を余裕込みで拾う）
 cliff_db = 10.0                # カットオフ前後 1 kHz の落差がこれ以上なら SRC の崖とみなす（実 SRC は 12〜21 dB）
 hard_cutoff_hz = 22500         # カットオフがこれ以下なら崖に関わらず「上げただけ」（44.1k の Nyquist + 余裕）
 
-[bin]                          # 外部バイナリ。パスで上書き可
+[bin]
 ffmpeg = "ffmpeg"
 flac = "flac"
 opusenc = "opusenc"
-cdparanoia = "cd-paranoia"     # libcdio 版（Debian パッケージ cd-paranoia）
+cdparanoia = "cd-paranoia"
 cdrdao = "cdrdao"
 ytdlp = "yt-dlp"
 adb = "adb"
 
 [devices]
-adb_server = "localfilesystem:/run/adb/adb.sock"   # adb サイドカーのソケット。空なら Android 同期を無効化
+# adb サイドカー（deploy/compose.yaml の adb サービス）のソケット。空なら Android の同期を無効にする（D-98）
+adb_server = "localfilesystem:/run/adb/adb.sock"
 adb_timeout_secs = 60
 adb_transfer_timeout_secs = 3600
 ```
 
 実体は `deploy/config.example.toml`。両者は一致させる。
+
+端末への配信（§7.11）の設定（P5-3b、D-98）:
+
+- `[bin].adb`: adb クライアント。イメージに platform-tools の adb（版と sha256 を固定）を同梱し、compose の adb
+  サイドカーも同じイメージの adb をサーバとして使う（クライアントとサーバの版を揃える）。省略時は `adb`、空と前後の
+  空白は起動時に拒否する。子プロセスには `HOME=<data>/adb` を渡す（`$HOME/.android` を作れないと adb が止まる）
+- `[devices].adb_server`: adb サーバの場所（`ADB_SERVER_SOCKET`）。`localfilesystem:/絶対パス`（サイドカーの
+  Unix ソケット。既定の構成）か `tcp:ホスト:ポート`。**空（節ごと省略を含む）なら Android の同期を無効**にし、
+  Android の端末の操作は 503 `adb_disabled`（強制破棄と端末の削除、iPhone は動く）。前後の空白は起動時に拒否する
+- `[devices].adb_timeout_secs`: 1 回で終わる adb のコマンド（状態の確認・manifest の読み書き・1 曲の
+  `sha256sum` など）の上限（秒。既定 60、1 以上）
+- `[devices].adb_transfer_timeout_secs`: 1 曲の転送と、端末上の全ファイルの一覧（数千件の `stat` で長く
+  かかる）の上限（秒。既定 3600、1 以上）
+
+iPhone（Mac の `spindle-agent`）はサーバ側の設定を持たない（エージェントは pair のときに spindle の URL を
+受け取る。§7.11、`agent/README.md`）。
 
 ---
 
@@ -2690,7 +2883,8 @@ adb_transfer_timeout_secs = 3600
 ### イメージの配布（P4-12、D-79）
 
 - 置き場は GHCR `ghcr.io/akashisn/spindle`（public。pull にトークン不要）。`linux/amd64` のみ
-- CI（`.github/workflows/ci.yml`）は web → rust → docker → publish の順。docker ジョブ（PR でも走る。
+- CI（`.github/workflows/ci.yml`）は web → rust → docker → publish の順（Mac の `spindle-agent` の
+  `agent-macos` も publish の前提。下記）。docker ジョブ（PR でも走る。
   `contents: read` だけ）が**イメージを 1 回だけビルド**し（`docker/build-push-action` の `load`）、起動確認
   （`--version`、`/health` の `version` / `ytdlp`、ロックモード、ログイン、CSRF、ジョブ API、同梱 SPA）に
   通ったものを `docker save` して成果物に渡す。publish ジョブ（push イベントだけ。書き込み権限 = GHCR /
@@ -2703,6 +2897,14 @@ adb_transfer_timeout_secs = 3600
   --always)` で渡し、`build.rs` が `cargo:rustc-env` で焼く（環境変数 > 作業ツリーの `git describe`（HEAD /
   その ref / packed-refs / index の変化で再計算。`--dirty` は付けない）> `dev`）。OCI ラベル（`org.opencontainers.image.{source,revision,version,created,…}`）は metadata-action
 - メタデータプラグイン（`spindle-ytmusic-meta`）はイメージに焼かず実行時マウントのまま（D-70）
+- adb（Android の platform-tools。版と sha256 を Dockerfile で固定）はイメージに同梱し、spindle のクライアントと
+  compose の adb サイドカーのサーバが同じものを使う（D-98）
+- **Mac の `spindle-agent`**（P5-4c、D-101）: CI の `agent-macos` ジョブ（`macos-latest`）が clippy・test
+  （偽のミュージック.app の `fake` 機能）・release ビルドを行い、`spindle-agent-<git describe>-aarch64-apple-darwin.tar.gz`
+  （バイナリと `agent/README.md`）と `.sha256` を成果物にする。publish ジョブはこれにも依存し（edge のイメージも
+  macOS ジョブの成功が要る）、`vX.Y.Z` タグでは Release に添付する。macOS（arm64）だけで、**署名・公証は
+  しない**（Developer ID が無い。必要になったら入れる）。導入は README の
+  `xattr -d com.apple.quarantine` と、初回の Automation（ミュージック.app の操作）の許可
 - **`edge` は開発用で DB の互換（マイグレーションの前進）以外は約束しない。** 本番は `latest`
   （= 最新の `vX.Y.Z`）か `X.Y` を指す。マイグレーションは起動時に自動で前進のみ = 戻すときは
   バックアップから（OPERATIONS）
@@ -2734,11 +2936,30 @@ services:
       - /mnt/ssd/media/Inbox:/inbox
       - /mnt/ssd/media/Playlists:/playlists
       - /mnt/ssd/apps/spindle:/data
+      - adb-run:/run/adb:ro      # adb サイドカーの Unix ソケット（D-98）。:ro は外さない（下記）
       - /mnt/ssd/apps/spindle/bin/spindle-ytmusic-meta:/usr/local/bin/spindle-ytmusic-meta:ro   # メタデータプラグイン（D-70）
     ports:
       - "8080:8080"
     restart: unless-stopped
+
+  adb:                           # adb サーバだけを動かすサイドカー（D-98）。Android の同期を使わないなら不要
+    image: ghcr.io/akashisn/spindle:latest
+    network_mode: host
+    init: true
+    entrypoint: ["/bin/sh", "-c", "umask 000 && exec /usr/local/bin/adb -L localfilesystem:/run/adb/adb.sock nodaemon server"]
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - adb-run:/run/adb
+      - /mnt/ssd/apps/spindle/adb-keys:/root/.android   # USB デバッグの許可の鍵。消すと端末で許可し直す
+    device_cgroup_rules:
+      - 'c 189:* rmw'            # USB（/dev/bus/usb）
+    restart: unless-stopped
+
+volumes:
+  adb-run: {}
 ```
+
+実体は `deploy/compose.yaml`（PID 1 を tini にする `init: true` などのコメントもそこ）。
 
 **注意点:**
 
@@ -2749,6 +2970,21 @@ services:
 - ホストにドライブが無いと `devices` の行で compose が起動に失敗する。ドライブの無い機体では
   `devices` / `group_add` / `device_cgroup_rules` を消す。アプリ側は `[rip].device` を開けなくても
   起動し、CD 画面に「ドライブが無い」と出す
+
+**adb サイドカー**（Android の同期。§7.11、D-98）:
+
+- **`network_mode: host`**: 独自のネットワーク名前空間では、挿し直した端末を拾わない（USB のホットプラグの
+  通知 = netlink の uevent が届かない。実機で確認）。代わりに **TCP は開かず**、名前付きボリューム `adb-run` 上の
+  Unix ソケット（`-L localfilesystem:/run/adb/adb.sock`）だけで待ち受ける（`-a` で 5037 を開くと LAN から端末を
+  操作できてしまう）。`umask 000` はサイドカー（root）が作るソケットに spindle（`user: 1000:1000`）が繋げるようにするため
+- **spindle 側はソケットのボリュームを `:ro` でマウントする**: `localfilesystem:` を指定しても adb クライアントは
+  「サーバに繋がらなければ同じパスで自前のサーバを起こす」。サイドカーが落ちている間にそれが起きると、戻った
+  サイドカーとサーバが 2 つになり、端末の監視が USB を持たない方に繋がったままになる。読み取り専用なら connect()
+  は通り、自前のサーバの待ち受けの作成だけが `Read-only file system` で失敗する（未接続として扱われる）
+- **鍵の置き場**: USB デバッグの許可の鍵（`/root/.android`）を `/mnt/ssd/apps/spindle/adb-keys` に残す。消すと
+  端末で許可し直しになる。USB は `/dev/bus/usb` の bind と `c 189:* rmw`
+- spindle 側は `[devices].adb_server = "localfilesystem:/run/adb/adb.sock"`（§13）。サイドカーを置かない構成では
+  空にする（Android の同期だけが無効になる）。spindle 本体の権限は変えない
 
 ### ZFS データセット
 
@@ -2844,6 +3080,9 @@ src/
 │   ├── categories.rs    統制語彙（canonical key で一意）
 │   ├── inbox.rs         inbox_items / inbox_files（承認キューの状態機械。D-68）
 │   ├── subscriptions.rs playlist_subscriptions（再生リストの購読。追記先の CAS 束ねと同期の latch。D-78）
+│   ├── devices.rs       端末の表（§6）: マニフェストの入力の読み取りと全端末のスナップショット、計画の確定・終端、
+│   │                    キャッシュの全置換、pair コードとトークン、source_hash の投入（§7.11、D-95 / D-99）
+│   ├── stages.rs        Inbox の承認済みの件の段（配置 → RG → 系統 → 端末。§12.6）
 │   ├── playlists.rs  jobs.rs  history.rs
 ├── domain/
 │   ├── identity.rs      inode / audio_md5 による同一性解決
@@ -2852,6 +3091,8 @@ src/
 │   ├── pathgen.rs       テンプレート展開・正規化・衝突回避
 │   ├── tags.rs          lofty ラッパ、正規化、多値処理、Derived への書き出し（Opus の VorbisComments / MP4 の ilst + フリーフォーム）
 │   ├── replaygain.rs    ebur128、フォーマット別変換
+│   ├── device.rs        端末への配信の純粋関数（選曲・送る元・パスの検査と衝突・desired / hold / remove・トークン・
+│   │                    差分・plan_token・曲ごとの状態・見積もり。§7.11、D-95）
 │   └── category.rs      統制語彙、GENRE 写像
 ├── edit/
 │   ├── mod.rs           編集バッチの coordinator（記録・DB 先行更新・反映・overlay 解消・
@@ -2893,10 +3134,25 @@ src/
 │                        downloader.rs（yt-dlp の dump / download、remux、タグ、Archive、Inbox への配置と
 │                        spindle-inbox.json。D-70）、sidecar.rs（spindle-inbox.json の読み書き。Inbox と共有）、
 │                        playlist.rs（再生リストの列挙の解釈と番号揃えの計画。純粋。D-78）
+├── device/              端末への配信の実行側（§7.11。判定は domain::device、キャッシュは db::devices）
+│   ├── remote.rs        DeviceFs（端末の root 配下の操作。試験は偽の端末 FS）
+│   ├── adb.rs           adb による DeviceFs（shell v2 だけ、引数配列。ボリュームの探索）
+│   ├── quote.rs         端末側のシェルへ渡すパスの検査と単引用符クォート（1 か所だけ）
+│   ├── ondevice.rs  journal.rs  store.rs
+│   │                    端末側の正本（manifest.json）・ジャーナル（NDJSON）・耐久化の順序
+│   ├── recover.rs       接続のたびの回復（DB は見ない）
+│   ├── plan.rs          確定した計画と、開始済みの計画の再開（実行する部分集合）
+│   ├── sync.rs          計画の実行（削除 → パス変更のバッチ → 更新 → 追加 → プレイリスト）
+│   ├── verify.rs        内容の検証（全曲の sha256sum）
+│   ├── track.rs  runtime.rs
+│   │                    `adb track-devices` の解析と常駐監視、端末ごとのロック・空き容量（D-98）
+│   ├── credential.rs    エージェントのワンタイムコードとトークン（`<selector>.<secret>`。D-99）
+│   └── report.rs        エージェントの報告の検証と正準ダイジェスト（D-99）
 ├── jobs/
 │   ├── queue.rs  worker.rs  recovery.rs  scheduler.rs（backup / gc の周期投入。inbox は handlers/inbox.rs、
 │   │                        購読の dispatcher は handlers/playlist_sync.rs）
-│   └── handlers/        種別ごと（playlist_sync.rs = 購読の同期: 列挙 → 追記先 → 揃え → 投入。D-78）
+│   └── handlers/        種別ごと（playlist_sync.rs = 購読の同期: 列挙 → 追記先 → 揃え → 投入。D-78。
+│                        device.rs = device_scan / device_sync / device_verify、source_hash.rs。§7.11）
 ├── gc/
 │   └── mod.rs           物理削除の唯一の経路。plan（判定・dry-run）と execute_*（6 区分。D-56 / D-90）
 ├── playlist/
@@ -2908,8 +3164,25 @@ src/
 │   ├── mod.rs  tracks.rs  albums.rs  categories.rs  selection.rs  batch.rs  rename.rs  normalize.rs
 │   │   history.rs  stream.rs  cd.rs  inbox.rs  events.rs  ytmusic.rs  subscriptions.rs
 │   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
+│   ├── devices.rs       端末 API（UI 向け。`/api/devices*`）
+│   ├── agent.rs         エージェント API（`/api/agent/*`）と Bearer のミドルウェア（auth::guard の外。D-99）
 │   ├── state.rs  error.rs   AppState、`{ "error": code }` 応答
 └── web/                 SPA を rust-embed で同梱
+
+agent-proto/             ワークスペースのクレート。本体とエージェントが共有する `/api/agent/*` のワイヤ型
+                         （serde だけに依存する。D-99）
+agent/                   ワークスペースのクレート `spindle-agent`（Mac の CLI。§7.11、D-100 / D-101）。本体には依存しない
+├── src/main.rs          CLI（pair / sync / status / resolve / abandon）
+├── src/sync.rs          各コマンドの段取り（state のディレクトリの lock を取り、state.json を読んでエンジンを呼ぶ）
+├── src/pair.rs          pair と冪等な初期化（`.spindle-device`、「spindle」フォルダ）
+├── src/state.rs  ctx.rs state.json（エージェントの実状態の正本）と耐久化
+├── src/recover.rs  rediscover.rs  plan.rs  exec.rs  batch.rs  playlist.rs
+│                        回復・再発見・再開の照合・実行・パス変更のバッチ・プレイリストの入れ替え
+├── src/local.rs  pathkey.rs   ローカルの root（`~/Music/spindle`）と canonical_key
+├── src/music.rs + music/ ミュージック.app の trait と JXA 実装（`osascript -l JavaScript`）・偽実装
+├── src/server.rs + server/   `/api/agent/*` のクライアント（reqwest blocking）・偽実装
+├── src/secrets.rs + secrets/ トークンの保管（Keychain / ファイル）
+└── README.md            導入・前提・困ったとき
 ```
 
 ---
@@ -2922,6 +3195,7 @@ src/
 | **P1** | ReplayGain、アートワーク、WAV 正規化、プレイリスト（m3u8 出力）、再生、Derived 生成・追随、GC | foobar2000 を開かずに日常運用が回る |
 | **P2** | CD 取り込み（TOC → MB → rip → AR/CTDB → エンコード）、遡及照合 | 新規 CD が検証付きで取り込め、既存 FLAC が格付けされる |
 | **P3** | ytmusic 移植（メタデータプラグイン + yt-dlp → Inbox）、配置直後のアートワーク解決、偽ハイレゾ検出 | ytmusic CLI を廃止できる |
+| **P5** | 端末への配信（§7.11、D-95）: 端末の表とマニフェストの計算、端末タブ・選曲の近道・可視化、Android の ADB 同期（ジョブ・常駐監視・adb サイドカー）、エージェント API と Mac の `spindle-agent` | Xperia（Poweramp）を USB でつなげば差分を見てからボタンで同期でき、Mac で `spindle-agent sync` を実行すれば iPhone に入れる曲とプレイリストがミュージック.app に反映される。取り込みから端末までの状態が画面で追える |
 
 P0 を先に置くのは、リップの出口（タグ付け・配置・RG）がすべて P0 の成果物であり、
 先に作った方が結果的に早いため。
@@ -2960,6 +3234,7 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 | `.fpl` | 非対応（確定） | .m3u8 とクエリ文字列で足りる。非公開バイナリで 1.x / 2.x が違う（D-72） |
 | album gain | album ごとの属性（既定 off、CD 取り込みは on、承認画面で選ぶ）。RG の一致判定は完全一致のまま | 育つコレクションに曲を足すたびに全曲の再解析と書き換えになる。運用はシャッフルが主（D-74） |
 | ACL の再適用 | 移行後に TrueNAS の ACL エディタで手動（MIGRATION.md §2 のチェックリスト） | rsync は NFSv4 ACL を引き継げない。1 回しか使わないのでスクリプト化しない |
+| 端末への配信 | spindle の管轄に入れる。Android は ADB 直結（host ネットワークの adb サイドカーが Unix ソケットで待ち受ける）、iPhone は Mac の `spindle-agent` がミュージック.app を中継し Finder 同期に任せる。端末ごとのマニフェストを毎回計算し、差分を確かめて確定した計画だけを実行する（自動では送らない）。端末の写しは Library から再生成できる複製なので物理削除と `edit_batches` の対象外を明示の例外にする（§7.11、D-95 / D-98〜D-101） | 端末に何が入っていて何が古いかが spindle から見えなかった。Linux から純正ミュージックへ直接書く手段が無い。配信ツリーの実体化は Derived と同量をもう一度持つ。差分の確認はユーザが選んだ |
 
 ### 残課題
 
@@ -2975,3 +3250,13 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 - [x] 一括リネームで album 全体を動かした後、旧ディレクトリに残る同梱ファイル（cover.jpg /
       disc.cue / rip.log 等）の追随と空ディレクトリの扱い（2026-09-19。rename ジョブが commit 後に
       既知の名前を追随させ、空なら rmdir。D-67）
+- [x] 端末への配信の実現性の確認（2026-09-30 / 10-01。Poweramp の再スキャンは `ACTION_SCAN_DIRS` を API レシーバへ
+      明示で送り extras を付けない（D-98）。ミュージック.app の track の `location` は文字列の代入で付け替えられ、
+      移動でも track と再生回数を保てる（D-101））
+- [ ] ADB の転送の速さ: shell v2 の stdin 自体は約 38MB/s だが、1 曲ごとの意図・`sync`・sha256 の往復込みの実測は
+      約 6.5MB/s で、全曲（約 9,000 曲）の初回はおよそ 2 時間。意図の追記や `sync` をまとめる高速化は持ち越し（D-98）
+- [ ] DB を失ったときの既存の保存先の引き継ぎ: 設計書は端末タブの明示操作（端末側の manifest の `device_uuid` を
+      新しい行に写す）で復旧するとしていたが、作っていない。今は保存先（端末の `Music/spindle`、Mac の
+      `~/Music/spindle` とミュージック.app の「spindle」フォルダ）を空にしてから登録・pair し直す（§6、§7.11）
+- [ ] 終端した計画の回収: 設計書は完了・破棄から `[gc].retention_days` を過ぎた `device_sync_plans` を GC が消すと
+      していたが、作っていない。終端した計画の行は端末の削除（`ON DELETE CASCADE`）でしか消えない（§6）
