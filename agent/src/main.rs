@@ -1,5 +1,7 @@
 //! spindle-agent の CLI。引数の誤りは終了コード 2、`Error` は「エラー: …」を stderr に出して 1。
-//! ミュージック.app は P5-4c まで `UnsupportedMusic`（全操作が失敗する）
+//! macOS ではミュージック.app を JXA（`JxaMusic`）で操作し、トークンは Keychain に置く。
+//! それ以外の OS では `UnsupportedMusic`（全操作が失敗する）とファイルのトークン。
+//! `SPINDLE_AGENT_SECRETS=file` なら macOS でもトークンをファイルに置く（試験と、Keychain が使えないときの逃げ道）
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
@@ -7,8 +9,13 @@ use std::process::ExitCode;
 use agent_proto::ManifestResponse;
 use spindle_agent::ctx::Ui;
 use spindle_agent::failpoint::Failpoints;
+#[cfg(target_os = "macos")]
+use spindle_agent::music::jxa::{JxaMusic, ProcessOsascript};
+#[cfg(not(target_os = "macos"))]
 use spindle_agent::music::UnsupportedMusic;
 use spindle_agent::recover::Resolution;
+#[cfg(target_os = "macos")]
+use spindle_agent::secrets::keychain::{KeychainSecrets, ACCOUNT, SERVICE};
 use spindle_agent::secrets::{FileSecrets, Secrets};
 use spindle_agent::server::HttpServer;
 use spindle_agent::state::StateFile;
@@ -94,6 +101,25 @@ impl Ui for StdUi {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn open_music() -> JxaMusic<ProcessOsascript> {
+    JxaMusic::new(ProcessOsascript::new())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_music() -> UnsupportedMusic {
+    UnsupportedMusic
+}
+
+/// トークンの置き場。macOS は Keychain、それ以外（と `SPINDLE_AGENT_SECRETS=file`）はファイル
+fn open_secrets(paths: &Paths) -> Box<dyn Secrets> {
+    #[cfg(target_os = "macos")]
+    if std::env::var("SPINDLE_AGENT_SECRETS").as_deref() != Ok("file") {
+        return Box::new(KeychainSecrets::new(SERVICE, ACCOUNT));
+    }
+    Box::new(FileSecrets::new(&paths.state_dir))
+}
+
 /// pair 済みの state の URL とトークンで spindle に繋ぐ。読むのは URL・insecure_http・トークンだけなので
 /// ロックは取らない（state を扱う段取りは各コマンドがロックを取ってから読み直す）
 fn paired_server(paths: &Paths) -> Result<HttpServer> {
@@ -103,13 +129,13 @@ fn paired_server(paths: &Paths) -> Result<HttpServer> {
             "pair されていません。spindle-agent pair <URL> <コード> を実行してください".to_owned(),
         ));
     };
-    let token = FileSecrets::new(&paths.state_dir).get()?;
+    let token = open_secrets(paths).get()?;
     HttpServer::new(&info.url, info.insecure_http, token)
 }
 
 fn run(cmd: Command) -> Result<()> {
     let paths = Paths::from_env()?;
-    let music = UnsupportedMusic;
+    let music = open_music();
     let fp = Failpoints::none();
     let mut ui = StdUi;
     match cmd {
@@ -119,11 +145,11 @@ fn run(cmd: Command) -> Result<()> {
             insecure_http,
         } => {
             let server = HttpServer::new(&url, insecure_http, None)?;
-            let secrets = FileSecrets::new(&paths.state_dir);
+            let secrets = open_secrets(&paths);
             sync::pair_cmd(
                 &music,
                 &server,
-                &secrets,
+                secrets.as_ref(),
                 &paths,
                 &fp,
                 &mut ui,

@@ -1,10 +1,13 @@
-//! トークンの保管。4b はファイル（`<state_dir>/token`、0600）。Keychain は P5-4c で別実装を足す（D-100）
+//! トークンの保管。4b はファイル（`<state_dir>/token`、0600）。macOS では `keychain::KeychainSecrets`（P5-4c、D-100）
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::Result;
+
+#[cfg(target_os = "macos")]
+pub mod keychain;
 
 pub trait Secrets {
     fn get(&self) -> Result<Option<String>>;
