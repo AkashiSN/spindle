@@ -235,3 +235,31 @@ fn final_symlink_is_not_followed() {
         .is_symlink());
     assert_eq!(std::fs::read(outside.join("x.m4a")).unwrap(), b"outside");
 }
+
+#[test]
+fn media_folder_marks_are_detected() {
+    let (_d, r) = root();
+    // root が無ければ偽
+    assert!(!r.looks_like_media_folder().unwrap());
+    std::fs::create_dir_all(r.path()).unwrap();
+    assert!(!r.looks_like_media_folder().unwrap());
+    // 印がディレクトリ
+    std::fs::create_dir(r.path().join(MEDIA_FOLDER_MARKS[0])).unwrap();
+    assert!(r.looks_like_media_folder().unwrap());
+}
+
+#[test]
+fn media_folder_mark_file_is_detected() {
+    let (_d, r) = root();
+    std::fs::create_dir_all(r.path()).unwrap();
+    std::fs::write(r.path().join(MEDIA_FOLDER_MARKS[1]), b"x").unwrap();
+    assert!(r.looks_like_media_folder().unwrap());
+}
+
+#[test]
+fn media_folder_mark_symlink_counts_by_existence() {
+    let (_d, r) = root();
+    std::fs::create_dir_all(r.path()).unwrap();
+    std::os::unix::fs::symlink("/nonexistent", r.path().join(MEDIA_FOLDER_MARKS[1])).unwrap();
+    assert!(r.looks_like_media_folder().unwrap());
+}

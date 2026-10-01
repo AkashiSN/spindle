@@ -124,6 +124,7 @@ pub fn sync<M: Music, S: Server>(
 fn run_sync<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<SyncOutcome> {
     require_paired(&cx.state)?;
     pair::check_copy_setting(cx)?;
+    pair::check_root_not_media_folder(cx)?;
     // ① root の印と初期化の続き。印を書く前（Started）の検証と書き込みは continue_setup が行う
     check_marker(cx)?;
     pair::continue_setup(cx)?;

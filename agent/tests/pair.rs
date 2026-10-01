@@ -132,3 +132,11 @@ fn foreign_marker_stops() {
         .unwrap();
     assert!(matches!(do_pair(&mut env), Err(Error::Stop(_))));
 }
+
+#[test]
+fn media_folder_root_stops_before_using_the_code() {
+    let mut env = Env::new();
+    env.write_local(".Media Preferences.plist", b"x");
+    assert!(matches!(do_pair(&mut env), Err(Error::Stop(m)) if m.contains("メディアフォルダ")));
+    assert!(env.state().server.is_none());
+}

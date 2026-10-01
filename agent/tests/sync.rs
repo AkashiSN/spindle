@@ -364,3 +364,16 @@ fn remaining_diff_after_apply_is_noted() {
         env.ui.log
     );
 }
+
+#[test]
+fn media_folder_root_stops_sync_without_touching_music() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    std::fs::create_dir(env.root.path().join("Automatically Add to Music.localized")).unwrap();
+    let calls = env.music.calls().len();
+    assert!(matches!(env.sync(), Err(Error::Stop(m)) if m.contains("メディアフォルダ")));
+    assert!(env.server.open().is_none());
+    assert!(env.music.tracks().is_empty());
+    assert_eq!(env.music.calls().len(), calls);
+}

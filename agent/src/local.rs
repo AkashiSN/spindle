@@ -21,6 +21,11 @@ use crate::{Error, Result};
 pub const MARKER: &str = ".spindle-device";
 pub const MOVING_DIR: &str = ".moving";
 pub const TMP_SUFFIX: &str = ".spindle-tmp";
+/// ミュージック.app のメディアフォルダが root 直下に持つ印
+pub const MEDIA_FOLDER_MARKS: [&str; 2] = [
+    "Automatically Add to Music.localized",
+    ".Media Preferences.plist",
+];
 
 /// エージェントの予約（印・バッチの置き場・取得中の一時ファイル）
 pub fn is_reserved(rel: &str) -> bool {
@@ -228,6 +233,22 @@ impl LocalRoot {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// root 直下にミュージック.app のメディアフォルダの印があるか。root が無ければ偽。
+    /// 印は存在で判定する（シンボリックリンクでも真。辿らない）
+    pub fn looks_like_media_folder(&self) -> Result<bool> {
+        let Some(root) = self.open_root()? else {
+            return Ok(false);
+        };
+        for name in MEDIA_FOLDER_MARKS {
+            match statat(&root, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => return Ok(true),
+                Err(Errno::NOENT) => {}
+                Err(e) => return Err(io(e)),
+            }
+        }
+        Ok(false)
     }
 
     pub fn read_marker(&self) -> Result<Option<Marker>> {
