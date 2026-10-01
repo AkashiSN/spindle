@@ -10,8 +10,8 @@
 
 TrueNAS 上で動作する単一コンテナのWebアプリケーション。CDリッピング、メディアライブラリ管理、
 メタデータ一括編集、ReplayGain、プレイリスト管理、簡易再生、端末への配信を提供する。
-端末への配信は、Android へは USB の ADB で直接、iPhone へは Mac の `spindle-agent` がミュージック.app へ反映する
-（D-95。§7.11）。
+端末への配信は、Android へは USB の ADB で直接、iPhone へは Mac の `spindle-agent` が
+ミュージック.app へ反映する（D-95。§7.11）。
 Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic` を統合する。
 
 ### 非目標
@@ -43,7 +43,7 @@ Windows版 foobar2000 の実用機能を代替し、既存CLIツール `ytmusic`
 | 端末 (device) | 配信先。Android（ADB 直結）か iPhone（Mac のエージェント経由）の 1 台。系統（`opus` / `aac`）と対象（全曲 / プレイリスト）を持つ（§7.11、D-95） |
 | マニフェスト（あるべき状態） | 端末に置くべき曲とプレイリストの一覧。保存せず毎回 Library から計算する。端末側の実態が正（D-95） |
 | 写し（端末上の曲） | 端末（Mac の `~/Music/spindle` を含む）に置いた曲の複製。Library から再生成できるので、物理削除してよい（D-95） |
-| 差分 | マニフェストと端末の実態の違い。曲ごとに add / update / move / delete に分け、確認してから送る（§7.11） |
+| 差分 | マニフェストと端末の実態の違い。曲ごとに add / update / move / 更新+移動 / delete に分け、確認してから送る（§7.11） |
 | 計画 | 差分から作る、端末へ反映する操作の列。差分を見てからボタンで実行する（自動では送らない。D-95） |
 | エージェント (spindle-agent) | Mac で動く常駐しない CLI。spindle から計画を受け取り、ミュージック.app へ反映して結果を報告する（§7.11、D-95） |
 
@@ -855,7 +855,7 @@ D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に
 | 投入 | scan ジョブの完了時に食い違う全トラック × 系統、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（`(track_id, variant)` 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める。P4-1 の共通並列予算の対象 |
 | 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児（行に無いファイル。`Derived/` 全体）は GC ジョブ |
 | マルチch | どの系統も既定で対象外（チャンネル数不明も対象外）。トラック単位の `-ac 2` ダウンミックスは需要が出たら（D-51。実データは全件 2ch） |
-| 配布ビュー | `delivery` は **`opus` 系統に固定**（Android の m3u8、`?transcode=opus`、`has_derived`）。`aac` は配布ビューを持たない。端末へは、Android に `opus` 系統、iPhone に `aac` 系統を既定で送る（端末ごとに選べる）。iPhone へは Mac のエージェントが `aac` を取り込み、プレイリストも `~/Music/spindle` に反映する（§7.11、D-75、D-95） |
+| 配布ビュー | `delivery` は **`opus` 系統に固定**（Android の m3u8、`?transcode=opus`、`has_derived`）。`aac` は配布ビューを持たない。端末へは、Android に `opus` 系統、iPhone に `aac` 系統を既定で送る（端末ごとに選べる）。iPhone へは Mac のエージェントが `aac` を取り込み、曲は `~/Music/spindle` に置き、プレイリストはミュージック.app の「spindle」フォルダに作る（§7.11、D-75、D-95） |
 
 **`opus` 系統**
 
