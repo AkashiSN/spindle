@@ -93,15 +93,18 @@ impl Sources for RootSources {
             SourceKind::Master => &self.library,
             SourceKind::Derived(_) => &self.derived,
         };
-        let file = root.open_file(&e.rel_path).map_err(|err| match err {
-            FsError::NotFound => SourceError::Missing,
-            // symlink に差し替わった送る元は、もう読んでよい通常ファイルではない。「変わった」として扱い、
-            // ハッシュ行を消して取り直させる（Other にすると 500 のまま行が残り続ける）
-            FsError::Symlink => SourceError::Changed,
-            other => SourceError::Other(other.to_string()),
-        })?;
+        let file = root
+            .open_file_nonblocking(&e.rel_path)
+            .map_err(|err| match err {
+                FsError::NotFound => SourceError::Missing,
+                // symlink に差し替わった送る元は、もう読んでよい通常ファイルではない。「変わった」として扱い、
+                // ハッシュ行を消して取り直させる（Other にすると 500 のまま行が残り続ける）
+                FsError::Symlink => SourceError::Changed,
+                other => SourceError::Other(other.to_string()),
+            })?;
         let st = fstat(&file).map_err(|err| SourceError::Other(err.to_string()))?;
-        // ディレクトリ・デバイスなど通常ファイルでないものに差し替わった場合も「変わった」
+        // ディレクトリ・FIFO・デバイスなど通常ファイルでないものに差し替わった場合も「変わった」
+        // （FIFO は O_NONBLOCK で開いているのでここまで止まらずに来る）
         if st.kind != FileKind::File {
             return Err(SourceError::Changed);
         }

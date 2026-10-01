@@ -404,6 +404,40 @@ async fn symlinked_source_is_412_and_hash_row_is_forgotten() {
 }
 
 #[tokio::test]
+async fn fifo_source_is_412_without_hanging() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"0123456789").await;
+    let token = app.pair(id).await;
+    let etag = format!("\"{}\"", t.token);
+    // 送る元が FIFO に差し替わった（開くと書き手を待って止まる）
+    let path = app.roots.as_ref().unwrap().derived.join(&t.derived_rel);
+    let tmp = path.with_extension("tmp");
+    let c = std::ffi::CString::new(tmp.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+    std::fs::rename(&tmp, &path).unwrap();
+    let (st, _, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        get_file(&app, &token, 1, Some(&etag), None),
+    )
+    .await
+    .expect("FIFO で止まった");
+    assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+    let gone: i64 = app
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM source_hashes WHERE track_id = 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(gone, 0);
+}
+
+#[tokio::test]
 async fn other_device_track_is_404() {
     let app = App::with_roots().await;
     let a = app.create_iphone("A").await;
