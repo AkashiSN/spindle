@@ -4432,3 +4432,44 @@ aac の焼き込み）は DB の値で作られるので Library のタグとず
 - manifest に差分を載せず、エージェントが自前で差分を出す（サーバの `device_items` 基準の差分と食い違い、表示と確定がずれる）
 - ファイル取得のたびに厳密なスナップショットを取る（Derived の変換中に要求ごとの全曲の差分計算になる）
 - `/api/agent` を `auth::guard` の中に置いて分岐する（セッションと Bearer の検査が混ざり、どちらかが緩む）
+
+## D-100 Mac エージェントのエンジンは同期処理で書き、ミュージック.app・サーバ・トークンの保管を trait で差し替えて試す
+
+**背景**（2026-10-01。仕様は `docs/superpowers/specs/` の P5-4 設計の ⑥ と、③「開始済みの計画の再開」「計画の終端」「例外: 始まったパス変更のバッチ」、D-95 の P5-3a 追記と D-99）: P5-4b で Mac の `spindle-agent`（`agent/` クレート）のエンジンを作る。pair の冪等な初期化・state・回復・再発見・計画の確定と再開・追加 / 更新 / 削除・パス変更のバッチ・プレイリストの入れ替え・resolve・報告まで。ミュージック.app の本物の操作（JXA）は 4c で実機の Mac で固定するため、4b は外界を trait に閉じ込め、偽のミュージック.app と本物の spindle サーバを相手に試す。計画は `docs/superpowers/plans/2026-10-01-p5-4b-agent-engine.md`。以下がその決定と、仕様の空白を埋めた判断。
+
+**決定**:
+
+- **外界は 3 つの trait**: `Music`（ミュージック.app。4b は偽実装 `FakeMusic` と「未実装」を返す `UnsupportedMusic`、JXA 実装は 4c）、`Server`（`/api/agent/*`。本物は reqwest の blocking クライアント `HttpServer`）、`Secrets`（トークンの保管）。ローカルの root（`~/Music/spindle`）と `state.json` は本物のファイルシステムを tempdir で試す。クラッシュの試験は要所の中断点（`Failpoints::hit`）と偽実装の「実行してから失敗」で起こし、同じ state で `sync` をやり直して確かめる
+- **エンジンは同期処理**: エージェントは 1 回ずつのコマンドで並行性が要らない。tokio を入れず、HTTP は reqwest の blocking、ミュージック.app は `osascript` の子プロセス（4c）
+- **ローカルのファイルの同一性はキャッシュで照合する**: 仕様は再発見で「size・sha256 が state と一致することも確かめる」とする。state の各曲に `inode`・`mtime_ns` を持ち、`(size, inode, mtime_ns)` が一致すれば sha256 を読み直さない。違えば読み直して比べる
+- **外で書き換えられた曲は「古い写し」にする**: size・sha256 が state と違う曲は track を消さず（再生回数を保つ）、state のトークンを空文字（ADB の `STALE_TOKEN` と同じ）にして報告する。サーバは報告のトークンが空の曲を、`(track_id, dest_path)` が希望・現状・計画の行き先のどれかと一致すれば受け入れ、`device_items` にトークン空で入れる（差分は「更新」になる）。サーバ側の変更（`src/device/report.rs`）を含む
+- **ミュージック.app から track が消えた曲**: state から外し、自分の置いたローカルのファイルも消す（state にあるパスなので管理下。残すと次の追加が「管理外と衝突」になる）。報告から外れるので、サーバの差分は「追加」になる
+- **報告だけの回**: 回復か再発見で state が変わり（`needs_report` を state に耐久化）、open な計画が無いときは、manifest の `plan_token` で計画を確定し、何も実行せずに報告して閉じる。その後で manifest を取り直して差分を表示する。表示する差分（サーバの `device_items` 基準）をエージェントの実状態に合わせるため。空の差分でも確定できる
+- **ダウンロードの途中再開は 1 回の実行の中だけ**: 接続が切れたら同じ `If-Match` + `Range` で最大 3 回まで続きを取る。実行をまたいだ再開はしない（回復が一時ファイルを消す）。412 はその操作を実行せずに次の差分に回して続け、実行の最後の報告の後に manifest を取り直して差分を出す
+- **コピー設定 ON の検出と停止**: `Music::copy_to_library()` が `Some(true)` なら pair と sync を始めない。`None`（読めない）なら仕様どおり `add` の後の `location` で検出し、通常経路でその track を消してから残りの操作を止めて報告し、設定を切るよう案内して非 0 で終わる
+- **resolve の「表示したときと同じ」**: 候補（persistent ID と sha256 の組の集合）を表示した時点で `pending_ops` のその add に `candidates` として耐久化し、`resolve` は取り直した候補の集合と比べる。違えば記録を新しい候補で書き直し、表示し直して拒否する
+- **トークンの保管は 4b ではファイル**（state のディレクトリの `token`、0600）。Keychain は 4c で `Secrets` の別実装として入れる。各パスは環境変数 `SPINDLE_AGENT_STATE_DIR` / `SPINDLE_AGENT_ROOT` で上書きできる（試験用。既定は `~/Library/Application Support/spindle-agent` と `~/Music/spindle`）
+- **CLI に `abandon` を足す**: 仕様の CLI は pair / sync / status / resolve だが、`POST /api/agent/plans/:id/abandon` を叩く手段として `spindle-agent abandon` を置く（`pending_ops` と `pending_batches` が空のときだけ送る）
+- **プレイリストの入れ替えの一時名は `.tmp-<op_id>`**（spindle フォルダの直下）。改名の後で本名が別の管理下のプレイリストと一時的に重なる（入れ替え・循環の途中）のは許す。ミュージック.app は同名を許し、照合は persistent ID で行うため。管理外（state にも `pending_ops` にも無い persistent ID）の同名があれば、その操作を「エラー: 管理外と衝突」で保留する
+- **パス変更のバッチの一時ファイル名**: `~/Music/spindle/.moving/<batch_id>-<op_id>`（移動の旧ファイル・更新 + 移動の旧版）と `….new`（更新 + 移動の新しい内容）。D-95 の P5-3a 追記と同じ理由で batch_id を含める。更新 + 移動の旧版は仕様どおり `.moving/` へ動かしてから（`location` を付け替えて track を残す）、`done` の前に消す
+- **計画の再開の照合（`runnable`）は本体の `device::plan::runnable` をエージェント側に移植する**（`agent-proto` の型の上で）。`canonical_key`（casefold + NFD）も移植し、結合試験（`tests/agent_e2e.rs`）で本体と同じ結果になることを確かめる
+- **SIGINT は扱わない**: Ctrl-C で止まっても、次の `sync` の回復が続きを行う（`vacating` 以降は前進して完遂）
+- **persistent ID を記録する前に落ちた一時プレイリスト**: 仕様は「`pending_ops` に記録した persistent ID のものだけを消す（名前の接頭辞だけで消さない）」とする。作った直後・ID を記録する前に落ちると片付けられず残るので、フォルダの直下で名前がちょうど `.tmp-<op_id>`（op_id は 128 bit 乱数でその操作だけのもの）のものが 1 つなら消す。pair の `spindle-setup-<nonce>` と同じ考え方で、接頭辞での一括削除はしない
+- **実装（P5-4b）で決めたこと**（レビューで変わった点を含む）:
+  - `HttpServer` のタイムアウト: blocking の reqwest には無通信の `read_timeout` が無い。API 呼び出しは全体で 60 秒、曲の取得だけ要求ごとに 2 時間の上限を付け、TCP keepalive（30 秒）で死んだ接続を切る。接続は 10 秒。止まった NAS で永久に固まらないため
+  - サーバの 409 は、確定では `plan_changed` / `open_plan_exists` / `pending_reevaluation`、報告と破棄では `plan_closed` / `generation_mismatch` だけを区別し、それ以外のコード（`plan_unreadable` など）はエラーとして止まる。計画を読めないことを「閉じた」と誤読しないため
+  - 報告は計画の `generation` で送る（確定の後で端末の設定が変われば、サーバが拒否する）
+  - open な計画は、`state.plan_id` と一致するとき（自分が y/N を経て確定した計画）だけ再開して実行する。違えば実行せずに報告だけして閉じる。報告だけの回の失敗や確定直後の中断で、利用者が確認していない計画（削除を含む）を実行しないため
+  - パス変更のバッチの途中で track が手で消された（ミュージック.app に無い）ときは、ファイルの移動は続けて `location` の付け替え・refresh を飛ばし、`done` で行を書く。後の再発見が「track が消えた曲」として外す。回復が永久に止まらないため
+  - バッチの行き先を、動かない管理下の曲が占めていれば、その成分ごと `PATH_OCCUPIED` で保留する（ADB 版には無い追加の安全策）。rename の上書きと、2 曲が 1 ファイルを共有する事故を防ぐ
+  - pair の初期化が途中（`setup.phase == Started`）の間は、sync の marker 照合を飛ばして初期化の続きに任せる。報告だけの回で再評価待ちかつ差分が無いときは「再評価待ち」を返す
+
+**理由**: エージェントは利用者が叩く 1 回ずつのコマンドで、並行性は要らない。外界（ミュージック.app・サーバ・Keychain）を trait にすれば、実機の Mac が無い Linux の CI でも、回復・再発見・バッチ・入れ替えの中断と再開を偽実装で列挙して試せる。管理対象は state と `pending_*` にある persistent ID とパスだけにし、名前やパスの一致だけで管理外のものに触らない。ファイルとミュージック.app を変える前に state へ意図を耐久化し、次の `sync` の回復が前進か巻き戻しで完遂する（不変条件 6）。
+
+**却下**:
+- エンジンを tokio で書く（並行性が要らず、`osascript` の子プロセスと blocking HTTP で足りる）
+- 再発見のたびに全曲の sha256 を読む（数十 GB を毎回読む）
+- 外で書き換えられた曲を state から外す（track を消して足し直すと再生回数を失う。外すだけだと次の追加が管理外と衝突する）
+- 報告だけの回をせず、次の sync で直す（手で消した曲が戻るまで 2 回の sync が要り、表示する差分が実状態とずれる）
+- 一時プレイリストを名前の接頭辞で片付ける（ユーザの「.tmp-」を消しうる）
+- 本体の `device::plan` を `agent-proto` の型へ書き換えて共有する（4b の範囲を超えて本体の ADB 同期を触る）
