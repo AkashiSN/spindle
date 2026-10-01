@@ -190,7 +190,7 @@ async fn bearer_post_needs_no_csrf_headers() {
     let id = app.create_iphone("iPhone").await;
     let token = app.pair(id).await;
     // agent_call は sec-fetch-site / Origin を付けない
-    let (st, _) = app
+    let (st, v) = app
         .agent_call(
             Some(&token),
             Method::POST,
@@ -198,8 +198,11 @@ async fn bearer_post_needs_no_csrf_headers() {
             Some(json!({"plan_token": "x"})),
         )
         .await;
-    assert_ne!(st, StatusCode::FORBIDDEN);
-    assert_ne!(st, StatusCode::UNAUTHORIZED);
+    // CSRF・認証で落ちず、計画の確定まで届く（計算し直した plan_token と違うので 409 plan_changed）
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("plan_changed"))
+    );
 }
 
 #[tokio::test]
@@ -381,4 +384,318 @@ async fn other_device_track_is_404() {
     let token_a = app.pair(a).await;
     let (st, _, _) = get_file(&app, &token_a, 1, Some(&format!("\"{}\"", t.token)), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+async fn confirm(app: &App, token: &str) -> agent_proto::Plan {
+    let (_, m) = app
+        .agent_call(Some(token), Method::GET, "/api/agent/manifest", None)
+        .await;
+    let (st, v) = app
+        .agent_call(
+            Some(token),
+            Method::POST,
+            "/api/agent/plans",
+            Some(json!({"plan_token": m["plan_token"]})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    serde_json::from_value(v).unwrap()
+}
+
+fn report_of(plan: &agent_proto::Plan, tracks: Value, errors: Value) -> Value {
+    json!({"generation": plan.generation, "plan_id": plan.plan_id,
+           "state": {"tracks": tracks, "playlists": []}, "errors": errors})
+}
+
+#[tokio::test]
+async fn confirm_is_idempotent_and_conflicts() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    let (st, v) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/plans",
+            Some(json!({"plan_token": p.plan_token})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "同じ plan_token は同じ計画: {v}");
+    assert_eq!(v["plan_id"], p.plan_id);
+    let (st, v) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/plans",
+            Some(json!({"plan_token": "other"})),
+        )
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("open_plan_exists"))
+    );
+    let (st, v) = app
+        .agent_call(Some(&token), Method::GET, "/api/agent/plans/open", None)
+        .await;
+    assert_eq!(
+        (st, v["plan_id"].as_i64()),
+        (StatusCode::OK, Some(p.plan_id))
+    );
+    // open な計画の間は UI の PATCH（名前以外）・PUT playlists・pair-code が 409、名前だけの PATCH は通る
+    let (st, _) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/devices/{id}"),
+            Some(json!({"selection": "playlists"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _) = app
+        .call(
+            Method::PUT,
+            &format!("/api/devices/{id}/playlists"),
+            Some(json!({"playlist_ids": []})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _) = app
+        .call(Method::POST, &format!("/api/devices/{id}/pair-code"), None)
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _) = app
+        .call(
+            Method::PATCH,
+            &format!("/api/devices/{id}"),
+            Some(json!({"name": "iPhone 2"})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn stale_plan_token_is_409_with_current_token() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let (st, v) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/plans",
+            Some(json!({"plan_token": "stale"})),
+        )
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("plan_changed"))
+    );
+    assert!(v["plan_token"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn report_applies_state_closes_plan_and_resend_is_200() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    let body = report_of(
+        &p,
+        json!([{"track_id": 1, "dest_path": t.dest_path, "token": t.token, "size": 1, "sha256": t.sha256}]),
+        json!([]),
+    );
+    let (st, v) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/report",
+            Some(body.clone()),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, d) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(d["counts"]["synced"], 1);
+    let (st, _) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/report",
+            Some(body.clone()),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "同じ報告の再送");
+    let mut other = body;
+    other["errors"] = json!([{"kind": "track", "ref_id": 1, "reason": "x"}]);
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, "/api/agent/report", Some(other))
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("plan_closed"))
+    );
+}
+
+#[tokio::test]
+async fn invalid_report_is_400_and_changes_nothing() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    for bad in [
+        json!([{"track_id": 1, "dest_path": "../x.m4a", "token": t.token, "size": 1, "sha256": t.sha256}]),
+        json!([{"track_id": 99, "dest_path": "Z/z.m4a", "token": "t", "size": 1, "sha256": "s"}]),
+    ] {
+        let (st, v) = app
+            .agent_call(
+                Some(&token),
+                Method::POST,
+                "/api/agent/report",
+                Some(report_of(&p, bad, json!([]))),
+            )
+            .await;
+        assert_eq!(
+            (st, v["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_report"))
+        );
+    }
+    let (st, v) = app
+        .agent_call(Some(&token), Method::GET, "/api/agent/plans/open", None)
+        .await;
+    assert_eq!(
+        (st, v["plan_id"].as_i64()),
+        (StatusCode::OK, Some(p.plan_id)),
+        "計画は open のまま"
+    );
+    let n: i64 = app
+        .db
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM device_items", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn generation_mismatch_is_409() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    let mut body = report_of(&p, json!([]), json!([]));
+    body["generation"] = json!(p.generation + 1);
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, "/api/agent/report", Some(body))
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("generation_mismatch"))
+    );
+}
+
+#[tokio::test]
+async fn abandon_requires_empty_pending_and_valid_state() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    let uri = format!("/api/agent/plans/{}/abandon", p.plan_id);
+    let mut body = report_of(&p, json!([]), json!([]));
+    body["pending_ops"] = json!(1);
+    body["pending_batches"] = json!(0);
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, &uri, Some(body.clone()))
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("pending_work"))
+    );
+    body["pending_ops"] = json!(0);
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, &uri, Some(body))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, _) = app
+        .agent_call(Some(&token), Method::GET, "/api/agent/plans/open", None)
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cannot_report_on_other_devices_plan() {
+    let app = App::with_roots().await;
+    let a = app.create_iphone("A").await;
+    let b = app.create_iphone("B").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let (ta, tb) = (app.pair(a).await, app.pair(b).await);
+    let p = confirm(&app, &ta).await;
+    let (st, _) = app
+        .agent_call(
+            Some(&tb),
+            Method::POST,
+            "/api/agent/report",
+            Some(report_of(&p, json!([]), json!([]))),
+        )
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn unreadable_plan_is_409_and_changes_nothing() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    let pid = p.plan_id;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "UPDATE device_sync_plans SET plan = '[1]' WHERE id = ?1",
+                [pid],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .agent_call(Some(&token), Method::GET, "/api/agent/plans/open", None)
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("plan_unreadable"))
+    );
+    let body = report_of(
+        &p,
+        json!([{"track_id": 1, "dest_path": t.dest_path, "token": t.token, "size": 1, "sha256": t.sha256}]),
+        json!([]),
+    );
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, "/api/agent/report", Some(body))
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("plan_unreadable"))
+    );
+    let (state, n): (String, i64) = app
+        .db
+        .read(move |c| {
+            Ok((
+                c.query_row(
+                    "SELECT state FROM device_sync_plans WHERE id = ?1",
+                    [pid],
+                    |r| r.get(0),
+                )?,
+                c.query_row("SELECT count(*) FROM device_items", [], |r| r.get(0))?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!((state.as_str(), n), ("open", 0));
 }

@@ -555,6 +555,11 @@ pub fn compute(conn: &Connection, device_id: i64) -> Result<Option<Computed>> {
     Ok(out)
 }
 
+/// [`compute`] の書き込みトランザクション内版（既に張ったトランザクションの中で呼ぶ）
+pub fn compute_within(conn: &Connection, device_id: i64) -> Result<Option<Computed>> {
+    compute_in(conn, device_id)
+}
+
 /// 系統の設定。設定に無ければ凍結と同じ扱い（音声版が一致する既存の行だけ送れる）
 fn settings_or_frozen(conn: &Connection, variant: Variant) -> Result<VariantSettings> {
     Ok(
@@ -1130,6 +1135,34 @@ pub fn open_plan(conn: &Connection, device_id: i64) -> Result<Option<OpenPlan>> 
     let plan: StoredPlan = serde_json::from_str(&json)
         .map_err(|e| crate::db::DbError::Internal(format!("計画 {id} を読めない: {e}")))?;
     Ok(Some(OpenPlan { id, job_id, plan }))
+}
+
+/// 計画の行（計画の JSON は解かずに持つ。壊れていても状態だけは見られるように）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRow {
+    pub id: i64,
+    pub device_id: i64,
+    pub state: String,
+    pub report_digest: Option<String>,
+    pub plan_json: String,
+}
+
+pub fn plan_row(conn: &Connection, plan_id: i64) -> Result<Option<PlanRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, device_id, state, report_digest, plan FROM device_sync_plans WHERE id = ?1",
+            [plan_id],
+            |r| {
+                Ok(PlanRow {
+                    id: r.get(0)?,
+                    device_id: r.get(1)?,
+                    state: r.get(2)?,
+                    report_digest: r.get(3)?,
+                    plan_json: r.get(4)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
