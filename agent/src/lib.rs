@@ -9,6 +9,7 @@ pub mod local;
 pub mod music;
 pub mod pathkey;
 pub mod plan;
+pub mod rediscover;
 pub mod secrets;
 pub mod server;
 pub mod state;

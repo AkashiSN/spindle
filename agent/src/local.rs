@@ -125,8 +125,9 @@ impl LocalRoot {
         ))
     }
 
-    /// 記録（stat と sha256）と照合する。stat が一致すれば sha256 を読まない（D-100）
-    pub fn check(&self, rel: &str, recorded: &FileStat, _sha256: &str) -> Result<Check> {
+    /// 記録の stat と照合する。一致すれば sha256 を読まない（D-100）。`Changed` の sha256 と記録の
+    /// 照合は呼び出し側が行う
+    pub fn check(&self, rel: &str, recorded: &FileStat) -> Result<Check> {
         let Some(st) = self.stat(rel)? else {
             return Ok(Check::Missing);
         };

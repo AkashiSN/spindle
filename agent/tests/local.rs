@@ -49,10 +49,10 @@ fn check_uses_stat_cache_and_detects_changes() {
     r.place(&tmp, "x.m4a").unwrap();
     let st = r.stat("x.m4a").unwrap().unwrap();
     let sha = r.sha256("x.m4a").unwrap().unwrap();
-    // stat が一致すれば sha256 は読まない（記録の sha256 が嘘でも Same）
-    assert_eq!(r.check("x.m4a", &st, "bogus").unwrap(), Check::Same);
+    // stat が一致すれば sha256 は読まない
+    assert_eq!(r.check("x.m4a", &st).unwrap(), Check::Same);
     std::fs::write(r.path().join("x.m4a"), b"abcd").unwrap();
-    match r.check("x.m4a", &st, &sha).unwrap() {
+    match r.check("x.m4a", &st).unwrap() {
         Check::Changed(st2, sha2) => {
             assert_eq!(st2.size, 4);
             assert_ne!(sha2, sha);
@@ -60,7 +60,7 @@ fn check_uses_stat_cache_and_detects_changes() {
         other => panic!("{other:?}"),
     }
     r.remove("x.m4a").unwrap();
-    assert_eq!(r.check("x.m4a", &st, &sha).unwrap(), Check::Missing);
+    assert_eq!(r.check("x.m4a", &st).unwrap(), Check::Missing);
     // 無いファイルの削除は成功
     r.remove("x.m4a").unwrap();
 }
