@@ -11,7 +11,7 @@ use crate::{Error, Result};
 
 pub const SERVICE: &str = "spindle-agent";
 pub const ACCOUNT: &str = "token";
-/// 書けるかを確かめる試しの項目のアカウント名（トークンの項目には触らない）
+/// トークンの項目が無いときに、書けるかを確かめる試しの項目のアカウント名
 pub const PROBE_ACCOUNT: &str = "probe";
 
 /// `errSecItemNotFound`
@@ -67,14 +67,22 @@ impl Secrets for KeychainSecrets {
             .map_err(|e| keychain_error("保存", &e))
     }
 
-    /// 同じサービスの試しの項目（アカウント `probe`）を書いて消す
+    /// トークンの項目が在れば、同じ値を書き戻してその項目を更新できるか（ACL など）を確かめる。
+    /// 無ければ同じサービスの試しの項目（アカウント `probe`）を書いて消す。値はどこにも出さない
     fn check_writable(&self) -> Result<()> {
-        set_generic_password(&self.service, PROBE_ACCOUNT, b"probe")
-            .map_err(|e| keychain_error("保存の確認", &e))?;
-        match delete_generic_password(&self.service, PROBE_ACCOUNT) {
-            Ok(()) => Ok(()),
-            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
-            Err(e) => Err(keychain_error("保存の確認の後始末", &e)),
+        match get_generic_password(&self.service, &self.account) {
+            Ok(existing) => set_generic_password(&self.service, &self.account, &existing)
+                .map_err(|e| keychain_error("保存の確認", &e)),
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => {
+                set_generic_password(&self.service, PROBE_ACCOUNT, b"probe")
+                    .map_err(|e| keychain_error("保存の確認", &e))?;
+                match delete_generic_password(&self.service, PROBE_ACCOUNT) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+                    Err(e) => Err(keychain_error("保存の確認の後始末", &e)),
+                }
+            }
+            Err(e) => Err(keychain_error("保存の確認", &e)),
         }
     }
 }

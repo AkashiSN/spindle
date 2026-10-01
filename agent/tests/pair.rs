@@ -196,3 +196,39 @@ fn file_secrets_check_writable() {
     let s = FileSecrets::new(&d.path().join("blocked"));
     assert!(matches!(s.check_writable(), Err(Error::Stop(_))));
 }
+
+/// 本番のトークンの置き場（`token` か `.token.tmp`）がディレクトリ: `set` が失敗するので、コードを使う前に止める
+#[test]
+fn file_token_path_blocked_stops_before_using_the_code() {
+    for name in ["token", ".token.tmp"] {
+        let mut env = Env::new();
+        std::fs::create_dir_all(env.state_dir.join(name)).unwrap();
+        let s = FileSecrets::new(&env.state_dir);
+        assert!(
+            matches!(s.check_writable(), Err(Error::Stop(m)) if m.contains(name)),
+            "{name}"
+        );
+        assert!(matches!(do_pair(&mut env), Err(Error::Stop(_))), "{name}");
+        assert_eq!(env.server.pair_calls(), 0, "{name}");
+        assert!(env.state().server.is_none(), "{name}");
+        // 直せば同じコードで pair できる
+        std::fs::remove_dir(env.state_dir.join(name)).unwrap();
+        do_pair(&mut env).unwrap();
+        assert_eq!(env.server.pair_calls(), 1, "{name}");
+    }
+}
+
+/// 既にトークンがあっても check_writable はそれに触らず、試しのファイルも残さない
+#[test]
+fn file_secrets_check_writable_keeps_existing_token() {
+    let d = tempfile::tempdir().unwrap();
+    let s = FileSecrets::new(d.path());
+    s.set("old.token").unwrap();
+    s.check_writable().unwrap();
+    assert_eq!(s.get().unwrap().as_deref(), Some("old.token"));
+    let names: Vec<_> = std::fs::read_dir(d.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("token")]);
+}

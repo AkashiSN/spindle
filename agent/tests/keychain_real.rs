@@ -1,4 +1,4 @@
-//! 本物の Keychain でトークンの保存・読み出し・上書き・削除を確かめる（macOS だけ、`#[ignore]`）。
+//! 本物の Keychain でトークンの保存・読み出し・上書き・削除と保存の確認を確かめる（macOS だけ、`#[ignore]`）。
 //! 試験用のサービス名（`spindle-agent-test-<乱数>`）を使い、最後に消す。
 //! 実行: `cargo test -p spindle-agent --test keychain_real -- --ignored`
 #![cfg(target_os = "macos")]
@@ -36,4 +36,17 @@ fn check_writable_leaves_no_items() {
     // トークンの項目も試しの項目も残らない
     assert_eq!(s.get().unwrap(), None);
     assert_eq!(KeychainSecrets::new(&service, "probe").get().unwrap(), None);
+}
+
+/// トークンが在るときは同じ値を書き戻して確かめる（値は変わらず、試しの項目も残らない）
+#[test]
+#[ignore]
+fn check_writable_keeps_existing_token() {
+    let service = format!("spindle-agent-test-{}", random_hex());
+    let s = KeychainSecrets::new(&service, "token");
+    s.set("kept-token").unwrap();
+    s.check_writable().unwrap();
+    assert_eq!(s.get().unwrap().as_deref(), Some("kept-token"));
+    assert_eq!(KeychainSecrets::new(&service, "probe").get().unwrap(), None);
+    s.delete().unwrap();
 }
