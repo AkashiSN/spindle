@@ -20,6 +20,9 @@ pub const SCRIPT: &str = include_str!("music.js");
 /// osascript 1 回の上限
 pub const TIMEOUT: Duration = Duration::from_secs(120);
 
+/// `set_playlist_tracks` で 1 曲ごとに足す時間。実機で 1 曲あたり約 35 ms（200 曲で 7 秒）かかったので余裕を見る
+pub const PER_PLAYLIST_TRACK: Duration = Duration::from_millis(100);
+
 /// 終了を確かめる間隔
 const POLL: Duration = Duration::from_millis(50);
 
@@ -214,7 +217,12 @@ impl<R: Osascript> JxaMusic<R> {
 
     /// 要求を投げて ok の値を返す。err は Error::Music
     fn call(&self, request: Value) -> Result<Value> {
-        let out = self.runner.run(SCRIPT, &request.to_string(), TIMEOUT)?;
+        self.call_with(request, TIMEOUT)
+    }
+
+    /// `call` の上限を指定する版
+    fn call_with(&self, request: Value, timeout: Duration) -> Result<Value> {
+        let out = self.runner.run(SCRIPT, &request.to_string(), timeout)?;
         let reply: Value = serde_json::from_str(&out)
             .map_err(|e| Error::Music(format!("JXA の応答を読めない（{e}）: {out}")))?;
         if let Some(err) = reply.get("err") {
@@ -277,12 +285,7 @@ impl<R: Osascript> Music for JxaMusic<R> {
     }
 
     fn max_database_id(&self) -> Result<i64> {
-        Ok(self
-            .all_tracks()?
-            .iter()
-            .map(|t| t.database_id)
-            .max()
-            .unwrap_or(0))
+        decode(self.call(json!({"op": "max_db"}))?)
     }
 
     fn add(&self, path: &Path) -> Result<MusicTrack> {
@@ -352,7 +355,14 @@ impl<R: Osascript> Music for JxaMusic<R> {
     }
 
     fn set_playlist_tracks(&self, persistent_id: &str, tracks: &[String]) -> Result<()> {
-        self.call_unit(json!({"op": "set_playlist_tracks", "pid": persistent_id, "tracks": tracks}))
+        // 1 曲ずつ複製するので、曲数に比例して上限を延ばす（固定の上限だと大きいプレイリストが毎回失敗する）
+        let n = u32::try_from(tracks.len()).unwrap_or(u32::MAX);
+        let timeout = TIMEOUT.saturating_add(PER_PLAYLIST_TRACK.saturating_mul(n));
+        self.call_with(
+            json!({"op": "set_playlist_tracks", "pid": persistent_id, "tracks": tracks}),
+            timeout,
+        )
+        .map(|_| ())
     }
 
     fn delete_playlist(&self, persistent_id: &str) -> Result<()> {

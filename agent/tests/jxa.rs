@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use spindle_agent::music::jxa::{JxaMusic, Osascript, ProcessOsascript, SCRIPT};
+use spindle_agent::music::jxa::{JxaMusic, Osascript, ProcessOsascript, SCRIPT, TIMEOUT};
 use spindle_agent::music::Music;
 use spindle_agent::{Error, Result};
 
@@ -15,11 +15,13 @@ use spindle_agent::{Error, Result};
 struct Scripted {
     replies: RefCell<Vec<Result<String>>>,
     seen: RefCell<Vec<Value>>,
+    timeouts: RefCell<Vec<Duration>>,
 }
 
 impl Osascript for &Scripted {
-    fn run(&self, script: &str, request: &str, _t: Duration) -> Result<String> {
+    fn run(&self, script: &str, request: &str, t: Duration) -> Result<String> {
         assert_eq!(script, SCRIPT);
+        self.timeouts.borrow_mut().push(t);
         self.seen
             .borrow_mut()
             .push(serde_json::from_str(request).unwrap());
@@ -76,13 +78,44 @@ fn added_after_and_max_database_id() {
         {"pid":"A","db":10,"loc":"/x/a","added":1,"size":1},
         {"pid":"B","db":30,"loc":null,"added":2,"size":1}
     ]);
-    s.replies.borrow_mut().push(ok(all.clone()));
     s.replies.borrow_mut().push(ok(all));
-    s.replies.borrow_mut().push(ok(json!([])));
+    s.replies.borrow_mut().push(ok(json!(30)));
+    s.replies.borrow_mut().push(ok(json!(0)));
     let m = JxaMusic::new(&s);
     assert_eq!(m.tracks_added_after(10).unwrap().len(), 1);
     assert_eq!(m.max_database_id().unwrap(), 30);
     assert_eq!(m.max_database_id().unwrap(), 0);
+    // max_database_id は databaseID だけを取る専用の op を使う（5 項目の一覧を取らない）
+    let seen = s.seen.borrow();
+    assert_eq!(seen[0], json!({"op":"tracks"}));
+    assert_eq!(seen[1], json!({"op":"max_db"}));
+    assert_eq!(seen[2], json!({"op":"max_db"}));
+}
+
+#[test]
+fn script_has_max_db_op_guarding_empty_library() {
+    let start = SCRIPT.find("case 'max_db'").unwrap();
+    let body = &SCRIPT[start..start + 400];
+    assert!(body.contains("length === 0) return 0"));
+}
+
+#[test]
+fn set_playlist_tracks_timeout_grows_with_track_count() {
+    let s = Scripted::default();
+    for _ in 0..3 {
+        s.replies.borrow_mut().push(ok(Value::Null));
+    }
+    let m = JxaMusic::new(&s);
+    let ids = |n: usize| (0..n).map(|i| format!("T{i}")).collect::<Vec<_>>();
+    m.set_playlist_tracks("P", &[]).unwrap();
+    m.set_playlist_tracks("P", &ids(200)).unwrap();
+    m.set_playlist_tracks("P", &ids(5000)).unwrap();
+    let t = s.timeouts.borrow();
+    assert_eq!(t[0], TIMEOUT);
+    assert_eq!(t[1], TIMEOUT + Duration::from_millis(100) * 200);
+    assert_eq!(t[2], TIMEOUT + Duration::from_millis(100) * 5000);
+    // 実機の 35 ms/曲 で 5000 曲（175 秒）でも収まる
+    assert!(t[2] > Duration::from_millis(35) * 5000);
 }
 
 #[test]

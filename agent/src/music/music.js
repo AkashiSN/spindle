@@ -58,6 +58,13 @@ function dispatch(q) {
         added: epoch(added[i]), size: sizes[i],
       }));
     }
+    case 'max_db': {
+      // add の前に 1 回ずつ呼ぶので databaseID だけを取る。0 件だと一括取得が -1728 で落ちるので先に見る
+      const ts = lib.fileTracks;
+      if (ts.length === 0) return 0;
+      // 件数が多いと Math.max(...xs) は引数の上限を超えるので、畳み込みで求める
+      return ts.databaseID().reduce((m, x) => (x > m ? x : m), 0);
+    }
     case 'track': { const t = trackOf(q.pid); return t ? info(t) : null; }
     case 'add': {
       // 音声でないファイルなどは add が undefined を返す（例外にならない）
