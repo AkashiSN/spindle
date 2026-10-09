@@ -435,7 +435,7 @@ state とミュージック.app。spindle へは報告で届く）で、DB の�
 | `device_sync_plans` | 確定した計画。`plan` は不変の JSON（版 `v`・`generation`・`plan_token` と、曲の操作（`op_id`・種類・`track_id`・from・to・トークン・size・sha256）とプレイリストの操作（`op_id`・種類・`playlist_id`・from・to・トークン）の列）、`state`（`open` / `completed` / `abandoned`）、`job_id`（adb）、`report_digest`（agent の報告の再送の照合）。端末ごとに `open` は 1 つまで（部分 UNIQUE 索引） | DB にしか無い |
 
 - `devices.generation` は端末の選曲に効く設定（`selection` / `variant` / 印）を API で変えるたびに 1 進める
-  （名前の変更では進めない。プレイリストの削除による印の消滅では進まない）。計画とジョブと報告はそれを持ち、食い違えば実行・受理しない（§7.11「計画」）
+  （名前の変更では進めない。印のついたプレイリストの削除でも、open な作業が無ければ進める。D-102）。計画とジョブと報告はそれを持ち、食い違えば実行・受理しない（§7.11「計画」）
 - `device_items` / `device_playlist_state` は端末側の正本を読んだ時点で**全置換**する（adb は回復の後と同期の
   完了、agent は報告・破棄の受理）。部分的な更新はしない
 - 端末の行と計画・キャッシュが消えるのは端末の削除（`ON DELETE CASCADE`。端末上のファイルには触らない）。
@@ -1523,7 +1523,7 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   `abandoned` にし、待ちの同期を取り消す（実行中の同期・端末のロック中は 409 `busy`）。adb で安全なのは、
   次につないだときの回復が計画と無関係に端末のジャーナルから封印済みバッチを完遂・取り消すため。iPhone の
   Mac が失われたときもこれで閉じる。端末の削除も open な計画があっても通す（端末のジョブが実行中か
-  ロック中なら 409 `busy`。待ちのジョブは取り消す）
+  ロック中なら 409 `busy`。待ちのジョブは取り消す）。印のついたプレイリストの削除が `open_plan` で止まるときも、これで開く
 
 **Android（ADB）**
 
@@ -2811,7 +2811,7 @@ deep_interval_days = 30         # tag_hash / audio_md5 を全件再計算する 
 poll_interval_secs = 60         # Inbox の確認間隔（秒。変化があったときだけ走査を投入）。0 で自動なし（UI の「今すぐ確認」だけ）
 
 [gc]
-retention_days = 7              # missing_since / 退避 WAV / Derived 孤児 / 却下して削除した Inbox の取り込みを物理削除するまでの日数
+retention_days = 7              # missing_since / 退避 WAV / Derived 孤児 / 却下して削除した Inbox の取り込みを物理削除するまでの日数（終端した同期の計画の回収にも使う）
 jobs_done_days = 7              # 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない
 jobs_failed_days = 30           # failed のジョブ行を消すまでの日数。0 で消さない
 
