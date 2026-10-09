@@ -135,6 +135,27 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
             [now - 8 * 86_400],
         )
         .unwrap();
+    app.conn()
+        .execute(
+            "INSERT INTO devices (id, uuid, name, name_key, transport, variant, selection,
+                                  adb_serial, adb_volume, adb_root, created_at, updated_at)
+             VALUES (1, 'u1', 'd', 'd', 'adb', 'opus', 'all', 'S', 'emulated', 'Music', 0, 0)",
+            [],
+        )
+        .unwrap();
+    for (id, state, closed) in [
+        (1, "completed", Some(now - 40 * 86_400)),
+        (2, "abandoned", Some(now - 39 * 86_400)),
+        (3, "open", None),
+    ] {
+        app.conn()
+            .execute(
+                "INSERT INTO device_sync_plans (id, device_id, plan_token, plan, state, created_at, closed_at)
+                 VALUES (?1, 1, 't', '[]', ?2, 1, ?3)",
+                params![id, state, closed],
+            )
+            .unwrap();
+    }
     std::fs::create_dir_all(app.dir.path().join("Archive/A")).unwrap();
     std::fs::write(app.dir.path().join("Archive/A/1.m4a"), b"12345").unwrap();
 
@@ -149,6 +170,8 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
     // ジョブ行の掃除の対象（P4-18）。設定は例の既定（done 7 日 / failed 30 日）
     assert_eq!(body["jobs"]["done"], 1, "{body}");
     assert_eq!(body["jobs"]["failed"], 0);
+    // 終端した同期の計画（P5-6）: 古い終端 2 件のうち最後の 1 件は残るので 1 件、open は数えない
+    assert_eq!(body["plans"], 1, "{body}");
     // cutoff（例の既定の retention_days = 7 日）はサーバが受信時刻から数える。テストの now より後なので、秒が進んだぶんだけ大きくなり得る
     let cutoff = body["cutoff"].as_i64().unwrap();
     assert!(

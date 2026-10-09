@@ -823,3 +823,77 @@ async fn confirm_after_marked_playlist_deleted_is_plan_changed() {
         (StatusCode::CONFLICT, Some("plan_changed"))
     );
 }
+
+/// 終端を GC が消した後の同じ報告の再送は 404 no_plan。端末ごとに残る最後の終端への再送は 200
+#[tokio::test]
+async fn resend_after_plan_was_pruned_is_404_but_kept_latest_is_200() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    let body = report_of(
+        &p,
+        json!([{"track_id": 1, "dest_path": t.dest_path, "token": t.token, "size": 1, "sha256": t.sha256}]),
+        json!([]),
+    );
+    let (st, v) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/report",
+            Some(body.clone()),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // 閉じた計画しか無い（最後の終端）: 古くても GC は残すので再送は 200
+    let old = spindle::db::now_epoch() - 400 * 86_400;
+    app.db
+        .write(move |c| {
+            c.execute("UPDATE device_sync_plans SET closed_at = ?1", [old])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let n = spindle::gc::prune_plans(&app.db, 7 * 86_400, spindle::db::now_epoch())
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    let (st, _) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/report",
+            Some(body.clone()),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "残した最後の終端への再送");
+    // 次の計画を閉じると、最初の計画は「最後」ではなくなり、古ければ消える
+    let p2 = confirm(&app, &token).await;
+    assert_ne!(p2.plan_id, p.plan_id);
+    let body2 = report_of(&p2, json!([]), json!([]));
+    let (st, v) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/report",
+            Some(body2.clone()),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let n = spindle::gc::prune_plans(&app.db, 7 * 86_400, spindle::db::now_epoch() + 10 * 86_400)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "最初の計画だけが消える");
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, "/api/agent/report", Some(body))
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("no_plan"))
+    );
+    let (st, _) = app
+        .agent_call(Some(&token), Method::POST, "/api/agent/report", Some(body2))
+        .await;
+    assert_eq!(st, StatusCode::OK, "最後の終端への再送は 200");
+}

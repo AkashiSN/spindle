@@ -1200,3 +1200,125 @@ async fn gc_job_prunes_job_rows_and_keeps_itself() {
         "自分（終端直後の done）は消えない"
     );
 }
+
+// ---------------------------------------------------------------- 終端した同期の計画（P5-6）
+
+fn seed_device(env: &Env, id: i64) {
+    env.conn()
+        .execute(
+            "INSERT INTO devices (id, uuid, name, name_key, transport, variant, selection,
+                                  adb_serial, adb_volume, adb_root, created_at, updated_at)
+             VALUES (?1, printf('%032x', ?1), 'd' || ?1, 'd' || ?1, 'adb', 'opus', 'all',
+                     'S' || ?1, 'emulated', 'Music', 0, 0)",
+            [id],
+        )
+        .unwrap();
+}
+
+fn seed_plan(
+    env: &Env,
+    id: i64,
+    device: i64,
+    state: &str,
+    closed_at: Option<i64>,
+    job: Option<i64>,
+) {
+    env.conn()
+        .execute(
+            "INSERT INTO device_sync_plans (id, device_id, job_id, plan_token, plan, state, created_at, closed_at)
+             VALUES (?1, ?2, ?3, 't', '[]', ?4, 1, ?5)",
+            params![id, device, job, state, closed_at],
+        )
+        .unwrap();
+}
+
+fn plan_ids(env: &Env) -> Vec<i64> {
+    let c = env.conn();
+    let mut st = c
+        .prepare("SELECT id FROM device_sync_plans ORDER BY id")
+        .unwrap();
+    st.query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// 保持期間を過ぎた completed / abandoned が消える。open・期間内・端末ごとの最後の終端は残る。
+/// 端末は互いに独立。2 回目は何も消さない（冪等）
+#[tokio::test]
+async fn gc_prunes_old_terminal_plans_but_keeps_open_recent_and_last_per_device() {
+    use spindle::gc::{prunable_plans, prune_plans};
+    let env = Env::new();
+    let now = env.now;
+    seed_device(&env, 1);
+    seed_device(&env, 2);
+    // 端末 1: 古い completed(1) / 古い abandoned(2) / 最後の終端 completed(3, 古い) / open(4)
+    seed_plan(&env, 1, 1, "completed", Some(now - 31 * DAY), None);
+    seed_plan(&env, 2, 1, "abandoned", Some(now - 31 * DAY), None);
+    seed_plan(&env, 3, 1, "completed", Some(now - 31 * DAY), None);
+    seed_plan(&env, 4, 1, "open", None, None);
+    // 端末 2: 古い終端(5)、期間内の終端(6)。最後は 6 なので 5 は消える
+    seed_plan(&env, 5, 2, "completed", Some(now - 31 * DAY), None);
+    seed_plan(&env, 6, 2, "abandoned", Some(now - 29 * DAY), None);
+    assert_eq!(prunable_plans(&env.db, RETENTION, now).await.unwrap(), 3);
+    assert_eq!(prune_plans(&env.db, RETENTION, now).await.unwrap(), 3);
+    assert_eq!(plan_ids(&env), [3, 4, 6]);
+    assert_eq!(prunable_plans(&env.db, RETENTION, now).await.unwrap(), 0);
+    assert_eq!(prune_plans(&env.db, RETENTION, now).await.unwrap(), 0);
+    assert_eq!(plan_ids(&env), [3, 4, 6]);
+}
+
+/// 端末に終端が 1 件しか無い（古い）なら残る。open だけの端末にも触れない
+#[tokio::test]
+async fn gc_keeps_sole_terminal_plan_per_device() {
+    use spindle::gc::prune_plans;
+    let env = Env::new();
+    seed_device(&env, 1);
+    seed_device(&env, 2);
+    seed_plan(&env, 1, 1, "abandoned", Some(env.now - 90 * DAY), None);
+    seed_plan(&env, 2, 2, "open", None, None);
+    assert_eq!(prune_plans(&env.db, RETENTION, env.now).await.unwrap(), 0);
+    assert_eq!(plan_ids(&env), [1, 2]);
+}
+
+/// `job_id` の FK（ON DELETE SET NULL）があるので、ジョブ行の掃除の後でも計画の掃除は落ちない。
+/// gc ジョブ本体が両方を行う
+#[tokio::test]
+async fn gc_job_prunes_plans_after_job_rows_without_fk_failure() {
+    use spindle::gc::JobsRetention;
+    let env = Env::new();
+    env.retire_fake_gc_job();
+    let now = env.now;
+    seed_device(&env, 1);
+    env.conn()
+        .execute(
+            "INSERT INTO jobs (id, type, payload, state, created_at, finished_at) VALUES (1, 'rg', '{}', 'done', 1, ?1)",
+            [now - 8 * DAY],
+        )
+        .unwrap();
+    seed_plan(&env, 1, 1, "completed", Some(now - 40 * DAY), Some(1));
+    seed_plan(&env, 2, 1, "completed", Some(now - 39 * DAY), Some(1));
+    let mut reg = Registry::new();
+    reg.register(
+        JobType::Gc,
+        Arc::new(
+            GcHandler::new(env.db.clone(), env.roots.clone(), RETENTION)
+                .with_jobs_retention(JobsRetention::from_days(7, 30)),
+        ),
+    );
+    let gc_id = match env.jobs.enqueue(new_gc_job()).await.unwrap() {
+        EnqueueResult::Inserted(id) | EnqueueResult::Duplicate(id) => id,
+    };
+    env.jobs.start(reg, env.shutdown.clone());
+    assert_eq!(env.wait_job(gc_id).await, JobState::Done);
+    assert_eq!(env.count("SELECT count(*) FROM jobs WHERE id = 1"), 0);
+    assert_eq!(
+        plan_ids(&env),
+        [2],
+        "古い 1 は消え、最後の終端 2 は残る（job_id は NULL）"
+    );
+    assert_eq!(
+        env.count("SELECT count(*) FROM device_sync_plans WHERE id = 2 AND job_id IS NULL"),
+        1
+    );
+}

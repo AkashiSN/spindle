@@ -123,6 +123,17 @@ impl GcHandler {
                 "保持期間を過ぎたジョブ行を消した"
             );
         }
+        // 終端した同期の計画の掃除（open と端末ごとの最後の終端は残る。P5-6）
+        let plans = gc::prune_plans(&self.db, self.retention_secs, now_epoch())
+            .await
+            .map_err(map_err)?;
+        if plans > 0 {
+            tracing::info!(
+                job_id = ctx.job.id,
+                plans,
+                "保持期間を過ぎた同期の計画を消した"
+            );
+        }
         Ok(Outcome::Done)
     }
 }
