@@ -2037,3 +2037,15 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
       （D-101。実機 mbp14 で JXA を固定、Release に macOS arm64 バイナリ）
 - [x] P5-5 文書の改訂（SPEC §1・§7.6・§7.7・§9・§10・§12・§13・§14、DSL.md、CLAUDE.md の禁止事項の注記）
       （SPEC §7.11 を新設）
+- [x] P5-6 端末配信の残課題のうち小さい 2 件: 印のついたプレイリストの削除を印の変更と同じ規則にする
+      （open な作業中は 409 `open_plan`、通れば `generation` を進める）、終端した計画を GC が回収する
+      （`/api/gc/preview` に `plans`）（D-102）
+- [ ] P5-7 Android の保存先の引き継ぎ（DB 全損後）: 登録で manifest の uuid を新しい行に写し、
+      `canonical_key(dest_path)` で manifest の `track_id` / `playlist_id` を付け替える（トークンは端末の
+      sha256 が今の送る元と一致すれば今の配信トークン、違えば STALE）。DB の作り直しで id が振り直されるので
+      uuid だけを写すと写しが別の曲に結び付く（D-102）
+- [ ] P5-8 Mac の `pair --adopt`: uuid の不一致を明示で受け入れ、エージェントの state の `tracks` /
+      `playlists` のキーを同じ付け替えで直して `report_only` で全状態を報告する。ここが本命（再生回数・
+      レートの保全）で、pending が残っていれば拒否する。`--adopt` 無しの不一致は今どおり止める（D-102）
+- [ ] id の再利用の対策: 最大 id の行を GC が消さない（SQLite は max(rowid)+1 を振る）か、token も sha256 も
+      パスも違う既存の写しを Update ではなく Delete + Add にする。Mac で再生回数が別の曲に移るのを防ぐ（D-102）
