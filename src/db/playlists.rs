@@ -13,6 +13,7 @@ use crate::domain::relpath::canonical_key;
 use crate::playlist::export::{ExportProfile, ExportTrack, PathStyle, Source};
 use crate::playlist::import::Candidate;
 
+use super::devices::{atomically, has_open_work};
 use super::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -299,9 +300,52 @@ pub fn set_auto_export(conn: &Connection, id: i64, on: bool, now: i64) -> Result
     Ok(n > 0)
 }
 
-/// 消えたら true。項目と書き出し記録は CASCADE で消える
-pub fn delete(conn: &Connection, id: i64) -> Result<bool> {
-    Ok(conn.execute("DELETE FROM playlists WHERE id = ?", [id])? > 0)
+/// `delete` の結果
+#[derive(Debug, PartialEq, Eq)]
+pub enum Delete {
+    Deleted,
+    NotFound,
+    /// 印をつけた端末に open な作業がある。消していない（端末名）
+    OpenPlan(Vec<String>),
+}
+
+/// 項目と書き出し記録は CASCADE で消える。印（device_playlists）も消えるので、印の変更
+/// （`PUT /devices/:id/playlists`）と同じ規則にする: 印をつけた端末のどれかに open な作業
+/// （`has_open_work`）があれば消さず、無ければ印をつけた端末の generation を進めて消す。
+/// 判定・generation・DELETE は 1 つの SAVEPOINT の中（書き込みコネクションは 1 本）
+pub fn delete(conn: &Connection, id: i64, now: i64) -> Result<Delete> {
+    atomically(conn, "playlist_delete", || {
+        let mut st = conn.prepare_cached(
+            "SELECT d.id, d.name FROM device_playlists dp JOIN devices d ON d.id = dp.device_id
+              WHERE dp.playlist_id = ?1 ORDER BY d.id",
+        )?;
+        let marked: Vec<(i64, String)> = st
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        drop(st);
+        let mut busy = Vec::new();
+        for (dev, name) in &marked {
+            if has_open_work(conn, *dev)? {
+                busy.push(name.clone());
+            }
+        }
+        if !busy.is_empty() {
+            return Ok(Delete::OpenPlan(busy));
+        }
+        for (dev, _) in &marked {
+            conn.execute(
+                "UPDATE devices SET generation = generation + 1, updated_at = ?2 WHERE id = ?1",
+                params![dev, now],
+            )?;
+        }
+        Ok(
+            if conn.execute("DELETE FROM playlists WHERE id = ?", [id])? > 0 {
+                Delete::Deleted
+            } else {
+                Delete::NotFound
+            },
+        )
+    })
 }
 
 fn exists(conn: &Connection, id: i64) -> Result<bool> {

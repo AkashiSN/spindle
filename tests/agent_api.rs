@@ -797,3 +797,29 @@ async fn report_with_stale_token_turns_into_update() {
     assert_eq!(d["counts"]["update"], 1, "{d}");
     assert_eq!(d["counts"]["synced"], 0, "{d}");
 }
+
+#[tokio::test]
+async fn confirm_after_marked_playlist_deleted_is_plan_changed() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    app.seed_playlist(id, 10, "夜", &[1]).await;
+    let token = app.pair(id).await;
+    let (_, m) = app
+        .agent_call(Some(&token), Method::GET, "/api/agent/manifest", None)
+        .await;
+    let (st, v) = app.call(Method::DELETE, "/api/playlists/10", None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    let (st, v) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/plans",
+            Some(json!({"plan_token": m["plan_token"]})),
+        )
+        .await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("plan_changed"))
+    );
+}

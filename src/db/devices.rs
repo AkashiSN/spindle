@@ -100,7 +100,11 @@ fn device_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Device>> {
 /// 張っていなくても安全（`src/db/playlists.rs` の `rewrite_items` と同じ流儀）。`name` は
 /// 固定の定数だけを渡すこと（SAVEPOINT 名はバインドパラメータにできないので直接埋め込むが、
 /// 外部からの値を差し込むことはない）
-fn atomically<T>(conn: &Connection, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn atomically<T>(
+    conn: &Connection,
+    name: &str,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     conn.execute_batch(&format!("SAVEPOINT {name}"))?;
     match f() {
         Ok(v) => {

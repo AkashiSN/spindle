@@ -702,3 +702,144 @@ async fn agent_plan_force_abandon_only() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["plan_open"], false);
 }
+
+async fn generation_of(app: &App, id: i64) -> i64 {
+    app.db
+        .read(move |c| {
+            Ok(
+                c.query_row("SELECT generation FROM devices WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap()
+}
+
+async fn count_rows(app: &App, sql: &'static str) -> i64 {
+    app.db
+        .read(move |c| Ok(c.query_row(sql, [], |r| r.get(0))?))
+        .await
+        .unwrap()
+}
+
+async fn mark(app: &App, device: i64, playlists: &[i64]) {
+    let (st, v) = app
+        .call(
+            Method::PUT,
+            &format!("/api/devices/{device}/playlists"),
+            Some(json!({"playlist_ids": playlists})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn deleting_marked_playlist_is_blocked_by_open_plan() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone 15").await;
+    insert_playlist(&app, 5, "通勤", None).await;
+    mark(&app, id, &[5]).await;
+    let gen = generation_of(&app, id).await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at)
+                 VALUES (?1, 'x', '[]', 'open', 0)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app.call(Method::DELETE, "/api/playlists/5", None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"], "open_plan");
+    assert!(
+        v["message"].as_str().unwrap().contains("iPhone 15"),
+        "端末名が入る: {v}"
+    );
+    assert_eq!(
+        count_rows(&app, "SELECT count(*) FROM playlists WHERE id = 5").await,
+        1
+    );
+    assert_eq!(
+        count_rows(&app, "SELECT count(*) FROM device_playlists").await,
+        1
+    );
+    assert_eq!(generation_of(&app, id).await, gen);
+}
+
+#[tokio::test]
+async fn deleting_marked_playlist_is_blocked_by_queued_device_sync() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    insert_playlist(&app, 5, "通勤", None).await;
+    mark(&app, id, &[5]).await;
+    let gen = generation_of(&app, id).await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO jobs (type, payload, state, created_at) VALUES ('device_sync', json_object('device_id', ?1), 'queued', 0)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app.call(Method::DELETE, "/api/playlists/5", None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"], "open_plan");
+    assert_eq!(
+        count_rows(&app, "SELECT count(*) FROM playlists WHERE id = 5").await,
+        1
+    );
+    assert_eq!(generation_of(&app, id).await, gen);
+}
+
+#[tokio::test]
+async fn deleting_marked_playlist_bumps_generation_of_marked_devices_only() {
+    let app = App::new().await;
+    let marked = create_iphone(&app, "marked").await;
+    let other = create_iphone(&app, "other").await;
+    insert_playlist(&app, 5, "通勤", None).await;
+    insert_playlist(&app, 6, "別", None).await;
+    mark(&app, marked, &[5]).await;
+    mark(&app, other, &[6]).await;
+    let (g_marked, g_other) = (
+        generation_of(&app, marked).await,
+        generation_of(&app, other).await,
+    );
+    let (st, v) = app.call(Method::DELETE, "/api/playlists/5", None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    assert_eq!(generation_of(&app, marked).await, g_marked + 1);
+    assert_eq!(generation_of(&app, other).await, g_other);
+    assert_eq!(
+        count_rows(&app, "SELECT count(*) FROM playlists WHERE id = 5").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn deleting_unmarked_playlist_ignores_device_state() {
+    let app = App::new().await;
+    let id = create_iphone(&app, "iPhone").await;
+    insert_playlist(&app, 5, "通勤", None).await;
+    insert_playlist(&app, 6, "未印", None).await;
+    mark(&app, id, &[5]).await;
+    let gen = generation_of(&app, id).await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at)
+                 VALUES (?1, 'x', '[]', 'open', 0)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app.call(Method::DELETE, "/api/playlists/6", None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    assert_eq!(generation_of(&app, id).await, gen);
+}

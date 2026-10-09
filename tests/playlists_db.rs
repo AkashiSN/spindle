@@ -183,8 +183,14 @@ fn delete_cascades_items_and_exports() {
     playlists::append(&c, id, &[1, 2], 200).unwrap();
     let internal = playlists::profile_by_name(&c, "internal").unwrap().unwrap();
     playlists::record_export(&c, id, internal.id, "internal/通勤.m3u8", 300).unwrap();
-    assert!(playlists::delete(&c, id).unwrap());
-    assert!(!playlists::delete(&c, id).unwrap());
+    assert_eq!(
+        playlists::delete(&c, id, 0).unwrap(),
+        playlists::Delete::Deleted
+    );
+    assert_eq!(
+        playlists::delete(&c, id, 0).unwrap(),
+        playlists::Delete::NotFound
+    );
     let n: i64 = c
         .query_row("SELECT count(*) FROM playlist_items", [], |r| r.get(0))
         .unwrap();
