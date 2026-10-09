@@ -880,6 +880,22 @@ pub async fn prunable_jobs(
         .await?)
 }
 
+/// 保持期間（`retention_secs`）を過ぎた終端の同期計画を消す（端末ごとに最後の終端は残す）。冪等
+pub async fn prune_plans(db: &Db, retention_secs: i64, now: i64) -> Result<usize, GcError> {
+    let before = now.saturating_sub(retention_secs);
+    Ok(db
+        .write(move |c| crate::db::devices::prune_terminal_plans(c, before))
+        .await?)
+}
+
+/// [`prune_plans`] が消す数（dry-run）
+pub async fn prunable_plans(db: &Db, retention_secs: i64, now: i64) -> Result<usize, GcError> {
+    let before = now.saturating_sub(retention_secs);
+    Ok(db
+        .read(move |c| crate::db::devices::count_prunable_plans(c, before))
+        .await?)
+}
+
 /// `GET /api/gc/preview` の応答（件数・バイト数と先頭 [`PREVIEW_SAMPLE`] 件）
 pub const PREVIEW_SAMPLE: usize = 50;
 
@@ -904,6 +920,8 @@ pub struct Preview {
     pub inbox: PreviewSection,
     /// 掃除するジョブ行の数（P4-18）
     pub jobs: PreviewJobs,
+    /// 掃除する終端の同期計画の数（P5-6）
+    pub plans: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -915,6 +933,11 @@ pub struct PreviewJobs {
 impl Preview {
     pub fn with_jobs(mut self, (done, failed): (usize, usize)) -> Self {
         self.jobs = PreviewJobs { done, failed };
+        self
+    }
+
+    pub fn with_plans(mut self, plans: usize) -> Self {
+        self.plans = plans;
         self
     }
 
@@ -947,6 +970,7 @@ impl Preview {
                 i.rel_dir.clone()
             }),
             jobs: PreviewJobs::default(),
+            plans: 0,
         }
     }
 }

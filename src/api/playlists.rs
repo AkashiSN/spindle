@@ -22,7 +22,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::db::devices as dbdev;
-use crate::db::playlists::{self as dbpl, MoveError, Playlist, Rename};
+use crate::db::playlists::{self as dbpl, Delete, MoveError, Playlist, Rename};
 use crate::db::{now_epoch, tracks};
 use crate::domain::device::PendingSets;
 use crate::domain::filter::Sort;
@@ -500,11 +500,21 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, ApiError> {
-    let deleted = state.db.write(move |c| dbpl::delete(c, id)).await?;
-    Ok(if deleted {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        not_found()
+    let out = state
+        .db
+        .write(move |c| dbpl::delete(c, id, now_epoch()))
+        .await?;
+    Ok(match out {
+        Delete::Deleted => StatusCode::NO_CONTENT.into_response(),
+        Delete::NotFound => not_found(),
+        Delete::OpenPlan(names) => error_response_with_message(
+            StatusCode::CONFLICT,
+            "open_plan",
+            format!(
+                "端末「{}」の同期が途中か実行中なので、印のついたプレイリストは削除できません（完了させるか、端末タブで計画を破棄してから。Mac・端末が戻らなければ強制破棄）",
+                names.join("」「")
+            ),
+        ),
     })
 }
 

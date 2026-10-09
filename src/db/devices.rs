@@ -100,7 +100,11 @@ fn device_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Device>> {
 /// 張っていなくても安全（`src/db/playlists.rs` の `rewrite_items` と同じ流儀）。`name` は
 /// 固定の定数だけを渡すこと（SAVEPOINT 名はバインドパラメータにできないので直接埋め込むが、
 /// 外部からの値を差し込むことはない）
-fn atomically<T>(conn: &Connection, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn atomically<T>(
+    conn: &Connection,
+    name: &str,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     conn.execute_batch(&format!("SAVEPOINT {name}"))?;
     match f() {
         Ok(v) => {
@@ -1413,4 +1417,26 @@ pub fn estimate_selection(
         }
     }
     Ok(out)
+}
+
+/// 保持期間を過ぎた終端の計画の条件（`?1` = cutoff）。open には触れず、端末ごとに
+/// 終端のうち最大 id の 1 件は残す（応答を失った報告の再送を 200 で受ける保険）
+const PRUNABLE_PLANS: &str = "FROM device_sync_plans
+     WHERE state IN ('completed','abandoned')
+       AND closed_at IS NOT NULL AND closed_at < ?1
+       AND id NOT IN (SELECT max(id) FROM device_sync_plans WHERE state <> 'open' GROUP BY device_id)";
+
+/// 終端した計画を消す（GC）。`closed_at < before` のものだけ。返り値は消した数
+pub fn prune_terminal_plans(conn: &Connection, before: i64) -> Result<usize> {
+    Ok(conn.execute(&format!("DELETE {PRUNABLE_PLANS}"), [before])?)
+}
+
+/// [`prune_terminal_plans`] が消す数（dry-run）
+pub fn count_prunable_plans(conn: &Connection, before: i64) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        &format!("SELECT count(*) {PRUNABLE_PLANS}"),
+        [before],
+        |r| r.get(0),
+    )?;
+    Ok(n.max(0) as usize)
 }

@@ -35,7 +35,10 @@ pub async fn preview(State(state): State<AppState>) -> Result<Response, ApiError
     let jobs = gc::prunable_jobs(&state.db, &jobs_retention(&state), now)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(Preview::of(&plan).with_jobs(jobs)).into_response())
+    let plans = gc::prunable_plans(&state.db, retention, now)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(Preview::of(&plan).with_jobs(jobs).with_plans(plans)).into_response())
 }
 
 pub async fn start(State(state): State<AppState>) -> Result<Response, ApiError> {

@@ -367,7 +367,8 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
 Inbox の取り込みのファイル（D-90）を回収する。
 1 日 1 回自動、`POST /api/gc` で手動、`GET /api/gc/preview` が dry-run。D-56）。GC は保持期間を過ぎた
 終端の**ジョブ行**も消す（done / cancelled は `[gc].jobs_done_days`、failed は `jobs_failed_days`。0 で
-消さない。P4-18、D-81）。
+消さない。P4-18、D-81）。端末の同期の計画（`device_sync_plans`）も、終端（`completed` / `abandoned`）して
+`[gc].retention_days` を過ぎたものを消す。端末ごとに最後の終端 1 件と open な計画は残す（D-102）。
 
 ### ReplayGain の内部表現
 
@@ -434,13 +435,16 @@ state とミュージック.app。spindle へは報告で届く）で、DB の�
 | `device_sync_plans` | 確定した計画。`plan` は不変の JSON（版 `v`・`generation`・`plan_token` と、曲の操作（`op_id`・種類・`track_id`・from・to・トークン・size・sha256）とプレイリストの操作（`op_id`・種類・`playlist_id`・from・to・トークン）の列）、`state`（`open` / `completed` / `abandoned`）、`job_id`（adb）、`report_digest`（agent の報告の再送の照合）。端末ごとに `open` は 1 つまで（部分 UNIQUE 索引） | DB にしか無い |
 
 - `devices.generation` は端末の選曲に効く設定（`selection` / `variant` / 印）を API で変えるたびに 1 進める
-  （名前の変更では進めない。プレイリストの削除による印の消滅では進まない）。計画とジョブと報告はそれを持ち、食い違えば実行・受理しない（§7.11「計画」）
+  （名前の変更では進めない。印のついたプレイリストの削除でも、open な作業が無ければ進める。D-102）。計画とジョブと報告はそれを持ち、食い違えば実行・受理しない（§7.11「計画」）
 - `device_items` / `device_playlist_state` は端末側の正本を読んだ時点で**全置換**する（adb は回復の後と同期の
   完了、agent は報告・破棄の受理）。部分的な更新はしない
 - 端末の行と計画・キャッシュが消えるのは端末の削除（`ON DELETE CASCADE`。端末上のファイルには触らない）。
-  印はそれに加えてプレイリストの削除でも消え（`device_playlists.playlist_id` も CASCADE）、そのとき
-  `generation` は進まず、open な計画があっても止めない（残課題。§17）。`source_hashes` は `tracks` の
-  行の削除で消える。GC は終端した計画を回収しない
+  印はそれに加えてプレイリストの削除でも消える（`device_playlists.playlist_id` も CASCADE）。印のついた
+  プレイリストの削除は印の変更と同じ規則で、印のある端末に open な作業（open な計画か待ち・実行中の
+  `device_sync`）があれば 409 `open_plan`、通れば印のある端末の `generation` を進める（同じトランザクション。
+  D-102）。`source_hashes` は `tracks` の行の削除で消える。GC は終端した計画のうち、閉じてから
+  `[gc].retention_days` を過ぎたものを消す。端末ごとに最後の終端 1 件（報告の再送を 200 で受ける保険）と
+  open な計画は残す（D-102）
 - 同じマイグレーションで `playlists.evaluated_at`（スマートプレイリストを評価した時刻。差分画面に出す）を
   足し、`jobs.type` に `source_hash` / `device_scan` / `device_sync` / `device_verify` を足した
   （`playlist_sync` も同時）。0003 の `inbox_item_tracks` は Inbox の件で配置した曲で、件の「配置 → RG →
@@ -1500,8 +1504,10 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   agent は最初の副作用の前にエージェントが確定する
 - **端末ごとに open な計画は 1 つ**。同じ `plan_token` の確定は同じ計画を返し（冪等）、違えば
   409 `open_plan_exists`。open な計画か待ち・実行中の `device_sync` がある間は、名前以外の PATCH・
-  印の変更（PUT）・pair コードの発行を 409 `open_plan` にする（`generation` を動かさないため。
-  プレイリストの削除による印の消滅は対象外で、§17 の残課題）
+  印の変更（PUT）・pair コードの発行を 409 `open_plan` にする（`generation` を動かさないため）。
+  印のついたプレイリストの削除も同じ規則で、印のある端末のどれかに open な作業があれば 409 `open_plan`
+  （端末名を message に出す）。通れば印のある端末の `generation` を削除と同じトランザクションで進める
+  （D-102）。プレイリストの中身・名前・ルールの変更は止めない（次の差分で反映される）
 - **開始済みの計画の再開**: 実行するのは計画の部分集合だけ。今の状態で満たされている操作は済みとして
   飛ばし、今の差分にも**同じ操作・同じトークン・同じパス**で残っているものだけを実行する。差分から消えた・
   変わった操作と、計画に無い操作（とくに新しい削除）は実行せず、次の差分に回す。パス変更は入れ替え・
@@ -1510,12 +1516,14 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
 - **終端**: adb はジョブの成功で `completed`。失敗・キャンセル・未接続では `open` のまま残り、
   端末タブが「続きを実行」（同じ計画で同期を投入し直す）と「破棄」を出す。agent は報告の受理で
   `completed`、エージェントの `abandon` で `abandoned`。終端した計画への報告は受けない（同じ報告の
-  再送だけは `report_digest` の一致で成功を返す。D-99）
+  再送だけは `report_digest` の一致で成功を返す。D-99）。終端した計画は GC が保持期間後に消すので、それより
+  遅れて届いた再送は 404 `no_plan` になる（エージェントは `plan_id` を外して止まり、次の sync が報告だけを
+  取り直して回復する。端末ごとの最後の終端 1 件は残すので、通常の再送は影響を受けない。D-102）
 - **端末が戻らないときの逃げ道**（D-98）: 破棄に `force` を付けると、端末につながず回復もせずに計画を
   `abandoned` にし、待ちの同期を取り消す（実行中の同期・端末のロック中は 409 `busy`）。adb で安全なのは、
   次につないだときの回復が計画と無関係に端末のジャーナルから封印済みバッチを完遂・取り消すため。iPhone の
   Mac が失われたときもこれで閉じる。端末の削除も open な計画があっても通す（端末のジョブが実行中か
-  ロック中なら 409 `busy`。待ちのジョブは取り消す）
+  ロック中なら 409 `busy`。待ちのジョブは取り消す）。印のついたプレイリストの削除が `open_plan` で止まるときも、これで開く
 
 **Android（ADB）**
 
@@ -1819,7 +1827,8 @@ POST   /api/artwork/from-caa                      { release_id } か { release_g
                                                   上流の失敗は 502 lookup_failed、未構成は 503 coverart_unavailable（D-86）
                                                   → 404 artwork_not_found、409 pending | no_changes
 
-GET    /api/playlists, POST, PATCH, DELETE        プレイリストの CRUD（D-53）。POST / PATCH に rule があれば
+GET    /api/playlists, POST, PATCH, DELETE        プレイリストの CRUD（D-53）。DELETE は印のある端末に open な作業があれば
+                                                  409 open_plan（D-102）。POST / PATCH に rule があれば
                                                   スマート（D-54。評価結果は playlist_items に書く）。並びは
                                                   /api/tracks?filter={"playlist_id":N}&sort=position
 POST   /api/playlists/:id/items                   { selection, sort? } を末尾に追加（同じトラックは 1 回）
@@ -1954,7 +1963,7 @@ DELETE /api/jobs?state=failed                     失敗をまとめて消す �
 GET    /api/config                                読み込んだ config.toml の原文 { "path", "text" }（設定画面 §12.6。秘密は config に無い）
 GET    /api/archive                                退避台帳 { "items": [ archived_files の行 + "batch_id" ] }（新しい順。復元は batch の巻き戻し）
 POST   /api/scan                                  {"kind": "incremental" | "deep"}。scan ジョブを投入
-GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件、`jobs: { done, failed }` は掃除するジョブ行の数。何も消さない。D-56）
+GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件、`jobs: { done, failed }` は掃除するジョブ行の数、`plans` は消す終端した計画の数。何も消さない。D-56、D-102）
 GET    /api/inbox                                 承認キュー { "items": [{ id, rel_dir, state, detected_at, error, placed_album_id,
                                                   proposal, draft, warnings, destination, tracks: [{ rel_path, codec, lossless,
                                                   sample_rate, bit_depth, channels, duration_ms, tags, source,
@@ -2802,7 +2811,7 @@ deep_interval_days = 30         # tag_hash / audio_md5 を全件再計算する 
 poll_interval_secs = 60         # Inbox の確認間隔（秒。変化があったときだけ走査を投入）。0 で自動なし（UI の「今すぐ確認」だけ）
 
 [gc]
-retention_days = 7              # missing_since / 退避 WAV / Derived 孤児 / 却下して削除した Inbox の取り込みを物理削除するまでの日数
+retention_days = 7              # missing_since / 退避 WAV / Derived 孤児 / 却下して削除した Inbox の取り込みを物理削除するまでの日数（終端した同期の計画の回収にも使う）
 jobs_done_days = 7              # 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない
 jobs_failed_days = 30           # failed のジョブ行を消すまでの日数。0 で消さない
 
@@ -3256,8 +3265,10 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 
 ### 残課題
 
-- [ ] 印のついたプレイリストを削除しても `generation` が進まず、open な計画も止めない（次の差分で反映される
-      想定だが、確定済みの計画との整合は未検討。§6、§7.11）
+- [x] 印のついたプレイリストの削除（2026-10-09。印の変更と同じ規則: open な作業中は 409 `open_plan`、
+      通れば `generation` を進める。D-102）
+- [x] 終端した計画の回収（2026-10-09。GC が `[gc].retention_days` 後に消す。端末ごとに最後の終端 1 件は残す。
+      D-102）
 - [x] Discogs / VGMdb 連携（2026-09-20。作らない。D-72）
 - [x] `.fpl` 書き出し（2026-09-20。作らない。D-72）
 - [x] `HAS` 等の演算子の foobar 実機との挙動突き合わせ（2026-09-19。部分一致で一致。D-55）
@@ -3277,6 +3288,11 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
       約 6.5MB/s で、全曲（約 9,000 曲）の初回はおよそ 2 時間。意図の追記や `sync` をまとめる高速化は持ち越し（D-98）
 - [ ] DB を失ったときの既存の保存先の引き継ぎ: 設計書は端末タブの明示操作（端末側の manifest の `device_uuid` を
       新しい行に写す）で復旧するとしていたが、作っていない。今は保存先（端末の `Music/spindle`、Mac の
-      `~/Music/spindle` とミュージック.app の「spindle」フォルダ）を空にしてから登録・pair し直す（§6、§7.11）
-- [ ] 終端した計画の回収: 設計書は完了・破棄から `[gc].retention_days` を過ぎた `device_sync_plans` を GC が消すと
-      していたが、作っていない。終端した計画の行は端末の削除（`ON DELETE CASCADE`）でしか消えない（§6）
+      `~/Music/spindle` とミュージック.app の「spindle」フォルダ）を空にしてから登録・pair し直す（§6、§7.11）。
+      uuid を写すだけでは足りない: DB を作り直すと `tracks.id` / `playlists.id` が振り直され、端末の正本
+      （manifest、Mac の state）は id をキーにするので、写しが別の曲に結び付く（Mac では再生回数が別の曲に
+      移る）。`dest_path` の `canonical_key` で id を付け替える必要がある（P5-7 / P5-8。D-102）
+- [ ] id の再利用: `tracks.id` / `playlists.id` は `INTEGER PRIMARY KEY` で `AUTOINCREMENT` ではないので、
+      最大 id の行を GC が消すと次の挿入が同じ id を得る。端末に写しのある曲の id が別の曲に再利用されると、
+      差分は `UpdateMove` になり、Android は収束するが、Mac ではミュージック.app の track（再生回数）が
+      別の曲に引き継がれる。7 日以上同期しない場合に限る（D-102）
