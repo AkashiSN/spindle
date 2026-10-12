@@ -19,8 +19,8 @@ use crate::device::recover::complete_batch;
 use crate::device::remote::{DeviceFs, RemoteError};
 use crate::device::store::{append_durable, compact, StoreError};
 use crate::domain::device::{
-    peak_bytes, sha256_hex, DeviceItem, EntryKind, OpKind, PlaylistOpKind, PlaylistState,
-    SourceHash, SourceKind,
+    peak_bytes, sha256_hex, DesiredItem, DeviceItem, EntryKind, OpKind, PlaylistOpKind,
+    PlaylistState, SourceHash, SourceKind,
 };
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::fsroot::{fstat, FileKind, FsError, RootDir};
@@ -130,6 +130,31 @@ pub trait Control {
     async fn progress(&self, done: u64, total: u64);
 }
 
+/// 端末の曲の出どころ（manifest の `rel_path` / `source` に書く値と、今の端末上のパス）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub rel_path: String,
+    pub source: SourceKind,
+    pub dest_path: String,
+}
+
+/// 衝突を解いた後の desired から出どころの表を作る
+pub fn origins_of(desired: &[DesiredItem]) -> HashMap<i64, Origin> {
+    desired
+        .iter()
+        .map(|d| {
+            (
+                d.track_id,
+                Origin {
+                    rel_path: d.rel_path.clone(),
+                    source: d.source.kind,
+                    dest_path: d.dest_path.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 pub struct SyncInput<'a> {
     pub generation: i64,
     /// 回復済みの正本（`recover` の結果）
@@ -137,6 +162,8 @@ pub struct SyncInput<'a> {
     pub runnable: &'a Runnable,
     /// プレイリストの中身（`Computed.playlists` の playlist_id → body）
     pub playlist_bodies: &'a HashMap<i64, Vec<u8>>,
+    /// 送る曲の出どころ（`origins_of(&computed.desired)`）
+    pub origins: &'a HashMap<i64, Origin>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -214,6 +241,8 @@ struct Exec<'a, F, S, C> {
     unmanaged: HashSet<String>,
     /// 送る元が変わっていた曲（ハッシュの取り直し対象）
     rehash: std::collections::BTreeSet<i64>,
+    /// 送る曲の出どころ
+    origins: &'a HashMap<i64, Origin>,
 }
 
 pub async fn run<F: DeviceFs, S: Sources, C: Control>(
@@ -223,6 +252,7 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
     input: SyncInput<'_>,
 ) -> Result<SyncReport, SyncError> {
     let r = input.runnable;
+    let origins = input.origins;
     let current = Book::from(input.start.clone()).device_items();
     let ops: Vec<(OpKind, i64, u64)> = r.items.iter().map(|o| (o.op, o.track_id, o.size)).collect();
     let playlist_bytes: u64 = r
@@ -264,6 +294,7 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
         total: (r.items.len() + r.playlists.len()) as u64,
         unmanaged,
         rehash: std::collections::BTreeSet::new(),
+        origins,
     };
     let of = |k: OpKind| r.items.iter().filter(move |o| o.op == k);
     for op in of(OpKind::Delete) {
@@ -307,6 +338,16 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
         x.tick().await?;
     }
     x.fs.prune_empty_dirs().await?;
+    // 出どころの補填: 今の desired と同じパスにある曲の rel_path / source を今の値にする
+    // （移動の操作が出ないまま Library の rel_path が変わる場合がある。WAV → FLAC の正規化など）
+    for item in x.book.items.values_mut() {
+        if let Some(o) = origins.get(&item.track_id) {
+            if canonical_key(&o.dest_path) == canonical_key(&item.path) {
+                item.rel_path = o.rel_path.clone();
+                item.source = o.source.as_str().to_owned();
+            }
+        }
+    }
     let manifest = x.book.manifest();
     compact(x.fs, &manifest).await?;
     let mut warnings = Vec::new();
@@ -372,6 +413,8 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             token: None,
             size: None,
             sha256: None,
+            rel_path: None,
+            source: None,
         }
     }
 
@@ -467,6 +510,11 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
                 .push((EntryKind::Track, op.track_id, e.reason()));
             return Ok(());
         }
+        let Some(origin) = self.origins.get(&op.track_id).cloned() else {
+            self.errors
+                .push((EntryKind::Track, op.track_id, SourceError::Missing.reason()));
+            return Ok(());
+        };
         self.intent(Intent {
             op_id: op.op_id.clone(),
             generation: self.generation,
@@ -478,6 +526,8 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             token: Some(token.clone()),
             size: Some(op.size),
             sha256: Some(sha.clone()),
+            rel_path: Some(origin.rel_path.clone()),
+            source: Some(origin.source.as_str().to_owned()),
         })
         .await?;
         let tmp = format!("{to}{TMP_SUFFIX}");
@@ -496,6 +546,8 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
                 token,
                 size: op.size,
                 sha256: sha,
+                rel_path: origin.rel_path,
+                source: origin.source.as_str().to_owned(),
             },
         );
         self.finished(&op.op_id);
@@ -569,6 +621,8 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             token: Some(token.clone()),
             size: Some(body.len() as u64),
             sha256: Some(sha.clone()),
+            rel_path: None,
+            source: None,
         })
         .await?;
         let tmp = format!("{to}{TMP_SUFFIX}");
@@ -632,7 +686,20 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             if let Some((old, members)) = superseded.take() {
                 self.abort_batch(&old, Some(&batch_id), &members).await?;
             }
-            let members = batch_members(&batch_id, &ops);
+            let members = batch_members(&batch_id, &ops, self.origins);
+            for o in &ops {
+                let moving = matches!(o.op, OpKind::Move | OpKind::UpdateMove);
+                if moving
+                    && !members.iter().any(|m| m.track_id == o.track_id)
+                    && !self
+                        .errors
+                        .iter()
+                        .any(|e| e.0 == EntryKind::Track && e.1 == o.track_id)
+                {
+                    self.errors
+                        .push((EntryKind::Track, o.track_id, SourceError::Missing.reason()));
+                }
+            }
             let mut records = std::mem::take(&mut self.pending_done);
             records.push(Record::BatchBegin {
                 batch_id: batch_id.clone(),
@@ -786,7 +853,11 @@ fn drop_components(ops: Vec<PlanItem>, tracks: &HashSet<i64>) -> Vec<PlanItem> {
         .collect()
 }
 
-fn batch_members(batch_id: &str, ops: &[PlanItem]) -> Vec<BatchMember> {
+fn batch_members(
+    batch_id: &str,
+    ops: &[PlanItem],
+    origins: &HashMap<i64, Origin>,
+) -> Vec<BatchMember> {
     ops.iter()
         .filter_map(|o| {
             let op = match o.op {
@@ -797,6 +868,7 @@ fn batch_members(batch_id: &str, ops: &[PlanItem]) -> Vec<BatchMember> {
             // 名前に batch_id を含める: 縮めた後の新バッチが旧バッチ（中止済み）と一時ファイルを共有すると、
             // 回復が旧バッチの掃除として新バッチの new を消してしまう（D-95 の P5-3a 追記）
             let staging = format!("{MOVING_DIR}/{batch_id}-{}", o.op_id);
+            let origin = origins.get(&o.track_id)?;
             Some(BatchMember {
                 batch_id: batch_id.to_owned(),
                 op_id: o.op_id.clone(),
@@ -809,6 +881,8 @@ fn batch_members(batch_id: &str, ops: &[PlanItem]) -> Vec<BatchMember> {
                 token: o.token.clone()?,
                 size: o.size,
                 sha256: o.sha256.clone()?,
+                rel_path: origin.rel_path.clone(),
+                source: origin.source.as_str().to_owned(),
             })
         })
         .collect()

@@ -29,6 +29,11 @@ pub struct Intent {
     pub token: Option<String>,
     pub size: Option<u64>,
     pub sha256: Option<String>,
+    /// 曲の put だけ: Library の `rel_path` と送る元の種類（manifest に写す）
+    #[serde(default)]
+    pub rel_path: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// バッチの相。並び順が進む順
@@ -64,6 +69,8 @@ pub struct BatchMember {
     pub token: String,
     pub size: u64,
     pub sha256: String,
+    pub rel_path: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

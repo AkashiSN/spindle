@@ -15,6 +15,8 @@ fn intent(op_id: &str) -> Intent {
         token: Some("t".into()),
         size: Some(3),
         sha256: Some("h".into()),
+        rel_path: Some("a.flac".into()),
+        source: Some("master".into()),
     }
 }
 
@@ -31,6 +33,8 @@ fn member(batch: &str, op_id: &str, id: i64) -> BatchMember {
         token: "t".into(),
         size: 1,
         sha256: "h".into(),
+        rel_path: format!("{id}.flac"),
+        source: "master".into(),
     }
 }
 

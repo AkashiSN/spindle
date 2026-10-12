@@ -241,6 +241,8 @@ pub struct DesiredItem {
     pub token: String,
     pub size: u64,
     pub sha256: String,
+    /// Library の `rel_path`（端末の manifest に写す）
+    pub rel_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -309,6 +311,7 @@ pub fn build_manifest(
             dest_key: canonical_key(&dest),
             dest_path: dest,
             source,
+            rel_path: t.rel_path.clone(),
         });
     }
     let mut by_key: HashMap<&str, usize> = HashMap::new();

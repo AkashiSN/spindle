@@ -10,6 +10,7 @@ use spindle::device::journal::{parse, Record};
 use spindle::device::ondevice::*;
 use spindle::device::plan::{runnable, Runnable, StoredPlan};
 use spindle::device::recover::{recover, STALE_TOKEN};
+use spindle::device::store;
 use spindle::device::sync::{self, *};
 use spindle::domain::device::*;
 use spindle::domain::relpath::RelPath;
@@ -140,6 +141,7 @@ fn source_error_is_reported_and_others_continue() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -173,6 +175,7 @@ fn content_differing_from_the_plan_is_not_placed() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -279,6 +282,7 @@ fn playlists_are_written_renamed_and_deleted() {
                             start,
                             runnable: &r,
                             playlist_bodies: &bodies,
+                            origins: &origins_from(&r),
                         },
                     )
                     .await
@@ -675,6 +679,7 @@ fn rename_without_body_keeps_the_old_copy() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -841,6 +846,7 @@ async fn run_stored_plan(
             start: rec.manifest,
             runnable: &r,
             playlist_bodies: &bodies,
+            origins: &origins_from(&r),
         },
     )
     .await
@@ -1043,6 +1049,7 @@ fn failed_prepare_shrinks_the_batch_by_component() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -1083,6 +1090,7 @@ async fn run_without_source(
             start: rec.manifest,
             runnable: &r,
             playlist_bodies: &HashMap::new(),
+            origins: &origins_from(&r),
         },
     )
     .await
@@ -1326,6 +1334,7 @@ fn add_onto_a_move_source_dropped_on_resume_is_held() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -1364,6 +1373,7 @@ fn stale_token_from_recovery_survives_a_sync_that_does_not_touch_it() {
                 start: rec.manifest,
                 runnable: &Runnable::default(),
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&Runnable::default()),
             },
         )
         .await
@@ -1496,6 +1506,7 @@ fn changed_source_is_reported_for_rehash() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &std::collections::HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -1503,4 +1514,27 @@ fn changed_source_is_reported_for_rehash() {
         assert_eq!(report.rehash, vec![3, 7]);
         assert_eq!(report.errors.len(), 2);
     });
+}
+
+#[tokio::test]
+async fn transferred_items_record_rel_path_and_source() {
+    let fs = device_at(&[(1, "A/a.flac", b"AAAA")], 1 << 30).await;
+    let m = store::read_manifest(&fs).await.unwrap().unwrap();
+    assert_eq!(m.items[0].rel_path, "A/a.flac");
+    assert_eq!(m.items[0].source, "master");
+}
+
+#[tokio::test]
+async fn sync_refreshes_stale_rel_path_of_unchanged_items() {
+    let fs = device_at(&[(1, "A/a.flac", b"AAAA")], 1 << 30).await;
+    // 端末の rel_path を古い値にしておく（WAV → FLAC の正規化で Library 側だけ変わった状況）
+    let mut m = store::read_manifest(&fs).await.unwrap().unwrap();
+    m.items[0].rel_path = "A/a.wav".into();
+    store::write_manifest(&fs, &m).await.unwrap();
+    // 差分は無い（パス・トークン同じ）が、同期の終わりに今の値へ直る
+    sync_to(&fs, &[(1, "A/a.flac", b"AAAA")], &TestControl::default())
+        .await
+        .unwrap();
+    let m = store::read_manifest(&fs).await.unwrap().unwrap();
+    assert_eq!(m.items[0].rel_path, "A/a.flac");
 }

@@ -155,6 +155,12 @@ async fn apply_intent<F: DeviceFs>(
             }
             match it.kind {
                 EntryKind::Track => {
+                    // 出どころの無い曲の put は manifest に載せられない（必須項目）。管理外として残す
+                    let (Some(rel_path), Some(source)) = (it.rel_path.clone(), it.source.clone())
+                    else {
+                        tracing::warn!(op_id = %it.op_id, "出どころの無い曲の意図を取り込まない");
+                        return Ok(());
+                    };
                     book.items.insert(
                         it.ref_id,
                         ManifestItem {
@@ -163,6 +169,8 @@ async fn apply_intent<F: DeviceFs>(
                             token: it.token.clone().unwrap_or_default(),
                             size: it.size.unwrap_or(0),
                             sha256: it.sha256.clone().unwrap_or_default(),
+                            rel_path,
+                            source,
                         },
                     );
                 }
@@ -265,6 +273,8 @@ fn place_in_book(book: &mut Book, m: &BatchMember) {
             token: m.token.clone(),
             size: m.size,
             sha256: m.sha256.clone(),
+            rel_path: m.rel_path.clone(),
+            source: m.source.clone(),
         },
     );
 }

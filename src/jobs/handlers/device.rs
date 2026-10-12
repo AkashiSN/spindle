@@ -402,6 +402,7 @@ async fn run_sync(env: Arc<DeviceEnv>, ctx: JobContext) -> HandlerResult {
         device_id,
         generation: open.plan.generation,
     };
+    let origins = sync::origins_of(&computed.desired);
     let result = sync::run(
         &p.fs,
         &sources,
@@ -411,6 +412,7 @@ async fn run_sync(env: Arc<DeviceEnv>, ctx: JobContext) -> HandlerResult {
             start: p.rec.manifest.clone(),
             runnable: &r,
             playlist_bodies: &bodies,
+            origins: &origins,
         },
     )
     .await;

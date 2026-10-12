@@ -151,6 +151,8 @@ fn compact_is_never_seen_as_old_manifest_with_empty_journal() {
             token: "t".into(),
             size: 1,
             sha256: "0".repeat(64),
+            rel_path: "a.flac".into(),
+            source: "master".into(),
         });
         let new = DeviceManifest::new("u1", "emulated");
         let base = FakeFs::with_root(1 << 30);

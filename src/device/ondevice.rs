@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::device::{DeviceItem, EntryKind, PlaylistState, RESERVED_NAME};
+use crate::domain::device::{DeviceItem, EntryKind, PlaylistState, SourceKind, RESERVED_NAME};
 use crate::domain::relpath::{canonical_key, RelPath};
 
 /// manifest の形式の版
@@ -28,6 +28,10 @@ pub struct ManifestItem {
     pub token: String,
     pub size: u64,
     pub sha256: String,
+    /// 送った元の曲の Library の `rel_path`（引き継ぎで `track_id` を付け替える鍵。DB に依存しない）
+    pub rel_path: String,
+    /// 送る元の種類（`SourceKind::as_str()`。`source_hashes.source` と同じ語彙）
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +78,10 @@ pub enum ManifestError {
     DuplicatePath(String),
     #[error("manifest のパスが root の外か予約名を指す: {0}")]
     BadPath(String),
+    #[error("manifest の送る元の種類を知らない: {0}")]
+    BadSource(String),
+    #[error("manifest の Library のパスが不正: {0}")]
+    BadRelPath(String),
 }
 
 /// `.spindle` の下（大小文字・正規化の違いを含む）
@@ -112,6 +120,12 @@ pub fn validate(m: &DeviceManifest) -> Result<(), ManifestError> {
     let mut keys = HashSet::new();
     let mut ids = HashSet::new();
     for it in &m.items {
+        if RelPath::parse(&it.rel_path).is_err() {
+            return Err(ManifestError::BadRelPath(it.rel_path.clone()));
+        }
+        if SourceKind::parse(&it.source).is_none() {
+            return Err(ManifestError::BadSource(it.source.clone()));
+        }
         if !managed_path_ok(&it.path) {
             return Err(ManifestError::BadPath(it.path.clone()));
         }
