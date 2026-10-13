@@ -1118,14 +1118,16 @@ pub fn refund_pair_attempt(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdoptSwap {
     Swapped,
-    /// 行の uuid が既に `adopt_uuid`（差し替え済みのやり直し）
+    /// 行の uuid が既に `adopt_uuid` で、まだ報告も計画も無い（差し替え済みのやり直し）
     Already,
     NotAllowed,
 }
 
 /// 行の uuid を `adopt_uuid` に差し替えてよいか判定し、よければ差し替える（pair と同じ tx の中で呼ぶ）。
 /// 許すのは行が端末の状態を一度も持っていない（報告なし・計画なし・キャッシュ空）うえ、`adopt_uuid` が
-/// 他の行に無いときだけ。`agent_selector` はコードの発行で NULL に戻るので条件にしない
+/// 他の行に無いときだけ。`agent_selector` はコードの発行で NULL に戻るので条件にしない。
+/// 行の uuid が既に `adopt_uuid` なら、報告も計画も無いとき（差し替えた後、adopt がキャッシュを
+/// 書いたあとで落ちたやり直しを含む）だけ `Already`。報告か計画があれば、DB を失っていない端末なので断る
 pub fn adopt_swap_uuid(
     conn: &Connection,
     device_id: i64,
@@ -1136,7 +1138,18 @@ pub fn adopt_swap_uuid(
         return Ok(AdoptSwap::NotAllowed);
     };
     if d.uuid == adopt_uuid {
-        return Ok(AdoptSwap::Already);
+        let unreported: bool = conn.query_row(
+            "SELECT last_synced_at IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM device_sync_plans WHERE device_id = ?1)
+             FROM devices WHERE id = ?1",
+            params![device_id],
+            |r| r.get(0),
+        )?;
+        return Ok(if unreported {
+            AdoptSwap::Already
+        } else {
+            AdoptSwap::NotAllowed
+        });
     }
     let unused: bool = conn.query_row(
         "SELECT last_synced_at IS NULL

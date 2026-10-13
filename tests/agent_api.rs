@@ -970,6 +970,65 @@ async fn pair_adopt_is_idempotent_on_retry() {
     assert_eq!(v["device_uuid"], OLD_UUID);
 }
 
+/// 引き継ぎの後（adopt でキャッシュを書いた後）、finish を保存する前に落ちてもう一度 pair --adopt しても通る
+#[tokio::test]
+async fn pair_adopt_retry_after_adopt_wrote_the_cache_succeeds() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t1 = app.seed_track(1, "A/01 a.flac", b"aaa").await;
+    insert_playlist(&app, 10, "夜").await;
+    let code = app.pair_code(id).await;
+    let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let token = v["token"].as_str().unwrap().to_owned();
+    let body = json!({
+        "tracks": [adopt_track(70, &t1.dest_path, "A/01 a.flac", 3, &t1.sha256, false)],
+        "playlists": [{"playlist_id": 50, "name": "夜"}],
+    });
+    let (st, v) = adopt(&app, &token, body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let code = app.pair_code(id).await;
+    let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "キャッシュがあっても報告前ならやり直せる: {v}"
+    );
+    assert_eq!(v["device_uuid"], OLD_UUID);
+}
+
+/// uuid が既に adopt_uuid でも、報告・計画のある行（DB を失っていない Mac）は引き継ぎを断り、
+/// コードを消費しない（素の pair で入れ直せる）
+#[tokio::test]
+async fn pair_adopt_refuses_a_used_row_with_the_same_uuid_without_consuming_the_code() {
+    let setups: [&'static str; 2] = [
+        "UPDATE devices SET last_synced_at = 1 WHERE id = ?1",
+        "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at)
+         VALUES (?1, 'x', '{}', 'completed', 0)",
+    ];
+    for q in setups {
+        let app = App::new().await;
+        let id = app.create_iphone("iPhone").await;
+        let code = app.pair_code(id).await;
+        let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        sql(&app, q, id).await;
+        let code = app.pair_code(id).await;
+        let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+        assert_eq!(
+            (st, v["error"].as_str()),
+            (StatusCode::CONFLICT, Some("not_adoptable")),
+            "{q}"
+        );
+        let (uuid, _, _, attempts) = device_row(&app, id).await;
+        assert_eq!(uuid, OLD_UUID, "{q}");
+        assert_eq!(attempts, 0, "試行に数えない: {q}");
+        let (st, v) = pair_with(&app, &code, None).await;
+        assert_eq!(st, StatusCode::OK, "コードは消費されていない: {q}: {v}");
+        assert_eq!(v["device_uuid"], OLD_UUID);
+    }
+}
+
 #[tokio::test]
 async fn pair_adopt_refuses_a_used_row_without_consuming_the_code() {
     let setups: [&'static str; 4] = [
@@ -1132,8 +1191,8 @@ async fn adopt_remaps_and_writes_the_cache() {
     let body = json!({
         "tracks": [
             adopt_track(70, &t1.dest_path, "A/01 a.flac", 3, &t1.sha256, false),
-            adopt_track(80, "B/01 b.m4a", "b/01 B.flac", 9, "zz", true),
-            adopt_track(90, "C/x.m4a", "C/gone.flac", 1, "s", false),
+            adopt_track(80, "B/01 b.m4a", "b/01 B.flac", 9, &"b".repeat(64), true),
+            adopt_track(90, "C/x.m4a", "C/gone.flac", 1, "", false),
         ],
         "playlists": [{"playlist_id": 50, "name": "夜"}, {"playlist_id": 51, "name": "Gone"}],
     });
@@ -1155,7 +1214,7 @@ async fn adopt_remaps_and_writes_the_cache() {
                 3,
                 t1.sha256.clone()
             ),
-            (2, "B/01 b.m4a".into(), "".into(), 9, "zz".into()),
+            (2, "B/01 b.m4a".into(), "".into(), 9, "b".repeat(64)),
         ]
     );
     assert_eq!(pls, vec![(10, "夜".into(), "".into())]);
@@ -1238,7 +1297,8 @@ async fn adopt_rejects_bad_input() {
     let id = app.create_iphone("iPhone").await;
     app.seed_track(1, "A/01 a.flac", b"aaa").await;
     let token = app.pair(id).await;
-    let ok = |id, path: &str| adopt_track(id, path, "A/01 a.flac", 3, "s", false);
+    let hex = "a".repeat(64);
+    let ok = |id, path: &str| adopt_track(id, path, "A/01 a.flac", 3, &hex, false);
     let mut unknown_source = ok(1, "A/a.m4a");
     unknown_source["source"] = json!("mp3");
     let many: Vec<Value> = (0..=spindle::device::report::MAX_PLAYLISTS as i64)
@@ -1263,7 +1323,7 @@ async fn adopt_rejects_bad_input() {
         ),
         (
             "rel_path",
-            json!({"tracks": [adopt_track(1, "A/a.m4a", "/abs.flac", 3, "s", false)], "playlists": []}),
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "/abs.flac", 3, &hex, false)], "playlists": []}),
         ),
         (
             "source",
@@ -1278,6 +1338,22 @@ async fn adopt_rejects_bad_input() {
             json!({"tracks": [], "playlists": [{"playlist_id": 1, "name": ""}]}),
         ),
         ("件数", json!({"tracks": [], "playlists": many})),
+        (
+            "sha256 が短い",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", 3, "s", false)], "playlists": []}),
+        ),
+        (
+            "sha256 が大文字",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", 3, &"A".repeat(64), false)], "playlists": []}),
+        ),
+        (
+            "sha256 が 16 進でない",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", 3, &"g".repeat(64), false)], "playlists": []}),
+        ),
+        (
+            "size が i64 を超える",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", i64::MAX as u64 + 1, &hex, false)], "playlists": []}),
+        ),
     ];
     for (what, body) in cases {
         let (st, v) = adopt(&app, &token, body).await;
