@@ -56,7 +56,7 @@ pub fn pair<M: Music, S: Server>(
         if let Some(s) = &cx.state.server {
             if s.device_uuid != resp.device_uuid {
                 return Err(Error::Stop(format!(
-                    "この Mac は別の端末（{}）として登録されています。~/Music/spindle とミュージック.app の spindle フォルダを片付けてから pair してください",
+                    "この Mac は別の端末（{}）として登録されています。~/Music/spindle とミュージック.app の spindle フォルダを片付けてから pair してください。この Mac の保存先を引き継ぐなら、新しい pair コードで spindle-agent pair --adopt <URL> <コード> を実行してください",
                     resp.device_name
                 )));
             }

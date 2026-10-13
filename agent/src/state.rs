@@ -15,6 +15,9 @@ pub const STATE_VERSION: u32 = 1;
 /// 外で書き換えられた・中身を失った曲のトークン（本体の `recover::STALE_TOKEN` と同じ値）。
 /// 報告するとサーバの差分は「更新」になる（D-100）
 pub const STALE_TOKEN: &str = "";
+/// 引き継ぎ（`pair --adopt`）で付け替えた曲のトークン（本体の `ADOPTED_TOKEN` と同じ値）。
+/// 中身は前の登録で置いたもので、次の差分の「更新」でトークンだけ書き換える
+pub const ADOPTED_TOKEN: &str = "adopted";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {

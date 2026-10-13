@@ -10,6 +10,7 @@ use agent_proto::{
     ReportRequest, ReportState, ReportTrack,
 };
 
+use crate::adopt::{self, AdoptSummary};
 use crate::ctx::{now_epoch, Ctx, Ui};
 use crate::failpoint::Failpoints;
 use crate::local::{self, LocalRoot, Marker};
@@ -188,6 +189,13 @@ fn run_sync<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<SyncOutcome> 
     pair::continue_setup(cx)?;
     // ② バッチと pending_ops の回復
     recover::recover(cx)?;
+    // pair --adopt の付け替えが途中なら、manifest を取る前に終える（仕様 P5-8 2 の 6）
+    if cx.state.adopt_pending {
+        cx.ui.info("前回の引き継ぎ（pair --adopt）の続きを行います");
+        if let Some(a) = adopt::finish(cx)? {
+            cx.ui.info(&adopt_message(&a));
+        }
+    }
     let mut m = cx.server.manifest()?;
     let uuid = cx
         .state
@@ -445,8 +453,17 @@ pub fn pair_cmd<M: Music, S: Server>(
     url: &str,
     insecure_http: bool,
     code: &str,
+    adopt: bool,
 ) -> Result<()> {
     with_ctx(music, server, paths, fp, ui, |cx| {
+        if adopt {
+            let a = adopt::pair_adopt(cx, secrets, url, insecure_http, code)?;
+            cx.ui.info(&format!(
+                "{}。spindle-agent sync で反映します",
+                adopt_message(&a)
+            ));
+            return Ok(());
+        }
         pair::pair(cx, secrets, url, insecure_http, code)?;
         let name = cx
             .state
@@ -459,6 +476,13 @@ pub fn pair_cmd<M: Music, S: Server>(
         ));
         Ok(())
     })
+}
+
+fn adopt_message(a: &AdoptSummary) -> String {
+    format!(
+        "前の登録の保存先を引き継ぎました（曲 {} 件、プレイリスト {} 件。対応が無く管理から外したもの: 曲 {} 件、プレイリスト {} 件）",
+        a.tracks_adopted, a.playlists_adopted, a.tracks_dropped, a.playlists_dropped
+    )
 }
 
 pub fn resolve_cmd<M: Music, S: Server>(
@@ -549,6 +573,9 @@ pub fn status(paths: &Paths) -> Result<String> {
     let _ = writeln!(out, "保存先: {}", paths.root.display());
     if setup.phase != SetupPhase::Done {
         let _ = writeln!(out, "初期化: 途中（sync で続きを行います）");
+    }
+    if s.adopt_pending {
+        let _ = writeln!(out, "引き継ぎ: 途中（sync で続きを行います）");
     }
     let _ = writeln!(out, "曲: {}（うち古い写し {stale}）", s.tracks.len());
     let _ = writeln!(out, "プレイリスト: {}", s.playlists.len());

@@ -59,7 +59,7 @@ fn pair_and_sync(url: String, code: String, dir: PathBuf) -> Synced {
     let mut ui = Yes;
     let anon = HttpServer::new(&url, true, None).unwrap();
     pair_cmd(
-        &music, &anon, &secrets, &paths, &fp, &mut ui, &url, true, &code,
+        &music, &anon, &secrets, &paths, &fp, &mut ui, &url, true, &code, false,
     )
     .unwrap();
     let server = HttpServer::new(&url, true, secrets.get().unwrap()).unwrap();
