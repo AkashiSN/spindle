@@ -19,8 +19,8 @@ use crate::device::recover::complete_batch;
 use crate::device::remote::{DeviceFs, RemoteError};
 use crate::device::store::{append_durable, compact, StoreError};
 use crate::domain::device::{
-    peak_bytes, sha256_hex, DesiredItem, DeviceItem, EntryKind, OpKind, PlaylistOpKind,
-    PlaylistState, SourceHash, SourceKind,
+    adopted_unchanged, peak_bytes, sha256_hex, DesiredItem, DeviceItem, EntryKind, OpKind,
+    PlaylistOpKind, PlaylistState, SourceHash, SourceKind,
 };
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::fsroot::{fstat, FileKind, FsError, RootDir};
@@ -254,7 +254,22 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
     let r = input.runnable;
     let origins = input.origins;
     let current = Book::from(input.start.clone()).device_items();
-    let ops: Vec<(OpKind, i64, u64)> = r.items.iter().map(|o| (o.op, o.track_id, o.size)).collect();
+    let cur: HashMap<i64, &DeviceItem> = current.iter().map(|c| (c.track_id, c)).collect();
+    // 引き継ぎの照合で済む更新は送らないので、空き容量の判定に入れない
+    let ops: Vec<(OpKind, i64, u64)> = r
+        .items
+        .iter()
+        .filter(|o| {
+            !adopted_unchanged(
+                o.op,
+                o.to.as_deref(),
+                o.size,
+                o.sha256.as_deref(),
+                cur.get(&o.track_id).copied(),
+            )
+        })
+        .map(|o| (o.op, o.track_id, o.size))
+        .collect();
     let playlist_bytes: u64 = r
         .playlists
         .iter()
@@ -484,6 +499,26 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         else {
             return Ok(());
         };
+        // 引き継ぎの照合: 中身は manifest の sha256 のとおりと信じ、トークンと出どころだけ書き換える
+        // （ジャーナルは書かない。落ちても印が残るだけで次の同期でやり直す）
+        if let Some(item) = self.book.items.get_mut(&op.track_id) {
+            let cur = DeviceItem {
+                track_id: item.track_id,
+                dest_path: item.path.clone(),
+                token: item.token.clone(),
+                size: item.size,
+                sha256: item.sha256.clone(),
+            };
+            if adopted_unchanged(op.op, Some(&to), op.size, Some(&sha), Some(&cur)) {
+                item.token = token;
+                if let Some(o) = self.origins.get(&op.track_id) {
+                    item.rel_path = o.rel_path.clone();
+                    item.source = o.source.as_str().to_owned();
+                }
+                self.since_compact += 1;
+                return Ok(());
+            }
+        }
         if self.unmanaged.contains(&canonical_key(&to)) {
             self.errors.push((
                 EntryKind::Track,

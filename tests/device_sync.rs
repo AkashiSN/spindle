@@ -1538,3 +1538,59 @@ async fn sync_refreshes_stale_rel_path_of_unchanged_items() {
     let m = store::read_manifest(&fs).await.unwrap().unwrap();
     assert_eq!(m.items[0].rel_path, "A/a.flac");
 }
+
+/// 端末の manifest の曲のトークンを引き継ぎの印にする（引き継ぎ直後の状態）
+async fn mark_adopted(fs: &FakeFs) {
+    let mut m = store::read_manifest(fs).await.unwrap().unwrap();
+    for i in &mut m.items {
+        i.token = ADOPTED_TOKEN.to_owned();
+    }
+    store::write_manifest(fs, &m).await.unwrap();
+}
+
+fn put_count(fs: &FakeFs) -> usize {
+    fs.calls().iter().filter(|c| c.starts_with("put")).count()
+}
+
+#[tokio::test]
+async fn adopted_with_same_content_is_not_transferred() {
+    let want: &[Want] = &[(1, "A/a.flac", b"AAAA")];
+    let fs = device_at(want, 1 << 30).await;
+    mark_adopted(&fs).await;
+    let before = put_count(&fs);
+    let r = sync_to(&fs, want, &TestControl::default()).await.unwrap();
+    assert_eq!(put_count(&fs), before);
+    assert_eq!(r.manifest.items[0].token, desired(want).desired[0].token);
+}
+
+#[tokio::test]
+async fn adopted_with_wrong_size_is_transferred() {
+    let fs = device_at(&[(1, "A/a.flac", b"AAAA")], 1 << 30).await;
+    mark_adopted(&fs).await;
+    fs.set("A/a.flac", b"AAAAAA"); // 端末上の写しが変わった
+    let want: &[Want] = &[(1, "A/a.flac", b"AAAA")];
+    let r = sync_to(&fs, want, &TestControl::default()).await.unwrap();
+    assert_eq!(fs.get("A/a.flac").unwrap(), b"AAAA");
+    assert_eq!(r.manifest.items[0].token, desired(want).desired[0].token);
+}
+
+#[tokio::test]
+async fn adopted_updates_do_not_count_toward_peak_bytes() {
+    // 空きが転送量に足りなくても、全曲が引き継ぎの照合なら NoSpace にならない
+    let want: &[Want] = &[(1, "A/a.flac", &[1u8; 4096]), (2, "A/b.flac", &[2u8; 4096])];
+    let big = device_at(want, 1 << 30).await;
+    mark_adopted(&big).await;
+    let used: u64 = big
+        .paths()
+        .iter()
+        .map(|p| big.get(p).unwrap().len() as u64)
+        .sum();
+    let small = FakeFs::with_root(used + sync::MARGIN_BYTES + 2048);
+    for p in big.paths() {
+        small.set(&p, &big.get(&p).unwrap());
+    }
+    sync_to(&small, want, &TestControl::default())
+        .await
+        .unwrap();
+    assert_eq!(put_count(&small), 0);
+}

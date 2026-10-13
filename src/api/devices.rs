@@ -505,7 +505,7 @@ pub struct DiffView {
 }
 #[derive(Serialize)]
 pub struct DiffItem {
-    pub op: &'static str, // add | update | move | update_move | delete | waiting | error
+    pub op: &'static str, // add | update | adopted | move | update_move | delete | waiting | error
     pub track_id: i64,
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -584,7 +584,17 @@ pub async fn diff(
         .items
         .iter()
         .map(|o| DiffItem {
-            op: o.kind.as_str(),
+            op: if crate::domain::device::adopted_unchanged(
+                o.kind,
+                o.to.as_deref(),
+                o.size,
+                o.sha256.as_deref(),
+                current_of.get(&o.track_id).copied(),
+            ) {
+                "adopted"
+            } else {
+                o.kind.as_str()
+            },
             track_id: o.track_id,
             title: titles.get(&o.track_id).map(|t| t.0.clone()),
             artist: titles.get(&o.track_id).map(|t| t.1.clone()),

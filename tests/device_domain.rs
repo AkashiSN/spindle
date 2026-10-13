@@ -813,3 +813,77 @@ fn pending_sets_lookup_defaults_to_empty() {
     assert!(p.for_key("iphone").is_empty());
     assert!(p.for_id(1).is_empty());
 }
+
+fn adopted_cur(token: &str) -> DeviceItem {
+    DeviceItem {
+        track_id: 1,
+        dest_path: "A/a.opus".into(),
+        token: token.into(),
+        size: 4,
+        sha256: "s".into(),
+    }
+}
+
+#[test]
+fn adopted_unchanged_needs_marker_same_path_size_and_sha() {
+    let ok =
+        |c: &DeviceItem| adopted_unchanged(OpKind::Update, Some("A/a.opus"), 4, Some("s"), Some(c));
+    assert!(ok(&adopted_cur(ADOPTED_TOKEN)));
+    assert!(!ok(&adopted_cur("")));
+    assert!(!ok(&adopted_cur("x")));
+    let a = adopted_cur(ADOPTED_TOKEN);
+    assert!(!adopted_unchanged(
+        OpKind::Update,
+        Some("A/b.opus"),
+        4,
+        Some("s"),
+        Some(&a)
+    ));
+    assert!(!adopted_unchanged(
+        OpKind::Update,
+        Some("A/a.opus"),
+        5,
+        Some("s"),
+        Some(&a)
+    ));
+    assert!(!adopted_unchanged(
+        OpKind::Update,
+        Some("A/a.opus"),
+        4,
+        Some("t"),
+        Some(&a)
+    ));
+    assert!(!adopted_unchanged(
+        OpKind::Add,
+        Some("A/a.opus"),
+        4,
+        Some("s"),
+        Some(&a)
+    ));
+    assert!(!adopted_unchanged(
+        OpKind::Update,
+        Some("A/a.opus"),
+        4,
+        Some("s"),
+        None
+    ));
+}
+
+#[test]
+fn estimate_excludes_adopted_updates() {
+    let current = vec![adopted_cur(ADOPTED_TOKEN)];
+    let diff = Diff {
+        items: vec![ItemOp {
+            kind: OpKind::Update,
+            track_id: 1,
+            from: None,
+            to: Some("A/a.opus".into()),
+            token: Some("real".into()),
+            size: 4,
+            sha256: Some("s".into()),
+        }],
+        ..Default::default()
+    };
+    let e = estimate(&diff, &current);
+    assert_eq!((e.transfer_bytes, e.peak_bytes), (0, 0));
+}

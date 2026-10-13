@@ -897,10 +897,41 @@ pub fn peak_bytes(ops: &[(OpKind, i64, u64)], current: &[DeviceItem]) -> Estimat
     }
 }
 
+/// 引き継ぎ（DB 全損後に保存先を新しい行へ写す）で付け替えた曲のトークン。中身は manifest の
+/// sha256 のとおりと信じ、送る元の sha256・サイズ・パスが一致すれば同期で送らずにトークンだけ書き換える
+pub const ADOPTED_TOKEN: &str = "adopted";
+
+/// 引き継ぎの照合で済む更新か（転送しない。見積もりにも空き容量の判定にも入れない）
+pub fn adopted_unchanged(
+    kind: OpKind,
+    to: Option<&str>,
+    size: u64,
+    sha256: Option<&str>,
+    cur: Option<&DeviceItem>,
+) -> bool {
+    kind == OpKind::Update
+        && cur.is_some_and(|c| {
+            c.token == ADOPTED_TOKEN
+                && c.size == size
+                && sha256 == Some(c.sha256.as_str())
+                && to.is_some_and(|t| canonical_key(t) == canonical_key(&c.dest_path))
+        })
+}
+
 pub fn estimate(diff: &Diff, current: &[DeviceItem]) -> Estimate {
+    let cur: HashMap<i64, &DeviceItem> = current.iter().map(|c| (c.track_id, c)).collect();
     let ops: Vec<(OpKind, i64, u64)> = diff
         .items
         .iter()
+        .filter(|o| {
+            !adopted_unchanged(
+                o.kind,
+                o.to.as_deref(),
+                o.size,
+                o.sha256.as_deref(),
+                cur.get(&o.track_id).copied(),
+            )
+        })
         .map(|o| (o.kind, o.track_id, o.size))
         .collect();
     peak_bytes(&ops, current)
