@@ -150,6 +150,8 @@ impl Env {
             sha256: item.sha256.clone(),
             inode: st.inode,
             mtime_ns: st.mtime_ns,
+            rel_path: rel.into(),
+            source: "master".into(),
         };
         let mut s = self.state();
         s.tracks.insert(track_id, e.clone());

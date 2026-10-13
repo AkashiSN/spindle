@@ -8,13 +8,14 @@
 //! done（バッチを外す）。vacating 以降はキャンセルも差分の変化も見ずに完遂する（巻き戻さない）。
 //! 旧ファイルは `staging` へ動かし、track の `location` も付け替えるので track（再生回数など）は残る
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use agent_proto::{OpKind, PlanItem};
 
 use crate::ctx::Ctx;
 use crate::exec::{
-    download, entry_for, Downloaded, CONTENT_MISMATCH, PATH_OCCUPIED, UNMANAGED_COLLISION,
+    download, entry_for, Downloaded, Origin, CONTENT_MISMATCH, NO_ORIGIN, PATH_OCCUPIED,
+    UNMANAGED_COLLISION,
 };
 use crate::local::MOVING_DIR;
 use crate::music::Music;
@@ -38,6 +39,7 @@ pub fn run<M: Music, S: Server>(
     cx: &mut Ctx<'_, M, S>,
     ops: Vec<PlanItem>,
     unmanaged: &HashSet<String>,
+    origins: &HashMap<i64, Origin>,
 ) -> Result<(usize, usize)> {
     let total = ops.len();
     let mut errored = 0;
@@ -53,7 +55,12 @@ pub fn run<M: Music, S: Server>(
                 .iter()
                 .any(|(id, e)| !moving.contains(id) && canonical_key(&e.path) == *k)
         });
-        if to_key.as_ref().is_some_and(|k| unmanaged.contains(k)) {
+        if runnable_member(cx, o) && !origins.contains_key(&o.track_id) {
+            // 出どころ（Library の rel_path と送る元の種類）が分からない曲は動かさない
+            cx.error_track(o.track_id, NO_ORIGIN);
+            errored += 1;
+            skip.insert(o.track_id);
+        } else if to_key.as_ref().is_some_and(|k| unmanaged.contains(k)) {
             cx.error_track(o.track_id, UNMANAGED_COLLISION);
             errored += 1;
             skip.insert(o.track_id);
@@ -80,7 +87,7 @@ pub fn run<M: Music, S: Server>(
         if let Some(old) = superseded.take() {
             abort(cx, &old)?;
         }
-        let members = batch_members(cx, &batch_id, &ops);
+        let members = batch_members(cx, &batch_id, &ops, origins);
         let batch = PendingBatch {
             batch_id: batch_id.clone(),
             phase: BatchPhase::Sealed,
@@ -155,6 +162,7 @@ fn batch_members<M: Music, S: Server>(
     cx: &Ctx<'_, M, S>,
     batch_id: &str,
     ops: &[PlanItem],
+    origins: &HashMap<i64, Origin>,
 ) -> Vec<BatchMember> {
     ops.iter()
         .filter_map(|o| {
@@ -164,6 +172,7 @@ fn batch_members<M: Music, S: Server>(
                 _ => return None,
             };
             let e = cx.state.tracks.get(&o.track_id)?;
+            let origin = origins.get(&o.track_id)?;
             // 名前に batch_id を含める: 縮めた後の新バッチが旧バッチ（破棄済み）と一時ファイルを共有すると、
             // 旧バッチの片付けが新バッチの new を消してしまう（D-95 の P5-3a 追記）
             let staging = format!("{MOVING_DIR}/{batch_id}-{}", o.op_id);
@@ -180,6 +189,8 @@ fn batch_members<M: Music, S: Server>(
                 token: o.token.clone()?,
                 size: o.size,
                 sha256: o.sha256.clone()?,
+                rel_path: origin.rel_path.clone(),
+                source: origin.source.clone(),
             })
         })
         .collect()
@@ -274,7 +285,19 @@ fn complete<M: Music, S: Server>(
     // done: バッチを外すのと tracks の更新を 1 回の書き込みで
     for (m, ok) in b.members.iter().zip(placed) {
         if ok {
-            let entry = entry_for(cx, &m.persistent_id, &m.token, &m.to, m.size, &m.sha256)?;
+            let origin = Origin {
+                rel_path: m.rel_path.clone(),
+                source: m.source.clone(),
+            };
+            let entry = entry_for(
+                cx,
+                &m.persistent_id,
+                &m.token,
+                &m.to,
+                m.size,
+                &m.sha256,
+                &origin,
+            )?;
             cx.state.tracks.insert(m.track_id, entry);
         } else {
             cx.state.tracks.remove(&m.track_id);

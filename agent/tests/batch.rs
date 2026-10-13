@@ -540,3 +540,44 @@ fn recovery_adopts_destination_with_expected_content() {
     assert_eq!(s.tracks[&1].path, "y.m4a");
     assert_eq!(location_of(&env, &pid), "y.m4a");
 }
+
+#[test]
+fn move_and_update_move_record_manifest_origin_in_state() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "x.m4a", b"one");
+    env.synced_track(2, "y.m4a", b"two");
+    env.server.put_track(1, "x2.m4a", b"one");
+    env.server.set_origin(1, "Lib/one.flac", "opus");
+    env.server.put_track(2, "y2.m4a", b"twotwo");
+    env.server.set_origin(2, "Lib/two.flac", "aac");
+    exec_all(&mut env).unwrap();
+    let s = env.state();
+    assert_eq!(s.tracks[&1].path, "x2.m4a");
+    assert_eq!(s.tracks[&1].rel_path, "Lib/one.flac");
+    assert_eq!(s.tracks[&1].source, "opus");
+    assert_eq!(s.tracks[&2].path, "y2.m4a");
+    assert_eq!(s.tracks[&2].rel_path, "Lib/two.flac");
+    assert_eq!(s.tracks[&2].source, "aac");
+}
+
+#[test]
+fn move_without_origin_in_manifest_is_item_error_and_not_moved() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "x.m4a", b"one");
+    env.server.put_track(1, "x2.m4a", b"one");
+    let (_p, r, mut m) = env.confirm_all();
+    m.items.clear();
+    let errors = env.with_ctx(|cx| {
+        exec::run(cx, &r, &m).unwrap();
+        cx.errors.clone()
+    });
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].reason, exec::NO_ORIGIN);
+    assert!(env.root.exists("x.m4a").unwrap());
+    assert!(!env.root.exists("x2.m4a").unwrap());
+    let s = env.state();
+    assert!(s.pending_batches.is_empty());
+    assert_eq!(s.tracks[&1].path, "x.m4a");
+}

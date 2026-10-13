@@ -79,6 +79,14 @@ impl FakeServer {
         item
     }
 
+    /// `put_track` の後で、Library の `rel_path` と送る元の種類を指定する
+    pub fn set_origin(&self, track_id: i64, rel_path: &str, source: &str) {
+        if let Some((item, _)) = self.0.borrow_mut().desired.get_mut(&track_id) {
+            item.rel_path = rel_path.to_owned();
+            item.source = source.to_owned();
+        }
+    }
+
     pub fn remove_track(&self, track_id: i64) {
         self.0.borrow_mut().desired.remove(&track_id);
     }

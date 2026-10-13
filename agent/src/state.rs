@@ -36,6 +36,9 @@ pub struct State {
     /// 回復・再発見で state が変わり、まだ報告していない（D-100 の「報告だけの回」）
     #[serde(default)]
     pub needs_report: bool,
+    /// 引き継ぎ（`pair --adopt`）の `adopt` を待っている（サーバの DB 全損のあと）
+    #[serde(default)]
+    pub adopt_pending: bool,
 }
 
 impl Default for State {
@@ -50,6 +53,7 @@ impl Default for State {
             pending_batches: Vec::new(),
             plan_id: None,
             needs_report: false,
+            adopt_pending: false,
         }
     }
 }
@@ -93,6 +97,10 @@ pub struct TrackEntry {
     /// sha256 を読み直さずに済ませるための stat のキャッシュ（D-100）
     pub inode: u64,
     pub mtime_ns: i64,
+    /// サーバの Library の `rel_path`（`dest_path` とは別。引き継ぎで曲を結び直す鍵）
+    pub rel_path: String,
+    /// 送る元の種類（`master` / `opus` / `aac`）
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +160,11 @@ pub struct PendingOp {
     /// コピー設定 ON の疑いで表示した候補（resolve が照合する。D-100）
     #[serde(default)]
     pub candidates: Option<Vec<Candidate>>,
+    /// 曲の Add / Update だけ Some（回復が `TrackEntry` を作るときに写す）
+    #[serde(default)]
+    pub rel_path: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -186,6 +199,8 @@ pub struct BatchMember {
     pub token: String,
     pub size: u64,
     pub sha256: String,
+    pub rel_path: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

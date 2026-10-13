@@ -321,6 +321,8 @@ fn current_of_reads_state() {
             sha256: "h".into(),
             inode: 1,
             mtime_ns: 1,
+            rel_path: "a.flac".into(),
+            source: "master".into(),
         },
     );
     s.playlists.insert(

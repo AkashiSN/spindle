@@ -539,3 +539,110 @@ fn add_does_not_overwrite_file_created_after_check() {
     assert!(!s.tracks.contains_key(&1));
     assert!(env.music.tracks().is_empty());
 }
+
+#[test]
+fn add_and_update_record_manifest_origin_in_state() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.server.set_origin(1, "Lib/a.flac", "opus");
+    exec_all(&mut env).unwrap();
+    let e = env.state().tracks[&1].clone();
+    assert_eq!(e.rel_path, "Lib/a.flac");
+    assert_eq!(e.source, "opus");
+}
+
+#[test]
+fn update_records_manifest_origin_in_state() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "A/a.m4a", b"aaa");
+    env.server.put_track(1, "A/a.m4a", b"bbbb");
+    env.server.set_origin(1, "Lib/b.flac", "aac");
+    exec_all(&mut env).unwrap();
+    let e = env.state().tracks[&1].clone();
+    assert_eq!(e.rel_path, "Lib/b.flac");
+    assert_eq!(e.source, "aac");
+}
+
+#[test]
+fn add_without_origin_in_manifest_is_item_error_and_skipped() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.server.put_track(2, "A/b.m4a", b"bbb");
+    let (_p, r, mut m) = env.confirm_all();
+    m.items.retain(|i| i.track_id != 1);
+    let (o, errors) = env.with_ctx(|cx| {
+        let o = exec::run(cx, &r, &m).unwrap();
+        (o, cx.errors.clone())
+    });
+    assert_eq!(o.executed, 1);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].ref_id, 1);
+    assert_eq!(errors[0].reason, exec::NO_ORIGIN);
+    let s = env.state();
+    assert!(!s.tracks.contains_key(&1));
+    assert!(s.tracks.contains_key(&2));
+    assert!(s.pending_ops.is_empty());
+    assert!(!env.root.exists("A/a.m4a").unwrap());
+}
+
+#[test]
+fn update_without_origin_in_manifest_is_item_error_and_skipped() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "A/a.m4a", b"aaa");
+    env.server.put_track(1, "A/a.m4a", b"bbbb");
+    let (_p, r, mut m) = env.confirm_all();
+    m.items.clear();
+    let errors = env.with_ctx(|cx| {
+        exec::run(cx, &r, &m).unwrap();
+        cx.errors.clone()
+    });
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].reason, exec::NO_ORIGIN);
+    assert_eq!(
+        std::fs::read(env.root.abs("A/a.m4a").unwrap()).unwrap(),
+        b"aaa"
+    );
+    assert!(env.state().pending_ops.is_empty());
+}
+
+#[test]
+fn recovered_add_copies_origin_from_pending_op() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.server.set_origin(1, "Lib/a.flac", "opus");
+    env.fp.arm("music.add:after", 1);
+    assert!(matches!(exec_all(&mut env), Err(Error::Crash(_))));
+    env.with_ctx(recover).unwrap();
+    let e = env.state().tracks[&1].clone();
+    assert_eq!(e.rel_path, "Lib/a.flac");
+    assert_eq!(e.source, "opus");
+}
+
+#[test]
+fn recovered_add_without_recorded_origin_is_item_error_and_not_in_state() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.fp.arm("music.add:after", 1);
+    assert!(matches!(exec_all(&mut env), Err(Error::Crash(_))));
+    let mut s = env.state();
+    for o in &mut s.pending_ops {
+        o.rel_path = None;
+        o.source = None;
+    }
+    env.file().save(&s).unwrap();
+    let errors = env.with_ctx(|cx| {
+        recover(cx).unwrap();
+        cx.errors.clone()
+    });
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].reason, exec::NO_ORIGIN);
+    let s = env.state();
+    assert!(!s.tracks.contains_key(&1));
+    assert!(s.pending_ops.is_empty());
+}
