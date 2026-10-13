@@ -735,3 +735,27 @@ fn non_adopted_update_with_same_content_takes_the_normal_path() {
     assert!(!env.server.fetch_log().is_empty());
     assert_eq!(env.state().tracks[&1].token, it.token);
 }
+
+#[test]
+fn adopted_unchanged_updates_are_not_counted_against_free_space() {
+    let mut env = Env::new();
+    env.paired();
+    let before = adopted_track(&env, b"aaa");
+    let it = env.server.put_track(1, "A/a.m4a", b"aaa");
+    // 引き継いだ写しが空きより大きくても、近道に入る曲は受け取らないので容量の見積もりに入れない
+    let huge = u64::MAX / 2;
+    let mut s = env.state();
+    s.tracks.get_mut(&1).unwrap().size = huge;
+    env.file().save(&s).unwrap();
+    let (_p, mut r, m) = env.confirm_all();
+    assert_eq!(r.items.len(), 1);
+    r.items[0].size = huge;
+    let o = env.with_ctx(|cx| exec::run(cx, &r, &m)).unwrap();
+    assert_eq!(o.executed, 1);
+    assert!(o.stop.is_none());
+    assert!(env.server.fetch_log().is_empty());
+    let s = env.state();
+    assert_eq!(s.tracks[&1].token, it.token);
+    assert_eq!(s.tracks[&1].persistent_id, before.persistent_id);
+    assert!(s.pending_ops.is_empty());
+}

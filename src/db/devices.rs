@@ -1585,7 +1585,7 @@ pub fn add_marks(conn: &Connection, device_id: i64, playlist_ids: &[i64]) -> Res
 }
 
 /// エージェントの引き継ぎの書き込み: `device_items`・`device_playlist_state` を全置換し、`device_errors` を
-/// 空にして、印を付け直す。`last_synced_at`・`generation` は進めない
+/// 空にして、印を付け足す（既存の印は外さない）。`last_synced_at`・`generation` は進めない
 pub fn apply_agent_adopt(
     conn: &Connection,
     device_id: i64,

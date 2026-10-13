@@ -894,8 +894,13 @@ fn validate_adopt(r: &AdoptRequest) -> Result<(), String> {
                 t.track_id, t.source
             ));
         }
-        // 空は中身を失った曲（STALE。次の差分で置き直す）。それ以外は小文字 16 進 64 桁
-        if !t.sha256.is_empty() && !is_sha256_hex(&t.sha256) {
+        // 空は中身を失った曲（STALE。次の差分で置き直す）にだけ許す。それ以外は小文字 16 進 64 桁
+        let sha_ok = if t.sha256.is_empty() {
+            t.stale
+        } else {
+            is_sha256_hex(&t.sha256)
+        };
+        if !sha_ok {
             return Err(format!("曲 {} の sha256 が不正です", t.track_id));
         }
         if i64::try_from(t.size).is_err() {

@@ -1722,8 +1722,9 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   コードを使う前には検出しない）
 - **引き継いだ曲の近道**: `Update`（`from` 無し）で、state の曲のトークンが `ADOPTED_TOKEN`、パスの鍵・
   size・sha256 が計画の項目と一致すれば、受け取りもミュージック.app の操作もせず、トークン（と `rel_path` /
-  `source`）だけを書き換える。報告はそのトークンで行う（計画に含まれるので検証を通る）。信頼の水準は日常の
-  差分と同じ（state の sha256 は再発見の inode / mtime のキャッシュと読み直しで保たれている）
+  `source`）だけを書き換える。報告はそのトークンで行う（計画に含まれるので検証を通る）。受け取らないので
+  実行前の空き容量の確認からも外す。信頼の水準は日常の差分と同じ（state の sha256 は再発見の inode /
+  mtime のキャッシュと読み直しで保たれている）
 - **報告**（`POST /api/agent/report`）: `generation`・`plan_id`・再発見で確かめた state 全体・
   失敗した項目を送る。サーバは計画がその端末の open な計画で、`generation` が一致し、各項目が「現在の
   desired」「既存の `device_items` と同じ値」「その計画で許された遷移の結果」のどれかに完全一致すること
@@ -2005,7 +2006,7 @@ POST   /api/agent/adopt                           { tracks: [{ track_id, path, r
                                                   （`to` は付け替え先の id、外れたものは null）。DB 全損後の `pair --adopt` で、付け替えた状態を
                                                   キャッシュへ直接書く（`generation` と `last_synced_at` は進めない。冪等。§7.11「引き継ぎ」、D-104）。
                                                   400 bad_request（件数の上限・パスの形・未知の source・id とパスの鍵の重複・空のプレイリスト名・
-                                                  sha256 が空でも小文字 16 進 64 桁でもない・size が i64 を超える）、
+                                                  sha256 が小文字 16 進 64 桁でない（空は `stale` のときだけ許す）・size が i64 を超える）、
                                                   409 library_busy（スキャン中）| open_plan | not_adoptable（既に報告を受けた端末）
 // Report = { generation, plan_id, state: { tracks: [{ track_id, dest_path, token, size, sha256 }],
 //            playlists: [{ playlist_id, name, token }] }, errors: [{ kind: track | playlist, ref_id, reason }] }

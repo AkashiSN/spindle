@@ -1192,7 +1192,7 @@ async fn adopt_remaps_and_writes_the_cache() {
         "tracks": [
             adopt_track(70, &t1.dest_path, "A/01 a.flac", 3, &t1.sha256, false),
             adopt_track(80, "B/01 b.m4a", "b/01 B.flac", 9, &"b".repeat(64), true),
-            adopt_track(90, "C/x.m4a", "C/gone.flac", 1, "", false),
+            adopt_track(90, "C/x.m4a", "C/gone.flac", 1, "", true),
         ],
         "playlists": [{"playlist_id": 50, "name": "夜"}, {"playlist_id": 51, "name": "Gone"}],
     });
@@ -1349,6 +1349,10 @@ async fn adopt_rejects_bad_input() {
         (
             "sha256 が 16 進でない",
             json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", 3, &"g".repeat(64), false)], "playlists": []}),
+        ),
+        (
+            "stale でないのに sha256 が空",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", 3, "", false)], "playlists": []}),
         ),
         (
             "size が i64 を超える",

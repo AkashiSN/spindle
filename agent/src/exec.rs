@@ -94,6 +94,12 @@ pub fn run<M: Music, S: Server>(
         .items
         .iter()
         .filter(|i| matches!(i.op, OpKind::Add | OpKind::Update | OpKind::UpdateMove))
+        .filter(|i| {
+            !cx.state
+                .tracks
+                .get(&i.track_id)
+                .is_some_and(|e| adopted_unchanged(e, i))
+        })
         .fold(MARGIN_BYTES, |a, i| a.saturating_add(i.size));
     let free = cx.local.free_bytes()?;
     if free < need {
@@ -330,6 +336,19 @@ fn after_download<M: Music, S: Server>(
     Ok(Some(step))
 }
 
+/// 同期の近道に入る曲か: 引き継ぎ直後（`ADOPTED_TOKEN`）の更新で、パス・大きさ・sha256 が計画と同じ。
+/// 近道は何も受け取らないので、空き容量の見積もりもこれで除外する（判定を 1 か所にして食い違わせない）
+fn adopted_unchanged(e: &TrackEntry, item: &PlanItem) -> bool {
+    item.op == OpKind::Update
+        && e.token == ADOPTED_TOKEN
+        && item
+            .to
+            .as_deref()
+            .is_some_and(|to| canonical_key(&e.path) == canonical_key(to))
+        && e.size == item.size
+        && item.sha256.as_deref() == Some(e.sha256.as_str())
+}
+
 fn update<M: Music, S: Server>(
     cx: &mut Ctx<'_, M, S>,
     item: &PlanItem,
@@ -349,7 +368,7 @@ fn update<M: Music, S: Server>(
         return Ok(Step::Errored);
     };
     // 同期の近道: 引き継ぎ直後の曲で中身が計画と同じなら、取得も track の操作もせずトークンと出どころだけ書き換える
-    if e.token == ADOPTED_TOKEN && e.size == item.size && e.sha256 == *sha {
+    if adopted_unchanged(&e, item) {
         let mut entry = e;
         entry.token = token.clone();
         entry.rel_path = origin.rel_path.clone();
