@@ -20,8 +20,11 @@ use spindle::config::Config;
 use spindle::db::devices::{self, Confirm};
 use spindle::db::{now_epoch, Db};
 use spindle::device::adb::AdbConfig;
+use spindle::device::adopt::{self, LibraryTrack};
 use spindle::device::runtime::AdbRuntime;
+use spindle::device::store;
 use spindle::device::track::TrackedDevice;
+use spindle::domain::device::sha256_hex;
 use spindle::playlist::autoexport::ReevalFlag;
 use tokio_util::sync::CancellationToken;
 
@@ -295,6 +298,60 @@ impl App {
              VALUES ({id}, 'x', '[]', 'open', 0)"
         ));
         id
+    }
+
+    /// 前の DB で同期済みだった保存先を端末に置く（uuid は DB に無い）
+    fn plant_store(&self, items: &[(&str, &str, &[u8])], playlists: &[&str]) {
+        let root = self.device_root("emulated");
+        let mut its = Vec::new();
+        for (i, (path, rel, body)) in items.iter().enumerate() {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), body).unwrap();
+            its.push(json!({"track_id": 100 + i as i64, "path": path, "token": "old",
+                "size": body.len(), "sha256": sha256_hex(body), "rel_path": rel, "source": "master"}));
+        }
+        let pls: Vec<Value> = playlists
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let path = format!("Playlists/{name}.m3u8");
+                std::fs::create_dir_all(root.join("Playlists")).unwrap();
+                std::fs::write(root.join(&path), b"#EXTM3U\n").unwrap();
+                json!({"playlist_id": 200 + i as i64, "path": path, "token": "old"})
+            })
+            .collect();
+        std::fs::create_dir_all(root.join(".spindle")).unwrap();
+        std::fs::write(
+            root.join(".spindle/manifest.json"),
+            serde_json::to_vec(&json!({
+                "format": 1, "device_uuid": "olduuid", "volume": "emulated", "items": its, "playlists": pls,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn insert_track(&self, id: i64, rel: &str) {
+        self.raw_exec(&format!(
+            "INSERT INTO tracks (id, rel_path, rel_path_key, inode, size, mtime_ns, ctime_ns, codec, lossless, channels, audio_version, tag_version, seen_at)
+             VALUES ({id}, '{rel}', lower('{rel}'), {id}, 4, 0, 0, 'flac', 1, 2, 1, 1, 0)"
+        ));
+    }
+
+    fn query_i64(&self, sql: &str) -> i64 {
+        self.query(sql, [])
+    }
+
+    async fn adopt(&self, name: &str) -> (StatusCode, Value) {
+        self.call(
+            Method::POST,
+            "/api/devices",
+            Some(json!({
+                "name": name, "transport": "adb", "variant": "opus", "selection": "playlists",
+                "serial": "SER1", "volume": "emulated", "adopt": true,
+            })),
+        )
+        .await
     }
 
     fn uuid_of(&self, id: i64) -> String {
@@ -735,6 +792,17 @@ async fn adb_endpoints_are_503_when_disabled() {
     let app = App::new_without_adb().await;
     let (s, v) = app
         .call(Method::GET, "/api/devices/adb/unregistered", None)
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::SERVICE_UNAVAILABLE, Some("adb_disabled"))
+    );
+    let (s, v) = app
+        .call(
+            Method::GET,
+            "/api/devices/adb/adopt-preview?serial=SER1&volume=emulated",
+            None,
+        )
         .await;
     assert_eq!(
         (s, v["error"].as_str()),
@@ -1229,4 +1297,192 @@ async fn reevaluation_does_not_block_all_even_if_smart_playlists_stay_listed() {
     assert!(!pending);
     assert!(evals.iter().all(|p| !p), "{evals:?}");
     assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+}
+
+#[tokio::test]
+async fn adoptable_store_is_listed_and_refused_by_plain_registration() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.plant_store(&[("A/a.flac", "A/a.flac", b"AAAA")], &[]);
+    let (_, v) = app
+        .call(Method::GET, "/api/devices/adb/unregistered", None)
+        .await;
+    assert_eq!(v["items"][0]["volumes"][0]["state"], "adoptable");
+    let (s, v) = app.register("X", "SER1", "emulated").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("adoptable"))
+    );
+    assert!(app
+        .device_root("emulated")
+        .join(".spindle/manifest.json")
+        .is_file());
+}
+
+#[tokio::test]
+async fn empty_leftover_manifest_is_still_reclaimed() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.plant_store(&[], &[]);
+    let (s, v) = app.register("X", "SER1", "emulated").await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+}
+
+#[tokio::test]
+async fn preview_counts_what_would_be_adopted() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.insert_track(1, "A/a.flac");
+    insert_playlist(&app, 1, "Drive", None).await;
+    app.plant_store(
+        &[
+            ("A/a.flac", "A/a.flac", b"AAAA"),
+            ("B/b.flac", "B/gone.flac", b"BB"),
+        ],
+        &["Drive", "Gone"],
+    );
+    let (s, v) = app
+        .call(
+            Method::GET,
+            "/api/devices/adb/adopt-preview?serial=SER1&volume=emulated",
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["device_uuid"], "olduuid");
+    assert_eq!(
+        (v["tracks_adopted"].as_u64(), v["tracks_dropped"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(
+        (
+            v["playlists_adopted"].as_u64(),
+            v["playlists_dropped"].as_u64()
+        ),
+        (Some(1), Some(1))
+    );
+    assert_eq!(v["library_busy"], false);
+    // 読むだけで書かない
+    let m = std::fs::read_to_string(app.device_root("emulated").join(".spindle/manifest.json"))
+        .unwrap();
+    assert!(m.contains("\"track_id\":100"));
+}
+
+#[tokio::test]
+async fn adopt_creates_the_row_with_the_device_uuid_marks_and_scan() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.insert_track(1, "A/a.flac");
+    insert_playlist(&app, 1, "Drive", None).await;
+    app.plant_store(
+        &[
+            ("A/a.flac", "A/a.flac", b"AAAA"),
+            ("B/b.flac", "B/gone.flac", b"BB"),
+        ],
+        &["Drive"],
+    );
+    let (s, v) = app.adopt("Xperia").await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let id = v["id"].as_i64().unwrap();
+    assert_eq!(app.uuid_of(id), "olduuid");
+    assert_eq!(app.count_jobs("device_scan"), 1);
+    let marks: i64 = app.query_i64(&format!(
+        "SELECT COUNT(*) FROM device_playlists WHERE device_id = {id}"
+    ));
+    assert_eq!(marks, 1);
+    let m: Value = serde_json::from_slice(
+        &std::fs::read(app.device_root("emulated").join(".spindle/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(m["items"].as_array().unwrap().len(), 1);
+    assert_eq!(m["items"][0]["track_id"], 1);
+    assert_eq!(m["items"][0]["token"], "adopted");
+    // 外れた曲のファイルは残る（管理外）
+    assert!(app.device_root("emulated").join("B/b.flac").is_file());
+}
+
+#[tokio::test]
+async fn adopt_refuses_a_registered_uuid_without_touching_the_manifest() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.plant_store(&[("A/a.flac", "A/a.flac", b"AAAA")], &[]);
+    app.raw_exec("INSERT INTO devices (uuid, name, name_key, transport, variant, selection, created_at, updated_at)
+                  VALUES ('olduuid', 'Mac', 'mac', 'agent', 'aac', 'all', 0, 0)");
+    let before = std::fs::read(app.device_root("emulated").join(".spindle/manifest.json")).unwrap();
+    let (s, v) = app.adopt("Xperia").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("uuid_registered"))
+    );
+    assert_eq!(
+        std::fs::read(app.device_root("emulated").join(".spindle/manifest.json")).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn adopt_is_refused_while_library_scan_is_active() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.plant_store(&[("A/a.flac", "A/a.flac", b"AAAA")], &[]);
+    app.raw_exec(
+        "INSERT INTO jobs (type, state, payload, created_at) VALUES ('scan', 'queued', '{}', 0)",
+    );
+    let (s, v) = app.adopt("Xperia").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("library_busy"))
+    );
+    let (_, v) = app
+        .call(
+            Method::GET,
+            "/api/devices/adb/adopt-preview?serial=SER1&volume=emulated",
+            None,
+        )
+        .await;
+    assert_eq!(v["library_busy"], true);
+}
+
+#[tokio::test]
+async fn adopt_without_a_manifest_is_not_adoptable() {
+    let app = App::new().await;
+    app.connect("SER1");
+    let (s, v) = app.adopt("Xperia").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("not_adoptable"))
+    );
+}
+
+#[tokio::test]
+async fn adopt_can_be_retried_after_the_manifest_was_rewritten() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.insert_track(1, "A/a.flac");
+    app.plant_store(&[("A/a.flac", "A/a.flac", b"AAAA")], &[]);
+    // 書き直しの後・行の作成の前に落ちた状態を作る（API と同じ書き直しを直に通す）
+    let fs = app.rt.fs_for("SER1", "emulated", "Music/spindle").unwrap();
+    let m = store::read_manifest(&fs).await.unwrap().unwrap();
+    let lib = [LibraryTrack {
+        track_id: 1,
+        rel_path: "A/a.flac".into(),
+    }];
+    let first = adopt::rewrite(&fs, &m, &lib, &[]).await.unwrap();
+    // やり直しの引き継ぎは同じ結果になる
+    let (s, v) = app.adopt("Xperia").await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(app.uuid_of(v["id"].as_i64().unwrap()), "olduuid");
+    assert_eq!(
+        store::read_manifest(&fs).await.unwrap().unwrap(),
+        first.manifest
+    );
+}
+
+#[tokio::test]
+async fn adopt_for_agent_is_bad_request() {
+    let app = App::new().await;
+    let (s, _) = app.call(Method::POST, "/api/devices", Some(json!({
+        "name": "Mac", "transport": "agent", "variant": "aac", "selection": "all", "adopt": true,
+    }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }

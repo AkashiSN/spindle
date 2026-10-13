@@ -58,6 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/{id}/diff", get(devices::diff))
         .route("/devices/{id}/estimate", get(devices::estimate))
         .route("/devices/adb/unregistered", get(devices::unregistered))
+        .route("/devices/adb/adopt-preview", get(devices::adopt_preview))
         .route("/devices/{id}/sync", post(devices::sync))
         .route("/devices/{id}/plans/open/resume", post(devices::resume))
         .route("/devices/{id}/plans/open/abandon", post(devices::abandon))

@@ -9,6 +9,8 @@ use crate::db::devices::{
 use crate::db::jobs as dbjobs;
 use crate::db::{now_epoch, DbError};
 use crate::device::adb::probe_volumes_under;
+use crate::device::adb::AdbFs;
+use crate::device::adopt::{self, Candidate};
 use crate::device::credential::{self, PAIR_SECRET_BYTES, PAIR_SELECTOR_BYTES};
 use crate::device::ondevice::is_reserved;
 use crate::device::quote::{root_abs_under, valid_serial, valid_volume, DEFAULT_ROOT};
@@ -22,7 +24,7 @@ use crate::domain::device::{Counts, Hold, TrackState, Transport};
 use crate::domain::filter::Filter;
 use crate::jobs::handlers::device::{scan_job, sync_job, verify_job};
 use crate::playlist::dsl::Rule;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -228,6 +230,9 @@ pub struct CreateBody {
     pub serial: Option<String>,
     #[serde(default)]
     pub volume: Option<String>,
+    /// adb のみ: 既存の保存先を引き継ぐ（D-103）
+    #[serde(default)]
+    pub adopt: bool,
 }
 
 pub async fn create(
@@ -245,8 +250,20 @@ pub async fn create(
     ) else {
         return Ok(bad_request("transport / variant / selection が不正"));
     };
+    if body.adopt && transport != Transport::Adb {
+        return Ok(bad_request("引き継ぎは Android だけ"));
+    }
     if transport == Transport::Adb {
-        return create_adb(&state, name, variant, selection, body.serial, body.volume).await;
+        return create_adb(
+            &state,
+            name,
+            variant,
+            selection,
+            body.serial,
+            body.volume,
+            body.adopt,
+        )
+        .await;
     }
     let created = state
         .db
@@ -813,7 +830,8 @@ pub struct VolumeView {
     pub volume: String,
     pub path: String,
     pub free: u64,
-    /// `missing` / `empty` / `nonempty`
+    /// `missing` / `empty` / `nonempty` / `adoptable`（前の登録の曲を指す manifest があり、
+    /// その uuid が DB に無い。引き継げる）
     pub state: &'static str,
 }
 
@@ -837,6 +855,34 @@ fn dir_state_str(s: DirState) -> &'static str {
         DirState::Missing => "missing",
         DirState::Empty => "empty",
         DirState::NonEmpty => "nonempty",
+    }
+}
+
+/// 保存先が引き継げるか。読めない・失敗は引き継げない扱い（ログに出す）
+async fn is_adoptable_store(state: &AppState, rt: &AdbRuntime, serial: &str, volume: &str) -> bool {
+    let fs = match rt.fs_for(serial, volume, DEFAULT_ROOT) {
+        Ok(fs) => fs,
+        Err(e) => {
+            tracing::warn!(%serial, %volume, error = %e, "引き継げるか調べられない");
+            return false;
+        }
+    };
+    match adopt::read_candidate(&fs).await {
+        Ok(Candidate::Manifest(m)) if adopt::is_adoptable(&m) => {
+            let uuid = m.device_uuid;
+            match state.db.read(move |c| dbdev::uuid_exists(c, &uuid)).await {
+                Ok(registered) => !registered,
+                Err(e) => {
+                    tracing::warn!(%serial, %volume, error = %e, "引き継げるか調べられない");
+                    false
+                }
+            }
+        }
+        Ok(_) => false,
+        Err(e) => {
+            tracing::warn!(%serial, %volume, error = %e, "引き継げるか調べられない");
+            false
+        }
     }
 }
 
@@ -876,15 +922,20 @@ pub async fn unregistered(State(state): State<AppState>) -> Result<Response, Api
             .await
             {
                 Ok(v) => {
-                    volumes = v
-                        .into_iter()
-                        .map(|v| VolumeView {
+                    for v in v {
+                        let mut st = dir_state_str(v.state);
+                        if v.state == DirState::NonEmpty
+                            && is_adoptable_store(&state, &rt, &d.serial, &v.volume).await
+                        {
+                            st = "adoptable";
+                        }
+                        volumes.push(VolumeView {
                             volume: v.volume,
                             path: v.path,
                             free: v.free,
-                            state: dir_state_str(v.state),
-                        })
-                        .collect();
+                            state: st,
+                        });
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(serial = %d.serial, error = %e, "端末のボリュームを調べられない");
@@ -923,6 +974,7 @@ async fn create_adb(
     selection: Selection,
     serial: Option<String>,
     volume: Option<String>,
+    adopt: bool,
 ) -> Result<Response, ApiError> {
     let (Some(serial), Some(volume)) = (serial, volume) else {
         return Ok(bad_request("Android の登録には serial と volume が要る"));
@@ -964,6 +1016,24 @@ async fn create_adb(
         Ok(fs) => fs,
         Err(e) => return Ok(remote_failed(&rt, &serial, e)),
     };
+    if adopt {
+        return adopt_adb(state, &rt, &fs, name, variant, selection, serial, volume).await;
+    }
+    // 引き継げる保存先（曲かプレイリストを指す manifest で、uuid が DB に無い）は推測で捨てず、
+    // 引き継ぎを案内する
+    match adopt::read_candidate(&fs).await {
+        Ok(Candidate::Manifest(m)) if adopt::is_adoptable(&m) => {
+            let uuid = m.device_uuid.clone();
+            if !state.db.read(move |c| dbdev::uuid_exists(c, &uuid)).await? {
+                return Ok(conflict(
+                    "adoptable",
+                    "保存先に前の登録の曲がある。「既存の保存先を引き継ぐ」で登録してください",
+                ));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => return Ok(remote_failed(&rt, &serial, e)),
+    }
     match fs.root_state().await {
         Ok(DirState::NonEmpty) => {
             // 中身が `.spindle` の下だけで、その manifest が無い・読めない・生きた登録のものでない
@@ -1046,6 +1116,176 @@ async fn create_adb(
         Some(v) => (StatusCode::CREATED, Json(v)).into_response(),
         None => not_found(),
     })
+}
+
+/// 既存の保存先の引き継ぎ（D-103）。uuid が DB に無いことを確かめてから回復・書き直しをし、
+/// manifest の uuid で行を作って印を付け直し、差分の計算を投入する
+#[allow(clippy::too_many_arguments)]
+async fn adopt_adb(
+    state: &AppState,
+    rt: &AdbRuntime,
+    fs: &AdbFs,
+    name: String,
+    variant: Variant,
+    selection: Selection,
+    serial: String,
+    volume: String,
+) -> Result<Response, ApiError> {
+    if state.db.read(dbdev::library_scan_active).await? {
+        return Ok(library_busy());
+    }
+    let m = match adopt::read_candidate(fs).await {
+        Ok(Candidate::Manifest(m)) if m.volume == volume => m,
+        Ok(_) => return Ok(not_adoptable()),
+        Err(e) => return Ok(remote_failed(rt, &serial, e)),
+    };
+    let uuid = m.device_uuid.clone();
+    let u = uuid.clone();
+    if state.db.read(move |c| dbdev::uuid_exists(c, &u)).await? {
+        return Ok(uuid_registered());
+    }
+    let (tracks, playlists) = state.db.read(dbdev::adopt_inputs).await?;
+    let r = match adopt::rewrite(fs, &m, &tracks, &playlists).await {
+        Ok(r) => r,
+        Err(RecoverError::Store(StoreError::Remote(e))) => {
+            return Ok(remote_failed(rt, &serial, e))
+        }
+        Err(e) => {
+            tracing::warn!(%serial, %volume, error = %e, "保存先を引き継げない");
+            return Ok(not_adoptable());
+        }
+    };
+    tracing::info!(%serial, %volume, adopted = r.tracks_adopted, dropped = r.tracks_dropped, "保存先を引き継いだ");
+    let marks = r.playlists_adopted.clone();
+    let (s, v) = (serial.clone(), volume.clone());
+    let created = state
+        .db
+        .write(move |c| {
+            let tx = c.transaction()?;
+            if name_taken(&tx, &name)? {
+                return Ok(Err("duplicate"));
+            }
+            if dbdev::find_by_serial(&tx, &s)?.is_some() {
+                return Ok(Err("serial_registered"));
+            }
+            if dbdev::uuid_exists(&tx, &uuid)? {
+                return Ok(Err("uuid_registered"));
+            }
+            let d = dbdev::create_with_uuid(
+                &tx,
+                &NewDevice {
+                    name: &name,
+                    transport: Transport::Adb,
+                    variant,
+                    selection,
+                    adb: Some((&s, &v, DEFAULT_ROOT)),
+                },
+                &uuid,
+                now_epoch(),
+            )?;
+            dbdev::add_marks(&tx, d.id, &marks)?;
+            tx.commit()?;
+            Ok(Ok(d))
+        })
+        .await?;
+    let d = match created {
+        Ok(d) => d,
+        Err("duplicate") => return Ok(error_response(StatusCode::CONFLICT, "duplicate")),
+        Err("uuid_registered") => return Ok(uuid_registered()),
+        Err(_) => return Ok(conflict("serial_registered", "この端末は登録済み")),
+    };
+    state.jobs.enqueue(scan_job(d.id)).await?;
+    Ok(match view_of(state, d.id).await? {
+        Some(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        None => not_found(),
+    })
+}
+
+fn library_busy() -> Response {
+    conflict(
+        "library_busy",
+        "ライブラリのスキャン中。終わってから引き継いでください（途中だと多くの曲が外れる）",
+    )
+}
+fn not_adoptable() -> Response {
+    conflict(
+        "not_adoptable",
+        "引き継げる保存先が無い（manifest が無いか読めないか、別のボリュームのもの）",
+    )
+}
+fn uuid_registered() -> Response {
+    conflict("uuid_registered", "この保存先は登録済みの端末のもの")
+}
+
+#[derive(Deserialize)]
+pub struct AdoptQuery {
+    pub serial: String,
+    pub volume: String,
+}
+
+#[derive(Serialize)]
+pub struct AdoptPreview {
+    pub device_uuid: String,
+    pub tracks_adopted: usize,
+    pub tracks_dropped: usize,
+    pub playlists_adopted: usize,
+    pub playlists_dropped: usize,
+    pub unmanaged: usize,
+    pub library_busy: bool,
+}
+
+/// 引き継ぎのプレビュー（読むだけ。ジャーナルは回復しないので件数は目安）
+pub async fn adopt_preview(
+    State(state): State<AppState>,
+    Query(q): Query<AdoptQuery>,
+) -> Result<Response, ApiError> {
+    if !valid_serial(&q.serial) || !valid_volume(&q.volume) {
+        return Ok(bad_request("serial か volume が不正"));
+    }
+    let Some(rt) = state.adb.clone() else {
+        return Ok(adb_disabled());
+    };
+    if !rt.is_connected(&q.serial) {
+        return Ok(not_connected(&rt, &q.serial));
+    }
+    let fs = match rt.fs_for(&q.serial, &q.volume, DEFAULT_ROOT) {
+        Ok(fs) => fs,
+        Err(e) => return Ok(remote_failed(&rt, &q.serial, e)),
+    };
+    let m = match adopt::read_candidate(&fs).await {
+        Ok(Candidate::Manifest(m)) if m.volume == q.volume => m,
+        Ok(_) => return Ok(not_adoptable()),
+        Err(e) => return Ok(remote_failed(&rt, &q.serial, e)),
+    };
+    let uuid = m.device_uuid.clone();
+    let (registered, busy, (tracks, playlists)) = state
+        .db
+        .read(move |c| {
+            Ok((
+                dbdev::uuid_exists(c, &uuid)?,
+                dbdev::library_scan_active(c)?,
+                dbdev::adopt_inputs(c)?,
+            ))
+        })
+        .await?;
+    if registered {
+        return Ok(uuid_registered());
+    }
+    let unmanaged = match adopt::unmanaged_count(&fs, &m).await {
+        Ok(n) => n,
+        Err(e) => return Ok(remote_failed(&rt, &q.serial, e)),
+    };
+    let r = adopt::remap(&m, &tracks, &playlists);
+    Ok(Json(AdoptPreview {
+        device_uuid: m.device_uuid,
+        tracks_adopted: r.tracks_adopted,
+        tracks_dropped: r.tracks_dropped,
+        playlists_adopted: r.playlists_adopted.len(),
+        playlists_dropped: r.playlists_dropped,
+        unmanaged,
+        library_busy: busy,
+    })
+    .into_response())
 }
 
 #[derive(Deserialize)]
