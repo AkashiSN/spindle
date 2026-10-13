@@ -539,3 +539,223 @@ fn add_does_not_overwrite_file_created_after_check() {
     assert!(!s.tracks.contains_key(&1));
     assert!(env.music.tracks().is_empty());
 }
+
+#[test]
+fn add_and_update_record_manifest_origin_in_state() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.server.set_origin(1, "Lib/a.flac", "opus");
+    exec_all(&mut env).unwrap();
+    let e = env.state().tracks[&1].clone();
+    assert_eq!(e.rel_path, "Lib/a.flac");
+    assert_eq!(e.source, "opus");
+}
+
+#[test]
+fn update_records_manifest_origin_in_state() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "A/a.m4a", b"aaa");
+    env.server.put_track(1, "A/a.m4a", b"bbbb");
+    env.server.set_origin(1, "Lib/b.flac", "aac");
+    exec_all(&mut env).unwrap();
+    let e = env.state().tracks[&1].clone();
+    assert_eq!(e.rel_path, "Lib/b.flac");
+    assert_eq!(e.source, "aac");
+}
+
+#[test]
+fn add_without_origin_in_manifest_is_item_error_and_skipped() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.server.put_track(2, "A/b.m4a", b"bbb");
+    let (_p, r, mut m) = env.confirm_all();
+    m.items.retain(|i| i.track_id != 1);
+    let (o, errors) = env.with_ctx(|cx| {
+        let o = exec::run(cx, &r, &m).unwrap();
+        (o, cx.errors.clone())
+    });
+    assert_eq!(o.executed, 1);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].ref_id, 1);
+    assert_eq!(errors[0].reason, exec::NO_ORIGIN);
+    let s = env.state();
+    assert!(!s.tracks.contains_key(&1));
+    assert!(s.tracks.contains_key(&2));
+    assert!(s.pending_ops.is_empty());
+    assert!(!env.root.exists("A/a.m4a").unwrap());
+}
+
+#[test]
+fn update_without_origin_in_manifest_is_item_error_and_skipped() {
+    let mut env = Env::new();
+    env.paired();
+    env.synced_track(1, "A/a.m4a", b"aaa");
+    env.server.put_track(1, "A/a.m4a", b"bbbb");
+    let (_p, r, mut m) = env.confirm_all();
+    m.items.clear();
+    let errors = env.with_ctx(|cx| {
+        exec::run(cx, &r, &m).unwrap();
+        cx.errors.clone()
+    });
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].reason, exec::NO_ORIGIN);
+    assert_eq!(
+        std::fs::read(env.root.abs("A/a.m4a").unwrap()).unwrap(),
+        b"aaa"
+    );
+    assert!(env.state().pending_ops.is_empty());
+}
+
+#[test]
+fn recovered_add_copies_origin_from_pending_op() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.server.set_origin(1, "Lib/a.flac", "opus");
+    env.fp.arm("music.add:after", 1);
+    assert!(matches!(exec_all(&mut env), Err(Error::Crash(_))));
+    env.with_ctx(recover).unwrap();
+    let e = env.state().tracks[&1].clone();
+    assert_eq!(e.rel_path, "Lib/a.flac");
+    assert_eq!(e.source, "opus");
+}
+
+#[test]
+fn recovered_add_without_recorded_origin_is_item_error_and_not_in_state() {
+    let mut env = Env::new();
+    env.paired();
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.fp.arm("music.add:after", 1);
+    assert!(matches!(exec_all(&mut env), Err(Error::Crash(_))));
+    let mut s = env.state();
+    for o in &mut s.pending_ops {
+        o.rel_path = None;
+        o.source = None;
+    }
+    env.file().save(&s).unwrap();
+    let errors = env.with_ctx(|cx| {
+        recover(cx).unwrap();
+        cx.errors.clone()
+    });
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].reason, exec::NO_ORIGIN);
+    let s = env.state();
+    assert!(!s.tracks.contains_key(&1));
+    assert!(s.pending_ops.is_empty());
+}
+
+/// 引き継ぎ直後の state の曲を `ADOPTED_TOKEN` にし、サーバ側に同じ中身の別トークンを置く
+fn adopted_track(env: &Env, bytes_in_state: &[u8]) -> spindle_agent::state::TrackEntry {
+    let e = env.synced_track(1, "A/a.m4a", bytes_in_state);
+    let mut s = env.state();
+    s.tracks.get_mut(&1).unwrap().token = spindle_agent::state::ADOPTED_TOKEN.to_owned();
+    env.file().save(&s).unwrap();
+    // サーバ側の current も同じ印にする（adopt はそう書く）
+    let mut cur = env.server.current();
+    for c in &mut cur {
+        c.token = spindle_agent::state::ADOPTED_TOKEN.to_owned();
+    }
+    env.server.set_current(cur, vec![]);
+    e
+}
+
+#[test]
+fn adopted_update_with_same_content_rewrites_token_only() {
+    let mut env = Env::new();
+    env.paired();
+    let before = adopted_track(&env, b"aaa");
+    let it = env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.server.set_origin(1, "Lib/new.flac", "opus");
+    let calls = env.music.calls().len();
+    let o = exec_all(&mut env).unwrap();
+    assert_eq!(o.executed, 1);
+    assert!(env.server.fetch_log().is_empty());
+    assert_eq!(env.music.calls().len(), calls, "{:?}", env.music.calls());
+    let s = env.state();
+    assert_eq!(s.tracks[&1].token, it.token);
+    assert_eq!(s.tracks[&1].persistent_id, before.persistent_id);
+    assert_eq!(s.tracks[&1].path, before.path);
+    assert_eq!(s.tracks[&1].rel_path, "Lib/new.flac");
+    assert_eq!(s.tracks[&1].source, "opus");
+    assert!(s.pending_ops.is_empty());
+}
+
+#[test]
+fn adopted_update_with_different_sha_downloads() {
+    let mut env = Env::new();
+    env.paired();
+    adopted_track(&env, b"aaa");
+    let it = env.server.put_track(1, "A/a.m4a", b"bbbb");
+    exec_all(&mut env).unwrap();
+    assert!(!env.server.fetch_log().is_empty());
+    assert_eq!(
+        std::fs::read(env.root.abs("A/a.m4a").unwrap()).unwrap(),
+        b"bbbb"
+    );
+    assert_eq!(env.state().tracks[&1].token, it.token);
+}
+
+#[test]
+fn adopted_update_with_same_sha_but_different_size_downloads() {
+    let mut env = Env::new();
+    env.paired();
+    adopted_track(&env, b"aaa");
+    // state の大きさだけが計画と違う（sha256 は同じ）。近道せずに取り直す
+    let mut s = env.state();
+    s.tracks.get_mut(&1).unwrap().size = 99;
+    env.file().save(&s).unwrap();
+    let it = env.server.put_track(1, "A/a.m4a", b"aaa");
+    exec_all(&mut env).unwrap();
+    assert!(!env.server.fetch_log().is_empty());
+    let s = env.state();
+    assert_eq!(s.tracks[&1].token, it.token);
+    assert_eq!(s.tracks[&1].size, 3);
+}
+
+#[test]
+fn non_adopted_update_with_same_content_takes_the_normal_path() {
+    let mut env = Env::new();
+    env.paired();
+    let before = env.synced_track(1, "A/a.m4a", b"aaa");
+    // 引き継ぎの印ではない古いトークン。中身は計画と同じでも近道しない
+    let mut s = env.state();
+    s.tracks.get_mut(&1).unwrap().token = "old.token".to_owned();
+    env.file().save(&s).unwrap();
+    let mut cur = env.server.current();
+    for c in &mut cur {
+        c.token = "old.token".to_owned();
+    }
+    env.server.set_current(cur, vec![]);
+    let it = env.server.put_track(1, "A/a.m4a", b"aaa");
+    assert_eq!(before.sha256, it.sha256);
+    exec_all(&mut env).unwrap();
+    assert!(!env.server.fetch_log().is_empty());
+    assert_eq!(env.state().tracks[&1].token, it.token);
+}
+
+#[test]
+fn adopted_unchanged_updates_are_not_counted_against_free_space() {
+    let mut env = Env::new();
+    env.paired();
+    let before = adopted_track(&env, b"aaa");
+    let it = env.server.put_track(1, "A/a.m4a", b"aaa");
+    // 引き継いだ写しが空きより大きくても、近道に入る曲は受け取らないので容量の見積もりに入れない
+    let huge = u64::MAX / 2;
+    let mut s = env.state();
+    s.tracks.get_mut(&1).unwrap().size = huge;
+    env.file().save(&s).unwrap();
+    let (_p, mut r, m) = env.confirm_all();
+    assert_eq!(r.items.len(), 1);
+    r.items[0].size = huge;
+    let o = env.with_ctx(|cx| exec::run(cx, &r, &m)).unwrap();
+    assert_eq!(o.executed, 1);
+    assert!(o.stop.is_none());
+    assert!(env.server.fetch_log().is_empty());
+    let s = env.state();
+    assert_eq!(s.tracks[&1].token, it.token);
+    assert_eq!(s.tracks[&1].persistent_id, before.persistent_id);
+    assert!(s.pending_ops.is_empty());
+}

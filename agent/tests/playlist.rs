@@ -189,6 +189,8 @@ fn impossible_pending_phase_is_a_state_error() {
         started_at: 0,
         max_database_id: None,
         candidates: None,
+        rel_path: None,
+        source: None,
     });
     env.file().save(&s).unwrap();
     assert!(matches!(env.with_ctx(recover), Err(Error::State(_))));

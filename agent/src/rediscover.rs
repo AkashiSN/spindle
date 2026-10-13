@@ -231,6 +231,8 @@ pub fn rediscover<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, m: &ManifestRespo
                 sha256: item.sha256.clone(),
                 inode: st.inode,
                 mtime_ns: st.mtime_ns,
+                rel_path: item.rel_path.clone(),
+                source: item.source.clone(),
             },
         );
         used.insert(key.clone());

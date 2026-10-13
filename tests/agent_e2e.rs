@@ -11,7 +11,7 @@ use spindle_agent::ctx::Ui;
 use spindle_agent::failpoint::Failpoints;
 use spindle_agent::music::fake::FakeMusic;
 use spindle_agent::secrets::{FileSecrets, Secrets};
-use spindle_agent::server::HttpServer;
+use spindle_agent::server::{HttpServer, Server};
 use spindle_agent::sync::{pair_cmd, sync, Paths, SyncOutcome};
 
 /// 確認に必ず y と答える UI
@@ -59,7 +59,7 @@ fn pair_and_sync(url: String, code: String, dir: PathBuf) -> Synced {
     let mut ui = Yes;
     let anon = HttpServer::new(&url, true, None).unwrap();
     pair_cmd(
-        &music, &anon, &secrets, &paths, &fp, &mut ui, &url, true, &code,
+        &music, &anon, &secrets, &paths, &fp, &mut ui, &url, true, &code, false,
     )
     .unwrap();
     let server = HttpServer::new(&url, true, secrets.get().unwrap()).unwrap();
@@ -157,6 +157,264 @@ async fn changed_source_is_skipped_and_reported() {
         .await
         .unwrap();
     assert_eq!(rows, 0);
+}
+
+/// `dir` の下の state と root で pair だけ行う（sync はしない）
+fn pair_only(
+    url: &str,
+    code: &str,
+    dir: &std::path::Path,
+    adopt: bool,
+) -> spindle_agent::Result<()> {
+    let paths = Paths {
+        state_dir: dir.join("state"),
+        root: dir.join("Music/spindle"),
+    };
+    let fp = Failpoints::none();
+    let music = FakeMusic::new(dir.join("Media"), fp.clone());
+    let secrets = FileSecrets::new(&paths.state_dir);
+    let anon = HttpServer::new(url, true, None).unwrap();
+    pair_cmd(
+        &music, &anon, &secrets, &paths, &fp, &mut Yes, url, true, code, adopt,
+    )
+}
+
+/// 端末の行が消えた後（DB 全損の代わり）、新しい行のコードで pair --adopt する。CLI と同じく
+/// トークン無しのサーバで始め、pair で得たトークンで adopt まで終える
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_adopt_finishes_adopt_with_the_new_token() {
+    let app = App::with_roots().await;
+    let old = app.create_iphone("iPhone").await;
+    let code = app.pair_code(old).await;
+    let url = serve(&app).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let u = url.clone();
+    tokio::task::spawn_blocking(move || pair_only(&u, &code, &path, false).unwrap())
+        .await
+        .unwrap();
+    // 前の行を消し、新しい行を作る
+    app.db.write(move |c| dbdev::delete(c, old)).await.unwrap();
+    let new = app.create_iphone("iPhone 2").await;
+    let code = app.pair_code(new).await;
+    let path = dir.path().to_path_buf();
+    let u = url.clone();
+    let (state, token) = tokio::task::spawn_blocking(move || {
+        pair_only(&u, &code, &path, true).unwrap();
+        let state = spindle_agent::state::StateFile::new(&path.join("state"))
+            .load()
+            .unwrap();
+        let token = FileSecrets::new(&path.join("state")).get().unwrap();
+        (state, token)
+    })
+    .await
+    .unwrap();
+    assert!(!state.adopt_pending);
+    // 新しいトークンで繋がり、行の uuid は前の登録のもの
+    let uuid = state.server.unwrap().device_uuid;
+    let m = tokio::task::spawn_blocking(move || {
+        HttpServer::new(&url, true, token)
+            .unwrap()
+            .manifest()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(m.device_uuid, uuid);
+}
+
+/// fetch の回数を数える `Server`（ほかの呼び出しはそのまま渡す）
+struct CountingServer {
+    inner: HttpServer,
+    fetches: std::cell::Cell<usize>,
+}
+
+impl Server for CountingServer {
+    fn pair(
+        &self,
+        code: &str,
+        adopt_uuid: Option<&str>,
+    ) -> spindle_agent::Result<agent_proto::PairResponse> {
+        self.inner.pair(code, adopt_uuid)
+    }
+    fn adopt(
+        &self,
+        r: &agent_proto::AdoptRequest,
+    ) -> spindle_agent::Result<agent_proto::AdoptResponse> {
+        self.inner.adopt(r)
+    }
+    fn use_token(&self, token: &str) -> spindle_agent::Result<()> {
+        self.inner.use_token(token)
+    }
+    fn manifest(&self) -> spindle_agent::Result<agent_proto::ManifestResponse> {
+        self.inner.manifest()
+    }
+    fn fetch(
+        &self,
+        track_id: i64,
+        token: &str,
+        size: u64,
+        offset: u64,
+        out: &mut dyn std::io::Write,
+    ) -> spindle_agent::Result<spindle_agent::server::Fetch> {
+        self.fetches.set(self.fetches.get() + 1);
+        self.inner.fetch(track_id, token, size, offset, out)
+    }
+    fn confirm(&self, plan_token: &str) -> spindle_agent::Result<spindle_agent::server::Confirmed> {
+        self.inner.confirm(plan_token)
+    }
+    fn open_plan(&self) -> spindle_agent::Result<Option<agent_proto::Plan>> {
+        self.inner.open_plan()
+    }
+    fn report(
+        &self,
+        r: &agent_proto::ReportRequest,
+    ) -> spindle_agent::Result<spindle_agent::server::Reported> {
+        self.inner.report(r)
+    }
+    fn abandon(
+        &self,
+        plan_id: i64,
+        a: &agent_proto::AbandonRequest,
+    ) -> spindle_agent::Result<spindle_agent::server::Reported> {
+        self.inner.abandon(plan_id, a)
+    }
+}
+
+/// 確認に y と答え、見せられた曲の操作の種類を覚える UI
+#[derive(Default)]
+struct RecordingYes {
+    item_ops: Vec<agent_proto::OpKind>,
+}
+
+impl Ui for RecordingYes {
+    fn info(&mut self, _: &str) {}
+    fn confirm(&mut self, m: &agent_proto::ManifestResponse) -> bool {
+        self.item_ops.extend(m.diff.items.iter().map(|i| i.op));
+        true
+    }
+}
+
+/// state の曲を (保存先のパス, persistent_id) で並べる
+fn pids_by_path(state: &spindle_agent::state::State) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = state
+        .tracks
+        .values()
+        .map(|e| (e.path.clone(), e.persistent_id.clone()))
+        .collect();
+    v.sort();
+    v
+}
+
+/// サーバの DB を失った後（新しい DB に同じ Library を入れ直し、新しい端末の行を作る）、
+/// Mac が pair --adopt で前の保存先を引き継ぎ、送り直しなしで同期を終える
+#[tokio::test(flavor = "multi_thread")]
+async fn adopt_after_db_loss_keeps_tracks_and_downloads_nothing() {
+    let old = App::with_roots().await;
+    let (_dev, seeded, code) = prepare(&old).await;
+    let url = serve(&old).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let rt = tokio::runtime::Handle::current();
+    // 偽のミュージック.app はスレッドをまたげないので、エージェント側は 1 本の blocking スレッドで通す
+    let new = tokio::task::spawn_blocking(move || {
+        let paths = Paths {
+            state_dir: path.join("state"),
+            root: path.join("Music/spindle"),
+        };
+        let fp = Failpoints::none();
+        let music = FakeMusic::new(path.join("Media"), fp.clone());
+        let secrets = FileSecrets::new(&paths.state_dir);
+        let state_file = spindle_agent::state::StateFile::new(&paths.state_dir);
+
+        // 1 回目: 前の DB の端末として pair して同期する
+        let anon = HttpServer::new(&url, true, None).unwrap();
+        pair_cmd(
+            &music, &anon, &secrets, &paths, &fp, &mut Yes, &url, true, &code, false,
+        )
+        .unwrap();
+        let server = HttpServer::new(&url, true, secrets.get().unwrap()).unwrap();
+        let outcome = sync(&music, &server, &paths, &fp, &mut Yes).unwrap();
+        assert!(
+            matches!(outcome, SyncOutcome::Applied { errors: 0, .. }),
+            "{outcome:?}"
+        );
+        let first = state_file.load().unwrap();
+        let first_pids = pids_by_path(&first);
+        assert_eq!(first_pids.len(), 2);
+        let first_tracks = music.tracks();
+
+        // DB 全損: 新しい DB に同じ Library（id は振り直し）と新しい端末の行を作る
+        let (new, code) = rt.block_on(async {
+            let new = App::with_roots().await;
+            let library: [(i64, &str, &[u8]); 2] = [
+                (11, "J-Pop/A/1-01 a.flac", b"aaa"),
+                (12, "J-Pop/A/1-02 b.flac", b"bbb"),
+            ];
+            for ((id, rel, bytes), t) in library.into_iter().zip(&seeded) {
+                let s = new.seed_track(id, rel, bytes).await;
+                assert_eq!(s.dest_path, t.dest_path);
+                assert_eq!(s.sha256, t.sha256);
+            }
+            let dev = new.create_iphone("iPhone").await;
+            new.seed_playlist(dev, 20, "Favs", &[12, 11]).await;
+            let code = new.pair_code(dev).await;
+            (new, code)
+        });
+        let url = rt.block_on(serve(&new));
+
+        // pair --adopt → sync
+        let calls_before = music.calls().len();
+        let anon = HttpServer::new(&url, true, None).unwrap();
+        pair_cmd(
+            &music, &anon, &secrets, &paths, &fp, &mut Yes, &url, true, &code, true,
+        )
+        .unwrap();
+        let server = CountingServer {
+            inner: HttpServer::new(&url, true, secrets.get().unwrap()).unwrap(),
+            fetches: std::cell::Cell::new(0),
+        };
+        let mut ui = RecordingYes::default();
+        let outcome = sync(&music, &server, &paths, &fp, &mut ui).unwrap();
+        assert!(
+            matches!(outcome, SyncOutcome::Applied { errors: 0, .. }),
+            "{outcome:?}"
+        );
+        // 引き継いだ曲は update として見せられ、ダウンロードは 1 件も無い
+        assert_eq!(
+            ui.item_ops,
+            vec![agent_proto::OpKind::Update, agent_proto::OpKind::Update]
+        );
+        assert_eq!(server.fetches.get(), 0);
+        // ミュージック.app の track は足しも消しもしない（プレイリストは入れ直してよい）
+        let calls: Vec<String> = music.calls()[calls_before..].to_vec();
+        assert!(
+            !calls.iter().any(|c| c == "add" || c == "delete_track"),
+            "{calls:?}"
+        );
+        assert_eq!(music.tracks(), first_tracks);
+
+        // 2 回目の manifest の差分は空で、state の persistent_id は 1 回目と同じ
+        let m = server.manifest().unwrap();
+        assert!(m.diff.items.is_empty(), "{:?}", m.diff);
+        assert!(m.diff.playlists.is_empty(), "{:?}", m.diff);
+        assert!(m.diff.held.is_empty(), "{:?}", m.diff);
+        let after = state_file.load().unwrap();
+        assert_eq!(pids_by_path(&after), first_pids);
+        assert_eq!(
+            after.tracks.keys().copied().collect::<Vec<_>>(),
+            vec![11, 12]
+        );
+        assert!(after
+            .tracks
+            .values()
+            .all(|e| e.token != spindle_agent::state::ADOPTED_TOKEN));
+        // 新しいサーバは試験の終わりまで生かしておく
+        new
+    })
+    .await
+    .unwrap();
+    drop(new);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import type { AdbVolume, Device, DeviceCounts, DeviceDiff, DiffItem } from '../api/types'
-import { agentPlanText, pairCommand, connectionNote, nextPollDelay, UNREGISTERED_POLL_MS, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, volumeSelectable, volumeAdoptable, adoptPreviewText, adoptPreviewRetryDelay, ADOPT_PREVIEW_RETRY_MS, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
+import { agentPlanText, pairCommand, pairAdoptCommand, connectionNote, nextPollDelay, UNREGISTERED_POLL_MS, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, volumeSelectable, volumeAdoptable, adoptPreviewText, adoptPreviewRetryDelay, ADOPT_PREVIEW_RETRY_MS, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
 
 const counts = (p: Partial<DeviceCounts> = {}): DeviceCounts => ({
   add: 0, update: 0, move: 0, delete: 0, waiting: 0, error: 0, synced: 0, ...p,
@@ -188,6 +188,14 @@ describe('agentPlanText', () => {
 describe('pairCommand', () => {
   it('この画面の origin とコードを並べる', () => {
     expect(pairCommand('https://musics.example', 'abc.def')).toBe('spindle-agent pair https://musics.example abc.def')
+  })
+})
+
+describe('pairAdoptCommand', () => {
+  it('pair に --adopt を付けて origin とコードを並べる', () => {
+    expect(pairAdoptCommand('https://musics.example', 'abc.def')).toBe(
+      'spindle-agent pair --adopt https://musics.example abc.def',
+    )
   })
 })
 

@@ -23,7 +23,7 @@ use spindle_agent::sync::{self, Paths, SyncOutcome};
 use spindle_agent::{Error, Result};
 
 const USAGE: &str = "使い方:
-  spindle-agent pair <URL> <コード> [--insecure-http]
+  spindle-agent pair <URL> <コード> [--insecure-http] [--adopt]
   spindle-agent sync
   spindle-agent status
   spindle-agent resolve <op_id> (--delete-track <persistent_id> | --no-copy-created)
@@ -34,6 +34,7 @@ enum Command {
         url: String,
         code: String,
         insecure_http: bool,
+        adopt: bool,
     },
     Sync,
     Status,
@@ -49,10 +50,11 @@ fn parse(args: &[String]) -> Option<Command> {
     match rest.as_slice() {
         ["pair", tail @ ..] => {
             let insecure_http = tail.contains(&"--insecure-http");
+            let adopt = tail.contains(&"--adopt");
             let pos: Vec<&str> = tail
                 .iter()
                 .copied()
-                .filter(|a| *a != "--insecure-http")
+                .filter(|a| *a != "--insecure-http" && *a != "--adopt")
                 .collect();
             if pos.iter().any(|a| a.starts_with("--")) {
                 return None;
@@ -62,6 +64,7 @@ fn parse(args: &[String]) -> Option<Command> {
                     url: (*url).to_owned(),
                     code: (*code).to_owned(),
                     insecure_http,
+                    adopt,
                 }),
                 _ => None,
             }
@@ -143,6 +146,7 @@ fn run(cmd: Command) -> Result<()> {
             url,
             code,
             insecure_http,
+            adopt,
         } => {
             let server = HttpServer::new(&url, insecure_http, None)?;
             let secrets = open_secrets(&paths);
@@ -156,6 +160,7 @@ fn run(cmd: Command) -> Result<()> {
                 &url,
                 insecure_http,
                 &code,
+                adopt,
             )
         }
         Command::Sync => {

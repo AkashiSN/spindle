@@ -10,7 +10,7 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::ctx::Ctx;
-use crate::exec::{entry_for, remove_pending};
+use crate::exec::{entry_for, remove_pending, Origin, NO_ORIGIN};
 use crate::local::{MOVING_DIR, TMP_SUFFIX};
 use crate::music::{Music, MusicTrack};
 use crate::pathkey::{canonical_key, to_rel};
@@ -90,6 +90,14 @@ fn need<'a>(v: &'a Option<String>, what: &str, op: &PendingOp) -> Result<&'a str
     })
 }
 
+/// pending の曲の Add / Update に記録した出どころ
+fn origin_of(op: &PendingOp) -> Option<Origin> {
+    Some(Origin {
+        rel_path: op.rel_path.clone()?,
+        source: op.source.clone()?,
+    })
+}
+
 fn kind_name(k: PendingKind) -> &'static str {
     match k {
         PendingKind::Add => "add",
@@ -130,12 +138,17 @@ fn recover_update<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, op: &PendingOp) -
     if cx.local.sha256(to)?.as_deref() == Some(sha) {
         let pid = need(&op.persistent_id, "persistent_id", op)?;
         let token = need(&op.token, "token", op)?;
+        let Some(origin) = origin_of(op) else {
+            cx.error_track(op.ref_id, NO_ORIGIN);
+            remove_pending(cx, &op.op_id);
+            return cx.save();
+        };
         // track が手で消されていれば refresh しない。行は書き、再発見が「手で消された」として外す
         // （refresh で失敗すると、この回復が毎回止まって先へ進めない）
         if cx.music.track(pid)?.is_some() {
             cx.music.refresh(pid)?;
         }
-        let entry = entry_for(cx, pid, token, to, op.size, sha)?;
+        let entry = entry_for(cx, pid, token, to, op.size, sha, &origin)?;
         cx.state.tracks.insert(op.ref_id, entry);
         cx.state.needs_report = true;
     }
@@ -181,9 +194,13 @@ fn recover_add_adding<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, op: &PendingO
     match at.as_slice() {
         [t] => {
             if cx.local.sha256(to)?.as_deref() == Some(sha) {
-                let entry = entry_for(cx, &t.persistent_id, token, to, op.size, sha)?;
-                cx.state.tracks.insert(op.ref_id, entry);
-                cx.state.needs_report = true;
+                if let Some(origin) = origin_of(op) {
+                    let entry = entry_for(cx, &t.persistent_id, token, to, op.size, sha, &origin)?;
+                    cx.state.tracks.insert(op.ref_id, entry);
+                    cx.state.needs_report = true;
+                } else {
+                    cx.error_track(op.ref_id, NO_ORIGIN);
+                }
             }
             // 中身が違えば取り込まない（track もファイルも触らない。管理外として残る）
             remove_pending(cx, &op.op_id);

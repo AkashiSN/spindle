@@ -275,6 +275,8 @@ async fn manifest_lists_desired_items_playlists_and_diff() {
     assert_eq!(m.items[0].token, t.token);
     assert_eq!(m.items[0].sha256, t.sha256);
     assert_eq!(m.items[0].size, 5);
+    assert_eq!(m.items[0].rel_path, "J-Pop/A/01 a.flac");
+    assert_eq!(m.items[0].source, "aac");
     assert_eq!(m.playlists[0].name, "夜");
     assert_eq!(m.playlists[0].tracks, vec![1]);
     assert_eq!(m.diff.items[0].op, agent_proto::OpKind::Add);
@@ -896,4 +898,525 @@ async fn resend_after_plan_was_pruned_is_404_but_kept_latest_is_200() {
         .agent_call(Some(&token), Method::POST, "/api/agent/report", Some(body2))
         .await;
     assert_eq!(st, StatusCode::OK, "最後の終端への再送は 200");
+}
+
+// ---------------------------------------------------------------- pair --adopt と adopt（P5-8）
+
+const OLD_UUID: &str = "0123456789abcdef0123456789abcdef";
+
+async fn pair_with(app: &App, code: &str, adopt_uuid: Option<&str>) -> (StatusCode, Value) {
+    let body = match adopt_uuid {
+        Some(u) => json!({"code": code, "adopt_uuid": u}),
+        None => json!({"code": code}),
+    };
+    app.agent_call(None, Method::POST, "/api/agent/pair", Some(body))
+        .await
+}
+
+async fn sql(app: &App, q: &'static str, id: i64) {
+    app.db
+        .write(move |c| {
+            c.execute(q, [id])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn device_row(app: &App, id: i64) -> (String, i64, Option<i64>, i64) {
+    app.db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT uuid, generation, last_synced_at, pair_code_attempts FROM devices WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn pair_adopt_swaps_the_uuid_of_an_unused_row() {
+    let app = App::new().await;
+    let id = app.create_iphone("iPhone").await;
+    let code = app.pair_code(id).await;
+    let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["device_uuid"], OLD_UUID);
+    assert_eq!(device_row(&app, id).await.0, OLD_UUID);
+    let token = v["token"].as_str().unwrap();
+    let (st, _) = app
+        .agent_call(
+            Some(token),
+            Method::POST,
+            "/api/agent/plans",
+            Some(json!({"plan_token": "x"})),
+        )
+        .await;
+    assert_ne!(st, StatusCode::UNAUTHORIZED, "トークンが使える");
+}
+
+#[tokio::test]
+async fn pair_adopt_is_idempotent_on_retry() {
+    let app = App::new().await;
+    let id = app.create_iphone("iPhone").await;
+    let code = app.pair_code(id).await;
+    let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let code = app.pair_code(id).await;
+    let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+    assert_eq!(st, StatusCode::OK, "差し替え済みのやり直し: {v}");
+    assert_eq!(v["device_uuid"], OLD_UUID);
+}
+
+/// 引き継ぎの後（adopt でキャッシュを書いた後）、finish を保存する前に落ちてもう一度 pair --adopt しても通る
+#[tokio::test]
+async fn pair_adopt_retry_after_adopt_wrote_the_cache_succeeds() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t1 = app.seed_track(1, "A/01 a.flac", b"aaa").await;
+    insert_playlist(&app, 10, "夜").await;
+    let code = app.pair_code(id).await;
+    let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let token = v["token"].as_str().unwrap().to_owned();
+    let body = json!({
+        "tracks": [adopt_track(70, &t1.dest_path, "A/01 a.flac", 3, &t1.sha256, false)],
+        "playlists": [{"playlist_id": 50, "name": "夜"}],
+    });
+    let (st, v) = adopt(&app, &token, body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let code = app.pair_code(id).await;
+    let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "キャッシュがあっても報告前ならやり直せる: {v}"
+    );
+    assert_eq!(v["device_uuid"], OLD_UUID);
+}
+
+/// uuid が既に adopt_uuid でも、報告・計画のある行（DB を失っていない Mac）は引き継ぎを断り、
+/// コードを消費しない（素の pair で入れ直せる）
+#[tokio::test]
+async fn pair_adopt_refuses_a_used_row_with_the_same_uuid_without_consuming_the_code() {
+    let setups: [&'static str; 2] = [
+        "UPDATE devices SET last_synced_at = 1 WHERE id = ?1",
+        "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at)
+         VALUES (?1, 'x', '{}', 'completed', 0)",
+    ];
+    for q in setups {
+        let app = App::new().await;
+        let id = app.create_iphone("iPhone").await;
+        let code = app.pair_code(id).await;
+        let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        sql(&app, q, id).await;
+        let code = app.pair_code(id).await;
+        let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+        assert_eq!(
+            (st, v["error"].as_str()),
+            (StatusCode::CONFLICT, Some("not_adoptable")),
+            "{q}"
+        );
+        let (uuid, _, _, attempts) = device_row(&app, id).await;
+        assert_eq!(uuid, OLD_UUID, "{q}");
+        assert_eq!(attempts, 0, "試行に数えない: {q}");
+        let (st, v) = pair_with(&app, &code, None).await;
+        assert_eq!(st, StatusCode::OK, "コードは消費されていない: {q}: {v}");
+        assert_eq!(v["device_uuid"], OLD_UUID);
+    }
+}
+
+#[tokio::test]
+async fn pair_adopt_refuses_a_used_row_without_consuming_the_code() {
+    let setups: [&'static str; 4] = [
+        "UPDATE devices SET last_synced_at = 1 WHERE id = ?1",
+        "INSERT INTO device_sync_plans (device_id, plan_token, plan, state, created_at)
+         VALUES (?1, 'x', '{}', 'completed', 0)",
+        "INSERT INTO device_items (device_id, track_id, dest_path, dest_path_key, token, size, sha256, synced_at)
+         VALUES (?1, 1, 'a.m4a', 'a.m4a', 't', 1, 's', 0)",
+        "INSERT INTO device_playlist_state (device_id, playlist_id, dest_path, token, synced_at)
+         VALUES (?1, 1, '夜', 't', 0)",
+    ];
+    for q in setups {
+        let app = App::new().await;
+        let id = app.create_iphone("iPhone").await;
+        let code = app.pair_code(id).await;
+        sql(&app, q, id).await;
+        let before = device_row(&app, id).await.0;
+        let (st, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+        assert_eq!(
+            (st, v["error"].as_str()),
+            (StatusCode::CONFLICT, Some("not_adoptable")),
+            "{q}"
+        );
+        let (uuid, _, _, attempts) = device_row(&app, id).await;
+        assert_eq!(uuid, before, "{q}");
+        assert_eq!(attempts, 0, "試行に数えない: {q}");
+        let (st, v) = pair_with(&app, &code, None).await;
+        assert_eq!(st, StatusCode::OK, "コードは消費されていない: {q}: {v}");
+        assert_eq!(v["device_uuid"], before.as_str());
+    }
+}
+
+#[tokio::test]
+async fn pair_adopt_refuses_a_uuid_of_another_row() {
+    let app = App::new().await;
+    let a = app.create_iphone("iPhone").await;
+    let b = app.create_iphone("iPad").await;
+    let other = device_row(&app, b).await.0;
+    let code = app.pair_code(a).await;
+    let (st, v) = pair_with(&app, &code, Some(&other)).await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("not_adoptable"))
+    );
+    let (st, v) = pair_with(&app, &code, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_ne!(v["device_uuid"], other.as_str());
+}
+
+#[tokio::test]
+async fn pair_adopt_rejects_a_malformed_uuid() {
+    let app = App::new().await;
+    let id = app.create_iphone("iPhone").await;
+    let code = app.pair_code(id).await;
+    for bad in ["OLD", "0123456789ABCDEF0123456789ABCDEF", ""] {
+        let (st, v) = pair_with(&app, &code, Some(bad)).await;
+        assert_eq!(
+            (st, v["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("bad_request")),
+            "{bad}"
+        );
+    }
+    assert_eq!(device_row(&app, id).await.3, 0, "試行に数えない");
+    let (st, v) = pair_with(&app, &code, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+/// 印の付いていないプレイリストを入れる
+async fn insert_playlist(app: &App, playlist_id: i64, name: &str) {
+    let name = name.to_owned();
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO playlists (id, name, name_key, kind, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'manual', 0, 0)",
+                rusqlite::params![
+                    playlist_id,
+                    name,
+                    spindle::domain::relpath::canonical_key(&name)
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+type Rows = (
+    Vec<(i64, String, String, i64, String)>,
+    Vec<(i64, String, String)>,
+    Vec<i64>,
+    i64,
+);
+
+/// device_items・device_playlist_state・印・device_errors の件数
+async fn cache_of(app: &App, id: i64) -> Rows {
+    app.db
+        .read(move |c| {
+            let mut st = c.prepare(
+                "SELECT track_id, dest_path, token, size, sha256 FROM device_items
+                 WHERE device_id = ?1 ORDER BY track_id",
+            )?;
+            let items = st
+                .query_map([id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut st = c.prepare(
+                "SELECT playlist_id, dest_path, token FROM device_playlist_state
+                 WHERE device_id = ?1 ORDER BY playlist_id",
+            )?;
+            let pls = st
+                .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut st = c.prepare(
+                "SELECT playlist_id FROM device_playlists WHERE device_id = ?1 ORDER BY playlist_id",
+            )?;
+            let marks = st
+                .query_map([id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let errors: i64 = c.query_row(
+                "SELECT COUNT(*) FROM device_errors WHERE device_id = ?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            Ok((items, pls, marks, errors))
+        })
+        .await
+        .unwrap()
+}
+
+async fn adopt(app: &App, token: &str, body: Value) -> (StatusCode, Value) {
+    app.agent_call(Some(token), Method::POST, "/api/agent/adopt", Some(body))
+        .await
+}
+
+fn adopt_track(id: i64, path: &str, rel: &str, size: u64, sha: &str, stale: bool) -> Value {
+    json!({"track_id": id, "path": path, "rel_path": rel, "source": "aac",
+           "size": size, "sha256": sha, "stale": stale})
+}
+
+#[tokio::test]
+async fn adopt_remaps_and_writes_the_cache() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t1 = app.seed_track(1, "A/01 a.flac", b"aaa").await;
+    app.seed_track(2, "B/01 b.flac", b"bb").await;
+    insert_playlist(&app, 10, "夜").await;
+    let code = app.pair_code(id).await;
+    let (_, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+    let token = v["token"].as_str().unwrap().to_owned();
+    sql(
+        &app,
+        "INSERT INTO device_errors (device_id, kind, ref_id, reason, reported_at)
+         VALUES (?1, 'track', 1, 'x', 0)",
+        id,
+    )
+    .await;
+    let gen_before = device_row(&app, id).await.1;
+    let body = json!({
+        "tracks": [
+            adopt_track(70, &t1.dest_path, "A/01 a.flac", 3, &t1.sha256, false),
+            adopt_track(80, "B/01 b.m4a", "b/01 B.flac", 9, &"b".repeat(64), true),
+            adopt_track(90, "C/x.m4a", "C/gone.flac", 1, "", true),
+        ],
+        "playlists": [{"playlist_id": 50, "name": "夜"}, {"playlist_id": 51, "name": "Gone"}],
+    });
+    let (st, v) = adopt(&app, &token, body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let r: agent_proto::AdoptResponse = serde_json::from_value(v).unwrap();
+    let m = |from, to| agent_proto::IdMap { from, to };
+    assert_eq!(r.tracks, vec![m(70, Some(1)), m(80, Some(2)), m(90, None)]);
+    assert_eq!(r.playlists, vec![m(50, Some(10)), m(51, None)]);
+
+    let (items, pls, marks, errors) = cache_of(&app, id).await;
+    assert_eq!(
+        items,
+        vec![
+            (
+                1,
+                t1.dest_path.clone(),
+                "adopted".into(),
+                3,
+                t1.sha256.clone()
+            ),
+            (2, "B/01 b.m4a".into(), "".into(), 9, "b".repeat(64)),
+        ]
+    );
+    assert_eq!(pls, vec![(10, "夜".into(), "".into())]);
+    assert_eq!(marks, vec![10]);
+    assert_eq!(errors, 0);
+    let (_, gen_after, synced, _) = device_row(&app, id).await;
+    assert_eq!(gen_after, gen_before, "generation は進めない");
+    assert_eq!(synced, None);
+}
+
+#[tokio::test]
+async fn adopt_is_idempotent() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t1 = app.seed_track(1, "A/01 a.flac", b"aaa").await;
+    insert_playlist(&app, 10, "夜").await;
+    let token = app.pair(id).await;
+    let body = json!({
+        "tracks": [adopt_track(70, &t1.dest_path, "A/01 a.flac", 3, &t1.sha256, false)],
+        "playlists": [{"playlist_id": 50, "name": "夜"}],
+    });
+    let (st, first) = adopt(&app, &token, body.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{first}");
+    let cache = cache_of(&app, id).await;
+    let (st, second) = adopt(&app, &token, body).await;
+    assert_eq!(st, StatusCode::OK, "{second}");
+    assert_eq!(first, second);
+    assert_eq!(cache_of(&app, id).await, cache);
+}
+
+#[tokio::test]
+async fn adopt_refuses_open_plan_reported_device_and_scan() {
+    let body = json!({"tracks": [], "playlists": []});
+    // open な計画
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"aaa").await;
+    let token = app.pair(id).await;
+    confirm(&app, &token).await;
+    let (st, v) = adopt(&app, &token, body.clone()).await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("open_plan"))
+    );
+    // 報告を受けたことがある
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let token = app.pair(id).await;
+    sql(
+        &app,
+        "UPDATE devices SET last_synced_at = 1 WHERE id = ?1",
+        id,
+    )
+    .await;
+    let (st, v) = adopt(&app, &token, body.clone()).await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("not_adoptable"))
+    );
+    // スキャン中
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let token = app.pair(id).await;
+    sql(
+        &app,
+        "INSERT INTO jobs (type, state, payload, created_at) SELECT 'scan', 'queued', '{}', ?1",
+        0,
+    )
+    .await;
+    let (st, v) = adopt(&app, &token, body).await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("library_busy"))
+    );
+}
+
+#[tokio::test]
+async fn adopt_rejects_bad_input() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"aaa").await;
+    let token = app.pair(id).await;
+    let hex = "a".repeat(64);
+    let ok = |id, path: &str| adopt_track(id, path, "A/01 a.flac", 3, &hex, false);
+    let mut unknown_source = ok(1, "A/a.m4a");
+    unknown_source["source"] = json!("mp3");
+    let many: Vec<Value> = (0..=spindle::device::report::MAX_PLAYLISTS as i64)
+        .map(|i| json!({"playlist_id": i, "name": "n"}))
+        .collect();
+    let cases = [
+        (
+            "重複 id",
+            json!({"tracks": [ok(1, "A/a.m4a"), ok(1, "A/b.m4a")], "playlists": []}),
+        ),
+        (
+            "重複パス",
+            json!({"tracks": [ok(1, "A/a.m4a"), ok(2, "a/A.m4a")], "playlists": []}),
+        ),
+        (
+            "..",
+            json!({"tracks": [ok(1, "A/../a.m4a")], "playlists": []}),
+        ),
+        (
+            "予約名",
+            json!({"tracks": [ok(1, ".spindle/a.m4a")], "playlists": []}),
+        ),
+        (
+            "rel_path",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "/abs.flac", 3, &hex, false)], "playlists": []}),
+        ),
+        (
+            "source",
+            json!({"tracks": [unknown_source], "playlists": []}),
+        ),
+        (
+            "プレイリストの重複 id",
+            json!({"tracks": [], "playlists": [{"playlist_id": 1, "name": "a"}, {"playlist_id": 1, "name": "b"}]}),
+        ),
+        (
+            "空の名前",
+            json!({"tracks": [], "playlists": [{"playlist_id": 1, "name": ""}]}),
+        ),
+        ("件数", json!({"tracks": [], "playlists": many})),
+        (
+            "sha256 が短い",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", 3, "s", false)], "playlists": []}),
+        ),
+        (
+            "sha256 が大文字",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", 3, &"A".repeat(64), false)], "playlists": []}),
+        ),
+        (
+            "sha256 が 16 進でない",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", 3, &"g".repeat(64), false)], "playlists": []}),
+        ),
+        (
+            "stale でないのに sha256 が空",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", 3, "", false)], "playlists": []}),
+        ),
+        (
+            "size が i64 を超える",
+            json!({"tracks": [adopt_track(1, "A/a.m4a", "A/01 a.flac", i64::MAX as u64 + 1, &hex, false)], "playlists": []}),
+        ),
+    ];
+    for (what, body) in cases {
+        let (st, v) = adopt(&app, &token, body).await;
+        assert_eq!(
+            (st, v["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("bad_request")),
+            "{what}: {v}"
+        );
+    }
+    let (items, pls, _, _) = cache_of(&app, id).await;
+    assert!(items.is_empty() && pls.is_empty());
+}
+
+#[tokio::test]
+async fn adopted_diff_is_adoption_check_and_report_passes() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"aaa").await;
+    let code = app.pair_code(id).await;
+    let (_, v) = pair_with(&app, &code, Some(OLD_UUID)).await;
+    let token = v["token"].as_str().unwrap().to_owned();
+    let body = json!({
+        "tracks": [adopt_track(70, &t.dest_path, "A/01 a.flac", 3, &t.sha256, false)],
+        "playlists": [],
+    });
+    let (st, v) = adopt(&app, &token, body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    let (st, m) = app
+        .agent_call(Some(&token), Method::GET, "/api/agent/manifest", None)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    let m: agent_proto::ManifestResponse = serde_json::from_value(m).unwrap();
+    assert_eq!(m.diff.items.len(), 1);
+    assert_eq!(m.diff.items[0].op, agent_proto::OpKind::Update);
+    let (st, d) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["items"][0]["op"], "adopted", "{d}");
+
+    let p = confirm(&app, &token).await;
+    assert_eq!(p.items[0].token.as_deref(), Some(t.token.as_str()));
+    let report = report_of(
+        &p,
+        json!([{"track_id": 1, "dest_path": t.dest_path, "token": t.token, "size": 3, "sha256": t.sha256}]),
+        json!([]),
+    );
+    let (st, v) = app
+        .agent_call(
+            Some(&token),
+            Method::POST,
+            "/api/agent/report",
+            Some(report),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, d) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(d["counts"]["synced"], 1);
 }

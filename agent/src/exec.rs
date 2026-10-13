@@ -2,7 +2,7 @@
 //! 各操作は副作用の前に `pending_ops` へ記録し、終われば state の行の更新と pending からの除去を
 //! 1 回の保存で行う。途中で落ちたものは `recover::recover` が片付ける
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write};
 
 use agent_proto::{ManifestResponse, OpKind, PlanItem};
@@ -16,12 +16,13 @@ use crate::plan::Runnable;
 use crate::playlist;
 use crate::rediscover::pending_pids;
 use crate::server::{Fetch, Server};
-use crate::state::{OpPhase, PendingKind, PendingOp, TrackEntry};
+use crate::state::{OpPhase, PendingKind, PendingOp, TrackEntry, ADOPTED_TOKEN};
 use crate::{Error, Result};
 
 pub const UNMANAGED_COLLISION: &str = "管理外と衝突";
 pub const PATH_OCCUPIED: &str = "パス衝突（移動しなかった曲が置き先にいる）";
 pub const CONTENT_MISMATCH: &str = "受け取った内容がトークンと一致しない";
+pub const NO_ORIGIN: &str = "出どころが無い（manifest に無い曲）";
 /// 空き容量の余裕
 pub const MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 /// 受信が切れたときに同じ `If-Match` の続きでやり直す回数
@@ -50,6 +51,28 @@ pub enum Downloaded {
     Mismatch,
 }
 
+/// manifest の項目が持つ、曲の Library での出どころ（state の `TrackEntry` に写す）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub rel_path: String,
+    pub source: String,
+}
+
+pub fn origins_of(m: &ManifestResponse) -> HashMap<i64, Origin> {
+    m.items
+        .iter()
+        .map(|i| {
+            (
+                i.track_id,
+                Origin {
+                    rel_path: i.rel_path.clone(),
+                    source: i.source.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 /// 1 操作の結果
 enum Step {
     Done,
@@ -71,6 +94,12 @@ pub fn run<M: Music, S: Server>(
         .items
         .iter()
         .filter(|i| matches!(i.op, OpKind::Add | OpKind::Update | OpKind::UpdateMove))
+        .filter(|i| {
+            !cx.state
+                .tracks
+                .get(&i.track_id)
+                .is_some_and(|e| adopted_unchanged(e, i))
+        })
         .fold(MARGIN_BYTES, |a, i| a.saturating_add(i.size));
     let free = cx.local.free_bytes()?;
     if free < need {
@@ -79,6 +108,7 @@ pub fn run<M: Music, S: Server>(
         )));
     }
     let unmanaged = unmanaged_keys(cx)?;
+    let origins = origins_of(m);
 
     let mut out = Outcome {
         dropped: r.dropped,
@@ -94,7 +124,7 @@ pub fn run<M: Music, S: Server>(
                 .cloned()
                 .collect();
             if !path_changes.is_empty() {
-                let (executed, dropped) = batch::run(cx, path_changes, &unmanaged)?;
+                let (executed, dropped) = batch::run(cx, path_changes, &unmanaged, &origins)?;
                 out.executed += executed;
                 out.dropped += dropped;
             }
@@ -102,8 +132,8 @@ pub fn run<M: Music, S: Server>(
         for item in r.items.iter().filter(|i| i.op == kind) {
             let step = match kind {
                 OpKind::Delete => delete(cx, item)?,
-                OpKind::Update => update(cx, item)?,
-                OpKind::Add => add(cx, item, &unmanaged)?,
+                OpKind::Update => update(cx, item, &origins)?,
+                OpKind::Add => add(cx, item, &unmanaged, &origins)?,
                 OpKind::Move | OpKind::UpdateMove => continue,
             };
             match step {
@@ -226,6 +256,7 @@ pub fn entry_for<M: Music, S: Server>(
     path: &str,
     size: u64,
     sha256: &str,
+    origin: &Origin,
 ) -> Result<TrackEntry> {
     let st = cx.local.stat(path)?.ok_or_else(|| {
         Error::Io(std::io::Error::new(
@@ -241,6 +272,8 @@ pub fn entry_for<M: Music, S: Server>(
         sha256: sha256.to_owned(),
         inode: st.inode,
         mtime_ns: st.mtime_ns,
+        rel_path: origin.rel_path.clone(),
+        source: origin.source.clone(),
     })
 }
 
@@ -269,6 +302,8 @@ fn delete<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, item: &PlanItem) -> Resul
         started_at: (cx.now)(),
         max_database_id: None,
         candidates: None,
+        rel_path: None,
+        source: None,
     });
     cx.save()?;
     if cx.music.track(&e.persistent_id)?.is_some() {
@@ -301,7 +336,24 @@ fn after_download<M: Music, S: Server>(
     Ok(Some(step))
 }
 
-fn update<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, item: &PlanItem) -> Result<Step> {
+/// 同期の近道に入る曲か: 引き継ぎ直後（`ADOPTED_TOKEN`）の更新で、パス・大きさ・sha256 が計画と同じ。
+/// 近道は何も受け取らないので、空き容量の見積もりもこれで除外する（判定を 1 か所にして食い違わせない）
+fn adopted_unchanged(e: &TrackEntry, item: &PlanItem) -> bool {
+    item.op == OpKind::Update
+        && e.token == ADOPTED_TOKEN
+        && item
+            .to
+            .as_deref()
+            .is_some_and(|to| canonical_key(&e.path) == canonical_key(to))
+        && e.size == item.size
+        && item.sha256.as_deref() == Some(e.sha256.as_str())
+}
+
+fn update<M: Music, S: Server>(
+    cx: &mut Ctx<'_, M, S>,
+    item: &PlanItem,
+    origins: &HashMap<i64, Origin>,
+) -> Result<Step> {
     let (Some(to), Some(token), Some(sha)) = (&item.to, &item.token, &item.sha256) else {
         return Ok(Step::Dropped);
     };
@@ -310,6 +362,20 @@ fn update<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, item: &PlanItem) -> Resul
     };
     if canonical_key(&e.path) != canonical_key(to) {
         return Ok(Step::Dropped);
+    }
+    let Some(origin) = origins.get(&item.track_id) else {
+        cx.error_track(item.track_id, NO_ORIGIN);
+        return Ok(Step::Errored);
+    };
+    // 同期の近道: 引き継ぎ直後の曲で中身が計画と同じなら、取得も track の操作もせずトークンと出どころだけ書き換える
+    if adopted_unchanged(&e, item) {
+        let mut entry = e;
+        entry.token = token.clone();
+        entry.rel_path = origin.rel_path.clone();
+        entry.source = origin.source.clone();
+        cx.state.tracks.insert(item.track_id, entry);
+        cx.save()?;
+        return Ok(Step::Done);
     }
     let path = e.path.clone();
     let pid = e.persistent_id.clone();
@@ -327,6 +393,8 @@ fn update<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, item: &PlanItem) -> Resul
         started_at: (cx.now)(),
         max_database_id: None,
         candidates: None,
+        rel_path: Some(origin.rel_path.clone()),
+        source: Some(origin.source.clone()),
     });
     cx.save()?;
     let tmp = format!("{path}{TMP_SUFFIX}");
@@ -340,7 +408,7 @@ fn update<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>, item: &PlanItem) -> Resul
     if cx.music.track(&pid)?.is_some() {
         cx.music.refresh(&pid)?;
     }
-    let entry = entry_for(cx, &pid, token, &path, item.size, sha)?;
+    let entry = entry_for(cx, &pid, token, &path, item.size, sha, origin)?;
     cx.state.tracks.insert(item.track_id, entry);
     remove_pending(cx, &item.op_id);
     cx.save()?;
@@ -351,9 +419,14 @@ fn add<M: Music, S: Server>(
     cx: &mut Ctx<'_, M, S>,
     item: &PlanItem,
     unmanaged: &HashSet<String>,
+    origins: &HashMap<i64, Origin>,
 ) -> Result<Step> {
     let (Some(to), Some(token), Some(sha)) = (&item.to, &item.token, &item.sha256) else {
         return Ok(Step::Dropped);
+    };
+    let Some(origin) = origins.get(&item.track_id) else {
+        cx.error_track(item.track_id, NO_ORIGIN);
+        return Ok(Step::Errored);
     };
     let key = canonical_key(to);
     if unmanaged.contains(&key) {
@@ -387,6 +460,8 @@ fn add<M: Music, S: Server>(
         started_at: (cx.now)(),
         max_database_id: None,
         candidates: None,
+        rel_path: Some(origin.rel_path.clone()),
+        source: Some(origin.source.clone()),
     });
     cx.save()?;
     let tmp = format!("{to}{TMP_SUFFIX}");
@@ -441,7 +516,7 @@ fn add<M: Music, S: Server>(
         cx.save()?;
         return Ok(Step::Stop(COPY_ON_STOP.to_owned()));
     }
-    let entry = entry_for(cx, &t.persistent_id, token, to, item.size, sha)?;
+    let entry = entry_for(cx, &t.persistent_id, token, to, item.size, sha, origin)?;
     cx.state.tracks.insert(item.track_id, entry);
     remove_pending(cx, &item.op_id);
     cx.save()?;

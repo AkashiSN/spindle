@@ -1099,6 +1099,78 @@ pub fn consume_pair_code(
     Ok(n == 1)
 }
 
+/// 予約した試行の枠を返す（コードは正しかったが pair を断ったとき。試行に数えない）
+pub fn refund_pair_attempt(
+    conn: &Connection,
+    device_id: i64,
+    selector: &str,
+    code_hash: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE devices SET pair_code_attempts = MAX(pair_code_attempts - 1, 0)
+         WHERE id = ?1 AND pair_selector = ?2 AND pair_code_hash = ?3",
+        params![device_id, selector, code_hash],
+    )?;
+    Ok(())
+}
+
+/// pair の uuid の差し替えの結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptSwap {
+    Swapped,
+    /// 行の uuid が既に `adopt_uuid` で、まだ報告も計画も無い（差し替え済みのやり直し）
+    Already,
+    NotAllowed,
+}
+
+/// 行の uuid を `adopt_uuid` に差し替えてよいか判定し、よければ差し替える（pair と同じ tx の中で呼ぶ）。
+/// 許すのは行が端末の状態を一度も持っていない（報告なし・計画なし・キャッシュ空）うえ、`adopt_uuid` が
+/// 他の行に無いときだけ。`agent_selector` はコードの発行で NULL に戻るので条件にしない。
+/// 行の uuid が既に `adopt_uuid` なら、報告も計画も無いとき（差し替えた後、adopt がキャッシュを
+/// 書いたあとで落ちたやり直しを含む）だけ `Already`。報告か計画があれば、DB を失っていない端末なので断る
+pub fn adopt_swap_uuid(
+    conn: &Connection,
+    device_id: i64,
+    adopt_uuid: &str,
+    now: i64,
+) -> Result<AdoptSwap> {
+    let Some(d) = get(conn, device_id)? else {
+        return Ok(AdoptSwap::NotAllowed);
+    };
+    if d.uuid == adopt_uuid {
+        let unreported: bool = conn.query_row(
+            "SELECT last_synced_at IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM device_sync_plans WHERE device_id = ?1)
+             FROM devices WHERE id = ?1",
+            params![device_id],
+            |r| r.get(0),
+        )?;
+        return Ok(if unreported {
+            AdoptSwap::Already
+        } else {
+            AdoptSwap::NotAllowed
+        });
+    }
+    let unused: bool = conn.query_row(
+        "SELECT last_synced_at IS NULL
+             AND NOT EXISTS (SELECT 1 FROM device_sync_plans WHERE device_id = ?1)
+             AND NOT EXISTS (SELECT 1 FROM device_items WHERE device_id = ?1)
+             AND NOT EXISTS (SELECT 1 FROM device_playlist_state WHERE device_id = ?1)
+             AND NOT EXISTS (SELECT 1 FROM devices WHERE uuid = ?2 AND id <> ?1)
+         FROM devices WHERE id = ?1",
+        params![device_id, adopt_uuid],
+        |r| r.get(0),
+    )?;
+    if !unused {
+        return Ok(AdoptSwap::NotAllowed);
+    }
+    conn.execute(
+        "UPDATE devices SET uuid = ?2, updated_at = ?3 WHERE id = ?1",
+        params![device_id, adopt_uuid, now],
+    )?;
+    Ok(AdoptSwap::Swapped)
+}
+
 /// トークンで引いたエージェントの端末
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentAuth {
@@ -1510,4 +1582,20 @@ pub fn add_marks(conn: &Connection, device_id: i64, playlist_ids: &[i64]) -> Res
         st.execute(params![device_id, pid])?;
     }
     Ok(())
+}
+
+/// エージェントの引き継ぎの書き込み: `device_items`・`device_playlist_state` を全置換し、`device_errors` を
+/// 空にして、印を付け足す（既存の印は外さない）。`last_synced_at`・`generation` は進めない
+pub fn apply_agent_adopt(
+    conn: &Connection,
+    device_id: i64,
+    items: &[DeviceItem],
+    playlists: &[PlaylistState],
+    marks: &[i64],
+) -> Result<()> {
+    atomically(conn, "device_apply_agent_adopt", || {
+        let now = crate::db::now_epoch();
+        apply_device_state(conn, device_id, items, playlists, Some(&[]), false, now)?;
+        add_marks(conn, device_id, marks)
+    })
 }

@@ -1217,7 +1217,7 @@ async fn adopt_adb(
     })
 }
 
-fn library_busy() -> Response {
+pub(crate) fn library_busy() -> Response {
     conflict(
         "library_busy",
         "ライブラリのスキャン中。終わってから引き継いでください（途中だと多くの曲が外れる）",

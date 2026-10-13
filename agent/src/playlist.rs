@@ -113,6 +113,8 @@ fn delete<M: Music, S: Server>(
         started_at: (cx.now)(),
         max_database_id: None,
         candidates: None,
+        rel_path: None,
+        source: None,
     });
     cx.save()?;
     if scene.has(&e.persistent_id) {
@@ -170,6 +172,8 @@ fn write<M: Music, S: Server>(
         started_at: (cx.now)(),
         max_database_id: None,
         candidates: None,
+        rel_path: None,
+        source: None,
     });
     cx.save()?;
     let tmp = cx

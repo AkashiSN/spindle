@@ -22,6 +22,7 @@ fn sample() -> State {
         pending_batches: vec![],
         plan_id: Some(7),
         needs_report: true,
+        adopt_pending: false,
     };
     s.tracks.insert(
         3,
@@ -33,6 +34,8 @@ fn sample() -> State {
             sha256: "s".into(),
             inode: 5,
             mtime_ns: 6,
+            rel_path: "J-Pop/a.flac".into(),
+            source: "master".into(),
         },
     );
     s
@@ -80,6 +83,8 @@ fn digest_changes_with_members() {
         token: "t".into(),
         size: 1,
         sha256: "s".into(),
+        rel_path: "b.flac".into(),
+        source: "master".into(),
     };
     let mut m2 = m.clone();
     m2.to = "c.m4a".into();
@@ -93,4 +98,12 @@ fn phases_are_ordered() {
     assert!(BatchPhase::Vacated < BatchPhase::Placing);
     assert!(SetupPhase::Started < SetupPhase::Marker);
     assert!(SetupPhase::FolderRenamed < SetupPhase::Done);
+}
+
+#[test]
+fn state_without_rel_path_does_not_load() {
+    let d = tempfile::tempdir().unwrap();
+    let old = r#"{"v":1,"tracks":{"3":{"persistent_id":"P3","token":"t","path":"a.m4a","size":1,"sha256":"s","inode":5,"mtime_ns":6}}}"#;
+    std::fs::write(d.path().join("state.json"), old).unwrap();
+    assert!(StateFile::new(d.path()).load().is_err());
 }

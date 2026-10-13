@@ -52,29 +52,81 @@ fn playlist_name(path: &str) -> Option<&str> {
         .filter(|n| !n.is_empty() && !n.contains('/'))
 }
 
-pub fn remap(
-    m: &DeviceManifest,
+/// 付け替え表（端末の id → 今の id）。引けない・曖昧な項目は載らない
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdRemap {
+    pub tracks: HashMap<i64, i64>,
+    pub playlists: HashMap<i64, i64>,
+}
+
+/// 付け替えの核。曲は `canonical_key(rel_path)`、プレイリストは `canonical_key(名前)` で今の行を引く。
+/// 今の行の鍵が曖昧なら採らない。同じ曲に 2 項目以上が当たったらどれも採らない。同じプレイリストに
+/// 2 つ以上が当たったら先に来た方だけを採る。`items` / `pls` の端末の id は一意であること
+pub fn remap_ids(
+    items: &[(i64, &str)],
+    pls: &[(i64, &str)],
     tracks: &[LibraryTrack],
     playlists: &[LibraryPlaylist],
-) -> Remapped {
+) -> IdRemap {
     let by_rel = unique_index(
         tracks
             .iter()
             .map(|t| (canonical_key(&t.rel_path), t.track_id)),
     );
-    // 項目 → 新しい id。同じ曲に 2 項目以上が当たったらどれも採らない
-    let hits: Vec<Option<i64>> = m
-        .items
+    let hits: Vec<(i64, i64)> = items
         .iter()
-        .map(|i| by_rel.get(&canonical_key(&i.rel_path)).copied())
+        .filter_map(|(from, rel)| by_rel.get(&canonical_key(rel)).map(|to| (*from, *to)))
         .collect();
     let mut count: HashMap<i64, usize> = HashMap::new();
-    for id in hits.iter().flatten() {
-        *count.entry(*id).or_default() += 1;
+    for (_, to) in &hits {
+        *count.entry(*to).or_default() += 1;
     }
+    let track_map = hits
+        .into_iter()
+        .filter(|(_, to)| count.get(to) == Some(&1))
+        .collect();
+
+    let by_name = unique_index(
+        playlists
+            .iter()
+            .map(|p| (canonical_key(&p.name), p.playlist_id)),
+    );
+    let mut used = HashSet::new();
+    let mut pl_map = HashMap::new();
+    for (from, name) in pls {
+        if let Some(to) = by_name.get(&canonical_key(name)) {
+            if used.insert(*to) {
+                pl_map.insert(*from, *to);
+            }
+        }
+    }
+    IdRemap {
+        tracks: track_map,
+        playlists: pl_map,
+    }
+}
+
+pub fn remap(
+    m: &DeviceManifest,
+    tracks: &[LibraryTrack],
+    playlists: &[LibraryPlaylist],
+) -> Remapped {
+    let item_keys: Vec<(i64, &str)> = m
+        .items
+        .iter()
+        .map(|i| (i.track_id, i.rel_path.as_str()))
+        .collect();
+    // 名前を取り出せないパスのプレイリストは付け替えない
+    let pl_keys: Vec<(i64, &str)> = m
+        .playlists
+        .iter()
+        .filter_map(|p| playlist_name(&p.path).map(|n| (p.playlist_id, n)))
+        .collect();
+    let ids = remap_ids(&item_keys, &pl_keys, tracks, playlists);
+
     let mut items = Vec::new();
-    for (i, hit) in m.items.iter().zip(&hits) {
-        let Some(id) = hit.filter(|id| count.get(id) == Some(&1)) else {
+    for i in &m.items {
+        let Some(id) = ids.tracks.get(&i.track_id).copied() else {
             continue;
         };
         let token = if i.token == STALE_TOKEN {
@@ -88,26 +140,16 @@ pub fn remap(
             ..i.clone()
         });
     }
-
-    let by_name = unique_index(
-        playlists
-            .iter()
-            .map(|p| (canonical_key(&p.name), p.playlist_id)),
-    );
     let mut out_pl = Vec::new();
-    let mut used = HashSet::new();
     for p in &m.playlists {
-        let Some(id) = playlist_name(&p.path).and_then(|n| by_name.get(&canonical_key(n)).copied())
-        else {
+        let Some(id) = ids.playlists.get(&p.playlist_id).copied() else {
             continue;
         };
-        if used.insert(id) {
-            out_pl.push(ManifestPlaylist {
-                playlist_id: id,
-                path: p.path.clone(),
-                token: STALE_TOKEN.to_owned(),
-            });
-        }
+        out_pl.push(ManifestPlaylist {
+            playlist_id: id,
+            path: p.path.clone(),
+            token: STALE_TOKEN.to_owned(),
+        });
     }
     let adopted_pl: Vec<i64> = out_pl.iter().map(|p| p.playlist_id).collect();
     Remapped {
@@ -148,11 +190,13 @@ pub fn is_adoptable(m: &DeviceManifest) -> bool {
 /// このボリュームの保存先として引き継げる manifest か。ボリュームが一致し、曲かプレイリストを指し、
 /// `device_uuid` が `random_uuid` の形（32 桁の小文字 16 進）であること
 pub fn adoptable_for(m: &DeviceManifest, volume: &str) -> bool {
-    m.volume == volume
-        && is_adoptable(m)
-        && m.device_uuid.len() == 32
-        && m.device_uuid
-            .bytes()
+    m.volume == volume && is_adoptable(m) && is_device_uuid(&m.device_uuid)
+}
+
+/// 端末の uuid の形（`random_uuid` が作る 32 桁の小文字 16 進）か
+pub fn is_device_uuid(s: &str) -> bool {
+    s.len() == 32
+        && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 

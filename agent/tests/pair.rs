@@ -1,9 +1,13 @@
 #![cfg(feature = "fake")]
 mod support;
 
+use spindle_agent::adopt::{pair_adopt, AdoptSummary};
+use spindle_agent::exec;
 use spindle_agent::pair::{continue_setup, pair};
 use spindle_agent::secrets::{FileSecrets, Secrets};
-use spindle_agent::state::SetupPhase;
+use spindle_agent::server::fake::FakeServer;
+use spindle_agent::state::{PlaylistEntry, SetupPhase, TrackEntry, ADOPTED_TOKEN, STALE_TOKEN};
+use spindle_agent::sync::SyncOutcome;
 use spindle_agent::Error;
 use support::{Env, UUID};
 
@@ -231,4 +235,261 @@ fn file_secrets_check_writable_keeps_existing_token() {
         .map(|e| e.unwrap().file_name())
         .collect();
     assert_eq!(names, vec![std::ffi::OsString::from("token")]);
+}
+
+fn do_pair_adopt(env: &mut Env) -> spindle_agent::Result<AdoptSummary> {
+    let secrets = FileSecrets::new(&env.state_dir);
+    env.with_ctx(|cx| pair_adopt(cx, &secrets, "https://new.example", true, "code"))
+}
+
+/// 同期済みの state（曲 1・2、プレイリスト 10）を作ってからサーバの DB 全損を模す。
+/// 新しいサーバは空で、uuid も違う（pair の差し替えで前の uuid に戻る）
+struct Synced {
+    a: TrackEntry,
+    b: TrackEntry,
+    playlist_pid: String,
+}
+
+fn synced_then_db_lost(env: &mut Env) -> Synced {
+    let folder = env.paired();
+    let a = env.synced_track(1, "A/a.m4a", b"aaa");
+    let b = env.synced_track(2, "B/b.m4a", b"bbb");
+    let playlist_pid = env.music.insert_playlist(Some(&folder), "Favs");
+    let mut s = env.state();
+    s.playlists.insert(
+        10,
+        PlaylistEntry {
+            persistent_id: playlist_pid.clone(),
+            name: "Favs".into(),
+            token: "pl.token".into(),
+        },
+    );
+    // 2 は外で書き換えられた古い写し。前の計画の途中・報告待ちも残っている
+    s.tracks.get_mut(&2).unwrap().token = STALE_TOKEN.into();
+    s.plan_id = Some(5);
+    s.needs_report = true;
+    env.file().save(&s).unwrap();
+    env.server = FakeServer::new("99999999999999999999999999999999");
+    // CLI の pair と同じく、トークン無しのサーバで始める
+    env.server.set_anonymous();
+    Synced { a, b, playlist_pid }
+}
+
+#[test]
+fn pair_adopt_remaps_state_and_keeps_persistent_ids() {
+    let mut env = Env::new();
+    let old = synced_then_db_lost(&mut env);
+    env.server.put_track(7, "A/a.m4a", b"aaa");
+    env.server.put_track(8, "B/b.m4a", b"bbb");
+    env.server.put_playlist(20, "Favs", &[7, 8]);
+    let sum = do_pair_adopt(&mut env).unwrap();
+    assert_eq!(
+        sum,
+        AdoptSummary {
+            tracks_adopted: 2,
+            tracks_dropped: 0,
+            playlists_adopted: 1,
+            playlists_dropped: 0,
+        }
+    );
+    // 前の登録の uuid で pair し、state の曲を送った
+    assert_eq!(env.server.last_pair_adopt_uuid().as_deref(), Some(UUID));
+    let calls = env.server.adopt_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].tracks.len(), 2);
+    assert!(!calls[0].tracks[0].stale);
+    assert!(calls[0].tracks[1].stale);
+    assert_eq!(calls[0].tracks[1].rel_path, "B/b.m4a");
+    assert_eq!(calls[0].playlists[0].name, "Favs");
+
+    let s = env.state();
+    assert_eq!(s.tracks.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
+    assert_eq!(s.tracks[&7].persistent_id, old.a.persistent_id);
+    assert_eq!(s.tracks[&7].token, ADOPTED_TOKEN);
+    assert_eq!(s.tracks[&7].path, "A/a.m4a");
+    assert_eq!(s.tracks[&8].persistent_id, old.b.persistent_id);
+    assert_eq!(s.tracks[&8].token, STALE_TOKEN);
+    assert_eq!(s.playlists.keys().copied().collect::<Vec<_>>(), vec![20]);
+    assert_eq!(s.playlists[&20].persistent_id, old.playlist_pid);
+    assert_eq!(s.playlists[&20].token, STALE_TOKEN);
+    assert_eq!(s.plan_id, None);
+    assert!(!s.needs_report);
+    assert!(!s.adopt_pending);
+    let server = s.server.unwrap();
+    assert_eq!(server.device_uuid, UUID);
+    assert_eq!(server.url, "https://new.example");
+    assert!(server.insecure_http);
+    assert_eq!(
+        FileSecrets::new(&env.state_dir).get().unwrap().as_deref(),
+        Some("fake.token")
+    );
+    // 印と初期化はそのまま
+    assert_eq!(s.setup.unwrap().phase, SetupPhase::Done);
+    assert_eq!(env.root.read_marker().unwrap().unwrap().device_uuid, UUID);
+}
+
+#[test]
+fn pair_adopt_drops_unmatched_entries_but_keeps_files_and_tracks() {
+    let mut env = Env::new();
+    let old = synced_then_db_lost(&mut env);
+    // 新しい Library には 1 の曲だけがあり、プレイリストは無い
+    env.server.put_track(7, "A/a.m4a", b"aaa");
+    let sum = do_pair_adopt(&mut env).unwrap();
+    assert_eq!(
+        sum,
+        AdoptSummary {
+            tracks_adopted: 1,
+            tracks_dropped: 1,
+            playlists_adopted: 0,
+            playlists_dropped: 1,
+        }
+    );
+    let s = env.state();
+    assert_eq!(s.tracks.keys().copied().collect::<Vec<_>>(), vec![7]);
+    assert!(s.playlists.is_empty());
+    // 外したものは管理外にするだけ: ファイルもミュージック.app の track もプレイリストも残す
+    assert!(env.root.exists("B/b.m4a").unwrap());
+    let pids: Vec<_> = env.music_paths().into_iter().map(|(_, p)| p).collect();
+    assert!(pids.contains(&old.b.persistent_id));
+    assert_eq!(env.music.tracks().len(), 2);
+    assert!(env
+        .music
+        .playlists()
+        .iter()
+        .any(|p| p.persistent_id == old.playlist_pid));
+}
+
+#[test]
+fn adopt_stops_before_pairing_when_pending_remains() {
+    let mut env = Env::new();
+    env.paired();
+    // コピー ON で add 直後に落ち、回復が候補を出して止まる（resolve 待ちの pending が残る）
+    env.music.set_copy_on(true);
+    env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.fp.arm("music.add:after", 1);
+    let (_p, r, m) = env.confirm_all();
+    assert!(env.with_ctx(|cx| exec::run(cx, &r, &m)).is_err());
+    assert!(matches!(do_pair_adopt(&mut env), Err(Error::Stop(_))));
+    assert_eq!(env.server.pair_calls(), 0);
+    let s = env.state();
+    assert_eq!(s.pending_ops.len(), 1);
+    assert!(!s.adopt_pending);
+}
+
+#[test]
+fn pair_adopt_requires_a_previous_registration() {
+    let mut env = Env::new();
+    let res = do_pair_adopt(&mut env);
+    assert!(
+        matches!(&res, Err(Error::Stop(m)) if m.contains("引き継ぐ前の登録がありません")),
+        "{res:?}"
+    );
+    assert_eq!(env.server.pair_calls(), 0);
+    assert!(env.state().server.is_none());
+}
+
+#[test]
+fn sync_resumes_a_pending_adopt() {
+    let mut env = Env::new();
+    let old = synced_then_db_lost(&mut env);
+    env.server.put_track(7, "A/a.m4a", b"aaa");
+    env.server.put_track(8, "B/b.m4a", b"bbb");
+    // pair の後、adopt の送信で落ちる
+    env.server.fail_adopt(1);
+    assert!(matches!(do_pair_adopt(&mut env), Err(Error::Server(_))));
+    let s = env.state();
+    assert!(s.adopt_pending);
+    assert_eq!(s.tracks.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(env.server.pair_calls(), 1);
+    // 次の sync が manifest の前に付け替えを終える（差分の確認は断る）
+    env.ui.answers.push_back(false);
+    assert_eq!(env.sync().unwrap(), SyncOutcome::Declined);
+    assert_eq!(env.server.adopt_calls().len(), 2);
+    assert_eq!(env.server.pair_calls(), 1);
+    let s = env.state();
+    assert!(!s.adopt_pending);
+    assert_eq!(s.tracks.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
+    assert_eq!(s.tracks[&7].persistent_id, old.a.persistent_id);
+    assert_eq!(s.tracks[&7].token, ADOPTED_TOKEN);
+    assert!(s.playlists.is_empty());
+    assert!(env.ui.log.iter().any(|l| l.contains("引き継ぎ")));
+}
+
+#[test]
+fn pair_without_adopt_still_stops_on_uuid_mismatch_and_suggests_adopt() {
+    let mut env = Env::new();
+    do_pair(&mut env).unwrap();
+    env.server = FakeServer::new("other-uuid");
+    let res = do_pair(&mut env);
+    assert!(
+        matches!(&res, Err(Error::Stop(m)) if m.contains("spindle-agent pair --adopt")),
+        "{res:?}"
+    );
+    assert_eq!(env.server.last_pair_adopt_uuid(), None);
+    assert_eq!(env.state().server.unwrap().device_uuid, UUID);
+}
+
+#[test]
+fn pair_adopt_stops_on_a_foreign_marker_before_using_the_code() {
+    let mut env = Env::new();
+    synced_then_db_lost(&mut env);
+    env.server.put_track(7, "A/a.m4a", b"aaa");
+    env.root
+        .write_marker(&spindle_agent::local::Marker {
+            device_uuid: "x".into(),
+            nonce: "y".into(),
+        })
+        .unwrap();
+    assert!(matches!(do_pair_adopt(&mut env), Err(Error::Stop(_))));
+    assert_eq!(env.server.pair_calls(), 0);
+    assert!(!env.state().adopt_pending);
+}
+
+/// 置き場は確かめられるが、書き込みで落ちる（Keychain への書き込みの直前で落ちた代わり）
+struct FailsOnSet;
+
+impl Secrets for FailsOnSet {
+    fn get(&self) -> spindle_agent::Result<Option<String>> {
+        Ok(None)
+    }
+    fn set(&self, _token: &str) -> spindle_agent::Result<()> {
+        Err(Error::Crash("secrets.set".into()))
+    }
+    fn check_writable(&self) -> spindle_agent::Result<()> {
+        Ok(())
+    }
+}
+
+/// トークンを書く前に adopt_pending と接続先を保存する。トークンを書けずに落ちても、新しいトークンが
+/// 古い id の state と組み合わさる（次の sync が全部追加の差分を出す）ことは無く、pair --adopt の
+/// やり直しで続きができる
+#[test]
+fn pair_adopt_saves_pending_before_writing_the_token() {
+    let mut env = Env::new();
+    let old = synced_then_db_lost(&mut env);
+    env.server.put_track(7, "A/a.m4a", b"aaa");
+    env.server.put_track(8, "B/b.m4a", b"bbb");
+    let res = env.with_ctx(|cx| pair_adopt(cx, &FailsOnSet, "https://new.example", true, "code"));
+    assert!(matches!(res, Err(Error::Crash(_))), "{res:?}");
+    let s = env.state();
+    assert!(s.adopt_pending, "トークンより先に保存している");
+    assert_eq!(s.tracks.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+    let server = s.server.unwrap();
+    assert_eq!(server.url, "https://new.example");
+    assert!(server.insecure_http);
+    assert_eq!(server.device_uuid, UUID);
+    assert_eq!(FileSecrets::new(&env.state_dir).get().unwrap(), None);
+    assert!(env.server.adopt_calls().is_empty());
+    // 新しいコードで pair --adopt し直せば続きができる
+    let sum = do_pair_adopt(&mut env).unwrap();
+    assert_eq!(sum.tracks_adopted, 2);
+    assert_eq!(env.server.pair_calls(), 2);
+    let s = env.state();
+    assert!(!s.adopt_pending);
+    assert_eq!(s.tracks.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
+    assert_eq!(s.tracks[&7].persistent_id, old.a.persistent_id);
+    assert_eq!(
+        FileSecrets::new(&env.state_dir).get().unwrap().as_deref(),
+        Some("fake.token")
+    );
 }

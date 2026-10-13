@@ -10,7 +10,7 @@ use std::rc::Rc;
 use agent_proto::*;
 use sha2::{Digest, Sha256};
 
-use crate::server::{Confirmed, Fetch, Reported, Server};
+use crate::server::{Confirmed, Fetch, Reported, Server, NOT_ADOPTABLE_PAIR_STOP};
 use crate::{Error, Result};
 
 #[derive(Default)]
@@ -37,6 +37,15 @@ struct World {
     report_fail: u32,
     /// pair が呼ばれた回数（ワンタイムコードを使った回数）
     pair_calls: u32,
+    /// 直近の pair に渡された adopt_uuid
+    last_pair_adopt_uuid: Option<String>,
+    /// adopt_uuid 付きの pair を 409 not_adoptable 相当で断る
+    adopt_refused: bool,
+    adopt_calls: Vec<AdoptRequest>,
+    /// adopt をこの回数だけ通信エラーにする
+    adopt_fail: u32,
+    /// トークンを持たない（CLI の pair が作るサーバ）。`use_token` まで、トークンの要る呼び出しを断る
+    anonymous: bool,
 }
 
 #[derive(Clone, Default)]
@@ -70,11 +79,21 @@ impl FakeServer {
             token: sha256_hex(format!("tok:{track_id}:{sha}").as_bytes()),
             size: bytes.len() as u64,
             sha256: sha,
+            rel_path: dest_path.to_owned(),
+            source: "master".to_owned(),
         };
         let mut w = self.0.borrow_mut();
         w.held.remove(&track_id);
         w.desired.insert(track_id, (item.clone(), bytes.to_vec()));
         item
+    }
+
+    /// `put_track` の後で、Library の `rel_path` と送る元の種類を指定する
+    pub fn set_origin(&self, track_id: i64, rel_path: &str, source: &str) {
+        if let Some((item, _)) = self.0.borrow_mut().desired.get_mut(&track_id) {
+            item.rel_path = rel_path.to_owned();
+            item.source = source.to_owned();
+        }
     }
 
     pub fn remove_track(&self, track_id: i64) {
@@ -131,6 +150,31 @@ impl FakeServer {
     /// pair（ワンタイムコードの消費）が呼ばれた回数
     pub fn pair_calls(&self) -> u32 {
         self.0.borrow().pair_calls
+    }
+
+    /// 直近の pair に渡された adopt_uuid
+    pub fn last_pair_adopt_uuid(&self) -> Option<String> {
+        self.0.borrow().last_pair_adopt_uuid.clone()
+    }
+
+    /// adopt_uuid 付きの pair を断る（409 `not_adoptable` 相当）
+    pub fn set_adopt_refused(&self, v: bool) {
+        self.0.borrow_mut().adopt_refused = v;
+    }
+
+    /// トークン無しのサーバにする（CLI の pair と同じ）。adopt は `use_token` の後でないと断る
+    pub fn set_anonymous(&self) {
+        self.0.borrow_mut().anonymous = true;
+    }
+
+    /// adopt をこの回数だけ通信エラーにする
+    pub fn fail_adopt(&self, times: u32) {
+        self.0.borrow_mut().adopt_fail = times;
+    }
+
+    /// adopt に届いた要求（成功・失敗とも記録する）
+    pub fn adopt_calls(&self) -> Vec<AdoptRequest> {
+        self.0.borrow().adopt_calls.clone()
     }
 
     pub fn reports(&self) -> Vec<ReportRequest> {
@@ -264,14 +308,66 @@ impl FakeServer {
 }
 
 impl Server for FakeServer {
-    fn pair(&self, _code: &str) -> Result<PairResponse> {
+    fn pair(&self, _code: &str, adopt_uuid: Option<&str>) -> Result<PairResponse> {
         let mut w = self.0.borrow_mut();
         w.pair_calls += 1;
+        w.last_pair_adopt_uuid = adopt_uuid.map(str::to_owned);
+        if let Some(u) = adopt_uuid {
+            if w.adopt_refused {
+                return Err(Error::Stop(NOT_ADOPTABLE_PAIR_STOP.to_owned()));
+            }
+            w.device_uuid = u.to_owned();
+        }
         Ok(PairResponse {
             device_uuid: w.device_uuid.clone(),
             device_name: "iPhone".to_owned(),
             token: "fake.token".to_owned(),
         })
+    }
+
+    /// 試験用の簡易規則: 曲は送られた `rel_path` と desired の `rel_path` の完全一致で付け替え、
+    /// プレイリストは名前の完全一致。一致が無ければ `to` は `None`
+    fn adopt(&self, r: &AdoptRequest) -> Result<AdoptResponse> {
+        let mut w = self.0.borrow_mut();
+        if w.anonymous {
+            // 本物の HttpServer はトークンが無ければ送らずに止める
+            return Err(Error::Stop("トークンがありません（偽）".to_owned()));
+        }
+        w.adopt_calls.push(r.clone());
+        if w.adopt_fail > 0 {
+            w.adopt_fail -= 1;
+            return Err(Error::Server("引き継ぎの送信に失敗（偽）".to_owned()));
+        }
+        let tracks = r
+            .tracks
+            .iter()
+            .map(|t| IdMap {
+                from: t.track_id,
+                to: w
+                    .desired
+                    .values()
+                    .find(|(i, _)| i.rel_path == t.rel_path)
+                    .map(|(i, _)| i.track_id),
+            })
+            .collect();
+        let playlists = r
+            .playlists
+            .iter()
+            .map(|p| IdMap {
+                from: p.playlist_id,
+                to: w
+                    .playlists
+                    .values()
+                    .find(|q| q.name == p.name)
+                    .map(|q| q.playlist_id),
+            })
+            .collect();
+        Ok(AdoptResponse { tracks, playlists })
+    }
+
+    fn use_token(&self, _token: &str) -> Result<()> {
+        self.0.borrow_mut().anonymous = false;
+        Ok(())
     }
 
     fn manifest(&self) -> Result<ManifestResponse> {

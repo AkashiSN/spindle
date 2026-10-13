@@ -135,3 +135,155 @@ fn base_url_keeps_sub_path() {
         "https://nas.example/spindle/api/agent/manifest"
     );
 }
+
+/// 1 接続だけ受けて、要求（先頭行 + 本文）を返す使い捨ての HTTP サーバ
+fn mock_once(status: &str, body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let status = status.to_owned();
+    let h = std::thread::spawn(move || {
+        let (mut c, _) = l.accept().unwrap();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = c.read(&mut tmp).unwrap();
+            buf.extend_from_slice(&tmp[..n]);
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                let len = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if rest.len() >= len {
+                    break;
+                }
+            }
+            if n == 0 {
+                break;
+            }
+        }
+        let resp = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        c.write_all(resp.as_bytes()).unwrap();
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+    (url, h)
+}
+
+fn adopt_req() -> agent_proto::AdoptRequest {
+    agent_proto::AdoptRequest {
+        tracks: vec![agent_proto::AdoptTrack {
+            track_id: 7,
+            path: "A/a.m4a".into(),
+            rel_path: "Artist/a.flac".into(),
+            source: "master".into(),
+            size: 3,
+            sha256: "ab".into(),
+            stale: false,
+        }],
+        playlists: vec![agent_proto::AdoptPlaylist {
+            playlist_id: 2,
+            name: "P".into(),
+        }],
+    }
+}
+
+#[test]
+fn http_adopt_posts_the_body_and_reads_the_map() {
+    let (url, h) = mock_once(
+        "200 OK",
+        r#"{"tracks":[{"from":7,"to":70},{"from":8,"to":null}],"playlists":[{"from":2,"to":20}]}"#,
+    );
+    let s = HttpServer::new(&url, true, Some("tok".into())).unwrap();
+    let r = s.adopt(&adopt_req()).unwrap();
+    assert_eq!(r.tracks[0].to, Some(70));
+    assert_eq!(r.tracks[1].to, None);
+    assert_eq!(r.playlists[0].to, Some(20));
+    let req = h.join().unwrap();
+    assert!(req.starts_with("POST /api/agent/adopt "), "{req}");
+    assert!(req.contains("\"rel_path\":\"Artist/a.flac\""), "{req}");
+    assert!(req
+        .to_ascii_lowercase()
+        .contains("authorization: bearer tok"));
+}
+
+#[test]
+fn http_adopt_409_codes_are_japanese_stops() {
+    for (code, want) in [
+        (
+            "library_busy",
+            "サーバのライブラリのスキャン中。終わってから sync し直してください",
+        ),
+        ("open_plan", "途中の計画"),
+        (
+            "not_adoptable",
+            "端末タブでこの端末を削除し、新しい iPhone 端末を作ってから spindle-agent pair --adopt",
+        ),
+    ] {
+        let body: &'static str = Box::leak(format!(r#"{{"error":"{code}"}}"#).into_boxed_str());
+        let (url, h) = mock_once("409 Conflict", body);
+        let s = HttpServer::new(&url, true, Some("tok".into())).unwrap();
+        match s.adopt(&adopt_req()) {
+            Err(Error::Stop(m)) => assert!(m.contains(want), "{code}: {m}"),
+            other => panic!("{code}: {other:?}"),
+        }
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn http_pair_sends_adopt_uuid_and_maps_not_adoptable() {
+    let (url, h) = mock_once(
+        "200 OK",
+        r#"{"device_uuid":"u","device_name":"n","token":"t"}"#,
+    );
+    let s = HttpServer::new(&url, true, None).unwrap();
+    s.pair("123456", Some("0123456789abcdef0123456789abcdef"))
+        .unwrap();
+    let req = h.join().unwrap();
+    assert!(
+        req.contains("\"adopt_uuid\":\"0123456789abcdef0123456789abcdef\""),
+        "{req}"
+    );
+
+    let (url, h) = mock_once("409 Conflict", r#"{"error":"not_adoptable"}"#);
+    let s = HttpServer::new(&url, true, None).unwrap();
+    match s.pair("123456", Some("0123456789abcdef0123456789abcdef")) {
+        Err(Error::Stop(m)) => {
+            assert!(m.contains("--adopt を付けずに spindle-agent pair"), "{m}");
+            assert!(m.contains("新しい iPhone 端末を作り"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    h.join().unwrap();
+}
+
+#[test]
+fn fake_server_adopt_maps_by_rel_path_and_name() {
+    let env = Env::new();
+    let s = &env.server;
+    s.put_track(70, "X/a.m4a", b"a");
+    s.set_origin(70, "Artist/a.flac", "master");
+    s.put_playlist(20, "P", &[70]);
+    let r = s.adopt(&adopt_req()).unwrap();
+    assert_eq!(r.tracks[0].to, Some(70));
+    assert_eq!(r.playlists[0].to, Some(20));
+    s.fail_adopt(1);
+    assert!(s.adopt(&adopt_req()).is_err());
+    assert_eq!(s.adopt_calls().len(), 2);
+    // pair は adopt_uuid を記録し、その uuid を返す。断られれば Stop
+    let u = "0123456789abcdef0123456789abcdef";
+    assert_eq!(s.pair("1", Some(u)).unwrap().device_uuid, u);
+    assert_eq!(s.last_pair_adopt_uuid().as_deref(), Some(u));
+    s.set_adopt_refused(true);
+    assert!(matches!(s.pair("1", Some(u)), Err(Error::Stop(_))));
+    assert!(s.pair("1", None).is_ok());
+    assert_eq!(s.last_pair_adopt_uuid(), None);
+}

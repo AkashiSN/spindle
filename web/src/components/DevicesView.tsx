@@ -28,6 +28,7 @@ import {
   offerForceAbandon,
   OP_LABELS,
   pairCommand,
+  pairAdoptCommand,
   queuedSyncText,
   sortDiffItems,
   syncButton,
@@ -828,21 +829,22 @@ function SettingsTab({ device, devices }: { device: Device; devices: Devices }) 
 /** iPhone のエージェントの pair コードを発行して出す。コードはこの画面の state にだけ持ち、再読み込みで消える */
 function PairCodeCell({ device, devices }: { device: Device; devices: Devices }) {
   const [issued, setIssued] = useState<PairCode | null>(null)
-  const [copied, setCopied] = useState(false)
+  // コピーしたコマンド（通常の pair か引き継ぎか）
+  const [copied, setCopied] = useState<string | null>(null)
   const command = issued != null ? pairCommand(window.location.origin, issued.code) : null
+  const adoptCommand = issued != null ? pairAdoptCommand(window.location.origin, issued.code) : null
   const issue = async () => {
     if (!window.confirm('発行すると今の Mac のトークンは使えなくなります。よろしいですか？')) return
-    setCopied(false)
+    setCopied(null)
     const p = await devices.pairCode(device.id)
     if (p != null) setIssued(p)
   }
-  const copy = async () => {
-    if (command == null) return
+  const copy = async (text: string) => {
     try {
-      await navigator.clipboard.writeText(command)
-      setCopied(true)
+      await navigator.clipboard.writeText(text)
+      setCopied(text)
     } catch {
-      setCopied(false)
+      setCopied(null)
     }
   }
   return (
@@ -855,15 +857,22 @@ function PairCodeCell({ device, devices }: { device: Device; devices: Devices })
       >
         pair コードを発行
       </button>
-      {issued != null && command != null && (
+      {issued != null && command != null && adoptCommand != null && (
         <div className="small">
           <p>
             コード <code>{issued.code}</code>（期限 {formatDateTime(issued.expires_at)}、1 回限り）。Mac で次を実行する
           </p>
           <p>
             <code>{command}</code>{' '}
-            <button type="button" onClick={() => void copy()}>
-              {copied ? 'コピーした' : 'コピー'}
+            <button type="button" onClick={() => void copy(command)}>
+              {copied === command ? 'コピーした' : 'コピー'}
+            </button>
+          </p>
+          <p className="muted">この Mac に前の登録の保存先が残っていれば、代わりに次を実行すると引き継げます</p>
+          <p>
+            <code>{adoptCommand}</code>{' '}
+            <button type="button" onClick={() => void copy(adoptCommand)}>
+              {copied === adoptCommand ? 'コピーした' : 'コピー'}
             </button>
           </p>
         </div>
