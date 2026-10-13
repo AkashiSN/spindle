@@ -843,3 +843,57 @@ async fn deleting_unmarked_playlist_ignores_device_state() {
     assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
     assert_eq!(generation_of(&app, id).await, gen);
 }
+
+/// 引き継ぎの印のついた行は、送る元の中身が同じなら差分で adopted と出し、転送量に入れない
+#[tokio::test]
+async fn diff_shows_adopted_update_without_transfer() {
+    use spindle::domain::device::{semantic_master, SourceHash, SourceKind, ADOPTED_TOKEN};
+    let app = App::new().await;
+    let sha = "ab".repeat(32);
+    let h = SourceHash {
+        semantic: semantic_master(1, 1),
+        inode: 1,
+        size: 1,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        sha256: sha.clone(),
+    };
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO tracks (id, rel_path, rel_path_key, inode, size, mtime_ns, ctime_ns, codec, lossless,
+                                     channels, audio_version, tag_version, seen_at, title)
+                 VALUES (1, 'YT/a.opus', 'yt/a.opus', 1, 1, 0, 0, 'opus', 0, 2, 1, 1, 0, '群青')",
+                [],
+            )?;
+            spindle::db::devices::put_source_hash(c, 1, SourceKind::Master, &h, 5)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .call(Method::POST, "/api/devices",
+              Some(json!({"name": "Xperia", "transport": "agent", "variant": "opus", "selection": "all"})))
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let id = v["id"].as_i64().unwrap();
+    app.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO device_items (device_id, track_id, dest_path, dest_path_key, token, size, sha256, synced_at)
+                 VALUES (?1, 1, 'YT/a.opus', 'yt/a.opus', ?2, 1, ?3, 5)",
+                rusqlite::params![id, ADOPTED_TOKEN, sha],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (st, v) = app
+        .call(Method::GET, &format!("/api/devices/{id}/diff"), None)
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{v}");
+    assert_eq!(items[0]["op"], "adopted", "{v}");
+    assert_eq!(v["estimate"]["transfer_bytes"], 0, "{v}");
+}

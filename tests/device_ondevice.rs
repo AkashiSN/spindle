@@ -10,6 +10,8 @@ fn item(id: i64, path: &str) -> ManifestItem {
         token: format!("t{id}"),
         size: 10,
         sha256: format!("h{id}"),
+        rel_path: format!("Lib/{id}.flac"),
+        source: "master".into(),
     }
 }
 
@@ -157,5 +159,42 @@ fn render_refuses_what_parse_would_refuse() {
     assert!(matches!(
         render(&shared).unwrap_err(),
         ManifestError::DuplicatePath(_)
+    ));
+}
+
+fn item_json(extra: &str) -> String {
+    format!(
+        r#"{{"format":1,"device_uuid":"u1","volume":"emulated","items":[{{"track_id":1,"path":"A/a.opus","token":"t","size":4,"sha256":"s"{extra}}}],"playlists":[]}}"#
+    )
+}
+
+#[test]
+fn manifest_items_carry_rel_path_and_source() {
+    let m = parse(item_json(r#","rel_path":"A/a.flac","source":"opus""#).as_bytes()).unwrap();
+    assert_eq!(m.items[0].rel_path, "A/a.flac");
+    assert_eq!(m.items[0].source, "opus");
+    let again = parse(&render(&m).unwrap()).unwrap();
+    assert_eq!(again, m);
+}
+
+#[test]
+fn manifest_without_rel_path_or_source_is_unreadable() {
+    assert!(matches!(
+        parse(item_json("").as_bytes()),
+        Err(ManifestError::Json(_))
+    ));
+}
+
+#[test]
+fn manifest_rejects_unknown_source_and_bad_rel_path() {
+    let bad_source = item_json(r#","rel_path":"A/a.flac","source":"mp3""#);
+    assert!(matches!(
+        parse(bad_source.as_bytes()),
+        Err(ManifestError::BadSource(_))
+    ));
+    let bad_rel = item_json(r#","rel_path":"../a.flac","source":"master""#);
+    assert!(matches!(
+        parse(bad_rel.as_bytes()),
+        Err(ManifestError::BadRelPath(_))
     ));
 }

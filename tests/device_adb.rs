@@ -586,6 +586,7 @@ fn sync_stops_before_writing_when_listing_fails() {
                 start: rec.manifest,
                 runnable: &runnable,
                 playlist_bodies: &bodies,
+                origins: &device_support::origins_from(&runnable),
             },
         )
         .await;

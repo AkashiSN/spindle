@@ -373,7 +373,7 @@ use spindle::device::plan::{runnable, Runnable, StoredPlan};
 use spindle::device::recover::{recover, Expect};
 use spindle::device::store::initialize;
 use spindle::device::sync::{
-    self, Control, SourceError, Sources, SyncError, SyncInput, SyncReport,
+    self, origins_of, Control, Origin, SourceError, Sources, SyncError, SyncInput, SyncReport,
 };
 use spindle::domain::device::{delivery_token, diff, DesiredItem, Manifest, Source, SourceKind};
 
@@ -422,6 +422,25 @@ pub fn expect() -> Expect {
     }
 }
 
+/// 手書きの `Runnable` 用: 各操作の行き先（無ければ元）を出どころにする（rel_path は同じ値、source は master）
+#[allow(dead_code)]
+pub fn origins_from(r: &spindle::device::plan::Runnable) -> HashMap<i64, Origin> {
+    r.items
+        .iter()
+        .filter_map(|o| {
+            let path = o.to.clone().or_else(|| o.from.clone())?;
+            Some((
+                o.track_id,
+                Origin {
+                    rel_path: path.clone(),
+                    source: SourceKind::Master,
+                    dest_path: path,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// 目標の状態（track_id, 端末上のパス, 中身）
 pub type Want<'a> = (i64, &'a str, &'a [u8]);
 
@@ -441,6 +460,7 @@ pub fn desired(want: &[Want]) -> Manifest {
             token: delivery_token("s", &sha),
             size: body.len() as u64,
             sha256: sha,
+            rel_path: (*path).to_owned(),
         });
     }
     m.desired.sort_by_key(|d| d.track_id);
@@ -476,6 +496,7 @@ async fn run_want_with<F: DeviceFs, C: Control>(
     let plan = StoredPlan::from_diff(1, "tok", &d).unwrap();
     let r: Runnable = runnable(&plan, &rec.items, &rec.playlists, &d);
     let bodies = HashMap::new();
+    let origins = origins_of(&desired(want).desired);
     sync::run(
         fs,
         &sources(want),
@@ -485,6 +506,7 @@ async fn run_want_with<F: DeviceFs, C: Control>(
             start: rec.manifest,
             runnable: &r,
             playlist_bodies: &bodies,
+            origins: &origins,
         },
     )
     .await
@@ -521,6 +543,7 @@ pub async fn sync_full<C: Control>(
         .iter()
         .map(|p| (p.playlist_id, p.body.clone()))
         .collect();
+    let origins = origins_of(&desired(want).desired);
     let mut src = sources(want);
     for id in missing {
         src.0.remove(id);
@@ -534,6 +557,7 @@ pub async fn sync_full<C: Control>(
             start: rec.manifest,
             runnable: &r,
             playlist_bodies: &bodies,
+            origins: &origins,
         },
     )
     .await

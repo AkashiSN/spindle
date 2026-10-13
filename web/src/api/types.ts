@@ -408,7 +408,7 @@ export interface PairCode {
   code: string
   expires_at: number
 }
-export type AdbVolume = { volume: string; path: string; free: number; state: 'missing' | 'empty' | 'nonempty' }
+export type AdbVolume = { volume: string; path: string; free: number; state: 'missing' | 'empty' | 'nonempty' | 'adoptable' }
 export type UnregisteredAdb = {
   serial: string
   model: string | null
@@ -416,8 +416,18 @@ export type UnregisteredAdb = {
   volumes: AdbVolume[]
   error: string | null
 }
+/** 既存の保存先を引き継ぐ前のプレビュー（`GET /api/devices/adb/adopt-preview`） */
+export type AdoptPreview = {
+  device_uuid: string
+  tracks_adopted: number
+  tracks_dropped: number
+  playlists_adopted: number
+  playlists_dropped: number
+  unmanaged: number
+  library_busy: boolean
+}
 export type UnregisteredList = { items: UnregisteredAdb[] }
-export type DiffOp = 'add' | 'update' | 'move' | 'update_move' | 'delete' | 'waiting' | 'error'
+export type DiffOp = 'add' | 'update' | 'move' | 'update_move' | 'delete' | 'waiting' | 'error' | 'adopted'
 export type DiffItem = {
   op: DiffOp
   track_id: number

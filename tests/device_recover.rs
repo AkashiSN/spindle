@@ -30,6 +30,8 @@ fn item(id: i64, path: &str, body: &[u8]) -> ManifestItem {
         token: format!("t-{}", sha256_hex(body)),
         size: body.len() as u64,
         sha256: sha256_hex(body),
+        rel_path: path.into(),
+        source: "master".into(),
     }
 }
 
@@ -58,6 +60,8 @@ fn put_intent(op_id: &str, id: i64, to: &str, body: &[u8]) -> Intent {
         token: Some(it.token),
         size: Some(it.size),
         sha256: Some(it.sha256),
+        rel_path: Some(to.into()),
+        source: Some("master".into()),
     }
 }
 
@@ -73,6 +77,8 @@ fn rm_intent(op_id: &str, id: i64, from: &str) -> Intent {
         token: None,
         size: None,
         sha256: None,
+        rel_path: None,
+        source: None,
     }
 }
 
@@ -131,6 +137,41 @@ fn put_without_done_is_taken_when_sha_matches() {
         // 圧縮済み
         assert!(read_journal(&fs).await.unwrap().is_empty());
         assert_eq!(read_manifest(&fs).await.unwrap().unwrap().items.len(), 1);
+    });
+}
+
+#[test]
+fn recovered_put_carries_rel_path_and_source_from_intent() {
+    block_on(async {
+        let fs = device_with(&[]).await;
+        let mut intent = put_intent("o1", 1, "a.opus", b"A");
+        intent.rel_path = Some("Lib/a.flac".into());
+        intent.source = Some("opus".into());
+        append_durable(&fs, &[Record::Intent(intent)])
+            .await
+            .unwrap();
+        fs.set("a.opus", b"A");
+        let r = recover(&fs, &expect()).await.unwrap();
+        assert_eq!(r.manifest.items[0].rel_path, "Lib/a.flac");
+        assert_eq!(r.manifest.items[0].source, "opus");
+        let m = read_manifest(&fs).await.unwrap().unwrap();
+        assert_eq!(m.items[0].rel_path, "Lib/a.flac");
+    });
+}
+
+#[test]
+fn put_intent_without_origin_is_left_unmanaged() {
+    block_on(async {
+        let fs = device_with(&[]).await;
+        let mut intent = put_intent("o1", 1, "a.opus", b"A");
+        intent.rel_path = None;
+        intent.source = None;
+        append_durable(&fs, &[Record::Intent(intent)])
+            .await
+            .unwrap();
+        fs.set("a.opus", b"A");
+        let r = recover(&fs, &expect()).await.unwrap();
+        assert!(r.items.is_empty());
     });
 }
 
@@ -255,6 +296,8 @@ fn mv(batch: &str, op_id: &str, id: i64, from: &str, to: &str, body: &[u8]) -> B
         token: it.token,
         size: it.size,
         sha256: it.sha256,
+        rel_path: to.into(),
+        source: "master".into(),
     }
 }
 
@@ -571,6 +614,8 @@ fn playlist_put_without_done_is_taken_when_sha_matches() {
             token: Some(it.token.clone()),
             size: Some(it.size),
             sha256: Some(it.sha256),
+            rel_path: None,
+            source: None,
         };
         append_durable(&fs, &[Record::Intent(intent)])
             .await

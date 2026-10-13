@@ -11,13 +11,17 @@ use spindle::config::{DerivedConfig, OpusVariantConfig};
 use spindle::db::devices::{self, Confirm, Device, NewDevice, PlanEnd, Selection};
 use spindle::db::{derived, now_epoch, Db};
 use spindle::device::adb::AdbConfig;
+use spindle::device::adopt;
+use spindle::device::ondevice::ManifestItem;
 use spindle::device::recover::STALE_TOKEN;
 use spindle::device::runtime::AdbRuntime;
 use spindle::device::store;
 use spindle::device::sync::SourceError;
 use spindle::device::track::TrackedDevice;
 use spindle::domain::derived::Variant;
-use spindle::domain::device::{semantic_master, sha256_hex, SourceHash, SourceKind, Transport};
+use spindle::domain::device::{
+    semantic_master, sha256_hex, OpKind, SourceHash, SourceKind, Transport,
+};
 use spindle::domain::relpath::RelPath;
 use spindle::fsroot::{self, RootDir};
 use spindle::jobs::handlers::device::{
@@ -209,7 +213,10 @@ impl Fx {
     }
 
     async fn confirm(&self) -> i64 {
-        let id = self.device.id;
+        self.confirm_device(self.device.id).await
+    }
+
+    async fn confirm_device(&self, id: i64) -> i64 {
         self.db
             .write(move |c| {
                 let comp = devices::compute(c, id)?.unwrap();
@@ -273,10 +280,14 @@ impl Fx {
 
     /// 計画を確定して同期し、完了を待つ
     async fn sync_once(&self) -> Job {
-        let plan_id = self.confirm().await;
+        self.sync_device_once(self.device.id).await
+    }
+
+    async fn sync_device_once(&self, device_id: i64) -> Job {
+        let plan_id = self.confirm_device(device_id).await;
         let id = self
             .jobs
-            .enqueue(sync_job(self.device.id, plan_id))
+            .enqueue(sync_job(device_id, plan_id))
             .await
             .unwrap()
             .id();
@@ -689,4 +700,95 @@ async fn invalid_stored_volume_fails_without_retry() {
     assert_eq!(job.attempts, 1, "{:?}", job.last_error);
     let err = job.last_error.unwrap();
     assert!(err.contains("保存先が不正"), "{err}");
+}
+
+#[tokio::test]
+async fn adopted_store_syncs_without_transferring_unchanged_tracks() {
+    let fx = Fx::new().await;
+    fx.connect();
+    // 前の DB で同期済みの保存先: 曲 1（Library と同じ中身 "AAAA"）。track_id は前の DB の 77
+    let fs = fx.rt.fs_for("SER1", "emulated", "Music/spindle").unwrap();
+    store::initialize(&fs, "olduuid", "emulated").await.unwrap();
+    std::fs::create_dir_all(device_file(&fx.device_root).parent().unwrap()).unwrap();
+    std::fs::write(device_file(&fx.device_root), b"AAAA").unwrap();
+    let mut m = store::read_manifest(&fs).await.unwrap().unwrap();
+    m.items.push(ManifestItem {
+        track_id: 77,
+        path: TRACK.into(),
+        token: "old".into(),
+        size: 4,
+        sha256: sha256_hex(b"AAAA"),
+        rel_path: TRACK.into(),
+        source: SourceKind::Master.as_str().into(),
+    });
+    store::write_manifest(&fs, &m).await.unwrap();
+    let meta_before = std::fs::metadata(device_file(&fx.device_root)).unwrap();
+    let mtime_before = meta_before.modified().unwrap();
+    let ino_before = std::os::unix::fs::MetadataExt::ino(&meta_before);
+
+    // 引き継ぎ（API と同じ手順）
+    let (tracks, playlists) = fx.db.read(devices::adopt_inputs).await.unwrap();
+    adopt::rewrite(&fs, &m, &tracks, &playlists).await.unwrap();
+    let id = fx.device.id;
+    let dev = fx
+        .db
+        .write(move |c| {
+            devices::delete(c, id)?;
+            devices::create_with_uuid(
+                c,
+                &NewDevice {
+                    name: "Xperia",
+                    transport: Transport::Adb,
+                    variant: Variant::Opus,
+                    selection: Selection::All,
+                    adb: Some(("SER1", "emulated", "Music/spindle")),
+                },
+                "olduuid",
+                0,
+            )
+        })
+        .await
+        .unwrap();
+
+    fx.start();
+    // API は引き継ぎ直後に端末の走査を積む。これで manifest が items の写しになる
+    let scan = fx.jobs.enqueue(scan_job(dev.id)).await.unwrap().id();
+    fx.wait(scan, JobState::Done).await;
+    // 差分は「引き継ぎの照合」の更新 1 件
+    let comp = fx
+        .db
+        .read(move |c| devices::compute(c, dev.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(comp.diff.items.len(), 1);
+    assert_eq!(comp.diff.items[0].kind, OpKind::Update);
+    // 同期: 転送しない（端末のファイルを書き換えない）がトークンは今の配信トークンになる
+    fx.sync_device_once(dev.id).await;
+    assert_eq!(
+        std::fs::metadata(device_file(&fx.device_root))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        mtime_before
+    );
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(
+            &std::fs::metadata(device_file(&fx.device_root)).unwrap()
+        ),
+        ino_before
+    );
+    let items = fx
+        .db
+        .read(move |c| devices::items(c, dev.id))
+        .await
+        .unwrap();
+    assert_eq!(items[0].token, comp.diff.items[0].token.clone().unwrap());
+    let comp = fx
+        .db
+        .read(move |c| devices::compute(c, dev.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(comp.diff.items.is_empty());
 }

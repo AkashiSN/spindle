@@ -697,3 +697,116 @@ fn pair_code_lifecycle() {
     devices::issue_pair_code(&c, d.id, "sel4", "h4", 200).unwrap();
     assert!(devices::agent_by_selector(&c, "tsel").unwrap().is_none());
 }
+
+fn adopt_device<'a>(name: &'a str, serial: &'a str) -> NewDevice<'a> {
+    NewDevice {
+        name,
+        transport: Transport::Adb,
+        variant: Variant::Opus,
+        selection: Selection::All,
+        adb: Some((serial, "emulated", "Music/spindle")),
+    }
+}
+
+fn insert_playlist_row(c: &Connection, id: i64, name: &str) {
+    c.execute(
+        "INSERT INTO playlists (id, name, name_key, created_at, updated_at) VALUES (?1, ?2, lower(?2), 0, 0)",
+        params![id, name],
+    )
+    .unwrap();
+}
+
+fn insert_job_row(c: &Connection, ty: &str, state: &str) {
+    c.execute(
+        "INSERT INTO jobs (type, payload, state, created_at) VALUES (?1, '{}', ?2, 0)",
+        params![ty, state],
+    )
+    .unwrap();
+}
+
+#[test]
+fn create_with_uuid_keeps_the_given_uuid() {
+    let c = conn();
+    let d = devices::create_with_uuid(&c, &adopt_device("X", "SER1"), "abc123", 10).unwrap();
+    assert_eq!(d.uuid, "abc123");
+    assert_eq!(d.generation, 1); // 列の既定値（0 ではない）
+    assert!(devices::create_with_uuid(&c, &adopt_device("Y", "SER2"), "abc123", 10).is_err());
+}
+
+#[test]
+fn adopt_inputs_skip_missing_tracks() {
+    use spindle::device::adopt::{LibraryPlaylist, LibraryTrack};
+    let c = conn();
+    insert_track(&c, 1, "A/a.flac", "flac");
+    insert_track(&c, 2, "A/b.flac", "flac");
+    c.execute("UPDATE tracks SET missing_since = 100 WHERE id = 2", [])
+        .unwrap();
+    insert_playlist_row(&c, 3, "Drive");
+    let (t, p) = devices::adopt_inputs(&c).unwrap();
+    assert_eq!(
+        t,
+        vec![LibraryTrack {
+            track_id: 1,
+            rel_path: "A/a.flac".into()
+        }]
+    );
+    assert_eq!(
+        p,
+        vec![LibraryPlaylist {
+            playlist_id: 3,
+            name: "Drive".into()
+        }]
+    );
+}
+
+#[test]
+fn library_scan_active_sees_queued_and_running_scans_only() {
+    let c = conn();
+    assert!(!devices::library_scan_active(&c).unwrap());
+    insert_job_row(&c, "scan", "done");
+    insert_job_row(&c, "gc", "queued");
+    assert!(!devices::library_scan_active(&c).unwrap());
+    insert_job_row(&c, "scan", "queued");
+    assert!(devices::library_scan_active(&c).unwrap());
+}
+
+#[test]
+fn library_scan_active_sees_running_scan() {
+    let c = conn();
+    insert_job_row(&c, "scan", "running");
+    assert!(devices::library_scan_active(&c).unwrap());
+}
+
+#[test]
+fn add_marks_does_not_bump_generation() {
+    let c = conn();
+    let d = devices::create(&c, &adopt_device("X", "SER1"), 0).unwrap();
+    insert_playlist_row(&c, 3, "Drive");
+    devices::add_marks(&c, d.id, &[3]).unwrap();
+    devices::add_marks(&c, d.id, &[3]).unwrap(); // 重複は無視
+    assert_eq!(devices::playlist_ids(&c, d.id).unwrap(), vec![3]);
+    assert_eq!(
+        devices::get(&c, d.id).unwrap().unwrap().generation,
+        d.generation
+    );
+}
+
+#[test]
+fn adopt_snapshot_is_none_while_a_library_scan_is_queued_or_running() {
+    let c = conn();
+    insert_track(&c, 1, "A/a.flac", "flac");
+    insert_playlist_row(&c, 3, "Drive");
+    let (t, p) = devices::adopt_snapshot(&c).unwrap().unwrap();
+    assert_eq!((t.len(), p.len()), (1, 1));
+    assert_eq!(t[0].rel_path, "A/a.flac");
+    insert_job_row(&c, "scan", "done");
+    assert!(devices::adopt_snapshot(&c).unwrap().is_some());
+    insert_job_row(&c, "scan", "queued");
+    assert!(devices::adopt_snapshot(&c).unwrap().is_none());
+    c.execute(
+        "UPDATE jobs SET state = 'running' WHERE state = 'queued'",
+        [],
+    )
+    .unwrap();
+    assert!(devices::adopt_snapshot(&c).unwrap().is_none());
+}

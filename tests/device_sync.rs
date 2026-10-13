@@ -10,6 +10,7 @@ use spindle::device::journal::{parse, Record};
 use spindle::device::ondevice::*;
 use spindle::device::plan::{runnable, Runnable, StoredPlan};
 use spindle::device::recover::{recover, STALE_TOKEN};
+use spindle::device::store;
 use spindle::device::sync::{self, *};
 use spindle::domain::device::*;
 use spindle::domain::relpath::RelPath;
@@ -140,6 +141,7 @@ fn source_error_is_reported_and_others_continue() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -173,6 +175,7 @@ fn content_differing_from_the_plan_is_not_placed() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -279,6 +282,7 @@ fn playlists_are_written_renamed_and_deleted() {
                             start,
                             runnable: &r,
                             playlist_bodies: &bodies,
+                            origins: &origins_from(&r),
                         },
                     )
                     .await
@@ -675,6 +679,7 @@ fn rename_without_body_keeps_the_old_copy() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -841,6 +846,7 @@ async fn run_stored_plan(
             start: rec.manifest,
             runnable: &r,
             playlist_bodies: &bodies,
+            origins: &origins_from(&r),
         },
     )
     .await
@@ -1043,6 +1049,7 @@ fn failed_prepare_shrinks_the_batch_by_component() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -1083,6 +1090,7 @@ async fn run_without_source(
             start: rec.manifest,
             runnable: &r,
             playlist_bodies: &HashMap::new(),
+            origins: &origins_from(&r),
         },
     )
     .await
@@ -1326,6 +1334,7 @@ fn add_onto_a_move_source_dropped_on_resume_is_held() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -1364,6 +1373,7 @@ fn stale_token_from_recovery_survives_a_sync_that_does_not_touch_it() {
                 start: rec.manifest,
                 runnable: &Runnable::default(),
                 playlist_bodies: &HashMap::new(),
+                origins: &origins_from(&Runnable::default()),
             },
         )
         .await
@@ -1496,6 +1506,7 @@ fn changed_source_is_reported_for_rehash() {
                 start: rec.manifest,
                 runnable: &r,
                 playlist_bodies: &std::collections::HashMap::new(),
+                origins: &origins_from(&r),
             },
         )
         .await
@@ -1503,4 +1514,163 @@ fn changed_source_is_reported_for_rehash() {
         assert_eq!(report.rehash, vec![3, 7]);
         assert_eq!(report.errors.len(), 2);
     });
+}
+
+#[tokio::test]
+async fn transferred_items_record_rel_path_and_source() {
+    let fs = device_at(&[(1, "A/a.flac", b"AAAA")], 1 << 30).await;
+    let m = store::read_manifest(&fs).await.unwrap().unwrap();
+    assert_eq!(m.items[0].rel_path, "A/a.flac");
+    assert_eq!(m.items[0].source, "master");
+}
+
+#[tokio::test]
+async fn move_and_update_move_record_rel_path_and_source() {
+    let fs = device_at(
+        &[(1, "A/a.flac", b"AAAA"), (2, "B/b.flac", b"BBBB")],
+        1 << 30,
+    )
+    .await;
+    // 1 は移動だけ、2 は内容も変えて移動（更新 + 移動）
+    let report = sync_to(
+        &fs,
+        &[(1, "C/a.flac", b"AAAA"), (2, "D/b.flac", b"BBB2")],
+        &TestControl::default(),
+    )
+    .await
+    .unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let m = store::read_manifest(&fs).await.unwrap().unwrap();
+    let by_id = |id| m.items.iter().find(|i| i.track_id == id).unwrap();
+    assert_eq!(by_id(1).path, "C/a.flac");
+    assert_eq!(by_id(1).rel_path, "C/a.flac");
+    assert_eq!(by_id(1).source, "master");
+    assert_eq!(by_id(2).path, "D/b.flac");
+    assert_eq!(by_id(2).rel_path, "D/b.flac");
+    assert_eq!(by_id(2).source, "master");
+}
+
+#[tokio::test]
+async fn sync_refreshes_stale_rel_path_of_unchanged_items() {
+    let fs = device_at(&[(1, "A/a.flac", b"AAAA")], 1 << 30).await;
+    // 端末の rel_path を古い値にしておく（WAV → FLAC の正規化で Library 側だけ変わった状況）
+    let mut m = store::read_manifest(&fs).await.unwrap().unwrap();
+    m.items[0].rel_path = "A/a.wav".into();
+    store::write_manifest(&fs, &m).await.unwrap();
+    // 差分は無い（パス・トークン同じ）が、同期の終わりに今の値へ直る
+    sync_to(&fs, &[(1, "A/a.flac", b"AAAA")], &TestControl::default())
+        .await
+        .unwrap();
+    let m = store::read_manifest(&fs).await.unwrap().unwrap();
+    assert_eq!(m.items[0].rel_path, "A/a.flac");
+}
+
+/// 端末の manifest の曲のトークンを引き継ぎの印にする（引き継ぎ直後の状態）
+async fn mark_adopted(fs: &FakeFs) {
+    let mut m = store::read_manifest(fs).await.unwrap().unwrap();
+    for i in &mut m.items {
+        i.token = ADOPTED_TOKEN.to_owned();
+    }
+    store::write_manifest(fs, &m).await.unwrap();
+}
+
+fn put_count(fs: &FakeFs) -> usize {
+    fs.calls().iter().filter(|c| c.starts_with("put")).count()
+}
+
+#[tokio::test]
+async fn adopted_with_same_content_is_not_transferred() {
+    let want: &[Want] = &[(1, "A/a.flac", b"AAAA")];
+    let fs = device_at(want, 1 << 30).await;
+    mark_adopted(&fs).await;
+    let before = put_count(&fs);
+    let r = sync_to(&fs, want, &TestControl::default()).await.unwrap();
+    assert_eq!(put_count(&fs), before);
+    assert_eq!(r.manifest.items[0].token, desired(want).desired[0].token);
+}
+
+#[tokio::test]
+async fn adopted_with_wrong_size_is_transferred() {
+    let fs = device_at(&[(1, "A/a.flac", b"AAAA")], 1 << 30).await;
+    mark_adopted(&fs).await;
+    fs.set("A/a.flac", b"AAAAAA"); // 端末上の写しが変わった
+    let want: &[Want] = &[(1, "A/a.flac", b"AAAA")];
+    let r = sync_to(&fs, want, &TestControl::default()).await.unwrap();
+    assert_eq!(fs.get("A/a.flac").unwrap(), b"AAAA");
+    assert_eq!(r.manifest.items[0].token, desired(want).desired[0].token);
+}
+
+#[tokio::test]
+async fn adopted_updates_do_not_count_toward_peak_bytes() {
+    // 空きが転送量に足りなくても、全曲が引き継ぎの照合なら NoSpace にならない
+    let want: &[Want] = &[(1, "A/a.flac", &[1u8; 4096]), (2, "A/b.flac", &[2u8; 4096])];
+    let big = device_at(want, 1 << 30).await;
+    mark_adopted(&big).await;
+    let used: u64 = big
+        .paths()
+        .iter()
+        .map(|p| big.get(p).unwrap().len() as u64)
+        .sum();
+    let small = FakeFs::with_root(used + sync::MARGIN_BYTES + 2048);
+    for p in big.paths() {
+        small.set(&p, &big.get(&p).unwrap());
+    }
+    sync_to(&small, want, &TestControl::default())
+        .await
+        .unwrap();
+    assert_eq!(put_count(&small), 0);
+}
+
+/// 引き継いだ端末を、指定の送る元で `want` へ同期する
+async fn sync_adopted_with<S: Sources>(fs: &FakeFs, want: &[Want<'_>], src: &S) -> SyncReport {
+    let rec = recover(fs, &expect()).await.unwrap();
+    let d = diff(&desired(want), &rec.items, &[], &[], Vec::new());
+    let plan = StoredPlan::from_diff(1, "tok", &d).unwrap();
+    let r = runnable(&plan, &rec.items, &rec.playlists, &d);
+    sync::run(
+        fs,
+        src,
+        &TestControl::default(),
+        SyncInput {
+            generation: 1,
+            start: rec.manifest,
+            runnable: &r,
+            playlist_bodies: &HashMap::new(),
+            origins: &origins_from(&r),
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// 計画の後に送る元が差し替わった引き継ぎの照合は、トークンを進めずハッシュを取り直させる
+#[tokio::test]
+async fn adopted_with_changed_source_keeps_the_mark_and_is_rehashed() {
+    struct ChangedSources;
+    impl Sources for ChangedSources {
+        fn open(&self, _: i64) -> Result<std::fs::File, SourceError> {
+            Err(SourceError::Changed)
+        }
+    }
+    let want: &[Want] = &[(1, "A/a.flac", b"AAAA")];
+    let fs = device_at(want, 1 << 30).await;
+    mark_adopted(&fs).await;
+    let r = sync_adopted_with(&fs, want, &ChangedSources).await;
+    assert_eq!(r.manifest.items[0].token, ADOPTED_TOKEN);
+    assert_eq!(r.rehash, vec![1]);
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    let m = store::read_manifest(&fs).await.unwrap().unwrap();
+    assert_eq!(m.items[0].token, ADOPTED_TOKEN);
+}
+
+/// 送る元が無い引き継ぎの照合は、トークンを進めず項目エラーにする
+#[tokio::test]
+async fn adopted_with_missing_source_keeps_the_mark() {
+    let want: &[Want] = &[(1, "A/a.flac", b"AAAA")];
+    let fs = device_at(want, 1 << 30).await;
+    mark_adopted(&fs).await;
+    let r = sync_adopted_with(&fs, want, &MemSources::default()).await;
+    assert_eq!(r.manifest.items[0].token, ADOPTED_TOKEN);
+    assert!(r.rehash.is_empty());
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
 }
