@@ -9,6 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension as _};
 use crate::db::derived as dbderived;
 use crate::db::jobs::{self as dbjobs, EnqueueResult, JobType, NewJob};
 use crate::db::{playlists as dbpl, Result};
+use crate::device::adopt::{LibraryPlaylist, LibraryTrack};
 use crate::device::credential::{PAIR_CODE_TTL_SECS, PAIR_MAX_ATTEMPTS};
 use crate::device::plan::StoredPlan;
 use crate::domain::derived::{Variant, VariantSettings};
@@ -127,7 +128,16 @@ fn random_uuid() -> Result<String> {
 }
 
 pub fn create(conn: &Connection, d: &NewDevice<'_>, now: i64) -> Result<Device> {
-    let uuid = random_uuid()?;
+    create_with_uuid(conn, d, &random_uuid()?, now)
+}
+
+/// 引き継ぎ（D-103）: 端末の manifest の uuid で行を作る。uuid の重複は UNIQUE 違反で失敗する
+pub fn create_with_uuid(
+    conn: &Connection,
+    d: &NewDevice<'_>,
+    uuid: &str,
+    now: i64,
+) -> Result<Device> {
     let (serial, volume, root) = match d.adb {
         Some((s, v, r)) => (Some(s), Some(v), Some(r)),
         None => (None, None, None),
@@ -1439,4 +1449,49 @@ pub fn count_prunable_plans(conn: &Connection, before: i64) -> Result<usize> {
         |r| r.get(0),
     )?;
     Ok(n.max(0) as usize)
+}
+
+/// 引き継ぎの入力: 今の曲（missing を除く）の rel_path と、全プレイリストの名前
+pub fn adopt_inputs(conn: &Connection) -> Result<(Vec<LibraryTrack>, Vec<LibraryPlaylist>)> {
+    let mut st = conn.prepare_cached(
+        "SELECT id, rel_path FROM tracks WHERE missing_since IS NULL ORDER BY id",
+    )?;
+    let tracks = st
+        .query_map([], |r| {
+            Ok(LibraryTrack {
+                track_id: r.get(0)?,
+                rel_path: r.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut st = conn.prepare_cached("SELECT id, name FROM playlists ORDER BY id")?;
+    let playlists = st
+        .query_map([], |r| {
+            Ok(LibraryPlaylist {
+                playlist_id: r.get(0)?,
+                name: r.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok((tracks, playlists))
+}
+
+/// Library のスキャンが待ち・実行中か（DB の作り直し途中の引き継ぎは大半が外れる）
+pub fn library_scan_active(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM jobs WHERE type = 'scan' AND state IN ('queued', 'running'))",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// 引き継ぎで印を付け直す。新しい行の generation は 0 のまま（計画はまだ無い）
+pub fn add_marks(conn: &Connection, device_id: i64, playlist_ids: &[i64]) -> Result<()> {
+    let mut st = conn.prepare_cached(
+        "INSERT OR IGNORE INTO device_playlists (device_id, playlist_id) VALUES (?1, ?2)",
+    )?;
+    for pid in playlist_ids {
+        st.execute(params![device_id, pid])?;
+    }
+    Ok(())
 }
