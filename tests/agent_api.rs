@@ -275,6 +275,8 @@ async fn manifest_lists_desired_items_playlists_and_diff() {
     assert_eq!(m.items[0].token, t.token);
     assert_eq!(m.items[0].sha256, t.sha256);
     assert_eq!(m.items[0].size, 5);
+    assert_eq!(m.items[0].rel_path, "J-Pop/A/01 a.flac");
+    assert_eq!(m.items[0].source, "aac");
     assert_eq!(m.playlists[0].name, "夜");
     assert_eq!(m.playlists[0].tracks, vec![1]);
     assert_eq!(m.diff.items[0].op, agent_proto::OpKind::Add);

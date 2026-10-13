@@ -70,6 +70,8 @@ impl FakeServer {
             token: sha256_hex(format!("tok:{track_id}:{sha}").as_bytes()),
             size: bytes.len() as u64,
             sha256: sha,
+            rel_path: dest_path.to_owned(),
+            source: "master".to_owned(),
         };
         let mut w = self.0.borrow_mut();
         w.held.remove(&track_id);

@@ -202,6 +202,8 @@ async fn manifest(
                 token: x.token.clone(),
                 size: x.size,
                 sha256: x.sha256.clone(),
+                rel_path: x.rel_path.clone(),
+                source: x.source.kind.as_str().to_owned(),
             })
             .collect(),
         playlists,

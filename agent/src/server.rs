@@ -191,6 +191,7 @@ impl Server for HttpServer {
             .post(self.url("api/agent/pair")?)
             .json(&PairRequest {
                 code: code.to_owned(),
+                adopt_uuid: None,
             })
             .send()
             .map_err(|e| Error::Server(e.without_url().to_string()))?;
