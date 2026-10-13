@@ -16,7 +16,7 @@ use crate::plan::Runnable;
 use crate::playlist;
 use crate::rediscover::pending_pids;
 use crate::server::{Fetch, Server};
-use crate::state::{OpPhase, PendingKind, PendingOp, TrackEntry};
+use crate::state::{OpPhase, PendingKind, PendingOp, TrackEntry, ADOPTED_TOKEN};
 use crate::{Error, Result};
 
 pub const UNMANAGED_COLLISION: &str = "管理外と衝突";
@@ -348,6 +348,16 @@ fn update<M: Music, S: Server>(
         cx.error_track(item.track_id, NO_ORIGIN);
         return Ok(Step::Errored);
     };
+    // 同期の近道: 引き継ぎ直後の曲で中身が計画と同じなら、取得も track の操作もせずトークンと出どころだけ書き換える
+    if e.token == ADOPTED_TOKEN && e.size == item.size && e.sha256 == *sha {
+        let mut entry = e;
+        entry.token = token.clone();
+        entry.rel_path = origin.rel_path.clone();
+        entry.source = origin.source.clone();
+        cx.state.tracks.insert(item.track_id, entry);
+        cx.save()?;
+        return Ok(Step::Done);
+    }
     let path = e.path.clone();
     let pid = e.persistent_id.clone();
     cx.state.pending_ops.push(PendingOp {

@@ -646,3 +646,54 @@ fn recovered_add_without_recorded_origin_is_item_error_and_not_in_state() {
     assert!(!s.tracks.contains_key(&1));
     assert!(s.pending_ops.is_empty());
 }
+
+/// 引き継ぎ直後の state の曲を `ADOPTED_TOKEN` にし、サーバ側に同じ中身の別トークンを置く
+fn adopted_track(env: &Env, bytes_in_state: &[u8]) -> spindle_agent::state::TrackEntry {
+    let e = env.synced_track(1, "A/a.m4a", bytes_in_state);
+    let mut s = env.state();
+    s.tracks.get_mut(&1).unwrap().token = spindle_agent::state::ADOPTED_TOKEN.to_owned();
+    env.file().save(&s).unwrap();
+    // サーバ側の current も同じ印にする（adopt はそう書く）
+    let mut cur = env.server.current();
+    for c in &mut cur {
+        c.token = spindle_agent::state::ADOPTED_TOKEN.to_owned();
+    }
+    env.server.set_current(cur, vec![]);
+    e
+}
+
+#[test]
+fn adopted_update_with_same_content_rewrites_token_only() {
+    let mut env = Env::new();
+    env.paired();
+    let before = adopted_track(&env, b"aaa");
+    let it = env.server.put_track(1, "A/a.m4a", b"aaa");
+    env.server.set_origin(1, "Lib/new.flac", "opus");
+    let calls = env.music.calls().len();
+    let o = exec_all(&mut env).unwrap();
+    assert_eq!(o.executed, 1);
+    assert!(env.server.fetch_log().is_empty());
+    assert_eq!(env.music.calls().len(), calls, "{:?}", env.music.calls());
+    let s = env.state();
+    assert_eq!(s.tracks[&1].token, it.token);
+    assert_eq!(s.tracks[&1].persistent_id, before.persistent_id);
+    assert_eq!(s.tracks[&1].path, before.path);
+    assert_eq!(s.tracks[&1].rel_path, "Lib/new.flac");
+    assert_eq!(s.tracks[&1].source, "opus");
+    assert!(s.pending_ops.is_empty());
+}
+
+#[test]
+fn adopted_update_with_different_sha_downloads() {
+    let mut env = Env::new();
+    env.paired();
+    adopted_track(&env, b"aaa");
+    let it = env.server.put_track(1, "A/a.m4a", b"bbbb");
+    exec_all(&mut env).unwrap();
+    assert!(!env.server.fetch_log().is_empty());
+    assert_eq!(
+        std::fs::read(env.root.abs("A/a.m4a").unwrap()).unwrap(),
+        b"bbbb"
+    );
+    assert_eq!(env.state().tracks[&1].token, it.token);
+}
