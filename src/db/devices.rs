@@ -1485,6 +1485,22 @@ pub fn library_scan_active(conn: &Connection) -> Result<bool> {
     )?)
 }
 
+/// 引き継ぎの入力（Library の曲とプレイリスト）を、スキャンの有無と同じスナップショットで読む。
+/// スキャンが待ち・実行中なら `None`。その時点で待ち・実行中のスキャンが無ければ曲の集合は作り直しの
+/// 途中ではなく、後から始まったスキャンは読んだ内容を変えない
+pub fn adopt_snapshot(
+    conn: &Connection,
+) -> Result<Option<(Vec<LibraryTrack>, Vec<LibraryPlaylist>)>> {
+    let tx = conn.unchecked_transaction()?;
+    let out = if library_scan_active(&tx)? {
+        None
+    } else {
+        Some(adopt_inputs(&tx)?)
+    };
+    tx.finish()?;
+    Ok(out)
+}
+
 /// 引き継ぎで印を付け直す。新しい行の generation は 0 のまま（計画はまだ無い）
 pub fn add_marks(conn: &Connection, device_id: i64, playlist_ids: &[i64]) -> Result<()> {
     let mut st = conn.prepare_cached(

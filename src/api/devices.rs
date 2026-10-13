@@ -1036,8 +1036,10 @@ async fn create_adb(
     }
     match fs.root_state().await {
         Ok(DirState::NonEmpty) => {
-            // 中身が `.spindle` の下だけで、その manifest が無い・読めない・生きた登録のものでない
-            // （= 前の登録の失敗の残り）なら片付けて続ける。それ以外は推測しないで断る
+            // 中身が `.spindle` の下だけで、その manifest が無い・読めない・空で生きた登録のものでない
+            // （= 前の登録の失敗の残り）なら片付けて続ける。それ以外は推測しないで断る。
+            // 曲かプレイリストを指す manifest は、別ボリュームや uuid の形が不正でも片付けない
+            // （`.spindle/moving` に曲の唯一の実体があり得る）
             let files = match fs.list_files().await {
                 Ok(f) => f,
                 Err(e) => return Ok(remote_failed(&rt, &serial, e)),
@@ -1047,6 +1049,7 @@ async fn create_adb(
             }
             let leftover = match store::read_manifest(&fs).await {
                 Ok(None) => true,
+                Ok(Some(m)) if adopt::is_adoptable(&m) => false,
                 Ok(Some(m)) => {
                     let uuid = m.device_uuid;
                     !state.db.read(move |c| dbdev::uuid_exists(c, &uuid)).await?
@@ -1131,6 +1134,7 @@ async fn adopt_adb(
     serial: String,
     volume: String,
 ) -> Result<Response, ApiError> {
+    // 早めに断るための確認。正は書き直しの直前のスナップショット
     if state.db.read(dbdev::library_scan_active).await? {
         return Ok(library_busy());
     }
@@ -1144,7 +1148,11 @@ async fn adopt_adb(
     if state.db.read(move |c| dbdev::uuid_exists(c, &u)).await? {
         return Ok(uuid_registered());
     }
-    let (tracks, playlists) = state.db.read(dbdev::adopt_inputs).await?;
+    // スキャンの有無と入力を 1 つの読み取りトランザクションで読む（別々だと間に始まったスキャンの
+    // 作り直し途中の曲を読み、remap が多くの項目を manifest から外し得る）
+    let Some((tracks, playlists)) = state.db.read(dbdev::adopt_snapshot).await? else {
+        return Ok(library_busy());
+    };
     let r = match adopt::rewrite(fs, &m, &tracks, &playlists).await {
         Ok(r) => r,
         Err(RecoverError::Store(StoreError::Remote(e))) => {
@@ -1258,15 +1266,9 @@ pub async fn adopt_preview(
         Err(e) => return Ok(remote_failed(&rt, &q.serial, e)),
     };
     let uuid = m.device_uuid.clone();
-    let (registered, busy, (tracks, playlists)) = state
+    let (registered, snapshot) = state
         .db
-        .read(move |c| {
-            Ok((
-                dbdev::uuid_exists(c, &uuid)?,
-                dbdev::library_scan_active(c)?,
-                dbdev::adopt_inputs(c)?,
-            ))
-        })
+        .read(move |c| Ok((dbdev::uuid_exists(c, &uuid)?, dbdev::adopt_snapshot(c)?)))
         .await?;
     if registered {
         return Ok(uuid_registered());
@@ -1275,6 +1277,9 @@ pub async fn adopt_preview(
         Ok(n) => n,
         Err(e) => return Ok(remote_failed(&rt, &q.serial, e)),
     };
+    // スキャン中は入力が作り直しの途中なので、件数は空の入力で数える（UI は library_busy で止める）
+    let busy = snapshot.is_none();
+    let (tracks, playlists) = snapshot.unwrap_or_default();
     let r = adopt::remap(&m, &tracks, &playlists);
     Ok(Json(AdoptPreview {
         device_uuid: m.device_uuid,

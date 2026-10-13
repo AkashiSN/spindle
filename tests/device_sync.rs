@@ -1620,3 +1620,57 @@ async fn adopted_updates_do_not_count_toward_peak_bytes() {
         .unwrap();
     assert_eq!(put_count(&small), 0);
 }
+
+/// 引き継いだ端末を、指定の送る元で `want` へ同期する
+async fn sync_adopted_with<S: Sources>(fs: &FakeFs, want: &[Want<'_>], src: &S) -> SyncReport {
+    let rec = recover(fs, &expect()).await.unwrap();
+    let d = diff(&desired(want), &rec.items, &[], &[], Vec::new());
+    let plan = StoredPlan::from_diff(1, "tok", &d).unwrap();
+    let r = runnable(&plan, &rec.items, &rec.playlists, &d);
+    sync::run(
+        fs,
+        src,
+        &TestControl::default(),
+        SyncInput {
+            generation: 1,
+            start: rec.manifest,
+            runnable: &r,
+            playlist_bodies: &HashMap::new(),
+            origins: &origins_from(&r),
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// 計画の後に送る元が差し替わった引き継ぎの照合は、トークンを進めずハッシュを取り直させる
+#[tokio::test]
+async fn adopted_with_changed_source_keeps_the_mark_and_is_rehashed() {
+    struct ChangedSources;
+    impl Sources for ChangedSources {
+        fn open(&self, _: i64) -> Result<std::fs::File, SourceError> {
+            Err(SourceError::Changed)
+        }
+    }
+    let want: &[Want] = &[(1, "A/a.flac", b"AAAA")];
+    let fs = device_at(want, 1 << 30).await;
+    mark_adopted(&fs).await;
+    let r = sync_adopted_with(&fs, want, &ChangedSources).await;
+    assert_eq!(r.manifest.items[0].token, ADOPTED_TOKEN);
+    assert_eq!(r.rehash, vec![1]);
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    let m = store::read_manifest(&fs).await.unwrap().unwrap();
+    assert_eq!(m.items[0].token, ADOPTED_TOKEN);
+}
+
+/// 送る元が無い引き継ぎの照合は、トークンを進めず項目エラーにする
+#[tokio::test]
+async fn adopted_with_missing_source_keeps_the_mark() {
+    let want: &[Want] = &[(1, "A/a.flac", b"AAAA")];
+    let fs = device_at(want, 1 << 30).await;
+    mark_adopted(&fs).await;
+    let r = sync_adopted_with(&fs, want, &MemSources::default()).await;
+    assert_eq!(r.manifest.items[0].token, ADOPTED_TOKEN);
+    assert!(r.rehash.is_empty());
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+}

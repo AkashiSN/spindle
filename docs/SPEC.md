@@ -1551,7 +1551,9 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   manifest を読む（無い・読めない・`volume` 違い・空・uuid の形が不正・回復で manifest の不整合が
   見つかったときは 409 `not_adoptable`、uuid が DB にあれば 409 `uuid_registered`。端末との通信の失敗は
   既存のエラー応答の 502 `device_failed` / 409 `not_connected`）→
-  回復（`recover`。DB は見ない）→ remap → `compact` で manifest を書き直す →
+  `scan` が待ち・実行中でないことと remap の入力（Library の曲とプレイリスト）を 1 つの読み取り
+  トランザクションで読む（スキャン中なら 409 `library_busy`。別々に読むと間に始まったスキャンの途中の曲で
+  remap し得る）→ 回復（`recover`。DB は見ない）→ remap → `compact` で manifest を書き直す →
   1 トランザクションで manifest の uuid の行を作り、付け替えたプレイリストに印を付け直す →
   `device_scan` を投入する。`generation` は作成時の既定のまま（印の復元で進めない）。印を付け直すのは、
   端末に m3u8 があるのはそのプレイリストに印が付いていたからで、付けないと `selection=playlists` の端末の
@@ -1603,7 +1605,9 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   計画が閉じられていたら、キャッシュも `last_synced_at` も進めずに失敗）
 - **引き継いだ写しの近道**: `Update` でパスが同じ（`from` 無し）、book の項目のトークンが `ADOPTED_TOKEN`、
   `sha256` と `size` が操作と一致する曲は、転送もジャーナルも省いてトークンだけを操作のものに書き換える
-  （信頼の水準は日常の差分と同じ。manifest の `sha256` は転送時に端末上で測って照合した値）。この曲は転送量の
+  （信頼の水準は日常の差分と同じ。manifest の `sha256` は転送時に端末上で測って照合した値）。ただし送る元は
+  通常の転送と同じく開いて identity を照合し、変わっていれば項目エラー + ハッシュの取り直し、開けなければ
+  項目エラーにしてトークンを進めない。この曲は転送量の
   見積もりと空き容量の確認から外し、差分では op `adopted`（UI は「引き継ぎの照合」）として分ける。回復や
   `device_verify` が付けた `STALE_TOKEN` が優先されるので、壊れた写しは送り直す。同期の終わり（最後の
   `compact` の前）に、パスのキーが今の desired と一致する全項目の `rel_path` / `source` を今の値へ書き直す

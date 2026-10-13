@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import type { AdbVolume, Device, DeviceCounts, DeviceDiff, DiffItem } from '../api/types'
-import { agentPlanText, pairCommand, connectionNote, nextPollDelay, UNREGISTERED_POLL_MS, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, volumeSelectable, volumeAdoptable, adoptPreviewText, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
+import { agentPlanText, pairCommand, connectionNote, nextPollDelay, UNREGISTERED_POLL_MS, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, volumeSelectable, volumeAdoptable, adoptPreviewText, adoptPreviewRetryDelay, ADOPT_PREVIEW_RETRY_MS, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
 
 const counts = (p: Partial<DeviceCounts> = {}): DeviceCounts => ({
   add: 0, update: 0, move: 0, delete: 0, waiting: 0, error: 0, synced: 0, ...p,
@@ -209,6 +209,14 @@ describe('引き継ぎ', () => {
     expect(adoptPreviewText({ ...p, tracks_dropped: 0, playlists_dropped: 0, unmanaged: 0 })).toBe(
       '曲 120 件を引き継ぎます。プレイリスト 2 件を引き継ぎます',
     )
+  })
+  it('プレビューがスキャン中か失敗なら取り直し、取れていれば取り直さない', () => {
+    const p = { device_uuid: 'u', tracks_adopted: 1, tracks_dropped: 0, playlists_adopted: 0,
+      playlists_dropped: 0, unmanaged: 0, library_busy: false }
+    expect(adoptPreviewRetryDelay(null)).toBeNull()
+    expect(adoptPreviewRetryDelay({ preview: p, error: null })).toBeNull()
+    expect(adoptPreviewRetryDelay({ preview: { ...p, library_busy: true }, error: null })).toBe(ADOPT_PREVIEW_RETRY_MS)
+    expect(adoptPreviewRetryDelay({ preview: null, error: '失敗' })).toBe(ADOPT_PREVIEW_RETRY_MS)
   })
   it('差分の「引き継ぎの照合」は送る件数に入るが表示は別', () => {
     expect(OP_LABELS.adopted).toBe('引き継ぎの照合')

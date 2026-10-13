@@ -37,6 +37,7 @@ import {
   volumeAdoptable,
   volumeSelectable,
   adoptPreviewText,
+  adoptPreviewRetryDelay,
 } from '../lib/devices'
 import { formatCount } from '../lib/format'
 import { formatDateTime } from '../lib/history'
@@ -340,6 +341,15 @@ function AndroidCandidate({
   const preview = current?.preview ?? null
   const previewError = current?.error ?? null
 
+  // スキャン中か失敗なら間を置いて取り直す（同じ保存先を選んでいる間だけ。取れたら止める）
+  const [retry, setRetry] = useState(0)
+  const retryDelay = adopting ? adoptPreviewRetryDelay(current) : null
+  useEffect(() => {
+    if (retryDelay == null) return
+    const t = setTimeout(() => setRetry((n) => n + 1), retryDelay)
+    return () => clearTimeout(t)
+  }, [retryDelay, current])
+
   // 引き継ぐ保存先を選んだら、引き継ぐ件数を取る
   useEffect(() => {
     if (!adopting || chosenVolume == null) return
@@ -352,7 +362,7 @@ function AndroidCandidate({
         if (!ac.signal.aborted) setFetched({ volume: chosenVolume, preview: null, error: deviceMessage(e) })
       })
     return () => ac.abort()
-  }, [adopting, chosenVolume, found.serial, fetchAdoptPreview])
+  }, [adopting, chosenVolume, found.serial, fetchAdoptPreview, retry])
 
   return (
     <form
@@ -409,7 +419,7 @@ function AndroidCandidate({
         ))}
       </fieldset>
       {adopting && previewError != null && <p className="error small">{previewError}</p>}
-      {adopting && preview != null && <p className="small">{adoptPreviewText(preview)}</p>}
+      {adopting && preview != null && !preview.library_busy && <p className="small">{adoptPreviewText(preview)}</p>}
       {adopting && preview?.library_busy === true && (
         <p className="devices-warn small">ライブラリのスキャン中です。終わってから引き継いでください</p>
       )}

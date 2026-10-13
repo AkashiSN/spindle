@@ -1578,3 +1578,30 @@ async fn registered_uuid_store_with_items_is_not_empty_for_plain_registration() 
         "{v}"
     );
 }
+
+/// 曲の唯一の実体が `.spindle/moving` の下にある（移動の途中で止まった）保存先を、別ボリュームの
+/// manifest か不正な uuid の manifest で置く。予約領域しか残っていなくても通常登録は片付けない
+#[tokio::test]
+async fn plain_registration_keeps_a_nonempty_manifest_whose_only_file_is_moving() {
+    for (uuid, volume) in [(OLD_UUID, "sdcard0"), ("olduuid", "emulated")] {
+        let app = App::new().await;
+        app.connect("SER1");
+        app.plant_store_as(uuid, volume, &[("A/a.flac", "A/a.flac", b"AAAA")], &[]);
+        let root = app.device_root("emulated");
+        std::fs::create_dir_all(root.join(".spindle/moving")).unwrap();
+        std::fs::rename(root.join("A/a.flac"), root.join(".spindle/moving/1")).unwrap();
+        std::fs::remove_dir(root.join("A")).unwrap();
+        let (s, v) = app.register("X", "SER1", "emulated").await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (StatusCode::CONFLICT, Some("not_empty")),
+            "{uuid} {volume} {v}"
+        );
+        assert!(root.join(".spindle/moving/1").is_file(), "{uuid} {volume}");
+        assert!(
+            root.join(".spindle/manifest.json").is_file(),
+            "{uuid} {volume}"
+        );
+        assert_eq!(app.device_count(), 0);
+    }
+}

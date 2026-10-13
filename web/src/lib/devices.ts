@@ -123,6 +123,23 @@ export function adoptPreviewText(p: AdoptPreview): string {
   return parts.join('。')
 }
 
+/** 引き継ぎのプレビューを取り直すまでの間隔 */
+export const ADOPT_PREVIEW_RETRY_MS = 5000
+
+/**
+ * 引き継ぎのプレビューを取り直すまでの待ち。スキャン中（library_busy）か失敗なら取り直し、
+ * 取れていれば（またはまだ取っている途中なら）取り直さない
+ */
+export function adoptPreviewRetryDelay(
+  fetched: { preview: AdoptPreview | null; error: string | null } | null,
+): number | null {
+  if (fetched == null) return null
+  if (fetched.error != null || fetched.preview == null || fetched.preview.library_busy) {
+    return ADOPT_PREVIEW_RETRY_MS
+  }
+  return null
+}
+
 /** 待ちの同期の説明。未接続なら接続を待っている（つながっていれば順番待ち） */
 export function queuedSyncText(d: Device): string {
   return d.connected === false ? '端末の接続を待っています' : '同期の待ち'

@@ -510,6 +510,16 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
                 sha256: item.sha256.clone(),
             };
             if adopted_unchanged(op.op, Some(&to), op.size, Some(&sha), Some(&cur)) {
+                // 送る元が計画の後に差し替わっていないことは確かめる（通常の転送と同じ照合。
+                // 変わっていればトークンを進めず、ハッシュを取り直させる）
+                if let Err(e) = self.sources.open(op.track_id) {
+                    if matches!(e, SourceError::Changed) {
+                        self.rehash.insert(op.track_id);
+                    }
+                    self.errors
+                        .push((EntryKind::Track, op.track_id, e.reason()));
+                    return Ok(());
+                }
                 item.token = token;
                 if let Some(o) = self.origins.get(&op.track_id) {
                     item.rel_path = o.rel_path.clone();

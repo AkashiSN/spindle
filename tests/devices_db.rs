@@ -790,3 +790,23 @@ fn add_marks_does_not_bump_generation() {
         d.generation
     );
 }
+
+#[test]
+fn adopt_snapshot_is_none_while_a_library_scan_is_queued_or_running() {
+    let c = conn();
+    insert_track(&c, 1, "A/a.flac", "flac");
+    insert_playlist_row(&c, 3, "Drive");
+    let (t, p) = devices::adopt_snapshot(&c).unwrap().unwrap();
+    assert_eq!((t.len(), p.len()), (1, 1));
+    assert_eq!(t[0].rel_path, "A/a.flac");
+    insert_job_row(&c, "scan", "done");
+    assert!(devices::adopt_snapshot(&c).unwrap().is_some());
+    insert_job_row(&c, "scan", "queued");
+    assert!(devices::adopt_snapshot(&c).unwrap().is_none());
+    c.execute(
+        "UPDATE jobs SET state = 'running' WHERE state = 'queued'",
+        [],
+    )
+    .unwrap();
+    assert!(devices::adopt_snapshot(&c).unwrap().is_none());
+}
