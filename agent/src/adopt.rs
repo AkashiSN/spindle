@@ -30,7 +30,7 @@ pub struct AdoptSummary {
     pub playlists_dropped: usize,
 }
 
-/// pair --adopt: 前提 → 回復 → pair(adopt_uuid) → adopt_pending を保存 → finish
+/// pair --adopt: 前提 → 回復 → pair(adopt_uuid) → adopt_pending を保存 → トークンを保存 → finish
 pub fn pair_adopt<M: Music, S: Server>(
     cx: &mut Ctx<'_, M, S>,
     secrets: &dyn Secrets,
@@ -66,9 +66,9 @@ pub fn pair_adopt<M: Music, S: Server>(
             resp.device_name
         )));
     }
-    secrets.set(&resp.token)?;
-    // 続く adopt はこのトークンで送る（CLI の pair はトークン無しのサーバで始まる）
-    cx.server.use_token(&resp.token)?;
+    // adopt_pending と接続先をトークンより先に保存する。逆順だと、間で落ちたときに新しいトークンと
+    // 古い id の state が組み合わさり、次の sync が付け替えずに差分を出す（D-102 の取り違え）。
+    // この順なら、間で落ちても sync は古いトークン（または無し）で止まり、pair --adopt のやり直しで続く
     if let Some(s) = cx.state.server.as_mut() {
         s.url = url.to_owned();
         s.insecure_http = insecure_http;
@@ -76,6 +76,9 @@ pub fn pair_adopt<M: Music, S: Server>(
     }
     cx.state.adopt_pending = true;
     cx.save()?;
+    secrets.set(&resp.token)?;
+    // 続く adopt はこのトークンで送る（CLI の pair はトークン無しのサーバで始まる）
+    cx.server.use_token(&resp.token)?;
     let summary = finish(cx)?;
     Ok(summary.unwrap_or_default())
 }

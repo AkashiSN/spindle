@@ -222,7 +222,10 @@ fn http_adopt_409_codes_are_japanese_stops() {
             "サーバのライブラリのスキャン中。終わってから sync し直してください",
         ),
         ("open_plan", "途中の計画"),
-        ("not_adoptable", "引き継げる状態ではありません"),
+        (
+            "not_adoptable",
+            "端末タブでこの端末を削除し、新しい iPhone 端末を作ってから spindle-agent pair --adopt",
+        ),
     ] {
         let body: &'static str = Box::leak(format!(r#"{{"error":"{code}"}}"#).into_boxed_str());
         let (url, h) = mock_once("409 Conflict", body);
@@ -254,7 +257,8 @@ fn http_pair_sends_adopt_uuid_and_maps_not_adoptable() {
     let s = HttpServer::new(&url, true, None).unwrap();
     match s.pair("123456", Some("0123456789abcdef0123456789abcdef")) {
         Err(Error::Stop(m)) => {
-            assert!(m.contains("新しい iPhone 端末を作ってから pair し直してください"))
+            assert!(m.contains("--adopt を付けずに spindle-agent pair"), "{m}");
+            assert!(m.contains("新しい iPhone 端末を作り"), "{m}");
         }
         other => panic!("{other:?}"),
     }

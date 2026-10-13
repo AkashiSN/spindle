@@ -697,3 +697,41 @@ fn adopted_update_with_different_sha_downloads() {
     );
     assert_eq!(env.state().tracks[&1].token, it.token);
 }
+
+#[test]
+fn adopted_update_with_same_sha_but_different_size_downloads() {
+    let mut env = Env::new();
+    env.paired();
+    adopted_track(&env, b"aaa");
+    // state の大きさだけが計画と違う（sha256 は同じ）。近道せずに取り直す
+    let mut s = env.state();
+    s.tracks.get_mut(&1).unwrap().size = 99;
+    env.file().save(&s).unwrap();
+    let it = env.server.put_track(1, "A/a.m4a", b"aaa");
+    exec_all(&mut env).unwrap();
+    assert!(!env.server.fetch_log().is_empty());
+    let s = env.state();
+    assert_eq!(s.tracks[&1].token, it.token);
+    assert_eq!(s.tracks[&1].size, 3);
+}
+
+#[test]
+fn non_adopted_update_with_same_content_takes_the_normal_path() {
+    let mut env = Env::new();
+    env.paired();
+    let before = env.synced_track(1, "A/a.m4a", b"aaa");
+    // 引き継ぎの印ではない古いトークン。中身は計画と同じでも近道しない
+    let mut s = env.state();
+    s.tracks.get_mut(&1).unwrap().token = "old.token".to_owned();
+    env.file().save(&s).unwrap();
+    let mut cur = env.server.current();
+    for c in &mut cur {
+        c.token = "old.token".to_owned();
+    }
+    env.server.set_current(cur, vec![]);
+    let it = env.server.put_track(1, "A/a.m4a", b"aaa");
+    assert_eq!(before.sha256, it.sha256);
+    exec_all(&mut env).unwrap();
+    assert!(!env.server.fetch_log().is_empty());
+    assert_eq!(env.state().tracks[&1].token, it.token);
+}

@@ -22,7 +22,7 @@ pub mod fake;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// pair の 409 `not_adoptable`（行の差し替えを断られた）
-pub const NOT_ADOPTABLE_PAIR_STOP: &str = "この端末の行は既に使われているか、別の端末の uuid です。spindle の端末タブで新しい iPhone 端末を作ってから pair し直してください";
+pub const NOT_ADOPTABLE_PAIR_STOP: &str = "この端末の行には引き継げません（行が既に使われているか、前の登録が別の行に残っています）。この Mac の登録が spindle の端末タブに残っている（DB を失っていない）なら、--adopt を付けずに spindle-agent pair してください。そうでなければ、端末タブで新しい iPhone 端末を作り、そのコードで pair --adopt し直してください";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fetch {
@@ -246,7 +246,7 @@ impl Server for HttpServer {
                             .to_owned(),
                     ),
                     "not_adoptable" => Error::Stop(
-                        "この端末の行は引き継げる状態ではありません（同期済みか、別の端末の行です）。spindle の端末タブで新しい iPhone 端末を作ってから pair し直してください"
+                        "この端末の行は既に同期の報告を受けているため、引き継げません。spindle の端末タブでこの端末を削除し、新しい iPhone 端末を作ってから spindle-agent pair --adopt <URL> <コード> し直してください"
                             .to_owned(),
                     ),
                     other => Error::Server(format!("409: {other}")),

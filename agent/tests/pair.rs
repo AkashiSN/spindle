@@ -444,3 +444,52 @@ fn pair_adopt_stops_on_a_foreign_marker_before_using_the_code() {
     assert_eq!(env.server.pair_calls(), 0);
     assert!(!env.state().adopt_pending);
 }
+
+/// 置き場は確かめられるが、書き込みで落ちる（Keychain への書き込みの直前で落ちた代わり）
+struct FailsOnSet;
+
+impl Secrets for FailsOnSet {
+    fn get(&self) -> spindle_agent::Result<Option<String>> {
+        Ok(None)
+    }
+    fn set(&self, _token: &str) -> spindle_agent::Result<()> {
+        Err(Error::Crash("secrets.set".into()))
+    }
+    fn check_writable(&self) -> spindle_agent::Result<()> {
+        Ok(())
+    }
+}
+
+/// トークンを書く前に adopt_pending と接続先を保存する。トークンを書けずに落ちても、新しいトークンが
+/// 古い id の state と組み合わさる（次の sync が全部追加の差分を出す）ことは無く、pair --adopt の
+/// やり直しで続きができる
+#[test]
+fn pair_adopt_saves_pending_before_writing_the_token() {
+    let mut env = Env::new();
+    let old = synced_then_db_lost(&mut env);
+    env.server.put_track(7, "A/a.m4a", b"aaa");
+    env.server.put_track(8, "B/b.m4a", b"bbb");
+    let res = env.with_ctx(|cx| pair_adopt(cx, &FailsOnSet, "https://new.example", true, "code"));
+    assert!(matches!(res, Err(Error::Crash(_))), "{res:?}");
+    let s = env.state();
+    assert!(s.adopt_pending, "トークンより先に保存している");
+    assert_eq!(s.tracks.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+    let server = s.server.unwrap();
+    assert_eq!(server.url, "https://new.example");
+    assert!(server.insecure_http);
+    assert_eq!(server.device_uuid, UUID);
+    assert_eq!(FileSecrets::new(&env.state_dir).get().unwrap(), None);
+    assert!(env.server.adopt_calls().is_empty());
+    // 新しいコードで pair --adopt し直せば続きができる
+    let sum = do_pair_adopt(&mut env).unwrap();
+    assert_eq!(sum.tracks_adopted, 2);
+    assert_eq!(env.server.pair_calls(), 2);
+    let s = env.state();
+    assert!(!s.adopt_pending);
+    assert_eq!(s.tracks.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
+    assert_eq!(s.tracks[&7].persistent_id, old.a.persistent_id);
+    assert_eq!(
+        FileSecrets::new(&env.state_dir).get().unwrap().as_deref(),
+        Some("fake.token")
+    );
+}
