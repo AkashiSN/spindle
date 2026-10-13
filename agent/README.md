@@ -53,14 +53,32 @@ mkdir -p ~/.local/bin && cp spindle-agent ~/.local/bin/
 
 選曲を変えたときは、端末タブで変えてからもう一度 `sync` します。
 
+### サーバの DB を失った後（`pair --adopt`）
+
+spindle の DB を失って作り直したとき（端末の登録が消え、Library を走査し直したとき）は、この Mac の `~/Music/spindle` とミュージック.app の track を残したまま、新しい登録へ引き継げます。
+
+1. 端末タブで「iPhone（Mac 経由）」の端末を新しく作り、「pair コードを発行」を押す
+2. 引き継ぐ
+
+   ```sh
+   spindle-agent pair --adopt https://spindle.example.com <コード>
+   ```
+
+   前の登録の state（`~/Library/Application Support/spindle-agent`）と root の `.spindle-device` がそのまま要ります。コードを使う前に、前の登録があること・root の印が一致すること・途中の操作が残っていないことを確かめます。サーバの行を前の登録と同じ端末として扱わせ、state の曲を Library の `rel_path` で、プレイリストを名前で新しい id へ付け替えます
+3. いつもどおり `sync` する。中身が同じ曲は受け取り直さず、ミュージック.app の track（再生回数など）もそのまま使います。プレイリストは同じ名前のまま中身を入れ直します
+
+新しい Library で見つからなかった曲・プレイリストは管理外になります。ファイルもミュージック.app の track も消しませんが、以後エージェントは触りません（要らなければ手で消してください）。途中で止まっても、次の `sync` か `pair --adopt` のやり直しが続きを行います。DB を失っていない（端末タブに今の Mac の登録が残っている）ときは `--adopt` を付けずに pair します
+
 ### その他のコマンド
 
 ```
+spindle-agent pair --adopt <URL> <コード> [--insecure-http]
 spindle-agent status
 spindle-agent resolve <op_id> (--delete-track <persistent_id> | --no-copy-created)
 spindle-agent abandon
 ```
 
+- `pair --adopt`: サーバの DB を失った後、この Mac の保存先を新しい登録へ引き継ぎます（上記）
 - `status`: 登録状況と、保留中の操作を表示します
 - `resolve`: 保留した追加の操作を解決します。`sync` が表示した候補を見て、`--delete-track` でその曲を spindle の複製として消すか、複製は作られなかったときに `--no-copy-created` で add の意図を捨てます
 - `abandon`: 開いている計画を破棄します。保留中の操作が無いときだけ送れます

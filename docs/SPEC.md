@@ -1695,17 +1695,21 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   2. `POST /api/agent/pair` に `adopt_uuid`（state の uuid）を付ける。サーバは 32 桁の小文字 16 進でなければ
      コードに触らずに 400 `bad_request`。コードの消費と同じトランザクションで、行が端末の状態を一度も持って
      いない（`last_synced_at` が NULL、計画が 1 件も無い、`device_items` と `device_playlist_state` が空）うえ
-     `adopt_uuid` が他の行に無いか、行の uuid が既に `adopt_uuid`（差し替え済みのやり直し）のときだけ行の uuid を
-     差し替える。それ以外は 409 `not_adoptable` で、コードは消費せず、予約した試行の枠も返す（断られても
-     5 回の試行に数えない）
-  3. エージェントは応答の uuid が state と同じことを確かめ、トークンを保存し、サーバの URL・名前と
-     `adopt_pending = true` を保存する。続く adopt はこの新しいトークンで送る
+     `adopt_uuid` が他の行に無いときだけ行の uuid を差し替える。行の uuid が既に `adopt_uuid` なら、報告も
+     計画も無い（`last_synced_at` が NULL、計画が 1 件も無い）ときだけ差し替え済みのやり直しとして通す
+     （前の adopt が `device_items` などを書いた後で落ちたやり直しを含む）。報告か計画があれば DB を失って
+     いない端末なので断る。それ以外は 409 `not_adoptable` で、コードは消費せず、予約した試行の枠も返す
+     （断られても 5 回の試行に数えない）
+  3. エージェントは応答の uuid が state と同じことを確かめ、サーバの URL・名前と `adopt_pending = true` を
+     保存してから、トークンを保存する（逆順だと間で落ちたとき、新しいトークンと付け替える前の state が
+     組み合わさる。この順なら次の `sync` は古いトークンで止まり、`pair --adopt` のやり直しで続く）。続く adopt
+     はこの新しいトークンで送る
   4. `POST /api/agent/adopt` に state の曲（`track_id`・パス・`rel_path`・`source`・size・sha256・
      トークンが `STALE_TOKEN` か）とプレイリスト（`playlist_id`・名前）を送り、付け替え表（外れたものは
      `to: null`）を受け取る。付け替えは Android と同じ規則（曲は `rel_path`、プレイリストは名前の
      `canonical_key`。曖昧なものは採らない）。サーバはそのまま `device_items`（トークンは `stale` なら
      `STALE_TOKEN`、それ以外は `ADOPTED_TOKEN`）・`device_playlist_state`（`dest_path` は名前、トークンは
-     `STALE_TOKEN`）を全置換し、付け替えたプレイリストに印を付け直し、`device_errors` を空にする。
+     `STALE_TOKEN`）を全置換し、付け替えたプレイリストに印を付け足し（既存の印は外さない）、`device_errors` を空にする。
      `generation` と `last_synced_at` は進めない。冪等で、同じ入力を送り直しても同じ結果になる
   5. エージェントは state の `tracks` / `playlists` のキーを付け替え、曲のトークンを `ADOPTED_TOKEN`
      （`STALE_TOKEN` の曲はそのまま）、プレイリストのトークンを `STALE_TOKEN`（サーバと同じ。最初の同期で
@@ -1974,8 +1978,8 @@ POST   /api/devices/:id/pair-code                 agent のみ。10 分・1 回�
 POST   /api/agent/pair                            { code, adopt_uuid? }（Bearer なし。端末タブで発行した `<selector>.<secret>`）→ 200 { device_uuid,
                                                   device_name, token }。不一致・期限切れ・試行超過・引けないセレクタは一律 401 invalid_code。
                                                   adopt_uuid（`pair --adopt`。32 桁の小文字 16 進。形の不正はコードに触らず 400 bad_request）は
-                                                  コードの消費と同じトランザクションで行の uuid を差し替える。行が端末の状態を持つか、uuid が
-                                                  他の行にあれば 409 not_adoptable（コードは消費せず、試行にも数えない。§7.11「引き継ぎ」、D-104）
+                                                  コードの消費と同じトランザクションで行の uuid を差し替える。行が端末の状態を持つか（uuid が
+                                                  既に adopt_uuid なら報告か計画があるか）、uuid が他の行にあれば 409 not_adoptable（コードは消費せず、試行にも数えない。§7.11「引き継ぎ」、D-104）
 GET    /api/agent/manifest                        → { device_uuid, device_name, generation, plan_token, pending_reevaluation,
                                                   items: [{ track_id, dest_path, token, size, sha256, rel_path, source }],
                                                   playlists: [{ playlist_id, name, token, tracks: [track_id] }],
@@ -2000,7 +2004,8 @@ POST   /api/agent/adopt                           { tracks: [{ track_id, path, r
                                                   playlists: [{ playlist_id, name }] } → 200 { tracks: [{ from, to }], playlists: [{ from, to }] }
                                                   （`to` は付け替え先の id、外れたものは null）。DB 全損後の `pair --adopt` で、付け替えた状態を
                                                   キャッシュへ直接書く（`generation` と `last_synced_at` は進めない。冪等。§7.11「引き継ぎ」、D-104）。
-                                                  400 bad_request（件数の上限・パスの形・未知の source・id とパスの鍵の重複・空のプレイリスト名）、
+                                                  400 bad_request（件数の上限・パスの形・未知の source・id とパスの鍵の重複・空のプレイリスト名・
+                                                  sha256 が空でも小文字 16 進 64 桁でもない・size が i64 を超える）、
                                                   409 library_busy（スキャン中）| open_plan | not_adoptable（既に報告を受けた端末）
 // Report = { generation, plan_id, state: { tracks: [{ track_id, dest_path, token, size, sha256 }],
 //            playlists: [{ playlist_id, name, token }] }, errors: [{ kind: track | playlist, ref_id, reason }] }
