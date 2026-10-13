@@ -181,6 +181,11 @@ export function pairCommand(origin: string, code: string): string {
   return `spindle-agent pair ${origin} ${code}`
 }
 
+/** DB を失った後、Mac に前の登録の保存先が残っているときに引き継ぐ pair のコマンド（P5-8、D-104） */
+export function pairAdoptCommand(origin: string, code: string): string {
+  return `spindle-agent pair --adopt ${origin} ${code}`
+}
+
 /** ジョブのイベントが状態の変化か（進捗だけのイベントは false）。`seen` はジョブごとの直前の状態で、
  * 終わりの状態は覚えない（大きくならない。再試行で queued に戻っても変化として拾う） */
 export function jobStateChanged(seen: Map<number, JobState>, e: Pick<JobEvent, 'id' | 'state'>): boolean {

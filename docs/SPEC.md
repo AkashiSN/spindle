@@ -454,7 +454,10 @@ state とミュージック.app。spindle へは報告で届く）で、DB の�
   manifest / `.spindle-device` と照合できず、回復・報告を受ける行も無い。**Android** は端末タブの「前の登録の
   保存先（引き継げる）」で、manifest の uuid の行を作り、曲の `rel_path` で `track_id` を付け替える
   （§7.11「引き継ぎ」、D-103）。
-  **Mac** は P5-8 まで、保存先（`~/Music/spindle`）を空にしてから pair し直す。バックアップを復元して行の uuid が
+  **Mac** は端末タブで新しく作った行の pair コードで `spindle-agent pair --adopt` を実行し、行の uuid を
+  エージェントの state の uuid へ差し替えてから、state の曲の `rel_path` で `track_id` を付け替える
+  （§7.11「iPhone」の「引き継ぎ」、D-104）。ミュージック.app の track（再生回数・レート・追加日）はそのまま残る。
+  Android でバックアップを復元して行の uuid が
   端末の manifest と食い違うときは、端末を削除（端末上のファイルには触らない）してから引き継ぐ
 
 ---
@@ -1563,7 +1566,8 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   1 つのキーに複数の曲、1 曲に複数の項目が当たるものは採らない。**採らなかった項目は manifest から外して管理外に
   する（ファイルは消さない）**。曲のトークンは `ADOPTED_TOKEN`（`"adopted"`）、プレイリストは `STALE_TOKEN`
   （回復が先に `STALE_TOKEN` にした曲は変えない）。remap は冪等で、途中で落ちてもやり直せば同じ結果になる。
-  Android 以外の transport は 400。Mac の `pair --adopt`（P5-8）は remap をサーバで計算する（§17）
+  Android 以外の transport は 400。Mac は `pair --adopt` で、同じ付け替えの規則をサーバで計算する
+  （下の「iPhone」の「引き継ぎ」、D-104）
 - **端末側の正本**: manifest は `format`・`device_uuid`・`volume` と、曲（track_id・path・配信トークン・
   size・sha256・`rel_path`・`source`）とプレイリスト（playlist_id・path・トークン）の一覧。知らない `format`、id とパスの重複、
   root 外のパス、10 万件超は読まずに止める。`device_uuid` と `volume` が端末の行と揃わなければ止める（別の
@@ -1633,8 +1637,9 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
 `agent-proto` で本体と共有）。導入・前提・困ったときは `agent/README.md`、エンジンの判断は D-100、
 ミュージック.app と配布の判断は D-101。
 
-- **コマンド**: `pair <URL> <コード> [--insecure-http]`（端末タブで発行した 10 分・1 回限り・
-  5 回まで試せるワンタイムコードでトークンを受け取る。発行すると旧トークンは失効）、`sync`、`status`、
+- **コマンド**: `pair <URL> <コード> [--insecure-http] [--adopt]`（端末タブで発行した 10 分・1 回限り・
+  5 回まで試せるワンタイムコードでトークンを受け取る。発行すると旧トークンは失効。`--adopt` は下の
+  「引き継ぎ」）、`sync`、`status`（引き継ぎが途中なら `adopt_pending` を出す）、
   `resolve`、`abandon`。多重起動は state のディレクトリの `lock`（`flock`）で防ぐ。平文の http は
   `--insecure-http` なしでは拒む
 - **保存先の所有権**: ローカルの root は `~/Music/spindle`（起動時にシンボリックリンクを解いた
@@ -1651,7 +1656,7 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   sync も止める（メディアフォルダの中の曲は削除でファイルまで消え、コピー設定が ON でも複製されず、
   前提が崩れる。D-101）
 - **sync の順序**: 前提の検査 → root の印と pair の初期化の続き → `pending_batches` と
-  `pending_ops` の回復 → manifest の取得 → **再発見**（ミュージック.app の file track のうち location が
+  `pending_ops` の回復 → 途中の引き継ぎ（`adopt_pending`）の続き → manifest の取得 → **再発見**（ミュージック.app の file track のうち location が
   root の下を指すものを state と突き合わせる）→ open な計画の照合 → 差分の表示と `y/N` → 確定 → 反映 →
   報告。バッチの途中は location が `.moving/` を指すので、回復を再発見より先に行う。
   open な計画を再開するのは、自分が `y/N` を経て確定し state に `plan_id` を記録した計画だけ（それ以外は
@@ -1674,6 +1679,47 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   （次の差分で追加になる）。コピー設定 ON のまま `add` の直後に落ちたときの複製は件数にかかわらず自動では
   消さず、候補を表示して `resolve <op_id> --delete-track <persistent_id>` か `--no-copy-created` を明示で
   選ばせる
+- **state の曲の出どころ**: state（`state.json`）の曲は persistent ID・パス・トークン・size・sha256・
+  inode / mtime に加えて、`rel_path`（送った元の Library の `tracks.rel_path`）と `source`（送る元の種類。
+  `master` / `opus` / `aac`）を必須で持つ（引き継ぎの付け替えの鍵。§7.11「端末側の正本」の manifest と同じ）。
+  値は manifest（`GET /api/agent/manifest` の `items[].rel_path` / `source`）の同じ `track_id` の項目から取り、
+  manifest に無い曲の追加・更新は項目のエラー（「出どころが無い（manifest に無い曲）」）にする。曲の
+  `pending_ops` には任意で、パス変更のバッチのメンバーには必須で持たせ、回復で写す。`STATE_VERSION` と
+  `PROTO_VERSION` は 1 のまま、この 2 項目の無い旧 state は読めない（リリース前の変更。作り直す）
+- **引き継ぎ**（`pair --adopt <URL> <コード>`。DB 全損後。D-104）: DB を作り直して端末タブで作った新しい
+  行の pair コードで、この Mac の保存先とミュージック.app の track をそのまま引き継ぐ。
+  1. 前提（コードを使う前）: 通常の pair と同じ検査（コピー設定・メディアフォルダ・Automation・トークンの
+     置き場）、前の登録の state（初期化が済み、サーバの情報がある）があること（無ければ「引き継ぐ前の登録が
+     ありません」で止める）、root の `.spindle-device` が state の uuid と一致すること、ローカルの回復
+     （サーバを使わない）で `pending_ops` / `pending_batches` が空になること（残れば止める）
+  2. `POST /api/agent/pair` に `adopt_uuid`（state の uuid）を付ける。サーバは 32 桁の小文字 16 進でなければ
+     コードに触らずに 400 `bad_request`。コードの消費と同じトランザクションで、行が端末の状態を一度も持って
+     いない（`last_synced_at` が NULL、計画が 1 件も無い、`device_items` と `device_playlist_state` が空）うえ
+     `adopt_uuid` が他の行に無いか、行の uuid が既に `adopt_uuid`（差し替え済みのやり直し）のときだけ行の uuid を
+     差し替える。それ以外は 409 `not_adoptable` で、コードは消費せず、予約した試行の枠も返す（断られても
+     5 回の試行に数えない）
+  3. エージェントは応答の uuid が state と同じことを確かめ、トークンを保存し、サーバの URL・名前と
+     `adopt_pending = true` を保存する。続く adopt はこの新しいトークンで送る
+  4. `POST /api/agent/adopt` に state の曲（`track_id`・パス・`rel_path`・`source`・size・sha256・
+     トークンが `STALE_TOKEN` か）とプレイリスト（`playlist_id`・名前）を送り、付け替え表（外れたものは
+     `to: null`）を受け取る。付け替えは Android と同じ規則（曲は `rel_path`、プレイリストは名前の
+     `canonical_key`。曖昧なものは採らない）。サーバはそのまま `device_items`（トークンは `stale` なら
+     `STALE_TOKEN`、それ以外は `ADOPTED_TOKEN`）・`device_playlist_state`（`dest_path` は名前、トークンは
+     `STALE_TOKEN`）を全置換し、付け替えたプレイリストに印を付け直し、`device_errors` を空にする。
+     `generation` と `last_synced_at` は進めない。冪等で、同じ入力を送り直しても同じ結果になる
+  5. エージェントは state の `tracks` / `playlists` のキーを付け替え、曲のトークンを `ADOPTED_TOKEN`
+     （`STALE_TOKEN` の曲はそのまま）、プレイリストのトークンを `STALE_TOKEN`（サーバと同じ。最初の同期で
+     中身を同じ名前のまま書き直す）にし、`plan_id` を消し、`needs_report` と `adopt_pending` を下ろして
+     1 回で保存する。**外れた曲・プレイリストは state から外すだけで、ファイルもミュージック.app の track も
+     消さない**（管理外になる）
+  3 と 5 の間で落ちたら、次の `sync` が回復の後・manifest の取得の前に 4 と 5 をやり直す（`pair --adopt` の
+  打ち直しでもよい。サーバの差し替えはやり直しを受け付ける）。`--adopt` 無しの pair で uuid が state と
+  食い違ったときは今どおり止め、文言で `pair --adopt` を案内する（同じ端末の pair し直しと区別できないので、
+  コードを使う前には検出しない）
+- **引き継いだ曲の近道**: `Update`（`from` 無し）で、state の曲のトークンが `ADOPTED_TOKEN`、パスの鍵・
+  size・sha256 が計画の項目と一致すれば、受け取りもミュージック.app の操作もせず、トークン（と `rel_path` /
+  `source`）だけを書き換える。報告はそのトークンで行う（計画に含まれるので検証を通る）。信頼の水準は日常の
+  差分と同じ（state の sha256 は再発見の inode / mtime のキャッシュと読み直しで保たれている）
 - **報告**（`POST /api/agent/report`）: `generation`・`plan_id`・再発見で確かめた state 全体・
   失敗した項目を送る。サーバは計画がその端末の open な計画で、`generation` が一致し、各項目が「現在の
   desired」「既存の `device_items` と同じ値」「その計画で許された遷移の結果」のどれかに完全一致すること
@@ -1925,10 +1971,13 @@ POST   /api/devices/:id/pair-code                 agent のみ。10 分・1 回�
 // 503 adb_disabled（強制破棄と端末の削除は adb を使わないので動く。D-98）
 
 // エージェントの経路（認証は下の「認証」。セッション・CSRF・trusted_cidrs は通らない。D-99）
-POST   /api/agent/pair                            { code }（Bearer なし。端末タブで発行した `<selector>.<secret>`）→ 200 { device_uuid,
-                                                  device_name, token }。不一致・期限切れ・試行超過・引けないセレクタは一律 401 invalid_code
+POST   /api/agent/pair                            { code, adopt_uuid? }（Bearer なし。端末タブで発行した `<selector>.<secret>`）→ 200 { device_uuid,
+                                                  device_name, token }。不一致・期限切れ・試行超過・引けないセレクタは一律 401 invalid_code。
+                                                  adopt_uuid（`pair --adopt`。32 桁の小文字 16 進。形の不正はコードに触らず 400 bad_request）は
+                                                  コードの消費と同じトランザクションで行の uuid を差し替える。行が端末の状態を持つか、uuid が
+                                                  他の行にあれば 409 not_adoptable（コードは消費せず、試行にも数えない。§7.11「引き継ぎ」、D-104）
 GET    /api/agent/manifest                        → { device_uuid, device_name, generation, plan_token, pending_reevaluation,
-                                                  items: [{ track_id, dest_path, token, size, sha256 }],
+                                                  items: [{ track_id, dest_path, token, size, sha256, rel_path, source }],
                                                   playlists: [{ playlist_id, name, token, tracks: [track_id] }],
                                                   diff: { items: [{ op, track_id, from, to, token, size, sha256 }],
                                                   held: [{ track_id, reason, waiting, has_copy }],
@@ -1946,7 +1995,13 @@ POST   /api/agent/plans/:id/abandon               Report に { pending_ops, pend
                                                   ほかは report と同じ
 POST   /api/agent/report                          Report → 200 {}（計画を completed にする。同じ報告の再送も 200）。400 invalid_report
                                                   （1 件でも外れれば全体を拒否。§7.11「報告」）| bad_request、404 no_plan、409 generation_mismatch |
-                                                  plan_closed | plan_unreadable。本文の上限は report と abandon だけ 64 MiB
+                                                  plan_closed | plan_unreadable。本文の上限は report と abandon と adopt だけ 64 MiB
+POST   /api/agent/adopt                           { tracks: [{ track_id, path, rel_path, source, size, sha256, stale }],
+                                                  playlists: [{ playlist_id, name }] } → 200 { tracks: [{ from, to }], playlists: [{ from, to }] }
+                                                  （`to` は付け替え先の id、外れたものは null）。DB 全損後の `pair --adopt` で、付け替えた状態を
+                                                  キャッシュへ直接書く（`generation` と `last_synced_at` は進めない。冪等。§7.11「引き継ぎ」、D-104）。
+                                                  400 bad_request（件数の上限・パスの形・未知の source・id とパスの鍵の重複・空のプレイリスト名）、
+                                                  409 library_busy（スキャン中）| open_plan | not_adoptable（既に報告を受けた端末）
 // Report = { generation, plan_id, state: { tracks: [{ track_id, dest_path, token, size, sha256 }],
 //            playlists: [{ playlist_id, name, token }] }, errors: [{ kind: track | playlist, ref_id, reason }] }
 // Plan   = { plan_id, generation, plan_token, items: [{ op_id, op, track_id, from, to, token, size, sha256 }],
@@ -2796,8 +2851,9 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
     途中の計画があれば保存できない
   - **設定**: 名前・系統（途中の計画があれば系統は変えられない）、Android は保存先の表示（変えるには削除して
     登録し直す）と「内容を検証」、iPhone は「pair コードを発行」（確認のうえ発行し、コードと期限と
-    `spindle-agent pair <この画面の origin> <コード>` をコピーできる形で出す。コードは画面の state にだけ
-    持つ）。最後に「端末を削除」（端末上のファイルは消さない。途中の計画があればそれも破棄する旨を確認に出す）
+    `spindle-agent pair <この画面の origin> <コード>` をコピーできる形で出す。「この Mac に前の登録の保存先が
+    残っていれば、代わりに次を実行すると引き継げます」と `spindle-agent pair --adopt <origin> <コード>` も
+    コピーできる形で添える（§7.11「引き継ぎ」、D-104）。コードは画面の state にだけ持つ）。最後に「端末を削除」（端末上のファイルは消さない。途中の計画があればそれも破棄する旨を確認に出す）
 - **設定**: 「表示」（配色: OS に従う / ライト / ダーク。localStorage に保存。P4-10、D-58 追記）、
   `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
   退避 WAV（`archived_files`）の一覧と復元
@@ -3247,6 +3303,7 @@ agent/                   ワークスペースのクレート `spindle-agent`（
 ├── src/main.rs          CLI（pair / sync / status / resolve / abandon）
 ├── src/sync.rs          各コマンドの段取り（state のディレクトリの lock を取り、state.json を読んでエンジンを呼ぶ）
 ├── src/pair.rs          pair と冪等な初期化（`.spindle-device`、「spindle」フォルダ）
+├── src/adopt.rs         `pair --adopt`（DB 全損後の引き継ぎ）と、途中で落ちたときの続き（D-104）
 ├── src/state.rs  ctx.rs state.json（エージェントの実状態の正本）と耐久化
 ├── src/recover.rs  rediscover.rs  plan.rs  exec.rs  batch.rs  playlist.rs
 │                        回復・再発見・再開の照合・実行・パス変更のバッチ・プレイリストの入れ替え
@@ -3337,12 +3394,11 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
 - [x] DB を失ったときの既存の保存先の引き継ぎ（Android。2026-10-13。P5-7）: 端末タブの「前の登録の保存先（引き継げる）」。
       manifest の uuid の行を作り、曲の `rel_path` で `track_id` を付け替える。manifest に `rel_path` / `source` を
       足し、`ADOPTED_TOKEN` の近道で送り直さずにトークンだけ書き換える（§6、§7.11「引き継ぎ」。D-103）
-- [ ] 引き継ぎ（Mac の `pair --adopt`。P5-8）: 今は保存先（`~/Music/spindle` とミュージック.app の「spindle」
-      フォルダ）を空にして pair し直す。uuid を写すだけでは足りない: DB を作り直すと `tracks.id` / `playlists.id` が
-      振り直され、state が id をキーにするので、写しが別の曲に結び付き再生回数が移る。remap は Library を引く
-      ので**サーバで計算**し、エージェントは state の `(track_id, path, rel_path, source)` とプレイリスト名を送って
-      付け替え表を受け取り、state のキーを直して `needs_report = true` で `report_only` する。pending が残って
-      いれば拒否し、`--adopt` 無しの uuid 不一致は今どおり止める（D-102、D-103）
+- [x] 引き継ぎ（Mac の `pair --adopt`。2026-10-13。P5-8）: 新しい行の pair コードで `pair --adopt` を実行すると、
+      pair が行の uuid を state の uuid へ差し替え、`POST /api/agent/adopt` が state の曲を `rel_path` で付け替えて
+      キャッシュへ直接書く。state と manifest に `rel_path` / `source` を足し、`ADOPTED_TOKEN` の近道で送り直さずに
+      トークンだけ書き換える。ミュージック.app の track（再生回数）は保たれる。pending が残っていれば止める
+      （§6、§7.11「iPhone」の「引き継ぎ」。D-104）
 - [ ] id の再利用: `tracks.id` / `playlists.id` は `INTEGER PRIMARY KEY` で `AUTOINCREMENT` ではないので、
       最大 id の行を GC が消すと次の挿入が同じ id を得る。端末に写しのある曲の id が別の曲に再利用されると、
       差分は `UpdateMove` になり、Android は収束するが、Mac ではミュージック.app の track（再生回数）が

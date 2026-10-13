@@ -2045,8 +2045,11 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
       `rel_path` の `canonical_key` で `track_id` / `playlist_id` を付け替え（外れた項目は管理外）、印を復元して
       `device_scan` を投入する。トークンは `ADOPTED_TOKEN` で、同期は同じパス・サイズ・sha256 なら転送せず
       トークンだけ書き換える（差分の op `adopted`）。Mac と id の再利用は残す（D-103）
-- [ ] P5-8 Mac の `pair --adopt`: uuid の不一致を明示で受け入れ、エージェントの state の `tracks` /
-      `playlists` のキーを同じ付け替えで直して `report_only` で全状態を報告する。ここが本命（再生回数・
-      レートの保全）で、pending が残っていれば拒否する。`--adopt` 無しの不一致は今どおり止める（D-102）
+- [x] P5-8 Mac の `pair --adopt`: 新しい行の pair コードで実行すると、pair が行の uuid を前の登録（state）の
+      uuid へ差し替え（`adopt_uuid`。行が端末の状態を持てば 409 `not_adoptable` でコードは消費しない）、
+      `POST /api/agent/adopt` が state の曲を `rel_path` で付け替えてキャッシュへ直接書く。state と manifest に
+      `rel_path` / `source` を足し、`ADOPTED_TOKEN` の近道で送り直さずにトークンだけ書き換える。ミュージック.app の
+      track（再生回数・レート）は保たれる。pending が残っていれば止め、途中で落ちたら次の `sync` が続きを行う。
+      端末タブの pair の案内に `--adopt` を添える。`--adopt` 無しの不一致は今どおり止める（D-104）
 - [ ] id の再利用の対策: 最大 id の行を GC が消さない（SQLite は max(rowid)+1 を振る）か、token も sha256 も
       パスも違う既存の写しを Update ではなく Delete + Add にする。Mac で再生回数が別の曲に移るのを防ぐ（D-102）
