@@ -1501,7 +1501,7 @@ pub fn adopt_snapshot(
     Ok(out)
 }
 
-/// 引き継ぎで印を付け直す。新しい行の generation は 0 のまま（計画はまだ無い）
+/// 引き継ぎで印を付け直す。新しい行の generation は作成時の既定のまま（進めない。計画はまだ無い）
 pub fn add_marks(conn: &Connection, device_id: i64, playlist_ids: &[i64]) -> Result<()> {
     let mut st = conn.prepare_cached(
         "INSERT OR IGNORE INTO device_playlists (device_id, playlist_id) VALUES (?1, ?2)",

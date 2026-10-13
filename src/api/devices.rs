@@ -12,7 +12,7 @@ use crate::device::adb::probe_volumes_under;
 use crate::device::adb::AdbFs;
 use crate::device::adopt::{self, Candidate};
 use crate::device::credential::{self, PAIR_SECRET_BYTES, PAIR_SELECTOR_BYTES};
-use crate::device::ondevice::is_reserved;
+use crate::device::ondevice::{is_reserved, JOURNAL_PATH, MOVING_DIR};
 use crate::device::quote::{root_abs_under, valid_serial, valid_volume, DEFAULT_ROOT};
 use crate::device::recover::{recover, Expect, RecoverError};
 use crate::device::remote::{DeviceFs as _, DirState, RemoteError};
@@ -1045,6 +1045,14 @@ async fn create_adb(
                 Err(e) => return Ok(remote_failed(&rt, &serial, e)),
             };
             if !files.iter().all(|f| is_reserved(&f.path)) {
+                return Ok(not_empty(&rt, &volume));
+            }
+            // 回復に要る物（`.spindle/moving` の下の曲、中身のあるジャーナル）が残っていれば、
+            // manifest の有無にかかわらず片付けない
+            let moving_prefix = format!("{MOVING_DIR}/");
+            if files.iter().any(|f| {
+                f.path.starts_with(&moving_prefix) || (f.path == JOURNAL_PATH && f.size > 0)
+            }) {
                 return Ok(not_empty(&rt, &volume));
             }
             let leftover = match store::read_manifest(&fs).await {

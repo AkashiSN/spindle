@@ -1605,3 +1605,46 @@ async fn plain_registration_keeps_a_nonempty_manifest_whose_only_file_is_moving(
         assert_eq!(app.device_count(), 0);
     }
 }
+
+/// 回復に要る物（`.spindle/moving` の下の曲、中身のあるジャーナル）が残っている保存先は、manifest が
+/// 無い・読めなくても通常登録は片付けない（曲の唯一の実体があり得る）
+#[tokio::test]
+async fn plain_registration_keeps_recovery_artifacts_when_manifest_is_missing_or_unreadable() {
+    // 旧形式（rel_path / source が無い）= 読めない manifest
+    let old_format = br#"{"format":1,"device_uuid":"0123456789abcdef0123456789abcdef","volume":"emulated","items":[{"track_id":1,"path":"A/a.flac","token":"t","size":4,"sha256":"00"}],"playlists":[]}"#;
+    // (manifest, moving の曲, journal)
+    type Case<'a> = (Option<&'a [u8]>, bool, Option<&'a [u8]>);
+    let cases: [Case; 3] = [
+        (None, true, None),
+        (Some(old_format), true, None),
+        (Some(old_format), false, Some(b"{\"x\":1}\n")),
+    ];
+    for (i, (manifest, moving, journal)) in cases.into_iter().enumerate() {
+        let app = App::new().await;
+        app.connect("SER1");
+        let root = app.device_root("emulated");
+        std::fs::create_dir_all(root.join(".spindle/moving")).unwrap();
+        if let Some(m) = manifest {
+            std::fs::write(root.join(".spindle/manifest.json"), m).unwrap();
+        }
+        if moving {
+            std::fs::write(root.join(".spindle/moving/1"), b"AAAA").unwrap();
+        }
+        if let Some(j) = journal {
+            std::fs::write(root.join(".spindle/journal"), j).unwrap();
+        }
+        let (s, v) = app.register("X", "SER1", "emulated").await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (StatusCode::CONFLICT, Some("not_empty")),
+            "case {i} {v}"
+        );
+        if moving {
+            assert!(root.join(".spindle/moving/1").is_file(), "case {i}");
+        }
+        if journal.is_some() {
+            assert!(root.join(".spindle/journal").is_file(), "case {i}");
+        }
+        assert_eq!(app.device_count(), 0, "case {i}");
+    }
+}
