@@ -5,8 +5,8 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use agent_proto::{
-    AbandonRequest, ConfirmRequest, ErrorBody, ManifestResponse, PairRequest, PairResponse, Plan,
-    ReportRequest,
+    AbandonRequest, AdoptRequest, AdoptResponse, ConfirmRequest, ErrorBody, ManifestResponse,
+    PairRequest, PairResponse, Plan, ReportRequest,
 };
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_RANGE, IF_MATCH, RANGE};
@@ -19,6 +19,9 @@ pub mod fake;
 
 /// 曲 1 本の取得の上限（止まった接続がいつまでも残らないように）
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// pair の 409 `not_adoptable`（行の差し替えを断られた）
+pub const NOT_ADOPTABLE_PAIR_STOP: &str = "この端末の行は既に使われているか、別の端末の uuid です。spindle の端末タブで新しい iPhone 端末を作ってから pair し直してください";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fetch {
@@ -48,7 +51,10 @@ pub enum Reported {
 }
 
 pub trait Server {
-    fn pair(&self, code: &str) -> Result<PairResponse>;
+    /// `adopt_uuid` は DB 全損後の引き継ぎ用（旧 state の device_uuid へ行の uuid を差し替える）
+    fn pair(&self, code: &str, adopt_uuid: Option<&str>) -> Result<PairResponse>;
+    /// 旧 state の曲・プレイリストの id を、再構築後の Library の id へ付け替える
+    fn adopt(&self, r: &AdoptRequest) -> Result<AdoptResponse>;
     fn manifest(&self) -> Result<ManifestResponse>;
     /// `size` は期待する総サイズ。再開（206）の `Content-Range` の総サイズと照合する
     fn fetch(
@@ -185,13 +191,13 @@ fn json<T: serde::de::DeserializeOwned>(res: Response) -> Result<T> {
 }
 
 impl Server for HttpServer {
-    fn pair(&self, code: &str) -> Result<PairResponse> {
+    fn pair(&self, code: &str, adopt_uuid: Option<&str>) -> Result<PairResponse> {
         let res = self
             .client
             .post(self.url("api/agent/pair")?)
             .json(&PairRequest {
                 code: code.to_owned(),
-                adopt_uuid: None,
+                adopt_uuid: adopt_uuid.map(str::to_owned),
             })
             .send()
             .map_err(|e| Error::Server(e.without_url().to_string()))?;
@@ -200,6 +206,43 @@ impl Server for HttpServer {
             StatusCode::UNAUTHORIZED => Err(Error::Stop(
                 "ペアリングコードが違うか、期限切れか、使用済みです。端末タブで発行し直してください".to_owned(),
             )),
+            StatusCode::CONFLICT => {
+                let b = error_body(res);
+                Err(if b.error == "not_adoptable" {
+                    Error::Stop(NOT_ADOPTABLE_PAIR_STOP.to_owned())
+                } else {
+                    Error::Server(format!("409: {}", b.error))
+                })
+            }
+            _ => Err(unexpected(res)),
+        }
+    }
+
+    fn adopt(&self, r: &AdoptRequest) -> Result<AdoptResponse> {
+        let res = self.send(
+            self.auth(self.client.post(self.url("api/agent/adopt")?))?
+                .json(r),
+        )?;
+        match res.status() {
+            StatusCode::OK => json(res),
+            StatusCode::CONFLICT => {
+                let b = error_body(res);
+                Err(match b.error.as_str() {
+                    "library_busy" => Error::Stop(
+                        "サーバのライブラリのスキャン中。終わってから sync し直してください"
+                            .to_owned(),
+                    ),
+                    "open_plan" => Error::Stop(
+                        "サーバに途中の計画があります。端末タブで計画を片付けてから pair --adopt し直してください"
+                            .to_owned(),
+                    ),
+                    "not_adoptable" => Error::Stop(
+                        "この端末の行は引き継げる状態ではありません（同期済みか、別の端末の行です）。spindle の端末タブで新しい iPhone 端末を作ってから pair し直してください"
+                            .to_owned(),
+                    ),
+                    other => Error::Server(format!("409: {other}")),
+                })
+            }
             _ => Err(unexpected(res)),
         }
     }

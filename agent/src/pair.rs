@@ -51,7 +51,7 @@ pub fn pair<M: Music, S: Server>(
     cx.music.probe()?;
     // トークンを保存できることも、コードを使う前に確かめる（ssh 越しの Keychain など）
     secrets.check_writable()?;
-    let resp = cx.server.pair(code)?;
+    let resp = cx.server.pair(code, None)?;
     if cx.state.setup.is_some() {
         if let Some(s) = &cx.state.server {
             if s.device_uuid != resp.device_uuid {
