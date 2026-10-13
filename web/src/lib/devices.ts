@@ -209,7 +209,7 @@ export function deviceMessage(e: unknown): string {
       case 'adb_disabled':
         return ADB_DISABLED_MESSAGE
       case 'adoptable':
-        return '保存先に前の登録の曲があります。「既存の保存先を引き継ぐ」で登録してください'
+        return '保存先に前の登録の曲があります。保存先で「前の登録の保存先（引き継げる）」を選んで引き継いでください'
       case 'not_adoptable':
         return '引き継げる保存先がありません（manifest が無いか読めないか、別のボリュームのものです）'
       case 'uuid_registered':

@@ -1525,6 +1525,32 @@ async fn transferred_items_record_rel_path_and_source() {
 }
 
 #[tokio::test]
+async fn move_and_update_move_record_rel_path_and_source() {
+    let fs = device_at(
+        &[(1, "A/a.flac", b"AAAA"), (2, "B/b.flac", b"BBBB")],
+        1 << 30,
+    )
+    .await;
+    // 1 は移動だけ、2 は内容も変えて移動（更新 + 移動）
+    let report = sync_to(
+        &fs,
+        &[(1, "C/a.flac", b"AAAA"), (2, "D/b.flac", b"BBB2")],
+        &TestControl::default(),
+    )
+    .await
+    .unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let m = store::read_manifest(&fs).await.unwrap().unwrap();
+    let by_id = |id| m.items.iter().find(|i| i.track_id == id).unwrap();
+    assert_eq!(by_id(1).path, "C/a.flac");
+    assert_eq!(by_id(1).rel_path, "C/a.flac");
+    assert_eq!(by_id(1).source, "master");
+    assert_eq!(by_id(2).path, "D/b.flac");
+    assert_eq!(by_id(2).rel_path, "D/b.flac");
+    assert_eq!(by_id(2).source, "master");
+}
+
+#[tokio::test]
 async fn sync_refreshes_stale_rel_path_of_unchanged_items() {
     let fs = device_at(&[(1, "A/a.flac", b"AAAA")], 1 << 30).await;
     // 端末の rel_path を古い値にしておく（WAV → FLAC の正規化で Library 側だけ変わった状況）

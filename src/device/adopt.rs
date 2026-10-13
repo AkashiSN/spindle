@@ -145,6 +145,17 @@ pub fn is_adoptable(m: &DeviceManifest) -> bool {
     !m.items.is_empty() || !m.playlists.is_empty()
 }
 
+/// このボリュームの保存先として引き継げる manifest か。ボリュームが一致し、曲かプレイリストを指し、
+/// `device_uuid` が `random_uuid` の形（32 桁の小文字 16 進）であること
+pub fn adoptable_for(m: &DeviceManifest, volume: &str) -> bool {
+    m.volume == volume
+        && is_adoptable(m)
+        && m.device_uuid.len() == 32
+        && m.device_uuid
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// 回復（ジャーナルの片付けとサイズの照合）→ remap → manifest の書き直し。uuid が DB に無いことは
 /// 呼び出し側が先に確かめること。remap は冪等なので、行の作成の前に落ちてもやり直せる
 pub async fn rewrite<F: DeviceFs>(

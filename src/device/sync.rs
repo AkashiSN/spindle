@@ -705,7 +705,27 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             self.errors
                 .push((EntryKind::Track, o.track_id, UNMANAGED_COLLISION.to_owned()));
         }
-        let mut ops = drop_components(ops, &blocked);
+        let ops = drop_components(ops, &blocked);
+        // 由来（rel_path / source）を引けない移動は manifest に書けない。成分ごと外して理由を残す
+        let no_origin: HashSet<i64> = ops
+            .iter()
+            .filter(|o| {
+                matches!(o.op, OpKind::Move | OpKind::UpdateMove)
+                    && !self.origins.contains_key(&o.track_id)
+            })
+            .map(|o| o.track_id)
+            .collect();
+        for o in ops.iter().filter(|o| no_origin.contains(&o.track_id)) {
+            if !self
+                .errors
+                .iter()
+                .any(|e| e.0 == EntryKind::Track && e.1 == o.track_id)
+            {
+                self.errors
+                    .push((EntryKind::Track, o.track_id, SourceError::Missing.reason()));
+            }
+        }
+        let mut ops = drop_components(ops, &no_origin);
         let mut superseded: Option<(String, Vec<BatchMember>)> = None;
         loop {
             if ops.is_empty() {
@@ -722,19 +742,6 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
                 self.abort_batch(&old, Some(&batch_id), &members).await?;
             }
             let members = batch_members(&batch_id, &ops, self.origins);
-            for o in &ops {
-                let moving = matches!(o.op, OpKind::Move | OpKind::UpdateMove);
-                if moving
-                    && !members.iter().any(|m| m.track_id == o.track_id)
-                    && !self
-                        .errors
-                        .iter()
-                        .any(|e| e.0 == EntryKind::Track && e.1 == o.track_id)
-                {
-                    self.errors
-                        .push((EntryKind::Track, o.track_id, SourceError::Missing.reason()));
-                }
-            }
             let mut records = std::mem::take(&mut self.pending_done);
             records.push(Record::BatchBegin {
                 batch_id: batch_id.clone(),

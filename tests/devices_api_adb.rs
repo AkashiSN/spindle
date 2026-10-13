@@ -302,6 +302,17 @@ impl App {
 
     /// 前の DB で同期済みだった保存先を端末に置く（uuid は DB に無い）
     fn plant_store(&self, items: &[(&str, &str, &[u8])], playlists: &[&str]) {
+        self.plant_store_as(OLD_UUID, "emulated", items, playlists);
+    }
+
+    /// manifest の uuid と volume を指定して置く（ファイルは常に `emulated` の下）
+    fn plant_store_as(
+        &self,
+        uuid: &str,
+        volume: &str,
+        items: &[(&str, &str, &[u8])],
+        playlists: &[&str],
+    ) {
         let root = self.device_root("emulated");
         let mut its = Vec::new();
         for (i, (path, rel, body)) in items.iter().enumerate() {
@@ -324,7 +335,7 @@ impl App {
         std::fs::write(
             root.join(".spindle/manifest.json"),
             serde_json::to_vec(&json!({
-                "format": 1, "device_uuid": "olduuid", "volume": "emulated", "items": its, "playlists": pls,
+                "format": 1, "device_uuid": uuid, "volume": volume, "items": its, "playlists": pls,
             }))
             .unwrap(),
         )
@@ -358,6 +369,8 @@ impl App {
         self.query("SELECT uuid FROM devices WHERE id = ?1", [id])
     }
 }
+
+const OLD_UUID: &str = "0123456789abcdef0123456789abcdef";
 
 fn req(method: Method, uri: &str) -> axum::http::request::Builder {
     let peer: SocketAddr = LAN.parse().unwrap();
@@ -1349,7 +1362,7 @@ async fn preview_counts_what_would_be_adopted() {
         )
         .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["device_uuid"], "olduuid");
+    assert_eq!(v["device_uuid"], OLD_UUID);
     assert_eq!(
         (v["tracks_adopted"].as_u64(), v["tracks_dropped"].as_u64()),
         (Some(1), Some(1))
@@ -1384,7 +1397,7 @@ async fn adopt_creates_the_row_with_the_device_uuid_marks_and_scan() {
     let (s, v) = app.adopt("Xperia").await;
     assert_eq!(s, StatusCode::CREATED, "{v}");
     let id = v["id"].as_i64().unwrap();
-    assert_eq!(app.uuid_of(id), "olduuid");
+    assert_eq!(app.uuid_of(id), OLD_UUID);
     assert_eq!(app.count_jobs("device_scan"), 1);
     let marks: i64 = app.query_i64(&format!(
         "SELECT COUNT(*) FROM device_playlists WHERE device_id = {id}"
@@ -1406,8 +1419,8 @@ async fn adopt_refuses_a_registered_uuid_without_touching_the_manifest() {
     let app = App::new().await;
     app.connect("SER1");
     app.plant_store(&[("A/a.flac", "A/a.flac", b"AAAA")], &[]);
-    app.raw_exec("INSERT INTO devices (uuid, name, name_key, transport, variant, selection, created_at, updated_at)
-                  VALUES ('olduuid', 'Mac', 'mac', 'agent', 'aac', 'all', 0, 0)");
+    app.raw_exec(&format!("INSERT INTO devices (uuid, name, name_key, transport, variant, selection, created_at, updated_at)
+                  VALUES ('{OLD_UUID}', 'Mac', 'mac', 'agent', 'aac', 'all', 0, 0)"));
     let before = std::fs::read(app.device_root("emulated").join(".spindle/manifest.json")).unwrap();
     let (s, v) = app.adopt("Xperia").await;
     assert_eq!(
@@ -1471,7 +1484,7 @@ async fn adopt_can_be_retried_after_the_manifest_was_rewritten() {
     // やり直しの引き継ぎは同じ結果になる
     let (s, v) = app.adopt("Xperia").await;
     assert_eq!(s, StatusCode::CREATED, "{v}");
-    assert_eq!(app.uuid_of(v["id"].as_i64().unwrap()), "olduuid");
+    assert_eq!(app.uuid_of(v["id"].as_i64().unwrap()), OLD_UUID);
     assert_eq!(
         store::read_manifest(&fs).await.unwrap().unwrap(),
         first.manifest
@@ -1485,4 +1498,83 @@ async fn adopt_for_agent_is_bad_request() {
         "name": "Mac", "transport": "agent", "variant": "aac", "selection": "all", "adopt": true,
     }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+const PREVIEW: &str = "/api/devices/adb/adopt-preview?serial=SER1&volume=emulated";
+
+async fn assert_not_adoptable(app: &App) {
+    let (s, v) = app.adopt("Xperia").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("not_adoptable")),
+        "{v}"
+    );
+    let (s, v) = app.call(Method::GET, PREVIEW, None).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("not_adoptable")),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn store_of_another_volume_is_nonempty_not_adoptable() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.plant_store_as(
+        OLD_UUID,
+        "sdcard0",
+        &[("A/a.flac", "A/a.flac", b"AAAA")],
+        &[],
+    );
+    let (_, v) = app
+        .call(Method::GET, "/api/devices/adb/unregistered", None)
+        .await;
+    assert_eq!(v["items"][0]["volumes"][0]["state"], "nonempty", "{v}");
+    let (s, v) = app.register("X", "SER1", "emulated").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("not_empty")),
+        "{v}"
+    );
+    assert_not_adoptable(&app).await;
+}
+
+#[tokio::test]
+async fn empty_leftover_manifest_is_not_adoptable() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.plant_store(&[], &[]);
+    assert_not_adoptable(&app).await;
+}
+
+#[tokio::test]
+async fn manifest_with_a_malformed_uuid_is_not_adoptable() {
+    let app = App::new().await;
+    app.connect("SER1");
+    for bad in ["olduuid", "0123456789ABCDEF0123456789ABCDEF", "../../etc"] {
+        app.plant_store_as(bad, "emulated", &[("A/a.flac", "A/a.flac", b"AAAA")], &[]);
+        assert_not_adoptable(&app).await;
+        let (s, v) = app.register("X", "SER1", "emulated").await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (StatusCode::CONFLICT, Some("not_empty")),
+            "{bad} {v}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn registered_uuid_store_with_items_is_not_empty_for_plain_registration() {
+    let app = App::new().await;
+    app.connect("SER1");
+    app.plant_store(&[("A/a.flac", "A/a.flac", b"AAAA")], &[]);
+    app.raw_exec(&format!("INSERT INTO devices (uuid, name, name_key, transport, variant, selection, created_at, updated_at)
+                  VALUES ('{OLD_UUID}', 'Mac', 'mac', 'agent', 'aac', 'all', 0, 0)"));
+    let (s, v) = app.register("X", "SER1", "emulated").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("not_empty")),
+        "{v}"
+    );
 }

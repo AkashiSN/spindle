@@ -722,10 +722,9 @@ async fn adopted_store_syncs_without_transferring_unchanged_tracks() {
         source: SourceKind::Master.as_str().into(),
     });
     store::write_manifest(&fs, &m).await.unwrap();
-    let mtime_before = std::fs::metadata(device_file(&fx.device_root))
-        .unwrap()
-        .modified()
-        .unwrap();
+    let meta_before = std::fs::metadata(device_file(&fx.device_root)).unwrap();
+    let mtime_before = meta_before.modified().unwrap();
+    let ino_before = std::os::unix::fs::MetadataExt::ino(&meta_before);
 
     // 引き継ぎ（API と同じ手順）
     let (tracks, playlists) = fx.db.read(devices::adopt_inputs).await.unwrap();
@@ -772,6 +771,12 @@ async fn adopted_store_syncs_without_transferring_unchanged_tracks() {
             .modified()
             .unwrap(),
         mtime_before
+    );
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(
+            &std::fs::metadata(device_file(&fx.device_root)).unwrap()
+        ),
+        ino_before
     );
     let items = fx
         .db

@@ -451,8 +451,9 @@ state とミュージック.app。spindle へは報告で届く）で、DB の�
   系統 → 端末」の段に使う（D-95 の P5-2 追記）
 - **キャッシュ表だけを失い、`devices` の行と認証情報が残った場合**は、曲とプレイリストのキャッシュは次の回復・
   報告で戻る。**DB 全体を失うと** `devices` の行・`devices.uuid`・エージェントのトークンも失われ、端末側の
-  manifest / `.spindle-device` と照合できず、回復・報告を受ける行も無い。**Android** は端末タブの「既存の保存先を
-  引き継ぐ」で、manifest の uuid の行を作り、曲の `rel_path` で `track_id` を付け替える（§7.11「引き継ぎ」、D-103）。
+  manifest / `.spindle-device` と照合できず、回復・報告を受ける行も無い。**Android** は端末タブの「前の登録の
+  保存先（引き継げる）」で、manifest の uuid の行を作り、曲の `rel_path` で `track_id` を付け替える
+  （§7.11「引き継ぎ」、D-103）。
   **Mac** は P5-8 まで、保存先（`~/Music/spindle`）を空にしてから pair し直す。バックアップを復元して行の uuid が
   端末の manifest と食い違うときは、端末を削除（端末上のファイルには触らない）してから引き継ぐ
 
@@ -1538,15 +1539,19 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   `Music/spindle`。**root が無いか空のときだけ**登録でき、`.spindle/manifest.json` を作る（空でなければ
   409 `not_empty`。既存のファイルの扱いを推測しない。片付けるのは**曲もプレイリストも指さない空の
   manifest だけ**（前の登録の失敗の残り）。曲かプレイリストを指す manifest は捨てず 409 `adoptable` で
-  「既存の保存先を引き継ぐ」を案内する）。保存先は PATCH で変えない（削除して登録し直す）。Poweramp の
+  引き継ぎを案内する。対象は `volume` が登録先と同じで、uuid が DB に無いものに限る）。
+  保存先は PATCH で変えない（削除して登録し直す）。Poweramp の
   スキャン範囲はそのフォルダ設定なので、保存先はその下に置く
 - **引き継ぎ**（DB 全損後。`POST /api/devices` の `adopt: true`。D-103）: 未登録の一覧は、root の manifest が
-  読めて、uuid が DB に無く、曲かプレイリストを指すボリュームを `adoptable` にする。プレビュー
+  読めて、`volume` が一致し、uuid が DB に無く（32 桁の小文字 16 進）、曲かプレイリストを指す
+  （空の manifest は引き継げない）ボリュームを `adoptable` にする。プレビュー
   （`GET /api/devices/adb/adopt-preview`）は書かずに付け替える曲・外れる曲・プレイリスト・管理外の件数と
   `library_busy` を返す（ジャーナルは回復しないので件数は目安）。確定は `register_lock` の下で、
   Library の `scan` ジョブが待ち・実行中なら 409 `library_busy`（DB の作り直し途中だと大半が外れる）→
-  manifest を読む（無い・読めない・`volume` 違い・回復の失敗は 409 `not_adoptable`、uuid が DB にあれば
-  409 `uuid_registered`）→ 回復（`recover`。DB は見ない）→ remap → `compact` で manifest を書き直す →
+  manifest を読む（無い・読めない・`volume` 違い・空・uuid の形が不正・回復で manifest の不整合が
+  見つかったときは 409 `not_adoptable`、uuid が DB にあれば 409 `uuid_registered`。端末との通信の失敗は
+  既存のエラー応答の 502 `device_failed` / 409 `not_connected`）→
+  回復（`recover`。DB は見ない）→ remap → `compact` で manifest を書き直す →
   1 トランザクションで manifest の uuid の行を作り、付け替えたプレイリストに印を付け直す →
   `device_scan` を投入する。`generation` は作成時の既定のまま（印の復元で進めない）。印を付け直すのは、
   端末に m3u8 があるのはそのプレイリストに印が付いていたからで、付けないと `selection=playlists` の端末の
@@ -1880,7 +1885,7 @@ POST   /api/devices                               { name, transport: adb | agent
                                                   `adopt: true`（adb のみ。他の transport は 400）は既存の保存先の引き継ぎで、manifest の uuid の
                                                   行を作る（§7.11「引き継ぎ」、D-103）。400 bad_request、
                                                   409 duplicate（名前）| serial_registered | not_empty | not_connected |
-                                                  adoptable（曲を指す manifest がある。引き継ぎを案内）| not_adoptable | uuid_registered |
+                                                  adoptable（引き継げる manifest がある。引き継ぎを案内）| not_adoptable | uuid_registered |
                                                   library_busy（scan が待ち・実行中）、502 device_failed、503 adb_disabled
 PATCH  /api/devices/:id                           { name?, selection?, variant? } → 200 Device。名前以外は open な計画か待ち・実行中の
                                                   device_sync がある間 409 open_plan。409 duplicate。保存先は変えない（削除して登録し直す）
@@ -1894,7 +1899,7 @@ GET    /api/devices/:id/estimate?selection=&playlist_ids=1,2
                                                   bytes に含まない曲数）
 GET    /api/devices/adb/unregistered              接続中で未登録の Android → { items: [{ serial, model, state, volumes: [{ volume, path, free,
                                                   state: missing | empty | nonempty | adoptable }], error }] }（volumes は state = device の端末だけ
-                                                  調べる。adoptable = 読める manifest が曲かプレイリストを指し、uuid が DB に無い）。503 adb_disabled
+                                                  調べる。adoptable = 読める manifest が曲かプレイリストを指し、volume が一致し、uuid が DB に無い）。503 adb_disabled
 GET    /api/devices/adb/adopt-preview?serial=&volume=
                                                   引き継ぎのプレビュー（読むだけ。ジャーナルは回復しないので件数は目安）→ { device_uuid,
                                                   tracks_adopted, tracks_dropped, playlists_adopted, playlists_dropped, unmanaged, library_busy }
@@ -3324,7 +3329,7 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
       移動でも track と再生回数を保てる（D-101））
 - [ ] ADB の転送の速さ: shell v2 の stdin 自体は約 38MB/s だが、1 曲ごとの意図・`sync`・sha256 の往復込みの実測は
       約 6.5MB/s で、全曲（約 9,000 曲）の初回はおよそ 2 時間。意図の追記や `sync` をまとめる高速化は持ち越し（D-98）
-- [x] DB を失ったときの既存の保存先の引き継ぎ（Android。2026-10-13。P5-7）: 端末タブの「既存の保存先を引き継ぐ」。
+- [x] DB を失ったときの既存の保存先の引き継ぎ（Android。2026-10-13。P5-7）: 端末タブの「前の登録の保存先（引き継げる）」。
       manifest の uuid の行を作り、曲の `rel_path` で `track_id` を付け替える。manifest に `rel_path` / `source` を
       足し、`ADOPTED_TOKEN` の近道で送り直さずにトークンだけ書き換える（§6、§7.11「引き継ぎ」。D-103）
 - [ ] 引き継ぎ（Mac の `pair --adopt`。P5-8）: 今は保存先（`~/Music/spindle` とミュージック.app の「spindle」

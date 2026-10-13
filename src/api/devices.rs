@@ -868,7 +868,7 @@ async fn is_adoptable_store(state: &AppState, rt: &AdbRuntime, serial: &str, vol
         }
     };
     match adopt::read_candidate(&fs).await {
-        Ok(Candidate::Manifest(m)) if adopt::is_adoptable(&m) => {
+        Ok(Candidate::Manifest(m)) if adopt::adoptable_for(&m, volume) => {
             let uuid = m.device_uuid;
             match state.db.read(move |c| dbdev::uuid_exists(c, &uuid)).await {
                 Ok(registered) => !registered,
@@ -1022,12 +1022,12 @@ async fn create_adb(
     // 引き継げる保存先（曲かプレイリストを指す manifest で、uuid が DB に無い）は推測で捨てず、
     // 引き継ぎを案内する
     match adopt::read_candidate(&fs).await {
-        Ok(Candidate::Manifest(m)) if adopt::is_adoptable(&m) => {
+        Ok(Candidate::Manifest(m)) if adopt::adoptable_for(&m, &volume) => {
             let uuid = m.device_uuid.clone();
             if !state.db.read(move |c| dbdev::uuid_exists(c, &uuid)).await? {
                 return Ok(conflict(
                     "adoptable",
-                    "保存先に前の登録の曲がある。「既存の保存先を引き継ぐ」で登録してください",
+                    "保存先に前の登録の曲があります。保存先で「前の登録の保存先（引き継げる）」を選んで引き継いでください",
                 ));
             }
         }
@@ -1135,7 +1135,7 @@ async fn adopt_adb(
         return Ok(library_busy());
     }
     let m = match adopt::read_candidate(fs).await {
-        Ok(Candidate::Manifest(m)) if m.volume == volume => m,
+        Ok(Candidate::Manifest(m)) if adopt::adoptable_for(&m, &volume) => m,
         Ok(_) => return Ok(not_adoptable()),
         Err(e) => return Ok(remote_failed(rt, &serial, e)),
     };
@@ -1253,7 +1253,7 @@ pub async fn adopt_preview(
         Err(e) => return Ok(remote_failed(&rt, &q.serial, e)),
     };
     let m = match adopt::read_candidate(&fs).await {
-        Ok(Candidate::Manifest(m)) if m.volume == q.volume => m,
+        Ok(Candidate::Manifest(m)) if adopt::adoptable_for(&m, &q.volume) => m,
         Ok(_) => return Ok(not_adoptable()),
         Err(e) => return Ok(remote_failed(&rt, &q.serial, e)),
     };
