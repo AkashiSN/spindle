@@ -52,6 +52,8 @@ pub fn pair_adopt<M: Music, S: Server>(
         (Some(s), true) => s.device_uuid.clone(),
         _ => return Err(Error::Stop(NO_PREVIOUS.to_owned())),
     };
+    // root の印が前の登録のものであること（sync と同じ照合。別の端末の root ならコードを使わずに止める）
+    crate::sync::check_marker(cx)?;
     // ローカルの回復はサーバを使わない。片付かない途中の操作があれば、コードを使わずに止める
     recover::recover(cx)?;
     if !cx.state.pending_ops.is_empty() || !cx.state.pending_batches.is_empty() {
@@ -65,6 +67,8 @@ pub fn pair_adopt<M: Music, S: Server>(
         )));
     }
     secrets.set(&resp.token)?;
+    // 続く adopt はこのトークンで送る（CLI の pair はトークン無しのサーバで始まる）
+    cx.server.use_token(&resp.token)?;
     if let Some(s) = cx.state.server.as_mut() {
         s.url = url.to_owned();
         s.insecure_http = insecure_http;
@@ -112,8 +116,9 @@ pub fn finish<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<Option<Adop
     let mut summary = AdoptSummary::default();
 
     let mut tracks = BTreeMap::new();
-    for (id, mut e) in std::mem::take(&mut cx.state.tracks) {
-        match tracks_map.get(&id) {
+    for (id, e) in &cx.state.tracks {
+        let mut e = e.clone();
+        match tracks_map.get(id) {
             Some(&to) => {
                 if e.token != STALE_TOKEN {
                     e.token = ADOPTED_TOKEN.to_owned();
@@ -128,8 +133,9 @@ pub fn finish<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<Option<Adop
         }
     }
     let mut playlists = BTreeMap::new();
-    for (id, mut e) in std::mem::take(&mut cx.state.playlists) {
-        match playlists_map.get(&id) {
+    for (id, e) in &cx.state.playlists {
+        let mut e = e.clone();
+        match playlists_map.get(id) {
             Some(&to) => {
                 // サーバの device_playlist_state と同じく STALE_TOKEN（次の差分で中身を入れ直す）
                 e.token = STALE_TOKEN.to_owned();
@@ -141,6 +147,7 @@ pub fn finish<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<Option<Adop
             None => summary.playlists_dropped += 1,
         }
     }
+    // 付け替え表を全部確かめてから差し替える（途中で止めても Ctx の state は元のまま）
     cx.state.tracks = tracks;
     cx.state.playlists = playlists;
     cx.state.plan_id = None;

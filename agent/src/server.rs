@@ -2,6 +2,7 @@
 //! トークンはログ・エラーに出さない。401 はトークンの失効として pair のやり直しを案内する
 
 use std::io::{Read, Write};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use agent_proto::{
@@ -55,6 +56,8 @@ pub trait Server {
     fn pair(&self, code: &str, adopt_uuid: Option<&str>) -> Result<PairResponse>;
     /// 旧 state の曲・プレイリストの id を、再構築後の Library の id へ付け替える
     fn adopt(&self, r: &AdoptRequest) -> Result<AdoptResponse>;
+    /// pair の応答のトークンを、以後の呼び出し（`pair --adopt` に続く `adopt`）に使う
+    fn use_token(&self, token: &str) -> Result<()>;
     fn manifest(&self) -> Result<ManifestResponse>;
     /// `size` は期待する総サイズ。再開（206）の `Content-Range` の総サイズと照合する
     fn fetch(
@@ -98,7 +101,8 @@ pub fn normalize_base(mut u: reqwest::Url) -> reqwest::Url {
 
 pub struct HttpServer {
     base: reqwest::Url,
-    token: Option<String>,
+    /// pair はトークン無しで作り、`use_token` で後から入れる
+    token: Mutex<Option<String>>,
     client: Client,
 }
 
@@ -132,7 +136,7 @@ impl HttpServer {
             .map_err(|e| Error::Server(e.to_string()))?;
         Ok(Self {
             base: normalize_base(base),
-            token,
+            token: Mutex::new(token),
             client,
         })
     }
@@ -147,7 +151,12 @@ impl HttpServer {
         &self,
         b: reqwest::blocking::RequestBuilder,
     ) -> Result<reqwest::blocking::RequestBuilder> {
-        let t = self.token.as_deref().ok_or_else(|| {
+        let t = self
+            .token
+            .lock()
+            .map_err(|_| Error::Server("トークンを読めない".to_owned()))?
+            .clone();
+        let t = t.ok_or_else(|| {
             Error::Stop("トークンがありません。spindle-agent pair を実行してください（pair のときと同じ SPINDLE_AGENT_SECRETS の指定で実行しているかも確かめてください）".to_owned())
         })?;
         Ok(b.header(AUTHORIZATION, format!("Bearer {t}")))
@@ -245,6 +254,14 @@ impl Server for HttpServer {
             }
             _ => Err(unexpected(res)),
         }
+    }
+
+    fn use_token(&self, token: &str) -> Result<()> {
+        *self
+            .token
+            .lock()
+            .map_err(|_| Error::Server("トークンを書けない".to_owned()))? = Some(token.to_owned());
+        Ok(())
     }
 
     fn manifest(&self) -> Result<ManifestResponse> {

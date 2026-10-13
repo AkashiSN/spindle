@@ -288,7 +288,7 @@ fn run_sync<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<SyncOutcome> 
 }
 
 /// 印を書いた後の相なら、root の `.spindle-device` が自分のものであること
-fn check_marker<M: Music, S: Server>(cx: &Ctx<'_, M, S>) -> Result<()> {
+pub(crate) fn check_marker<M: Music, S: Server>(cx: &Ctx<'_, M, S>) -> Result<()> {
     let (Some(server), Some(setup)) = (&cx.state.server, &cx.state.setup) else {
         return Err(Error::Stop(NOT_PAIRED.to_owned()));
     };

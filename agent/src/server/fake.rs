@@ -44,6 +44,8 @@ struct World {
     adopt_calls: Vec<AdoptRequest>,
     /// adopt をこの回数だけ通信エラーにする
     adopt_fail: u32,
+    /// トークンを持たない（CLI の pair が作るサーバ）。`use_token` まで、トークンの要る呼び出しを断る
+    anonymous: bool,
 }
 
 #[derive(Clone, Default)]
@@ -158,6 +160,11 @@ impl FakeServer {
     /// adopt_uuid 付きの pair を断る（409 `not_adoptable` 相当）
     pub fn set_adopt_refused(&self, v: bool) {
         self.0.borrow_mut().adopt_refused = v;
+    }
+
+    /// トークン無しのサーバにする（CLI の pair と同じ）。adopt は `use_token` の後でないと断る
+    pub fn set_anonymous(&self) {
+        self.0.borrow_mut().anonymous = true;
     }
 
     /// adopt をこの回数だけ通信エラーにする
@@ -322,6 +329,10 @@ impl Server for FakeServer {
     /// プレイリストは名前の完全一致。一致が無ければ `to` は `None`
     fn adopt(&self, r: &AdoptRequest) -> Result<AdoptResponse> {
         let mut w = self.0.borrow_mut();
+        if w.anonymous {
+            // 本物の HttpServer はトークンが無ければ送らずに止める
+            return Err(Error::Stop("トークンがありません（偽）".to_owned()));
+        }
         w.adopt_calls.push(r.clone());
         if w.adopt_fail > 0 {
             w.adopt_fail -= 1;
@@ -352,6 +363,11 @@ impl Server for FakeServer {
             })
             .collect();
         Ok(AdoptResponse { tracks, playlists })
+    }
+
+    fn use_token(&self, _token: &str) -> Result<()> {
+        self.0.borrow_mut().anonymous = false;
+        Ok(())
     }
 
     fn manifest(&self) -> Result<ManifestResponse> {

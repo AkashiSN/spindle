@@ -159,6 +159,71 @@ async fn changed_source_is_skipped_and_reported() {
     assert_eq!(rows, 0);
 }
 
+/// `dir` の下の state と root で pair だけ行う（sync はしない）
+fn pair_only(
+    url: &str,
+    code: &str,
+    dir: &std::path::Path,
+    adopt: bool,
+) -> spindle_agent::Result<()> {
+    let paths = Paths {
+        state_dir: dir.join("state"),
+        root: dir.join("Music/spindle"),
+    };
+    let fp = Failpoints::none();
+    let music = FakeMusic::new(dir.join("Media"), fp.clone());
+    let secrets = FileSecrets::new(&paths.state_dir);
+    let anon = HttpServer::new(url, true, None).unwrap();
+    pair_cmd(
+        &music, &anon, &secrets, &paths, &fp, &mut Yes, url, true, code, adopt,
+    )
+}
+
+/// 端末の行が消えた後（DB 全損の代わり）、新しい行のコードで pair --adopt する。CLI と同じく
+/// トークン無しのサーバで始め、pair で得たトークンで adopt まで終える
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_adopt_finishes_adopt_with_the_new_token() {
+    let app = App::with_roots().await;
+    let old = app.create_iphone("iPhone").await;
+    let code = app.pair_code(old).await;
+    let url = serve(&app).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let u = url.clone();
+    tokio::task::spawn_blocking(move || pair_only(&u, &code, &path, false).unwrap())
+        .await
+        .unwrap();
+    // 前の行を消し、新しい行を作る
+    app.db.write(move |c| dbdev::delete(c, old)).await.unwrap();
+    let new = app.create_iphone("iPhone 2").await;
+    let code = app.pair_code(new).await;
+    let path = dir.path().to_path_buf();
+    let u = url.clone();
+    let (state, token) = tokio::task::spawn_blocking(move || {
+        pair_only(&u, &code, &path, true).unwrap();
+        let state = spindle_agent::state::StateFile::new(&path.join("state"))
+            .load()
+            .unwrap();
+        let token = FileSecrets::new(&path.join("state")).get().unwrap();
+        (state, token)
+    })
+    .await
+    .unwrap();
+    assert!(!state.adopt_pending);
+    // 新しいトークンで繋がり、行の uuid は前の登録のもの
+    let uuid = state.server.unwrap().device_uuid;
+    let m = tokio::task::spawn_blocking(move || {
+        use spindle_agent::server::Server;
+        HttpServer::new(&url, true, token)
+            .unwrap()
+            .manifest()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(m.device_uuid, uuid);
+}
+
 #[test]
 fn canonical_key_matches_the_server() {
     let samples = [

@@ -270,6 +270,8 @@ fn synced_then_db_lost(env: &mut Env) -> Synced {
     s.needs_report = true;
     env.file().save(&s).unwrap();
     env.server = FakeServer::new("99999999999999999999999999999999");
+    // CLI の pair と同じく、トークン無しのサーバで始める
+    env.server.set_anonymous();
     Synced { a, b, playlist_pid }
 }
 
@@ -425,4 +427,20 @@ fn pair_without_adopt_still_stops_on_uuid_mismatch_and_suggests_adopt() {
     );
     assert_eq!(env.server.last_pair_adopt_uuid(), None);
     assert_eq!(env.state().server.unwrap().device_uuid, UUID);
+}
+
+#[test]
+fn pair_adopt_stops_on_a_foreign_marker_before_using_the_code() {
+    let mut env = Env::new();
+    synced_then_db_lost(&mut env);
+    env.server.put_track(7, "A/a.m4a", b"aaa");
+    env.root
+        .write_marker(&spindle_agent::local::Marker {
+            device_uuid: "x".into(),
+            nonce: "y".into(),
+        })
+        .unwrap();
+    assert!(matches!(do_pair_adopt(&mut env), Err(Error::Stop(_))));
+    assert_eq!(env.server.pair_calls(), 0);
+    assert!(!env.state().adopt_pending);
 }
