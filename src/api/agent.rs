@@ -2,11 +2,12 @@
 //! セッション Cookie・CSRF・trusted_cidrs のどれでも通らない。コードとトークンはログに出さない
 
 use agent_proto::{
-    AbandonRequest, ConfirmRequest, DiffView, Held, ItemOp, ManifestItem, ManifestPlaylist,
-    ManifestResponse, PairRequest, PairResponse, Plan, PlaylistError, PlaylistOp, ReportRequest,
+    AbandonRequest, AdoptRequest, AdoptResponse, ConfirmRequest, DiffView, Held, IdMap, ItemOp,
+    ManifestItem, ManifestPlaylist, ManifestResponse, PairRequest, PairResponse, Plan,
+    PlaylistError, PlaylistOp, ReportRequest,
 };
 use axum::extract::rejection::JsonRejection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
@@ -20,17 +21,22 @@ use super::devices;
 use super::error::{error_response, error_response_with_message, ApiError};
 use super::stream::{parse_range, range_not_satisfiable, ranged_body, Unsatisfiable};
 use super::AppState;
-use crate::db::devices::{self as dbdev, Confirm, PairReserve, PlanEnd};
+use crate::db::devices::{self as dbdev, AdoptSwap, Confirm, PairReserve, PlanEnd};
 use crate::db::{now_epoch, DbError};
+use crate::device::adopt::{self, IdRemap};
 use crate::device::credential::{
     self, PAIR_SECRET_BYTES, PAIR_SELECTOR_BYTES, TOKEN_SECRET_BYTES, TOKEN_SELECTOR_BYTES,
 };
+use crate::device::ondevice::managed_path_ok;
 use crate::device::plan::StoredPlan;
+use crate::device::recover::STALE_TOKEN;
 use crate::device::report;
 use crate::device::sync::{RootSources, SourceEntry, SourceError, Sources as _};
 use crate::domain::device::{
-    delivery_token, DesiredItem, Hold, OpKind, PlaylistOpKind, SourceHash,
+    delivery_token, DesiredItem, DeviceItem, Hold, OpKind, PlaylistOpKind, PlaylistState,
+    SourceHash, SourceKind, ADOPTED_TOKEN,
 };
+use crate::domain::relpath::canonical_key;
 use crate::domain::relpath::RelPath;
 
 /// 報告（`/report`・`/plans/{id}/abandon`）の本文の上限
@@ -58,6 +64,10 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route(
             "/report",
             post(report).layer(DefaultBodyLimit::max(REPORT_BODY_LIMIT)),
+        )
+        .route(
+            "/adopt",
+            post(adopt_state).layer(DefaultBodyLimit::max(REPORT_BODY_LIMIT)),
         )
         .fallback(not_found)
         .route_layer(middleware::from_fn_with_state(state, guard))
@@ -731,7 +741,14 @@ fn invalid_code() -> Response {
     error_response(StatusCode::UNAUTHORIZED, "invalid_code")
 }
 
-/// `POST /api/agent/pair`: ワンタイムコードを消費してトークンを返す
+enum Paired {
+    Done(Box<dbdev::Device>, Option<AdoptSwap>),
+    NotAdoptable,
+    Invalid,
+}
+
+/// `POST /api/agent/pair`: ワンタイムコードを消費してトークンを返す。`adopt_uuid` があれば、同じ
+/// トランザクションで行の uuid を前の登録の uuid へ差し替える（P5-8）
 pub async fn pair(
     State(state): State<AppState>,
     body: Result<Json<PairRequest>, JsonRejection>,
@@ -739,6 +756,15 @@ pub async fn pair(
     let Ok(Json(body)) = body else {
         return Ok(bad_request("本文が不正"));
     };
+    // 形の不正はコードに触る（試行を数える）前に断る
+    if body
+        .adopt_uuid
+        .as_deref()
+        .is_some_and(|u| !adopt::is_device_uuid(u))
+    {
+        return Ok(bad_request("adopt_uuid の形が不正"));
+    }
+    let adopt_uuid = body.adopt_uuid;
     let Some((selector, secret)) =
         credential::split(body.code.trim(), PAIR_SELECTOR_BYTES, PAIR_SECRET_BYTES)
     else {
@@ -782,32 +808,239 @@ pub async fn pair(
         .db
         .write(move |c| {
             let tx = c.transaction()?;
-            let ok = dbdev::consume_pair_code(
-                &tx,
-                device_id,
-                &selector,
-                &code_hash,
-                &tsel,
-                &th,
-                now_epoch(),
-            )?;
-            let d = if ok {
-                dbdev::get(&tx, device_id)?
-            } else {
-                None
+            let now = now_epoch();
+            let mut swap = None;
+            if let Some(u) = &adopt_uuid {
+                let r = dbdev::adopt_swap_uuid(&tx, device_id, u, now)?;
+                if r == AdoptSwap::NotAllowed {
+                    // コードは消費せず、予約した試行の枠も返す（コードは正しかった）
+                    dbdev::refund_pair_attempt(&tx, device_id, &selector, &code_hash)?;
+                    tx.commit()?;
+                    return Ok(Paired::NotAdoptable);
+                }
+                swap = Some(r);
+            }
+            if !dbdev::consume_pair_code(&tx, device_id, &selector, &code_hash, &tsel, &th, now)? {
+                // 差し替えも巻き戻す（tx を commit せずに落とす）
+                return Ok(Paired::Invalid);
+            }
+            let Some(d) = dbdev::get(&tx, device_id)? else {
+                return Ok(Paired::Invalid);
             };
             tx.commit()?;
-            Ok(d)
+            Ok(Paired::Done(Box::new(d), swap))
         })
         .await?;
-    let Some(d) = consumed else {
-        return Ok(invalid_code());
+    let d = match consumed {
+        Paired::Done(d, swap) => {
+            if let Some(swap) = swap {
+                tracing::info!(
+                    device_id,
+                    ?swap,
+                    "pair で端末の uuid を前の登録へ差し替えた"
+                );
+            }
+            d
+        }
+        Paired::NotAdoptable => {
+            tracing::warn!(device_id, "pair の引き継ぎを断った（端末の状態が既にある）");
+            return Ok(conflict(
+                "not_adoptable",
+                "この端末は既に同期の状態を持つか、前の登録が別の端末として残っている。引き継げない",
+            ));
+        }
+        Paired::Invalid => return Ok(invalid_code()),
     };
     tracing::info!(device_id, "エージェントを pair した");
     Ok(Json(PairResponse {
         device_uuid: d.uuid,
         device_name: d.name,
         token: token.text(),
+    })
+    .into_response())
+}
+
+// ---------------------------------------------------------------- 引き継ぎ（P5-8）
+
+/// 引き継ぎの本文を検証する（報告と同じ水準）。外れれば理由
+fn validate_adopt(r: &AdoptRequest) -> Result<(), String> {
+    if r.tracks.len() > report::MAX_TRACKS {
+        return Err(format!(
+            "曲の件数が上限（{}）を超えています",
+            report::MAX_TRACKS
+        ));
+    }
+    if r.playlists.len() > report::MAX_PLAYLISTS {
+        return Err(format!(
+            "プレイリストの件数が上限（{}）を超えています",
+            report::MAX_PLAYLISTS
+        ));
+    }
+    let mut ids = HashSet::new();
+    let mut keys = HashSet::new();
+    for t in &r.tracks {
+        if !managed_path_ok(&t.path) {
+            return Err(format!("曲 {} のパスが不正です（{}）", t.track_id, t.path));
+        }
+        if !managed_path_ok(&t.rel_path) {
+            return Err(format!(
+                "曲 {} の rel_path が不正です（{}）",
+                t.track_id, t.rel_path
+            ));
+        }
+        if SourceKind::parse(&t.source).is_none() {
+            return Err(format!(
+                "曲 {} の送る元の種類が不明です（{}）",
+                t.track_id, t.source
+            ));
+        }
+        if !ids.insert(t.track_id) {
+            return Err(format!("曲 {} が重複しています", t.track_id));
+        }
+        if !keys.insert(canonical_key(&t.path)) {
+            return Err(format!(
+                "曲 {} のパスが他の曲と衝突しています（{}）",
+                t.track_id, t.path
+            ));
+        }
+    }
+    let mut pl_ids = HashSet::new();
+    for p in &r.playlists {
+        if p.name.is_empty() {
+            return Err(format!("プレイリスト {} の名前が空です", p.playlist_id));
+        }
+        if !pl_ids.insert(p.playlist_id) {
+            return Err(format!("プレイリスト {} が重複しています", p.playlist_id));
+        }
+    }
+    Ok(())
+}
+
+enum Adopted {
+    Done,
+    OpenPlan,
+    Reported,
+    NotFound,
+}
+
+/// `POST /api/agent/adopt`: DB 全損後に、エージェントの state の id を今の行へ付け替え、付け替えた状態を
+/// 端末のキャッシュへ直接書く（D-103 の 7 の置き換え。報告の検証は送る元のハッシュが無いと通らない）。
+/// 冪等: 同じ入力は同じ結果になる
+async fn adopt_state(
+    State(state): State<AppState>,
+    Extension(dev): Extension<AgentDevice>,
+    body: Result<Json<AdoptRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Ok(Json(body)) = body else {
+        return Ok(bad_request("本文が不正"));
+    };
+    if let Err(msg) = validate_adopt(&body) {
+        return Ok(bad_request(msg));
+    }
+    let Some((tracks, playlists)) = state.db.read(dbdev::adopt_snapshot).await? else {
+        return Ok(devices::library_busy());
+    };
+    let item_keys: Vec<(i64, &str)> = body
+        .tracks
+        .iter()
+        .map(|t| (t.track_id, t.rel_path.as_str()))
+        .collect();
+    let pl_keys: Vec<(i64, &str)> = body
+        .playlists
+        .iter()
+        .map(|p| (p.playlist_id, p.name.as_str()))
+        .collect();
+    let IdRemap {
+        tracks: track_map,
+        playlists: pl_map,
+    } = adopt::remap_ids(&item_keys, &pl_keys, &tracks, &playlists);
+
+    let items: Vec<DeviceItem> = body
+        .tracks
+        .iter()
+        .filter_map(|t| {
+            track_map.get(&t.track_id).map(|to| DeviceItem {
+                track_id: *to,
+                dest_path: t.path.clone(),
+                token: if t.stale { STALE_TOKEN } else { ADOPTED_TOKEN }.to_owned(),
+                size: t.size,
+                sha256: t.sha256.clone(),
+            })
+        })
+        .collect();
+    let pls: Vec<PlaylistState> = body
+        .playlists
+        .iter()
+        .filter_map(|p| {
+            pl_map.get(&p.playlist_id).map(|to| PlaylistState {
+                playlist_id: *to,
+                dest_path: p.name.clone(),
+                token: STALE_TOKEN.to_owned(),
+            })
+        })
+        .collect();
+    let marks: Vec<i64> = pls.iter().map(|p| p.playlist_id).collect();
+    let (n_items, n_pls) = (items.len(), pls.len());
+    let device_id = dev.id;
+    let res = state
+        .db
+        .write(move |c| {
+            let tx = c.transaction()?;
+            let Some(d) = dbdev::get(&tx, device_id)? else {
+                return Ok(Adopted::NotFound);
+            };
+            if dbdev::open_plan_id(&tx, device_id)?.is_some() {
+                return Ok(Adopted::OpenPlan);
+            }
+            if d.last_synced_at.is_some() {
+                return Ok(Adopted::Reported);
+            }
+            dbdev::apply_agent_adopt(&tx, device_id, &items, &pls, &marks)?;
+            tx.commit()?;
+            Ok(Adopted::Done)
+        })
+        .await?;
+    match res {
+        Adopted::Done => {}
+        Adopted::OpenPlan => {
+            return Ok(conflict(
+                "open_plan",
+                "途中の計画がある。破棄してから引き継いでください",
+            ))
+        }
+        Adopted::Reported => {
+            return Ok(conflict(
+                "not_adoptable",
+                "この端末は既に報告を受けている。引き継げない",
+            ))
+        }
+        Adopted::NotFound => return Ok(error_response(StatusCode::NOT_FOUND, "not_found")),
+    }
+    tracing::info!(
+        device_id,
+        tracks = n_items,
+        tracks_dropped = body.tracks.len() - n_items,
+        playlists = n_pls,
+        playlists_dropped = body.playlists.len() - n_pls,
+        "エージェントの状態を引き継いだ"
+    );
+    Ok(Json(AdoptResponse {
+        tracks: body
+            .tracks
+            .iter()
+            .map(|t| IdMap {
+                from: t.track_id,
+                to: track_map.get(&t.track_id).copied(),
+            })
+            .collect(),
+        playlists: body
+            .playlists
+            .iter()
+            .map(|p| IdMap {
+                from: p.playlist_id,
+                to: pl_map.get(&p.playlist_id).copied(),
+            })
+            .collect(),
     })
     .into_response())
 }

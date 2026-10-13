@@ -1,7 +1,11 @@
 mod device_support;
 
 use device_support::FakeFs;
-use spindle::device::adopt::{remap, rewrite, LibraryPlaylist, LibraryTrack};
+use std::collections::HashMap;
+
+use spindle::device::adopt::{
+    is_device_uuid, remap, remap_ids, rewrite, LibraryPlaylist, LibraryTrack,
+};
 use spindle::device::ondevice::{DeviceManifest, ManifestItem, ManifestPlaylist};
 use spindle::device::recover::STALE_TOKEN;
 use spindle::device::store;
@@ -182,4 +186,70 @@ async fn rewrite_recovers_then_remaps_and_is_idempotent() {
     // やり直し（行の作成の前に落ちた想定）でも同じ結果
     let again = rewrite(&fs, &on_device, &lib, &[]).await.unwrap();
     assert_eq!(again.manifest, r.manifest);
+}
+
+// ---------------------------------------------------------------- remap_ids（エージェントの付け替え）
+
+#[test]
+fn remap_ids_maps_hits_and_leaves_out_misses() {
+    let r = remap_ids(
+        &[(7, "A/A.flac"), (8, "B/gone.flac")],
+        &[],
+        &[t(1, "a/a.flac"), t(2, "B/b.flac")],
+        &[],
+    );
+    assert_eq!(r.tracks, HashMap::from([(7, 1)]));
+    assert!(r.playlists.is_empty());
+}
+
+#[test]
+fn remap_ids_drops_ambiguous_library_keys() {
+    let r = remap_ids(
+        &[(7, "A/a.flac")],
+        &[],
+        &[t(1, "A/a.flac"), t(2, "a/A.flac")],
+        &[],
+    );
+    assert!(r.tracks.is_empty());
+}
+
+#[test]
+fn remap_ids_drops_every_item_that_hits_the_same_track() {
+    let r = remap_ids(
+        &[(7, "A/a.flac"), (8, "a/a.flac"), (9, "B/b.flac")],
+        &[],
+        &[t(1, "A/a.flac"), t(2, "B/b.flac")],
+        &[],
+    );
+    assert_eq!(r.tracks, HashMap::from([(9, 2)]));
+}
+
+#[test]
+fn remap_ids_maps_playlists_by_name() {
+    let r = remap_ids(
+        &[],
+        &[(5, "Drive"), (6, "Gone"), (7, "Same"), (8, "Same")],
+        &[],
+        &[
+            p(2, "drive"),
+            p(3, "Other"),
+            p(4, "same"),
+            p(10, "X"),
+            p(11, "x"),
+        ],
+    );
+    // 同じ行に当たる 2 つ目は採らない（remap と同じ。先に来た方が残る）
+    assert_eq!(r.playlists, HashMap::from([(5, 2), (7, 4)]));
+
+    let r = remap_ids(&[], &[(9, "X")], &[], &[p(10, "X"), p(11, "x")]);
+    assert!(r.playlists.is_empty(), "曖昧な名前は外す");
+}
+
+#[test]
+fn device_uuid_shape() {
+    assert!(is_device_uuid("0123456789abcdef0123456789abcdef"));
+    assert!(!is_device_uuid("0123456789ABCDEF0123456789ABCDEF"));
+    assert!(!is_device_uuid("OLD"));
+    assert!(!is_device_uuid("0123456789abcdef0123456789abcdeg"));
+    assert!(!is_device_uuid("0123456789abcdef0123456789abcdef0"));
 }
