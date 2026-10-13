@@ -1,7 +1,7 @@
 // 端末タブの純粋ロジック（P5-2、D-95）。件数・差分表の並び・文言
 
 import { ApiError } from '../api/client'
-import type { AdbVolume, Device, DeviceCounts, DeviceDiff, DiffItem, DiffOp, JobEvent, JobState } from '../api/types'
+import type { AdbVolume, AdoptPreview, Device, DeviceCounts, DeviceDiff, DiffItem, DiffOp, JobEvent, JobState } from '../api/types'
 import { formatDateTime } from './history'
 
 /** 未反映の件数（ナビのバッジ・一覧）。待ちはハッシュ計算などを待っているだけなので数えない */
@@ -22,10 +22,11 @@ export const OP_LABELS: Record<DiffOp, string> = {
   delete: '削除',
   waiting: '待ち',
   error: 'エラー',
+  adopted: '引き継ぎの照合',
 }
 
 /** 差分表の並び。手当てが要るもの（エラー）と端末から消えるもの（削除）を先に出す */
-const ORDER: DiffOp[] = ['error', 'delete', 'update_move', 'move', 'update', 'add', 'waiting']
+const ORDER: DiffOp[] = ['error', 'delete', 'update_move', 'move', 'update', 'adopted', 'add', 'waiting']
 
 export function sortDiffItems(items: readonly DiffItem[]): DiffItem[] {
   return [...items].sort(
@@ -93,9 +94,33 @@ export function volumeLabel(v: AdbVolume): string {
   return v.volume === 'emulated' ? '内部共有ストレージ' : `SD カード（${v.volume}）`
 }
 
-/** 保存先は空か存在しないときだけ選べる（仕様 ⑤「登録」4） */
+/** 通常の登録先にできるか（空か存在しないときだけ。仕様 ⑤「登録」4） */
 export function volumeUsable(v: AdbVolume): boolean {
-  return v.state !== 'nonempty'
+  return v.state === 'missing' || v.state === 'empty'
+}
+
+/** 前の登録の保存先で、引き継げるか（D-103） */
+export function volumeAdoptable(v: AdbVolume): boolean {
+  return v.state === 'adoptable'
+}
+
+/** 登録フォームで選べるか（通常の登録か引き継ぎのどちらかができる） */
+export function volumeSelectable(v: AdbVolume): boolean {
+  return volumeUsable(v) || volumeAdoptable(v)
+}
+
+export function adoptPreviewText(p: AdoptPreview): string {
+  const parts = [`曲 ${p.tracks_adopted} 件を引き継ぎます`]
+  if (p.tracks_dropped > 0) {
+    parts.push(`${p.tracks_dropped} 件はライブラリに見つからず管理外になります（ファイルは残ります）`)
+  }
+  parts.push(
+    p.playlists_dropped > 0
+      ? `プレイリスト ${p.playlists_adopted} 件を引き継ぎ、${p.playlists_dropped} 件は管理外になります`
+      : `プレイリスト ${p.playlists_adopted} 件を引き継ぎます`,
+  )
+  if (p.unmanaged > 0) parts.push(`管理外のファイルが既に ${p.unmanaged} 件あります`)
+  return parts.join('。')
 }
 
 /** 待ちの同期の説明。未接続なら接続を待っている（つながっていれば順番待ち） */
@@ -183,6 +208,14 @@ export function deviceMessage(e: unknown): string {
         return '途中の計画を読めません。破棄してください'
       case 'adb_disabled':
         return ADB_DISABLED_MESSAGE
+      case 'adoptable':
+        return '保存先に前の登録の曲があります。「既存の保存先を引き継ぐ」で登録してください'
+      case 'not_adoptable':
+        return '引き継げる保存先がありません（manifest が無いか読めないか、別のボリュームのものです）'
+      case 'uuid_registered':
+        return 'この保存先は登録済みの端末のものです'
+      case 'library_busy':
+        return 'ライブラリのスキャン中です。終わってから引き継いでください'
       case 'not_agent':
         return 'iPhone（Mac 経由）の端末ではありません'
     }

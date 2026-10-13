@@ -13,6 +13,7 @@ import type {
   PairCode,
   SelectionEstimate,
   UnregisteredList,
+  AdoptPreview,
 } from '../api/types'
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { mergePending, togglePlaylist } from '../lib/devicePicker'
@@ -138,6 +139,15 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     [],
   )
 
+  const fetchAdoptPreview = useCallback(
+    (serial: string, volume: string, signal?: AbortSignal) =>
+      apiFetch<AdoptPreview>(
+        `/api/devices/adb/adopt-preview?serial=${encodeURIComponent(serial)}&volume=${encodeURIComponent(volume)}`,
+        { signal },
+      ),
+    [],
+  )
+
   const run = useCallback(
     async (f: () => Promise<unknown>): Promise<boolean> => {
       setBusy(true)
@@ -218,6 +228,8 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     },
     /** 未登録の Android（接続中）。登録のフォームを開いている間だけ取る */
     fetchUnregistered,
+    /** 引き継ぎの前に、引き継ぐ曲・プレイリストの件数を見る */
+    fetchAdoptPreview,
     /** Android を登録する。成功すれば作った端末 */
     registerAndroid: async (body: {
       name: string
@@ -225,6 +237,7 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
       selection: DeviceSelection
       serial: string
       volume: string
+      adopt?: boolean
     }): Promise<Device | null> => {
       let created: Device | null = null
       const ok = await run(async () => {

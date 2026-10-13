@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
-import type { Device, DeviceCounts, DeviceDiff, DiffItem } from '../api/types'
-import { agentPlanText, pairCommand, connectionNote, nextPollDelay, UNREGISTERED_POLL_MS, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
+import type { AdbVolume, Device, DeviceCounts, DeviceDiff, DiffItem } from '../api/types'
+import { agentPlanText, pairCommand, connectionNote, nextPollDelay, UNREGISTERED_POLL_MS, jobStateChanged, offerForceAbandon, queuedSyncText, syncButton, volumeLabel, volumeUsable, volumeSelectable, volumeAdoptable, adoptPreviewText, deviceMessage, describeEvaluation, diffFor, OP_LABELS, withDevice, sortDiffItems, syncSummary, totalBadge, unsyncedCount } from './devices'
 
 const counts = (p: Partial<DeviceCounts> = {}): DeviceCounts => ({
   add: 0, update: 0, move: 0, delete: 0, waiting: 0, error: 0, synced: 0, ...p,
@@ -188,5 +188,37 @@ describe('agentPlanText', () => {
 describe('pairCommand', () => {
   it('この画面の origin とコードを並べる', () => {
     expect(pairCommand('https://musics.example', 'abc.def')).toBe('spindle-agent pair https://musics.example abc.def')
+  })
+})
+
+describe('引き継ぎ', () => {
+  const vol = (state: AdbVolume['state']): AdbVolume => ({ volume: 'emulated', path: '', free: 1, state })
+  it('引き継げる保存先は選べるが通常の登録先ではない', () => {
+    expect(volumeSelectable(vol('adoptable'))).toBe(true)
+    expect(volumeAdoptable(vol('adoptable'))).toBe(true)
+    expect(volumeUsable(vol('adoptable'))).toBe(false)
+    expect(volumeSelectable(vol('nonempty'))).toBe(false)
+    expect(volumeAdoptable(vol('empty'))).toBe(false)
+  })
+  it('プレビューの説明', () => {
+    const p = { device_uuid: 'u', tracks_adopted: 120, tracks_dropped: 3, playlists_adopted: 2,
+      playlists_dropped: 1, unmanaged: 4, library_busy: false }
+    expect(adoptPreviewText(p)).toBe(
+      '曲 120 件を引き継ぎます。3 件はライブラリに見つからず管理外になります（ファイルは残ります）。プレイリスト 2 件を引き継ぎ、1 件は管理外になります。管理外のファイルが既に 4 件あります',
+    )
+    expect(adoptPreviewText({ ...p, tracks_dropped: 0, playlists_dropped: 0, unmanaged: 0 })).toBe(
+      '曲 120 件を引き継ぎます。プレイリスト 2 件を引き継ぎます',
+    )
+  })
+  it('差分の「引き継ぎの照合」は送る件数に入るが表示は別', () => {
+    expect(OP_LABELS.adopted).toBe('引き継ぎの照合')
+  })
+  it.each([
+    ['adoptable', '前の登録の曲'],
+    ['not_adoptable', '引き継げる保存先がありません'],
+    ['uuid_registered', '登録済みの端末'],
+    ['library_busy', 'ライブラリのスキャン中'],
+  ])('%s のメッセージ', (code, text) => {
+    expect(deviceMessage(new ApiError(409, code, 'x'))).toContain(text)
   })
 })

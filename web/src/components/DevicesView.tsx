@@ -9,6 +9,7 @@ import type {
   DeviceVariant,
   PairCode,
   SelectionEstimate,
+  AdoptPreview,
   UnregisteredAdb,
 } from '../api/types'
 import type { Devices } from '../hooks/useDevices'
@@ -33,7 +34,9 @@ import {
   syncSummary,
   unsyncedCount,
   volumeLabel,
-  volumeUsable,
+  volumeAdoptable,
+  volumeSelectable,
+  adoptPreviewText,
 } from '../lib/devices'
 import { formatCount } from '../lib/format'
 import { formatDateTime } from '../lib/history'
@@ -325,7 +328,31 @@ function AndroidCandidate({
   const [selection, setSelection] = useState<DeviceSelection>('playlists')
   const [volume, setVolume] = useState<string | null>(null)
   // 選んだ保存先が使えなくなった（空でなくなった・消えた）ら選び直させる
-  const chosen = found.volumes.find((v) => v.volume === volume && volumeUsable(v))?.volume ?? null
+  const chosen = found.volumes.find((v) => v.volume === volume && volumeSelectable(v)) ?? null
+  const adopting = chosen != null && volumeAdoptable(chosen)
+  // 取った結果は取った保存先の印（volume）と組で持つ。選び直した直後に前の結果を出さない
+  const [fetched, setFetched] = useState<
+    { volume: string; preview: AdoptPreview | null; error: string | null } | null
+  >(null)
+  const { fetchAdoptPreview } = devices
+  const chosenVolume = chosen?.volume ?? null
+  const current = fetched != null && fetched.volume === chosenVolume ? fetched : null
+  const preview = current?.preview ?? null
+  const previewError = current?.error ?? null
+
+  // 引き継ぐ保存先を選んだら、引き継ぐ件数を取る
+  useEffect(() => {
+    if (!adopting || chosenVolume == null) return
+    const ac = new AbortController()
+    fetchAdoptPreview(found.serial, chosenVolume, ac.signal)
+      .then((p) => {
+        if (!ac.signal.aborted) setFetched({ volume: chosenVolume, preview: p, error: null })
+      })
+      .catch((e) => {
+        if (!ac.signal.aborted) setFetched({ volume: chosenVolume, preview: null, error: deviceMessage(e) })
+      })
+    return () => ac.abort()
+  }, [adopting, chosenVolume, found.serial, fetchAdoptPreview])
 
   return (
     <form
@@ -334,7 +361,7 @@ function AndroidCandidate({
         e.preventDefault()
         if (chosen == null) return
         void devices
-          .registerAndroid({ name: name.trim(), variant, selection, serial: found.serial, volume: chosen })
+          .registerAndroid({ name: name.trim(), variant, selection, serial: found.serial, volume: chosen.volume, adopt: adopting })
           .then((d) => {
             if (d != null) onCreated(d.id)
           })
@@ -371,18 +398,33 @@ function AndroidCandidate({
             <input
               type="radio"
               name={`vol-${found.serial}`}
-              checked={chosen === v.volume}
-              disabled={!volumeUsable(v)}
+              checked={chosen?.volume === v.volume}
+              disabled={!volumeSelectable(v)}
               onChange={() => setVolume(v.volume)}
             />
             {volumeLabel(v)} <span className="muted">空き {formatBytes(v.free)}</span>
-            {!volumeUsable(v) && <span className="muted"> · 空でない</span>}
+            {volumeAdoptable(v) && <span className="muted"> · 前の登録の保存先（引き継げる）</span>}
+            {!volumeSelectable(v) && <span className="muted"> · 空でない</span>}
           </label>
         ))}
       </fieldset>
+      {adopting && previewError != null && <p className="error small">{previewError}</p>}
+      {adopting && preview != null && <p className="small">{adoptPreviewText(preview)}</p>}
+      {adopting && preview?.library_busy === true && (
+        <p className="devices-warn small">ライブラリのスキャン中です。終わってから引き継いでください</p>
+      )}
+      {adopting && selection === 'playlists' && (
+        <p className="muted small">引き継いだプレイリストには印を付け直します</p>
+      )}
       <div className="op-row">
-        <button type="submit" className="primary" disabled={devices.busy || name.trim() === '' || chosen == null}>
-          登録
+        <button type="submit" className="primary" disabled={
+            devices.busy ||
+            name.trim() === '' ||
+            chosen == null ||
+            (adopting && (preview == null || preview.library_busy))
+          }
+        >
+          {adopting ? '引き継いで登録' : '登録'}
         </button>
       </div>
     </form>
