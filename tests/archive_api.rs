@@ -98,7 +98,7 @@ async fn archive_lists_newest_first_with_batch_id_and_requires_session() {
 
     let res = send(
         &app,
-        req(Method::GET, "/api/archive")
+        req(Method::GET, "/api/archive?state=all")
             .header(header::COOKIE, &c)
             .body(Body::empty())
             .unwrap(),
@@ -136,4 +136,110 @@ async fn archive_lists_newest_first_with_batch_id_and_requires_session() {
     )
     .await;
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+async fn get_json(app: &App, c: &str, uri: &str) -> (StatusCode, serde_json::Value) {
+    let res = send(
+        app,
+        req(Method::GET, uri)
+            .header(header::COOKIE, c)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let status = res.status();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+fn seed(conn: &Connection, n_held: i64, n_deleted: i64, n_restored: i64) {
+    let mut id = 0;
+    for (state, n) in [
+        ("deleted", n_deleted),
+        ("restored", n_restored),
+        ("held", n_held),
+    ] {
+        for _ in 0..n {
+            id += 1;
+            let rel = format!("A/{id}.wav");
+            conn.execute(
+                "INSERT INTO archived_files (id, track_id, op_id, rel_path, rel_path_key, source_rel_path, reason,
+                                             archived_at, eligible_after, state, state_at)
+                 VALUES (?1, NULL, NULL, ?2, lower(?2), ?2, 'normalize', ?1, ?1, ?3, NULL)",
+                params![id, rel, state],
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn archive_defaults_to_held_and_counts_every_state() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    seed(&app.conn(), 2, 3, 1);
+    let (st, v) = get_json(&app, &c, "/api/archive").await;
+    assert_eq!(st, StatusCode::OK);
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "既定は保持中だけ");
+    assert!(items.iter().all(|i| i["state"] == "held"));
+    assert_eq!(
+        v["counts"],
+        serde_json::json!({"held": 2, "restored": 1, "deleted": 3})
+    );
+    assert!(v["next_cursor"].is_null());
+
+    let (_, v) = get_json(&app, &c, "/api/archive?state=deleted").await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 3);
+    assert_eq!(v["counts"]["held"], 2, "counts は state に関係なく全体");
+    let (_, v) = get_json(&app, &c, "/api/archive?state=all").await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn archive_pages_by_cursor_without_gaps_or_duplicates() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    seed(&app.conn(), 0, 5, 0);
+    let (_, v) = get_json(&app, &c, "/api/archive?state=deleted&limit=2").await;
+    let ids: Vec<i64> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![5, 4]);
+    assert_eq!(v["next_cursor"], 4);
+    let (_, v) = get_json(&app, &c, "/api/archive?state=deleted&limit=2&cursor=4").await;
+    let ids: Vec<i64> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![3, 2]);
+    let (_, v) = get_json(&app, &c, "/api/archive?state=deleted&limit=1&cursor=2").await;
+    assert_eq!(v["items"][0]["id"], 1);
+    assert!(
+        v["next_cursor"].is_null(),
+        "最後のページ（limit ちょうど）は続き無し"
+    );
+}
+
+#[tokio::test]
+async fn archive_rejects_bad_state_and_limit() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    for uri in [
+        "/api/archive?state=gone",
+        "/api/archive?limit=0",
+        "/api/archive?limit=501",
+    ] {
+        let (st, v) = get_json(&app, &c, uri).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(v["error"], "bad_request");
+    }
 }
