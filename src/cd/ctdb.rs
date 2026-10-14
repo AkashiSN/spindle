@@ -364,7 +364,8 @@ impl CtdbClient {
         })
     }
 
-    /// TOC で照会する（`fuzzy=1`: プレス違いのエントリも返る。TOC は各エントリの `toc` で見分ける）
+    /// TOC で照会する（`fuzzy=1`: プレス違いのエントリも返る。TOC は各エントリの `toc` で見分ける）。
+    /// DB に無ければ（404）空
     pub async fn lookup(&self, toc: &Toc) -> Result<Vec<CtdbEntry>, LookupError> {
         let resp = self
             .http
@@ -378,6 +379,10 @@ impl CtdbClient {
             .send()
             .await?;
         let status = resp.status();
+        // 登録の無い TOC には 404（本文 `Not Found`）が返る。AccurateRip と同じく 0 件
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
         if !status.is_success() {
             return Err(LookupError::Status(status.as_u16()));
         }

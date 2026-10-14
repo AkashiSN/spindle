@@ -220,11 +220,11 @@ async fn ctdb_handler(
     s.ctdb_queries.push(q);
     if toc.starts_with("0:13915:") {
         (StatusCode::OK, CTDB_XML.to_owned())
+    } else if toc.starts_with("0:500:") {
+        (StatusCode::INTERNAL_SERVER_ERROR, String::new())
     } else {
-        (
-            StatusCode::OK,
-            r#"<ctdb xmlns="http://db.cuetools.net/ns/mmd-1.0#"><metadata /></ctdb>"#.to_owned(),
-        )
+        // 実サーバは登録の無い TOC に 404（本文 `Not Found`）を返す
+        (StatusCode::NOT_FOUND, "Not Found".to_owned())
     }
 }
 
@@ -319,6 +319,29 @@ async fn ctdb_client_queries_lookup2_with_the_toc_string() {
     assert_eq!(get("fuzzy"), Some("1"));
     assert_eq!(get("toc"), Some(hybrid_theory().ctdb_toc().as_str()));
     assert!(s.user_agents.iter().all(|ua| ua == "spindle-test/0.1"));
+}
+
+/// 登録の無い TOC への 404 は 0 件（AccurateRip と同じ）。404 以外の失敗はエラーのまま
+#[tokio::test]
+async fn ctdb_client_treats_404_as_no_entries() {
+    let (base, _seen) = serve().await;
+    let client =
+        CtdbClient::new(format!("{base}/lookup2.php"), "spindle-test/0.1").expect("client");
+    // ctdb_toc は「各トラックの開始:…:リードアウト」。2 曲目の開始で応答を選ぶ
+    let toc = |second: u32| {
+        let track = |number: u8, start_lba: u32| TocTrack {
+            number,
+            start_lba,
+            is_audio: true,
+        };
+        Toc::new(vec![track(1, 0), track(2, second)], second + 15_000).expect("TOC")
+    };
+    let entries = client.lookup(&toc(15_000)).await.expect("404 は 0 件");
+    assert!(entries.is_empty());
+    assert!(matches!(
+        client.lookup(&toc(500)).await,
+        Err(LookupError::Status(500))
+    ));
 }
 
 #[tokio::test]
