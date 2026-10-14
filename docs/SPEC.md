@@ -369,6 +369,10 @@ Inbox の取り込みのファイル（D-90）を回収する。
 終端の**ジョブ行**も消す（done / cancelled は `[gc].jobs_done_days`、failed は `jobs_failed_days`。0 で
 消さない。P4-18、D-81）。端末の同期の計画（`device_sync_plans`）も、終端（`completed` / `abandoned`）して
 `[gc].retention_days` を過ぎたものを消す。端末ごとに最後の終端 1 件と open な計画は残す（D-102）。
+GC は `tracks` の**最大 id の行を消さない**（missing で期限を過ぎていても一覧・削除の両方から外す）。
+`tracks.id` は `AUTOINCREMENT` ではなく、SQLite は次の行に `max(rowid)+1` を振るので、最大 id の行を
+消すと次の曲が同じ id を得て、端末の写し（`device_items`・Mac の state）が別の曲を指す。残した行は
+後で新しい曲が入れば最大でなくなり、次の GC で消える（D-105）。
 
 ### ReplayGain の内部表現
 
@@ -3405,7 +3409,7 @@ P0 を先に置くのは、リップの出口（タグ付け・配置・RG）が
       キャッシュへ直接書く。state と manifest に `rel_path` / `source` を足し、`ADOPTED_TOKEN` の近道で送り直さずに
       トークンだけ書き換える。ミュージック.app の track（再生回数）は保たれる。pending が残っていれば止める
       （§6、§7.11「iPhone」の「引き継ぎ」。D-104）
-- [ ] id の再利用: `tracks.id` / `playlists.id` は `INTEGER PRIMARY KEY` で `AUTOINCREMENT` ではないので、
+- [x] id の再利用（2026-10-14。D-105）: `tracks.id` / `playlists.id` は `INTEGER PRIMARY KEY` で `AUTOINCREMENT` ではないので、
       最大 id の行を GC が消すと次の挿入が同じ id を得る。端末に写しのある曲の id が別の曲に再利用されると、
       差分は `UpdateMove` になり、Android は収束するが、Mac ではミュージック.app の track（再生回数）が
       別の曲に引き継がれる。7 日以上同期しない場合に限る（D-102）。方針は **GC が `tracks` の最大 id の行を消さない**
