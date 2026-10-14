@@ -283,6 +283,66 @@ async fn missing_tracks_past_retention_are_deleted_unless_the_file_is_back() {
     assert_eq!(s.tracks.deleted, 0);
 }
 
+/// `tracks` の id 昇順
+fn track_ids(env: &Env) -> Vec<i64> {
+    let c = env.conn();
+    let mut st = c.prepare("SELECT id FROM tracks ORDER BY id").unwrap();
+    st.query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+/// 次に入るトラックが振られる id（`AUTOINCREMENT` でないので `max(rowid)+1`）
+fn next_track_id(env: &Env, rel: &str) -> i64 {
+    let c = env.conn();
+    c.execute(
+        "INSERT INTO tracks (rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
+                             audio_version, tag_version, seen_at)
+         VALUES (?1, lower(?1), 1, 0, 0, 'flac', 1, 1, 1, 0)",
+        [rel],
+    )
+    .unwrap();
+    c.last_insert_rowid()
+}
+
+#[tokio::test]
+async fn the_max_id_track_is_kept_so_its_id_is_never_reused() {
+    // id の再利用（D-105）: 最大 id の行を消すと次の曲が同じ id を得て、端末の写しが別の曲を指す
+    let env = Env::new();
+    env.track(1, "A/old.flac", None, Some(31 * DAY));
+    env.track(2, "A/last.flac", None, Some(31 * DAY)); // 最大 id → 期限超でも残る
+    let p = plan(&env.db, &env.roots, RETENTION, env.now).await.unwrap();
+    let ids: Vec<i64> = p.tracks.iter().map(|t| t.id).collect();
+    assert_eq!(ids, vec![1], "一覧にも出さない");
+    let s = run(&env).await;
+    assert_eq!(s.tracks.deleted, 1);
+    assert_eq!(track_ids(&env), vec![2]);
+    // 次の曲は使われたことの無い id を得る
+    assert_eq!(next_track_id(&env, "B/new.flac"), 3);
+    // 残した行は最大でなくなったので、次の GC で消える。その id は最大より小さく、もう振られない
+    let s = run(&env).await;
+    assert_eq!(s.tracks.deleted, 1);
+    assert_eq!(track_ids(&env), vec![3]);
+    assert_eq!(next_track_id(&env, "B/newer.flac"), 4);
+}
+
+#[tokio::test]
+async fn deletion_rechecks_that_the_row_is_not_the_max_id() {
+    // 計画の後に最大 id より上の行が消えて（ここでは直接）計画の行が最大になったら消さない
+    let env = Env::new();
+    env.track(1, "A/old.flac", None, Some(31 * DAY));
+    env.track(2, "A/live.flac", None, None);
+    let p = plan(&env.db, &env.roots, RETENTION, env.now).await.unwrap();
+    assert_eq!(p.tracks.len(), 1);
+    env.conn()
+        .execute("DELETE FROM tracks WHERE id = 2", [])
+        .unwrap();
+    let s = execute_rows(&env.db, &env.roots, &p).await.unwrap();
+    assert_eq!(s.tracks.deleted, 0);
+    assert_eq!(track_ids(&env), vec![1]);
+}
+
 #[tokio::test]
 async fn missing_albums_are_deleted_only_when_no_track_remains() {
     let env = Env::new();
@@ -359,6 +419,7 @@ async fn derived_orphans_are_removed_but_referenced_tmp_and_recent_files_stay() 
     env.put("Derived/C/fresh.opus", b"fresh", ORPHAN_GRACE_SECS - 60); // 24h 以内 → 残す
                                                                        // missing 期限超のトラックの Derived は行が CASCADE で消えるので同じ実行で拾う
     env.track(2, "A/gone.flac", None, Some(31 * DAY));
+    env.track(99, "Z/newest.flac", None, None); // 最大 id の行は GC が消さない（D-105）
     env.derived_row(2, "A/gone.opus");
     env.put("Derived/A/gone.opus", b"gone", 5 * DAY);
 
@@ -465,7 +526,8 @@ async fn gc_job_waits_while_a_scan_holds_the_library_mutex() {
     let env = Env::new();
     env.retire_fake_gc_job();
     env.track(1, "A/gone.flac", None, Some(31 * DAY));
-    // 本物の running な scan が library mutex を持ち続ける
+    env.track(99, "Z/newest.flac", None, None); // 最大 id の行は GC が消さない（D-105）
+                                                // 本物の running な scan が library mutex を持ち続ける
     let release = CancellationToken::new();
     let mut reg = Registry::new();
     reg.register_fn(JobType::Scan, Env::mutex_holder(release.clone()));
@@ -498,12 +560,12 @@ async fn gc_job_waits_while_a_scan_holds_the_library_mutex() {
         "{:?}",
         env.job_state(gc_id)
     );
-    assert_eq!(env.count("SELECT count(*) FROM tracks"), 1);
+    assert_eq!(env.count("SELECT count(*) FROM tracks"), 2);
     // scan が終端になれば（mutex が解放されれば）走る
     release.cancel();
     assert_eq!(env.wait_job(scan_id).await, JobState::Done);
     assert_eq!(env.wait_job(gc_id).await, JobState::Done);
-    assert_eq!(env.count("SELECT count(*) FROM tracks"), 0);
+    assert_eq!(env.count("SELECT count(*) FROM tracks"), 1);
     assert_eq!(
         env.count("SELECT count(*) FROM job_mutexes"),
         0,
@@ -686,6 +748,7 @@ async fn archived_item_whose_track_is_locked_by_another_job_is_skipped() {
 async fn derived_of_a_track_revived_after_planning_is_kept() {
     let env = Env::new();
     env.track(2, "A/gone.flac", None, Some(31 * DAY));
+    env.track(99, "Z/newest.flac", None, None); // 最大 id の行は GC が消さない（D-105）
     env.derived_row(2, "A/gone.opus");
     env.put("Derived/A/gone.opus", b"gone", 5 * DAY);
     let p = plan(&env.db, &env.roots, RETENTION, env.now).await.unwrap();

@@ -2051,5 +2051,8 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
       `rel_path` / `source` を足し、`ADOPTED_TOKEN` の近道で送り直さずにトークンだけ書き換える。ミュージック.app の
       track（再生回数・レート）は保たれる。pending が残っていれば止め、途中で落ちたら次の `sync` が続きを行う。
       端末タブの pair の案内に `--adopt` を添える。`--adopt` 無しの不一致は今どおり止める（D-104）
-- [ ] id の再利用の対策: 最大 id の行を GC が消さない（SQLite は max(rowid)+1 を振る）か、token も sha256 も
-      パスも違う既存の写しを Update ではなく Delete + Add にする。Mac で再生回数が別の曲に移るのを防ぐ（D-102）
+- [x] id の再利用の対策（2026-10-14）: GC が `tracks` の最大 id の行を消さない（SQLite は max(rowid)+1 を振る）。
+      missing で期限を過ぎていても `/api/gc/preview` の一覧と削除の両方から外し、削除の SQL でも再確認する。
+      後で新しい曲が入れば次の GC で消える。Mac で再生回数が別の曲に移るのを防ぐ（`tests/gc.rs`。D-105）。
+      古いバックアップへの復元は採番も巻き戻るので、手順で扱う（同期する前に端末を消して引き継ぎし直す。
+      `docs/OPERATIONS.md`「端末は引き継ぎし直す」）

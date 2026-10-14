@@ -117,7 +117,9 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
         .execute(
             "INSERT INTO tracks (id, rel_path, rel_path_key, size, mtime_ns, ctime_ns, codec, lossless,
                                  audio_version, tag_version, seen_at, missing_since)
-             VALUES (1, 'A/gone.flac', 'a/gone.flac', 1, 0, 0, 'flac', 1, 1, 1, 0, ?1)",
+             VALUES (1, 'A/gone.flac', 'a/gone.flac', 1, 0, 0, 'flac', 1, 1, 1, 0, ?1),
+                    -- 最大 id の行は GC が消さない（D-105）。missing でも一覧に出ない
+                    (2, 'A/last.flac', 'a/last.flac', 1, 0, 0, 'flac', 1, 1, 1, 0, ?1)",
             [now - 31 * 86_400],
         )
         .unwrap();
@@ -183,7 +185,7 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
         .conn()
         .query_row("SELECT count(*) FROM tracks", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(n, 1);
+    assert_eq!(n, 2);
     assert!(app.dir.path().join("Archive/A/1.m4a").exists());
 
     // POST は 202 でジョブを投入、未完了の間は 409

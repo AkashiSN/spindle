@@ -8,12 +8,20 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::Result;
 
-/// `missing_since <= cutoff` のトラック（id 昇順）
+/// 最大 id の行を除く条件（`tracks` の別名なし）。`tracks.id` は `AUTOINCREMENT` ではなく、SQLite は
+/// 次の行に `max(rowid)+1` を振るので、最大 id の行を消すと次の曲が同じ id を得る。端末の写し
+/// （`device_items` / Mac の state）は `track_id` で曲を指すので、別の曲が同じ id を得ると差分が
+/// `UpdateMove` になり、Mac ではミュージック.app の track（再生回数）が別の曲に移る。残した行は
+/// 後で新しい曲が入れば最大でなくなり、次の GC で消える（D-105）
+const NOT_MAX_TRACK: &str = "id < (SELECT max(id) FROM tracks)";
+
+/// `missing_since <= cutoff` のトラック（id 昇順）。最大 id の行は除く（[`NOT_MAX_TRACK`]）
 pub fn missing_tracks(conn: &Connection, cutoff: i64) -> Result<Vec<(i64, String)>> {
-    let mut st = conn.prepare_cached(
+    let mut st = conn.prepare_cached(&format!(
         "SELECT id, rel_path FROM tracks WHERE missing_since IS NOT NULL AND missing_since <= ?1
-         ORDER BY id",
-    )?;
+           AND {NOT_MAX_TRACK}
+         ORDER BY id"
+    ))?;
     let rows = st.query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -104,11 +112,12 @@ pub fn artwork_hashes(conn: &Connection) -> Result<Vec<Vec<u8>>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// トラック行を消す。計画時の条件（missing のまま）を再確認する。消した件数
+/// トラック行を消す。計画時の条件（missing のまま、最大 id でない）を再確認する。消した件数
 pub fn delete_tracks(conn: &Connection, ids: &[i64], cutoff: i64) -> Result<usize> {
-    let mut st = conn.prepare_cached(
-        "DELETE FROM tracks WHERE id = ?1 AND missing_since IS NOT NULL AND missing_since <= ?2",
-    )?;
+    let mut st = conn.prepare_cached(&format!(
+        "DELETE FROM tracks WHERE id = ?1 AND missing_since IS NOT NULL AND missing_since <= ?2
+           AND {NOT_MAX_TRACK}"
+    ))?;
     let mut n = 0;
     for id in ids {
         n += st.execute(params![id, cutoff])?;
