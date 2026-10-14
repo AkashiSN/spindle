@@ -80,10 +80,8 @@ async fn ctdb_handler(
     }
     match &s.ctdb {
         Some(x) => (StatusCode::OK, x.clone()),
-        None => (
-            StatusCode::OK,
-            r#"<ctdb xmlns="http://db.cuetools.net/ns/mmd-1.0#"><metadata /></ctdb>"#.to_owned(),
-        ),
+        // 実サーバは登録の無い TOC に 404（本文 `Not Found`）を返す
+        None => (StatusCode::NOT_FOUND, "Not Found".to_owned()),
     }
 }
 

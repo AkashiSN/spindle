@@ -683,6 +683,8 @@ CUETools の "verify from files" 相当。
 
 `verify` ジョブ（album 単位、並列 2。`POST /api/verify { selection }`）。読むだけでファイルは
 書かない。ファイルは root の FD を fstat して DB の行と照合してから読む（D-62）。
+照会の 404 は「登録なし」（0 件）として扱い、失敗にしない（AccurateRip は `dBAR-*.bin` が無い、
+CTDB は `lookup2.php` が登録の無い TOC に本文 `Not Found` で返す）。それ以外の非 2xx は照会失敗で再試行。
 
 適用条件:
 
