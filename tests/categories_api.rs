@@ -254,3 +254,77 @@ async fn delete_removes_only_unused_categories() {
         .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------- 使用数
+
+/// 一覧は削除の判定と同じ数え方で使用数を返す
+#[tokio::test]
+async fn list_reports_usage_counts_used_by_delete() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let mut ids = std::collections::HashMap::new();
+    for name in ["Anime", "J-Pop", "Game", "Drama", "Empty"] {
+        let (st, body) = app
+            .post(&c, "/api/categories", json!({ "name": name }))
+            .await;
+        assert_eq!(st, StatusCode::CREATED);
+        ids.insert(name, body["id"].as_i64().unwrap());
+    }
+    {
+        let db = app.conn();
+        for (dir, missing) in [
+            ("Anime/A/A", None),
+            ("Anime/B/B", None),
+            ("Anime/C/C", Some(5)),
+        ] {
+            db.execute(
+                "INSERT INTO albums (rel_dir, rel_dir_key, category_id, missing_since)
+                 VALUES (?1, lower(?1), ?2, ?3)",
+                rusqlite::params![dir, ids["Anime"], missing],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO genre_category_map (genre, category_id) VALUES ('RPG', ?1)",
+            [ids["Game"]],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO playlist_subscriptions (list_id, url, target_key, albumartist, album, category,
+                                                 created_at, updated_at)
+             VALUES ('PL1', 'https://x/1', 'k1', 'A', 'A', 'j-pop', 1, 1)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO inbox_items (rel_dir, rel_dir_key, state, detected_at, seen_at, draft)
+             VALUES ('d', 'd', 'pending', 1, 1, '{\"category\":\"DRAMA\"}')",
+            [],
+        )
+        .unwrap();
+    }
+    let (st, body) = app.get(&c, "/api/categories").await;
+    assert_eq!(st, StatusCode::OK);
+    let by_name = |n: &str| {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    // missing の album は数えない
+    assert_eq!(by_name("Anime")["albums"], 2);
+    assert_eq!(by_name("Game")["genres"], 1);
+    assert_eq!(
+        by_name("J-Pop")["subscriptions"],
+        1,
+        "購読は canonical key で照合"
+    );
+    assert_eq!(by_name("Drama")["inbox_drafts"], 1);
+    let empty = by_name("Empty");
+    for k in ["albums", "genres", "subscriptions", "inbox_drafts"] {
+        assert_eq!(empty[k], 0, "{k}");
+    }
+}
