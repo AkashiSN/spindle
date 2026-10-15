@@ -10,6 +10,7 @@ use std::rc::Rc;
 use agent_proto::*;
 use sha2::{Digest, Sha256};
 
+use crate::progress::ProgressSent;
 use crate::server::{Confirmed, Fetch, Reported, Server, NOT_ADOPTABLE_PAIR_STOP};
 use crate::{Error, Result};
 
@@ -44,6 +45,14 @@ struct World {
     adopt_calls: Vec<AdoptRequest>,
     /// adopt をこの回数だけ通信エラーにする
     adopt_fail: u32,
+    /// progress に届いた要求（受け付けた・断った・失敗させたものすべて）
+    progress_log: Vec<ProgressRequest>,
+    /// 受け付けた（`Ok` を返した）progress の数
+    progress_accepted: usize,
+    /// progress を 404（古いサーバ）で断る
+    progress_not_found: bool,
+    /// progress をこの回数だけ通信エラーにする
+    progress_fail: u32,
     /// トークンを持たない（CLI の pair が作るサーバ）。`use_token` まで、トークンの要る呼び出しを断る
     anonymous: bool,
 }
@@ -175,6 +184,26 @@ impl FakeServer {
     /// adopt に届いた要求（成功・失敗とも記録する）
     pub fn adopt_calls(&self) -> Vec<AdoptRequest> {
         self.0.borrow().adopt_calls.clone()
+    }
+
+    /// progress に届いた要求（断った・失敗させたものも含む）
+    pub fn progress_log(&self) -> Vec<ProgressRequest> {
+        self.0.borrow().progress_log.clone()
+    }
+
+    /// 受け付けた progress の数
+    pub fn progress_accepted(&self) -> usize {
+        self.0.borrow().progress_accepted
+    }
+
+    /// progress を 404（ルートが無い古いサーバ）で断る
+    pub fn set_progress_not_found(&self, v: bool) {
+        self.0.borrow_mut().progress_not_found = v;
+    }
+
+    /// progress をこの回数だけ通信エラーにする
+    pub fn fail_progress(&self, times: u32) {
+        self.0.borrow_mut().progress_fail = times;
     }
 
     pub fn reports(&self) -> Vec<ReportRequest> {
@@ -409,12 +438,18 @@ impl Server for FakeServer {
             return Ok(Fetch::Changed);
         }
         let rest = bytes.get(offset as usize..).unwrap_or_default();
-        if let Some(n) = w.fetch_cut.get_mut(&track_id) {
-            if *n > 0 {
+        let cut = match w.fetch_cut.get_mut(&track_id) {
+            Some(n) if *n > 0 => {
                 *n -= 1;
-                out.write_all(&rest[..rest.len() / 2])?;
-                return Err(Error::Server("受信が切れた（偽）".to_owned()));
+                true
             }
+            _ => false,
+        };
+        // 書いている間に（進捗の送信などで）呼び戻されても借用が重ならないよう、書く前に放す
+        drop(w);
+        if cut {
+            out.write_all(&rest[..rest.len() / 2])?;
+            return Err(Error::Server("受信が切れた（偽）".to_owned()));
         }
         out.write_all(rest)?;
         Ok(Fetch::Complete)
@@ -512,5 +547,23 @@ impl Server for FakeServer {
         w.current_playlists = a.report.state.playlists.clone();
         w.open = None;
         Ok(Reported::Ok)
+    }
+
+    /// 本体と同じく、open な計画でなければ 404、generation が違えば 409（どちらも `Stop`）
+    fn progress(&self, plan_id: i64, r: &ProgressRequest) -> Result<ProgressSent> {
+        let mut w = self.0.borrow_mut();
+        w.progress_log.push(r.clone());
+        if w.progress_fail > 0 {
+            w.progress_fail -= 1;
+            return Err(Error::Server("進捗の送信に失敗（偽）".to_owned()));
+        }
+        if w.progress_not_found || w.open.as_ref().map(|p| p.plan_id) != Some(plan_id) {
+            return Ok(ProgressSent::Stop);
+        }
+        if r.generation != w.generation {
+            return Ok(ProgressSent::Stop);
+        }
+        w.progress_accepted += 1;
+        Ok(ProgressSent::Ok)
     }
 }

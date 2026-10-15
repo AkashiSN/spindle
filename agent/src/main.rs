@@ -3,8 +3,11 @@
 //! それ以外の OS では `UnsupportedMusic`（全操作が失敗する）とファイルのトークン。
 //! `SPINDLE_AGENT_SECRETS=file` なら macOS でもトークンをファイルに置く（試験と、Keychain が使えないときの逃げ道）
 
-use std::io::{BufRead, Write};
+use std::cell::RefCell;
+use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use agent_proto::ManifestResponse;
 use spindle_agent::ctx::Ui;
@@ -13,6 +16,7 @@ use spindle_agent::failpoint::Failpoints;
 use spindle_agent::music::jxa::{JxaMusic, ProcessOsascript};
 #[cfg(not(target_os = "macos"))]
 use spindle_agent::music::UnsupportedMusic;
+use spindle_agent::progress::{render_line, Progress, ProgressSink, ProgressView};
 use spindle_agent::recover::Resolution;
 #[cfg(target_os = "macos")]
 use spindle_agent::secrets::keychain::{KeychainSecrets, ACCOUNT, SERVICE};
@@ -84,15 +88,128 @@ fn parse(args: &[String]) -> Option<Command> {
     }
 }
 
-/// 標準入出力の Ui
-struct StdUi;
+/// TTY でないときに 1 行出す間隔（時間）
+const PLAIN_EVERY: Duration = Duration::from_secs(10);
+/// TTY でないときに 1 行出す間隔（件数）
+const PLAIN_EVERY_ITEMS: u64 = 10;
+/// 端末の幅が取れないときの桁数
+const DEFAULT_WIDTH: usize = 80;
+/// TTY でないときの行は省かない
+const PLAIN_WIDTH: usize = 4096;
+
+/// 標準エラーの進捗の行。`StdUi` と進捗の sink が共有し、メッセージの前に行を消す
+struct TermLine {
+    tty: bool,
+    /// 上書きする行が今出ている
+    shown: bool,
+    /// TTY でないときに最後に出した（時刻, 件数）
+    last_plain: Option<(Instant, u64)>,
+}
+
+impl TermLine {
+    fn new() -> Self {
+        Self {
+            tty: std::io::stderr().is_terminal(),
+            shown: false,
+            last_plain: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        if self.shown {
+            let mut e = std::io::stderr();
+            let _ = write!(e, "\r\x1b[2K");
+            let _ = e.flush();
+            self.shown = false;
+        }
+    }
+
+    fn draw(&mut self, v: &ProgressView) {
+        let mut e = std::io::stderr();
+        if self.tty {
+            // 最後の桁まで書くと折り返す端末があるので 1 桁残す
+            let line = render_line(v, term_width().saturating_sub(1));
+            let _ = write!(e, "\r\x1b[2K{line}");
+            let _ = e.flush();
+            self.shown = true;
+        } else {
+            let now = Instant::now();
+            if plain_due(self.last_plain, now, v.done) {
+                self.last_plain = Some((now, v.done));
+                let _ = writeln!(e, "{}", render_line(v, PLAIN_WIDTH));
+            }
+        }
+    }
+}
+
+/// TTY でないとき、前に出してから 10 秒経ったか 10 件進んだら出す（最初の 1 回は出す）
+fn plain_due(last: Option<(Instant, u64)>, now: Instant, done: u64) -> bool {
+    match last {
+        None => true,
+        Some((t, d)) => {
+            now.saturating_duration_since(t) >= PLAIN_EVERY
+                || done >= d.saturating_add(PLAIN_EVERY_ITEMS)
+        }
+    }
+}
+
+/// 標準エラーの端末の桁数。取れなければ `COLUMNS`、それも無ければ 80
+fn term_width() -> usize {
+    if let Ok(ws) = rustix::termios::tcgetwinsize(std::io::stderr()) {
+        if ws.ws_col > 0 {
+            return usize::from(ws.ws_col);
+        }
+    }
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.trim().parse::<usize>().ok())
+        .filter(|w| *w > 0)
+        .unwrap_or(DEFAULT_WIDTH)
+}
+
+/// 進捗を標準エラーへ描く sink
+struct CliSink(Rc<RefCell<TermLine>>);
+
+impl ProgressSink for CliSink {
+    fn draw(&mut self, v: &ProgressView) {
+        if let Ok(mut t) = self.0.try_borrow_mut() {
+            t.draw(v);
+        }
+    }
+
+    fn clear(&mut self) {
+        if let Ok(mut t) = self.0.try_borrow_mut() {
+            t.clear();
+        }
+    }
+
+    fn summary(&mut self, line: &str) {
+        self.clear();
+        println!("{line}");
+    }
+}
+
+/// 標準入出力の Ui。出す前に進捗の行を消す（次の更新で描き直される）
+struct StdUi {
+    term: Rc<RefCell<TermLine>>,
+}
+
+impl StdUi {
+    fn clear_line(&self) {
+        if let Ok(mut t) = self.term.try_borrow_mut() {
+            t.clear();
+        }
+    }
+}
 
 impl Ui for StdUi {
     fn info(&mut self, msg: &str) {
+        self.clear_line();
         println!("{msg}");
     }
 
     fn confirm(&mut self, m: &ManifestResponse) -> bool {
+        self.clear_line();
         println!("{}", sync::render_diff(m));
         print!("反映しますか？ [y/N] ");
         let _ = std::io::stdout().flush();
@@ -102,6 +219,15 @@ impl Ui for StdUi {
         }
         matches!(line.trim(), "y" | "Y" | "yes")
     }
+}
+
+/// sync の進捗。時計は起動からの単調な経過
+fn cli_progress(term: &Rc<RefCell<TermLine>>) -> Progress {
+    let t0 = Instant::now();
+    Progress::new(
+        Box::new(CliSink(term.clone())),
+        Box::new(move || t0.elapsed()),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -140,7 +266,8 @@ fn run(cmd: Command) -> Result<()> {
     let paths = Paths::from_env()?;
     let music = open_music();
     let fp = Failpoints::none();
-    let mut ui = StdUi;
+    let term = Rc::new(RefCell::new(TermLine::new()));
+    let mut ui = StdUi { term: term.clone() };
     match cmd {
         Command::Pair {
             url,
@@ -165,7 +292,7 @@ fn run(cmd: Command) -> Result<()> {
         }
         Command::Sync => {
             let server = paired_server(&paths)?;
-            match sync::sync(&music, &server, &paths, &fp, &mut ui)? {
+            match sync::sync(&music, &server, &paths, &fp, &mut ui, cli_progress(&term))? {
                 SyncOutcome::NothingToDo | SyncOutcome::PendingReevaluation => {}
                 SyncOutcome::Declined => ui.info("反映しませんでした"),
                 SyncOutcome::Applied {
@@ -205,5 +332,20 @@ fn main() -> ExitCode {
             eprintln!("エラー: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_lines_every_ten_seconds_or_items() {
+        let t0 = Instant::now();
+        assert!(plain_due(None, t0, 0));
+        let last = Some((t0, 3));
+        assert!(!plain_due(last, t0 + Duration::from_secs(9), 12));
+        assert!(plain_due(last, t0 + Duration::from_secs(10), 3));
+        assert!(plain_due(last, t0 + Duration::from_secs(1), 13));
     }
 }

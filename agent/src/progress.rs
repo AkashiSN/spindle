@@ -37,10 +37,20 @@ pub trait ProgressSink {
     fn summary(&mut self, line: &str);
 }
 
+/// 進捗の送信の結果（`Server::progress`）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressSent {
+    Ok,
+    /// 404（計画が無い・古いサーバでルートが無い）か 409。この実行では以後送らない
+    Stop,
+}
+
 struct Inner {
     sink: Box<dyn ProgressSink>,
     clock: Clock,
     started: Option<Started>,
+    /// `ProgressSent::Stop` を受けた。この実行では以後送らない
+    send_stopped: bool,
 }
 
 struct Started {
@@ -81,6 +91,7 @@ impl Progress {
                 sink,
                 clock,
                 started: None,
+                send_stopped: false,
             })),
         }
     }
@@ -124,6 +135,15 @@ impl Progress {
             s.item_base = s.bytes_done;
             s.item_expected = expected_bytes;
             s.item_got = 0;
+            i.maybe_draw(false);
+            Some(())
+        });
+    }
+
+    /// 今の項目の段だけを変える（受信を終えてミュージック.app へ追加する、など）
+    pub fn set_phase(&self, phase: ProgressPhase) {
+        self.with(|i| {
+            i.started.as_mut()?.phase = phase;
             i.maybe_draw(false);
             Some(())
         });
@@ -223,6 +243,36 @@ impl Progress {
                 },
             ))
         })
+    }
+
+    /// 間引いて描き、送る時刻なら `send` で送る。送信の失敗は `send` の側で `Ok` として捨てる
+    pub fn tick(&self, send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent) {
+        self.with(|i| {
+            i.maybe_draw(false);
+            Some(())
+        });
+        self.send_with(false, send);
+    }
+
+    /// 間引かずに今の値を送る（報告の前の最後の 1 回）
+    pub fn flush(&self, send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent) {
+        self.send_with(true, send);
+    }
+
+    fn send_with(&self, force: bool, send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent) {
+        if self.with(|i| Some(i.send_stopped)).unwrap_or(true) {
+            return;
+        }
+        // 送っている間は借用を持たない
+        let Some((plan_id, req)) = self.take_send(force) else {
+            return;
+        };
+        if send(plan_id, &req) == ProgressSent::Stop {
+            self.with(|i| {
+                i.send_stopped = true;
+                Some(())
+            });
+        }
     }
 
     /// 終わりの 1 行を sink へ出し、その行を返す（開始していなければ None）

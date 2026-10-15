@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write};
 
-use agent_proto::{ManifestResponse, OpKind, PlanItem};
+use agent_proto::{ManifestResponse, OpKind, PlanItem, ProgressPhase};
 
 use crate::batch;
 use crate::ctx::Ctx;
@@ -90,17 +90,7 @@ pub fn run<M: Music, S: Server>(
     m: &ManifestResponse,
 ) -> Result<Outcome> {
     // 空き容量（副作用の前）
-    let need = r
-        .items
-        .iter()
-        .filter(|i| matches!(i.op, OpKind::Add | OpKind::Update | OpKind::UpdateMove))
-        .filter(|i| {
-            !cx.state
-                .tracks
-                .get(&i.track_id)
-                .is_some_and(|e| adopted_unchanged(e, i))
-        })
-        .fold(MARGIN_BYTES, |a, i| a.saturating_add(i.size));
+    let need = bytes_needed(cx, r).saturating_add(MARGIN_BYTES);
     let free = cx.local.free_bytes()?;
     if free < need {
         return Err(Error::Stop(format!(
@@ -124,18 +114,37 @@ pub fn run<M: Music, S: Server>(
                 .cloned()
                 .collect();
             if !path_changes.is_empty() {
+                // バッチは 1 つの項目として受信を数え、終わったら中の項目数だけ進める
+                let n = path_changes.len() as u64;
+                let expected = path_changes
+                    .iter()
+                    .filter(|i| needs_fetch(cx, i))
+                    .fold(0u64, |a, i| a.saturating_add(i.size));
+                let base = cx.progress.view().bytes_done;
+                cx.progress.begin_item(ProgressPhase::Move, None, expected);
                 let (executed, dropped) = batch::run(cx, path_changes, &unmanaged, &origins)?;
+                let got = cx.progress.view().bytes_done.saturating_sub(base);
+                cx.progress.end_items(n, expected.saturating_sub(got));
+                cx.progress_tick();
                 out.executed += executed;
                 out.dropped += dropped;
             }
         }
         for item in r.items.iter().filter(|i| i.op == kind) {
+            let (phase, current) = match kind {
+                OpKind::Delete => (ProgressPhase::Delete, item.from.as_deref()),
+                _ => (ProgressPhase::Fetch, item.to.as_deref()),
+            };
+            let expected = if needs_fetch(cx, item) { item.size } else { 0 };
+            cx.progress.begin_item(phase, current, expected);
             let step = match kind {
                 OpKind::Delete => delete(cx, item)?,
                 OpKind::Update => update(cx, item, &origins)?,
                 OpKind::Add => add(cx, item, &unmanaged, &origins)?,
                 OpKind::Move | OpKind::UpdateMove => continue,
             };
+            cx.progress.end_item();
+            cx.progress_tick();
             match step {
                 Step::Done => out.executed += 1,
                 Step::Satisfied => {}
@@ -155,6 +164,42 @@ pub fn run<M: Music, S: Server>(
     // 削除・移動で空いたディレクトリ（と `.moving/`）を片付ける。root 自身は残す
     cx.local.prune_empty_dirs()?;
     Ok(out)
+}
+
+/// 受け取りが要る項目か（追加・更新・更新 + 移動のうち、同期の近道に入らないもの）
+fn needs_fetch<M: Music, S: Server>(cx: &Ctx<'_, M, S>, i: &PlanItem) -> bool {
+    matches!(i.op, OpKind::Add | OpKind::Update | OpKind::UpdateMove)
+        && !cx
+            .state
+            .tracks
+            .get(&i.track_id)
+            .is_some_and(|e| adopted_unchanged(e, i))
+}
+
+/// 実行で受け取るバイト数の見積もり（空き容量の検査と進捗の `bytes_total`。余白は含めない）
+pub fn bytes_needed<M: Music, S: Server>(cx: &Ctx<'_, M, S>, r: &Runnable) -> u64 {
+    r.items
+        .iter()
+        .filter(|i| needs_fetch(cx, i))
+        .fold(0, |a, i| a.saturating_add(i.size))
+}
+
+/// 書いたバイト数を `on_write` に知らせる `Write` の包み（受信の進捗を数える）
+struct CountingWriter<W, F> {
+    inner: W,
+    on_write: F,
+}
+
+impl<W: Write, F: FnMut(u64)> Write for CountingWriter<W, F> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        (self.on_write)(n as u64);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// 管理外のパスの鍵: root のファイルのうち予約でなく、state の曲のパスでも pending の `to` / `from` でも
@@ -227,7 +272,14 @@ fn download_inner<M: Music, S: Server>(
     let mut retries = 0;
     loop {
         let offset = w.get_ref().metadata()?.len();
-        let res = cx.server.fetch(track_id, token, size, offset, &mut w);
+        let mut cw = CountingWriter {
+            inner: &mut w,
+            on_write: |n| {
+                cx.progress.add_bytes(n);
+                cx.progress_tick();
+            },
+        };
+        let res = cx.server.fetch(track_id, token, size, offset, &mut cw);
         // 切れた場合も、書けた分を続きの起点にする
         w.flush()?;
         match res {
@@ -470,6 +522,7 @@ fn add<M: Music, S: Server>(
         return Ok(step);
     }
     cx.fp.hit("exec.add.downloaded")?;
+    cx.progress.set_phase(ProgressPhase::Add);
     // 管理外の鍵は実行の始めに取ったもの。取得の間に置き先へファイルが現れていれば上書きしない
     // （ここで置き先にあってよい自分のファイルは無い。削除・移動元は先に空き、管理下の曲は上で外した）
     let mut collided = cx.local.exists(to)?;

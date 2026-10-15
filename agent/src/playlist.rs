@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use agent_proto::{ManifestResponse, PlanPlaylist, PlaylistOpKind};
+use agent_proto::{ManifestResponse, PlanPlaylist, PlaylistOpKind, ProgressPhase};
 
 use crate::ctx::Ctx;
 use crate::exec::{remove_pending, UNMANAGED_COLLISION};
@@ -75,10 +75,14 @@ pub fn run<M: Music, S: Server>(
     let deletes = ops.iter().filter(|o| o.op == PlaylistOpKind::Delete);
     let writes = ops.iter().filter(|o| o.op != PlaylistOpKind::Delete);
     for op in deletes.chain(writes) {
+        let name = op.to.as_deref().or(op.from.as_deref());
+        cx.progress.begin_item(ProgressPhase::Playlist, name, 0);
         let step = match op.op {
             PlaylistOpKind::Delete => delete(cx, &scene, op)?,
             PlaylistOpKind::Add | PlaylistOpKind::Update => write(cx, &scene, op, m)?,
         };
+        cx.progress.end_item();
+        cx.progress_tick();
         match step {
             Step::Done => executed += 1,
             Step::Dropped => dropped += 1,

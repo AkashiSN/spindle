@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use agent_proto::{
     AbandonRequest, AdoptRequest, AdoptResponse, ConfirmRequest, ErrorBody, ManifestResponse,
-    PairRequest, PairResponse, Plan, ReportRequest,
+    PairRequest, PairResponse, Plan, ProgressRequest, ReportRequest,
 };
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_RANGE, IF_MATCH, RANGE};
 use reqwest::StatusCode;
 
+use crate::progress::ProgressSent;
 use crate::{Error, Result};
 
 #[cfg(any(test, feature = "fake"))]
@@ -20,6 +21,8 @@ pub mod fake;
 
 /// 曲 1 本の取得の上限（止まった接続がいつまでも残らないように）
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+/// 進捗の送信の上限（遅いときは捨てて次の機会に送る）
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// pair の 409 `not_adoptable`（行の差し替えを断られた）
 pub const NOT_ADOPTABLE_PAIR_STOP: &str = "この端末の行には引き継げません（行が既に使われているか、前の登録が別の行に残っています）。この Mac の登録が spindle の端末タブに残っている（DB を失っていない）なら、--adopt を付けずに spindle-agent pair してください。そうでなければ、端末タブで新しい iPhone 端末を作り、そのコードで pair --adopt し直してください";
@@ -72,6 +75,9 @@ pub trait Server {
     fn open_plan(&self) -> Result<Option<Plan>>;
     fn report(&self, r: &ReportRequest) -> Result<Reported>;
     fn abandon(&self, plan_id: i64, a: &AbandonRequest) -> Result<Reported>;
+    /// 実行中の計画の進捗を送る。404（計画が無い・古いサーバ）と 409 は `Stop`。
+    /// 通信エラーと 5xx は `Err`（呼び出し側は捨てて続ける）
+    fn progress(&self, plan_id: i64, r: &ProgressRequest) -> Result<ProgressSent>;
 }
 
 /// `Content-Range: bytes <start>-<end>/<total>` の開始が `offset` なら総サイズを返す
@@ -371,6 +377,27 @@ impl Server for HttpServer {
             .json(a),
         )?;
         reported(res)
+    }
+
+    fn progress(&self, plan_id: i64, r: &ProgressRequest) -> Result<ProgressSent> {
+        let res = self.send(
+            self.auth(
+                self.client
+                    .post(self.url(&format!("api/agent/plans/{plan_id}/progress"))?),
+            )?
+            .timeout(PROGRESS_TIMEOUT)
+            .json(r),
+        )?;
+        progress_sent(res.status()).ok_or_else(|| unexpected(res))
+    }
+}
+
+/// 進捗の送信の応答。分類できないもの（5xx など）は None
+pub fn progress_sent(status: StatusCode) -> Option<ProgressSent> {
+    match status {
+        s if s.is_success() => Some(ProgressSent::Ok),
+        StatusCode::NOT_FOUND | StatusCode::CONFLICT => Some(ProgressSent::Stop),
+        _ => None,
     }
 }
 
