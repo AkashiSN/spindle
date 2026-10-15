@@ -1695,6 +1695,16 @@ SAVEPOINT で行う（D-95 の P5-1・P5-2 追記）。初回は全曲分が走�
   manifest に無い曲の追加・更新は項目のエラー（「出どころが無い（manifest に無い曲）」）にする。曲の
   `pending_ops` には任意で、パス変更のバッチのメンバーには必須で持たせ、回復で写す。`STATE_VERSION` と
   `PROTO_VERSION` は 1 のまま、この 2 項目の無い旧 state は読めない（リリース前の変更。作り直す）
+- **進捗**（D-108）: `spindle-agent sync` は確認の後の実行中（削除 → パス変更 → 更新 → 追加 → プレイリスト）の
+  進捗を、Mac の端末とサーバに出す。件数は 1 件を扱い終えるたびに進め（見送り・エラーも数える）、バイト数は
+  受け取りが要る項目の `size` の和に対する受信量（失敗・見送りは残りを足して合計に届かせる）。速度は直近 5 秒の
+  移動平均、残り時間は残りバイト ÷ 速度。サーバへは `POST /api/agent/plans/:id/progress` を 2 秒に 1 回まで送る
+  （件数が変わらなくても速度と生存のために送る）。**サーバはメモリだけに持つ**（端末ごとに 1 件。再起動で消え、次の
+  送信で戻る）。計画が閉じる（報告・破棄・強制破棄）と消して `device_progress`（`progress: null`）を流す。
+  端末の応答の `sync_progress` は、保持している進捗の `plan_id` が今の open な計画と一致するときだけ出す。
+  受理後に計画を確かめ直し、閉じていたら消して null を流す（閉じる側の消去との競合）。送信の失敗は同期を止めず、
+  その回を捨てる。404 / 409 を受けたらその実行では以後送らない（古いサーバの 404 もこれ）。
+  Android（adb）はジョブの進捗があるので対象外
 - **引き継ぎ**（`pair --adopt <URL> <コード>`。DB 全損後。D-104）: DB を作り直して端末タブで作った新しい
   行の pair コードで、この Mac の保存先とミュージック.app の track をそのまま引き継ぐ。
   1. 前提（コードを使う前）: 通常の pair と同じ検査（コピー設定・メディアフォルダ・Automation・トークンの
@@ -2012,6 +2022,12 @@ POST   /api/agent/plans/:id/abandon               Report に { pending_ops, pend
 POST   /api/agent/report                          Report → 200 {}（計画を completed にする。同じ報告の再送も 200）。400 invalid_report
                                                   （1 件でも外れれば全体を拒否。§7.11「報告」）| bad_request、404 no_plan、409 generation_mismatch |
                                                   plan_closed | plan_unreadable。本文の上限は report と abandon と adopt だけ 64 MiB
+POST   /api/agent/plans/:id/progress              { generation, done, total, bytes_done, bytes_total, rate, phase, current? } → 204。実行中の進捗を
+                                                  メモリだけに置く（DB には書かず、SSE `device_progress` で流す。§7.11「進捗」、D-108）。phase は
+                                                  delete | move | fetch | add | playlist、rate はバイト / 秒、current は 1,024 バイトまで。
+                                                  404 no_plan（その端末の open な計画でない: 閉じた・破棄済み・別の端末・無い）、
+                                                  409 generation_mismatch、400 invalid（done > total・bytes_done > bytes_total・未知の phase・
+                                                  負の値・current 超過）。本文の上限は 4 KiB。エージェントは 404 / 409 で以後送らない
 POST   /api/agent/adopt                           { tracks: [{ track_id, path, rel_path, source, size, sha256, stale }],
                                                   playlists: [{ playlist_id, name }] } → 200 { tracks: [{ from, to }], playlists: [{ from, to }] }
                                                   （`to` は付け替え先の id、外れたものは null）。DB 全損後の `pair --adopt` で、付け替えた状態を
@@ -2297,12 +2313,13 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 //                            → 404 | 409 { "error": "not_terminal" }
 // DELETE /api/jobs?state=failed → 200 { "deleted": N }。state=failed 以外は 400 { "error": "invalid_state" }
 
-// SSE /api/events   event 種別: job | batch | library | resync
+// SSE /api/events   event 種別: job | batch | library | resync | device_progress
 //   job:     { "id", "state", "progress", "done", "total" }
 //   batch:   { "id", "state", "applied", "conflict", "failed" }
 //   library: { "scan_run_id", "kind": "ids", "track_ids": [ … ] }   // 変更が 200 行以下
 //            { "scan_run_id", "kind": "bulk" }                     // それ以上。ページを無効化
 //            scan の完了時に 1 回（commit 後）。変更行 0 件なら流さない（D-39）
+//   device_progress: { "device_id", "progress": SyncProgress | null }   // agent 端末の同期の進捗（null は消去: 計画が閉じた）
 //   resync:  { "skipped": n }   // サーバ側で取りこぼした。一覧（jobs / history / 表示ページ）を再取得
 //   クライアントは SSE を開いてから一覧を取得する（逆順だと開く前のイベントを失う。D-36）
 ```
@@ -2338,7 +2355,11 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
   "playlist_ids": [1, 4],        // 印（device_playlists）
   "open_plan": false,            // open な計画か待ち・実行中の device_sync がある（設定を変えられない）
   "plan_open": false,            // open な計画がある（「続きを実行」「破棄」の対象）
-  "sync_job": null }             // 待ち・実行中の device_sync { id, state } か null
+  "sync_job": null,             // 待ち・実行中の device_sync { id, state } か null
+  "sync_progress": null }        // agent の同期の進捗か null。open な計画の plan_id と一致するものだけ（下記）
+
+// SyncProgress: { "plan_id", "done", "total", "bytes_done", "bytes_total", "rate", "phase", "current",
+//                 "updated_at", "age" }   // age = サーバが受けてからの秒数（画面は端末の時計に頼らない）
 
 // GET /api/devices/:id/diff
 { "generation": 5, "plan_token": "…",          // 同期（adb）と計画の確定（agent）に添える
@@ -2896,6 +2917,11 @@ GC は削除件数・バイト数と区分ごとの内訳・見送りと失敗�
     「続きを実行」「破棄」、未接続か通常の破棄が `not_connected` なら「強制破棄」。iPhone はボタンを出さず
     「Mac で `spindle-agent sync` を実行する」の案内とエージェントの最終報告時刻、途中の計画があれば Mac で
     続けるかの案内と「強制破棄」
+  - **同期の進捗**（agent。D-108）: 「差分」の同期中の表示の下に、`sync_progress` があれば進捗バー（`bytes_total > 0`
+    ならバイト、無ければ件数）、`12 / 92 件 · 85.3 MB / 634.8 MB · 12.4 MB/s · 残り 0:42`、段の動詞と今の項目を出す。
+    `device_progress` で差し替え、一覧の応答より新しい SSE の値は古い応答で上書きしない。`age`（応答時点）と受信後の
+    経過から 30 秒を超えたら速度と残り時間を消して「応答なし（最後の進捗: 1 分前）」と出す（1 秒ごとに描き直す）。
+    無ければ従来どおり（古いエージェント、Android）
   - **選曲**: 全曲 / プレイリストの切り替えと、プレイリストのチェック一覧（スマートは ⚙、曲数）。選び方を
     変えるたびに `GET /api/devices/:id/estimate` で合計曲数と容量（推定で数えた曲数と、容量の分からない
     曲数を添える。D-107）を出す。保存は印を先に、選び方を後に（プレイリスト選曲へ切り替えるとき空の選曲の差分を作らない）。
