@@ -19,6 +19,7 @@ import {
   type PropRow,
   type PropValue,
 } from '../lib/properties'
+import { singleAlbumId } from '../lib/records'
 import type { Selection } from '../lib/selection'
 import { toSelectionBody } from '../lib/selection'
 import { normKey } from '../lib/tagops'
@@ -35,6 +36,7 @@ export function PropertiesPanel({
   error,
   onEdit,
   onDelete,
+  onOpenLog,
 }: {
   /** 読み込み済みの選択行 */
   rows: TrackRow[]
@@ -48,6 +50,8 @@ export function PropertiesPanel({
   onEdit: (key: string, values: string[]) => Promise<string | null>
   /** フィールドの削除（選択全体への delete op）。失敗の理由を返す */
   onDelete: (key: string) => Promise<string | null>
+  /** 選択が 1 つの album のとき、その照合・吸い出しのログを記録画面で開く */
+  onOpenLog?: (albumId: number) => void
 }) {
   // 編集中の状態は選択（kind / ids / filter / exclude）に紐づける。読み込み済み行が同じでも
   // 選択の意味が変われば（ids → filter 形など）捨てる。Enter は選択全体に効くため
@@ -322,6 +326,12 @@ export function PropertiesPanel({
             ))}
           </tbody>
         </table>
+        {/* filter 形の選択では rows は読み込み済みの一部なので、選択全体が複数 album でも出ることがある */}
+        {onOpenLog && singleAlbumId(rows) != null && (
+          <button type="button" className="link small" onClick={() => onOpenLog(singleAlbumId(rows)!)}>
+            照合・吸い出しのログを見る
+          </button>
+        )}
       </div>
     </div>
   )

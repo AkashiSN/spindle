@@ -1,25 +1,22 @@
 // 設定画面（SPEC §12.6、D-58）: config.toml の閲覧、再スキャン / deep scan、GC の preview → 実行、
-// 退避ファイル（archived_files）の一覧。復元は対応バッチの履歴から巻き戻す（バッチ #n で履歴へ）
+// 退避ファイルは記録画面へ移した（D-106）
 
 import { useCategories } from '../hooks/useCategories'
 import type { SettingsState } from '../hooks/useSettings'
 import type { ThemeState } from '../hooks/useTheme'
 import { formatCount } from '../lib/format'
-import { formatDateTime } from '../lib/history'
-import { deleteConfirmText } from '../lib/categories'
-import { archiveReasonLabel, archiveStateLabel, formatBytes, gcPreviewRows } from '../lib/settings'
+import { categoryUsageText, deleteConfirmText, otherUsageText } from '../lib/categories'
+import { formatBytes, gcPreviewRows } from '../lib/settings'
 import { THEME_PREFS } from '../lib/theme'
 
 export function SettingsView({
   settings,
   theme,
-  onOpenBatch,
 }: {
   settings: SettingsState
   theme: ThemeState
-  onOpenBatch: (batchId: number) => void
 }) {
-  const { config, archive, gcPreview, busy, notice, error } = settings
+  const { config, gcPreview, busy, notice, error } = settings
   const gcRows = gcPreview ? gcPreviewRows(gcPreview) : null
   const gcTotal = gcRows ? gcRows.reduce((a, r) => a + r.count, 0) : 0
   const cats = useCategories(true)
@@ -109,73 +106,46 @@ export function SettingsView({
       <h2>category</h2>
       <p className="muted small">
         配置先の最上位のフォルダ。Library 直下のフォルダ名からスキャンで自動で作られる（追加だけ）。
-        使われていない語彙（どのアルバム・購読・Inbox の下書きにも使われていない）は削除できる
+        どのアルバム・GENRE の写像・購読・Inbox の下書きにも使われていない語彙だけ削除できる
       </p>
       {cats.error != null && <p className="error">{cats.error}</p>}
       {cats.items.length === 0 ? (
         <p className="muted">category はまだない</p>
       ) : (
-        <ul className="category-list">
-          {cats.items.map((c) => (
-            <li key={c.id}>
-              <span>{c.name}</span>{' '}
-              <button
-                type="button"
-                className="small"
-                onClick={() => {
-                  if (window.confirm(deleteConfirmText(c.name))) void cats.remove(c.id)
-                }}
-              >
-                削除
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <h2>退避ファイル</h2>
-      {archive == null ? (
-        <p className="muted">読み込み中…</p>
-      ) : archive.length === 0 ? (
-        <p className="muted">退避したファイルはありません（正規化で置き換えた元ファイルがここに載る）</p>
-      ) : (
-        <table className="history-table archive-table">
+        <table className="gc-table category-table">
           <thead>
             <tr>
-              <th className="num">#</th>
-              <th>元のパス</th>
-              <th>退避先（Archive/）</th>
-              <th>理由</th>
-              <th>退避</th>
-              <th>GC 期限</th>
-              <th>状態</th>
-              <th>復元</th>
+              <th>名前</th>
+              <th className="num">album</th>
+              <th>その他の使用</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
-            {archive.map((a) => (
-              <tr key={a.id} className={`state-${a.state}`}>
-                <td className="num">{a.id}</td>
-                <td className="path">{a.source_rel_path}</td>
-                <td className="path">{a.rel_path}</td>
-                <td className="nowrap">{archiveReasonLabel(a.reason)}</td>
-                <td className="nowrap">{formatDateTime(a.archived_at)}</td>
-                <td className="nowrap">{formatDateTime(a.eligible_after)}</td>
-                <td className="nowrap">
-                  {archiveStateLabel(a.state)}
-                  {a.state_at != null && <span className="muted small"> {formatDateTime(a.state_at)}</span>}
-                </td>
-                <td className="nowrap">
-                  {a.state === 'held' && a.batch_id != null ? (
-                    <button type="button" className="link small" onClick={() => onOpenBatch(a.batch_id!)}>
-                      バッチ #{a.batch_id} を巻き戻す
+            {cats.items.map((c) => {
+              const used = categoryUsageText(c)
+              return (
+                <tr key={c.id}>
+                  <td>{c.name}</td>
+                  <td className="num">{formatCount(c.albums ?? 0)}</td>
+                  <td className="muted small">{otherUsageText(c)}</td>
+                  <td className="action">
+                    <button
+                      type="button"
+                      className="small"
+                      disabled={used != null}
+                      title={used ?? undefined}
+                      onClick={() => {
+                        if (window.confirm(deleteConfirmText(c.name))) void cats.remove(c.id)
+                      }}
+                    >
+                      削除
                     </button>
-                  ) : (
-                    ''
-                  )}
-                </td>
-              </tr>
-            ))}
+                    {used != null && <span className="muted small"> {used}</span>}
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       )}

@@ -6,8 +6,10 @@ import {
   canRetry,
   cpuBudgetLabel,
   filterJobs,
+  jobLogAlbum,
   jobProgress,
   jobTypeLabel,
+  noteHeadline,
   shownLimit,
   summarizeByType,
   tabCounts,
@@ -162,5 +164,20 @@ describe('cpuBudgetLabel（D-73）', () => {
       'CPU 系（rg / transcode / flaccheck / hirescheck / source_hash）の実行中の合計 2 / 予算 12（= コア数）',
     )
     expect(cpuBudgetLabel(rows, null)).toBeNull()
+  })
+})
+
+describe('結果列と記録への導線', () => {
+  it('結果列は note の 1 行目', () => {
+    expect(noteHeadline('3 件・2.0 KB を削除\n退避ファイル 3（2.0 KB）')).toBe('3 件・2.0 KB を削除')
+    expect(noteHeadline(null)).toBe('')
+    expect(noteHeadline(undefined)).toBe('')
+  })
+
+  it('ログを開けるのは album を持つ verify だけ', () => {
+    const base = { id: 1, state: 'done', attempts: 1, max_attempts: 5 } as const
+    expect(jobLogAlbum({ ...base, type: 'verify', payload: { album_id: 7 } } as never)).toBe(7)
+    expect(jobLogAlbum({ ...base, type: 'verify', payload: {} } as never)).toBeNull()
+    expect(jobLogAlbum({ ...base, type: 'rip', payload: { album_id: 7 } } as never)).toBeNull()
   })
 })

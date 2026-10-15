@@ -20,6 +20,7 @@ pub mod hirescheck;
 pub mod history;
 pub mod inbox;
 pub mod jobs;
+pub mod logs;
 pub mod md5fill;
 pub mod normalize;
 pub mod playlists;
@@ -138,6 +139,8 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(events::stream))
         .route("/config", get(config::get))
         .route("/archive", get(archive::list))
+        .route("/logs", get(logs::list))
+        .route("/logs/{key}/text", get(logs::text))
         .route("/scan", post(scan::start))
         .route("/gc", post(gc::start))
         .route("/gc/preview", get(gc::preview))
@@ -150,6 +153,7 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox/{id}/discard", post(inbox::discard))
         .route("/inbox/{id}/undiscard", post(inbox::undiscard))
         .route("/inbox/{id}/artwork/{hash}", get(inbox::artwork))
+        .route("/inbox/{id}/files/{name}", get(inbox::file))
         .route("/inbox/{id}/preview", post(inbox::preview))
         .route("/ytmusic/download", post(ytmusic::download))
         .route("/ytmusic/lookup", post(ytmusic::lookup))

@@ -76,7 +76,8 @@ impl GcHandler {
             + plan.archived.len()
             + plan.derived.len()
             + plan.artwork_rows.len()
-            + plan.artwork_dirs.len()) as i64;
+            + plan.artwork_dirs.len()
+            + plan.inbox.len()) as i64;
         tracing::info!(
             job_id = ctx.job.id,
             tracks = plan.tracks.len(),
@@ -85,6 +86,7 @@ impl GcHandler {
             derived = plan.derived.len(),
             artwork_rows = plan.artwork_rows.len(),
             artwork_dirs = plan.artwork_dirs.len(),
+            inbox = plan.inbox.len(),
             "GC の対象を決めた"
         );
         ctx.progress(0, total).await?;
@@ -107,6 +109,12 @@ impl GcHandler {
         done += plan.derived.len() as i64;
         ctx.progress(done, total).await?;
         summary.artwork_dirs = gc::execute_artwork_dirs(&self.db, &self.roots, &plan, &token)
+            .await
+            .map_err(map_err)?;
+        done += plan.artwork_dirs.len() as i64;
+        ctx.progress(done, total).await?;
+        // 破棄待ちの Inbox の件（D-90）。execute_all と同じ順で最後に実行する
+        summary.inbox = gc::execute_inbox(&self.db, &self.roots, &plan, &token)
             .await
             .map_err(map_err)?;
         ctx.progress(total, total).await?;
@@ -134,7 +142,11 @@ impl GcHandler {
                 "保持期間を過ぎた同期の計画を消した"
             );
         }
-        Ok(Outcome::Done)
+        Ok(Outcome::DoneWith(crate::jobs::note::gc_note(
+            &summary,
+            (jobs_done, jobs_failed),
+            plans,
+        )))
     }
 }
 

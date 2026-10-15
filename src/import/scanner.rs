@@ -98,6 +98,9 @@ pub struct ScanReport {
     /// `seen` だけ更新した（次回スキャンで整合する）
     pub overtaken: u64,
     pub skipped: Vec<Skipped>,
+    /// 読めなかったファイルの先頭 [`crate::jobs::note::NOTE_LIST_MAX`] 件（件数は `errors`）。
+    /// ジョブの `note` に出す（D-106）
+    pub error_paths: Vec<String>,
     /// この run で DB の内容が変わった行（新規・更新・移動・復活・明け渡し・missing）。
     /// SSE `library` イベントに使う（200 件以下なら `ids`、超えたら `bulk`。SPEC §9）
     pub changed_ids: Vec<i64>,
@@ -111,6 +114,14 @@ pub struct ScanReport {
     pub categories_registered: u64,
     /// category が NULL だった album に直下のディレクトリ名で付けた数（D-92）
     pub albums_categorized: u64,
+}
+
+impl ScanReport {
+    fn note_error(&mut self, rel: &impl std::fmt::Display) {
+        if self.error_paths.len() < crate::jobs::note::NOTE_LIST_MAX {
+            self.error_paths.push(rel.to_string());
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1701,6 +1712,7 @@ impl Commit {
                         Some(Err(err)) => {
                             tracing::warn!(track_id, path = %e.rel, error = %err, "ファイルを読めない。物理属性だけ更新した");
                             report.errors += 1;
+                            report.note_error(&e.rel);
                             // nlink（hardlink バッジ）等の表示値は update_physical で変わっている
                             report.changed_ids.push(*track_id);
                         }
@@ -1754,9 +1766,11 @@ impl Commit {
                         Some(Err(err)) => {
                             tracing::warn!(path = %e.rel, error = %err, "新規ファイルを読めない。登録しない");
                             report.errors += 1;
+                            report.note_error(&e.rel);
                         }
                         None => {
                             report.errors += 1;
+                            report.note_error(&e.rel);
                         }
                     }
                 }

@@ -9,10 +9,13 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
+use crate::cd::riplog::is_rip_text_name;
 use crate::db::inbox::{self as dbinbox, FileRow, Item, ItemState};
 use crate::db::now_epoch;
 use crate::db::scans;
 use crate::db::stages::{stages, Stage};
+use crate::domain::relpath::RelPath;
+use crate::fsroot::{FileKind, RootDir};
 use crate::import::inbox::{
     destination, embedded_picture, propose, Destination, InboxDraft, RipLookup, SameTitle,
 };
@@ -47,6 +50,8 @@ pub struct ItemView {
     /// 承認済み以降の件の段（配置 → RG → 系統 → 端末。可視化 B）。それ以前の件は出さない
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stages: Option<Vec<Stage>>,
+    /// 件のディレクトリにある吸い出しのテキスト（`rip*.log` / `disc*.cue` / `disc*.toc`。D-106）
+    pub rip_files: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -202,6 +207,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
                 } else {
                     None
                 };
+                let rip_files = rip_files(&inbox, &item.rel_dir);
                 out.push(ItemView {
                     item,
                     tracks,
@@ -210,6 +216,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
                     destination: p.destination,
                     rip: p.lookup,
                     stages,
+                    rip_files,
                 });
             }
             // 件が参照する購読だけ（購読の表は小さいので 1 回で読んで絞る。件ごとに引かない）
@@ -487,6 +494,52 @@ async fn discard_cas(state: &AppState, id: i64, request: bool) -> Result<Respons
         Some(false) => error_response(StatusCode::CONFLICT, "state"),
         None => error_response(StatusCode::NOT_FOUND, "not_found"),
     })
+}
+
+/// `GET /api/inbox/{id}/files/{name}`: 承認前の CD 取り込みの吸い出しログ・cue・toc を読む（D-106）。
+/// 名前は [`is_rip_text_name`] だけ。Inbox の root から件の `rel_dir` を `openat2` で辿る
+pub async fn file(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(i64, String)>,
+) -> Result<Response, ApiError> {
+    let Some(inbox) = state.inbox.clone() else {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "inbox_unavailable",
+        ));
+    };
+    if !is_rip_text_name(&name) {
+        return Ok(super::logs::not_found());
+    }
+    let Some(item) = state.db.read(move |c| dbinbox::get(c, id)).await? else {
+        return Ok(super::logs::not_found());
+    };
+    let Some(rel) = RelPath::parse(&item.rel_dir)
+        .ok()
+        .and_then(|d| d.join(&name).ok())
+    else {
+        return Ok(super::logs::not_found());
+    };
+    Ok(super::logs::text_response(
+        super::logs::read_text_capped(inbox, rel).await?,
+    ))
+}
+
+/// 件のディレクトリに置かれている吸い出しのテキストの名前（読めなければ空）
+fn rip_files(inbox: &RootDir, rel_dir: &str) -> Vec<String> {
+    let Ok(dir) = RelPath::parse(rel_dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = inbox
+        .read_dir(Some(&dir))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.kind == FileKind::File)
+        .filter_map(|e| e.name.into_string().ok())
+        .filter(|n| is_rip_text_name(n))
+        .collect();
+    names.sort();
+    names
 }
 
 /// `GET /api/inbox/:id/artwork/:hash`（SPEC §7.8、P4-4）。件のファイルのうち `PICTURE` の sha256 が

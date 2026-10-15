@@ -151,3 +151,15 @@ export function shownLimit(state: StateFilter, limits: ListLimits | null, shown:
       return hit('active') || hit('done') || hit('failed') ? limits.active + limits.done + limits.failed : null
   }
 }
+
+/** 結果列（`note` の 1 行目。全文は行の展開で） */
+export function noteHeadline(note: string | null | undefined): string {
+  return note?.split('\n', 1)[0] ?? ''
+}
+
+/** 記録 > ログで開ける album（verify のジョブだけ。rip は Inbox に置くまでで album を知らない） */
+export function jobLogAlbum(j: Job): number | null {
+  if (j.type !== 'verify') return null
+  const v = j.payload?.album_id
+  return typeof v === 'number' ? v : null
+}

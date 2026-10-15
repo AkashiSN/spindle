@@ -3,9 +3,10 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, apiFetch, apiPost } from '../api/client'
-import { notifyCategoriesChanged, onCategoriesChanged } from '../lib/categories'
+import { notifyCategoriesChanged, onCategoriesChanged, type Category } from '../lib/categories'
 
-export type Category = { id: number; name: string }
+// 既存の import 元のため型を再公開する
+export type { Category } from '../lib/categories'
 
 export function useCategories(enabled: boolean) {
   const [items, setItems] = useState<Category[]>([])

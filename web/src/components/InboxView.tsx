@@ -6,8 +6,8 @@
 // 破棄待ちにするだけで、ファイルは GC が retention 日後に消す（D-90）。placed の件は 24 時間残るので、
 // そこからアルバムへ飛べる
 
-import { useEffect, useMemo, useState } from 'react'
-import { apiPost } from '../api/client'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { apiPost, apiText } from '../api/client'
 import { useArtworkUpload } from '../hooks/useArtworkUpload'
 import type { InboxState } from '../hooks/useInbox'
 import { useInboxPreview } from '../hooks/useInboxPreview'
@@ -21,6 +21,7 @@ import {
   type ReleaseCandidate,
 } from '../lib/cd'
 import { formatDateTime } from '../lib/history'
+import { logErrorText } from '../lib/records'
 import {
   applyCandidate,
   applyTracklist,
@@ -54,6 +55,7 @@ import { parseTracklist } from '../lib/tracklist'
 import { InboxAlbumProps } from './InboxAlbumProps'
 import { InboxCover } from './InboxCover'
 import { InboxTrackGrid } from './InboxTrackGrid'
+import { LogText } from './LogText'
 import { Step } from './Step'
 
 export function InboxView({
@@ -320,6 +322,7 @@ function ItemForm({
         <InboxCover item={item} draft={draft} files={files} editable={editable} artwork={artwork} update={setDraft} />
         <InboxAlbumProps item={item} draft={draft} editable={editable} onChange={(p) => setDraft((d) => ({ ...d, ...p }))} />
         {editable && item.rip != null && <MbLookup rip={item.rip} draft={draft} onApply={setDraft} />}
+        {(item.rip_files?.length ?? 0) > 0 && <RipFiles key={item.id} itemId={item.id} names={item.rip_files!} />}
       </Step>
 
       <Step
@@ -645,4 +648,49 @@ function unmatchedCount(item: InboxItem): number {
 /** 件のファイル集合の鍵（走査で変わったかの判定に使う） */
 function filesKey(item: InboxItem): string {
   return item.tracks.map((f) => `${f.rel_path}\u0000${f.inode}\u0000${f.mtime_ns}\u0000${f.size}`).join('\n')
+}
+
+type RipFile = { name: string; text: string | null; error: string | null }
+
+/** CD 取り込みの吸い出しログ・cue・toc（承認前の確認用。D-106） */
+function RipFiles({ itemId, names }: { itemId: number; names: string[] }) {
+  const [open, setOpen] = useState<string | null>(null)
+  // 取得結果は開いたファイル名と一緒に持ち、今開いているものの分だけ使う
+  const [got, setGot] = useState<RipFile | null>(null)
+  // 要求ごとの世代。開閉のたびに進め、今の世代の応答だけ使う（同じ名前の開き直しでも古い応答を捨てる）
+  const gen = useRef(0)
+  const show = (name: string) => {
+    const g = ++gen.current
+    if (open === name) {
+      setOpen(null)
+      return
+    }
+    setOpen(name)
+    apiText(`/api/inbox/${itemId}/files/${encodeURIComponent(name)}`)
+      .then((text) => {
+        if (gen.current === g) setGot({ name, text, error: null })
+      })
+      .catch((e: unknown) => {
+        if (gen.current === g) setGot({ name, text: null, error: logErrorText(e, 'inbox') })
+      })
+  }
+  const cur = open != null && got?.name === open ? got : null
+  return (
+    <div className="rip-files small">
+      吸い出しの記録:{' '}
+      {names.map((n) => (
+        <button key={n} type="button" className={`link small${open === n ? ' active' : ''}`} onClick={() => show(n)}>
+          {n}
+        </button>
+      ))}
+      {open != null &&
+        (cur == null ? (
+          <p className="muted">読み込み中…</p>
+        ) : cur.error != null ? (
+          <p className="error">{cur.error}</p>
+        ) : (
+          <LogText text={cur.text ?? ''} fileName={open} />
+        ))}
+    </div>
+  )
 }

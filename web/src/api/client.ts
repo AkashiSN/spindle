@@ -51,6 +51,16 @@ export async function apiFetch<T>(
   return JSON.parse(text) as T
 }
 
+/** text/plain の本文（ログ）。エラーは JSON の本文から ApiError にする */
+export async function apiText(path: string): Promise<string> {
+  const res = await fetch(path, { credentials: 'same-origin', headers: { Accept: 'text/plain' } })
+  if (res.status === 401) {
+    for (const l of unauthorizedListeners) l()
+  }
+  if (!res.ok) throw await parseError(res)
+  return res.text()
+}
+
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return apiFetch<T>(path, {
     method: 'POST',

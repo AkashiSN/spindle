@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::db::categories::{self, Category};
+use crate::db::categories::{self, Category, CategoryUsage};
 use crate::domain::pathgen::sanitize_component;
 
 use super::error::{error_response, error_response_with_message, ApiError};
@@ -15,7 +15,7 @@ use super::AppState;
 
 #[derive(Serialize)]
 pub struct CategoryList {
-    pub items: Vec<Category>,
+    pub items: Vec<CategoryUsage>,
 }
 
 #[derive(Deserialize)]
@@ -24,7 +24,7 @@ pub struct CreateBody {
 }
 
 pub async fn list(State(state): State<AppState>) -> Result<Json<CategoryList>, ApiError> {
-    let items = state.db.read(categories::list).await?;
+    let items = state.db.read(categories::list_with_usage).await?;
     Ok(Json(CategoryList { items }))
 }
 

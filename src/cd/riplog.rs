@@ -212,6 +212,14 @@ pub fn is_rip_log_name(name: &str) -> bool {
     stem_number_ext(name, "rip", ".log")
 }
 
+/// 画面で読ませる吸い出しのテキストか: `rip*.log`、`disc*.cue`、`disc*.toc`（D-106。名前だけを見る。
+/// `/` を含む名前は数字の並びに当たらないので false）
+pub fn is_rip_text_name(name: &str) -> bool {
+    is_rip_log_name(name)
+        || stem_number_ext(name, "disc", ".cue")
+        || stem_number_ext(name, "disc", ".toc")
+}
+
 /// album 全体の移動に追随させる同梱ファイルか: 同梱カバー画像（`cover_rank`）、`disc*.cue` /
 /// `disc*.toc`、`rip*.log`
 pub fn is_companion_name(name: &str) -> bool {
@@ -580,4 +588,34 @@ pub fn render_log(
         .collect();
     let _ = writeln!(s, "結果: {}", counts.join(", "));
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rip_text_names_are_logs_cues_and_tocs_only() {
+        for ok in [
+            "rip.log",
+            "rip2.log",
+            "disc.cue",
+            "disc10.cue",
+            "disc.toc",
+            "DISC1.TOC",
+        ] {
+            assert!(is_rip_text_name(ok), "{ok}");
+        }
+        for ng in [
+            "cover.jpg",
+            "rip.txt",
+            "disc.cue.bak",
+            "../rip.log",
+            "a/rip.log",
+            "ripx.log",
+            "",
+        ] {
+            assert!(!is_rip_text_name(ng), "{ng}");
+        }
+    }
 }

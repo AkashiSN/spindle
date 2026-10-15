@@ -60,6 +60,8 @@ pub struct AppState {
     pub adb: Option<Arc<crate::device::runtime::AdbRuntime>>,
     /// 起動時の診断で取った adb（platform-tools）の版。Android の同期が無効・probe 失敗なら None（/health の `adb`）
     pub adb_version: Option<Arc<str>>,
+    /// 照合ログの置き場（`[paths].data/verify`。D-63、D-106）。無いと照合ログの本文は 503
+    pub verify_logs: Option<Arc<RootDir>>,
 }
 
 /// ドライブとその監視状態の組
@@ -96,7 +98,13 @@ impl AppState {
             cd: None,
             adb: None,
             adb_version: None,
+            verify_logs: None,
         }
+    }
+
+    pub fn with_verify_logs(mut self, dir: Arc<RootDir>) -> Self {
+        self.verify_logs = Some(dir);
+        self
     }
 
     pub fn with_cd(

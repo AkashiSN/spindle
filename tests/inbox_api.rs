@@ -216,6 +216,14 @@ impl App {
             .unwrap()
     }
 
+    /// 本文をそのまま返す（text/plain の応答用）
+    async fn get_text(&self, c: &str, uri: &str) -> (StatusCode, String) {
+        let res = self.raw(Some(c), uri, None).await;
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     async fn state(&self, id: i64) -> ItemState {
         self.db
             .read(move |c| inbox::get(c, id))
@@ -1395,4 +1403,62 @@ async fn preview_returns_the_destination_and_approve_checks_pictures() {
     let t = &body["items"][0]["draft"]["tracks"][0];
     assert_eq!(t["tags"], json!({ "COMMENT": null, "GENRE": ["Rock"] }));
     assert_eq!(t["picture"], json!(format!("image/png:{hex}")));
+}
+
+/// 承認前の件の吸い出しのテキスト（`rip*.log` / `disc*.cue` / `disc*.toc`）だけを読める。
+/// それ以外の名前・`/` を含む名前・無い件は 404。一覧は `rip_files` で名前を返す（D-106）
+#[tokio::test]
+async fn inbox_files_serves_rip_texts_only() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = app.item("CD/x").await;
+    let dir = app.inbox_path("CD/x");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("rip.log"), "spindle rip.log\n").unwrap();
+    std::fs::write(dir.join("disc.cue"), "FILE \"01.flac\" WAVE\n").unwrap();
+    std::fs::write(dir.join("notes.txt"), "secret").unwrap();
+    let (st, body) = app
+        .get_text(&c, &format!("/api/inbox/{id}/files/rip.log"))
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body, "spindle rip.log\n");
+    let (st, _) = app
+        .get_text(&c, &format!("/api/inbox/{id}/files/disc.cue"))
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    for bad in ["notes.txt", "..%2Frip.log", "x%2Frip.log", "disc.toc"] {
+        let (st, _) = app
+            .get_text(&c, &format!("/api/inbox/{id}/files/{bad}"))
+            .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{bad}");
+    }
+    let (st, _) = app.get_text(&c, "/api/inbox/9999/files/rip.log").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    let (st, v) = app.get(&c, "/api/inbox").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let item = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    assert_eq!(
+        item["rip_files"],
+        serde_json::json!(["disc.cue", "rip.log"])
+    );
+}
+
+/// 件のディレクトリが通常ファイルに差し替わっていても 500 にせず 404 にする
+#[tokio::test]
+async fn inbox_files_404s_when_the_item_dir_became_a_file() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = app.item("CD/y").await;
+    std::fs::create_dir_all(app.inbox_path("CD")).unwrap();
+    std::fs::write(app.inbox_path("CD/y"), "x").unwrap();
+    let (st, _) = app
+        .get_text(&c, &format!("/api/inbox/{id}/files/rip.log"))
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }

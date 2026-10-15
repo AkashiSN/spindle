@@ -81,6 +81,13 @@ export type VerifyResultLine = {
   subject: string
   text: string
   kind: 'done' | 'error' | 'pending'
+  /** ジョブの payload の album（ログを開く） */
+  albumId: number | null
+}
+
+function albumOf(j: Job | undefined): number | null {
+  const v = j?.payload?.album_id
+  return typeof v === 'number' ? v : null
 }
 
 /** 投入した verify ジョブ（`ids`）の結果。`seen` はこれまでの `GET /api/jobs?type=verify` で見えた
@@ -101,7 +108,7 @@ export function verifyResults(
     const subject = j?.subject ?? `job #${id}`
     const terminal = j != null && (j.state === 'done' || j.state === 'failed' || j.state === 'cancelled')
     if (!terminal && !active) {
-      lines.push({ id, subject, text: '結果を取れない（ジョブ画面で確認）', kind: 'error' })
+      lines.push({ id, subject, text: '結果を取れない（ジョブ画面で確認）', kind: 'error', albumId: albumOf(j) })
       continue
     }
     if (!j) {
@@ -110,18 +117,18 @@ export function verifyResults(
     }
     switch (j.state) {
       case 'done':
-        lines.push({ id, subject, text: j.note || '完了', kind: 'done' })
+        lines.push({ id, subject, text: j.note || '完了', kind: 'done', albumId: albumOf(j) })
         break
       case 'failed':
-        lines.push({ id, subject, text: `失敗: ${j.last_error ?? '理由不明'}`, kind: 'error' })
+        lines.push({ id, subject, text: `失敗: ${j.last_error ?? '理由不明'}`, kind: 'error', albumId: albumOf(j) })
         break
       case 'cancelled':
-        lines.push({ id, subject, text: '取り消した', kind: 'error' })
+        lines.push({ id, subject, text: '取り消した', kind: 'error', albumId: albumOf(j) })
         break
       default:
         pending++
         if (j.state === 'queued' && j.last_error) {
-          lines.push({ id, subject, text: `再試行待ち: ${j.last_error}`, kind: 'pending' })
+          lines.push({ id, subject, text: `再試行待ち: ${j.last_error}`, kind: 'pending', albumId: albumOf(j) })
         }
     }
   }

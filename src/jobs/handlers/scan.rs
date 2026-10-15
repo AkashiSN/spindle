@@ -216,6 +216,7 @@ impl Handler for ScanHandler {
                     // 変更行を表へ通知する（SPEC §9 `library`）。commit 済みなので取得すれば新しい値が見える。
                     // 語彙だけが増えた run（人が別の category を付けた album しか無い直下のフォルダ等で、行は
                     // 何も変わらない）も、開いている category の選択欄に知らせるため `bulk` で流す（D-92）
+                    let note = crate::jobs::note::scan_note(&report);
                     let run_id = report.run_id;
                     let registered = report.categories_registered > 0;
                     let ev = LibraryEvent::from_changes(run_id, report.changed_ids).or_else(|| {
@@ -226,7 +227,7 @@ impl Handler for ScanHandler {
                     if let Some(ev) = ev {
                         ctx.jobs().publish(Event::Library(ev));
                     }
-                    Ok(Outcome::Done)
+                    Ok(Outcome::DoneWith(note))
                 }
                 Err(ScanError::Cancelled) => Err(JobError::Cancelled),
                 Err(e) => Err(JobError::Failed(e.into())),

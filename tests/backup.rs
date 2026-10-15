@@ -332,6 +332,16 @@ async fn backup_job_writes_a_consistent_copy_without_leaving_tmp() {
     assert_eq!(ok, "ok");
     let job = lib.jobs.get(id).await.unwrap().unwrap();
     assert_eq!(job.done, job.total);
+    let note = job.note.clone().unwrap_or_default();
+    assert!(note.starts_with(name.as_str()), "{note}");
+    assert!(note.contains("世代を保持"), "{note}");
+    let real = std::fs::metadata(lib.backup_dir().join(name))
+        .unwrap()
+        .len();
+    assert!(
+        note.contains(&spindle::jobs::note::human_bytes(real)),
+        "実サイズ {real} が note に出る: {note}"
+    );
     let _ = &lib.db;
 }
 

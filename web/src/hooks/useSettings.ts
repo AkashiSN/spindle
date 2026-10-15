@@ -1,13 +1,12 @@
-// 設定画面（SPEC §12.6）の状態: config.toml の原文、再スキャン / deep scan の投入、GC の preview → 実行、
-// 退避台帳。画面を開いたときに取り、GC preview はボタンで取り直す
+// 設定画面（SPEC §12.6）の状態: config.toml の原文、再スキャン / deep scan の投入、GC の preview → 実行。
+// 画面を開いたときに取り、GC preview はボタンで取り直す
 
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, apiFetch, apiPost } from '../api/client'
-import type { ArchivedEntry, GcPreview } from '../lib/settings'
+import type { GcPreview } from '../lib/settings'
 
 export type SettingsState = {
   config: { path: string | null; text: string } | null
-  archive: ArchivedEntry[] | null
   gcPreview: GcPreview | null
   busy: string | null
   notice: string | null
@@ -30,7 +29,6 @@ function describe(e: unknown): string {
 
 export function useSettings(enabled: boolean): SettingsState {
   const [config, setConfig] = useState<{ path: string | null; text: string } | null>(null)
-  const [archive, setArchive] = useState<ArchivedEntry[] | null>(null)
   const [gcPreview, setGcPreview] = useState<GcPreview | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -39,9 +37,6 @@ export function useSettings(enabled: boolean): SettingsState {
   const refresh = useCallback(() => {
     apiFetch<{ path: string | null; text: string }>('/api/config')
       .then(setConfig)
-      .catch((e: unknown) => setError(describe(e)))
-    apiFetch<{ items: ArchivedEntry[] }>('/api/archive')
-      .then((r) => setArchive(r.items))
       .catch((e: unknown) => setError(describe(e)))
   }, [])
   useEffect(() => {
@@ -90,7 +85,6 @@ export function useSettings(enabled: boolean): SettingsState {
 
   return {
     config,
-    archive,
     gcPreview,
     busy,
     notice,

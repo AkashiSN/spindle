@@ -140,7 +140,7 @@ describe('verifyResults（遡及照合の結果を操作タブに出す）', () 
   it('終わったジョブは対象と結果 1 行、終わっていなければ待ちの数', () => {
     const r = verifyResults(
       seen(
-        job({ id: 1, state: 'done', note: 'CTDB 全 2 曲一致（信頼度 34） / AccurateRip 登録なし' }),
+        job({ id: 1, state: 'done', note: 'CTDB 全 2 曲一致（信頼度 34） / AccurateRip 登録なし', payload: { album_id: 7 } }),
         job({ id: 2, state: 'running', subject: 'B/Alb' }),
       ),
       [1, 2],
@@ -148,7 +148,7 @@ describe('verifyResults（遡及照合の結果を操作タブに出す）', () 
     )
     expect(r.pending).toBe(1)
     expect(r.lines).toEqual([
-      { id: 1, subject: 'A/Alb', text: 'CTDB 全 2 曲一致（信頼度 34） / AccurateRip 登録なし', kind: 'done' },
+      { id: 1, subject: 'A/Alb', text: 'CTDB 全 2 曲一致（信頼度 34） / AccurateRip 登録なし', kind: 'done', albumId: 7 },
     ])
   })
 
@@ -164,9 +164,9 @@ describe('verifyResults（遡及照合の結果を操作タブに出す）', () 
     )
     expect(r.pending).toBe(1)
     expect(r.lines).toEqual([
-      { id: 1, subject: 'A/Alb', text: '失敗: CTDB の照会: timeout', kind: 'error' },
-      { id: 2, subject: 'job #2', text: '取り消した', kind: 'error' },
-      { id: 3, subject: 'A/Alb', text: '再試行待ち: AccurateRip の照会: 503', kind: 'pending' },
+      { id: 1, subject: 'A/Alb', text: '失敗: CTDB の照会: timeout', kind: 'error', albumId: null },
+      { id: 2, subject: 'job #2', text: '取り消した', kind: 'error', albumId: null },
+      { id: 3, subject: 'A/Alb', text: '再試行待ち: AccurateRip の照会: 503', kind: 'pending', albumId: null },
     ])
   })
 
@@ -176,8 +176,8 @@ describe('verifyResults（遡及照合の結果を操作タブに出す）', () 
     expect(verifyResults(seen(job({ id: 1, state: 'done', note: 'x' })), [1, 2], false)).toEqual({
       pending: 0,
       lines: [
-        { id: 1, subject: 'A/Alb', text: 'x', kind: 'done' },
-        { id: 2, subject: 'job #2', text: '結果を取れない（ジョブ画面で確認）', kind: 'error' },
+        { id: 1, subject: 'A/Alb', text: 'x', kind: 'done', albumId: null },
+        { id: 2, subject: 'job #2', text: '結果を取れない（ジョブ画面で確認）', kind: 'error', albumId: null },
       ],
     })
   })
@@ -187,15 +187,15 @@ describe('verifyResults（遡及照合の結果を操作タブに出す）', () 
     expect(r).toEqual({
       pending: 0,
       lines: [
-        { id: 1, subject: 'A/Alb', text: '結果を取れない（ジョブ画面で確認）', kind: 'error' },
-        { id: 2, subject: 'B/Alb', text: '結果を取れない（ジョブ画面で確認）', kind: 'error' },
+        { id: 1, subject: 'A/Alb', text: '結果を取れない（ジョブ画面で確認）', kind: 'error', albumId: null },
+        { id: 2, subject: 'B/Alb', text: '結果を取れない（ジョブ画面で確認）', kind: 'error', albumId: null },
       ],
     })
   })
 
   it('結果の無い完了は「完了」', () => {
     const r = verifyResults(seen(job({ id: 1, state: 'done', note: null })), [1], false)
-    expect(r).toEqual({ pending: 0, lines: [{ id: 1, subject: 'A/Alb', text: '完了', kind: 'done' }] })
+    expect(r).toEqual({ pending: 0, lines: [{ id: 1, subject: 'A/Alb', text: '完了', kind: 'done', albumId: null }] })
   })
 })
 

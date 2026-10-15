@@ -203,13 +203,48 @@ pub fn set_state(conn: &Connection, id: i64, state: ArchiveState, now: i64) -> R
     Ok(changed > 0)
 }
 
-/// 台帳の一覧（新しい順）に、退避した op のバッチ id を添える（`GET /api/archive`）
-pub fn list_with_batch(conn: &Connection) -> Result<Vec<(ArchivedFile, Option<i64>)>> {
+/// 状態ごとの件数（`GET /api/archive` の切り替えに添える）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ArchiveCounts {
+    pub held: i64,
+    pub restored: i64,
+    pub deleted: i64,
+}
+
+pub fn counts(conn: &Connection) -> Result<ArchiveCounts> {
+    let mut out = ArchiveCounts::default();
+    let mut stmt = conn.prepare("SELECT state, count(*) FROM archived_files GROUP BY state")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (state, n) = row?;
+        match ArchiveState::parse(&state) {
+            Some(ArchiveState::Held) => out.held = n,
+            Some(ArchiveState::Restored) => out.restored = n,
+            Some(ArchiveState::Deleted) => out.deleted = n,
+            None => {}
+        }
+    }
+    Ok(out)
+}
+
+/// 台帳の 1 ページ（新しい順）に、退避した op のバッチ id を添える（`GET /api/archive`）。
+/// `state` が None なら全状態、`cursor` はその id より古い行から
+pub fn list_page(
+    conn: &Connection,
+    state: Option<ArchiveState>,
+    limit: usize,
+    cursor: Option<i64>,
+) -> Result<Vec<(ArchivedFile, Option<i64>)>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLUMNS}, (SELECT o.batch_id FROM edit_ops o WHERE o.id = archived_files.op_id)
-         FROM archived_files ORDER BY id DESC"
+         FROM archived_files
+         WHERE (?1 IS NULL OR state = ?1) AND (?2 IS NULL OR id < ?2)
+         ORDER BY id DESC LIMIT ?3"
     ))?;
-    let rows = stmt.query_map([], |r| Ok((from_row(r)?, r.get::<_, Option<i64>>(10)?)))?;
+    let rows = stmt.query_map(
+        params![state.map(ArchiveState::as_str), cursor, limit as i64],
+        |r| Ok((from_row(r)?, r.get::<_, Option<i64>>(10)?)),
+    )?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
