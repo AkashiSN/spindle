@@ -6,8 +6,8 @@
 ## イメージの更新（TrueNAS カスタムアプリ）
 
 イメージは GHCR `ghcr.io/akashisn/spindle`（public。pull にトークン不要）。タグは `latest`（最新の
-リリース `vX.Y.Z`）/ `X.Y` / `X.Y.Z` と、開発用の `edge`（`main` の最新）/ `sha-<7 桁>`。本番は
-`latest` か `X.Y` を指す。`edge` は DB の互換を（前進のマイグレーション以外）約束しない。
+リリース `vX.Y.Z`）/ `X.Y` / `X.Y.Z`、リリース候補の `X.Y.Z-rc.N`（`vX.Y.Z-rc.N` タグ。`latest` / `X.Y` は
+付かない）と、開発用の `edge`（`main` の最新）/ `sha-<7 桁>`。本番は `latest` か `X.Y` を指す。`edge` は DB の互換を（前進のマイグレーション以外）約束しない。
 
 ### カスタムアプリの作り方
 
@@ -47,6 +47,23 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
    `/data/spindle.db`（と `-wal` / `-shm`）を退避し、更新前のバックアップから復元（下記「復元」の手順）→
    旧タグ（`X.Y.Z`）を指して再作成 → `/health` の `version` で旧版を確認。順序を違えると、旧版を新 schema の
    DB で起動したり、稼働中の DB を差し替えたりすることになる
+
+### リリース候補（RC）を本番で確かめてから出す
+
+画面の崩れなど実機でしか分からないことがあるので、正式版の前に RC を本番で確かめる。カスタムアプリは
+ホストにある `latest` をそのまま使う（上記）ので、RC のイメージにホストの上で `latest` の名前を付け直し、
+アプリの設定は変えない。
+
+1. `main` の確かめたいコミットに `vX.Y.Z-rc.N` タグを打って push する。CI が `X.Y.Z-rc.N` のイメージと
+   pre-release の Release を作る
+2. 更新前のスナップショットを取る（例 `zfs snapshot ssd/apps/spindle@pre-vX.Y.Z-rc.N-<日付>`）
+3. `sudo docker pull ghcr.io/akashisn/spindle:X.Y.Z-rc.N && sudo docker tag ghcr.io/akashisn/spindle:X.Y.Z-rc.N ghcr.io/akashisn/spindle:latest && sudo midclt call -j app.redeploy spindle`
+4. `/health` の `version` が `vX.Y.Z-rc.N` になったことを見て、画面で変更点を確かめる
+5. 問題なければ**同じコミット**に `vX.Y.Z` を打つ。CI が `latest` を公開したら
+   `sudo docker pull ghcr.io/akashisn/spindle:latest && sudo midclt call -j app.redeploy spindle`
+6. 問題があれば前の版へ戻す: `sudo docker pull ghcr.io/akashisn/spindle:<前の X.Y.Z> && sudo docker tag ghcr.io/akashisn/spindle:<前の X.Y.Z> ghcr.io/akashisn/spindle:latest && sudo midclt call -j app.redeploy spindle`。
+   RC がマイグレーションを進めていたら、上の「更新」の 4 と同じく DB も戻す（アプリを止めてから
+   スナップショットかバックアップで復元）。直したら `rc.N+1` を打ち直す
 
 ### 外から https で使う（リバースプロキシ / Cloudflare Tunnel）
 
