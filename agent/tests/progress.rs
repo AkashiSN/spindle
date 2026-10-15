@@ -411,9 +411,9 @@ fn heartbeat_shares_latch_and_stops_after_finish() {
     assert!(!hb.beat(&clock, &ok));
 }
 
-/// 心拍が送っている最中は、エンジンは重ねて送らない（最後の flush も含む）
+/// 心拍が送っている最中は、エンジンの間引いた送信（tick）は重ねて送らない
 #[test]
-fn engine_skips_while_heartbeat_in_flight() {
+fn engine_tick_skips_while_heartbeat_in_flight() {
     let (p, t, _) = make();
     let hb = heartbeat_of(&p);
     let clock = {
@@ -425,13 +425,144 @@ fn engine_skips_while_heartbeat_in_flight() {
     let inner2 = inner.clone();
     let pr = &p;
     let during = move |_: i64, _: &agent_proto::ProgressRequest| {
-        inner2.set(Some(pr.take_send(true).is_some()));
+        let n = Cell::new(0u32);
+        pr.tick(&|_, _| {
+            n.set(n.get() + 1);
+            ProgressSent::Ok
+        });
+        inner2.set(Some(pr.take_send(true).is_some() || n.get() > 0));
         ProgressSent::Ok
     };
     assert!(hb.beat(&clock, &during));
     assert_eq!(inner.get(), Some(false));
     // 終われば送れる
     assert!(p.take_send(true).is_some());
+}
+
+type Held = (
+    std::sync::mpsc::Receiver<i64>,
+    std::sync::mpsc::Sender<ProgressSent>,
+    std::thread::JoinHandle<bool>,
+);
+
+/// 心拍の送信を別スレッドで始め、`release` に結果を送るまで止めておく
+fn hold_heartbeat(hb: Heartbeat, at: Duration) -> Held {
+    use std::sync::mpsc;
+    use std::sync::Mutex;
+    let (started_tx, started_rx) = mpsc::channel::<i64>();
+    let (release_tx, release_rx) = mpsc::channel::<ProgressSent>();
+    let release_rx = Mutex::new(release_rx);
+    let th = std::thread::spawn(move || {
+        hb.beat(&move || at, &|id, _| {
+            let _ = started_tx.send(id);
+            release_rx
+                .lock()
+                .ok()
+                .and_then(|r| r.recv().ok())
+                .unwrap_or(ProgressSent::Failed)
+        })
+    });
+    (started_rx, release_tx, th)
+}
+
+/// 最後の flush は、心拍の送信中なら終わるのを待ってから最後の値を送る（落とさない）
+#[test]
+fn flush_waits_for_heartbeat_and_sends_final() {
+    let (p, t, _) = make();
+    p.start(1, 1, 2, 0);
+    p.begin_item(ProgressPhase::Delete, Some("a"), 0);
+    let (started, release, th) = hold_heartbeat(heartbeat_of(&p), Duration::ZERO);
+    assert_eq!(started.recv_timeout(Duration::from_secs(5)), Ok(1));
+    p.end_item();
+    p.begin_item(ProgressPhase::Delete, Some("b"), 0);
+    p.end_item();
+    secs(&t, 0.5);
+    // flush が待っている間に心拍の送信を終わらせる
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = release.send(ProgressSent::Ok);
+    });
+    let sent: RefCell<Vec<agent_proto::ProgressRequest>> = RefCell::default();
+    p.flush(&|_, r| {
+        sent.borrow_mut().push(r.clone());
+        ProgressSent::Ok
+    });
+    assert!(th.join().unwrap());
+    releaser.join().unwrap();
+    let sent = sent.into_inner();
+    assert_eq!(sent.len(), 1, "最後の値を送る");
+    assert_eq!((sent[0].done, sent[0].total), (2, 2));
+}
+
+/// 前の計画の心拍の送信が、次の計画を始めた後に終わっても（404 でも）、その結果は新しい計画の
+/// 間隔・失敗の数・打ち切りに触れない
+#[test]
+fn stale_heartbeat_result_does_not_touch_next_plan() {
+    let (p, t, _) = make();
+    p.start(1, 1, 1, 0);
+    let (started, release, th) = hold_heartbeat(heartbeat_of(&p), Duration::ZERO);
+    assert_eq!(started.recv_timeout(Duration::from_secs(5)), Ok(1));
+    // 計画 1 を終え（エラーで抜けた形。flush はしない）、同じ実行で計画 2 を始める
+    p.finish();
+    secs(&t, 1.0);
+    p.start(2, 1, 1, 0);
+    let n = Rc::new(Cell::new(0u32));
+    let count = {
+        let n = n.clone();
+        move |_: i64, _: &agent_proto::ProgressRequest| {
+            n.set(n.get() + 1);
+            ProgressSent::Ok
+        }
+    };
+    // 古い送信を 404（Stop）で終わらせる
+    release.send(ProgressSent::Stop).unwrap();
+    assert!(th.join().unwrap());
+    // 新しい計画は打ち切られず、間隔も古い送信の終わりから数えない（初回はすぐ送る）
+    p.tick(&count);
+    assert_eq!(n.get(), 1);
+    secs(&t, 3.0);
+    p.tick(&count);
+    assert_eq!(n.get(), 2);
+    let (id, _) = p.take_send(true).expect("新しい計画は送れる");
+    assert_eq!(id, 2);
+}
+
+/// 受信の止まった段（追加・プレイリスト）では、心拍が送る速度は送る時点で計り直され、5 秒で 0 に落ちる
+#[test]
+fn heartbeat_recomputes_rate_after_receiving_stops() {
+    let (p, t, _) = make();
+    let hb = heartbeat_of(&p);
+    let clock = {
+        let t = t.clone();
+        move || t.get()
+    };
+    let rates: Rc<RefCell<Vec<u64>>> = Rc::default();
+    let rec = {
+        let rates = rates.clone();
+        move |_: i64, r: &agent_proto::ProgressRequest| {
+            rates.borrow_mut().push(r.rate);
+            ProgressSent::Ok
+        }
+    };
+    p.start(1, 1, 1, 10 * MIB);
+    p.begin_item(ProgressPhase::Fetch, Some("a"), 10 * MIB);
+    for i in 1..=4 {
+        secs(&t, i as f64);
+        p.add_bytes(MIB);
+    }
+    p.tick(&rec); // 4 秒: 毎秒 1 MiB
+    assert_eq!(rates.borrow()[0], MIB);
+    p.set_phase(ProgressPhase::Add);
+    // ここから受信は無い（osascript 待ち）
+    secs(&t, 6.0);
+    assert!(hb.beat(&clock, &rec));
+    assert!(rates.borrow()[1] > 0, "窓の中にはまだ受信がある");
+    assert!(rates.borrow()[1] < MIB);
+    secs(&t, 9.0);
+    assert!(hb.beat(&clock, &rec));
+    assert_eq!(rates.borrow()[2], 0, "最後の受信から 5 秒で 0");
+    // 端末の表示も同じ速度
+    assert_eq!(p.view().rate, 0);
 }
 
 /// 本物のスレッドで回すと、エンジンが何も呼ばなくても送られる。落とすと止まる

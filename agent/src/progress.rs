@@ -5,8 +5,8 @@ use agent_proto::{ProgressPhase, ProgressRequest, PROGRESS_CURRENT_MAX};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 /// 開始からの単調な経過
 pub type Clock = Box<dyn Fn() -> Duration>;
@@ -23,6 +23,8 @@ const SEND_FAIL_LIMIT: u32 = 3;
 const RATE_WINDOW: Duration = Duration::from_secs(5);
 /// 心拍のスレッドが送るべきか見に行く間隔
 const HEARTBEAT_POLL: Duration = Duration::from_millis(250);
+/// 最後の送信（`flush`）が、心拍の送信の終わりを待つ上限（送信のタイムアウト 5 秒＋余裕。実時間）
+const FLUSH_WAIT: Duration = Duration::from_secs(6);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgressView {
@@ -60,14 +62,99 @@ struct Inner {
     clock: Clock,
     started: Option<Started>,
     /// 送信の間隔・打ち切りと最新の値。心拍のスレッドと共有する
-    gate: Arc<Mutex<Gate>>,
+    gate: Arc<Shared>,
+}
+
+/// エンジンと心拍のスレッドが共有するもの。送信が終わると `idle` で知らせる
+#[derive(Default)]
+struct Shared {
+    gate: Mutex<Gate>,
+    idle: Condvar,
+}
+
+impl Shared {
+    fn lock(&self) -> Option<MutexGuard<'_, Gate>> {
+        self.gate.lock().ok()
+    }
+
+    /// 送信中なら終わるまで待つ（上限 `limit`、実時間）。待ち切れなければ送信中のまま返す
+    fn lock_idle(&self, limit: Duration) -> Option<MutexGuard<'_, Gate>> {
+        let deadline = Instant::now() + limit;
+        let mut g = self.lock()?;
+        while g.in_flight {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            g = self.idle.wait_timeout(g, left).ok()?.0;
+        }
+        Some(g)
+    }
+
+    /// 送信の結果を記し、待っている側に知らせる
+    fn record(&self, epoch: u64, now: Duration, sent: ProgressSent) {
+        if let Some(mut g) = self.lock() {
+            g.record(epoch, now, sent);
+        }
+        self.idle.notify_all();
+    }
+}
+
+/// 速度の計り。受信量の標本（時刻, 累計）。直近の窓の外へ出る最後の 1 点まで残す。
+/// 心拍もこれで送る時点の速度を計り直す（受信の止まった段では 5 秒で 0 に落ちる）
+#[derive(Default)]
+struct Meter {
+    t0: Duration,
+    samples: VecDeque<(Duration, u64)>,
+    received: u64,
+}
+
+impl Meter {
+    fn add(&mut self, now: Duration, n: u64) {
+        self.received += n;
+        let t = now.saturating_sub(self.t0);
+        self.samples.push_back((t, self.received));
+        // 窓の外にある標本は、窓の端の基準になる 1 点だけ残す
+        let edge = t.saturating_sub(RATE_WINDOW);
+        while self.samples.len() >= 2 && self.samples[1].0 <= edge {
+            self.samples.pop_front();
+        }
+    }
+
+    fn rate(&self, now: Duration) -> u64 {
+        let t = now.saturating_sub(self.t0);
+        if t.is_zero() {
+            return 0;
+        }
+        let edge = t.saturating_sub(RATE_WINDOW);
+        let (bt, bb) = if t < RATE_WINDOW {
+            (Duration::ZERO, 0)
+        } else {
+            // 窓の端以前で最後の標本。無ければ開始
+            self.samples
+                .iter()
+                .rev()
+                .find(|(st, _)| *st <= edge)
+                .copied()
+                .unwrap_or((Duration::ZERO, 0))
+        };
+        let dt = t.saturating_sub(bt).as_secs_f64();
+        if dt <= 0.0 {
+            return 0;
+        }
+        (self.received.saturating_sub(bb) as f64 / dt).round() as u64
+    }
 }
 
 /// 送信の門。エンジンと心拍のスレッドのどちらが送っても、間隔・失敗の数・打ち切りは
 /// ここで 1 つに数える。時刻はエンジンの時計（`Clock`）の値で持つ
 #[derive(Default)]
 struct Gate {
-    /// 送る値（計画 id と本文）。エンジンが値を変えるたびに書き直す
+    /// 計画ごとの番号（`start` で進む）。前の計画の送信の結果を今の計画に記さないため
+    epoch: u64,
+    /// 速度の計り（計画ごと）
+    meter: Meter,
+    /// 送る値（計画 id と本文）。エンジンが値を変えるたびに書き直す。`rate` は送る時点で計り直す
     snapshot: Option<(i64, ProgressRequest)>,
     /// 計画を始めてから、終わる（`finish` / `clear`）まで
     open: bool,
@@ -84,8 +171,13 @@ struct Gate {
 }
 
 impl Gate {
-    fn reset(&mut self, snapshot: (i64, ProgressRequest)) {
+    fn reset(&mut self, t0: Duration, snapshot: (i64, ProgressRequest)) {
         *self = Gate {
+            epoch: self.epoch.wrapping_add(1),
+            meter: Meter {
+                t0,
+                ..Meter::default()
+            },
             snapshot: Some(snapshot),
             open: true,
             last_send: None,
@@ -96,8 +188,14 @@ impl Gate {
         };
     }
 
-    /// 送るべき時刻なら送る値を返し、送った時刻を記す。`mark` なら送信中の印を付ける
-    fn claim(&mut self, now: Duration, force: bool, mark: bool) -> Option<(i64, ProgressRequest)> {
+    /// 送るべき時刻なら（計画の番号, 計画 id, 本文）を返し、送った時刻を記す。`mark` なら送信中の印を付ける。
+    /// 本文の速度は `now` で計り直す
+    fn claim(
+        &mut self,
+        now: Duration,
+        force: bool,
+        mark: bool,
+    ) -> Option<(u64, i64, ProgressRequest)> {
         if !self.open || self.stopped || self.in_flight {
             return None;
         }
@@ -108,14 +206,19 @@ impl Gate {
                 }
             }
         }
-        let snap = self.snapshot.clone()?;
+        let (plan_id, mut req) = self.snapshot.clone()?;
+        req.rate = self.meter.rate(now);
         self.last_send = Some(now);
         self.in_flight = mark;
-        Some(snap)
+        Some((self.epoch, plan_id, req))
     }
 
-    /// 送信の結果を記す。間隔は送信が終わった時刻から数える
-    fn record(&mut self, now: Duration, sent: ProgressSent) {
+    /// 送信の結果を記す。間隔は送信が終わった時刻から数える。
+    /// 送っている間に計画が替わっていたら（`epoch` 違い）捨てる（新しい計画の間隔・失敗・打ち切りに触れない）
+    fn record(&mut self, epoch: u64, now: Duration, sent: ProgressSent) {
+        if epoch != self.epoch {
+            return;
+        }
         self.in_flight = false;
         self.last_send = Some(now);
         match sent {
@@ -142,7 +245,7 @@ impl Gate {
 /// 前回の送信から間隔が空けば最新の値を送り直す。打ち切り・間隔の延長はエンジンと共有する
 #[derive(Clone)]
 pub struct Heartbeat {
-    gate: Arc<Mutex<Gate>>,
+    gate: Arc<Shared>,
 }
 
 impl Heartbeat {
@@ -152,18 +255,16 @@ impl Heartbeat {
         clock: &dyn Fn() -> Duration,
         send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent,
     ) -> bool {
-        let claimed = match self.gate.lock() {
-            Ok(mut g) => g.claim(clock(), false, true),
-            Err(_) => None,
-        };
+        let claimed = self
+            .gate
+            .lock()
+            .and_then(|mut g| g.claim(clock(), false, true));
         // 送っている間は門を握らない（エンジンを止めない）
-        let Some((plan_id, req)) = claimed else {
+        let Some((epoch, plan_id, req)) = claimed else {
             return false;
         };
         let sent = send(plan_id, &req);
-        if let Ok(mut g) = self.gate.lock() {
-            g.record(clock(), sent);
-        }
+        self.gate.record(epoch, clock(), sent);
         true
     }
 
@@ -215,9 +316,6 @@ struct Started {
     item_got: u64,
     /// 完了済みの項目で確定したバイト数
     bytes_done: u64,
-    /// 受信量の標本（開始からの時刻, 累計）。直近の窓の外へ出る最後の 1 点まで残す
-    samples: VecDeque<(Duration, u64)>,
-    received: u64,
     phase: ProgressPhase,
     current: Option<String>,
     last_draw: Option<Duration>,
@@ -273,15 +371,13 @@ impl Progress {
                 item_expected: 0,
                 item_got: 0,
                 bytes_done: 0,
-                samples: VecDeque::new(),
-                received: 0,
                 phase: ProgressPhase::Delete,
                 current: None,
                 last_draw: None,
             });
-            let snap = i.started.as_ref()?.request(t0);
-            if let Ok(mut g) = i.gate.lock() {
-                g.reset(snap);
+            let snap = i.started.as_ref()?.request(0);
+            if let Some(mut g) = i.gate.lock() {
+                g.reset(t0, snap);
             }
             Some(())
         });
@@ -317,13 +413,8 @@ impl Progress {
             if n > 0 {
                 s.item_got += n;
                 s.bytes_done += n;
-                s.received += n;
-                let t = now.saturating_sub(s.t0);
-                s.samples.push_back((t, s.received));
-                // 窓の外にある標本は、窓の端の基準になる 1 点だけ残す
-                let edge = t.saturating_sub(RATE_WINDOW);
-                while s.samples.len() >= 2 && s.samples[1].0 <= edge {
-                    s.samples.pop_front();
+                if let Some(mut g) = i.gate.lock() {
+                    g.meter.add(now, n);
                 }
             }
             i.touch(false);
@@ -360,7 +451,8 @@ impl Progress {
     pub fn view(&self) -> ProgressView {
         self.with(|i| {
             let now = (i.clock)();
-            i.started.as_ref().map(|s| s.view(now))
+            let rate = i.rate(now);
+            i.started.as_ref().map(|s| s.view(rate))
         })
         .unwrap_or(ProgressView {
             done: 0,
@@ -377,15 +469,22 @@ impl Progress {
     /// 送るべき時刻なら Some（前回の送信から 2 秒、失敗が続けばそれ以上空ける。最後の 1 回は `force`）。
     /// 送らなくなった計画・終えた計画・心拍が送っている最中は常に None
     pub fn take_send(&self, force: bool) -> Option<(i64, ProgressRequest)> {
-        self.claim(force, false)
+        self.claim(force, false, Duration::ZERO)
+            .map(|(_, id, r)| (id, r))
     }
 
-    /// 今の値を門へ書いてから、送る時刻か門に問う
-    fn claim(&self, force: bool, mark: bool) -> Option<(i64, ProgressRequest)> {
+    /// 今の値を門へ書いてから、送る時刻か門に問う。`wait` の間は心拍の送信の終わりを待つ
+    fn claim(
+        &self,
+        force: bool,
+        mark: bool,
+        wait: Duration,
+    ) -> Option<(u64, i64, ProgressRequest)> {
         self.with(|i| {
             let now = (i.clock)();
-            let snap = i.started.as_ref()?.request(now);
-            let mut g = i.gate.lock().ok()?;
+            let s = i.started.as_ref()?;
+            let mut g = i.gate.lock_idle(wait)?;
+            let snap = s.request(g.meter.rate(now));
             g.snapshot = Some(snap);
             g.claim(now, force, mark)
         })
@@ -397,24 +496,30 @@ impl Progress {
             i.maybe_draw(false);
             Some(())
         });
-        self.send_with(false, send);
+        self.send_with(false, Duration::ZERO, send);
     }
 
-    /// 間引かずに今の値を送る（報告の前の最後の 1 回）
+    /// 間引かずに今の値を送る（報告の前の最後の 1 回）。心拍が送っている最中なら、その送信が終わるのを
+    /// 待ってから（上限 6 秒）送る。最後の値（`done == total`）を心拍の送信と取り違えて落とさない
     pub fn flush(&self, send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent) {
-        self.send_with(true, send);
+        self.send_with(true, FLUSH_WAIT, send);
     }
 
-    fn send_with(&self, force: bool, send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent) {
+    fn send_with(
+        &self,
+        force: bool,
+        wait: Duration,
+        send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent,
+    ) {
         // 送っている間は借用も門も持たない
-        let Some((plan_id, req)) = self.claim(force, true) else {
+        let Some((epoch, plan_id, req)) = self.claim(force, true, wait) else {
             return;
         };
         let sent = send(plan_id, &req);
         self.with(|i| {
             // 間隔は送信が終わった時刻から数える。送信が詰まっても、次の書き込みで即座に送り直さない
             let now = (i.clock)();
-            i.gate.lock().ok()?.record(now, sent);
+            i.gate.record(epoch, now, sent);
             Some(())
         });
     }
@@ -423,9 +528,10 @@ impl Progress {
     pub fn finish(&self) -> Option<String> {
         self.with(|i| {
             let now = (i.clock)();
+            let received = i.gate.lock().map_or(0, |g| g.meter.received);
             let s = i.started.as_ref()?;
             let elapsed = now.saturating_sub(s.t0).as_secs();
-            let line = summary_line(s.done, s.received.max(s.bytes_done), elapsed);
+            let line = summary_line(s.done, received.max(s.bytes_done), elapsed);
             i.close();
             i.sink.clear();
             i.sink.summary(&line);
@@ -443,9 +549,14 @@ impl Progress {
 }
 
 impl Inner {
+    fn rate(&self, now: Duration) -> u64 {
+        self.gate.lock().map_or(0, |g| g.meter.rate(now))
+    }
+
     /// 間引いて描く。描いたら true
     fn maybe_draw(&mut self, force: bool) -> bool {
         let now = (self.clock)();
+        let rate = self.rate(now);
         let Some(s) = self.started.as_mut() else {
             return false;
         };
@@ -458,7 +569,7 @@ impl Inner {
             }
         }
         s.last_draw = Some(t);
-        let v = s.view(now);
+        let v = s.view(rate);
         self.sink.draw(&v);
         true
     }
@@ -467,26 +578,28 @@ impl Inner {
     fn touch(&mut self, publish: bool) {
         if self.maybe_draw(false) || publish {
             let now = (self.clock)();
-            let Some(snap) = self.started.as_ref().map(|s| s.request(now)) else {
+            let Some(s) = self.started.as_ref() else {
                 return;
             };
-            if let Ok(mut g) = self.gate.lock() {
+            if let Some(mut g) = self.gate.lock() {
+                let snap = s.request(g.meter.rate(now));
                 g.snapshot = Some(snap);
             }
         }
     }
 
-    /// 計画を終えた。心拍はもう送らない
+    /// 計画を終えた。心拍はもう送らない。送信中の心拍は待たない（`flush` で待ってある。
+    /// エラーで抜ける `clear` では待たず、終わった送信の結果は計画の番号違いとして捨てられる）
     fn close(&mut self) {
-        if let Ok(mut g) = self.gate.lock() {
+        if let Some(mut g) = self.gate.lock() {
             g.open = false;
         }
     }
 }
 
 impl Started {
-    fn request(&self, now: Duration) -> (i64, ProgressRequest) {
-        let v = self.view(now);
+    fn request(&self, rate: u64) -> (i64, ProgressRequest) {
+        let v = self.view(rate);
         (
             self.plan_id,
             ProgressRequest {
@@ -502,32 +615,7 @@ impl Started {
         )
     }
 
-    fn rate(&self, now: Duration) -> u64 {
-        let t = now.saturating_sub(self.t0);
-        if t.is_zero() {
-            return 0;
-        }
-        let edge = t.saturating_sub(RATE_WINDOW);
-        let (bt, bb) = if t < RATE_WINDOW {
-            (Duration::ZERO, 0)
-        } else {
-            // 窓の端以前で最後の標本。無ければ開始
-            self.samples
-                .iter()
-                .rev()
-                .find(|(st, _)| *st <= edge)
-                .copied()
-                .unwrap_or((Duration::ZERO, 0))
-        };
-        let dt = t.saturating_sub(bt).as_secs_f64();
-        if dt <= 0.0 {
-            return 0;
-        }
-        (self.received.saturating_sub(bb) as f64 / dt).round() as u64
-    }
-
-    fn view(&self, now: Duration) -> ProgressView {
-        let rate = self.rate(now);
+    fn view(&self, rate: u64) -> ProgressView {
         let eta_secs = if self.bytes_total > 0 && rate > 0 {
             Some(self.bytes_total.saturating_sub(self.bytes_done) / rate)
         } else {
