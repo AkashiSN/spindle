@@ -539,10 +539,11 @@ fn track_inputs_joins_derived_and_hashes_in_one_pass() {
     assert!(got[2].hash_master.is_none(), "identity 不一致は無効");
 }
 
-/// 選曲の見積もりは「現在の送る元」のハッシュが有効な曲だけ bytes に数える（build_manifest と同じ判定）。
-/// Derived の意味トークンが古い・Derived が無い・非可逆原本のハッシュが無いものは unhashed
+/// 選曲の見積もりは「現在の送る元」のハッシュが有効な曲をその size で数える（build_manifest と同じ判定）。
+/// ハッシュが無い・古い曲は推定する: 原本を送るなら tracks.size、Derived なら長さ × 系統のビットレート。
+/// 長さが無い曲は推定できないので unhashed
 #[test]
-fn estimate_selection_counts_only_valid_current_source_hashes() {
+fn estimate_selection_uses_hashes_and_estimates_the_rest() {
     let c = conn();
     let d = adb(&c, Selection::All);
     let profile = derived::settings_of(&c, Variant::Opus)
@@ -593,23 +594,45 @@ fn estimate_selection_counts_only_valid_current_source_hashes() {
     .unwrap();
     devices::put_source_hash(&c, 5, opus, &h(sem_d1, 15, 500), 5).unwrap();
 
+    // 長さ: id 秒（6 は長さが分からない）。opus の系統は 256 kbps なので 1 秒 = 32,000 バイト
+    c.execute("UPDATE tracks SET duration_ms = id * 1000", [])
+        .unwrap();
+    insert_track_with_inode(&c, 6, "A/6.flac", "flac", Some(6));
+    c.execute("UPDATE tracks SET duration_ms = NULL WHERE id = 6", [])
+        .unwrap();
+
     let e = devices::estimate_selection(&c, &d, Selection::All, &[]).unwrap();
-    assert_eq!(e.tracks, 5);
+    assert_eq!(e.tracks, 6);
     assert_eq!(
         e.bytes,
-        100 + 300,
-        "有効なハッシュ（1 の Derived、3 の原本）だけ合計"
+        100 + 300 + 2 * 32_000 + 1 + 5 * 32_000,
+        "1 と 3 はハッシュの size。2（意味トークンが古い）と 5（Derived 無し）は長さ × ビットレート、\
+         4（非可逆原本のハッシュ無し）は原本の size"
     );
-    assert_eq!(
-        e.unhashed, 3,
-        "2（意味トークンが古い）・4（非可逆原本のハッシュ無し）・5（Derived 無し）"
-    );
+    assert_eq!(e.estimated, 3, "2・4・5");
+    assert_eq!(e.unhashed, 1, "6（長さが無い）");
 
-    // 原本が外部で書き換えられて identity がずれたら、3 のハッシュも無効
+    // 原本が外部で書き換えられて identity がずれたら、3 のハッシュは無効。原本の size で推定する
     c.execute("UPDATE tracks SET mtime_ns = 1 WHERE id = 3", [])
         .unwrap();
     let e = devices::estimate_selection(&c, &d, Selection::All, &[]).unwrap();
-    assert_eq!((e.bytes, e.unhashed), (100, 4));
+    assert_eq!(
+        (e.bytes, e.estimated, e.unhashed),
+        (100 + 300 + 2 * 32_000 + 1 + 5 * 32_000, 4, 1)
+    );
+
+    // 系統が凍結されていれば、Derived の無い曲は送られないので推定しない（5 が unhashed になる）。
+    // Derived のある 2 は凍結中も送れる（音声版が一致する既存の行）ので推定する
+    c.execute(
+        "UPDATE derived_variants SET enabled = 0 WHERE variant = 'opus'",
+        [],
+    )
+    .unwrap();
+    let e = devices::estimate_selection(&c, &d, Selection::All, &[]).unwrap();
+    assert_eq!(
+        (e.bytes, e.estimated, e.unhashed),
+        (100 + 300 + 2 * 32_000 + 1, 3, 2)
+    );
 }
 
 #[test]

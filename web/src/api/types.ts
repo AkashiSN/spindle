@@ -456,8 +456,11 @@ export type DeviceDiff = {
   evaluations: { playlist_id: number; name: string; evaluated_at: number | null; pending: boolean }[]
   counts: DeviceCounts
 }
-/** unhashed: 容量が未確定の曲の数（送る元の準備待ち: Derived が無い・古い、ハッシュが無い・古い）。bytes に含まれない */
-export type SelectionEstimate = { tracks: number; bytes: number; unhashed: number }
+/**
+ * bytes: 容量の合計（確定と推定の和）。estimated: そのうち推定で数えた曲の数（送る元のハッシュがまだ無い・古い。
+ * 長さ × ビットレートか原本の size。D-107）。unhashed: 推定もできない曲の数。bytes に含まれない
+ */
+export type SelectionEstimate = { tracks: number; bytes: number; estimated: number; unhashed: number }
 /** トラック行の端末ごとの状態（Task 9） */
 export type TrackDeviceState =
   | { device_id: number; state: 'synced'; synced_at: number | null }

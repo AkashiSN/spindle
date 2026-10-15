@@ -1961,8 +1961,9 @@ PUT    /api/devices/:id/playlists                 { playlist_ids }（印の全�
                                                   cycle（on_device / device_pending を使うスマート）、409 open_plan
 GET    /api/devices/:id/diff                      差分・見積もり・評価時刻と plan_token（下の「レスポンス形」）
 GET    /api/devices/:id/estimate?selection=&playlist_ids=1,2
-                                                  選曲タブの見積もり（保存しない）→ { tracks, bytes, unhashed }（unhashed = 送る元の準備待ちで
-                                                  bytes に含まない曲数）
+                                                  選曲タブの見積もり（保存しない）→ { tracks, bytes, estimated, unhashed }（bytes は確定と
+                                                  推定の和、estimated = 推定で数えた曲数、unhashed = 推定もできず
+                                                  bytes に含まない曲数。D-107）
 GET    /api/devices/adb/unregistered              接続中で未登録の Android → { items: [{ serial, model, state, volumes: [{ volume, path, free,
                                                   state: missing | empty | nonempty | adoptable }], error }] }（volumes は state = device の端末だけ
                                                   調べる。adoptable = 読める manifest が曲かプレイリストを指し、volume が一致し、uuid が DB に無い）。503 adb_disabled
@@ -2896,8 +2897,8 @@ GC は削除件数・バイト数と区分ごとの内訳・見送りと失敗�
     「Mac で `spindle-agent sync` を実行する」の案内とエージェントの最終報告時刻、途中の計画があれば Mac で
     続けるかの案内と「強制破棄」
   - **選曲**: 全曲 / プレイリストの切り替えと、プレイリストのチェック一覧（スマートは ⚙、曲数）。選び方を
-    変えるたびに `GET /api/devices/:id/estimate` で合計曲数と容量（送る元の準備待ちで容量未確定の曲数を
-    添える）を出す。保存は印を先に、選び方を後に（プレイリスト選曲へ切り替えるとき空の選曲の差分を作らない）。
+    変えるたびに `GET /api/devices/:id/estimate` で合計曲数と容量（推定で数えた曲数と、容量の分からない
+    曲数を添える。D-107）を出す。保存は印を先に、選び方を後に（プレイリスト選曲へ切り替えるとき空の選曲の差分を作らない）。
     途中の計画があれば保存できない
   - **設定**: 名前・系統（途中の計画があれば系統は変えられない）、Android は保存先の表示（変えるには削除して
     登録し直す）と「内容を検証」、iPhone は「pair コードを発行」（確認のうえ発行し、コードと期限と
