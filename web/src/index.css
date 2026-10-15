@@ -3417,3 +3417,26 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
   align-items: center;
   gap: 6px;
 }
+
+.jobs-table td.note-cell {
+  max-width: 24em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jobs-table tr.expandable {
+  cursor: pointer;
+}
+
+.jobs-table tr.job-detail pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+.jobs-table tr.job-detail pre.job-error {
+  color: var(--error);
+}

@@ -684,6 +684,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           <JobsView
             jobs={jobs}
             onOpenBatch={openBatch}
+            onOpenLog={(id) => openRecords({ tab: 'logs', albumId: id })}
           />
         ) : view === 'records' ? (
           <RecordsView

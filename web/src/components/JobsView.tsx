@@ -1,6 +1,7 @@
 // ジョブ画面（SPEC §12.5）: 種別ごとの並列度と待ち行列、一覧（進捗 / 失敗の last_error / 再試行 / 取り消し）。
 // 編集バッチ由来のジョブは edit_batch_id で履歴画面へ。更新は SSE job / batch（hooks/useJobSummary）、
-// リロードしても DB の値で復元
+// リロードしても DB の値で復元。
+// 結果（note）の 1 行目を列に出し、行を開くと note とエラーの全文
 
 import { useState } from 'react'
 import type { Job } from '../api/types'
@@ -13,8 +14,10 @@ import {
   canRetry,
   cpuBudgetLabel,
   filterJobs,
+  jobLogAlbum,
   jobProgress,
   jobTypeLabel,
+  noteHeadline,
   STATE_LABEL,
   shownLimit,
   summarizeByType,
@@ -22,7 +25,16 @@ import {
   type StateFilter,
 } from '../lib/jobs'
 
-export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: (batchId: number) => void }) {
+export function JobsView({
+  jobs,
+  onOpenBatch,
+  onOpenLog,
+}: {
+  jobs: JobsState
+  onOpenBatch: (batchId: number) => void
+  onOpenLog: (albumId: number) => void
+}) {
+  const [openId, setOpenId] = useState<number | null>(null)
   const [state, setState] = useState<StateFilter>('active')
   const [type, setType] = useState<string | null>(null)
   const { items, summary, concurrency, byType: counts, limits, cpuBudget, error, notice } = jobs
@@ -39,8 +51,9 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
         <h1>ジョブ</h1>
         {summary && (
           <span className="small muted">
-            実行中 {formatCount(summary.running)} · 待ち {formatCount(summary.queued)} · 完了 {formatCount(summary.done)} ·
-            失敗 {formatCount(summary.failed)} · 反映待ち op {formatCount(summary.pending_ops)}
+            実行中 {formatCount(summary.running)} · 待ち {formatCount(summary.queued)} · 完了{' '}
+            {formatCount(summary.done)} · 失敗 {formatCount(summary.failed)} · 反映待ち op{' '}
+            {formatCount(summary.pending_ops)}
           </span>
         )}
         <span className="spacer" />
@@ -121,14 +134,17 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
             className="ghost small"
             title="確認済みの失敗をすべて一覧から消す（上部バーの赤丸も消える）"
             onClick={() => {
-              if (window.confirm(`失敗 ${formatCount(summary?.failed ?? 0)} 件をすべて消しますか？`)) void jobs.removeFailed()
+              if (window.confirm(`失敗 ${formatCount(summary?.failed ?? 0)} 件をすべて消しますか？`))
+                void jobs.removeFailed()
             }}
           >
             失敗をすべて消す
           </button>
         )}
         <span className="muted small">
-          {items ? `${formatCount(shown.length)} 件${limit != null ? `（表示は最新 ${formatCount(limit)} 件まで）` : ''}` : ''}
+          {items
+            ? `${formatCount(shown.length)} 件${limit != null ? `（表示は最新 ${formatCount(limit)} 件まで）` : ''}`
+            : ''}
         </span>
       </div>
       {items == null ? (
@@ -148,13 +164,22 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
               <th>開始</th>
               <th>終了</th>
               <th className="num">試行</th>
+              <th>結果</th>
               <th>エラー</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
             {shown.map((j) => (
-              <JobRow key={j.id} j={j} jobs={jobs} onOpenBatch={onOpenBatch} />
+              <JobRow
+                key={j.id}
+                j={j}
+                jobs={jobs}
+                open={openId === j.id}
+                onToggle={() => setOpenId(openId === j.id ? null : j.id)}
+                onOpenBatch={onOpenBatch}
+                onOpenLog={onOpenLog}
+              />
             ))}
           </tbody>
         </table>
@@ -163,62 +188,103 @@ export function JobsView({ jobs, onOpenBatch }: { jobs: JobsState; onOpenBatch: 
   )
 }
 
-function JobRow({ j, jobs, onOpenBatch }: { j: Job; jobs: JobsState; onOpenBatch: (batchId: number) => void }) {
+function JobRow({
+  j,
+  jobs,
+  open,
+  onToggle,
+  onOpenBatch,
+  onOpenLog,
+}: {
+  j: Job
+  jobs: JobsState
+  open: boolean
+  onToggle: () => void
+  onOpenBatch: (batchId: number) => void
+  onOpenLog: (albumId: number) => void
+}) {
   // 再試行のバックオフ待ち（run_after）。過ぎていればワーカーがすぐ拾う
   const runAfter = j.state === 'queued' && j.run_after != null
+  const expandable = (j.note ?? '') !== '' || (j.last_error ?? '') !== ''
+  const logAlbum = jobLogAlbum(j)
   return (
-    <tr className={`state-${j.state}`}>
-      <td className="num">#{j.id}</td>
-      <td className="nowrap">
-        {jobTypeLabel(j.type)}
-        {j.edit_batch_id != null && (
-          <>
-            {' '}
+    <>
+      <tr
+        className={`state-${j.state}${open ? ' selected' : ''}${expandable ? ' expandable' : ''}`}
+        onClick={expandable ? onToggle : undefined}
+      >
+        <td className="num">#{j.id}</td>
+        <td className="nowrap">
+          {jobTypeLabel(j.type)}
+          {j.edit_batch_id != null && (
+            <>
+              {' '}
+              <button
+                type="button"
+                className="link small"
+                title="編集履歴で開く"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onOpenBatch(j.edit_batch_id!)
+                }}
+              >
+                バッチ #{j.edit_batch_id}
+              </button>
+            </>
+          )}
+        </td>
+        <td className="subject-cell" title={j.subject ?? undefined}>
+          {j.subject != null && <span>{j.subject}</span>}
+        </td>
+        <td className="nowrap">
+          {STATE_LABEL[j.state]}
+          {runAfter && <span className="muted small"> （{formatDateTime(j.run_after!)} から）</span>}
+        </td>
+        <td className="num">{jobProgress(j)}</td>
+        <td className="nowrap">{formatDateTime(j.created_at)}</td>
+        <td className="nowrap">{j.started_at != null ? formatDateTime(j.started_at) : ''}</td>
+        <td className="nowrap">{j.finished_at != null ? formatDateTime(j.finished_at) : ''}</td>
+        <td className="num">
+          {j.attempts} / {j.max_attempts}
+        </td>
+        <td className="note-cell">{noteHeadline(j.note)}</td>
+        <td className="error-cell">{j.last_error}</td>
+        <td className="nowrap" onClick={(e) => e.stopPropagation()}>
+          {canCancel(j) && (
+            <button type="button" className="ghost" onClick={() => void jobs.cancel(j.id)}>
+              取り消し
+            </button>
+          )}
+          {canRetry(j) && (
+            <button type="button" className="ghost" onClick={() => void jobs.retry(j.id)}>
+              再試行
+            </button>
+          )}
+          {canRemove(j) && (
             <button
               type="button"
-              className="link small"
-              title="編集履歴で開く"
-              onClick={() => onOpenBatch(j.edit_batch_id!)}
+              className="ghost"
+              title="一覧から消す（確認済み）"
+              onClick={() => void jobs.remove(j.id)}
             >
-              バッチ #{j.edit_batch_id}
+              消す
             </button>
-          </>
-        )}
-      </td>
-      <td className="subject-cell" title={j.subject ?? undefined}>
-        {j.subject != null && <span>{j.subject}</span>}
-      </td>
-      <td className="nowrap">
-        {STATE_LABEL[j.state]}
-        {runAfter && <span className="muted small"> （{formatDateTime(j.run_after!)} から）</span>}
-      </td>
-      <td className="num">{jobProgress(j)}</td>
-      <td className="nowrap">{formatDateTime(j.created_at)}</td>
-      <td className="nowrap">{j.started_at != null ? formatDateTime(j.started_at) : ''}</td>
-      <td className="nowrap">{j.finished_at != null ? formatDateTime(j.finished_at) : ''}</td>
-      <td className="num">
-        {j.attempts} / {j.max_attempts}
-      </td>
-      <td className="error-cell" title={j.last_error ?? undefined}>
-        {j.last_error}
-      </td>
-      <td className="nowrap">
-        {canCancel(j) && (
-          <button type="button" className="ghost" onClick={() => void jobs.cancel(j.id)}>
-            取り消し
-          </button>
-        )}
-        {canRetry(j) && (
-          <button type="button" className="ghost" onClick={() => void jobs.retry(j.id)}>
-            再試行
-          </button>
-        )}
-        {canRemove(j) && (
-          <button type="button" className="ghost" title="一覧から消す（確認済み）" onClick={() => void jobs.remove(j.id)}>
-            消す
-          </button>
-        )}
-      </td>
-    </tr>
+          )}
+        </td>
+      </tr>
+      {open && (
+        <tr className="job-detail">
+          <td colSpan={12}>
+            {(j.note ?? '') !== '' && <pre className="job-note">{j.note}</pre>}
+            {(j.last_error ?? '') !== '' && <pre className="job-error">{j.last_error}</pre>}
+            {logAlbum != null && (
+              <button type="button" className="link small" onClick={() => onOpenLog(logAlbum)}>
+                ログを見る
+              </button>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
   )
 }
