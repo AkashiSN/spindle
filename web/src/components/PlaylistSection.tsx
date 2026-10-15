@@ -192,15 +192,18 @@ export function PlaylistSection({
           >
             <button
               type="button"
-              className={`tree-node${activeId === p.id ? ' active' : ''}`}
+              className={`tree-node playlist-node${activeId === p.id ? ' active' : ''}`}
               title={`${p.track_count} 件 / ${formatDuration(p.duration_ms)}${p.missing_count > 0 ? `（missing ${p.missing_count}）` : ''}${
                 p.rule_source ? `\nルール: ${p.rule_source}` : ''
               }${p.exports.length > 0 ? `\n書き出し: ${p.exports.map((x) => x.out_path).join(', ')}` : ''}`}
               onClick={() => onOpen(p.id)}
             >
-              {p.kind === 'smart' ? '⚙ ' : '♪ '}
-              {p.name}
-              <span className="muted"> {p.track_count}</span>
+              {/* 名前だけを省略する。端末の印は名前が長くても切らない */}
+              <span className="playlist-name">
+                {p.kind === 'smart' ? '⚙ ' : '♪ '}
+                {p.name}
+                <span className="muted"> {p.track_count}</span>
+              </span>
               {chipsFor(p.id, devices).map((d) => (
                 <span key={d.id} className="device-chip" title={`${d.name} に送る`}>
                   📱 {d.name}
