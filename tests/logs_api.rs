@@ -465,3 +465,29 @@ async fn text_rejects_oversize_and_symlinks() {
     let (st, _) = get(&app, &c, "/api/logs/retro-2-j11/text").await;
     assert_eq!(st, StatusCode::NOT_FOUND, "symlink は辿らない");
 }
+
+/// 照合ログの名前にディレクトリが差し替わっていても 500 にせず 404 にする
+/// （FIFO も O_NONBLOCK で開いて fstat の種別で弾くので止まらない）
+#[tokio::test]
+async fn text_404s_when_the_log_is_not_a_regular_file() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    let conn = app.conn();
+    album(&conn, 1, "A/One");
+    job(&conn, 10, 1);
+    verification(
+        &conn,
+        1,
+        "retro",
+        Some(10),
+        Some(1),
+        "ctdb",
+        "verified",
+        100,
+        Some("/x/1.log"),
+    );
+    std::fs::create_dir(app.verify_dir().join("1.log")).unwrap();
+    let (st, v) = get_json(&app, &c, "/api/logs/retro-1-j10/text").await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["error"], "log_not_found");
+}

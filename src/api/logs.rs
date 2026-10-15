@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::cd::riplog::is_rip_log_name;
 use crate::db::logs::{self, LogAvail, LogRun, RunKey};
 use crate::domain::relpath::RelPath;
-use crate::fsroot::{FsError, RootDir};
+use crate::fsroot::{FileKind, FsError, RootDir};
 
 use super::error::{error_response, ApiError};
 use super::AppState;
@@ -83,13 +83,19 @@ pub(crate) async fn read_text_capped(
     rel: RelPath,
 ) -> Result<TextRead, ApiError> {
     tokio::task::spawn_blocking(move || -> Result<TextRead, ApiError> {
-        let file = match root.open_file(&rel) {
+        // O_NONBLOCK: FIFO に差し替わっていても止まらず、fstat の種別で弾く
+        let file = match root.open_file_nonblocking(&rel) {
             Ok(f) => f,
             Err(FsError::NotFound | FsError::Symlink | FsError::Escaped) => {
                 return Ok(TextRead::NotFound)
             }
             Err(e) => return Err(ApiError::Internal(format!("ログを開けない: {e}"))),
         };
+        let st = crate::fsroot::fstat(&file)
+            .map_err(|e| ApiError::Internal(format!("ログを調べられない: {e}")))?;
+        if st.kind != FileKind::File {
+            return Ok(TextRead::NotFound);
+        }
         let mut buf = Vec::new();
         file.take(LOG_TEXT_LIMIT + 1)
             .read_to_end(&mut buf)

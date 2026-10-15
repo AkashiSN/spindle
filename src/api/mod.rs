@@ -153,6 +153,7 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox/{id}/discard", post(inbox::discard))
         .route("/inbox/{id}/undiscard", post(inbox::undiscard))
         .route("/inbox/{id}/artwork/{hash}", get(inbox::artwork))
+        .route("/inbox/{id}/files/{name}", get(inbox::file))
         .route("/inbox/{id}/preview", post(inbox::preview))
         .route("/ytmusic/download", post(ytmusic::download))
         .route("/ytmusic/lookup", post(ytmusic::lookup))
