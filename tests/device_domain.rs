@@ -952,21 +952,37 @@ fn playlist_sync_states_summarize_members_and_the_playlist_file() {
             playlist_id: 10,
             state: PlaylistSync::Synced,
             pending: 0,
+            waiting: 0,
             errors: 0,
             reason: None,
         }
     );
     assert_eq!(
-        (by[&11].state, by[&11].pending, by[&11].errors),
-        (PlaylistSync::Pending, 2, 0)
+        (
+            by[&11].state,
+            by[&11].pending,
+            by[&11].waiting,
+            by[&11].errors
+        ),
+        (PlaylistSync::Pending, 1, 1, 0)
     );
     assert_eq!(
-        (by[&12].state, by[&12].pending, by[&12].errors),
-        (PlaylistSync::Pending, 0, 0)
+        (
+            by[&12].state,
+            by[&12].pending,
+            by[&12].waiting,
+            by[&12].errors
+        ),
+        (PlaylistSync::Pending, 0, 0, 0)
     );
     assert_eq!(
-        (by[&13].state, by[&13].pending, by[&13].errors),
-        (PlaylistSync::Error, 1, 1)
+        (
+            by[&13].state,
+            by[&13].pending,
+            by[&13].waiting,
+            by[&13].errors
+        ),
+        (PlaylistSync::Error, 0, 1, 1)
     );
     assert_eq!(by[&13].reason.as_deref(), Some("前回 書けない"));
     assert_eq!(by[&14].state, PlaylistSync::Error);

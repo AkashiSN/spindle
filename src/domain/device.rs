@@ -854,7 +854,7 @@ pub fn counts(states: &BTreeMap<i64, TrackState>) -> Counts {
 pub enum PlaylistSync {
     /// プレイリストのファイルも収録曲もすべて反映済み
     Synced,
-    /// 次の同期で送るもの（ファイルか収録曲）か、準備待ちの曲がある
+    /// 次の同期で送るもの（ファイルか収録曲）か、準備待ち（Derived 未生成など）の曲がある
     Pending,
     /// ファイルか収録曲のどれかが送れない
     Error,
@@ -866,8 +866,10 @@ pub enum PlaylistSync {
 pub struct PlaylistSyncState {
     pub playlist_id: i64,
     pub state: PlaylistSync,
-    /// 未反映か準備待ちの収録曲の数
+    /// 次の同期で送る収録曲の数
     pub pending: usize,
+    /// 準備待ち（Derived 未生成など。同期しても送られない）の収録曲の数
+    pub waiting: usize,
     /// 送れない収録曲の数
     pub errors: usize,
     /// プレイリストのファイル自体のエラー（今回の差分のものを優先し、無ければ前回の同期・報告のもの）
@@ -890,10 +892,11 @@ pub fn playlist_sync_states(
         .collect();
     let mut out = Vec::with_capacity(inputs.len());
     for p in inputs {
-        let (mut pending, mut errors) = (0, 0);
+        let (mut pending, mut waiting, mut errors) = (0, 0, 0);
         for id in &p.track_ids {
             match states.get(id) {
-                Some(TrackState::Pending { .. } | TrackState::Waiting { .. }) => pending += 1,
+                Some(TrackState::Pending { .. }) => pending += 1,
+                Some(TrackState::Waiting { .. }) => waiting += 1,
                 Some(TrackState::Error { .. }) => errors += 1,
                 Some(TrackState::Synced { .. } | TrackState::Removing) | None => {}
             }
@@ -915,7 +918,7 @@ pub fn playlist_sync_states(
         );
         let state = if errors > 0 || reason.is_some() {
             PlaylistSync::Error
-        } else if pending > 0 || file_pending {
+        } else if pending > 0 || waiting > 0 || file_pending {
             PlaylistSync::Pending
         } else {
             PlaylistSync::Synced
@@ -924,6 +927,7 @@ pub fn playlist_sync_states(
             playlist_id: p.playlist_id,
             state,
             pending,
+            waiting,
             errors,
             reason,
         });
@@ -934,6 +938,7 @@ pub fn playlist_sync_states(
                 playlist_id: o.playlist_id,
                 state: PlaylistSync::Removing,
                 pending: 0,
+                waiting: 0,
                 errors: 0,
                 reason: None,
             });

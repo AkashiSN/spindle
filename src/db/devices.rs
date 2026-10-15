@@ -542,6 +542,8 @@ pub struct Computed {
     pub desired: Vec<DesiredItem>,
     /// 衝突を解いた後の desired から組み立てたプレイリスト（中身を含む）
     pub playlists: Vec<DesiredPlaylist>,
+    /// 選曲のプレイリストとその収録曲（プレイリストごとの同期の状況の集計に使う）
+    pub playlist_inputs: Vec<PlaylistInput>,
 }
 
 /// 端末上の root の前置き（区切りの `/` を含む）の UTF-16 長。パス長の上限（SPEC §5）の計算に使う。
@@ -604,12 +606,8 @@ pub(crate) fn compute_in(conn: &Connection, device_id: i64) -> Result<Option<Com
         &build_manifest(&settings, root_prefix_utf16(&device), &tracks),
         &current,
     );
-    let (playlists, pl_errors) = build_playlists(
-        device.transport,
-        &playlist_inputs(conn, device_id)?,
-        &manifest,
-        &current,
-    );
+    let inputs = playlist_inputs(conn, device_id)?;
+    let (playlists, pl_errors) = build_playlists(device.transport, &inputs, &manifest, &current);
     let d = diff(
         &manifest,
         &current,
@@ -625,6 +623,7 @@ pub(crate) fn compute_in(conn: &Connection, device_id: i64) -> Result<Option<Com
         needs_hash: manifest.needs_hash,
         desired: manifest.desired,
         playlists,
+        playlist_inputs: inputs,
     }))
 }
 
@@ -820,7 +819,7 @@ pub fn snapshot(conn: &Connection) -> Result<Snapshot> {
         );
         let counts = counts(&states);
         let playlists = playlist_sync_states(
-            &playlist_inputs(&tx, device.id)?,
+            &computed.playlist_inputs,
             &computed.diff,
             &states,
             &playlist_errors_reported,

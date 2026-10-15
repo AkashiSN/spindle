@@ -422,11 +422,15 @@ export type SyncProgress = {
 }
 /** SSE device_progress。計画が閉じたら progress は null */
 export type DeviceProgressEvent = { device_id: number; progress: SyncProgress | null }
-/** pending: 未反映か準備待ちの収録曲の数。errors: 送れない収録曲の数。reason: プレイリストのファイル自体のエラー */
+/**
+ * pending: 次の同期で送る収録曲の数。waiting: 準備待ち（Derived 未生成など。同期しても送られない）の収録曲の数。
+ * errors: 送れない収録曲の数。reason: プレイリストのファイル自体のエラー
+ */
 export type PlaylistSyncState = {
   playlist_id: number
   state: 'synced' | 'pending' | 'error' | 'removing'
   pending: number
+  waiting: number
   errors: number
   reason: string | null
 }
