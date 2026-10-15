@@ -6,7 +6,7 @@
 // 破棄待ちにするだけで、ファイルは GC が retention 日後に消す（D-90）。placed の件は 24 時間残るので、
 // そこからアルバムへ飛べる
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { apiPost, apiText } from '../api/client'
 import { useArtworkUpload } from '../hooks/useArtworkUpload'
 import type { InboxState } from '../hooks/useInbox'
@@ -656,15 +656,23 @@ function RipFiles({ itemId, names }: { itemId: number; names: string[] }) {
   const [open, setOpen] = useState<string | null>(null)
   // 取得結果は開いたファイル名と一緒に持ち、今開いているものの分だけ使う
   const [got, setGot] = useState<RipFile | null>(null)
+  // 最後に要求した名前。遅れて届いた別ファイルの応答は捨てる
+  const wanted = useRef<string | null>(null)
   const show = (name: string) => {
     if (open === name) {
+      wanted.current = null
       setOpen(null)
       return
     }
+    wanted.current = name
     setOpen(name)
     apiText(`/api/inbox/${itemId}/files/${encodeURIComponent(name)}`)
-      .then((text) => setGot({ name, text, error: null }))
-      .catch((e: unknown) => setGot({ name, text: null, error: e instanceof Error ? e.message : String(e) }))
+      .then((text) => {
+        if (wanted.current === name) setGot({ name, text, error: null })
+      })
+      .catch((e: unknown) => {
+        if (wanted.current === name) setGot({ name, text: null, error: e instanceof Error ? e.message : String(e) })
+      })
   }
   const cur = open != null && got?.name === open ? got : null
   return (

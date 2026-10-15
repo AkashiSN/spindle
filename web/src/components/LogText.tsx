@@ -11,7 +11,8 @@ export function LogText({ text, fileName }: { text: string; fileName: string }) 
     a.href = url
     a.download = fileName
     a.click()
-    URL.revokeObjectURL(url)
+    // ダウンロードの開始を待ってから解放する
+    setTimeout(() => URL.revokeObjectURL(url), 0)
   }
   return (
     <div className="log-text">
@@ -20,7 +21,7 @@ export function LogText({ text, fileName }: { text: string; fileName: string }) 
           type="button"
           className="ghost small"
           onClick={() => {
-            void navigator.clipboard?.writeText(text).then(() => setCopied(true))
+            void navigator.clipboard?.writeText(text).then(() => setCopied(true), () => undefined)
           }}
         >
           {copied ? 'コピーした' : 'コピー'}

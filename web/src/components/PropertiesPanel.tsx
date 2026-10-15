@@ -326,6 +326,7 @@ export function PropertiesPanel({
             ))}
           </tbody>
         </table>
+        {/* filter 形の選択では rows は読み込み済みの一部なので、選択全体が複数 album でも出ることがある */}
         {onOpenLog && singleAlbumId(rows) != null && (
           <button type="button" className="link small" onClick={() => onOpenLog(singleAlbumId(rows)!)}>
             照合・吸い出しのログを見る
