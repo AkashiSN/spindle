@@ -77,6 +77,7 @@ pub fn run<M: Music, S: Server>(
     for op in deletes.chain(writes) {
         let name = op.to.as_deref().or(op.from.as_deref());
         cx.progress.begin_item(ProgressPhase::Playlist, name, 0);
+        cx.progress_tick();
         let step = match op.op {
             PlaylistOpKind::Delete => delete(cx, &scene, op)?,
             PlaylistOpKind::Add | PlaylistOpKind::Update => write(cx, &scene, op, m)?,

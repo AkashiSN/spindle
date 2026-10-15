@@ -96,6 +96,11 @@ fn sync_draws_and_sends_progress_to_the_end() {
     let sent = env.server.progress_log();
     assert!(sent.len() >= 2, "{sent:?}");
     assert_monotonic(&sent);
+    // 最初の送信は最初の項目（削除）の始め。長く掛かる項目でも段と項目がすぐ届く
+    let first = &sent[0];
+    assert_eq!((first.done, first.total), (0, 5), "{sent:?}");
+    assert_eq!(first.phase, agent_proto::ProgressPhase::Delete);
+    assert_eq!(first.current.as_deref(), Some("Z/z.m4a"));
     let fin = sent.last().unwrap();
     assert_eq!((fin.done, fin.total), (5, 5));
     assert_eq!((fin.bytes_done, fin.bytes_total), (bytes, bytes));

@@ -122,6 +122,8 @@ pub fn run<M: Music, S: Server>(
                     .fold(0u64, |a, i| a.saturating_add(i.size));
                 let base = cx.progress.view().bytes_done;
                 cx.progress.begin_item(ProgressPhase::Move, None, expected);
+                // 項目の始めにも送る（長く掛かる項目でも、段と項目がすぐ spindle に届く）
+                cx.progress_tick();
                 let (executed, dropped) = batch::run(cx, path_changes, &unmanaged, &origins)?;
                 let got = cx.progress.view().bytes_done.saturating_sub(base);
                 cx.progress.end_items(n, expected.saturating_sub(got));
@@ -137,6 +139,7 @@ pub fn run<M: Music, S: Server>(
             };
             let expected = if needs_fetch(cx, item) { item.size } else { 0 };
             cx.progress.begin_item(phase, current, expected);
+            cx.progress_tick();
             let step = match kind {
                 OpKind::Delete => delete(cx, item)?,
                 OpKind::Update => update(cx, item, &origins)?,
@@ -523,6 +526,7 @@ fn add<M: Music, S: Server>(
     }
     cx.fp.hit("exec.add.downloaded")?;
     cx.progress.set_phase(ProgressPhase::Add);
+    cx.progress_tick();
     // 管理外の鍵は実行の始めに取ったもの。取得の間に置き先へファイルが現れていれば上書きしない
     // （ここで置き先にあってよい自分のファイルは無い。削除・移動元は先に空き、管理下の曲は上で外した）
     let mut collided = cx.local.exists(to)?;

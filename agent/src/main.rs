@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_proto::ManifestResponse;
@@ -16,12 +17,12 @@ use spindle_agent::failpoint::Failpoints;
 use spindle_agent::music::jxa::{JxaMusic, ProcessOsascript};
 #[cfg(not(target_os = "macos"))]
 use spindle_agent::music::UnsupportedMusic;
-use spindle_agent::progress::{render_line, Progress, ProgressSink, ProgressView};
+use spindle_agent::progress::{render_line, Progress, ProgressSent, ProgressSink, ProgressView};
 use spindle_agent::recover::Resolution;
 #[cfg(target_os = "macos")]
 use spindle_agent::secrets::keychain::{KeychainSecrets, ACCOUNT, SERVICE};
 use spindle_agent::secrets::{FileSecrets, Secrets};
-use spindle_agent::server::HttpServer;
+use spindle_agent::server::{HttpServer, Server};
 use spindle_agent::state::StateFile;
 use spindle_agent::sync::{self, Paths, SyncOutcome};
 use spindle_agent::{Error, Result};
@@ -221,13 +222,27 @@ impl Ui for StdUi {
     }
 }
 
-/// sync の進捗。時計は起動からの単調な経過
-fn cli_progress(term: &Rc<RefCell<TermLine>>) -> Progress {
+/// sync の進捗。時計は起動からの単調な経過。
+/// 心拍のスレッドを添え、項目が長く掛かっても 2 秒ごとに spindle へ送り続ける（D-108）。
+/// 心拍は同じ基準の時計を使い、返り値のスレッドを落とすと止まる
+fn cli_progress(
+    term: &Rc<RefCell<TermLine>>,
+    server: &Arc<HttpServer>,
+) -> (Progress, Option<spindle_agent::progress::HeartbeatThread>) {
     let t0 = Instant::now();
-    Progress::new(
+    let p = Progress::new(
         Box::new(CliSink(term.clone())),
         Box::new(move || t0.elapsed()),
-    )
+    );
+    let server = server.clone();
+    let hb = p.heartbeat().map(|h| {
+        h.spawn(
+            move || t0.elapsed(),
+            // 送信の失敗は同期を止めない（エンジンの送信と同じく `Failed` として数える）
+            move |id, r| server.progress(id, r).unwrap_or(ProgressSent::Failed),
+        )
+    });
+    (p, hb)
 }
 
 #[cfg(target_os = "macos")]
@@ -291,8 +306,9 @@ fn run(cmd: Command) -> Result<()> {
             )
         }
         Command::Sync => {
-            let server = paired_server(&paths)?;
-            match sync::sync(&music, &server, &paths, &fp, &mut ui, cli_progress(&term))? {
+            let server = Arc::new(paired_server(&paths)?);
+            let (progress, _heartbeat) = cli_progress(&term, &server);
+            match sync::sync(&music, &*server, &paths, &fp, &mut ui, progress)? {
                 SyncOutcome::NothingToDo | SyncOutcome::PendingReevaluation => {}
                 SyncOutcome::Declined => ui.info("反映しませんでした"),
                 SyncOutcome::Applied {

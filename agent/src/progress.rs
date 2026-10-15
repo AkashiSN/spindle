@@ -4,6 +4,8 @@
 use agent_proto::{ProgressPhase, ProgressRequest, PROGRESS_CURRENT_MAX};
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// 開始からの単調な経過
@@ -19,6 +21,8 @@ const SEND_BACKOFF_MAX: Duration = Duration::from_secs(60);
 const SEND_FAIL_LIMIT: u32 = 3;
 /// 速度を平均する窓
 const RATE_WINDOW: Duration = Duration::from_secs(5);
+/// 心拍のスレッドが送るべきか見に行く間隔
+const HEARTBEAT_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgressView {
@@ -55,6 +59,147 @@ struct Inner {
     sink: Box<dyn ProgressSink>,
     clock: Clock,
     started: Option<Started>,
+    /// 送信の間隔・打ち切りと最新の値。心拍のスレッドと共有する
+    gate: Arc<Mutex<Gate>>,
+}
+
+/// 送信の門。エンジンと心拍のスレッドのどちらが送っても、間隔・失敗の数・打ち切りは
+/// ここで 1 つに数える。時刻はエンジンの時計（`Clock`）の値で持つ
+#[derive(Default)]
+struct Gate {
+    /// 送る値（計画 id と本文）。エンジンが値を変えるたびに書き直す
+    snapshot: Option<(i64, ProgressRequest)>,
+    /// 計画を始めてから、終わる（`finish` / `clear`）まで
+    open: bool,
+    /// 前回の送信（の終わり）の時刻
+    last_send: Option<Duration>,
+    /// 次の送信までに空ける間隔。失敗が続くと 2 秒・4 秒・8 秒…（上限 60 秒）と延ばす
+    send_gap: Duration,
+    /// 続けて失敗した回数
+    send_failures: u32,
+    /// `ProgressSent::Stop` を受けたか、失敗が続いた。この計画では以後送らない
+    stopped: bool,
+    /// どちらかが送っている最中。重ねて送らない（古い値が後から届かないように）
+    in_flight: bool,
+}
+
+impl Gate {
+    fn reset(&mut self, snapshot: (i64, ProgressRequest)) {
+        *self = Gate {
+            snapshot: Some(snapshot),
+            open: true,
+            last_send: None,
+            send_gap: SEND_INTERVAL,
+            send_failures: 0,
+            stopped: false,
+            in_flight: false,
+        };
+    }
+
+    /// 送るべき時刻なら送る値を返し、送った時刻を記す。`mark` なら送信中の印を付ける
+    fn claim(&mut self, now: Duration, force: bool, mark: bool) -> Option<(i64, ProgressRequest)> {
+        if !self.open || self.stopped || self.in_flight {
+            return None;
+        }
+        if !force {
+            if let Some(last) = self.last_send {
+                if now >= last && now - last < self.send_gap {
+                    return None;
+                }
+            }
+        }
+        let snap = self.snapshot.clone()?;
+        self.last_send = Some(now);
+        self.in_flight = mark;
+        Some(snap)
+    }
+
+    /// 送信の結果を記す。間隔は送信が終わった時刻から数える
+    fn record(&mut self, now: Duration, sent: ProgressSent) {
+        self.in_flight = false;
+        self.last_send = Some(now);
+        match sent {
+            ProgressSent::Ok => {
+                self.send_failures = 0;
+                self.send_gap = SEND_INTERVAL;
+            }
+            ProgressSent::Stop => self.stopped = true,
+            ProgressSent::Failed => {
+                self.send_failures += 1;
+                if self.send_failures >= SEND_FAIL_LIMIT {
+                    self.stopped = true;
+                }
+                self.send_gap = SEND_INTERVAL
+                    .saturating_mul(1 << self.send_failures.saturating_sub(1).min(5))
+                    .min(SEND_BACKOFF_MAX);
+            }
+        }
+    }
+}
+
+/// 送信を別スレッドから補う口（`Progress::heartbeat`）。値が変わらなくても、
+/// 項目が長く掛かっても（最初の削除・ミュージック.app への追加・大きなプレイリストの置き換え）、
+/// 前回の送信から間隔が空けば最新の値を送り直す。打ち切り・間隔の延長はエンジンと共有する
+#[derive(Clone)]
+pub struct Heartbeat {
+    gate: Arc<Mutex<Gate>>,
+}
+
+impl Heartbeat {
+    /// 送る時刻なら最新の値を `send` で送り、送ったら true。`clock` はエンジンと同じ基準の時計
+    pub fn beat(
+        &self,
+        clock: &dyn Fn() -> Duration,
+        send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent,
+    ) -> bool {
+        let claimed = match self.gate.lock() {
+            Ok(mut g) => g.claim(clock(), false, true),
+            Err(_) => None,
+        };
+        // 送っている間は門を握らない（エンジンを止めない）
+        let Some((plan_id, req)) = claimed else {
+            return false;
+        };
+        let sent = send(plan_id, &req);
+        if let Ok(mut g) = self.gate.lock() {
+            g.record(clock(), sent);
+        }
+        true
+    }
+
+    /// 別スレッドで 0.25 秒ごとに `beat` を回す。返り値を落とすと止まる（送信中なら終わるのを待たない）
+    pub fn spawn(
+        self,
+        clock: impl Fn() -> Duration + Send + 'static,
+        send: impl Fn(i64, &ProgressRequest) -> ProgressSent + Send + 'static,
+    ) -> HeartbeatThread {
+        let quit = Arc::new(AtomicBool::new(false));
+        let q = quit.clone();
+        // スレッドを作れなければ心拍なしで続ける（同期は止めない）
+        let _ = std::thread::Builder::new()
+            .name("progress-heartbeat".to_owned())
+            .spawn(move || {
+                while !q.load(Ordering::Relaxed) {
+                    std::thread::sleep(HEARTBEAT_POLL);
+                    if q.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    self.beat(&clock, &send);
+                }
+            });
+        HeartbeatThread { quit }
+    }
+}
+
+/// 心拍のスレッド。落とすと止まる
+pub struct HeartbeatThread {
+    quit: Arc<AtomicBool>,
+}
+
+impl Drop for HeartbeatThread {
+    fn drop(&mut self) {
+        self.quit.store(true, Ordering::Relaxed);
+    }
 }
 
 struct Started {
@@ -76,14 +221,6 @@ struct Started {
     phase: ProgressPhase,
     current: Option<String>,
     last_draw: Option<Duration>,
-    /// 前回の送信（の終わり）の時刻
-    last_send: Option<Duration>,
-    /// 次の送信までに空ける間隔。失敗が続くと 2 秒・4 秒・8 秒…（上限 60 秒）と延ばす
-    send_gap: Duration,
-    /// 続けて失敗した回数
-    send_failures: u32,
-    /// `ProgressSent::Stop` を受けたか、失敗が続いた。この計画では以後送らない
-    send_stopped: bool,
 }
 
 /// 内部可変。`&self` だけで呼べる（`disabled()` は何もしない）
@@ -102,8 +239,18 @@ impl Progress {
                 sink,
                 clock,
                 started: None,
+                gate: Arc::default(),
             })),
         }
+    }
+
+    /// 別スレッドから送信を補う口（`disabled()` では None）
+    pub fn heartbeat(&self) -> Option<Heartbeat> {
+        self.with(|i| {
+            Some(Heartbeat {
+                gate: i.gate.clone(),
+            })
+        })
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut Inner) -> Option<R>) -> Option<R> {
@@ -131,11 +278,11 @@ impl Progress {
                 phase: ProgressPhase::Delete,
                 current: None,
                 last_draw: None,
-                last_send: None,
-                send_gap: SEND_INTERVAL,
-                send_failures: 0,
-                send_stopped: false,
             });
+            let snap = i.started.as_ref()?.request(t0);
+            if let Ok(mut g) = i.gate.lock() {
+                g.reset(snap);
+            }
             Some(())
         });
     }
@@ -148,7 +295,7 @@ impl Progress {
             s.item_base = s.bytes_done;
             s.item_expected = expected_bytes;
             s.item_got = 0;
-            i.maybe_draw(false);
+            i.touch(true);
             Some(())
         });
     }
@@ -157,7 +304,7 @@ impl Progress {
     pub fn set_phase(&self, phase: ProgressPhase) {
         self.with(|i| {
             i.started.as_mut()?.phase = phase;
-            i.maybe_draw(false);
+            i.touch(true);
             Some(())
         });
     }
@@ -179,7 +326,7 @@ impl Progress {
                     s.samples.pop_front();
                 }
             }
-            i.maybe_draw(false);
+            i.touch(false);
             Some(())
         });
     }
@@ -192,7 +339,7 @@ impl Progress {
             s.item_base = s.bytes_done;
             s.item_expected = 0;
             s.item_got = 0;
-            i.maybe_draw(false);
+            i.touch(true);
             Some(())
         });
     }
@@ -205,7 +352,7 @@ impl Progress {
             s.item_base = s.bytes_done;
             s.item_expected = 0;
             s.item_got = 0;
-            i.maybe_draw(false);
+            i.touch(true);
             Some(())
         });
     }
@@ -228,37 +375,19 @@ impl Progress {
     }
 
     /// 送るべき時刻なら Some（前回の送信から 2 秒、失敗が続けばそれ以上空ける。最後の 1 回は `force`）。
-    /// 送らなくなった計画（`send_stopped`）では常に None
+    /// 送らなくなった計画・終えた計画・心拍が送っている最中は常に None
     pub fn take_send(&self, force: bool) -> Option<(i64, ProgressRequest)> {
+        self.claim(force, false)
+    }
+
+    /// 今の値を門へ書いてから、送る時刻か門に問う
+    fn claim(&self, force: bool, mark: bool) -> Option<(i64, ProgressRequest)> {
         self.with(|i| {
             let now = (i.clock)();
-            let s = i.started.as_mut()?;
-            if s.send_stopped {
-                return None;
-            }
-            let t = now.saturating_sub(s.t0);
-            if !force {
-                if let Some(last) = s.last_send {
-                    if t.saturating_sub(last) < s.send_gap && t >= last {
-                        return None;
-                    }
-                }
-            }
-            s.last_send = Some(t);
-            let v = s.view(now);
-            Some((
-                s.plan_id,
-                ProgressRequest {
-                    generation: s.generation,
-                    done: v.done,
-                    total: v.total,
-                    bytes_done: v.bytes_done,
-                    bytes_total: v.bytes_total,
-                    rate: v.rate,
-                    phase: v.phase,
-                    current: v.current.map(|c| truncate_bytes(&c, PROGRESS_CURRENT_MAX)),
-                },
-            ))
+            let snap = i.started.as_ref()?.request(now);
+            let mut g = i.gate.lock().ok()?;
+            g.snapshot = Some(snap);
+            g.claim(now, force, mark)
         })
     }
 
@@ -277,32 +406,15 @@ impl Progress {
     }
 
     fn send_with(&self, force: bool, send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent) {
-        // 送っている間は借用を持たない
-        let Some((plan_id, req)) = self.take_send(force) else {
+        // 送っている間は借用も門も持たない
+        let Some((plan_id, req)) = self.claim(force, true) else {
             return;
         };
         let sent = send(plan_id, &req);
         self.with(|i| {
             // 間隔は送信が終わった時刻から数える。送信が詰まっても、次の書き込みで即座に送り直さない
             let now = (i.clock)();
-            let s = i.started.as_mut()?;
-            s.last_send = Some(now.saturating_sub(s.t0));
-            match sent {
-                ProgressSent::Ok => {
-                    s.send_failures = 0;
-                    s.send_gap = SEND_INTERVAL;
-                }
-                ProgressSent::Stop => s.send_stopped = true,
-                ProgressSent::Failed => {
-                    s.send_failures += 1;
-                    if s.send_failures >= SEND_FAIL_LIMIT {
-                        s.send_stopped = true;
-                    }
-                    s.send_gap = SEND_INTERVAL
-                        .saturating_mul(1 << s.send_failures.saturating_sub(1).min(5))
-                        .min(SEND_BACKOFF_MAX);
-                }
-            }
+            i.gate.lock().ok()?.record(now, sent);
             Some(())
         });
     }
@@ -314,6 +426,7 @@ impl Progress {
             let s = i.started.as_ref()?;
             let elapsed = now.saturating_sub(s.t0).as_secs();
             let line = summary_line(s.done, s.received.max(s.bytes_done), elapsed);
+            i.close();
             i.sink.clear();
             i.sink.summary(&line);
             Some(line)
@@ -322,6 +435,7 @@ impl Progress {
 
     pub fn clear(&self) {
         self.with(|i| {
+            i.close();
             i.sink.clear();
             Some(())
         });
@@ -329,26 +443,65 @@ impl Progress {
 }
 
 impl Inner {
-    fn maybe_draw(&mut self, force: bool) {
+    /// 間引いて描く。描いたら true
+    fn maybe_draw(&mut self, force: bool) -> bool {
         let now = (self.clock)();
         let Some(s) = self.started.as_mut() else {
-            return;
+            return false;
         };
         let t = now.saturating_sub(s.t0);
         if !force {
             if let Some(last) = s.last_draw {
                 if t >= last && t - last < DRAW_INTERVAL {
-                    return;
+                    return false;
                 }
             }
         }
         s.last_draw = Some(t);
         let v = s.view(now);
         self.sink.draw(&v);
+        true
+    }
+
+    /// 値が変わったとき。間引いて描き、描いたとき（か `publish`）は心拍が送る値も書き直す
+    fn touch(&mut self, publish: bool) {
+        if self.maybe_draw(false) || publish {
+            let now = (self.clock)();
+            let Some(snap) = self.started.as_ref().map(|s| s.request(now)) else {
+                return;
+            };
+            if let Ok(mut g) = self.gate.lock() {
+                g.snapshot = Some(snap);
+            }
+        }
+    }
+
+    /// 計画を終えた。心拍はもう送らない
+    fn close(&mut self) {
+        if let Ok(mut g) = self.gate.lock() {
+            g.open = false;
+        }
     }
 }
 
 impl Started {
+    fn request(&self, now: Duration) -> (i64, ProgressRequest) {
+        let v = self.view(now);
+        (
+            self.plan_id,
+            ProgressRequest {
+                generation: self.generation,
+                done: v.done,
+                total: v.total,
+                bytes_done: v.bytes_done,
+                bytes_total: v.bytes_total,
+                rate: v.rate,
+                phase: v.phase,
+                current: v.current.map(|c| truncate_bytes(&c, PROGRESS_CURRENT_MAX)),
+            },
+        )
+    }
+
     fn rate(&self, now: Duration) -> u64 {
         let t = now.saturating_sub(self.t0);
         if t.is_zero() {

@@ -317,3 +317,146 @@ fn start_resets_send_latch() {
     });
     assert_eq!(m.get(), 1);
 }
+
+fn heartbeat_of(p: &Progress) -> Heartbeat {
+    p.heartbeat().expect("有効な進捗には心拍の口がある")
+}
+
+/// 項目が長く掛かって（エンジンが何も呼ばなくても）、心拍は 2 秒ごとに最新の値を送る
+#[test]
+fn heartbeat_sends_latest_while_engine_blocks() {
+    let (p, t, _) = make();
+    let hb = heartbeat_of(&p);
+    let clock = {
+        let t = t.clone();
+        move || t.get()
+    };
+    let sent: Rc<RefCell<Vec<(Duration, agent_proto::ProgressRequest)>>> = Rc::default();
+    let rec = {
+        let t = t.clone();
+        let sent = sent.clone();
+        move |_: i64, r: &agent_proto::ProgressRequest| {
+            sent.borrow_mut().push((t.get(), r.clone()));
+            ProgressSent::Ok
+        }
+    };
+    // 始める前は送らない
+    assert!(!hb.beat(&clock, &rec));
+    p.start(7, 3, 2, 0);
+    p.begin_item(ProgressPhase::Delete, Some("a"), 0);
+    p.tick(&rec); // 0 秒: 項目の始めにエンジンが送る
+    p.end_item();
+    secs(&t, 0.5);
+    p.begin_item(ProgressPhase::Add, Some("b"), 0);
+    // ここからエンジンは止まっている（osascript 待ちなど）
+    secs(&t, 1.9);
+    assert!(!hb.beat(&clock, &rec), "前回の送信から 2 秒経っていない");
+    secs(&t, 2.0);
+    assert!(hb.beat(&clock, &rec));
+    secs(&t, 3.0);
+    assert!(!hb.beat(&clock, &rec));
+    secs(&t, 4.0);
+    assert!(hb.beat(&clock, &rec), "値が変わらなくても 2 秒ごとに送る");
+    let sent = sent.borrow();
+    assert_eq!(sent.len(), 3);
+    let (at, r) = &sent[1];
+    assert_eq!(*at, Duration::from_secs(2));
+    assert_eq!((r.done, r.total, r.generation), (1, 2, 3));
+    assert_eq!(r.phase, ProgressPhase::Add);
+    assert_eq!(r.current.as_deref(), Some("b"));
+    // 心拍が送った後は、エンジンも間隔を空ける
+    secs(&t, 5.0);
+    assert!(p.take_send(false).is_none());
+}
+
+/// 心拍とエンジンは打ち切り・失敗の数を共有し、終えた計画（finish / clear）では送らない
+#[test]
+fn heartbeat_shares_latch_and_stops_after_finish() {
+    let (p, t, _) = make();
+    let hb = heartbeat_of(&p);
+    let clock = {
+        let t = t.clone();
+        move || t.get()
+    };
+    let n = Rc::new(Cell::new(0u32));
+    let fail = {
+        let n = n.clone();
+        move |_: i64, _: &agent_proto::ProgressRequest| {
+            n.set(n.get() + 1);
+            ProgressSent::Failed
+        }
+    };
+    p.start(1, 1, 1, 0);
+    p.tick(&fail); // 0 秒: エンジンが 1 回目に失敗 → 2 秒空ける
+    secs(&t, 2.0);
+    assert!(hb.beat(&clock, &fail)); // 2 回目に失敗 → 4 秒空ける
+    secs(&t, 5.0);
+    assert!(!hb.beat(&clock, &fail));
+    secs(&t, 6.0);
+    assert!(hb.beat(&clock, &fail)); // 3 回目で打ち切り
+    secs(&t, 100.0);
+    assert!(!hb.beat(&clock, &fail));
+    p.flush(&fail);
+    assert_eq!(n.get(), 3);
+
+    // 次の計画では送り直し、終えたら心拍は送らない
+    let ok = |_: i64, _: &agent_proto::ProgressRequest| ProgressSent::Ok;
+    p.start(2, 1, 1, 0);
+    assert!(hb.beat(&clock, &ok));
+    p.finish();
+    secs(&t, 200.0);
+    assert!(!hb.beat(&clock, &ok));
+    p.start(3, 1, 1, 0);
+    p.clear();
+    assert!(!hb.beat(&clock, &ok));
+}
+
+/// 心拍が送っている最中は、エンジンは重ねて送らない（最後の flush も含む）
+#[test]
+fn engine_skips_while_heartbeat_in_flight() {
+    let (p, t, _) = make();
+    let hb = heartbeat_of(&p);
+    let clock = {
+        let t = t.clone();
+        move || t.get()
+    };
+    p.start(1, 1, 1, 0);
+    let inner = Rc::new(Cell::new(None::<bool>));
+    let inner2 = inner.clone();
+    let pr = &p;
+    let during = move |_: i64, _: &agent_proto::ProgressRequest| {
+        inner2.set(Some(pr.take_send(true).is_some()));
+        ProgressSent::Ok
+    };
+    assert!(hb.beat(&clock, &during));
+    assert_eq!(inner.get(), Some(false));
+    // 終われば送れる
+    assert!(p.take_send(true).is_some());
+}
+
+/// 本物のスレッドで回すと、エンジンが何も呼ばなくても送られる。落とすと止まる
+#[test]
+fn heartbeat_thread_sends_and_stops_on_drop() {
+    use std::sync::mpsc;
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let p = Progress::new(
+        Box::new(RecSink(Rc::default())),
+        Box::new(move || t0.elapsed()),
+    );
+    p.start(5, 1, 1, 0);
+    p.begin_item(ProgressPhase::Add, Some("x"), 0);
+    let (tx, rx) = mpsc::channel();
+    let th = heartbeat_of(&p).spawn(
+        move || t0.elapsed(),
+        move |id, r| {
+            let _ = tx.send((id, r.phase));
+            ProgressSent::Ok
+        },
+    );
+    let got = rx.recv_timeout(Duration::from_secs(5)).expect("心拍が送る");
+    assert_eq!(got, (5, ProgressPhase::Add));
+    drop(th);
+    // 止めた後は、送信の間隔（2 秒）を過ぎても届かない
+    assert!(rx.recv_timeout(Duration::from_millis(2600)).is_err());
+}
