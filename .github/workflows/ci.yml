@@ -83,25 +83,31 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tags: ${{ steps.meta.outputs.tags }}
       release: ${{ steps.version.outputs.release }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0    # git describe のため
-      - name: 版（git describe --tags --always）と、v* タグなら vX.Y.Z の形の検査
+      - name: 版（git describe --tags --always）と、v* タグなら vX.Y.Z / vX.Y.Z-rc.N の形の検査
         id: version
         run: |
           set -eu
           echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+          # release: 正式版（latest / X.Y を付ける）。prerelease: RC（X.Y.Z-rc.N だけ。本番で確かめてから正式版を打つ）
           release=false
+          prerelease=false
           case "$GITHUB_REF" in
             refs/tags/v*)
               if echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
                 release=true
+              elif echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'; then
+                prerelease=true
               else
-                echo "::error::リリースタグは vX.Y.Z の形だけ: $GITHUB_REF_NAME"; exit 1
+                echo "::error::リリースタグは vX.Y.Z か vX.Y.Z-rc.N の形だけ: $GITHUB_REF_NAME"; exit 1
               fi ;;
           esac
           echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
       - uses: docker/metadata-action@v5
         id: meta
         with:
@@ -252,7 +258,8 @@ jobs:
 
   publish:
     # 書き込み権限（GHCR / Release）はこのジョブだけ。main への push（edge / sha-<7 桁>）と vX.Y.Z タグ
-    # （X.Y.Z / X.Y / latest + Release）で走り、PR では走らない。docker ジョブが確認した同じイメージ
+    # （X.Y.Z / X.Y / latest + Release）と vX.Y.Z-rc.N タグ（X.Y.Z-rc.N + pre-release。metadata-action は
+    # pre-release に X.Y を付けず、latest も付けない）で走り、PR では走らない。docker ジョブが確認した同じイメージ
     # （docker save の成果物）を skopeo で複製するので二度ビルドしない。docker push は buildx で load した
     # イメージを GHCR に押すと「unknown blob」で落ちることがある
     name: publish (GHCR)
@@ -260,7 +267,7 @@ jobs:
     needs: [docker, agent-macos]
     if: github.event_name == 'push'
     permissions:
-      contents: write     # vX.Y.Z の Release
+      contents: write     # vX.Y.Z / vX.Y.Z-rc.N の Release
       packages: write     # GHCR
     steps:
       - uses: actions/download-artifact@v8
@@ -283,23 +290,27 @@ jobs:
           digest=$(skopeo inspect --creds "$CREDS" --format '{{.Digest}}' "docker://$first")
           echo "pushed: ${first%%:*}@$digest" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "digest=${IMAGE}@$digest" >> "$GITHUB_OUTPUT"
-      - name: GitHub Release（vX.Y.Z タグ。自動生成のノート + イメージのタグと digest）
-        if: needs.docker.outputs.release == 'true'
+      - name: GitHub Release（vX.Y.Z / vX.Y.Z-rc.N タグ。自動生成のノート + イメージのタグと digest）
+        if: needs.docker.outputs.release == 'true' || needs.docker.outputs.prerelease == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           DIGEST: ${{ steps.push.outputs.digest }}
+          PRERELEASE: ${{ needs.docker.outputs.prerelease }}
         run: |
           set -eu
           notes=$(printf 'Docker image: `%s`\n\n```\n%s\n```\n' "${IMAGE}:${GITHUB_REF_NAME#v}" "$DIGEST")
+          # RC は pre-release にする（Latest の Release にならない）
+          pre=""
+          [ "$PRERELEASE" = "true" ] && pre="--prerelease"
           # このジョブは checkout しないので、gh にリポジトリを明示する（無いと「not a git repository」で落ちる）
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
-            --generate-notes --notes "$notes"
+            --generate-notes --notes "$notes" $pre
       - uses: actions/download-artifact@v8
-        if: needs.docker.outputs.release == 'true'
+        if: needs.docker.outputs.release == 'true' || needs.docker.outputs.prerelease == 'true'
         with:
           name: agent-macos
       - name: Release に spindle-agent（macOS）を添付
-        if: needs.docker.outputs.release == 'true'
+        if: needs.docker.outputs.release == 'true' || needs.docker.outputs.prerelease == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" spindle-agent-*.tar.gz spindle-agent-*.tar.gz.sha256
