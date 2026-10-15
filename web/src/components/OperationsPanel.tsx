@@ -94,7 +94,7 @@ const GROUPS: { title: string; ops: OpDef[] }[] = [
         id: 'verify',
         label: '遡及照合',
         nature: 'read',
-        desc: 'アルバムを CTDB / AccurateRip に照会し、CD 由来の FLAC を格付けする（44.1kHz/16bit/2ch の FLAC だけ。不一致は「要確認」で不良ではない。ログは data/verify/）',
+        desc: 'アルバムを CTDB / AccurateRip に照会し、CD 由来の FLAC を格付けする（44.1kHz/16bit/2ch の FLAC だけ。不一致は「要確認」で不良ではない。ログは記録 > ログで読める）',
       },
     ],
   },
@@ -124,6 +124,7 @@ export function OperationsPanel({
   playlists,
   onAddToPlaylist,
   albumGain,
+  onOpenLog,
 }: {
   ops: Operations
   hasSelection: boolean
@@ -132,6 +133,8 @@ export function OperationsPanel({
   playlists: Playlist[]
   onAddToPlaylist: (playlistId: number) => void
   albumGain: AlbumGainControl
+  /** 照合結果の「ログ」から記録画面のログタブを開く */
+  onOpenLog: (albumId: number) => void
 }) {
   const [picked, setPicked] = useLocalStorageState<OpId>('ops.picked', 'rename', isOpId)
   const [description, setDescription] = useState('')
@@ -243,7 +246,7 @@ export function OperationsPanel({
       run = () => void ops.startVerify()
       check = (
         <span className="muted small">
-          アルバム単位のジョブ。結果は ④ に出る（どちらで一致したかはプロパティ、詳細は data/verify/ のログ）
+          アルバム単位のジョブ。結果は ④ に出る（どちらで一致したかはプロパティ、詳細は各行の「ログ」）
         </span>
       )
       break
@@ -447,7 +450,7 @@ export function OperationsPanel({
               </button>
             </p>
           )}
-          {op.id === 'verify' && ops.verifyResult && <VerifyResult result={ops.verifyResult} />}
+          {op.id === 'verify' && ops.verifyResult && <VerifyResult result={ops.verifyResult} onOpenLog={onOpenLog} />}
         </div>
       </Step>
     </div>
@@ -455,7 +458,13 @@ export function OperationsPanel({
 }
 
 /** 遡及照合の結果（終わったアルバムから 1 行ずつ。まだのものは件数だけ） */
-function VerifyResult({ result }: { result: NonNullable<Operations['verifyResult']> }) {
+function VerifyResult({
+  result,
+  onOpenLog,
+}: {
+  result: NonNullable<Operations['verifyResult']>
+  onOpenLog: (albumId: number) => void
+}) {
   const finished = result.total - result.pending
   return (
     <div className="verify-result small">
@@ -469,6 +478,14 @@ function VerifyResult({ result }: { result: NonNullable<Operations['verifyResult
           {result.lines.map((l) => (
             <li key={l.id} className={l.kind === 'error' ? 'error' : l.kind === 'pending' ? 'muted' : undefined}>
               <span className="verify-subject">{l.subject}</span>: {l.text}
+              {l.albumId != null && l.kind === 'done' && (
+                <>
+                  {' '}
+                  <button type="button" className="link small" onClick={() => onOpenLog(l.albumId!)}>
+                    ログ
+                  </button>
+                </>
+              )}
             </li>
           ))}
         </ul>

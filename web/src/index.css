@@ -1710,6 +1710,33 @@ button.link {
   cursor: pointer;
 }
 
+/* 記録画面のログ本文（LogText。D-106） */
+.log-text pre {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+  white-space: pre;
+  overflow-x: auto;
+  max-height: 60vh;
+  padding: 8px;
+  background: var(--bg-alt);
+  border-radius: 4px;
+  user-select: text;
+}
+
+.log-text-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.logs-table tbody tr:not(.log-detail) {
+  cursor: pointer;
+}
+
+.rip-files button + button {
+  margin-left: 8px;
+}
+
 /* 設定画面（SPEC §12.6） */
 .settings {
   padding: 0 12px 12px;

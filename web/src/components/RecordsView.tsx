@@ -1,10 +1,11 @@
 // 記録画面（SPEC §12.4、D-106）: ☰ メニューの「記録」。編集履歴 / 退避ファイル / ログ をタブで切り替える。
-// 他の画面からは App の openRecords でタブと対象（バッチ）を指定して開く
+// 他の画面からは App の openRecords でタブと対象（バッチ・ログの album）を指定して開く
 
 import type { HistoryState } from '../hooks/useHistory'
 import { RECORDS_TABS, type RecordsTab } from '../lib/records'
 import { ArchiveTab } from './ArchiveTab'
 import { HistoryView } from './HistoryView'
+import { LogsTab } from './LogsTab'
 
 export function RecordsView({
   tab,
@@ -12,12 +13,17 @@ export function RecordsView({
   history,
   historyFocus,
   onOpenBatch,
+  logsAlbum,
+  onClearLogsAlbum,
 }: {
   tab: RecordsTab
   onTab: (t: RecordsTab) => void
   history: HistoryState
   historyFocus: number | null
   onOpenBatch: (batchId: number) => void
+  /** ログタブを絞る album（ジョブ・照合結果・プロパティから開いたとき） */
+  logsAlbum: number | null
+  onClearLogsAlbum: () => void
 }) {
   return (
     <section className="records">
@@ -40,7 +46,7 @@ export function RecordsView({
       ) : tab === 'archive' ? (
         <ArchiveTab onOpenBatch={onOpenBatch} />
       ) : (
-        <p className="muted">ログ</p>
+        <LogsTab albumId={logsAlbum} onClearAlbum={onClearLogsAlbum} />
       )}
     </section>
   )

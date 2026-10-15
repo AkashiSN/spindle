@@ -185,6 +185,8 @@ export type InboxItem = {
   destination: InboxDestination | null
   /** CD の件の照会の材料（P4-21）。CD でない件は null（旧サーバでは無い） */
   rip?: RipLookup | null
+  /** CD 取り込みの吸い出しの記録（ログ・cue・toc。D-106）。無ければ空か未定義 */
+  rip_files?: string[]
   /** 承認済み・配置中・配置済みの件の段（配置 → RG → 系統 → 端末）。旧サーバでは無い */
   stages?: Stage[]
 }

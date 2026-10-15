@@ -41,6 +41,7 @@ export function RightPanel({
   playlists,
   onAddToPlaylist,
   albumGain,
+  onOpenLog,
 }: {
   selection: Selection
   /** 端末の一覧（プロパティの「端末」節） */
@@ -57,6 +58,8 @@ export function RightPanel({
   onAddToPlaylist: (playlistId: number) => void
   /** 選択行が属する album の album gain 切り替え（D-74） */
   albumGain: AlbumGainControl
+  /** 照合・吸い出しのログを記録画面で開く（album 指定） */
+  onOpenLog: (albumId: number) => void
 }) {
   const [collapsed, setCollapsed] = useLocalStorageState<boolean>(
     'props.collapsed',
@@ -157,6 +160,7 @@ export function RightPanel({
             playlists={playlists}
             onAddToPlaylist={onAddToPlaylist}
             albumGain={albumGain}
+            onOpenLog={onOpenLog}
           />
         </div>
       ) : (
@@ -170,6 +174,7 @@ export function RightPanel({
             error={details.error}
             onEdit={edit.applyToSelection}
             onDelete={edit.deleteFromSelection}
+            onOpenLog={onOpenLog}
           />
         </div>
       )}

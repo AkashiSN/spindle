@@ -145,10 +145,13 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const history = useHistory(sseOpen && view === 'records' && recordsTab === 'history')
   /** ジョブ / 退避ファイルから「バッチ #n」で飛んできたときに開くバッチ */
   const [historyFocus, setHistoryFocus] = useState<number | null>(null)
-  /** 他の画面から記録画面へ（バッチ #n → 編集履歴）。ログタブの対象 album は Task 8 で扱う */
+  /** ログタブを絞る album（照合結果・プロパティ・ジョブから開いたとき。×で外す） */
+  const [logsAlbum, setLogsAlbum] = useState<number | null>(null)
+  /** 他の画面から記録画面へ（バッチ #n → 編集履歴、album → ログ） */
   const openRecords = useCallback((f: RecordsFocus) => {
     setRecordsTab(f.tab)
     if (f.tab === 'history' && f.batchId != null) setHistoryFocus(f.batchId)
+    if (f.tab === 'logs') setLogsAlbum(f.albumId ?? null)
     setView('records')
   }, [])
   const openBatch = useCallback((id: number) => openRecords({ tab: 'history', batchId: id }), [openRecords])
@@ -591,6 +594,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         ops={operations}
         playlists={playlists.items}
         onAddToPlaylist={(id) => void addToPlaylist(id, selection)}
+        onOpenLog={(albumId) => openRecords({ tab: 'logs', albumId })}
         albumGain={albumGain}
       />
       )}
@@ -688,6 +692,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             history={history}
             historyFocus={historyFocus}
             onOpenBatch={openBatch}
+            logsAlbum={logsAlbum}
+            onClearLogsAlbum={() => setLogsAlbum(null)}
           />
         ) : (
           <SettingsView settings={settings} theme={theme} />
