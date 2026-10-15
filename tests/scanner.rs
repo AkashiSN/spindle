@@ -1049,6 +1049,7 @@ async fn unreadable_changed_file_updates_physical_attrs_and_is_reported_as_chang
 
     let report = lib.scan().await;
     assert_eq!(report.errors, 1);
+    assert_eq!(report.error_paths, vec!["A/B/01.flac".to_owned()]);
     let t = lib.track("A/B/01.flac").unwrap();
     assert_eq!(t.id, before.id);
     assert_ne!(t.size, before.size, "物理属性は更新される");

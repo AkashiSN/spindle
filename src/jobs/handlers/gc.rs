@@ -134,7 +134,11 @@ impl GcHandler {
                 "保持期間を過ぎた同期の計画を消した"
             );
         }
-        Ok(Outcome::Done)
+        Ok(Outcome::DoneWith(crate::jobs::note::gc_note(
+            &summary,
+            (jobs_done, jobs_failed),
+            plans,
+        )))
     }
 }
 

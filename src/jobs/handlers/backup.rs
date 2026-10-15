@@ -281,7 +281,17 @@ impl BackupHandler {
             tracing::info!(removed = ?removed, retention, "古いバックアップ世代を削除した");
         }
         ctx.progress(STEPS, STEPS).await?;
-        Ok(Outcome::Done)
+        let file = final_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        Ok(Outcome::DoneWith(crate::jobs::note::backup_note(
+            &file,
+            db_size,
+            retention,
+            removed.len(),
+        )))
     }
 }
 

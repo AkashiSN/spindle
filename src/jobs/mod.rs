@@ -12,6 +12,7 @@
 
 mod context;
 pub mod handlers;
+pub mod note;
 pub mod process;
 mod queue;
 pub mod recovery;
