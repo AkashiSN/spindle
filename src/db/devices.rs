@@ -18,7 +18,10 @@ use crate::domain::device::{
     utf16_len, DesiredItem, DesiredPlaylist, DeviceItem, Diff, PlaylistInput, PlaylistState,
     SourceHash, SourceKind, TrackInput, Transport,
 };
-use crate::domain::device::{counts, track_states, Counts, EntryKind, PendingSets, TrackState};
+use crate::domain::device::{
+    counts, playlist_sync_states, track_states, Counts, EntryKind, PendingSets, PlaylistSyncState,
+    TrackState,
+};
 use crate::domain::relpath::canonical_key;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -749,6 +752,8 @@ pub struct DeviceSnapshot {
     pub playlist_errors_reported: Vec<(i64, String)>,
     /// 反映済みの行（見積もりに使う）
     pub current: Vec<DeviceItem>,
+    /// 選曲のプレイリストごとの同期の状況と、選曲から外したが端末に残るもの
+    pub playlists: Vec<PlaylistSyncState>,
 }
 
 pub struct Snapshot {
@@ -801,7 +806,7 @@ pub fn snapshot(conn: &Connection) -> Result<Snapshot> {
             .filter(|(k, _, _)| k == "track")
             .map(|(_, id, r)| (*id, r.clone()))
             .collect();
-        let playlist_errors_reported = errors
+        let playlist_errors_reported: Vec<(i64, String)> = errors
             .into_iter()
             .filter(|(k, _, _)| k == "playlist")
             .map(|(_, id, r)| (id, r))
@@ -814,6 +819,12 @@ pub fn snapshot(conn: &Connection) -> Result<Snapshot> {
             &synced_at_map(&tx, device.id)?,
         );
         let counts = counts(&states);
+        let playlists = playlist_sync_states(
+            &playlist_inputs(&tx, device.id)?,
+            &computed.diff,
+            &states,
+            &playlist_errors_reported,
+        );
         out.push(DeviceSnapshot {
             device,
             computed,
@@ -821,6 +832,7 @@ pub fn snapshot(conn: &Connection) -> Result<Snapshot> {
             counts,
             playlist_errors_reported,
             current,
+            playlists,
         });
     }
     tx.finish()?;

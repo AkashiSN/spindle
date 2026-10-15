@@ -395,6 +395,8 @@ export type Device = {
   counts: DeviceCounts
   last_synced_at: number | null
   playlist_ids: number[]
+  /** プレイリストごとの同期の状況（選曲のものと、外したが端末に残るもの。少し古いことがある） */
+  playlist_states: PlaylistSyncState[]
   /** 同期が途中か実行中（設定を変えられない） */
   open_plan: boolean
   /** open な計画がある（続きを実行か破棄の対象） */
@@ -420,6 +422,14 @@ export type SyncProgress = {
 }
 /** SSE device_progress。計画が閉じたら progress は null */
 export type DeviceProgressEvent = { device_id: number; progress: SyncProgress | null }
+/** pending: 未反映か準備待ちの収録曲の数。errors: 送れない収録曲の数。reason: プレイリストのファイル自体のエラー */
+export type PlaylistSyncState = {
+  playlist_id: number
+  state: 'synced' | 'pending' | 'error' | 'removing'
+  pending: number
+  errors: number
+  reason: string | null
+}
 export type DeviceList = { items: Device[] }
 /** iPhone のエージェントのワンタイムコード（`POST /api/devices/{id}/pair-code`）。画面の state にだけ持つ */
 export interface PairCode {

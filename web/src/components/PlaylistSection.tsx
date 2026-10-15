@@ -13,7 +13,7 @@ import {
   type Playlist,
 } from '../api/types'
 import type { Playlists } from '../hooks/usePlaylists'
-import { chipsFor } from '../lib/devicePicker'
+import { chipsFor, type ChipStatus } from '../lib/devicePicker'
 import { deviceMessage } from '../lib/devices'
 import { formatDuration } from '../lib/format'
 import { exportNotice, parseDragIds, TRACK_DRAG_TYPE } from '../lib/playlists'
@@ -21,6 +21,8 @@ import { Fb2kQueryDialog } from './Fb2kQueryDialog'
 
 // 右クリックメニューの大きさの見積もり（画面の端からはみ出さないよう位置を詰める）
 const MENU_W = 240
+/** 端末の印に添える状況の記号（同期済みは何も添えない） */
+const CHIP_MARK: Record<ChipStatus, string> = { synced: '', pending: '⏳', syncing: '⏳', error: '⚠', removing: '🗑' }
 const menuHeight = (deviceCount: number) => 40 + 28 * Math.max(deviceCount, 1)
 
 export function PlaylistSection({
@@ -198,15 +200,15 @@ export function PlaylistSection({
               }${p.exports.length > 0 ? `\n書き出し: ${p.exports.map((x) => x.out_path).join(', ')}` : ''}`}
               onClick={() => onOpen(p.id)}
             >
-              {/* 名前だけを省略する。端末の印はアイコンだけで、端末名はホバーで出す */}
+              {/* 名前だけを省略する。端末の印はアイコンと状況の記号で、端末名と状況はホバーで出す */}
               <span className="playlist-name">
                 {p.kind === 'smart' ? '⚙ ' : '♪ '}
                 {p.name}
                 <span className="muted"> {p.track_count}</span>
               </span>
-              {chipsFor(p.id, devices).map((d) => (
-                <span key={d.id} className="device-chip" title={`${d.name} に送る`} aria-label={`${d.name} に送る`}>
-                  📱
+              {chipsFor(p.id, devices).map((c) => (
+                <span key={c.device.id} className={`device-chip ${c.status}`} title={c.title} aria-label={c.title}>
+                  📱{CHIP_MARK[c.status]}
                 </span>
               ))}
             </button>

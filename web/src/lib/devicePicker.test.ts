@@ -1,17 +1,51 @@
 import { describe, expect, it } from 'vitest'
-import type { Device } from '../api/types'
+import type { Device, PlaylistSyncState } from '../api/types'
 import { chipsFor, mergePending, sameIdSet, toggleDraft, togglePlaylist, withPlaylistIds } from './devicePicker'
 
-const d = (id: number, name: string, playlist_ids: number[]): Device => ({
+const d = (id: number, name: string, playlist_ids: number[], playlist_states: PlaylistSyncState[] = []): Device => ({
   id, name, transport: 'agent', variant: 'aac', selection: 'playlists', generation: 1, connected: null,
   counts: { add: 0, update: 0, move: 0, delete: 0, waiting: 0, error: 0, synced: 0 },
-  last_synced_at: null, playlist_ids, open_plan: false, adb_state: null, adb_volume: null, adb_root: null, plan_open: false, sync_job: null,
+  last_synced_at: null, playlist_ids, playlist_states, open_plan: false, adb_state: null, adb_volume: null, adb_root: null, plan_open: false, sync_job: null,
 })
+const st = (
+  playlist_id: number,
+  state: PlaylistSyncState['state'],
+  more: Partial<PlaylistSyncState> = {},
+): PlaylistSyncState => ({ playlist_id, state, pending: 0, errors: 0, reason: null, ...more })
 
 describe('選曲の近道', () => {
   it('チップはその印が付いた端末だけ、名前順', () => {
     const got = chipsFor(5, [d(1, 'Xperia', [5]), d(2, 'iPhone', [5, 6]), d(3, 'iPad', [6])])
-    expect(got.map((x) => x.name)).toEqual(['iPhone', 'Xperia'])
+    expect(got.map((x) => x.device.name)).toEqual(['iPhone', 'Xperia'])
+  })
+  it('チップは同期の状況と、端末名つきの説明を持つ', () => {
+    const states = [
+      st(1, 'synced'),
+      st(2, 'pending', { pending: 3 }),
+      st(3, 'pending'),
+      st(4, 'error', { errors: 2 }),
+      st(5, 'error', { reason: 'パス衝突' }),
+      st(6, 'removing'),
+    ]
+    const dev = d(1, 'iPhone', [1, 2, 3, 4, 5, 7], states)
+    const one = (pid: number) => chipsFor(pid, [dev]).map((c) => [c.status, c.title])
+    expect(one(1)).toEqual([['synced', 'iPhone: 同期済み']])
+    expect(one(2)).toEqual([['pending', 'iPhone: 同期待ち（3 曲）']])
+    expect(one(3)).toEqual([['pending', 'iPhone: 同期待ち（プレイリストの更新）']])
+    expect(one(4)).toEqual([['error', 'iPhone: 2 曲を送れない']])
+    expect(one(5)).toEqual([['error', 'iPhone: 送れない（パス衝突）']])
+    // 選曲から外したが端末に残っている
+    expect(one(6)).toEqual([['removing', 'iPhone: 次の同期で端末から消える']])
+    // 付けたばかりで状況がまだ無い
+    expect(one(7)).toEqual([['pending', 'iPhone: 同期待ち']])
+  })
+  it('同期の実行中は、済んでいないものを同期中にする', () => {
+    const dev = { ...d(1, 'iPhone', [1, 2], [st(1, 'synced'), st(2, 'pending', { pending: 1 })]), sync_job: { id: 9, state: 'running' as const } }
+    expect(chipsFor(2, [dev]).map((c) => [c.status, c.title])).toEqual([['syncing', 'iPhone: 同期中']])
+    expect(chipsFor(1, [dev]).map((c) => c.status)).toEqual(['synced'])
+  })
+  it('外したばかり（状況がまだ synced のまま）のプレイリストには出さない', () => {
+    expect(chipsFor(1, [d(1, 'iPhone', [], [st(1, 'synced')])])).toEqual([])
   })
   it('印を付け外しする', () => {
     expect(togglePlaylist(d(1, 'a', [6, 2]), 5)).toEqual([2, 5, 6])

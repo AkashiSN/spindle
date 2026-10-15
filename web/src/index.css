@@ -3403,7 +3403,11 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
   margin-left: 4px;
   font-size: 12px;
   line-height: 14px;
+  white-space: nowrap;
   cursor: default;
+}
+.device-chip.removing {
+  opacity: 0.45;
 }
 .menu-heading {
   padding: 4px 12px 2px;

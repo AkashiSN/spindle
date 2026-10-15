@@ -848,6 +848,100 @@ pub fn counts(states: &BTreeMap<i64, TrackState>) -> Counts {
     c
 }
 
+/// 端末ごとのプレイリストの同期の状況（ライブラリの左サイドバーの印）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistSync {
+    /// プレイリストのファイルも収録曲もすべて反映済み
+    Synced,
+    /// 次の同期で送るもの（ファイルか収録曲）か、準備待ちの曲がある
+    Pending,
+    /// ファイルか収録曲のどれかが送れない
+    Error,
+    /// 選曲から外したが、まだ端末に残っている
+    Removing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlaylistSyncState {
+    pub playlist_id: i64,
+    pub state: PlaylistSync,
+    /// 未反映か準備待ちの収録曲の数
+    pub pending: usize,
+    /// 送れない収録曲の数
+    pub errors: usize,
+    /// プレイリストのファイル自体のエラー（今回の差分のものを優先し、無ければ前回の同期・報告のもの）
+    pub reason: Option<String>,
+}
+
+/// 選曲のプレイリストごとに、収録曲の状態とプレイリストのファイルの差分をまとめる。
+/// `states` は [`track_states`] の結果、`reported` は `device_errors` の playlist 行（ref_id, 理由）。
+/// 状態の無い収録曲（ライブラリから消えたもの）は数えない
+pub fn playlist_sync_states(
+    inputs: &[PlaylistInput],
+    diff: &Diff,
+    states: &BTreeMap<i64, TrackState>,
+    reported: &[(i64, String)],
+) -> Vec<PlaylistSyncState> {
+    let ops: HashMap<i64, PlaylistOpKind> = diff
+        .playlists
+        .iter()
+        .map(|o| (o.playlist_id, o.kind))
+        .collect();
+    let mut out = Vec::with_capacity(inputs.len());
+    for p in inputs {
+        let (mut pending, mut errors) = (0, 0);
+        for id in &p.track_ids {
+            match states.get(id) {
+                Some(TrackState::Pending { .. } | TrackState::Waiting { .. }) => pending += 1,
+                Some(TrackState::Error { .. }) => errors += 1,
+                Some(TrackState::Synced { .. } | TrackState::Removing) | None => {}
+            }
+        }
+        let reason = diff
+            .playlist_errors
+            .iter()
+            .find(|(id, _)| *id == p.playlist_id)
+            .map(|(_, r)| (*r).to_owned())
+            .or_else(|| {
+                reported
+                    .iter()
+                    .find(|(id, _)| *id == p.playlist_id)
+                    .map(|(_, r)| r.clone())
+            });
+        let file_pending = matches!(
+            ops.get(&p.playlist_id),
+            Some(PlaylistOpKind::Add | PlaylistOpKind::Update)
+        );
+        let state = if errors > 0 || reason.is_some() {
+            PlaylistSync::Error
+        } else if pending > 0 || file_pending {
+            PlaylistSync::Pending
+        } else {
+            PlaylistSync::Synced
+        };
+        out.push(PlaylistSyncState {
+            playlist_id: p.playlist_id,
+            state,
+            pending,
+            errors,
+            reason,
+        });
+    }
+    for o in &diff.playlists {
+        if o.kind == PlaylistOpKind::Delete {
+            out.push(PlaylistSyncState {
+                playlist_id: o.playlist_id,
+                state: PlaylistSync::Removing,
+                pending: 0,
+                errors: 0,
+                reason: None,
+            });
+        }
+    }
+    out
+}
+
 /// 送る量と、実行順（削除 → パス変更のバッチ → 更新 → 追加。仕様 ⑤）に沿った「今より増える量」の最大値
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Estimate {
