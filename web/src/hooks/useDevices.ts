@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPatch, apiPost } from '../api/client'
 import type {
   Device,
+  DeviceProgressEvent,
   DeviceDiff,
   DeviceList,
   DeviceSelection,
@@ -18,6 +19,7 @@ import type {
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { mergePending, togglePlaylist } from '../lib/devicePicker'
 import { withPlaylistIds } from '../lib/devicePicker'
+import { receivedAtOf } from '../lib/syncProgress'
 import { Latest } from '../lib/latest'
 import { TrailingDebounce } from '../lib/debounce'
 
@@ -63,11 +65,30 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     const id = listGen.current.next()
     apiFetch<DeviceList>('/api/devices')
       .then((l) => {
-        if (listGen.current.isCurrent(id)) setItems(mergePending(l.items, desired.current))
+        if (!listGen.current.isCurrent(id)) return
+        const now = Date.now()
+        setItems(
+          mergePending(l.items, desired.current).map((d) =>
+            d.sync_progress ? { ...d, sync_progress: { ...d.sync_progress, receivedAt: receivedAtOf(d.sync_progress, now) } } : d,
+          ),
+        )
       })
       .catch(() => {
         if (listGen.current.isCurrent(id)) setItems(null)
       })
+  }, [])
+  /** SSE の device_progress で該当端末の進捗を差し替える（一覧に無い端末は無視。次の取り直しで入る） */
+  const onProgress = useCallback((e: DeviceProgressEvent) => {
+    const now = Date.now()
+    setItems((cur) =>
+      cur == null
+        ? cur
+        : cur.map((d) =>
+            d.id !== e.device_id
+              ? d
+              : { ...d, sync_progress: e.progress ? { ...e.progress, receivedAt: receivedAtOf(e.progress, now) } : null },
+          ),
+    )
   }, [])
   const fetchDiff = useCallback(() => {
     const id = diffGen.current.next()
@@ -210,6 +231,7 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     busy,
     refresh,
     refreshAfterJob,
+    onProgress,
     clearError: () => {
       setError(null)
       setErrorCode(null)

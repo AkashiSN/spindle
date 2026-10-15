@@ -12,6 +12,8 @@ import type {
   AdoptPreview,
   UnregisteredAdb,
 } from '../api/types'
+import type { SyncProgress } from '../api/types'
+import { phaseLabel, progressRatio, progressSummary, receivedAtOf } from '../lib/syncProgress'
 import type { Devices } from '../hooks/useDevices'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
 import type { Playlists } from '../hooks/usePlaylists'
@@ -514,6 +516,7 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
           {device.sync_job != null && (
             <p className="small">{device.sync_job.state === 'running' ? '同期中…' : queuedSyncText(device)}</p>
           )}
+          {device.plan_open && device.sync_progress && <SyncProgressLine p={device.sync_progress} />}
           <div className="op-row">
             <button
               type="button"
@@ -546,6 +549,7 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
               </div>
             </div>
           )}
+          {device.plan_open && device.sync_progress && <SyncProgressLine p={device.sync_progress} />}
           <p className="small">
             Mac で <code>spindle-agent sync</code> を実行すると反映される。最終報告:{' '}
             {device.last_synced_at != null ? formatDateTime(device.last_synced_at) : 'まだ報告なし'}
@@ -880,6 +884,28 @@ function PairCodeCell({ device, devices }: { device: Device; devices: Devices })
           </p>
         </div>
       )}
+    </div>
+  )
+}
+
+/** Mac の同期の進捗。経過時間は受信時刻から 1 秒ごとに数え直す（サーバの age は受信時の値） */
+function SyncProgressLine({ p }: { p: SyncProgress & { receivedAt?: number } }) {
+  const [tick, setTick] = useState(() => Date.now())
+  useEffect(() => {
+    const id = window.setInterval(() => setTick(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+  const received = p.receivedAt ?? receivedAtOf(p, tick)
+  const age = Math.max(0, Math.floor((tick - received) / 1000))
+  const ratio = progressRatio(p)
+  return (
+    <div className="sync-progress small">
+      <div className="sync-progress-head">
+        <span>{phaseLabel(p.phase)}</span>
+        {p.current != null && <span className="muted sync-progress-current">{p.current}</span>}
+      </div>
+      <progress className="sync-progress-bar" value={ratio} max={1} aria-label="同期の進捗" />
+      <div className="muted">{progressSummary(p, age)}</div>
     </div>
   )
 }
