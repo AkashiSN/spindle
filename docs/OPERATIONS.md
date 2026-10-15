@@ -74,6 +74,12 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
 `172.16.100.24:80` へ転送するので、接続元は NAS 自身の `172.16.100.5`（`trusted_proxies = ["172.16.100.5/32"]`。
 2026-09-26）。変えたら再起動する
 
+nginx（Nginx Proxy Manager など）を挟むときは、その接続元も `trusted_proxies` に入れる（実機は
+`172.16.100.20`。2026-10-15）。nginx は既定で応答を溜める（`proxy_buffering`）ので、SSE（`/api/events`）が
+届かず、右上の点が赤のまま曲が 1 件も出なくなる（画面は SSE が開いてから一覧を取る。D-36）。spindle は
+`/api/events` の応答に `X-Accel-Buffering: no` を付けてこれを避けている。それより古い版や、ヘッダを捨てる
+プロキシでは、プロキシ側で `proxy_buffering off;` にする
+
 ### YouTube の取り込みが失敗し始めたら
 
 まずイメージを更新する（yt-dlp が古いと YouTube の抽出が壊れる。新版は Renovate が PR にし、マージ

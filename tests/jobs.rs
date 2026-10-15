@@ -2023,6 +2023,29 @@ async fn events_endpoint_streams_job_events() {
 }
 
 #[tokio::test]
+async fn events_stream_disables_proxy_buffering() {
+    // nginx（Nginx Proxy Manager など）は既定で応答を溜めるので、SSE が届かず画面が一覧を取りに行けない
+    let app = app().await;
+    let c = cookie(&app).await;
+    let res = send(
+        &app,
+        req(Method::GET, "/api/events")
+            .header(header::COOKIE, &c)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get("x-accel-buffering")
+            .and_then(|v| v.to_str().ok()),
+        Some("no")
+    );
+    app.shutdown.cancel();
+}
+
+#[tokio::test]
 async fn events_stream_ends_on_shutdown() {
     let app = app().await;
     let c = cookie(&app).await;
