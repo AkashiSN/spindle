@@ -39,6 +39,7 @@ pub struct App {
     pub db: Arc<Db>,
     /// SSE のイベントを受けるための口
     pub jobs: Arc<spindle::jobs::Jobs>,
+    pub sync_progress: Arc<spindle::device::progress::ProgressStore>,
     pub cookie: String,
     /// `with_roots` のときだけ持つ Library / Derived の root
     pub roots: Option<Roots>,
@@ -142,12 +143,14 @@ impl App {
             state = state.with_roots(r.library_root.clone(), r.derived_root.clone());
         }
         let jobs = state.jobs.clone();
+        let sync_progress = state.sync_progress.clone();
         let router = api::router(state);
         let Some(password) = password else {
             return Self {
                 router,
                 db,
                 jobs,
+                sync_progress,
                 cookie: String::new(),
                 roots,
                 _dir: dir,
@@ -174,6 +177,7 @@ impl App {
             router,
             db,
             jobs,
+            sync_progress,
             cookie,
             roots,
             _dir: dir,

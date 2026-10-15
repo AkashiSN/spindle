@@ -1634,3 +1634,24 @@ async fn ui_force_abandon_clears_progress() {
     assert!(sync_progress_of(&app, id).await.is_null());
     assert!(next_progress_event(&mut rx)["progress"].is_null());
 }
+
+#[tokio::test]
+async fn stale_progress_of_an_old_plan_is_hidden_under_a_new_plan() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p1 = confirm(&app, &token).await;
+    // 閉じる側の消去を追い越して残った、という状況を直接作る
+    let req: agent_proto::ProgressRequest =
+        serde_json::from_value(progress_body(p1.generation)).unwrap();
+    let uri = format!("/api/devices/{id}/plans/open/abandon");
+    let (st, _) = app
+        .call(Method::POST, &uri, Some(json!({"force": true})))
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    app.sync_progress.put(id, p1.plan_id, req, 0);
+    let p2 = confirm(&app, &token).await;
+    assert_ne!(p1.plan_id, p2.plan_id);
+    assert!(sync_progress_of(&app, id).await.is_null());
+}

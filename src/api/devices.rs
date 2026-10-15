@@ -103,14 +103,18 @@ struct Extras {
     playlist_ids: Vec<i64>,
     open_plan: bool,
     plan_open: bool,
+    /// open な計画の id（進捗がその計画のものか照らす）
+    open_plan_id: Option<i64>,
     sync_job: Option<SyncJobView>,
 }
 
 fn read_extras(c: &rusqlite::Connection, id: i64) -> crate::db::Result<Extras> {
+    let open_plan_id = dbdev::open_plan_id(c, id)?;
     Ok(Extras {
         playlist_ids: dbdev::playlist_ids(c, id)?,
         open_plan: dbdev::has_open_work(c, id)?,
-        plan_open: dbdev::open_plan_id(c, id)?.is_some(),
+        plan_open: open_plan_id.is_some(),
+        open_plan_id,
         sync_job: dbdev::active_device_job(c, id, "device_sync")?
             .map(|(id, state)| SyncJobView { id, state }),
     })
@@ -154,10 +158,9 @@ fn view(
         plan_open: extras.plan_open,
         sync_job: extras.sync_job,
         // 閉じた計画の遅れて着いた進捗は出さない
-        sync_progress: extras
-            .plan_open
-            .then(|| progress.view(d.id, now_epoch()))
-            .flatten(),
+        sync_progress: progress
+            .view(d.id, now_epoch())
+            .filter(|p| extras.open_plan_id == Some(p.plan_id)),
     }
 }
 

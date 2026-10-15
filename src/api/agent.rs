@@ -701,6 +701,21 @@ async fn progress(
                     device_id,
                     progress: state.sync_progress.view(device_id, now),
                 }));
+            // 検査と put の間に計画が閉じていたら、閉じた側の消去を追い越している。
+            // 公開の後で確かめ直し、閉じていれば消して null を流す（UI が最後に見るのは null）
+            let still = state
+                .db
+                .read(move |c| dbdev::open_plan_id(c, device_id))
+                .await?;
+            if still != Some(plan_id) {
+                state.sync_progress.clear_plan(device_id, plan_id);
+                state
+                    .jobs
+                    .publish(crate::jobs::Event::DeviceProgress(DeviceProgressEvent {
+                        device_id,
+                        progress: None,
+                    }));
+            }
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         ProgressCheck::NoPlan | ProgressCheck::Closed => {
