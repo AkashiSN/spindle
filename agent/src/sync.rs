@@ -366,9 +366,14 @@ fn apply<M: Music, S: Server>(
             return Err(e);
         }
     };
-    // 最後の進捗を送ってから報告する。要約の 1 行は sink が出す
+    // 最後の進捗を送ってから報告する。要約の 1 行は sink が出す。
+    // 途中で止めたときは要約を出さず行を消すだけ（止めた理由は呼び出し側がエラーとして出す）
     cx.progress_flush();
-    cx.progress.finish();
+    if out.stop.is_some() {
+        cx.progress.clear();
+    } else {
+        cx.progress.finish();
+    }
     let errors = cx.errors.len();
     report(cx, p)?;
     if let Some(stop) = out.stop {

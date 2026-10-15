@@ -222,3 +222,98 @@ fn finish_and_disabled() {
     assert!(d.finish().is_none());
     d.clear();
 }
+
+/// 送信が詰まる（5 秒でタイムアウトする）と、間隔は送信が終わってから数え、失敗が続くと延ばし、
+/// 3 回続けて失敗したらこの計画では送らない。書き込みのたびには送らない
+#[test]
+fn hung_send_backs_off_from_end_and_latches() {
+    let (p, t, _) = make();
+    p.start(1, 1, 1, 1_000_000);
+    p.begin_item(ProgressPhase::Fetch, Some("a"), 1_000_000);
+    let sends: Rc<RefCell<Vec<Duration>>> = Rc::default();
+    let hang = {
+        let t = t.clone();
+        let sends = sends.clone();
+        move |_: i64, _: &agent_proto::ProgressRequest| {
+            sends.borrow_mut().push(t.get());
+            t.set(t.get() + Duration::from_secs(5));
+            ProgressSent::Failed
+        }
+    };
+    // 64 KiB 相当の書き込みが 0.1 秒ごとに続く
+    for _ in 0..600 {
+        p.add_bytes(1);
+        p.tick(&hang);
+        t.set(t.get() + Duration::from_millis(100));
+    }
+    let sends = sends.borrow();
+    // 0 秒で送って 5 秒に失敗 → 2 秒空けて 7 秒 → 12 秒に失敗 → 4 秒空けて 16 秒 → 3 回目で打ち切り
+    assert_eq!(
+        *sends,
+        vec![
+            Duration::ZERO,
+            Duration::from_secs(7),
+            Duration::from_secs(16)
+        ]
+    );
+    // 打ち切った後は最後の 1 回（flush）も送らない
+    p.flush(&hang);
+    assert_eq!(sends.len(), 3);
+}
+
+/// 成功すれば失敗の数え直し。間隔も送信の終わりから 2 秒に戻る
+#[test]
+fn send_interval_counts_from_end_and_resets_on_success() {
+    let (p, t, _) = make();
+    p.start(1, 1, 1, 0);
+    let n = Rc::new(Cell::new(0u32));
+    let slow_ok = {
+        let t = t.clone();
+        let n = n.clone();
+        move |_: i64, _: &agent_proto::ProgressRequest| {
+            n.set(n.get() + 1);
+            t.set(t.get() + Duration::from_secs(3));
+            ProgressSent::Ok
+        }
+    };
+    p.tick(&slow_ok); // 0 秒に送り 3 秒に終わる
+    assert_eq!(n.get(), 1);
+    secs(&t, 4.9);
+    p.tick(&slow_ok);
+    assert_eq!(n.get(), 1, "終わりから 2 秒経っていない");
+    secs(&t, 5.0);
+    p.tick(&slow_ok);
+    assert_eq!(n.get(), 2);
+}
+
+/// Stop で打ち切っても、次の計画（start）ではまた送る
+#[test]
+fn start_resets_send_latch() {
+    let (p, t, _) = make();
+    let n = Rc::new(Cell::new(0u32));
+    let stop = {
+        let n = n.clone();
+        move |_: i64, _: &agent_proto::ProgressRequest| {
+            n.set(n.get() + 1);
+            ProgressSent::Stop
+        }
+    };
+    p.start(1, 1, 1, 0);
+    p.tick(&stop);
+    secs(&t, 10.0);
+    p.tick(&stop);
+    p.flush(&stop);
+    assert_eq!(n.get(), 1);
+    // 再開した計画の後に新しい計画
+    p.start(2, 1, 1, 0);
+    let ok = |_: i64, _: &agent_proto::ProgressRequest| ProgressSent::Ok;
+    assert!(p.take_send(true).is_some());
+    secs(&t, 20.0);
+    let m = Rc::new(Cell::new(0u32));
+    let m2 = m.clone();
+    p.tick(&move |a, r| {
+        m2.set(m2.get() + 1);
+        ok(a, r)
+    });
+    assert_eq!(m.get(), 1);
+}

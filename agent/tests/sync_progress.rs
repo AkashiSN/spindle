@@ -203,3 +203,44 @@ fn progress_status_mapping() {
     );
     assert_eq!(progress_sent(StatusCode::BAD_GATEWAY), None);
 }
+
+/// 送信が失敗し続けても、書き込みのたびには送らない。3 回続けて失敗したらこの計画では送らない
+#[test]
+fn failing_progress_backs_off_and_latches() {
+    let mut env = Env::new();
+    env.paired();
+    // 曲を多くして tick を何十回も回す（時計は呼ぶたびに 0.5 秒進む）
+    for id in 1..=30 {
+        env.server.put_track(id, &format!("A/{id}.m4a"), A);
+    }
+    env.server.fail_progress(u32::MAX);
+    let (p, rec) = recording();
+    let out = env.sync_with(p).unwrap();
+    assert!(matches!(out, SyncOutcome::Applied { .. }), "{out:?}");
+    // 2 秒・4 秒と空けて 3 回で打ち切る（最後の flush も送らない）
+    assert_eq!(env.server.progress_log().len(), 3);
+    assert_eq!(env.server.reports().len(), 1);
+    assert_eq!(rec.borrow().summaries.len(), 1);
+}
+
+/// 途中で止めたときは「完了」の要約を出さず、行を消すだけ
+#[test]
+fn stop_clears_line_without_summary() {
+    let mut env = Env::new();
+    env.paired();
+    env.music.set_copy_on(true);
+    env.server.put_track(1, "A/a.m4a", A);
+    env.server.put_track(2, "A/b.m4a", B);
+    let (p, rec) = recording();
+    let res = env.sync_with(p);
+    assert!(
+        matches!(res, Err(spindle_agent::Error::Stop(ref m)) if m.contains("コピー")),
+        "{res:?}"
+    );
+    let rec = rec.borrow();
+    assert!(rec.summaries.is_empty(), "{:?}", rec.summaries);
+    assert!(rec.clears >= 1);
+    // 最後の進捗は送ってから報告する
+    assert!(!env.server.progress_log().is_empty());
+    assert_eq!(env.server.reports().len(), 1);
+}

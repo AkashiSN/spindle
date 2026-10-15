@@ -11,8 +11,12 @@ pub type Clock = Box<dyn Fn() -> Duration>;
 
 /// 再描画の最短間隔
 const DRAW_INTERVAL: Duration = Duration::from_millis(200);
-/// サーバへ送る最短間隔
+/// サーバへ送る最短間隔（前回の送信が終わってから数える）
 const SEND_INTERVAL: Duration = Duration::from_secs(2);
+/// 送信の失敗が続いたときの間隔の上限
+const SEND_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// 送信がこの回数続けて失敗したら、この計画では以後送らない
+const SEND_FAIL_LIMIT: u32 = 3;
 /// 速度を平均する窓
 const RATE_WINDOW: Duration = Duration::from_secs(5);
 
@@ -41,16 +45,16 @@ pub trait ProgressSink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressSent {
     Ok,
-    /// 404（計画が無い・古いサーバでルートが無い）か 409。この実行では以後送らない
+    /// 404（計画が無い・古いサーバでルートが無い）か 409。この計画では以後送らない
     Stop,
+    /// 通信エラー・タイムアウト・5xx。同期は止めず、間隔を空けて送り直す
+    Failed,
 }
 
 struct Inner {
     sink: Box<dyn ProgressSink>,
     clock: Clock,
     started: Option<Started>,
-    /// `ProgressSent::Stop` を受けた。この実行では以後送らない
-    send_stopped: bool,
 }
 
 struct Started {
@@ -72,7 +76,14 @@ struct Started {
     phase: ProgressPhase,
     current: Option<String>,
     last_draw: Option<Duration>,
+    /// 前回の送信（の終わり）の時刻
     last_send: Option<Duration>,
+    /// 次の送信までに空ける間隔。失敗が続くと 2 秒・4 秒・8 秒…（上限 60 秒）と延ばす
+    send_gap: Duration,
+    /// 続けて失敗した回数
+    send_failures: u32,
+    /// `ProgressSent::Stop` を受けたか、失敗が続いた。この計画では以後送らない
+    send_stopped: bool,
 }
 
 /// 内部可変。`&self` だけで呼べる（`disabled()` は何もしない）
@@ -91,7 +102,6 @@ impl Progress {
                 sink,
                 clock,
                 started: None,
-                send_stopped: false,
             })),
         }
     }
@@ -122,6 +132,9 @@ impl Progress {
                 current: None,
                 last_draw: None,
                 last_send: None,
+                send_gap: SEND_INTERVAL,
+                send_failures: 0,
+                send_stopped: false,
             });
             Some(())
         });
@@ -214,15 +227,19 @@ impl Progress {
         })
     }
 
-    /// 送るべき時刻なら Some（2 秒に 1 回。最後の 1 回は `force`）
+    /// 送るべき時刻なら Some（前回の送信から 2 秒、失敗が続けばそれ以上空ける。最後の 1 回は `force`）。
+    /// 送らなくなった計画（`send_stopped`）では常に None
     pub fn take_send(&self, force: bool) -> Option<(i64, ProgressRequest)> {
         self.with(|i| {
             let now = (i.clock)();
             let s = i.started.as_mut()?;
+            if s.send_stopped {
+                return None;
+            }
             let t = now.saturating_sub(s.t0);
             if !force {
                 if let Some(last) = s.last_send {
-                    if t.saturating_sub(last) < SEND_INTERVAL && t >= last {
+                    if t.saturating_sub(last) < s.send_gap && t >= last {
                         return None;
                     }
                 }
@@ -260,19 +277,34 @@ impl Progress {
     }
 
     fn send_with(&self, force: bool, send: &dyn Fn(i64, &ProgressRequest) -> ProgressSent) {
-        if self.with(|i| Some(i.send_stopped)).unwrap_or(true) {
-            return;
-        }
         // 送っている間は借用を持たない
         let Some((plan_id, req)) = self.take_send(force) else {
             return;
         };
-        if send(plan_id, &req) == ProgressSent::Stop {
-            self.with(|i| {
-                i.send_stopped = true;
-                Some(())
-            });
-        }
+        let sent = send(plan_id, &req);
+        self.with(|i| {
+            // 間隔は送信が終わった時刻から数える。送信が詰まっても、次の書き込みで即座に送り直さない
+            let now = (i.clock)();
+            let s = i.started.as_mut()?;
+            s.last_send = Some(now.saturating_sub(s.t0));
+            match sent {
+                ProgressSent::Ok => {
+                    s.send_failures = 0;
+                    s.send_gap = SEND_INTERVAL;
+                }
+                ProgressSent::Stop => s.send_stopped = true,
+                ProgressSent::Failed => {
+                    s.send_failures += 1;
+                    if s.send_failures >= SEND_FAIL_LIMIT {
+                        s.send_stopped = true;
+                    }
+                    s.send_gap = SEND_INTERVAL
+                        .saturating_mul(1 << s.send_failures.saturating_sub(1).min(5))
+                        .min(SEND_BACKOFF_MAX);
+                }
+            }
+            Some(())
+        });
     }
 
     /// 終わりの 1 行を sink へ出し、その行を返す（開始していなければ None）

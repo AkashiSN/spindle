@@ -50,9 +50,11 @@ impl<M: Music, S: Server> Ctx<'_, M, S> {
         self.progress.flush(&|id, r| self.send_progress(id, r));
     }
 
-    /// 送信の失敗（通信エラー・5xx）は同期を止めない。捨てて次の機会に送る
+    /// 送信の失敗（通信エラー・5xx）は同期を止めない。`Failed` として間隔を延ばし、続けば送るのをやめる
     fn send_progress(&self, plan_id: i64, r: &ProgressRequest) -> ProgressSent {
-        self.server.progress(plan_id, r).unwrap_or(ProgressSent::Ok)
+        self.server
+            .progress(plan_id, r)
+            .unwrap_or(ProgressSent::Failed)
     }
 
     pub fn error_track(&mut self, track_id: i64, reason: impl Into<String>) {
