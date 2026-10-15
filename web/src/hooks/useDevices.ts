@@ -19,7 +19,7 @@ import type {
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { mergePending, togglePlaylist } from '../lib/devicePicker'
 import { withPlaylistIds } from '../lib/devicePicker'
-import { receivedAtOf } from '../lib/syncProgress'
+import { mergeListProgress, receivedAtOf } from '../lib/syncProgress'
 import { Latest } from '../lib/latest'
 import { TrailingDebounce } from '../lib/debounce'
 
@@ -61,16 +61,18 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     itemsRef.current = items
   }, [items])
 
+  // 端末ごとの最後の device_progress の受信時刻（一覧の応答との前後の判定）
+  const progressAt = useRef(new Map<number, number>())
   const fetchList = useCallback(() => {
     const id = listGen.current.next()
+    const startedAt = Date.now()
     apiFetch<DeviceList>('/api/devices')
       .then((l) => {
         if (!listGen.current.isCurrent(id)) return
         const now = Date.now()
-        setItems(
-          mergePending(l.items, desired.current).map((d) =>
-            d.sync_progress ? { ...d, sync_progress: { ...d.sync_progress, receivedAt: receivedAtOf(d.sync_progress, now) } } : d,
-          ),
+        // 要求より後に届いた device_progress は応答より新しい。その端末の進捗は現在の値を残す
+        setItems((cur) =>
+          mergeListProgress(mergePending(l.items, desired.current), cur, progressAt.current, startedAt, now),
         )
       })
       .catch(() => {
@@ -80,6 +82,7 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
   /** SSE の device_progress で該当端末の進捗を差し替える（一覧に無い端末は無視。次の取り直しで入る） */
   const onProgress = useCallback((e: DeviceProgressEvent) => {
     const now = Date.now()
+    progressAt.current.set(e.device_id, now)
     setItems((cur) =>
       cur == null
         ? cur

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SyncProgress } from '../api/types'
-import { agoText, phaseLabel, progressRatio, progressSummary, STALE_SECS } from './syncProgress'
+import { agoText, mergeListProgress, phaseLabel, progressRatio, progressSummary, STALE_SECS } from './syncProgress'
 
 const MB = 1024 * 1024
 function p(over: Partial<SyncProgress> = {}): SyncProgress {
@@ -66,5 +66,24 @@ describe('phaseLabel', () => {
     expect(phaseLabel('fetch')).toBe('受信中')
     expect(phaseLabel('add')).toBe('追加中')
     expect(phaseLabel('playlist')).toBe('プレイリスト')
+  })
+})
+
+describe('mergeListProgress', () => {
+  const resp = [{ id: 1, sync_progress: p({ age: 2 }) }]
+  it('要求より新しいイベントがあれば現在の値（null 含む）を残す', () => {
+    const ev = new Map([[1, 1500]])
+    expect(mergeListProgress(resp, [{ id: 1, sync_progress: null }], ev, 1000, 2000)[0].sync_progress).toBeNull()
+    const newer = p({ done: 50 })
+    expect(mergeListProgress(resp, [{ id: 1, sync_progress: newer }], ev, 1000, 2000)[0].sync_progress).toBe(newer)
+  })
+  it('要求より古いイベントは応答に負ける（receivedAt を付ける）', () => {
+    const ev = new Map([[1, 900]])
+    const out = mergeListProgress(resp, [{ id: 1, sync_progress: null }], ev, 1000, 5000)[0].sync_progress
+    expect(out?.done).toBe(12)
+    expect((out as { receivedAt?: number }).receivedAt).toBe(3000)
+  })
+  it('イベントが無い端末は応答のまま', () => {
+    expect(mergeListProgress(resp, null, new Map(), 1000, 5000)[0].sync_progress?.done).toBe(12)
   })
 })

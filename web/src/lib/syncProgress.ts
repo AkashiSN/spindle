@@ -58,3 +58,28 @@ export function phaseLabel(phase: SyncProgress['phase']): string {
 export function receivedAtOf(p: Pick<SyncProgress, 'age'>, nowMs: number): number {
   return nowMs - p.age * 1000
 }
+
+type Progressive = { id: number; sync_progress?: SyncProgress | null }
+
+/**
+ * 一覧の応答に SSE の進捗を重ねる。要求を出した後に device_progress が届いた端末は、応答より
+ * イベントの方が新しいので現在の sync_progress（null 含む）を残す。それ以外は応答の値を使い、
+ * receivedAt を付ける。events は端末 ID → 最後のイベントの受信時刻（ms）
+ */
+export function mergeListProgress<T extends Progressive>(
+  fresh: readonly T[],
+  current: readonly Progressive[] | null,
+  events: ReadonlyMap<number, number>,
+  requestStartMs: number,
+  nowMs: number,
+): T[] {
+  return fresh.map((d) => {
+    const at = events.get(d.id)
+    if (at != null && at > requestStartMs) {
+      const cur = current?.find((x) => x.id === d.id)
+      if (cur) return { ...d, sync_progress: cur.sync_progress ?? null }
+    }
+    const p = d.sync_progress
+    return p ? { ...d, sync_progress: { ...p, receivedAt: receivedAtOf(p, nowMs) } } : d
+  })
+}
