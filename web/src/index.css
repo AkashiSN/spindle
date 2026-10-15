@@ -1783,6 +1783,10 @@ table.gc-table td.sample {
   word-break: break-all;
   font-size: 12px;
 }
+/* category の表は gc-table の規則を使い、操作列（削除ボタンと理由）だけ折り返さない */
+table.category-table td.action {
+  white-space: nowrap;
+}
 .records-tabs {
   margin-bottom: 8px;
 }

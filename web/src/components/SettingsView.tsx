@@ -5,7 +5,7 @@ import { useCategories } from '../hooks/useCategories'
 import type { SettingsState } from '../hooks/useSettings'
 import type { ThemeState } from '../hooks/useTheme'
 import { formatCount } from '../lib/format'
-import { deleteConfirmText } from '../lib/categories'
+import { categoryUsageText, deleteConfirmText, otherUsageText } from '../lib/categories'
 import { formatBytes, gcPreviewRows } from '../lib/settings'
 import { THEME_PREFS } from '../lib/theme'
 
@@ -106,28 +106,48 @@ export function SettingsView({
       <h2>category</h2>
       <p className="muted small">
         配置先の最上位のフォルダ。Library 直下のフォルダ名からスキャンで自動で作られる（追加だけ）。
-        使われていない語彙（どのアルバム・購読・Inbox の下書きにも使われていない）は削除できる
+        どのアルバム・GENRE の写像・購読・Inbox の下書きにも使われていない語彙だけ削除できる
       </p>
       {cats.error != null && <p className="error">{cats.error}</p>}
       {cats.items.length === 0 ? (
         <p className="muted">category はまだない</p>
       ) : (
-        <ul className="category-list">
-          {cats.items.map((c) => (
-            <li key={c.id}>
-              <span>{c.name}</span>{' '}
-              <button
-                type="button"
-                className="small"
-                onClick={() => {
-                  if (window.confirm(deleteConfirmText(c.name))) void cats.remove(c.id)
-                }}
-              >
-                削除
-              </button>
-            </li>
-          ))}
-        </ul>
+        <table className="gc-table category-table">
+          <thead>
+            <tr>
+              <th>名前</th>
+              <th className="num">album</th>
+              <th>その他の使用</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {cats.items.map((c) => {
+              const used = categoryUsageText(c)
+              return (
+                <tr key={c.id}>
+                  <td>{c.name}</td>
+                  <td className="num">{formatCount(c.albums ?? 0)}</td>
+                  <td className="muted small">{otherUsageText(c)}</td>
+                  <td className="action">
+                    <button
+                      type="button"
+                      className="small"
+                      disabled={used != null}
+                      title={used ?? undefined}
+                      onClick={() => {
+                        if (window.confirm(deleteConfirmText(c.name))) void cats.remove(c.id)
+                      }}
+                    >
+                      削除
+                    </button>
+                    {used != null && <span className="muted small"> {used}</span>}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
       )}
 
       <h2>
