@@ -681,6 +681,9 @@ CUETools の "verify from files" 相当。
   → verify.log 出力（data/verify/<album_id>.log。rip.log とは別物）
 ```
 
+照合ログは album ごとに最新 1 回分しか残らない。記録画面のログタブ（§12.4）が `GET /api/logs` で実行ごとに
+並べ、本文を `GET /api/logs/{key}/text` で読む（古い実行は「上書きされた」と出す。D-106）。
+
 `verify` ジョブ（album 単位、並列 2。`POST /api/verify { selection }`）。読むだけでファイルは
 書かない。ファイルは root の FD を fstat して DB の行と照合してから読む（D-62）。
 照会の 404 は「登録なし」（0 件）として扱い、失敗にしない（AccurateRip は `dBAR-*.bin` が無い、
@@ -1894,7 +1897,8 @@ PATCH  /api/albums/:id                            { album_gain }。album gain �
                                                   false → rg_album_* を NULL にして未書込に戻し、Derived の追随を投入。
                                                   同じ値なら何もしない。200 { album, job_id | null, derived_jobs }。
                                                   404 not_found / 400 bad_request
-GET    /api/categories, POST /api/categories        統制語彙 { "items": [{ id, name }] }。POST は { name }（重複は 409）。
+GET    /api/categories, POST /api/categories        統制語彙 { "items": [{ id, name, albums, genres, subscriptions, inbox_drafts }] }
+                                                  （4 つは使用数。削除できるのは全部 0 の語彙。D-106）。POST は { name }（重複は 409）。
                                                   CD 取り込みの確定フォームの category に使う（D-67）
 DELETE /api/categories/:id                        使われていない語彙だけ消す（D-92）。204 / 404 / 409 `in_use`
                                                   （active な album・GENRE の写像・購読・Inbox の下書きのどれかが
@@ -2075,7 +2079,20 @@ GET    /api/jobs, POST /api/jobs/:id/cancel, POST /api/jobs/:id/retry
 DELETE /api/jobs/:id                              終端（failed / done / cancelled）のジョブ行を消す（P4-18。queued / running は 409 not_terminal）
 DELETE /api/jobs?state=failed                     失敗をまとめて消す → { "deleted": N }（state=failed 以外は 400）
 GET    /api/config                                読み込んだ config.toml の原文 { "path", "text" }（設定画面 §12.6。秘密は config に無い）
-GET    /api/archive                                退避台帳 { "items": [ archived_files の行 + "batch_id" ] }（新しい順。復元は batch の巻き戻し）
+GET    /api/archive?state=held|restored|deleted|all&limit=&cursor=
+                                                  退避台帳 { "items": [ archived_files の行 + "batch_id" ], "next_cursor", "counts" }
+                                                  （新しい順。`state` 省略は held、`limit` は 1..=500・省略 100、`cursor` は
+                                                  `id < cursor`。`counts` は状態ごとの件数。復元は batch の巻き戻し。D-106）
+GET    /api/logs?kind=all|retro|rip&album_id=&limit=&cursor=
+                                                  照合・吸い出しのログの実行ごとの一覧 { "items", "next_cursor" }。`limit` は
+                                                  1..=200・省略 50、`cursor` は不透明（offset）。実行は照合なら
+                                                  (album_id, source, job_id)、`job_id` が無い吸い出しなら (album_id, source,
+                                                  verified_at) でまとめ、key は `retro-<album>-j<job>` / `rip-<album>-t<verified_at>`。
+                                                  `log` は latest | superseded | none（照合ログは album ごとに最新 1 回分）
+GET    /api/logs/{key}/text?disc=N                ログ本文（text/plain）。root の dirfd から O_NONBLOCK で開き、通常ファイル以外
+                                                  （ディレクトリ・FIFO）と ENOTDIR は 404 `log_not_found`、1 MiB 超は 413
+                                                  `log_too_large`、key が不正なら 400、`data/verify` を開けなければ 503
+                                                  `logs_unavailable`（D-106）
 POST   /api/scan                                  {"kind": "incremental" | "deep"}。scan ジョブを投入
 GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件、`jobs: { done, failed }` は掃除するジョブ行の数、`plans` は消す終端した計画の数。何も消さない。D-56、D-102）
 GET    /api/inbox                                 承認キュー { "items": [{ id, rel_dir, state, detected_at, error, placed_album_id,
@@ -2091,6 +2108,8 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   取り込みのトラックが参照する購読の直近の同期の要約（last_result の align から。1 回で読む））
                                                   承認済み（approved / placing / placed）の件には stages: [{ key, label, status: done | running |
                                                   todo | na, done, total }]（配置 → RG → 系統 → 端末の段。§12.6、P5-2）
+GET    /api/inbox/:id/files/:name                 取り込みの吸い出しファイル本文（`rip*.log` / `disc*.cue` / `disc*.toc` だけ。
+                                                  `GET /api/inbox` の各項目の `rip_files` が名前の一覧。D-106）
 GET    /api/inbox/:id/artwork/:hash               取り込みのファイルの埋め込み画像（PICTURE の sha256 で実体を照合してから ETag / 304。
                                                   原寸、MIME は sniff、immutable。取り込みに無い / 実体消失 / 不一致は 404。状態非依存。
                                                   セッション必須。§7.8、P4-4）
@@ -2508,9 +2527,9 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 ```
 
 - **上部バー**（ナビとプレイヤーを 1 本に。D-58 追記）: 左に画面の切替、中央に ⏮ ▶ ⏭ ■ とシーク、
-  曲名（無ければ Not playing）、右に RG モード / 原本 / 音量、☰（ジョブ / 履歴 / 設定 / ログアウト。
+  曲名（無ければ Not playing）、右に RG モード / 原本 / 音量、☰（ジョブ / 記録 / 設定 / ログアウト。
   SSE の接続状態の点もここ）
-- **ナビの並び**（P4-20）: `ライブラリ / アルバム / CD / YouTube / Inbox / 端末`。ジョブ・履歴・設定は ☰ の中。
+- **ナビの並び**（P4-20）: `ライブラリ / アルバム / CD / YouTube / Inbox / 端末`。ジョブ・記録・設定は ☰ の中。
   **タブは取り込みの流れ順には並べない。** ものは 入力（CD / YouTube）→ Inbox → ライブラリ と流れるが、
   ライブラリが日常の入口なので先頭（ホーム）に置く。導線は「取り込みタブのすぐ右に Inbox があり、
   そこに赤い数字が増える」ことで示す（CD を取り込み終えたら右隣の Inbox を見る）。
@@ -2521,7 +2540,7 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
   削除 + エラー。待ちは含めない。同じ曲が 2 端末で未反映なら 2）の件数を黄色で出す（`GET /api/devices` の
   `counts` の合計。一覧は画面に関わらず取る）
 - **左サイドバーを出す画面**（P4-20）: ツリーの選択が表の絞り込みに効く画面（ライブラリ / アルバム）だけ。
-  CD / YouTube / Inbox / 端末 / ジョブ / 履歴 / 設定では左カラムごと畳んで全幅にする（ツリーが何にも効かないため。
+  CD / YouTube / Inbox / 端末 / ジョブ / 記録 / 設定では左カラムごと畳んで全幅にする（ツリーが何にも効かないため。
   左カラム下のアルバムアートも一緒に隠れるが、曲名は上部バーに残る）
 - **検索ボックス**は左サイドバーの先頭（スクロールしない）。表の `filter.q`（入力から 250ms 後に
   反映。3 文字以上で FTS、未満は LIKE。D-39 / D-40）
@@ -2632,7 +2651,19 @@ foobar2000 の Properties と同じく、行末の × か右クリックのメ�
   プレイリストは追加先）→ **④ 実行**（見出しは適用 / 投入 / 反映。押せない理由を添える。結果の 1 行と
   反映待ちの「除外して適用」もここ）
 
-### 12.4 編集履歴
+### 12.4 記録（編集履歴 / 退避ファイル / ログ）
+
+☰ の「記録」（旧「履歴」）は 3 つのタブを持つ: **編集履歴 / 退避ファイル / ログ**。設定にあった退避ファイルと、
+操作タブが実ファイルのパスで案内していた照合ログをここに集める（D-106）。
+
+- **退避ファイル**: `archived_files` の一覧と復元。既定は保持中（`held`）で 100 件ずつ（「もっと見る」で
+  `cursor`）。状態ごとの件数は `counts`。GC で実体を消した記録（`deleted`）は既定では出さない
+- **ログ**: 照合（`retro`）と吸い出し（`rip`）の実行ごとの一覧（50 件ずつ。`kind` で絞る）。照合ログは
+  album ごとに最新 1 回分しか残らないので、古い実行は `superseded`（「上書きされた」）と出す。吸い出しログは
+  DB の `log_path` を使わず、その disc の active な曲がいまあるディレクトリから `rip.log` / `rip<N>.log` を引く
+  （リネームに追随する）。行を開くと本文を読み、コピーとダウンロードができる。Inbox の承認画面でも CD の
+  取り込みの `rip*.log` / `cue` / `toc` を読める（`GET /api/inbox/:id/files/:name`）
+- **編集履歴タブ**: 以下
 
 ```
 #42  09-16 14:03  "Official を除去"      tags    1,204 件   applied              [巻き戻す]
@@ -2656,8 +2687,15 @@ foobar2000 の Properties と同じく、行末の × か右クリックのメ�
 片付け。失敗・取り消しタブには [失敗をすべて消す]。P4-18）。一覧のタブは
 **実行中・待ち / 完了 / 失敗・取り消し / すべて**で、各タブに `summary` の件数を添える（待ち → 実行中 → 完了と
 数が移っていくのが分かる）。一覧は状態ごとに切り出す（実行中・待ちはキューの順で 1,000 件、完了と失敗・取り消しは新しい順で
-各 300 件。`limits`）。表示中のタブが上限に達していれば「表示は最新 N 件まで」と添える。種別表の下に CPU 系の実行中の合計と共通予算（`cpu_budget`。D-73）。編集バッチ由来のジョブは `edit_batch_id` で履歴画面へリンク。
+各 300 件。`limits`）。表示中のタブが上限に達していれば「表示は最新 N 件まで」と添える。種別表の下に CPU 系の実行中の合計と共通予算（`cpu_budget`。D-73）。編集バッチ由来のジョブは `edit_batch_id` で記録画面（編集履歴）へリンク。
 SSE `/api/events` で更新し、リロードしても DB の値で復元する。
+
+**結果**列は完了したジョブの `note` の 1 行目を出す。`note` かエラーのある行は、クリックで開いて全文を読む
+（verify の行には「ログを見る」でログタブの該当の実行へ）。GC・スキャン・バックアップは複数行の `note` を残す:
+GC は削除件数・バイト数と区分ごとの内訳・見送りと失敗・掃除したジョブ行と計画の数、スキャンは見たファイル数・新規・更新・
+移動・missing・エラーの件数と、読めなかったファイルと対象外のパス（対象外は 20 件まで）、バックアップは作った
+ファイルと大きさ・保持する世代数・消した件数。ジョブ行と同じ保持期間
+（done 7 日）で消える（D-106）。
 
 ### 12.6 その他の画面（骨格のみ）
 
@@ -2868,7 +2906,8 @@ SSE `/api/events` で更新し、リロードしても DB の値で復元する�
     コピーできる形で添える（§7.11「引き継ぎ」、D-104）。コードは画面の state にだけ持つ）。最後に「端末を削除」（端末上のファイルは消さない。途中の計画があればそれも破棄する旨を確認に出す）
 - **設定**: 「表示」（配色: OS に従う / ライト / ダーク。localStorage に保存。P4-10、D-58 追記）、
   `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
-  退避 WAV（`archived_files`）の一覧と復元
+  category（統制語彙）の表（使用数 = アルバム / ジャンル / 購読 / Inbox の下書き。使用中は削除ボタンを無効にする）。
+  退避 WAV（`archived_files`）の一覧と復元は記録画面（§12.4）へ移した（D-106）
 
 ---
 
