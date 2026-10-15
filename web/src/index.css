@@ -1622,21 +1622,25 @@ button.primary {
   font-size: 16px;
   margin: 0;
 }
-.jobs .tabs {
+.jobs .tabs,
+.records .tabs {
   display: flex;
 }
-.jobs .tabs button {
+.jobs .tabs button,
+.records .tabs button {
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
   padding: 6px 10px;
 }
-.jobs .tabs button.active {
+.jobs .tabs button.active,
+.records .tabs button.active {
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
-.jobs .tabs button .count {
+.jobs .tabs button .count,
+.records .tabs button .count {
   margin-left: 6px;
   font-size: 11px;
   font-weight: 400;
@@ -1646,7 +1650,8 @@ button.primary {
   background: var(--border);
   color: var(--muted);
 }
-.jobs .tabs button.active .count {
+.jobs .tabs button.active .count,
+.records .tabs button.active .count {
   background: var(--accent-bg);
   color: var(--accent);
 }
@@ -1787,8 +1792,30 @@ table.gc-table td.sample {
 table.category-table td.action {
   white-space: nowrap;
 }
+/* 記録画面（SPEC §12.4）。タブの行を上に固定し、中身（.records-body）だけをスクロールする */
+.records {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+}
 .records-tabs {
+  flex: none;
+  padding: 8px 12px 0;
   margin-bottom: 8px;
+}
+.records-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 12px 12px;
+}
+/* 編集履歴は単独の画面だったときの高さ・スクロール・余白を持つので、記録画面の中では外す */
+.records-body > .history {
+  height: auto;
+  overflow: visible;
+  padding: 0;
 }
 
 .load-more {

@@ -41,13 +41,16 @@ export function RecordsView({
           </button>
         ))}
       </div>
-      {tab === 'history' ? (
-        <HistoryView history={history} focusId={historyFocus} />
-      ) : tab === 'archive' ? (
-        <ArchiveTab onOpenBatch={onOpenBatch} />
-      ) : (
-        <LogsTab albumId={logsAlbum} onClearAlbum={onClearLogsAlbum} />
-      )}
+      {/* タブの行は固定し、中身だけをスクロールする（ほかの画面の section と同じく main の高さに収める） */}
+      <div className="records-body">
+        {tab === 'history' ? (
+          <HistoryView history={history} focusId={historyFocus} />
+        ) : tab === 'archive' ? (
+          <ArchiveTab onOpenBatch={onOpenBatch} />
+        ) : (
+          <LogsTab albumId={logsAlbum} onClearAlbum={onClearLogsAlbum} />
+        )}
+      </div>
     </section>
   )
 }
