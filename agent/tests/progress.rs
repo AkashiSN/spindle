@@ -494,6 +494,51 @@ fn flush_waits_for_heartbeat_and_sends_final() {
     assert_eq!((sent[0].done, sent[0].total), (2, 2));
 }
 
+/// flush が心拍の送信を待つ間に時計が進んだら、最後の値の速度は待った後の時刻で計る（受信が止まれば 0）
+#[test]
+fn flush_measures_rate_after_waiting() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    let ms = Arc::new(AtomicU64::new(0));
+    let clock = {
+        let ms = ms.clone();
+        move || Duration::from_millis(ms.load(Ordering::SeqCst))
+    };
+    let p = Progress::new(Box::new(RecSink(Rc::default())), Box::new(clock.clone()));
+    p.start(1, 1, 1, 10 * MIB);
+    p.begin_item(ProgressPhase::Fetch, Some("a"), 10 * MIB);
+    for i in 1..=4u64 {
+        ms.store(i * 1000, Ordering::SeqCst);
+        p.add_bytes(MIB);
+    }
+    p.set_phase(ProgressPhase::Add);
+    assert_eq!(p.view().rate, MIB);
+    // 心拍の送信が詰まり、終わるまでに時計が 10 秒まで進む
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let hb = heartbeat_of(&p);
+    let ms2 = ms.clone();
+    let th = std::thread::spawn(move || {
+        hb.beat(&clock, &|_, _| {
+            let _ = started_tx.send(());
+            std::thread::sleep(Duration::from_millis(200));
+            ms2.store(10_000, Ordering::SeqCst);
+            ProgressSent::Ok
+        })
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let rates: RefCell<Vec<u64>> = RefCell::default();
+    p.flush(&|_, r| {
+        rates.borrow_mut().push(r.rate);
+        ProgressSent::Ok
+    });
+    assert!(th.join().unwrap());
+    assert_eq!(
+        rates.into_inner(),
+        vec![0],
+        "待った後の時刻（最後の受信から 6 秒）で計る"
+    );
+}
+
 /// 前の計画の心拍の送信が、次の計画を始めた後に終わっても（404 でも）、その結果は新しい計画の
 /// 間隔・失敗の数・打ち切りに触れない
 #[test]

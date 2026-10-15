@@ -481,9 +481,10 @@ impl Progress {
         wait: Duration,
     ) -> Option<(u64, i64, ProgressRequest)> {
         self.with(|i| {
-            let now = (i.clock)();
             let s = i.started.as_ref()?;
             let mut g = i.gate.lock_idle(wait)?;
+            // 時刻は待った後に読む（待ちの始めの速度を送らない）
+            let now = (i.clock)();
             let snap = s.request(g.meter.rate(now));
             g.snapshot = Some(snap);
             g.claim(now, force, mark)
