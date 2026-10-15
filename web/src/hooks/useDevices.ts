@@ -19,7 +19,7 @@ import type {
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { mergePending, togglePlaylist } from '../lib/devicePicker'
 import { withPlaylistIds } from '../lib/devicePicker'
-import { mergeListProgress, receivedAtOf } from '../lib/syncProgress'
+import { applyProgressEvent, mergeListProgress } from '../lib/syncProgress'
 import { Latest } from '../lib/latest'
 import { TrailingDebounce } from '../lib/debounce'
 
@@ -79,19 +79,12 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
         if (listGen.current.isCurrent(id)) setItems(null)
       })
   }, [])
-  /** SSE の device_progress で該当端末の進捗を差し替える（一覧に無い端末は無視。次の取り直しで入る） */
+  /** SSE の device_progress で該当端末の進捗を差し替える（一覧に無い端末は無視。次の取り直しで入る）。
+   * 進捗が来たら plan_open も立てる（applyProgressEvent） */
   const onProgress = useCallback((e: DeviceProgressEvent) => {
     const now = Date.now()
     progressAt.current.set(e.device_id, now)
-    setItems((cur) =>
-      cur == null
-        ? cur
-        : cur.map((d) =>
-            d.id !== e.device_id
-              ? d
-              : { ...d, sync_progress: e.progress ? { ...e.progress, receivedAt: receivedAtOf(e.progress, now) } : null },
-          ),
-    )
+    setItems((cur) => (cur == null ? cur : applyProgressEvent(cur, e, now)))
   }, [])
   const fetchDiff = useCallback(() => {
     const id = diffGen.current.next()

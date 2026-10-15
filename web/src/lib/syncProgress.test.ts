@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SyncProgress } from '../api/types'
-import { agoText, mergeListProgress, phaseLabel, progressRatio, progressSummary, STALE_SECS } from './syncProgress'
+import { agoText, applyProgressEvent, mergeListProgress, phaseLabel, progressRatio, progressSummary, STALE_SECS } from './syncProgress'
 
 const MB = 1024 * 1024
 function p(over: Partial<SyncProgress> = {}): SyncProgress {
@@ -85,5 +85,29 @@ describe('mergeListProgress', () => {
   })
   it('イベントが無い端末は応答のまま', () => {
     expect(mergeListProgress(resp, null, new Map(), 1000, 5000)[0].sync_progress?.done).toBe(12)
+  })
+})
+
+describe('applyProgressEvent', () => {
+  type Row = { id: number; plan_open: boolean; sync_progress: (SyncProgress & { receivedAt?: number }) | null }
+  const items: Row[] = [
+    { id: 1, plan_open: false, sync_progress: null },
+    { id: 2, plan_open: false, sync_progress: null },
+  ]
+  it('進捗が来たら plan_open を立て、受信時刻を付ける（確定はイベントを流さない）', () => {
+    const out = applyProgressEvent(items, { device_id: 1, progress: p({ age: 2 }) }, 5000)
+    expect(out[0].plan_open).toBe(true)
+    expect(out[0].sync_progress?.receivedAt).toBe(3000)
+    expect(out[1]).toBe(items[1])
+  })
+  it('null は進捗だけ消し、plan_open に触らない', () => {
+    const open: Row[] = [{ id: 1, plan_open: true, sync_progress: p() }]
+    const out = applyProgressEvent(open, { device_id: 1, progress: null }, 5000)
+    expect(out[0].sync_progress).toBeNull()
+    expect(out[0].plan_open).toBe(true)
+  })
+  it('一覧に無い端末は無視する', () => {
+    const out = applyProgressEvent(items, { device_id: 9, progress: p() }, 5000)
+    expect(out).toEqual(items)
   })
 })

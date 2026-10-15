@@ -1,6 +1,6 @@
 // Mac の同期の進捗（端末タブ）の書式と判定。表示の経過時間はサーバが計算した age を受信時刻に直して持つ
 
-import type { SyncProgress } from '../api/types'
+import type { DeviceProgressEvent, SyncProgress } from '../api/types'
 import { formatBytes } from './settings'
 
 /** これを超えて進捗が来なければ「応答なし」と見なす（秒） */
@@ -82,4 +82,21 @@ export function mergeListProgress<T extends Progressive>(
     const p = d.sync_progress
     return p ? { ...d, sync_progress: { ...p, receivedAt: receivedAtOf(p, nowMs) } } : d
   })
+}
+
+type ProgressTarget = Progressive & { plan_open: boolean }
+
+/**
+ * SSE の device_progress を一覧へ当てる（一覧に無い端末は無視）。進捗は open な計画にしか来ないので、
+ * 非 null なら plan_open も true にする（計画の確定はイベントを流さず、一覧の取り直しまで古いままのため）。
+ * null（計画が閉じた）のときは plan_open に触らない。閉じたかどうかは一覧の取り直しで知る
+ */
+export function applyProgressEvent<T extends ProgressTarget>(items: readonly T[], e: DeviceProgressEvent, nowMs: number): T[] {
+  return items.map((d) =>
+    d.id !== e.device_id
+      ? d
+      : e.progress
+        ? { ...d, plan_open: true, sync_progress: { ...e.progress, receivedAt: receivedAtOf(e.progress, nowMs) } }
+        : { ...d, sync_progress: null },
+  )
 }

@@ -516,7 +516,6 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
           {device.sync_job != null && (
             <p className="small">{device.sync_job.state === 'running' ? '同期中…' : queuedSyncText(device)}</p>
           )}
-          {device.plan_open && device.sync_progress && <SyncProgressLine p={device.sync_progress} />}
           <div className="op-row">
             <button
               type="button"
@@ -549,7 +548,8 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
               </div>
             </div>
           )}
-          {device.plan_open && device.sync_progress && <SyncProgressLine p={device.sync_progress} />}
+          {/* 進捗はサーバが open な計画の分だけ返し・流す。確定はイベントを流さないので plan_open は見ない */}
+          {device.sync_progress && <SyncProgressLine p={device.sync_progress} />}
           <p className="small">
             Mac で <code>spindle-agent sync</code> を実行すると反映される。最終報告:{' '}
             {device.last_synced_at != null ? formatDateTime(device.last_synced_at) : 'まだ報告なし'}
