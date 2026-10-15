@@ -14,6 +14,7 @@ pub mod pair;
 pub mod pathkey;
 pub mod plan;
 pub mod playlist;
+pub mod progress;
 pub mod recover;
 pub mod rediscover;
 pub mod secrets;
