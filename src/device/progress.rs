@@ -66,6 +66,12 @@ impl ProgressStore {
         }
     }
 
+    /// 受理後の確かめ直し。今の open な計画（`open_plan`）が `plan_id` でなければ、`plan_id` の進捗だけを消す。
+    /// 消したら true（null を流すのはこのときだけ。新しい計画の進捗が入っていれば消さず、流さない）
+    pub fn clear_if_closed(&self, device_id: i64, plan_id: i64, open_plan: Option<i64>) -> bool {
+        open_plan != Some(plan_id) && self.clear_plan(device_id, plan_id)
+    }
+
     pub fn view(&self, device_id: i64, now: i64) -> Option<SyncProgressView> {
         self.lock().get(&device_id).map(|s| view_of(s, now))
     }
@@ -123,5 +129,23 @@ mod tests {
         s.put(1, 7, req(), 100);
         assert!(s.clear(1));
         assert!(!s.clear(1));
+    }
+
+    /// 確かめ直しで古い計画が閉じていても、新しい計画の進捗は消さない（null を流さない）
+    #[test]
+    fn clear_if_closed_keeps_newer_plan() {
+        let s = ProgressStore::default();
+        // 計画 7 がまだ open なら消さない
+        s.put(1, 7, req(), 100);
+        assert!(!s.clear_if_closed(1, 7, Some(7)));
+        assert!(s.view(1, 100).is_some());
+        // 計画 7 が閉じた。保持しているのが 7 なら消す
+        assert!(s.clear_if_closed(1, 7, None));
+        assert!(s.view(1, 100).is_none());
+        // 新しい計画 8 の進捗が既に入っている。古い計画 7 の確かめ直しでは消さない
+        s.put(1, 8, req(), 100);
+        assert!(!s.clear_if_closed(1, 7, Some(8)));
+        assert!(!s.clear_if_closed(1, 7, None));
+        assert_eq!(s.view(1, 100).map(|v| v.plan_id), Some(8));
     }
 }

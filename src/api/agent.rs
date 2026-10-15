@@ -707,15 +707,14 @@ async fn progress(
                 .db
                 .read(move |c| dbdev::open_plan_id(c, device_id))
                 .await?;
-            if still != Some(plan_id) {
-                state.sync_progress.clear_plan(device_id, plan_id);
+            // 消したときだけ null を流す。新しい計画の進捗が既に入っていれば残し、それを消す null も流さない
+            publish_cleared(
+                &state,
+                device_id,
                 state
-                    .jobs
-                    .publish(crate::jobs::Event::DeviceProgress(DeviceProgressEvent {
-                        device_id,
-                        progress: None,
-                    }));
-            }
+                    .sync_progress
+                    .clear_if_closed(device_id, plan_id, still),
+            );
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         ProgressCheck::NoPlan | ProgressCheck::Closed => {
