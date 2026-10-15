@@ -379,3 +379,63 @@ fn is_root() -> bool {
         })
         .unwrap_or(false)
 }
+
+#[tokio::test]
+async fn gc_job_deletes_discarded_inbox_items_and_notes_them() {
+    // execute_all ではなく GC ジョブ（GcHandler）の経路で、期限の過ぎた破棄待ちが消えること。
+    // ジョブが execute_inbox を呼んでいなかった退行の固定
+    use spindle::jobs::handlers::gc::{new_gc_job, GcHandler};
+    use spindle::jobs::{EnqueueResult, JobType, Jobs, Registry};
+
+    let (env, id) = seeded().await;
+    env.reject_and_discard(id, env.t0).await;
+    // ジョブは実時刻で計画する。保持 1 秒で、要求（t0）の 1 秒後を過ぎるまで待つ
+    while spindle::db::now_epoch() < env.t0 + 1 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let jobs = Jobs::new(Arc::clone(&env.db));
+    let mut reg = Registry::new();
+    reg.register(
+        JobType::Gc,
+        Arc::new(GcHandler::new(
+            Arc::clone(&env.db),
+            Arc::new(GcRoots {
+                library: Arc::clone(&env.roots.library),
+                archive: Arc::clone(&env.roots.archive),
+                derived: Arc::clone(&env.roots.derived),
+                artwork: Arc::clone(&env.roots.artwork),
+                inbox: env.roots.inbox.clone(),
+            }),
+            1,
+        )),
+    );
+    let shutdown = CancellationToken::new();
+    let job_id = match jobs.enqueue(new_gc_job()).await.unwrap() {
+        EnqueueResult::Inserted(i) | EnqueueResult::Duplicate(i) => i,
+    };
+    jobs.start(reg, shutdown.clone());
+    let note = loop {
+        let row = env
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT state, note FROM jobs WHERE id = ?1",
+                    [job_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        match row.0.as_str() {
+            "done" => break row.1.unwrap_or_default(),
+            "failed" | "cancelled" => panic!("GC ジョブが {} で終わった", row.0),
+            _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    };
+    shutdown.cancel();
+    assert!(!exists(&env.path("youtube/A/Aのお歌/01 x.wav")));
+    assert!(!exists(&env.path("youtube/A/Aのお歌/cover.jpg")));
+    assert!(env.item(id).await.is_none());
+    assert!(exists(&env.path("youtube/A/other/04 w.wav")));
+    assert!(note.contains("Inbox 1"), "note に Inbox が無い: {note}");
+}
