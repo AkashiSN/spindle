@@ -1655,3 +1655,23 @@ async fn stale_progress_of_an_old_plan_is_hidden_under_a_new_plan() {
     assert_ne!(p1.plan_id, p2.plan_id);
     assert!(sync_progress_of(&app, id).await.is_null());
 }
+
+#[tokio::test]
+async fn device_delete_clears_progress() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    send_progress(&app, &token, p.plan_id, progress_body(p.generation)).await;
+    assert!(app.sync_progress.view(id, 0).is_some());
+    let mut rx = app.jobs.subscribe();
+    let (st, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    assert!(app.sync_progress.view(id, 0).is_none());
+    let ev = next_progress_event(&mut rx);
+    assert_eq!(ev["device_id"], id);
+    assert!(ev["progress"].is_null());
+}

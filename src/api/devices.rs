@@ -432,6 +432,8 @@ pub async fn delete(
         .await?;
     match res {
         Deleted::Done(queued) => {
+            // 途中の計画は行と一緒に消えたので、手元の進捗も消す（消えたことを画面へも知らせる）
+            super::agent::clear_progress(&state, id);
             // 行を消した後に取り消す。間に走り出したものは端末が無いのを見て何もせずに終わる
             for job_id in queued {
                 state.jobs.cancel(job_id).await?;
