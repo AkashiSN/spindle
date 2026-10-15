@@ -89,6 +89,10 @@ pub(crate) async fn read_text_capped(
             Err(FsError::NotFound | FsError::Symlink | FsError::Escaped) => {
                 return Ok(TextRead::NotFound)
             }
+            // 途中のディレクトリが通常ファイルに差し替わっている
+            Err(FsError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory => {
+                return Ok(TextRead::NotFound)
+            }
             Err(e) => return Err(ApiError::Internal(format!("ログを開けない: {e}"))),
         };
         let st = crate::fsroot::fstat(&file)

@@ -1448,3 +1448,17 @@ async fn inbox_files_serves_rip_texts_only() {
         serde_json::json!(["disc.cue", "rip.log"])
     );
 }
+
+/// 件のディレクトリが通常ファイルに差し替わっていても 500 にせず 404 にする
+#[tokio::test]
+async fn inbox_files_404s_when_the_item_dir_became_a_file() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = app.item("CD/y").await;
+    std::fs::create_dir_all(app.inbox_path("CD")).unwrap();
+    std::fs::write(app.inbox_path("CD/y"), "x").unwrap();
+    let (st, _) = app
+        .get_text(&c, &format!("/api/inbox/{id}/files/rip.log"))
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}

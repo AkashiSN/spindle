@@ -496,10 +496,6 @@ async fn discard_cas(state: &AppState, id: i64, request: bool) -> Result<Respons
     })
 }
 
-/// `GET /api/inbox/:id/artwork/:hash`（SPEC §7.8、P4-4）。件のファイルのうち `PICTURE` の sha256 が
-/// `hash` のものを開き、一致する埋め込み画像を原寸で返す（MIME は sniff）。ハッシュアドレスなので
-/// `immutable` + ETag。304 は**実体の照合の後**（件に無い・ファイルが消えた・画像が変わっていれば
-/// If-None-Match が一致しても 404）。件の状態は見ない。セッション必須
 /// `GET /api/inbox/{id}/files/{name}`: 承認前の CD 取り込みの吸い出しログ・cue・toc を読む（D-106）。
 /// 名前は [`is_rip_text_name`] だけ。Inbox の root から件の `rel_dir` を `openat2` で辿る
 pub async fn file(
@@ -546,6 +542,10 @@ fn rip_files(inbox: &RootDir, rel_dir: &str) -> Vec<String> {
     names
 }
 
+/// `GET /api/inbox/:id/artwork/:hash`（SPEC §7.8、P4-4）。件のファイルのうち `PICTURE` の sha256 が
+/// `hash` のものを開き、一致する埋め込み画像を原寸で返す（MIME は sniff）。ハッシュアドレスなので
+/// `immutable` + ETag。304 は**実体の照合の後**（件に無い・ファイルが消えた・画像が変わっていれば
+/// If-None-Match が一致しても 404）。件の状態は見ない。セッション必須
 pub async fn artwork(
     State(state): State<AppState>,
     Path((id, hash)): Path<(i64, String)>,
