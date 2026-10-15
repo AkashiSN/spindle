@@ -10,8 +10,10 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::extract::State;
+use axum::http::header::HeaderName;
+use axum::http::HeaderValue;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use futures_core::Stream;
+use axum::response::IntoResponse;
 use futures_util::StreamExt;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
@@ -21,16 +23,16 @@ use super::AppState;
 /// クライアントとの間の proxy に切られないための keep-alive 間隔
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
-pub async fn stream(
-    State(state): State<AppState>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+pub async fn stream(State(state): State<AppState>) -> impl IntoResponse {
     let rx = state.jobs.subscribe();
     let shutdown = state.shutdown.clone();
     let stream = BroadcastStream::new(rx)
         .map(|item| match item {
-            Ok(ev) => Ok(SseEvent::default()
-                .event(ev.name())
-                .data(ev.data().to_string())),
+            Ok(ev) => Ok::<_, Infallible>(
+                SseEvent::default()
+                    .event(ev.name())
+                    .data(ev.data().to_string()),
+            ),
             Err(BroadcastStreamRecvError::Lagged(skipped)) => {
                 tracing::debug!(skipped, "SSE 購読者が遅れてイベントを読み飛ばした");
                 Ok(SseEvent::default()
@@ -43,5 +45,14 @@ pub async fn stream(
     // 応答ヘッダを返さないことがあり、クライアントの open が最初の keep-alive（15 秒）まで待たされる
     let stream =
         futures_util::stream::once(async { Ok(SseEvent::default().comment("open")) }).chain(stream);
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
+    // nginx は既定で応答を溜める（proxy_buffering）ので、前段に置くとイベントが届かない。
+    // 画面は SSE の open を待って一覧を取りに行く（D-36）ため、届かないと曲が 1 件も出ない。
+    // `X-Accel-Buffering: no` で、この応答だけ nginx に溜めさせない
+    (
+        [(
+            HeaderName::from_static("x-accel-buffering"),
+            HeaderValue::from_static("no"),
+        )],
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEP_ALIVE)),
+    )
 }
