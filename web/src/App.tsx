@@ -11,7 +11,7 @@ import { apiFetch, apiPost, onUnauthorized } from './api/client'
 import type { Device, JobState, LibraryEvent, Playlist, TrackRow } from './api/types'
 import { AlbumGrid } from './components/AlbumGrid'
 import { AlbumArt } from './components/AlbumArt'
-import { HistoryView } from './components/HistoryView'
+import { RecordsView } from './components/RecordsView'
 import { JobsView } from './components/JobsView'
 import { Login } from './components/Login'
 import { CdView } from './components/CdView'
@@ -25,6 +25,7 @@ import { TopBar } from './components/TopBar'
 import { TrackTable } from './components/TrackTable'
 import { YoutubeView } from './components/YoutubeView'
 import { useAlbums } from './hooks/useAlbums'
+import type { RecordsFocus, RecordsTab } from './lib/records'
 import { notifyCategoriesChanged } from './lib/categories'
 import { useBatchEdit } from './hooks/useBatchEdit'
 import { useDragSize } from './hooks/useDragSize'
@@ -140,13 +141,17 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const youtube = useYoutube(sseOpen && view === 'youtube')
   const subs = useSubscriptions(sseOpen && view === 'youtube')
   // 履歴は画面を開いたときに取り、開いている間は batch イベントで取り直す
-  const history = useHistory(sseOpen && view === 'history')
-  /** ジョブ / 設定画面から「バッチ #n」で飛んできたときに開くバッチ */
+  const [recordsTab, setRecordsTab] = useState<RecordsTab>('history')
+  const history = useHistory(sseOpen && view === 'records' && recordsTab === 'history')
+  /** ジョブ / 退避ファイルから「バッチ #n」で飛んできたときに開くバッチ */
   const [historyFocus, setHistoryFocus] = useState<number | null>(null)
-  const openBatch = useCallback((id: number) => {
-    setHistoryFocus(id)
-    setView('history')
+  /** 他の画面から記録画面へ（バッチ #n → 編集履歴）。ログタブの対象 album は Task 8 で扱う */
+  const openRecords = useCallback((f: RecordsFocus) => {
+    setRecordsTab(f.tab)
+    if (f.tab === 'history' && f.batchId != null) setHistoryFocus(f.batchId)
+    setView('records')
   }, [])
+  const openBatch = useCallback((id: number) => openRecords({ tab: 'history', batchId: id }), [openRecords])
   const settings = useSettings(sseOpen && view === 'settings')
   const theme = useTheme()
   const cd = useCdLookup()
@@ -220,8 +225,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     // バッジは 60 秒の周期でしか直らないので、ここでも取り直す（P4-20）
     inboxSummary.refresh()
     devices.refresh()
-    if (view === 'history') history.refresh()
-  }, [jobs, albums, refreshPlaylists, tracks, refreshPending, bumpDetails, inboxSummary, devices, view, history])
+    if (view === 'records' && recordsTab === 'history') history.refresh()
+  }, [jobs, albums, refreshPlaylists, tracks, refreshPending, bumpDetails, inboxSummary, devices, view, recordsTab, history])
   // SSE が切れたとき（401 で閉じられた場合を含む）にセッションを確かめる。401 なら
   // apiFetch の onUnauthorized 経由でログイン画面へ戻る。連続するエラーは 5 秒に 1 回に間引くが、
   // 最後のエラーは必ず確認する（サーバ再起動直後は接続拒否 → 再接続で 401 の順に来る。
@@ -293,7 +298,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       tracks.reload(Math.max(visibleEnd.current + 1, 1))
       refreshPending()
       bumpDetails()
-      if (view === 'history') history.refresh()
+      if (view === 'records' && recordsTab === 'history') history.refresh()
     },
     onLibrary,
     onResync: refreshAll,
@@ -676,10 +681,16 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             jobs={jobs}
             onOpenBatch={openBatch}
           />
-        ) : view === 'history' ? (
-          <HistoryView history={history} focusId={historyFocus} />
+        ) : view === 'records' ? (
+          <RecordsView
+            tab={recordsTab}
+            onTab={setRecordsTab}
+            history={history}
+            historyFocus={historyFocus}
+            onOpenBatch={openBatch}
+          />
         ) : (
-          <SettingsView settings={settings} theme={theme} onOpenBatch={openBatch} />
+          <SettingsView settings={settings} theme={theme} />
         )}
       </main>
       </div>

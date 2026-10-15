@@ -1756,6 +1756,14 @@ table.gc-table td.sample {
   word-break: break-all;
   font-size: 12px;
 }
+.records-tabs {
+  margin-bottom: 8px;
+}
+
+.load-more {
+  margin: 8px 0;
+}
+
 .archive-table td.path {
   word-break: break-all;
 }
