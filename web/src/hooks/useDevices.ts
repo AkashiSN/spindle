@@ -19,7 +19,7 @@ import type {
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { mergePending, togglePlaylist } from '../lib/devicePicker'
 import { withPlaylistIds } from '../lib/devicePicker'
-import { applyProgressEvent, mergeListProgress } from '../lib/syncProgress'
+import { applyProgressEvent, mergeListProgress, ProgressEventSeq } from '../lib/syncProgress'
 import { Latest } from '../lib/latest'
 import { TrailingDebounce } from '../lib/debounce'
 
@@ -61,18 +61,19 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     itemsRef.current = items
   }, [items])
 
-  // 端末ごとの最後の device_progress の受信時刻（一覧の応答との前後の判定）
-  const progressAt = useRef(new Map<number, number>())
+  // device_progress の到着順（一覧の応答との前後の判定。時刻ではなく番号で比べる）
+  const progressSeq = useRef(new ProgressEventSeq())
   const fetchList = useCallback(() => {
     const id = listGen.current.next()
-    const startedAt = Date.now()
+    const mark = progressSeq.current.mark()
     apiFetch<DeviceList>('/api/devices')
       .then((l) => {
         if (!listGen.current.isCurrent(id)) return
         const now = Date.now()
         // 要求より後に届いた device_progress は応答より新しい。その端末の進捗は現在の値を残す
+        const seq = progressSeq.current
         setItems((cur) =>
-          mergeListProgress(mergePending(l.items, desired.current), cur, progressAt.current, startedAt, now),
+          mergeListProgress(mergePending(l.items, desired.current), cur, (d) => seq.since(d, mark), now),
         )
       })
       .catch(() => {
@@ -80,12 +81,17 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
       })
   }, [])
   /** SSE の device_progress で該当端末の進捗を差し替える（一覧に無い端末は無視。次の取り直しで入る）。
-   * 進捗が来たら plan_open も立てる（applyProgressEvent） */
-  const onProgress = useCallback((e: DeviceProgressEvent) => {
-    const now = Date.now()
-    progressAt.current.set(e.device_id, now)
-    setItems((cur) => (cur == null ? cur : applyProgressEvent(cur, e, now)))
-  }, [])
+   * 進捗が来たら plan_open も立てる（applyProgressEvent）。null はサーバが計画を閉じて進捗を消したときだけ
+   * 流れる（報告・破棄・強制破棄・端末の削除・受理後の確かめ直し）ので、一覧を取り直して plan_open を合わせる */
+  const onProgress = useCallback(
+    (e: DeviceProgressEvent) => {
+      const now = Date.now()
+      progressSeq.current.note(e.device_id)
+      setItems((cur) => (cur == null ? cur : applyProgressEvent(cur, e, now)))
+      if (e.progress == null) fetchList()
+    },
+    [fetchList],
+  )
   const fetchDiff = useCallback(() => {
     const id = diffGen.current.next()
     const deviceId = selectedRef.current

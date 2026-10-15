@@ -62,20 +62,43 @@ export function receivedAtOf(p: Pick<SyncProgress, 'age'>, nowMs: number): numbe
 type Progressive = { id: number; sync_progress?: SyncProgress | null }
 
 /**
+ * device_progress の到着順の番号。時刻（ms）で比べると、要求と同じ 1 ms に届いたイベントが古い一覧の
+ * 応答に負ける。番号はイベントのたびに 1 つ進むので、要求の開始時の `mark()` より後に届いたかを取り違えない
+ */
+export class ProgressEventSeq {
+  private seq = 0
+  private last = new Map<number, number>()
+
+  /** イベントが届いた */
+  note(deviceId: number): void {
+    this.seq += 1
+    this.last.set(deviceId, this.seq)
+  }
+
+  /** 一覧の要求を出す時点の印 */
+  mark(): number {
+    return this.seq
+  }
+
+  /** `mark` の後にこの端末のイベントが届いたか */
+  since(deviceId: number, mark: number): boolean {
+    return (this.last.get(deviceId) ?? 0) > mark
+  }
+}
+
+/**
  * 一覧の応答に SSE の進捗を重ねる。要求を出した後に device_progress が届いた端末は、応答より
  * イベントの方が新しいので現在の sync_progress（null 含む）を残す。それ以外は応答の値を使い、
- * receivedAt を付ける。events は端末 ID → 最後のイベントの受信時刻（ms）
+ * receivedAt を付ける。`newer(id)` はその端末に要求の後のイベントがあったか（`ProgressEventSeq.since`）
  */
 export function mergeListProgress<T extends Progressive>(
   fresh: readonly T[],
   current: readonly Progressive[] | null,
-  events: ReadonlyMap<number, number>,
-  requestStartMs: number,
+  newer: (deviceId: number) => boolean,
   nowMs: number,
 ): T[] {
   return fresh.map((d) => {
-    const at = events.get(d.id)
-    if (at != null && at > requestStartMs) {
+    if (newer(d.id)) {
       const cur = current?.find((x) => x.id === d.id)
       if (cur) return { ...d, sync_progress: cur.sync_progress ?? null }
     }
@@ -89,7 +112,7 @@ type ProgressTarget = Progressive & { plan_open: boolean }
 /**
  * SSE の device_progress を一覧へ当てる（一覧に無い端末は無視）。進捗は open な計画にしか来ないので、
  * 非 null なら plan_open も true にする（計画の確定はイベントを流さず、一覧の取り直しまで古いままのため）。
- * null（計画が閉じた）のときは plan_open に触らない。閉じたかどうかは一覧の取り直しで知る
+ * null（計画が閉じた）のときは plan_open に触らない。呼び出し側が一覧を取り直して知る（`useDevices`）
  */
 export function applyProgressEvent<T extends ProgressTarget>(items: readonly T[], e: DeviceProgressEvent, nowMs: number): T[] {
   return items.map((d) =>
