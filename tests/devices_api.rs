@@ -468,6 +468,8 @@ async fn estimate_counts_distinct_tracks_of_a_hypothetical_selection() {
         .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["tracks"], 3, "重複を除く");
+    // 長さが無いので推定できない
+    assert_eq!(v["estimated"], 0);
     assert_eq!(v["unhashed"], 3);
     let (st, v) = app
         .call(

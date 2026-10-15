@@ -1457,15 +1457,24 @@ pub fn smart_evaluations(
 
 pub struct SelectionEstimate {
     pub tracks: usize,
+    /// 容量の合計。ハッシュの size（確定）と推定（`estimated` の曲）を足したもの
     pub bytes: u64,
-    /// 容量が未確定の曲の数（送る元の準備待ち: Derived が無い・古い、送る元のハッシュが無い・古い）。bytes に含まれない
+    /// bytes のうち推定で数えた曲の数（送る元のハッシュがまだ無い・古い曲）
+    pub estimated: usize,
+    /// 推定もできない曲の数（長さが分からない、系統が凍結で送られない、など）。bytes に含まれない
     pub unhashed: usize,
 }
 
 /// 仮の選曲の曲数と容量（選曲タブ）。差分（`build_manifest`）と同じく `decide_source` で**現在の**送る元を
-/// 決め、そのハッシュの行の意味トークンが現在のものと一致する（原本は物理同一性も一致する）曲だけ
-/// size を数える（Derived はエンコード後の大きさが分からないため、ハッシュの行から取る）。
-/// Derived が無い・古い曲、ハッシュが無い・古い曲は unhashed に数える
+/// 決め、そのハッシュの行の意味トークンが現在のものと一致する（原本は物理同一性も一致する）曲は
+/// その size を数える（確定）。
+///
+/// ハッシュが無い・古い曲は推定する（D-107）。ハッシュは同期の計画に入った曲にしか取らないので、
+/// 推定しないと「全曲」の容量が数百 MB のように小さく見える。
+/// - 原本を送る曲: `tracks.size`（そのファイルを送る）
+/// - Derived を送る曲（Derived がまだ無い・古い曲も、系統が有効なら作られる）: 長さ × 系統のビットレート。
+///   実機の AAC 256 kbps で、実際の大きさとの差は 3% ほど（埋め込みのアートワーク分だけ小さく出る）
+/// - 長さが分からない、系統が凍結で Derived の無い曲は送られない、などは unhashed
 pub fn estimate_selection(
     conn: &Connection,
     device: &Device,
@@ -1479,26 +1488,74 @@ pub fn estimate_selection(
         Selection::Playlists => InputScope::PlaylistIds(&json),
     };
     let settings = settings_or_frozen(conn, device.variant)?;
+    let kbps = variant_bitrate_kbps(conn, device.variant)?;
     let tracks = track_inputs_in(conn, device.variant, scope)?;
+    let physical = track_sizes_and_durations(conn)?;
     let mut out = SelectionEstimate {
         tracks: tracks.len(),
         bytes: 0,
+        estimated: 0,
         unhashed: 0,
     };
     for t in &tracks {
-        let size = decide_source(&settings, t).ok().and_then(|src| {
+        let source = decide_source(&settings, t);
+        let exact = source.as_ref().ok().and_then(|src| {
             let hash = match src.kind {
                 SourceKind::Master => t.hash_master.as_ref(),
                 SourceKind::Derived(_) => t.hash_derived.as_ref(),
             };
             hash.filter(|h| h.semantic == src.semantic).map(|h| h.size)
         });
-        match size {
-            Some(n) => out.bytes += n,
+        if let Some(n) = exact {
+            out.bytes += n;
+            continue;
+        }
+        let (size, duration_ms) = physical.get(&t.track_id).copied().unwrap_or((0, None));
+        let derived_estimate = || {
+            duration_ms
+                .zip(kbps)
+                .map(|(ms, kbps)| ms.max(0) as u64 * kbps.max(0) as u64 / 8)
+        };
+        let guess = match &source {
+            Ok(src) if src.kind == SourceKind::Master => Some(size.max(0) as u64),
+            Ok(_) => derived_estimate(),
+            // まだ Derived が無い・古い: 系統が有効なら作られて送られる。凍結なら送られない
+            Err(_) if settings.enabled => derived_estimate(),
+            Err(_) => None,
+        };
+        match guess {
+            Some(n) => {
+                out.bytes += n;
+                out.estimated += 1;
+            }
             None => out.unhashed += 1,
         }
     }
     Ok(out)
+}
+
+/// 系統のビットレート（kbps）。系統が表に無い・未設定なら None
+fn variant_bitrate_kbps(conn: &Connection, variant: Variant) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT bitrate FROM derived_variants WHERE variant = ?1",
+            [variant.as_str()],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// 推定に使う、曲ごとの原本の size と長さ（missing を除く）
+fn track_sizes_and_durations(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<i64, (i64, Option<i64>)>> {
+    let mut st = conn
+        .prepare_cached("SELECT id, size, duration_ms FROM tracks WHERE missing_since IS NULL")?;
+    let rows = st
+        .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
 }
 
 /// 保持期間を過ぎた終端の計画の条件（`?1` = cutoff）。open には触れず、端末ごとに

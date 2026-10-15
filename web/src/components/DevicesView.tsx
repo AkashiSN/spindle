@@ -693,8 +693,11 @@ function SelectionTab({ device, devices, playlists }: { device: Device; devices:
         ) : (
           <>
             合計 {formatCount(estimate.tracks)} 曲・約 {formatBytes(estimate.bytes)}
+            {estimate.estimated > 0 && (
+              <span className="muted">（うち {formatCount(estimate.estimated)} 曲は長さとビットレートからの推定）</span>
+            )}
             {estimate.unhashed > 0 && (
-              <span className="muted">（容量未確定 {formatCount(estimate.unhashed)} 曲（送る元の準備待ち）は含まない）</span>
+              <span className="muted">（容量の分からない {formatCount(estimate.unhashed)} 曲は含まない）</span>
             )}
           </>
         )}

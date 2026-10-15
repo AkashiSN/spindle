@@ -714,8 +714,11 @@ pub struct EstimateParams {
 #[derive(Serialize)]
 pub struct EstimateSelectionView {
     pub tracks: usize,
+    /// 容量の合計（確定と推定の和）
     pub bytes: u64,
-    /// 容量が未確定の曲の数（送る元の準備待ち: Derived が無い・古い、送る元のハッシュが無い・古い）。bytes に含まれない
+    /// bytes のうち推定で数えた曲の数（送る元のハッシュがまだ無い・古い曲。D-107）
+    pub estimated: usize,
+    /// 推定もできない曲の数（長さが分からない、系統が凍結で送られない、など）。bytes に含まれない
     pub unhashed: usize,
 }
 
@@ -752,6 +755,7 @@ pub async fn estimate(
         Some(e) => Json(EstimateSelectionView {
             tracks: e.tracks,
             bytes: e.bytes,
+            estimated: e.estimated,
             unhashed: e.unhashed,
         })
         .into_response(),
