@@ -657,22 +657,21 @@ function RipFiles({ itemId, names }: { itemId: number; names: string[] }) {
   const [open, setOpen] = useState<string | null>(null)
   // 取得結果は開いたファイル名と一緒に持ち、今開いているものの分だけ使う
   const [got, setGot] = useState<RipFile | null>(null)
-  // 最後に要求した名前。遅れて届いた別ファイルの応答は捨てる
-  const wanted = useRef<string | null>(null)
+  // 要求ごとの世代。開閉のたびに進め、今の世代の応答だけ使う（同じ名前の開き直しでも古い応答を捨てる）
+  const gen = useRef(0)
   const show = (name: string) => {
+    const g = ++gen.current
     if (open === name) {
-      wanted.current = null
       setOpen(null)
       return
     }
-    wanted.current = name
     setOpen(name)
     apiText(`/api/inbox/${itemId}/files/${encodeURIComponent(name)}`)
       .then((text) => {
-        if (wanted.current === name) setGot({ name, text, error: null })
+        if (gen.current === g) setGot({ name, text, error: null })
       })
       .catch((e: unknown) => {
-        if (wanted.current === name) setGot({ name, text: null, error: logErrorText(e) })
+        if (gen.current === g) setGot({ name, text: null, error: logErrorText(e, 'inbox') })
       })
   }
   const cur = open != null && got?.name === open ? got : null

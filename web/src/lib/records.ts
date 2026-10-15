@@ -1,6 +1,5 @@
 // 記録画面（SPEC §12.4、D-106）の純ロジック: タブ、退避ファイルの切り替えと空の文言
 
-import { ApiError } from '../api/client'
 import { formatCount } from './format'
 
 export type RecordsTab = 'history' | 'archive' | 'logs'
@@ -87,10 +86,24 @@ export function singleAlbumId(rows: ReadonlyArray<{ album_id: number | null }>):
   return rows.every((r) => r.album_id === first) ? first : null
 }
 
-/** ログ本文・吸い出しの記録の取得失敗を画面の文言にする（ログタブと Inbox で共通） */
-export function logErrorText(e: unknown): string {
-  if (e instanceof ApiError && e.code === 'log_not_found') return 'ログが残っていない（後の照合で上書きされたか、ファイルが無い）'
-  if (e instanceof ApiError && e.code === 'log_too_large') return 'ログが大きすぎて表示できない（1 MiB 超）'
+/** API エラーの code（ApiError かどうかでなく形で見る。純ロジックから api 層へ依存しない） */
+function errorCode(e: unknown): string | null {
+  if (typeof e === 'object' && e !== null && 'code' in e) {
+    const c = (e as { code: unknown }).code
+    return typeof c === 'string' ? c : null
+  }
+  return null
+}
+
+/** ログ本文・吸い出しの記録の取得失敗を画面の文言にする。context はログタブ（verify）か Inbox のファイルか */
+export function logErrorText(e: unknown, context: 'log' | 'inbox' = 'log'): string {
+  const code = errorCode(e)
+  if (code === 'log_not_found') {
+    return context === 'inbox'
+      ? 'ファイルが見つからない（Inbox から移動・削除された）'
+      : 'ログが残っていない（後の照合で上書きされたか、ファイルが無い）'
+  }
+  if (code === 'log_too_large') return 'ログが大きすぎて表示できない（1 MiB 超）'
   return e instanceof Error ? e.message : String(e)
 }
 

@@ -269,7 +269,16 @@ impl BackupHandler {
         }
         // rename 済みなので tmp のガードは外す（消す対象がもう無い）
         let _ = tmp.keep();
-        tracing::info!(path = %final_path.display(), bytes = db_size, "バックアップを書いた");
+        // note には見積もりでなく書き上がったファイルの実サイズを載せる（取れなければ見積もり）
+        let written = {
+            let p = final_path.clone();
+            tokio::task::spawn_blocking(move || std::fs::metadata(&p).map(|m| m.len()))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(db_size)
+        };
+        tracing::info!(path = %final_path.display(), bytes = written, "バックアップを書いた");
         ctx.progress(3, STEPS).await?;
 
         // 5. 世代 GC。新しい順に retention 件残す
@@ -288,7 +297,7 @@ impl BackupHandler {
             .to_owned();
         Ok(Outcome::DoneWith(crate::jobs::note::backup_note(
             &file,
-            db_size,
+            written,
             retention,
             removed.len(),
         )))

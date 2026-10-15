@@ -433,6 +433,59 @@ async fn rip_text_picks_the_disc_and_rejects_other_names() {
 }
 
 #[tokio::test]
+async fn rip_text_does_not_fall_back_to_another_disc() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    let conn = app.conn();
+    album(&conn, 1, "A/Set");
+    track(&conn, 1, "A/Set/Disc 1/01.flac", Some(1), 1);
+    track(&conn, 1, "A/Set/Disc 2/01.flac", Some(2), 1);
+    conn.execute("UPDATE tracks SET missing_since = 5 WHERE disc_no = 2", [])
+        .unwrap();
+    verification(
+        &conn,
+        1,
+        "rip",
+        None,
+        Some(2),
+        "ctdb",
+        "verified",
+        50,
+        Some("A/Set/Disc 2/rip2.log"),
+    );
+    // disc 1 のディレクトリに rip2.log がある（disc 2 の曲は消えている）
+    std::fs::create_dir_all(app.lib().join("A/Set/Disc 1")).unwrap();
+    std::fs::write(app.lib().join("A/Set/Disc 1/rip2.log"), "other disc").unwrap();
+    let (st, _) = get(&app, &c, "/api/logs/rip-1-t50/text?disc=2").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn rip_text_single_disc_with_untagged_disc_no_still_works() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    let conn = app.conn();
+    album(&conn, 1, "A/One");
+    track(&conn, 1, "A/One/01.flac", None, 1);
+    verification(
+        &conn,
+        1,
+        "rip",
+        None,
+        Some(1),
+        "ctdb",
+        "verified",
+        50,
+        Some("A/One/rip.log"),
+    );
+    std::fs::create_dir_all(app.lib().join("A/One")).unwrap();
+    std::fs::write(app.lib().join("A/One/rip.log"), "one disc").unwrap();
+    let (st, body) = get(&app, &c, "/api/logs/rip-1-t50/text?disc=1").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body, b"one disc");
+}
+
+#[tokio::test]
 async fn text_rejects_oversize_and_symlinks() {
     let app = build().await;
     let c = cookie(&app).await;

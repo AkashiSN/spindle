@@ -205,8 +205,10 @@ pub fn availability(conn: &Connection, key: &RunKey, rows: &[RunRow]) -> Result<
     })
 }
 
-/// その album・ディスクの active な曲が今あるディレクトリ（Library 相対）。ディスク番号の一致を優先し、
-/// 無ければ album の最初の曲（1 枚物で tracks の disc_no が空のとき）
+/// その album・ディスクの active な曲が今あるディレクトリ（Library 相対）。
+/// 指定ディスクの曲だけを使う。album の任意の曲に落とすのは、ディスク指定が無いとき、
+/// または active な曲の disc_no がすべて空のとき（1 枚物でタグにディスク番号が無い）に限る。
+/// それ以外で指定ディスクの曲が無ければ None（別ディスクのディレクトリのログを返さない）
 pub fn track_dir_for_disc(
     conn: &Connection,
     album_id: i64,
@@ -216,6 +218,10 @@ pub fn track_dir_for_disc(
         .query_row(
             "SELECT rel_path FROM tracks
               WHERE album_id = ?1 AND missing_since IS NULL
+                AND (?2 IS NULL OR disc_no = ?2
+                     OR NOT EXISTS (SELECT 1 FROM tracks t2
+                                     WHERE t2.album_id = ?1 AND t2.missing_since IS NULL
+                                       AND t2.disc_no IS NOT NULL))
               ORDER BY (disc_no IS ?2) DESC, disc_no, track_no, id LIMIT 1",
             params![album_id, disc_no],
             |r| r.get(0),

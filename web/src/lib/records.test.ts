@@ -89,6 +89,7 @@ test('次のページを足すとき、既にある key の行は捨てる', () 
 
 test('ログの取得失敗は code で日本語にし、それ以外は message', () => {
   expect(logErrorText(new ApiError(404, 'log_not_found'))).toContain('残っていない')
+  expect(logErrorText(new ApiError(404, 'log_not_found'), 'inbox')).toContain('Inbox')
   expect(logErrorText(new ApiError(413, 'log_too_large'))).toContain('1 MiB')
   expect(logErrorText(new Error('boom'))).toBe('boom')
   expect(logErrorText('x')).toBe('x')
