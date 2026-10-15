@@ -248,6 +248,35 @@ pub struct ErrorBody {
     pub plan_token: Option<String>,
 }
 
+/// 同期の進捗の段（エージェント → サーバの `POST /api/agent/progress`）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProgressPhase {
+    Delete,
+    Move,
+    Fetch,
+    Add,
+    Playlist,
+}
+
+/// `ProgressRequest::current` の最大バイト数
+pub const PROGRESS_CURRENT_MAX: usize = 1024;
+
+/// 同期の進捗の報告
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProgressRequest {
+    pub generation: i64,
+    pub done: u64,
+    pub total: u64,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// バイト / 秒
+    pub rate: u64,
+    pub phase: ProgressPhase,
+    /// 今の項目（`PROGRESS_CURRENT_MAX` バイトまで。文字境界で切る）
+    pub current: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +346,15 @@ mod tests {
         let back: AdoptResponse =
             serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn progress_phase_is_lowercase_and_rejects_unknown() {
+        assert_eq!(
+            serde_json::to_string(&ProgressPhase::Playlist).unwrap(),
+            "\"playlist\""
+        );
+        assert!(serde_json::from_str::<ProgressPhase>("\"fetch\"").is_ok());
+        assert!(serde_json::from_str::<ProgressPhase>("\"nope\"").is_err());
     }
 }

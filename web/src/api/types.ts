@@ -401,7 +401,25 @@ export type Device = {
   plan_open: boolean
   /** その端末の queued / running の同期ジョブ */
   sync_job: { id: number; state: 'queued' | 'running' } | null
+  /** Mac の同期の進捗（open な計画のものだけ。無ければ null）。receivedAt は受信時にクライアントが付ける */
+  sync_progress?: (SyncProgress & { receivedAt?: number }) | null
 }
+export type SyncProgress = {
+  plan_id: number
+  done: number
+  total: number
+  bytes_done: number
+  bytes_total: number
+  /** bytes/s */
+  rate: number
+  phase: 'delete' | 'move' | 'fetch' | 'add' | 'playlist'
+  current: string | null
+  updated_at: number
+  /** サーバが数えた、最後の進捗からの経過秒 */
+  age: number
+}
+/** SSE device_progress。計画が閉じたら progress は null */
+export type DeviceProgressEvent = { device_id: number; progress: SyncProgress | null }
 export type DeviceList = { items: Device[] }
 /** iPhone のエージェントのワンタイムコード（`POST /api/devices/{id}/pair-code`）。画面の state にだけ持つ */
 export interface PairCode {

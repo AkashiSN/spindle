@@ -13,6 +13,7 @@ use crate::device::adb::AdbFs;
 use crate::device::adopt::{self, Candidate};
 use crate::device::credential::{self, PAIR_SECRET_BYTES, PAIR_SELECTOR_BYTES};
 use crate::device::ondevice::{is_reserved, JOURNAL_PATH, MOVING_DIR};
+use crate::device::progress::{ProgressStore, SyncProgressView};
 use crate::device::quote::{root_abs_under, valid_serial, valid_volume, DEFAULT_ROOT};
 use crate::device::recover::{recover, Expect, RecoverError};
 use crate::device::remote::{DeviceFs as _, DirState, RemoteError};
@@ -87,6 +88,8 @@ pub struct DeviceView {
     pub plan_open: bool,
     /// queued / running の `device_sync`（無ければ null）
     pub sync_job: Option<SyncJobView>,
+    /// エージェントが送った同期の進捗（メモリだけ。計画が開いていて受けていれば値、無ければ null）
+    pub sync_progress: Option<SyncProgressView>,
 }
 
 #[derive(Serialize)]
@@ -100,14 +103,18 @@ struct Extras {
     playlist_ids: Vec<i64>,
     open_plan: bool,
     plan_open: bool,
+    /// open な計画の id（進捗がその計画のものか照らす）
+    open_plan_id: Option<i64>,
     sync_job: Option<SyncJobView>,
 }
 
 fn read_extras(c: &rusqlite::Connection, id: i64) -> crate::db::Result<Extras> {
+    let open_plan_id = dbdev::open_plan_id(c, id)?;
     Ok(Extras {
         playlist_ids: dbdev::playlist_ids(c, id)?,
         open_plan: dbdev::has_open_work(c, id)?,
-        plan_open: dbdev::open_plan_id(c, id)?.is_some(),
+        plan_open: open_plan_id.is_some(),
+        open_plan_id,
         sync_job: dbdev::active_device_job(c, id, "device_sync")?
             .map(|(id, state)| SyncJobView { id, state }),
     })
@@ -118,7 +125,13 @@ pub struct DeviceList {
     pub items: Vec<DeviceView>,
 }
 
-fn view(d: &Device, snap: &Snapshot, extras: Extras, rt: Option<&AdbRuntime>) -> DeviceView {
+fn view(
+    d: &Device,
+    snap: &Snapshot,
+    extras: Extras,
+    rt: Option<&AdbRuntime>,
+    progress: &ProgressStore,
+) -> DeviceView {
     let (connected, adb_state) = match (d.transport, d.adb_serial.as_deref()) {
         (Transport::Adb, Some(serial)) => (
             Some(rt.is_some_and(|rt| rt.is_connected(serial))),
@@ -144,6 +157,10 @@ fn view(d: &Device, snap: &Snapshot, extras: Extras, rt: Option<&AdbRuntime>) ->
         open_plan: extras.open_plan,
         plan_open: extras.plan_open,
         sync_job: extras.sync_job,
+        // 閉じた計画の遅れて着いた進捗は出さない
+        sync_progress: progress
+            .view(d.id, now_epoch())
+            .filter(|p| extras.open_plan_id == Some(p.plan_id)),
     }
 }
 
@@ -159,7 +176,15 @@ async fn view_of(state: &AppState, id: i64) -> Result<Option<DeviceView>, ApiErr
             Ok(Some((d, extras)))
         })
         .await?;
-    Ok(found.map(|(d, extras)| view(&d, &snap, extras, state.adb.as_deref())))
+    Ok(found.map(|(d, extras)| {
+        view(
+            &d,
+            &snap,
+            extras,
+            state.adb.as_deref(),
+            &state.sync_progress,
+        )
+    }))
 }
 
 fn bad_request(msg: impl Into<String>) -> Response {
@@ -213,7 +238,15 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
         .await?;
     let items = rows
         .into_iter()
-        .map(|(d, extras)| view(&d, &snap, extras, state.adb.as_deref()))
+        .map(|(d, extras)| {
+            view(
+                &d,
+                &snap,
+                extras,
+                state.adb.as_deref(),
+                &state.sync_progress,
+            )
+        })
         .collect();
     enqueue_hashes(&state, &snap).await?;
     Ok(Json(DeviceList { items }).into_response())
@@ -399,6 +432,8 @@ pub async fn delete(
         .await?;
     match res {
         Deleted::Done(queued) => {
+            // 途中の計画は行と一緒に消えたので、手元の進捗も消す（消えたことを画面へも知らせる）
+            super::agent::clear_progress(&state, id);
             // 行を消した後に取り消す。間に走り出したものは端末が無いのを見て何もせずに終わる
             for job_id in queued {
                 state.jobs.cancel(job_id).await?;
@@ -1539,6 +1574,7 @@ pub async fn abandon(
 
 /// 閉じた計画の待ちの同期を取り消して、端末の view を返す
 async fn abandoned(state: &AppState, id: i64, queued: Vec<i64>) -> Result<Response, ApiError> {
+    super::agent::clear_progress(state, id);
     // 閉じた計画のジョブは走っても何もしないが、待ちの表示を残さない
     for job_id in queued {
         state.jobs.cancel(job_id).await?;

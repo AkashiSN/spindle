@@ -305,6 +305,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     },
     onLibrary,
     onResync: refreshAll,
+    onDeviceProgress: devices.onProgress,
     onPlaylist: (e) => {
       // 再評価で項目が変わった: 一覧の件数と、表示中ならその表を取り直す
       refreshPlaylists()

@@ -12,6 +12,7 @@ use spindle_agent::failpoint::Failpoints;
 use spindle_agent::local::LocalRoot;
 use spindle_agent::music::fake::FakeMusic;
 use spindle_agent::plan::{current_of, runnable, Runnable};
+use spindle_agent::progress::Progress;
 use spindle_agent::server::fake::FakeServer;
 use spindle_agent::server::{Confirmed, Reported, Server};
 use spindle_agent::state::{ServerInfo, Setup, SetupPhase, State, StateFile, TrackEntry};
@@ -96,6 +97,7 @@ impl Env {
             state,
             errors: Vec::new(),
             now: || 1_800_000_000,
+            progress: Progress::disabled(),
         };
         f(&mut cx)
     }
@@ -245,7 +247,22 @@ impl Env {
 
     /// `spindle-agent sync` と同じ段取りを偽のミュージック.app・偽のサーバで走らせる
     pub fn sync(&mut self) -> spindle_agent::Result<spindle_agent::sync::SyncOutcome> {
+        self.sync_with(Progress::disabled())
+    }
+
+    /// `sync` を、進捗を `progress` へ出しながら走らせる
+    pub fn sync_with(
+        &mut self,
+        progress: Progress,
+    ) -> spindle_agent::Result<spindle_agent::sync::SyncOutcome> {
         let paths = self.paths();
-        spindle_agent::sync::sync(&self.music, &self.server, &paths, &self.fp, &mut self.ui)
+        spindle_agent::sync::sync(
+            &self.music,
+            &self.server,
+            &paths,
+            &self.fp,
+            &mut self.ui,
+            progress,
+        )
     }
 }

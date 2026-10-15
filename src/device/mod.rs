@@ -8,6 +8,7 @@ pub mod credential;
 pub mod journal;
 pub mod ondevice;
 pub mod plan;
+pub mod progress;
 pub mod quote;
 pub mod recover;
 pub mod remote;

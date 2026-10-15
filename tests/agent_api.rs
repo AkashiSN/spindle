@@ -1420,3 +1420,258 @@ async fn adopted_diff_is_adoption_check_and_report_passes() {
         .await;
     assert_eq!(d["counts"]["synced"], 1);
 }
+
+// ---- 同期の進捗（POST /api/agent/plans/{id}/progress） ----
+
+fn progress_body(generation: i64) -> Value {
+    json!({"generation": generation, "done": 2, "total": 5, "bytes_done": 10,
+           "bytes_total": 50, "rate": 7, "phase": "fetch", "current": "A/01 a.flac"})
+}
+
+async fn send_progress(app: &App, token: &str, plan_id: i64, body: Value) -> (StatusCode, Value) {
+    app.agent_call(
+        Some(token),
+        Method::POST,
+        &format!("/api/agent/plans/{plan_id}/progress"),
+        Some(body),
+    )
+    .await
+}
+
+async fn sync_progress_of(app: &App, id: i64) -> Value {
+    let (_, v) = app.call(Method::GET, "/api/devices", None).await;
+    v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == id)
+        .unwrap()["sync_progress"]
+        .clone()
+}
+
+fn next_progress_event(rx: &mut tokio::sync::broadcast::Receiver<spindle::jobs::Event>) -> Value {
+    loop {
+        let ev = rx.try_recv().expect("device_progress が流れるはず");
+        if ev.name() == "device_progress" {
+            return ev.data();
+        }
+    }
+}
+
+#[tokio::test]
+async fn progress_requires_bearer() {
+    let app = App::with_roots().await;
+    let (st, _) = app
+        .agent_call(
+            None,
+            Method::POST,
+            "/api/agent/plans/1/progress",
+            Some(progress_body(0)),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn progress_is_stored_listed_and_published() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    assert!(sync_progress_of(&app, id).await.is_null());
+    let mut rx = app.jobs.subscribe();
+    let (st, v) = send_progress(&app, &token, p.plan_id, progress_body(p.generation)).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    let sp = sync_progress_of(&app, id).await;
+    assert_eq!(sp["plan_id"], p.plan_id);
+    assert_eq!(
+        (sp["done"].as_u64(), sp["total"].as_u64()),
+        (Some(2), Some(5))
+    );
+    assert_eq!(sp["phase"], "fetch");
+    assert_eq!(sp["current"], "A/01 a.flac");
+    assert!(sp["age"].as_i64().unwrap() >= 0);
+    let ev = next_progress_event(&mut rx);
+    assert_eq!(ev["device_id"], id);
+    assert_eq!(ev["progress"]["done"], 2);
+}
+
+#[tokio::test]
+async fn progress_rejects_unknown_closed_other_and_stale_generation() {
+    let app = App::with_roots().await;
+    let a = app.create_iphone("A").await;
+    let b = app.create_iphone("B").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let ta = app.pair(a).await;
+    let tb = app.pair(b).await;
+    let pa = confirm(&app, &ta).await;
+    let err = |v: &Value| v["error"].as_str().map(str::to_owned);
+    let (st, v) = send_progress(&app, &ta, pa.plan_id + 999, progress_body(pa.generation)).await;
+    assert_eq!(
+        (st, err(&v)),
+        (StatusCode::NOT_FOUND, Some("no_plan".into()))
+    );
+    let (st, v) = send_progress(&app, &tb, pa.plan_id, progress_body(pa.generation)).await;
+    assert_eq!(
+        (st, err(&v)),
+        (StatusCode::NOT_FOUND, Some("no_plan".into()))
+    );
+    let (st, v) = send_progress(&app, &ta, pa.plan_id, progress_body(pa.generation + 1)).await;
+    assert_eq!(
+        (st, err(&v)),
+        (StatusCode::CONFLICT, Some("generation_mismatch".into()))
+    );
+    // 閉じた計画
+    let uri = format!("/api/agent/plans/{}/abandon", pa.plan_id);
+    let mut body = report_of(&pa, json!([]), json!([]));
+    body["pending_ops"] = json!(0);
+    body["pending_batches"] = json!(0);
+    let (st, v) = app
+        .agent_call(Some(&ta), Method::POST, &uri, Some(body))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = send_progress(&app, &ta, pa.plan_id, progress_body(pa.generation)).await;
+    assert_eq!(
+        (st, err(&v)),
+        (StatusCode::NOT_FOUND, Some("no_plan".into()))
+    );
+}
+
+#[tokio::test]
+async fn progress_validates_the_body() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    let g = p.generation;
+    let mut cases = Vec::new();
+    let mut b = progress_body(g);
+    b["done"] = json!(6);
+    cases.push(b);
+    let mut b = progress_body(g);
+    b["bytes_done"] = json!(51);
+    cases.push(b);
+    let mut b = progress_body(g);
+    b["current"] = json!("a".repeat(1025));
+    cases.push(b);
+    let mut b = progress_body(g);
+    b["phase"] = json!("bogus");
+    cases.push(b);
+    for b in cases {
+        let (st, v) = send_progress(&app, &token, p.plan_id, b.clone()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+        assert_eq!(v["error"], "invalid", "{b}");
+    }
+    assert!(sync_progress_of(&app, id).await.is_null());
+    // ちょうど 1,024 バイトは通る
+    let mut b = progress_body(g);
+    b["current"] = json!("a".repeat(1024));
+    let (st, _) = send_progress(&app, &token, p.plan_id, b).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn report_clears_progress_and_publishes_null() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    let t = app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    send_progress(&app, &token, p.plan_id, progress_body(p.generation)).await;
+    assert!(!sync_progress_of(&app, id).await.is_null());
+    let mut rx = app.jobs.subscribe();
+    let body = report_of(
+        &p,
+        json!([{"track_id": 1, "dest_path": t.dest_path, "token": t.token, "size": 1, "sha256": t.sha256}]),
+        json!([]),
+    );
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, "/api/agent/report", Some(body))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(sync_progress_of(&app, id).await.is_null());
+    let ev = next_progress_event(&mut rx);
+    assert_eq!(ev["device_id"], id);
+    assert!(ev["progress"].is_null());
+}
+
+#[tokio::test]
+async fn agent_abandon_clears_progress() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    send_progress(&app, &token, p.plan_id, progress_body(p.generation)).await;
+    let mut body = report_of(&p, json!([]), json!([]));
+    body["pending_ops"] = json!(0);
+    body["pending_batches"] = json!(0);
+    let uri = format!("/api/agent/plans/{}/abandon", p.plan_id);
+    let (st, v) = app
+        .agent_call(Some(&token), Method::POST, &uri, Some(body))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(sync_progress_of(&app, id).await.is_null());
+}
+
+#[tokio::test]
+async fn ui_force_abandon_clears_progress() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    send_progress(&app, &token, p.plan_id, progress_body(p.generation)).await;
+    let mut rx = app.jobs.subscribe();
+    let uri = format!("/api/devices/{id}/plans/open/abandon");
+    let (st, v) = app
+        .call(Method::POST, &uri, Some(json!({"force": true})))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["sync_progress"].is_null());
+    assert!(sync_progress_of(&app, id).await.is_null());
+    assert!(next_progress_event(&mut rx)["progress"].is_null());
+}
+
+#[tokio::test]
+async fn stale_progress_of_an_old_plan_is_hidden_under_a_new_plan() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p1 = confirm(&app, &token).await;
+    // 閉じる側の消去を追い越して残った、という状況を直接作る
+    let req: agent_proto::ProgressRequest =
+        serde_json::from_value(progress_body(p1.generation)).unwrap();
+    let uri = format!("/api/devices/{id}/plans/open/abandon");
+    let (st, _) = app
+        .call(Method::POST, &uri, Some(json!({"force": true})))
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    app.sync_progress.put(id, p1.plan_id, req, 0);
+    let p2 = confirm(&app, &token).await;
+    assert_ne!(p1.plan_id, p2.plan_id);
+    assert!(sync_progress_of(&app, id).await.is_null());
+}
+
+#[tokio::test]
+async fn device_delete_clears_progress() {
+    let app = App::with_roots().await;
+    let id = app.create_iphone("iPhone").await;
+    app.seed_track(1, "A/01 a.flac", b"x").await;
+    let token = app.pair(id).await;
+    let p = confirm(&app, &token).await;
+    send_progress(&app, &token, p.plan_id, progress_body(p.generation)).await;
+    assert!(app.sync_progress.view(id, 0).is_some());
+    let mut rx = app.jobs.subscribe();
+    let (st, v) = app
+        .call(Method::DELETE, &format!("/api/devices/{id}"), None)
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    assert!(app.sync_progress.view(id, 0).is_none());
+    let ev = next_progress_event(&mut rx);
+    assert_eq!(ev["device_id"], id);
+    assert!(ev["progress"].is_null());
+}

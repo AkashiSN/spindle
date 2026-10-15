@@ -10,6 +10,7 @@ use spindle::db::devices as dbdev;
 use spindle_agent::ctx::Ui;
 use spindle_agent::failpoint::Failpoints;
 use spindle_agent::music::fake::FakeMusic;
+use spindle_agent::progress::Progress;
 use spindle_agent::secrets::{FileSecrets, Secrets};
 use spindle_agent::server::{HttpServer, Server};
 use spindle_agent::sync::{pair_cmd, sync, Paths, SyncOutcome};
@@ -63,7 +64,7 @@ fn pair_and_sync(url: String, code: String, dir: PathBuf) -> Synced {
     )
     .unwrap();
     let server = HttpServer::new(&url, true, secrets.get().unwrap()).unwrap();
-    let outcome = sync(&music, &server, &paths, &fp, &mut ui).unwrap();
+    let outcome = sync(&music, &server, &paths, &fp, &mut ui, Progress::disabled()).unwrap();
     let mut tracks: Vec<String> = music
         .tracks()
         .into_iter()
@@ -279,6 +280,13 @@ impl Server for CountingServer {
     ) -> spindle_agent::Result<spindle_agent::server::Reported> {
         self.inner.abandon(plan_id, a)
     }
+    fn progress(
+        &self,
+        plan_id: i64,
+        r: &agent_proto::ProgressRequest,
+    ) -> spindle_agent::Result<spindle_agent::progress::ProgressSent> {
+        self.inner.progress(plan_id, r)
+    }
 }
 
 /// 確認に y と答え、見せられた曲の操作の種類を覚える UI
@@ -334,7 +342,7 @@ async fn adopt_after_db_loss_keeps_tracks_and_downloads_nothing() {
         )
         .unwrap();
         let server = HttpServer::new(&url, true, secrets.get().unwrap()).unwrap();
-        let outcome = sync(&music, &server, &paths, &fp, &mut Yes).unwrap();
+        let outcome = sync(&music, &server, &paths, &fp, &mut Yes, Progress::disabled()).unwrap();
         assert!(
             matches!(outcome, SyncOutcome::Applied { errors: 0, .. }),
             "{outcome:?}"
@@ -375,7 +383,7 @@ async fn adopt_after_db_loss_keeps_tracks_and_downloads_nothing() {
             fetches: std::cell::Cell::new(0),
         };
         let mut ui = RecordingYes::default();
-        let outcome = sync(&music, &server, &paths, &fp, &mut ui).unwrap();
+        let outcome = sync(&music, &server, &paths, &fp, &mut ui, Progress::disabled()).unwrap();
         assert!(
             matches!(outcome, SyncOutcome::Applied { errors: 0, .. }),
             "{outcome:?}"

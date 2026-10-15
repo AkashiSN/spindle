@@ -16,6 +16,7 @@ use crate::failpoint::Failpoints;
 use crate::local::{self, LocalRoot, Marker};
 use crate::music::Music;
 use crate::plan::{current_of, runnable};
+use crate::progress::Progress;
 use crate::recover::Resolution;
 use crate::secrets::Secrets;
 use crate::server::{Confirmed, Reported, Server};
@@ -143,6 +144,7 @@ fn with_ctx<M: Music, S: Server, T>(
     paths: &Paths,
     fp: &Failpoints,
     ui: &mut dyn Ui,
+    progress: Progress,
     f: impl FnOnce(&mut Ctx<'_, M, S>) -> Result<T>,
 ) -> Result<T> {
     let _lock = local::lock(&paths.state_dir)?;
@@ -159,6 +161,7 @@ fn with_ctx<M: Music, S: Server, T>(
         state,
         errors: Vec::new(),
         now: now_epoch,
+        progress,
     };
     f(&mut cx)
 }
@@ -176,8 +179,9 @@ pub fn sync<M: Music, S: Server>(
     paths: &Paths,
     fp: &Failpoints,
     ui: &mut dyn Ui,
+    progress: Progress,
 ) -> Result<SyncOutcome> {
-    with_ctx(music, server, paths, fp, ui, run_sync)
+    with_ctx(music, server, paths, fp, ui, progress, run_sync)
 }
 
 fn run_sync<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<SyncOutcome> {
@@ -351,7 +355,25 @@ fn apply<M: Music, S: Server>(
     cx.save()?;
     let (c, cp) = current_of(&cx.state);
     let r = runnable(p, &c, &cp, &m.diff);
-    let out = exec::run(cx, &r, m)?;
+    let total = (r.items.len() + r.playlists.len()) as u64;
+    cx.progress
+        .start(p.plan_id, p.generation, total, exec::bytes_needed(cx, &r));
+    let out = match exec::run(cx, &r, m) {
+        Ok(out) => out,
+        Err(e) => {
+            // エラーで抜けるときも進捗の行を消してから（メッセージは呼び出し側が出す）
+            cx.progress.clear();
+            return Err(e);
+        }
+    };
+    // 最後の進捗を送ってから報告する。要約の 1 行は sink が出す。
+    // 途中で止めたときは要約を出さず行を消すだけ（止めた理由は呼び出し側がエラーとして出す）
+    cx.progress_flush();
+    if out.stop.is_some() {
+        cx.progress.clear();
+    } else {
+        cx.progress.finish();
+    }
     let errors = cx.errors.len();
     report(cx, p)?;
     if let Some(stop) = out.stop {
@@ -455,7 +477,7 @@ pub fn pair_cmd<M: Music, S: Server>(
     code: &str,
     adopt: bool,
 ) -> Result<()> {
-    with_ctx(music, server, paths, fp, ui, |cx| {
+    with_ctx(music, server, paths, fp, ui, Progress::disabled(), |cx| {
         if adopt {
             let a = adopt::pair_adopt(cx, secrets, url, insecure_http, code)?;
             cx.ui.info(&format!(
@@ -494,7 +516,7 @@ pub fn resolve_cmd<M: Music, S: Server>(
     op_id: &str,
     choice: Resolution,
 ) -> Result<()> {
-    with_ctx(music, server, paths, fp, ui, |cx| {
+    with_ctx(music, server, paths, fp, ui, Progress::disabled(), |cx| {
         require_paired(&cx.state)?;
         recover::resolve(cx, op_id, choice)?;
         cx.ui
@@ -511,7 +533,7 @@ pub fn abandon<M: Music, S: Server>(
     fp: &Failpoints,
     ui: &mut dyn Ui,
 ) -> Result<()> {
-    with_ctx(music, server, paths, fp, ui, |cx| {
+    with_ctx(music, server, paths, fp, ui, Progress::disabled(), |cx| {
         require_paired(&cx.state)?;
         if !cx.state.pending_ops.is_empty() || !cx.state.pending_batches.is_empty() {
             return Err(Error::Stop(

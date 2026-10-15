@@ -21,6 +21,8 @@ pub struct AppState {
     pub db: Arc<Db>,
     pub auth: Arc<auth::Shared>,
     pub jobs: Arc<Jobs>,
+    /// エージェントが送る同期の進捗（メモリだけ）
+    pub sync_progress: Arc<crate::device::progress::ProgressStore>,
     /// preview が固定した selection（token → スナップショット。D-33）
     pub selection: Arc<SelectionStore>,
     /// プロセス停止の合図。シグナルハンドラが倒し、HTTP サーバ・ワーカー・SSE が同時に見る
@@ -79,6 +81,7 @@ impl AppState {
             db,
             auth: Arc::new(auth::Shared::new(mode)),
             jobs,
+            sync_progress: Arc::default(),
             selection: Arc::new(SelectionStore::default()),
             shutdown: CancellationToken::new(),
             editor: None,
