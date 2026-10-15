@@ -1,5 +1,5 @@
 // 記録画面（SPEC §12.4、D-106）: ☰ メニューの「記録」。編集履歴 / 退避ファイル / ログ をタブで切り替える。
-// 他の画面からは App の openRecords でタブと対象（バッチ・album）を指定して開く
+// 他の画面からは App の openRecords でタブと対象（バッチ）を指定して開く
 
 import type { HistoryState } from '../hooks/useHistory'
 import { RECORDS_TABS, type RecordsTab } from '../lib/records'
