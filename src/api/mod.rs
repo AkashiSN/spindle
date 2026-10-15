@@ -20,6 +20,7 @@ pub mod hirescheck;
 pub mod history;
 pub mod inbox;
 pub mod jobs;
+pub mod logs;
 pub mod md5fill;
 pub mod normalize;
 pub mod playlists;
@@ -138,6 +139,7 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(events::stream))
         .route("/config", get(config::get))
         .route("/archive", get(archive::list))
+        .route("/logs", get(logs::list))
         .route("/scan", post(scan::start))
         .route("/gc", post(gc::start))
         .route("/gc/preview", get(gc::preview))

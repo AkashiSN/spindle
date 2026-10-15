@@ -17,6 +17,7 @@ pub mod hires;
 pub mod history;
 pub mod inbox;
 pub mod jobs;
+pub mod logs;
 pub mod migrations;
 pub mod playlists;
 pub mod replaygain;

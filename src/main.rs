@@ -12,7 +12,7 @@ use spindle::cd::device as cd_device;
 use spindle::cd::musicbrainz::MusicBrainzClient;
 use spindle::db::{migrations, Db};
 use spindle::edit::{Editor, NormalizeEnv};
-use spindle::fsroot::Roots;
+use spindle::fsroot::{RootDir, Roots};
 use spindle::gc::GcRoots;
 use spindle::import::inbox::PlaceItemEnv;
 use spindle::import::scanner::Scanner;
@@ -280,6 +280,17 @@ async fn main() -> anyhow::Result<()> {
             ctdb_client,
         )),
     );
+    // 照合ログを画面で読む（D-106）。ハンドラは書くときに作るが、読む側は起動時に dirfd を取るので先に作る
+    let verify_log_dir = state
+        .config
+        .paths
+        .data
+        .join(spindle::jobs::handlers::verify::LOG_DIR_NAME);
+    std::fs::create_dir_all(&verify_log_dir)
+        .with_context(|| format!("照合ログの置き場を作れない: {}", verify_log_dir.display()))?;
+    state = state.with_verify_logs(Arc::new(
+        RootDir::open(&verify_log_dir).context("照合ログの置き場を開けない")?,
+    ));
     registry.register(
         JobType::Tagwrite,
         Arc::new(TagwriteHandler::new(Arc::clone(&editor))),
