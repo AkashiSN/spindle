@@ -198,15 +198,15 @@ export function PlaylistSection({
               }${p.exports.length > 0 ? `\n書き出し: ${p.exports.map((x) => x.out_path).join(', ')}` : ''}`}
               onClick={() => onOpen(p.id)}
             >
-              {/* 名前だけを省略する。端末の印は名前が長くても切らない */}
+              {/* 名前だけを省略する。端末の印はアイコンだけで、端末名はホバーで出す */}
               <span className="playlist-name">
                 {p.kind === 'smart' ? '⚙ ' : '♪ '}
                 {p.name}
                 <span className="muted"> {p.track_count}</span>
               </span>
               {chipsFor(p.id, devices).map((d) => (
-                <span key={d.id} className="device-chip" title={`${d.name} に送る`}>
-                  📱 {d.name}
+                <span key={d.id} className="device-chip" title={`${d.name} に送る`} aria-label={`${d.name} に送る`}>
+                  📱
                 </span>
               ))}
             </button>
