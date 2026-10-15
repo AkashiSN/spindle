@@ -294,3 +294,174 @@ async fn runs_filter_by_kind_and_album_and_mark_superseded() {
     let (st, _) = get_json(&app, &c, "/api/logs?kind=other").await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn retro_text_reads_the_album_log_and_404s_when_superseded() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    let conn = app.conn();
+    album(&conn, 1, "A/One");
+    job(&conn, 10, 1);
+    job(&conn, 11, 1);
+    verification(
+        &conn,
+        1,
+        "retro",
+        Some(10),
+        Some(1),
+        "ctdb",
+        "mismatch",
+        100,
+        Some("/x/1.log"),
+    );
+    verification(
+        &conn,
+        1,
+        "retro",
+        Some(11),
+        Some(1),
+        "ctdb",
+        "verified",
+        200,
+        Some("/x/1.log"),
+    );
+    std::fs::write(app.verify_dir().join("1.log"), "spindle verify.log\n一致\n").unwrap();
+
+    let (st, body) = get(&app, &c, "/api/logs/retro-1-j11/text").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        String::from_utf8(body).unwrap(),
+        "spindle verify.log\n一致\n"
+    );
+    let (st, v) = get_json(&app, &c, "/api/logs/retro-1-j10/text").await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "上書きされた古い実行");
+    assert_eq!(v["error"], "log_not_found");
+    // 記録の無い key（他の album の id を差し込んでも本文を返さない）
+    let (st, _) = get(&app, &c, "/api/logs/retro-2-j11/text").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = get(&app, &c, "/api/logs/nonsense/text").await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn rip_text_follows_the_album_after_rename() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    let conn = app.conn();
+    // 配置時は A/Old、いまは B/New にある（log_path は古いまま）
+    album(&conn, 1, "B/New");
+    track(&conn, 1, "B/New/01.flac", Some(1), 1);
+    verification(
+        &conn,
+        1,
+        "rip",
+        None,
+        Some(1),
+        "ctdb",
+        "verified",
+        50,
+        Some("A/Old/rip.log"),
+    );
+    std::fs::create_dir_all(app.lib().join("B/New")).unwrap();
+    std::fs::write(app.lib().join("B/New/rip.log"), "spindle rip.log\n").unwrap();
+
+    let (st, body) = get(&app, &c, "/api/logs/rip-1-t50/text").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(String::from_utf8(body).unwrap(), "spindle rip.log\n");
+}
+
+#[tokio::test]
+async fn rip_text_picks_the_disc_and_rejects_other_names() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    let conn = app.conn();
+    album(&conn, 1, "A/Set");
+    track(&conn, 1, "A/Set/Disc 1/01.flac", Some(1), 1);
+    track(&conn, 1, "A/Set/Disc 2/01.flac", Some(2), 1);
+    verification(
+        &conn,
+        1,
+        "rip",
+        None,
+        Some(1),
+        "ctdb",
+        "verified",
+        50,
+        Some("A/Set/Disc 1/rip1.log"),
+    );
+    verification(
+        &conn,
+        1,
+        "rip",
+        None,
+        Some(2),
+        "ctdb",
+        "verified",
+        50,
+        Some("A/Set/Disc 2/rip2.log"),
+    );
+    verification(
+        &conn,
+        1,
+        "rip",
+        None,
+        Some(3),
+        "ctdb",
+        "verified",
+        50,
+        Some("A/Set/x/secret.txt"),
+    );
+    for (d, n) in [("Disc 1", "rip1.log"), ("Disc 2", "rip2.log")] {
+        std::fs::create_dir_all(app.lib().join("A/Set").join(d)).unwrap();
+        std::fs::write(app.lib().join("A/Set").join(d).join(n), n).unwrap();
+    }
+    let (_, body) = get(&app, &c, "/api/logs/rip-1-t50/text").await;
+    assert_eq!(body, b"rip1.log", "省略は最初のディスク");
+    let (_, body) = get(&app, &c, "/api/logs/rip-1-t50/text?disc=2").await;
+    assert_eq!(body, b"rip2.log");
+    let (st, _) = get(&app, &c, "/api/logs/rip-1-t50/text?disc=3").await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "rip*.log 以外の名前は読まない");
+}
+
+#[tokio::test]
+async fn text_rejects_oversize_and_symlinks() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    let conn = app.conn();
+    album(&conn, 1, "A/One");
+    album(&conn, 2, "A/Two");
+    job(&conn, 10, 1);
+    job(&conn, 11, 2);
+    verification(
+        &conn,
+        1,
+        "retro",
+        Some(10),
+        Some(1),
+        "ctdb",
+        "verified",
+        100,
+        Some("/x/1.log"),
+    );
+    verification(
+        &conn,
+        2,
+        "retro",
+        Some(11),
+        Some(1),
+        "ctdb",
+        "verified",
+        100,
+        Some("/x/2.log"),
+    );
+    std::fs::write(app.verify_dir().join("1.log"), vec![b'a'; (1 << 20) + 1]).unwrap();
+    let outside = app.dir.path().join("outside.txt");
+    std::fs::write(&outside, "secret").unwrap();
+    std::os::unix::fs::symlink(&outside, app.verify_dir().join("2.log")).unwrap();
+
+    let (st, v) = get_json(&app, &c, "/api/logs/retro-1-j10/text").await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(v["error"], "log_too_large");
+    let (st, _) = get(&app, &c, "/api/logs/retro-2-j11/text").await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "symlink は辿らない");
+}

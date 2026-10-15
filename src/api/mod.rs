@@ -140,6 +140,7 @@ pub fn router(state: AppState) -> Router {
         .route("/config", get(config::get))
         .route("/archive", get(archive::list))
         .route("/logs", get(logs::list))
+        .route("/logs/{key}/text", get(logs::text))
         .route("/scan", post(scan::start))
         .route("/gc", post(gc::start))
         .route("/gc/preview", get(gc::preview))
