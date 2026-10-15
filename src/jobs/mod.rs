@@ -143,6 +143,8 @@ pub enum Event {
     Library(LibraryEvent),
     /// プレイリストの項目が（再評価で）書き換わった。表示中なら表を取り直す（P1-7、D-54）
     Playlist(PlaylistEvent),
+    /// エージェントの同期の進捗（`progress` が null なら消す）
+    DeviceProgress(crate::device::progress::DeviceProgressEvent),
 }
 
 impl Event {
@@ -152,6 +154,7 @@ impl Event {
             Event::Batch(_) => "batch",
             Event::Library(_) => "library",
             Event::Playlist(_) => "playlist",
+            Event::DeviceProgress(_) => "device_progress",
         }
     }
 
@@ -162,6 +165,7 @@ impl Event {
             Event::Batch(e) => serde_json::to_value(e),
             Event::Library(e) => serde_json::to_value(e),
             Event::Playlist(e) => serde_json::to_value(e),
+            Event::DeviceProgress(e) => serde_json::to_value(e),
         };
         r.unwrap_or_else(|_| serde_json::json!({}))
     }

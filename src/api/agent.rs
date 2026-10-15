@@ -4,7 +4,7 @@
 use agent_proto::{
     AbandonRequest, AdoptRequest, AdoptResponse, ConfirmRequest, DiffView, Held, IdMap, ItemOp,
     ManifestItem, ManifestPlaylist, ManifestResponse, PairRequest, PairResponse, Plan,
-    PlaylistError, PlaylistOp, ReportRequest,
+    PlaylistError, PlaylistOp, ProgressRequest, ReportRequest, PROGRESS_CURRENT_MAX,
 };
 use axum::extract::rejection::JsonRejection;
 use std::collections::{HashMap, HashSet};
@@ -29,6 +29,7 @@ use crate::device::credential::{
 };
 use crate::device::ondevice::managed_path_ok;
 use crate::device::plan::StoredPlan;
+use crate::device::progress::DeviceProgressEvent;
 use crate::device::recover::STALE_TOKEN;
 use crate::device::report;
 use crate::device::sync::{RootSources, SourceEntry, SourceError, Sources as _};
@@ -41,6 +42,9 @@ use crate::domain::relpath::RelPath;
 
 /// 報告（`/report`・`/plans/{id}/abandon`）の本文の上限
 pub const REPORT_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// 進捗（`/plans/{id}/progress`）の本文の上限
+pub const PROGRESS_BODY_LIMIT: usize = 4 * 1024;
 
 /// Bearer で確定した端末。ハンドラは `Extension<AgentDevice>` で受け取る
 #[derive(Debug, Clone)]
@@ -60,6 +64,10 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route(
             "/plans/{id}/abandon",
             post(abandon).layer(DefaultBodyLimit::max(REPORT_BODY_LIMIT)),
+        )
+        .route(
+            "/plans/{id}/progress",
+            post(progress).layer(DefaultBodyLimit::max(PROGRESS_BODY_LIMIT)),
         )
         .route(
             "/report",
@@ -602,6 +610,118 @@ async fn report(
     finish(&state, &dev, body, PlanEnd::Completed).await
 }
 
+/// 端末の進捗を消し、消えていれば `progress: null` を SSE に流す
+pub fn clear_progress(state: &AppState, device_id: i64) {
+    publish_cleared(state, device_id, state.sync_progress.clear(device_id));
+}
+
+/// 保持しているのがその計画の進捗のときだけ消す
+fn clear_progress_of(state: &AppState, device_id: i64, plan_id: i64) {
+    publish_cleared(
+        state,
+        device_id,
+        state.sync_progress.clear_plan(device_id, plan_id),
+    );
+}
+
+fn publish_cleared(state: &AppState, device_id: i64, cleared: bool) {
+    if cleared {
+        state
+            .jobs
+            .publish(crate::jobs::Event::DeviceProgress(DeviceProgressEvent {
+                device_id,
+                progress: None,
+            }));
+    }
+}
+
+enum ProgressCheck {
+    Ok,
+    NoPlan,
+    Closed,
+    GenerationMismatch,
+}
+
+/// `POST /api/agent/plans/{id}/progress`: 同期の進捗を受ける（メモリだけに置く。DB は読むだけ）。
+/// 受け取れたら 204。計画が無い・閉じた・別の端末のものは 404、世代が違えば 409。
+/// エージェントはどちらでも送るのを止める
+async fn progress(
+    State(state): State<AppState>,
+    Extension(dev): Extension<AgentDevice>,
+    Path(plan_id): Path<i64>,
+    body: Result<Json<ProgressRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Ok(Json(req)) = body else {
+        return Ok(invalid_progress("本文が不正"));
+    };
+    if req.done > req.total {
+        return Ok(invalid_progress("done が total を超えている"));
+    }
+    if req.bytes_done > req.bytes_total {
+        return Ok(invalid_progress("bytes_done が bytes_total を超えている"));
+    }
+    if req
+        .current
+        .as_ref()
+        .is_some_and(|c| c.len() > PROGRESS_CURRENT_MAX)
+    {
+        return Ok(invalid_progress("current が長すぎる"));
+    }
+    let device_id = dev.id;
+    let generation = req.generation;
+    let check = state
+        .db
+        .read(move |c| {
+            let Some(row) = dbdev::plan_row(c, plan_id)? else {
+                return Ok(ProgressCheck::NoPlan);
+            };
+            if row.device_id != device_id {
+                return Ok(ProgressCheck::NoPlan);
+            }
+            if row.state != "open" || dbdev::open_plan_id(c, device_id)? != Some(plan_id) {
+                return Ok(ProgressCheck::Closed);
+            }
+            let Some(device) = dbdev::get(c, device_id)? else {
+                return Ok(ProgressCheck::NoPlan);
+            };
+            Ok(if device.generation == generation {
+                ProgressCheck::Ok
+            } else {
+                ProgressCheck::GenerationMismatch
+            })
+        })
+        .await?;
+    match check {
+        ProgressCheck::Ok => {
+            let now = now_epoch();
+            state.sync_progress.put(device_id, plan_id, req, now);
+            state
+                .jobs
+                .publish(crate::jobs::Event::DeviceProgress(DeviceProgressEvent {
+                    device_id,
+                    progress: state.sync_progress.view(device_id, now),
+                }));
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+        ProgressCheck::NoPlan | ProgressCheck::Closed => {
+            clear_progress_of(&state, device_id, plan_id);
+            Ok(error_response_with_message(
+                StatusCode::NOT_FOUND,
+                "no_plan",
+                "開いている計画が無い",
+            ))
+        }
+        ProgressCheck::GenerationMismatch => Ok(conflict(
+            "generation_mismatch",
+            "端末の世代が変わった。差分を取り直してください",
+        )),
+    }
+}
+
+fn invalid_progress(msg: &str) -> Response {
+    error_response_with_message(StatusCode::BAD_REQUEST, "invalid", msg)
+}
+
 enum Finish {
     Done {
         tracks: usize,
@@ -625,6 +745,7 @@ async fn finish(
 ) -> Result<Response, ApiError> {
     let digest = report::digest(&req);
     let device_id = dev.id;
+    let plan_id = req.plan_id;
     let res = state
         .db
         .write(move |c| {
@@ -702,6 +823,7 @@ async fn finish(
         .await?;
     Ok(match res {
         Finish::Done { tracks, errors } => {
+            clear_progress_of(state, device_id, plan_id);
             match end {
                 PlanEnd::Completed => {
                     tracing::info!(device_id, tracks, errors, "エージェントの報告を反映した")
@@ -715,11 +837,17 @@ async fn finish(
             }
             Json(serde_json::json!({})).into_response()
         }
-        Finish::Resent => Json(serde_json::json!({})).into_response(),
+        Finish::Resent => {
+            clear_progress_of(state, device_id, plan_id);
+            Json(serde_json::json!({})).into_response()
+        }
         Finish::NoPlan => {
             error_response_with_message(StatusCode::NOT_FOUND, "no_plan", "計画が無い")
         }
-        Finish::Closed => plan_closed(),
+        Finish::Closed => {
+            clear_progress_of(state, device_id, plan_id);
+            plan_closed()
+        }
         Finish::GenerationMismatch => conflict(
             "generation_mismatch",
             "端末の世代が変わった。差分を取り直してください",

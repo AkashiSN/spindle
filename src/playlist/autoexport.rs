@@ -156,7 +156,7 @@ fn triggers(ev: &Event) -> bool {
         Event::Library(_) => true,
         Event::Batch(b) => matches!(b.state.as_str(), "applied" | "partial" | "failed"),
         Event::Job(j) => j.state == JobState::Done,
-        Event::Playlist(_) => false,
+        Event::Playlist(_) | Event::DeviceProgress(_) => false,
     }
 }
 
