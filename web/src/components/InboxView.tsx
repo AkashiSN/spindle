@@ -21,6 +21,7 @@ import {
   type ReleaseCandidate,
 } from '../lib/cd'
 import { formatDateTime } from '../lib/history'
+import { logErrorText } from '../lib/records'
 import {
   applyCandidate,
   applyTracklist,
@@ -671,7 +672,7 @@ function RipFiles({ itemId, names }: { itemId: number; names: string[] }) {
         if (wanted.current === name) setGot({ name, text, error: null })
       })
       .catch((e: unknown) => {
-        if (wanted.current === name) setGot({ name, text: null, error: e instanceof Error ? e.message : String(e) })
+        if (wanted.current === name) setGot({ name, text: null, error: logErrorText(e) })
       })
   }
   const cur = open != null && got?.name === open ? got : null

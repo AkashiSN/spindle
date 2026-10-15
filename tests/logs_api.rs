@@ -333,6 +333,15 @@ async fn retro_text_reads_the_album_log_and_404s_when_superseded() {
         String::from_utf8(body).unwrap(),
         "spindle verify.log\n一致\n"
     );
+    let r = req(Method::GET, "/api/logs/retro-1-j11/text")
+        .header(header::COOKIE, &c)
+        .body(Body::empty())
+        .unwrap();
+    let res = app.router.clone().oneshot(r).await.unwrap();
+    assert_eq!(
+        res.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
     let (st, v) = get_json(&app, &c, "/api/logs/retro-1-j10/text").await;
     assert_eq!(st, StatusCode::NOT_FOUND, "上書きされた古い実行");
     assert_eq!(v["error"], "log_not_found");
@@ -490,4 +499,17 @@ async fn text_404s_when_the_log_is_not_a_regular_file() {
     let (st, v) = get_json(&app, &c, "/api/logs/retro-1-j10/text").await;
     assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
     assert_eq!(v["error"], "log_not_found");
+}
+
+#[tokio::test]
+async fn list_rejects_cursors_that_overflow() {
+    let app = build().await;
+    let c = cookie(&app).await;
+    for cur in ["18446744073709551615", "9223372036854775808"] {
+        let (st, v) = get_json(&app, &c, &format!("/api/logs?cursor={cur}")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{cur}");
+        assert_eq!(v["error"], "bad_request");
+    }
+    let (st, _) = get_json(&app, &c, "/api/logs?cursor=9223372036854775807").await;
+    assert_eq!(st, StatusCode::OK);
 }

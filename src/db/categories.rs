@@ -62,14 +62,6 @@ pub enum DeleteOutcome {
     InUse(String),
 }
 
-/// 使われていない語彙だけを消す（D-92）。自動登録は追加しかしないので、SMB で一時的に作った Library 直下の
-/// フォルダの名前などを人が消す経路。次のどれかがあれば消さない:
-/// - active な album（`missing_since IS NULL`）の category（missing の album は ON DELETE SET NULL で外れる）
-/// - GENRE の写像（`genre_category_map`。CASCADE で黙って消えるので明示的に外してもらう）
-/// - 再生リストの購読の category（名前で持つ。canonical key で照合）
-/// - 承認前・承認済みの Inbox の取り込みの保存済みの下書きの category（名前で持つ）
-///
-/// 呼び出し側は書き込みのトランザクションの中で呼ぶ（確かめと削除の間に参照が増えない）
 /// 語彙の使用数（`GET /api/categories` と [`delete_if_unused`] が同じ数え方を使う。D-92）
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub struct Usage {
@@ -159,6 +151,14 @@ pub fn list_with_usage(conn: &Connection) -> Result<Vec<CategoryUsage>> {
         .collect()
 }
 
+/// 使われていない語彙だけを消す（D-92）。自動登録は追加しかしないので、SMB で一時的に作った Library 直下の
+/// フォルダの名前などを人が消す経路。次のどれかがあれば消さない:
+/// - active な album（`missing_since IS NULL`）の category（missing の album は ON DELETE SET NULL で外れる）
+/// - GENRE の写像（`genre_category_map`。CASCADE で黙って消えるので明示的に外してもらう）
+/// - 再生リストの購読の category（名前で持つ。canonical key で照合）
+/// - 承認前・承認済みの Inbox の取り込みの保存済みの下書きの category（名前で持つ）
+///
+/// 呼び出し側は書き込みのトランザクションの中で呼ぶ（確かめと削除の間に参照が増えない）
 pub fn delete_if_unused(conn: &Connection, id: i64) -> Result<DeleteOutcome> {
     let name: Option<String> = conn
         .query_row(

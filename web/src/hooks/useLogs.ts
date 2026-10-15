@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../api/client'
-import type { LogKind, LogRun } from '../lib/records'
+import { appendLogRuns, type LogKind, type LogRun } from '../lib/records'
 
 type Page = { items: LogRun[]; next_cursor: string | null }
 type Data = { kind: LogKind; albumId: number | null; items: LogRun[]; next: string | null }
@@ -32,7 +32,7 @@ export function useLogs(enabled: boolean, kind: LogKind, albumId: number | null)
             return {
               kind,
               albumId,
-              items: cursor == null || !same ? p.items : [...prev.items, ...p.items],
+              items: cursor == null || !same ? p.items : appendLogRuns(prev.items, p.items),
               next: p.next_cursor,
             }
           })

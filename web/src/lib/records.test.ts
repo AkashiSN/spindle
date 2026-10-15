@@ -2,12 +2,17 @@ import { expect, test } from 'vitest'
 import {
   archiveEmptyText,
   archiveFilterTabs,
+  appendLogRuns,
   logAvailText,
+  logErrorText,
+  logFileName,
   logKindLabel,
   logSummary,
   RECORDS_TABS,
   singleAlbumId,
+  type LogRun,
 } from './records'
+import { ApiError } from '../api/client'
 
 test('記録画面のタブは 編集履歴 / 退避ファイル / ログ の順', () => {
   expect(RECORDS_TABS).toEqual([
@@ -63,4 +68,34 @@ test('選択が 1 つの album のときだけその id', () => {
   expect(singleAlbumId([{ album_id: 3 }, { album_id: 4 }])).toBeNull()
   expect(singleAlbumId([{ album_id: null }])).toBeNull()
   expect(singleAlbumId([])).toBeNull()
+})
+
+const run = (key: string, source: 'retro' | 'rip' = 'rip'): LogRun => ({
+  key,
+  album_id: 7,
+  albumartist: null,
+  album: null,
+  source,
+  job_id: null,
+  verified_at: 1,
+  discs: [],
+  log: 'latest',
+})
+
+test('次のページを足すとき、既にある key の行は捨てる', () => {
+  const out = appendLogRuns([run('a'), run('b')], [run('b'), run('c')])
+  expect(out.map((r) => r.key)).toEqual(['a', 'b', 'c'])
+})
+
+test('ログの取得失敗は code で日本語にし、それ以外は message', () => {
+  expect(logErrorText(new ApiError(404, 'log_not_found'))).toContain('残っていない')
+  expect(logErrorText(new ApiError(413, 'log_too_large'))).toContain('1 MiB')
+  expect(logErrorText(new Error('boom'))).toBe('boom')
+  expect(logErrorText('x')).toBe('x')
+})
+
+test('保存名は複数ディスクの吸い出しだけディスク番号を添える', () => {
+  expect(logFileName(run('k', 'retro'), null, 0)).toBe('verify-7.log')
+  expect(logFileName(run('k'), 1, 1)).toBe('rip-7.log')
+  expect(logFileName(run('k'), 2, 2)).toBe('rip-7-disc2.log')
 })

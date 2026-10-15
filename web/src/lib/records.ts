@@ -1,5 +1,6 @@
 // 記録画面（SPEC §12.4、D-106）の純ロジック: タブ、退避ファイルの切り替えと空の文言
 
+import { ApiError } from '../api/client'
 import { formatCount } from './format'
 
 export type RecordsTab = 'history' | 'archive' | 'logs'
@@ -84,4 +85,23 @@ export function singleAlbumId(rows: ReadonlyArray<{ album_id: number | null }>):
   const first = rows[0]?.album_id ?? null
   if (first == null) return null
   return rows.every((r) => r.album_id === first) ? first : null
+}
+
+/** ログ本文・吸い出しの記録の取得失敗を画面の文言にする（ログタブと Inbox で共通） */
+export function logErrorText(e: unknown): string {
+  if (e instanceof ApiError && e.code === 'log_not_found') return 'ログが残っていない（後の照合で上書きされたか、ファイルが無い）'
+  if (e instanceof ApiError && e.code === 'log_too_large') return 'ログが大きすぎて表示できない（1 MiB 超）'
+  return e instanceof Error ? e.message : String(e)
+}
+
+/** 次のページを足す。offset 方式のページ送りは、間に新しい実行が増えると重なるので key が既出の行を捨てる */
+export function appendLogRuns(prev: LogRun[], next: LogRun[]): LogRun[] {
+  const seen = new Set(prev.map((r) => r.key))
+  return [...prev, ...next.filter((r) => !seen.has(r.key))]
+}
+
+/** 保存するログの名前（複数ディスクの吸い出しはディスク番号を添える） */
+export function logFileName(run: LogRun, disc: number | null, discCount: number): string {
+  if (run.source === 'retro') return `verify-${run.album_id}.log`
+  return discCount > 1 && disc != null ? `rip-${run.album_id}-disc${disc}.log` : `rip-${run.album_id}.log`
 }

@@ -2,10 +2,10 @@
 // 照合ログは album ごとに最新 1 回分しか残らないので、古い実行は本文を出さずにその旨を出す
 
 import { Fragment, useEffect, useState } from 'react'
-import { ApiError, apiText } from '../api/client'
+import { apiText } from '../api/client'
 import { useLogs } from '../hooks/useLogs'
 import { formatDateTime } from '../lib/history'
-import { logAvailText, logKindLabel, logSummary, type LogKind, type LogRun } from '../lib/records'
+import { logAvailText, logErrorText, logFileName, logKindLabel, logSummary, type LogKind, type LogRun } from '../lib/records'
 import { LogText } from './LogText'
 
 const KIND_TABS: ReadonlyArray<readonly [LogKind, string]> = [
@@ -118,12 +118,7 @@ function LogBody({ run }: { run: LogRun }) {
       })
       .catch((e: unknown) => {
         if (stale) return
-        let msg: string
-        if (e instanceof ApiError && e.code === 'log_not_found')
-          msg = 'ログが残っていない（後の照合で上書きされたか、ファイルが無い）'
-        else if (e instanceof ApiError && e.code === 'log_too_large') msg = 'ログが大きすぎて表示できない（1 MiB 超）'
-        else msg = e instanceof Error ? e.message : String(e)
-        setFetched({ url, text: null, error: msg })
+        setFetched({ url, text: null, error: logErrorText(e) })
       })
     return () => {
       stale = true
@@ -149,7 +144,7 @@ function LogBody({ run }: { run: LogRun }) {
       ) : (
         <LogText
           text={cur.text ?? ''}
-          fileName={run.source === 'retro' ? `verify-${run.album_id}.log` : `rip-${run.album_id}.log`}
+          fileName={logFileName(run, disc, discs.length)}
         />
       )}
     </>

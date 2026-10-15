@@ -53,8 +53,9 @@ pub async fn list(
     }
     let offset = match q.cursor.as_deref().map(str::parse::<usize>) {
         None => 0,
-        Some(Ok(n)) => n,
-        Some(Err(_)) => return Ok(error_response(StatusCode::BAD_REQUEST, "bad_request")),
+        // i64 に収まらない・limit との和が溢れる値は不正として弾く
+        Some(Ok(n)) if i64::try_from(n).is_ok() && n.checked_add(limit).is_some() => n,
+        Some(_) => return Ok(error_response(StatusCode::BAD_REQUEST, "bad_request")),
     };
     let album_id = q.album_id;
     let mut items = state
@@ -119,9 +120,14 @@ pub(crate) fn not_found() -> Response {
 
 pub(crate) fn text_response(r: TextRead) -> Response {
     match r {
-        TextRead::Text(s) => {
-            ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], s).into_response()
-        }
+        TextRead::Text(s) => (
+            [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            s,
+        )
+            .into_response(),
         TextRead::TooLarge => error_response(StatusCode::PAYLOAD_TOO_LARGE, "log_too_large"),
         TextRead::NotFound => not_found(),
     }

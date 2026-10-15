@@ -103,12 +103,17 @@ pub fn list_runs(
            FROM album_verifications v JOIN albums a ON a.id = v.album_id
           WHERE (?1 IS NULL OR v.source = ?1) AND (?2 IS NULL OR v.album_id = ?2)
           GROUP BY v.album_id, v.source, v.job_id, t
-          ORDER BY at DESC, v.album_id DESC, v.job_id DESC
+          ORDER BY at DESC, v.album_id DESC, v.job_id DESC, v.source DESC
           LIMIT ?3 OFFSET ?4",
     )?;
     let heads = st
         .query_map(
-            params![source, album_id, limit as i64, offset as i64],
+            params![
+                source,
+                album_id,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX)
+            ],
             |r| {
                 Ok((
                     RunKey {
