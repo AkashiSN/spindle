@@ -5,12 +5,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch, apiPatch, apiPost } from '../api/client'
 import type {
+  AdbProgress,
   Device,
   DeviceProgressEvent,
   DeviceDiff,
   DeviceList,
   DeviceSelection,
   DeviceVariant,
+  JobEvent,
   PairCode,
   SelectionEstimate,
   UnregisteredList,
@@ -19,7 +21,7 @@ import type {
 import { deviceMessage, diffFor, withDevice } from '../lib/devices'
 import { mergePending, togglePlaylist } from '../lib/devicePicker'
 import { withPlaylistIds } from '../lib/devicePicker'
-import { applyProgressEvent, mergeListProgress, ProgressEventSeq } from '../lib/syncProgress'
+import { applyJobProgress, applyProgressEvent, mergeListProgress, ProgressEventSeq } from '../lib/syncProgress'
 import { Latest } from '../lib/latest'
 import { TrailingDebounce } from '../lib/debounce'
 
@@ -92,6 +94,11 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     },
     [fetchList],
   )
+  // Android の同期の進捗（ジョブ id → 進捗）。device_sync ジョブの job イベントの detail から作り、
+  // ジョブが終われば消す。DB には無いので、開き直した直後は次のイベントが届くまで空
+  const [jobProgress, setJobProgress] = useState<ReadonlyMap<number, AdbProgress>>(() => new Map())
+  /** SSE の job イベントで Android の進捗を更新する（他の種別のジョブは表を変えない） */
+  const onJob = useCallback((e: JobEvent) => setJobProgress((cur) => applyJobProgress(cur, e)), [])
   const fetchDiff = useCallback(() => {
     const id = diffGen.current.next()
     const deviceId = selectedRef.current
@@ -234,6 +241,8 @@ export function useDevices(enabled: boolean, selectedId: number | null) {
     refresh,
     refreshAfterJob,
     onProgress,
+    jobProgress,
+    onJob,
     clearError: () => {
       setError(null)
       setErrorCode(null)

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { SyncProgress } from '../api/types'
+import type { AdbProgress, JobEvent, SyncProgress } from '../api/types'
 import {
+  adbProgressFrom,
   agoText,
+  applyJobProgress,
   applyProgressEvent,
   mergeListProgress,
   phaseLabel,
@@ -67,6 +69,11 @@ describe('progressSummary', () => {
   it('bytes_total が 0 なら件数だけ', () => {
     expect(progressSummary(p({ bytes_total: 0, bytes_done: 0 }), 0)).toBe('12 / 92 件')
   })
+  it('stale: false なら 30 秒を超えても応答なしを出さない（Android）', () => {
+    const out = progressSummary(p(), 120, { stale: false })
+    expect(out).not.toContain('応答なし')
+    expect(out).toBe('12 / 92 件 · 85.3 MB / 634.8 MB · 12.4 MB/s · 残り 0:44')
+  })
   it('rate が 0 なら速度と残りを出さない', () => {
     expect(progressSummary(p({ rate: 0 }), 0)).toBe('12 / 92 件 · 85.3 MB / 634.8 MB')
   })
@@ -88,6 +95,7 @@ describe('phaseLabel', () => {
     expect(phaseLabel('fetch')).toBe('受信中')
     expect(phaseLabel('add')).toBe('追加中')
     expect(phaseLabel('playlist')).toBe('プレイリスト')
+    expect(phaseLabel('send')).toBe('送信中')
   })
 })
 
@@ -156,5 +164,84 @@ describe('applyProgressEvent', () => {
   it('一覧に無い端末は無視する', () => {
     const out = applyProgressEvent(items, { device_id: 9, progress: p() }, 5000)
     expect(out).toEqual(items)
+  })
+})
+
+function ev(over: Partial<JobEvent> = {}): JobEvent {
+  return {
+    id: 7,
+    state: 'running',
+    progress: 0.1,
+    done: 3,
+    total: 30,
+    detail: { kind: 'device_sync', phase: 'send', current: 'x.opus', bytes_done: 100, bytes_total: 1000, rate: 50 },
+    ...over,
+  }
+}
+
+describe('adbProgressFrom', () => {
+  it('device_sync の detail と件数から進捗を作る', () => {
+    expect(adbProgressFrom(ev())).toEqual({
+      done: 3,
+      total: 30,
+      bytes_done: 100,
+      bytes_total: 1000,
+      rate: 50,
+      phase: 'send',
+      current: 'x.opus',
+    })
+  })
+  it('current が null でもよい', () => {
+    const d = { kind: 'device_sync', phase: 'delete', current: null, bytes_done: 0, bytes_total: 0, rate: 0 }
+    expect(adbProgressFrom(ev({ detail: d }))?.current).toBeNull()
+  })
+  it('kind 違い・数値の欠け・未知の phase・件数の null は null', () => {
+    const base = { kind: 'device_sync', phase: 'send', current: null, bytes_done: 1, bytes_total: 2, rate: 0 }
+    expect(adbProgressFrom(ev({ detail: { ...base, kind: 'rip' } }))).toBeNull()
+    expect(adbProgressFrom(ev({ detail: { ...base, bytes_done: undefined } }))).toBeNull()
+    expect(adbProgressFrom(ev({ detail: { ...base, rate: 'x' } }))).toBeNull()
+    expect(adbProgressFrom(ev({ detail: { ...base, phase: 'fetch' } }))).toBeNull()
+    expect(adbProgressFrom(ev({ detail: base, done: null }))).toBeNull()
+    expect(adbProgressFrom(ev({ detail: base, total: null }))).toBeNull()
+    expect(adbProgressFrom(ev({ detail: undefined }))).toBeNull()
+    expect(adbProgressFrom(ev({ detail: 'device_sync' }))).toBeNull()
+  })
+})
+
+describe('applyJobProgress', () => {
+  const prog: AdbProgress = {
+    done: 1,
+    total: 2,
+    bytes_done: 0,
+    bytes_total: 0,
+    rate: 0,
+    phase: 'delete',
+    current: null,
+  }
+  it('running で detail が読めれば入れる（新しい表を返す）', () => {
+    const m = new Map<number, AdbProgress>()
+    const out = applyJobProgress(m, ev())
+    expect(out).not.toBe(m)
+    expect(out.get(7)?.phase).toBe('send')
+    expect(m.size).toBe(0)
+  })
+  it('終端の状態なら消す', () => {
+    for (const state of ['done', 'failed', 'cancelled'] as const) {
+      const m = new Map([[7, prog]])
+      const out = applyJobProgress(m, ev({ state, detail: undefined }))
+      expect(out.has(7)).toBe(false)
+    }
+  })
+  it('detail が読めない running は表を変えない（同じ表を返す）', () => {
+    const m = new Map([[7, prog]])
+    expect(applyJobProgress(m, ev({ detail: undefined }))).toBe(m)
+  })
+  it('queued は表を変えない', () => {
+    const m = new Map([[7, prog]])
+    expect(applyJobProgress(m, ev({ state: 'queued', detail: undefined }))).toBe(m)
+  })
+  it('表に無いジョブの終端は同じ表を返す', () => {
+    const m = new Map([[8, prog]])
+    expect(applyJobProgress(m, ev({ state: 'done' }))).toBe(m)
   })
 })
