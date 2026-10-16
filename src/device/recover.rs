@@ -250,7 +250,18 @@ async fn settle_batch<F: DeviceFs>(
                 place_in_book(book, m);
             }
         }
-        Some(phase) => complete_batch(fs, &b.batch_id, &b.members, phase, true, book).await?,
+        Some(phase) => {
+            complete_batch(
+                fs,
+                &b.batch_id,
+                &b.members,
+                phase,
+                true,
+                book,
+                &mut NoProgress,
+            )
+            .await?
+        }
     }
     Ok(())
 }
@@ -279,6 +290,24 @@ fn place_in_book(book: &mut Book, m: &BatchMember) {
     );
 }
 
+/// バッチを仕上げる間のメンバーごとの通知（同期の進捗に使う。回復では何もしない）。
+/// 通知は失敗しない。耐久化と `mv` の順序には関わらない
+#[allow(async_fn_in_trait)]
+pub(crate) trait BatchProgress {
+    /// 空ける・置くメンバーに取りかかる
+    async fn begin(&mut self, m: &BatchMember);
+    /// メンバーを置き終えた（置けたかどうかにかかわらず）
+    async fn placed(&mut self, m: &BatchMember);
+}
+
+/// 何も通知しない（回復用）
+pub(crate) struct NoProgress;
+
+impl BatchProgress for NoProgress {
+    async fn begin(&mut self, _m: &BatchMember) {}
+    async fn placed(&mut self, _m: &BatchMember) {}
+}
+
 /// `vacating` 以降のバッチを `done` まで前進させる（巻き戻さない）。`from` は最後に耐久化された相。
 /// `verify` は回復のとき真: メンバーごとにファイルの実在と sha256 から位置を判定する。
 /// 同期の実行中（偽）は記録どおりに `mv` するだけ。全メンバーが空くまで行き先を埋めない
@@ -289,6 +318,7 @@ pub(crate) async fn complete_batch<F: DeviceFs>(
     from: Phase,
     verify: bool,
     book: &mut Book,
+    progress: &mut impl BatchProgress,
 ) -> Result<(), StoreError> {
     let phase = |phase| Record::BatchPhase {
         batch_id: batch_id.to_owned(),
@@ -300,6 +330,7 @@ pub(crate) async fn complete_batch<F: DeviceFs>(
     }
     if from < Phase::Vacated {
         for m in members {
+            progress.begin(m).await;
             vacate(fs, m, verify).await?;
         }
         append_durable(fs, &[phase(Phase::Vacated)]).await?;
@@ -309,7 +340,9 @@ pub(crate) async fn complete_batch<F: DeviceFs>(
     }
     let mut placed = Vec::with_capacity(members.len());
     for m in members {
+        progress.begin(m).await;
         placed.push(place(fs, m, verify).await?);
+        progress.placed(m).await;
     }
     // done の前に置き場の残り（更新 + 移動の旧版は vacate で消している）を片付ける
     for m in members {

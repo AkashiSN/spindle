@@ -15,7 +15,7 @@ use crate::device::ondevice::{
     self, Book, DeviceManifest, ManifestItem, ManifestPlaylist, MOVING_DIR, TMP_SUFFIX,
 };
 use crate::device::plan::{path_components, PlanItem, PlanPlaylist, Runnable};
-use crate::device::recover::complete_batch;
+use crate::device::recover::{complete_batch, BatchProgress};
 use crate::device::remote::{DeviceFs, RemoteError};
 use crate::device::store::{append_durable, compact, StoreError};
 use crate::domain::device::{
@@ -128,6 +128,31 @@ pub trait Control {
     /// 開始時の generation のままか。`vacating` より前の書き込みの直前に呼ぶ
     async fn generation_ok(&self) -> bool;
     async fn progress(&self, done: u64, total: u64);
+    /// 同期の進捗（バイト数・相・今の項目つき）。既定は件数だけを `progress` へ渡す
+    async fn sync_progress(&self, p: &SyncProgress) {
+        self.progress(p.done, p.total).await;
+    }
+}
+
+/// 同期の相（画面の見出し）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncPhase {
+    Delete,
+    Move,
+    Send,
+    Playlist,
+}
+
+/// 進捗のスナップショット。件数は項目の数、バイトは送る曲の size の和（D-109）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncProgress {
+    pub done: u64,
+    pub total: u64,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub phase: SyncPhase,
+    pub current: Option<String>,
 }
 
 /// 端末の曲の出どころ（manifest の `rel_path` / `source` に書く値と、今の端末上のパス）
@@ -225,6 +250,25 @@ impl SyncReport {
     }
 }
 
+/// パス変更のバッチの仕上げ（空ける・置く）で、メンバーごとに今の曲と件数を出す
+struct MoveProgress<'b, C> {
+    progress: &'b mut SyncProgress,
+    control: &'b C,
+}
+
+impl<C: Control> BatchProgress for MoveProgress<'_, C> {
+    async fn begin(&mut self, m: &BatchMember) {
+        self.progress.phase = SyncPhase::Move;
+        self.progress.current = Some(file_name(&m.to));
+        self.control.sync_progress(self.progress).await;
+    }
+
+    async fn placed(&mut self, _m: &BatchMember) {
+        self.progress.done += 1;
+        self.control.sync_progress(self.progress).await;
+    }
+}
+
 struct Exec<'a, F, S, C> {
     fs: &'a F,
     sources: &'a S,
@@ -235,8 +279,10 @@ struct Exec<'a, F, S, C> {
     pending_done: Vec<Record>,
     since_compact: usize,
     errors: Vec<ReportedError>,
-    done: u64,
-    total: u64,
+    /// 進捗（件数・バイト数・相・今の項目）
+    progress: SyncProgress,
+    /// 端末へ中身を送る操作の op_id → size（`bytes_total` に数えたもの。引き継ぎの照合で済む更新を除く）
+    send_bytes: HashMap<String, u64>,
     /// 開始時に端末にあった管理外のファイルの `canonical_key`（上書きしない）
     unmanaged: HashSet<String>,
     /// 送る元が変わっていた曲（ハッシュの取り直し対象）
@@ -255,8 +301,8 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
     let origins = input.origins;
     let current = Book::from(input.start.clone()).device_items();
     let cur: HashMap<i64, &DeviceItem> = current.iter().map(|c| (c.track_id, c)).collect();
-    // 引き継ぎの照合で済む更新は送らないので、空き容量の判定に入れない
-    let ops: Vec<(OpKind, i64, u64)> = r
+    // 引き継ぎの照合で済む更新は送らないので、空き容量の判定と進捗のバイト数に入れない
+    let sent: Vec<&PlanItem> = r
         .items
         .iter()
         .filter(|o| {
@@ -268,7 +314,13 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
                 cur.get(&o.track_id).copied(),
             )
         })
-        .map(|o| (o.op, o.track_id, o.size))
+        .collect();
+    let ops: Vec<(OpKind, i64, u64)> = sent.iter().map(|o| (o.op, o.track_id, o.size)).collect();
+    // 中身を送るのは追加・更新・更新 + 移動（純粋な移動は送らない）
+    let send_bytes: HashMap<String, u64> = sent
+        .iter()
+        .filter(|o| matches!(o.op, OpKind::Add | OpKind::Update | OpKind::UpdateMove))
+        .map(|o| (o.op_id.clone(), o.size))
         .collect();
     let playlist_bytes: u64 = r
         .playlists
@@ -305,8 +357,15 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
         pending_done: Vec::new(),
         since_compact: 0,
         errors: Vec::new(),
-        done: 0,
-        total: (r.items.len() + r.playlists.len()) as u64,
+        progress: SyncProgress {
+            done: 0,
+            total: (r.items.len() + r.playlists.len()) as u64,
+            bytes_done: 0,
+            bytes_total: send_bytes.values().sum(),
+            phase: SyncPhase::Delete,
+            current: None,
+        },
+        send_bytes,
         unmanaged,
         rehash: std::collections::BTreeSet::new(),
         origins,
@@ -314,6 +373,7 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
     let of = |k: OpKind| r.items.iter().filter(move |o| o.op == k);
     for op in of(OpKind::Delete) {
         x.guard().await?;
+        x.begin(SyncPhase::Delete, op.from.as_deref()).await;
         x.delete(op).await?;
         x.tick().await?;
     }
@@ -328,7 +388,10 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
     }
     for op in of(OpKind::Update).chain(of(OpKind::Add)) {
         x.guard().await?;
+        x.begin(SyncPhase::Send, op.to.as_deref()).await;
         x.put_track(op).await?;
+        // 保留になった曲も処理し終えた量として数える（バーを最後まで進める）
+        x.progress.bytes_done += x.send_bytes.get(&op.op_id).copied().unwrap_or(0);
         x.tick().await?;
     }
     // プレイリスト: 書き込みが成り立たないものを破壊の前に保留にし（旧パスも残す）、
@@ -337,10 +400,12 @@ pub async fn run<F: DeviceFs, S: Sources, C: Control>(
     for p in &r.playlists {
         if p.op == PlaylistOpKind::Delete || (renamed(p) && !held.contains_key(&p.playlist_id)) {
             x.guard().await?;
+            x.begin(SyncPhase::Playlist, playlist_path(p)).await;
             x.remove_playlist(p).await?;
         }
     }
     for p in &r.playlists {
+        x.begin(SyncPhase::Playlist, playlist_path(p)).await;
         if let Some(reason) = held.get(&p.playlist_id) {
             if let Some(reason) = reason {
                 x.errors
@@ -390,9 +455,16 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         Ok(())
     }
 
+    /// 項目の始め: 相と今の項目（ファイル名）を入れて進捗を出す
+    async fn begin(&mut self, phase: SyncPhase, path: Option<&str>) {
+        self.progress.phase = phase;
+        self.progress.current = path.map(file_name);
+        self.control.sync_progress(&self.progress).await;
+    }
+
     async fn tick(&mut self) -> Result<(), SyncError> {
-        self.done += 1;
-        self.control.progress(self.done, self.total).await;
+        self.progress.done += 1;
+        self.control.sync_progress(&self.progress).await;
         if self.since_compact >= COMPACT_EVERY {
             compact(self.fs, &self.book.manifest()).await?;
             self.pending_done.clear();
@@ -703,6 +775,12 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
     /// （`superseded_by` 付き）で閉じて一時ファイルを消してから、残りで新しいバッチを記録する
     async fn path_batch(&mut self, ops: Vec<PlanItem>) -> Result<(), SyncError> {
         let total = ops.len() as u64;
+        // このバッチの送る量（外したメンバーの分も含む。終えたら全体で確定する）
+        let batch_bytes: u64 = ops
+            .iter()
+            .filter(|o| o.op == OpKind::UpdateMove)
+            .filter_map(|o| self.send_bytes.get(&o.op_id))
+            .sum();
         let blocked: HashSet<i64> = ops
             .iter()
             .filter(|o| {
@@ -736,14 +814,20 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             }
         }
         let mut ops = drop_components(ops, &no_origin);
+        // 進捗のバイト数: やり直しで減らさないよう、試行内で送り終えた量の最大を見せ、終えたら全体で確定する
+        let base = self.progress.bytes_done;
+        // 件数: 仕上げで置くたびに進め、終えたらバッチの開始時 + total で確定する（二重に足さない）
+        let base_done = self.progress.done;
+        let mut shown: u64 = 0;
+        self.begin(SyncPhase::Move, None).await;
         let mut superseded: Option<(String, Vec<BatchMember>)> = None;
         loop {
             if ops.is_empty() {
                 if let Some((old, members)) = superseded.take() {
                     self.abort_batch(&old, None, &members).await?;
                 }
-                self.done += total;
-                self.control.progress(self.done, self.total).await;
+                self.finish_batch(base_done + total, base + batch_bytes)
+                    .await;
                 return Ok(());
             }
             self.guard().await?;
@@ -765,12 +849,19 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
             append_durable(self.fs, &records).await?;
 
             let mut failed: HashSet<i64> = HashSet::new();
+            let mut attempt: u64 = 0;
             for m in &members {
                 let Some(new) = &m.new else { continue };
                 self.guard().await?;
+                self.begin(SyncPhase::Move, Some(&m.to)).await;
                 if let Err(reason) = self.transfer(m.track_id, new, m.size, &m.sha256).await? {
                     self.errors.push((EntryKind::Track, m.track_id, reason));
                     failed.insert(m.track_id);
+                } else {
+                    attempt += self.send_bytes.get(&m.op_id).copied().unwrap_or(0);
+                    shown = shown.max(attempt).min(batch_bytes);
+                    self.progress.bytes_done = base + shown;
+                    self.control.sync_progress(&self.progress).await;
                 }
             }
             if failed.is_empty() {
@@ -789,15 +880,26 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
                     Phase::Vacating,
                     false,
                     &mut self.book,
+                    &mut MoveProgress {
+                        progress: &mut self.progress,
+                        control: self.control,
+                    },
                 )
                 .await?;
-                self.done += total;
-                self.control.progress(self.done, self.total).await;
+                self.finish_batch(base_done + total, base + batch_bytes)
+                    .await;
                 return Ok(());
             }
             ops = drop_components(ops, &failed);
             superseded = Some((batch_id, members));
         }
+    }
+
+    /// パス変更のバッチを終えた（成功・中断のどちらでも）: 件数とバイト数を確定させて進捗を出す
+    async fn finish_batch(&mut self, done: u64, bytes_done: u64) {
+        self.progress.done = done;
+        self.progress.bytes_done = bytes_done;
+        self.control.sync_progress(&self.progress).await;
     }
 
     /// 先に旧バッチの終端を耐久化し、その後で旧バッチの一時ファイルを消す
@@ -822,6 +924,16 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         }
         Ok(())
     }
+}
+
+/// 進捗に出す今の項目（パスの最後の `/` の後）
+fn file_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_owned()
+}
+
+/// 進捗に出すプレイリストのパス（送り先。削除なら元）
+fn playlist_path(p: &PlanPlaylist) -> Option<&str> {
+    p.to.as_deref().or(p.from.as_deref())
 }
 
 /// パスの変わるプレイリストの更新か

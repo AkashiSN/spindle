@@ -280,6 +280,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     onJob: (e) => {
       jobs.refresh()
       rip.onJob(e)
+      devices.onJob(e)
       youtube.refresh()
       subs.refresh()
       if (e.state === 'done' || e.state === 'failed') scheduleRowRefresh()

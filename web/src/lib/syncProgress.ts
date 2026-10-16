@@ -1,13 +1,17 @@
-// Mac の同期の進捗（端末タブ）の書式と判定。表示の経過時間はサーバが計算した age を受信時刻に直して持つ
+// 同期の進捗（端末タブ）の書式と判定。Mac は device_progress、Android は device_sync ジョブの job イベントで届く。
+// Mac の表示の経過時間はサーバが計算した age を受信時刻に直して持つ
 
-import type { DeviceProgressEvent, SyncProgress } from '../api/types'
+import type { AdbProgress, DeviceProgressEvent, JobEvent, SyncProgress } from '../api/types'
 import { formatBytes } from './settings'
 
 /** これを超えて進捗が来なければ「応答なし」と見なす（秒） */
 export const STALE_SECS = 30
 
+/** 進み具合と要約に使う列（Mac と Android で共通） */
+export type ProgressCounts = Pick<SyncProgress, 'done' | 'total' | 'bytes_done' | 'bytes_total' | 'rate'>
+
 /** 進み具合 0..1。バイトの総量があればバイト、無ければ件数 */
-export function progressRatio(p: SyncProgress): number {
+export function progressRatio(p: ProgressCounts): number {
   const r = p.bytes_total > 0 ? p.bytes_done / p.bytes_total : p.total > 0 ? p.done / p.total : 0
   return Math.min(1, Math.max(0, r))
 }
@@ -25,12 +29,15 @@ function remaining(secs: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-/** 1 行の要約。`ageSecs` は最後の進捗からの経過秒 */
-export function progressSummary(p: SyncProgress, ageSecs: number): string {
+/**
+ * 1 行の要約。`ageSecs` は最後の進捗からの経過秒。`stale: false` なら「応答なし」を出さない
+ * （Android はジョブの生死をワーカーが管理し、移動のバッチのように進捗の間が空く段がある）
+ */
+export function progressSummary(p: ProgressCounts, ageSecs: number, opts: { stale?: boolean } = {}): string {
   const parts = [`${p.done} / ${p.total} 件`]
   const hasBytes = p.bytes_total > 0
   if (hasBytes) parts.push(`${formatBytes(p.bytes_done)} / ${formatBytes(p.bytes_total)}`)
-  if (ageSecs > STALE_SECS) {
+  if ((opts.stale ?? true) && ageSecs > STALE_SECS) {
     parts.push(`応答なし（最後の進捗: ${agoText(ageSecs)}）`)
   } else if (hasBytes && p.rate > 0) {
     parts.push(`${formatBytes(p.rate)}/s`)
@@ -49,6 +56,8 @@ export function phaseLabel(phase: SyncProgress['phase']): string {
       return '受信中'
     case 'add':
       return '追加中'
+    case 'send':
+      return '送信中'
     case 'playlist':
       return 'プレイリスト'
   }
@@ -128,4 +137,45 @@ export function applyProgressEvent<T extends ProgressTarget>(items: readonly T[]
         ? { ...d, plan_open: true, sync_progress: { ...e.progress, receivedAt: receivedAtOf(e.progress, nowMs) } }
         : { ...d, sync_progress: null },
   )
+}
+
+const ADB_PHASES: readonly AdbProgress['phase'][] = ['delete', 'move', 'send', 'playlist']
+
+/** device_sync ジョブの job イベントから Android の進捗を読む。形が合わなければ null */
+export function adbProgressFrom(e: JobEvent): AdbProgress | null {
+  const detail = e.detail
+  if (detail == null || typeof detail !== 'object') return null
+  const d = detail as Record<string, unknown>
+  if (d.kind !== 'device_sync') return null
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  if (typeof d.phase !== 'string' || !ADB_PHASES.includes(d.phase as AdbProgress['phase'])) return null
+  const bytes_done = num(d.bytes_done)
+  const bytes_total = num(d.bytes_total)
+  const rate = num(d.rate)
+  const done = num(e.done)
+  const total = num(e.total)
+  if (bytes_done == null || bytes_total == null || rate == null || done == null || total == null) return null
+  const current = typeof d.current === 'string' ? d.current : null
+  return { done, total, bytes_done, bytes_total, rate, phase: d.phase as AdbProgress['phase'], current }
+}
+
+/**
+ * ジョブ id → Android の進捗の表を job イベントで更新する。running で進捗が読めれば入れ、
+ * running 以外（queued へ戻った・終端）なら消す。それ以外は同じ表を返す（React の state を無駄に変えない）
+ */
+export function applyJobProgress(
+  map: ReadonlyMap<number, AdbProgress>,
+  e: JobEvent,
+): ReadonlyMap<number, AdbProgress> {
+  if (e.state === 'running') {
+    const p = adbProgressFrom(e)
+    if (p == null) return map
+    const next = new Map(map)
+    next.set(e.id, p)
+    return next
+  }
+  if (!map.has(e.id)) return map
+  const next = new Map(map)
+  next.delete(e.id)
+  return next
 }

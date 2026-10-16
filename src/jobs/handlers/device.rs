@@ -4,7 +4,9 @@
 //! `DISCONNECTED_REQUEUE_SECS` 待つ（scan は待たずに終わる。次の接続でまた投入される）
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rusqlite::OptionalExtension as _;
 
@@ -16,7 +18,9 @@ use crate::device::recover::{recover, Expect, RecoverError, Recovered};
 use crate::device::remote::{DeviceFs, RemoteError};
 use crate::device::runtime::AdbRuntime;
 use crate::device::store::StoreError;
-use crate::device::sync::{self, Control, RootSources, SourceEntry, SyncError, SyncInput};
+use crate::device::sync::{
+    self, Control, RootSources, SourceEntry, SyncError, SyncInput, SyncProgress,
+};
 use crate::device::verify::verify;
 use crate::domain::device::{OpKind, SourceKind, Transport};
 use crate::domain::relpath::RelPath;
@@ -134,6 +138,62 @@ struct JobControl {
     db: Arc<Db>,
     device_id: i64,
     generation: i64,
+    /// 速度の計り（`start` からの経過で標本を取る）
+    rate: std::sync::Mutex<RateWindow>,
+    start: Instant,
+}
+
+impl JobControl {
+    fn new(ctx: JobContext, db: Arc<Db>, device_id: i64, generation: i64) -> Self {
+        Self {
+            ctx,
+            db,
+            device_id,
+            generation,
+            rate: std::sync::Mutex::new(RateWindow::default()),
+            start: Instant::now(),
+        }
+    }
+}
+
+/// 速度を計る窓の長さ
+const RATE_WINDOW: Duration = Duration::from_secs(5);
+
+/// 速度の計り。標本（開始からの経過, 累計バイト）を持ち、直近 `RATE_WINDOW` の速度を出す。
+/// 窓の外にある標本は、窓の端の基準になる 1 点だけ残す（agent の `Meter` と同じ扱い）
+#[derive(Default)]
+struct RateWindow {
+    samples: VecDeque<(Duration, u64)>,
+}
+
+impl RateWindow {
+    /// 時刻 `at`（開始からの経過）に累計が `bytes` になったと記し、そのときの速度（バイト/秒）を返す
+    fn push(&mut self, at: Duration, bytes: u64) -> u64 {
+        self.samples.push_back((at, bytes));
+        let edge = at.saturating_sub(RATE_WINDOW);
+        while self.samples.len() >= 2 && self.samples[1].0 <= edge {
+            self.samples.pop_front();
+        }
+        if at.is_zero() {
+            return 0;
+        }
+        // 窓の端以前で最後の標本。無ければ開始（0 秒・0 バイト）
+        let (bt, bb) = if at < RATE_WINDOW {
+            (Duration::ZERO, 0)
+        } else {
+            self.samples
+                .iter()
+                .rev()
+                .find(|(st, _)| *st <= edge)
+                .copied()
+                .unwrap_or((Duration::ZERO, 0))
+        };
+        let dt = at.saturating_sub(bt).as_secs_f64();
+        if dt <= 0.0 {
+            return 0;
+        }
+        (bytes.saturating_sub(bb) as f64 / dt).round() as u64
+    }
 }
 
 impl Control for JobControl {
@@ -152,6 +212,26 @@ impl Control for JobControl {
     async fn progress(&self, done: u64, total: u64) {
         // キャンセルは cancelled() で拾う（ここでの Err は無視してよい）
         let _ = self.ctx.progress(done as i64, total as i64).await;
+    }
+
+    async fn sync_progress(&self, p: &SyncProgress) {
+        let rate = {
+            let mut w = self.rate.lock().unwrap_or_else(|e| e.into_inner());
+            w.push(self.start.elapsed(), p.bytes_done)
+        };
+        let detail = serde_json::json!({
+            "kind": "device_sync",
+            "phase": p.phase,
+            "current": p.current,
+            "bytes_done": p.bytes_done,
+            "bytes_total": p.bytes_total,
+            "rate": rate,
+        });
+        // キャンセルは cancelled() で拾う（ここでの Err は無視してよい）
+        let _ = self
+            .ctx
+            .progress_with(p.done as i64, p.total as i64, Some(detail))
+            .await;
     }
 }
 
@@ -396,12 +476,12 @@ async fn run_sync(env: Arc<DeviceEnv>, ctx: JobContext) -> HandlerResult {
         .map(|pl| (pl.playlist_id, pl.body.clone()))
         .collect();
     let sources = RootSources::new(Arc::clone(&env.library), Arc::clone(&env.derived), entries);
-    let control = JobControl {
-        ctx: ctx.clone(),
-        db: Arc::clone(&env.db),
+    let control = JobControl::new(
+        ctx.clone(),
+        Arc::clone(&env.db),
         device_id,
-        generation: open.plan.generation,
-    };
+        open.plan.generation,
+    );
     let origins = sync::origins_of(&computed.desired);
     let result = sync::run(
         &p.fs,
@@ -504,13 +584,13 @@ async fn run_verify(env: Arc<DeviceEnv>, ctx: JobContext) -> HandlerResult {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let control = JobControl {
-        ctx: ctx.clone(),
-        db: Arc::clone(&env.db),
+    // 検証は generation を見ないので、端末の今の値を入れる
+    let control = JobControl::new(
+        ctx.clone(),
+        Arc::clone(&env.db),
         device_id,
-        // 検証は generation を見ないので、端末の今の値を入れる
-        generation: p.device.generation,
-    };
+        p.device.generation,
+    );
     let report = match verify(&p.fs, &control, p.rec.manifest.clone()).await {
         Ok(r) => r,
         Err(e) => return sync_failure(Kind::Verify, e),
@@ -534,5 +614,55 @@ impl Handler for VerifyHandler {
     fn run(&self, ctx: JobContext) -> BoxFuture<'static, HandlerResult> {
         let fut = assert_send(run_verify(Arc::clone(&self.env), ctx));
         Box::pin(fut)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn rate_is_zero_with_a_single_sample() {
+        let mut w = RateWindow::default();
+        assert_eq!(w.push(s(0), 0), 0);
+    }
+
+    #[test]
+    fn rate_is_bytes_over_elapsed_within_the_window() {
+        let mut w = RateWindow::default();
+        w.push(s(0), 0);
+        w.push(s(2), 2000);
+        assert_eq!(w.push(s(4), 6000), 1500);
+    }
+
+    #[test]
+    fn rate_uses_the_last_sample_at_or_before_the_window_edge() {
+        // 窓は直近 5 秒。agent の Meter と同じく、窓の端以前で最後の標本を基準にする
+        let mut w = RateWindow::default();
+        w.push(s(0), 0);
+        w.push(s(6), 6000);
+        // t=8, edge=3。端以前の標本は (0, 0) だけなので 10000 / 8
+        assert_eq!(w.push(s(8), 10000), 1250);
+        // t=12, edge=7。端以前で最後は (6, 6000) なので (14000 - 6000) / 6
+        assert_eq!(w.push(s(12), 14000), 1333);
+    }
+
+    #[test]
+    fn rate_is_zero_when_no_time_has_passed() {
+        let mut w = RateWindow::default();
+        assert_eq!(w.push(s(0), 500), 0);
+        assert_eq!(w.push(s(0), 900), 0);
+    }
+
+    #[test]
+    fn rate_drops_to_zero_when_bytes_stop_for_the_window() {
+        let mut w = RateWindow::default();
+        w.push(s(0), 0);
+        w.push(s(1), 1000);
+        assert_eq!(w.push(s(10), 1000), 0);
     }
 }

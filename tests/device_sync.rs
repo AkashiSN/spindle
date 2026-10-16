@@ -1674,3 +1674,151 @@ async fn adopted_with_missing_source_keeps_the_mark() {
     assert!(r.rehash.is_empty());
     assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
 }
+
+fn seen(c: &TestControl) -> Vec<SyncProgress> {
+    c.seen.lock().unwrap().clone()
+}
+
+/// 件数もバイト数も減らず、最後に件数もバイト数も揃う
+fn assert_finishes(s: &[SyncProgress]) {
+    let last = s.last().expect("進捗が出ていない");
+    assert!(s.windows(2).all(|w| w[0].done <= w[1].done), "{s:?}");
+    assert_eq!(last.done, last.total, "{s:?}");
+    assert_eq!(last.bytes_done, last.bytes_total, "{s:?}");
+    assert!(
+        s.windows(2).all(|w| w[0].bytes_done <= w[1].bytes_done),
+        "{s:?}"
+    );
+    assert!(s.iter().all(|p| p.bytes_done <= p.bytes_total), "{s:?}");
+    assert!(s.iter().all(|p| p.bytes_total == last.bytes_total), "{s:?}");
+}
+
+#[tokio::test]
+async fn progress_counts_bytes_of_sent_tracks() {
+    let fs = device_at(&[], 1 << 30).await;
+    let want: &[Want] = &[(1, "A/a.opus", &[1u8; 100]), (2, "B/b.opus", &[2u8; 250])];
+    let c = TestControl::default();
+    sync_to(&fs, want, &c).await.unwrap();
+    let s = seen(&c);
+    assert_finishes(&s);
+    assert_eq!(s.last().unwrap().bytes_total, 350);
+    for name in ["a.opus", "b.opus"] {
+        assert!(
+            s.iter()
+                .any(|p| p.phase == SyncPhase::Send && p.current.as_deref() == Some(name)),
+            "{name}: {s:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn progress_does_not_count_adopted_updates() {
+    let fs = device_at(&[(1, "A/a.flac", b"AAAA")], 1 << 30).await;
+    mark_adopted(&fs).await;
+    let c = TestControl::default();
+    sync_to(&fs, &[(1, "A/a.flac", b"AAAA"), (2, "B/b.flac", b"BB")], &c)
+        .await
+        .unwrap();
+    let s = seen(&c);
+    assert_finishes(&s);
+    assert_eq!(s.last().unwrap().bytes_total, 2);
+    assert_eq!(s.last().unwrap().total, 2);
+}
+
+#[tokio::test]
+async fn progress_counts_update_moves_in_the_batch() {
+    let fs = device_at(&[(1, "a.opus", b"OLD"), (2, "x.opus", b"X")], 1 << 30).await;
+    let c = TestControl::default();
+    sync_to(&fs, &[(1, "Dir/b.opus", b"NEW!"), (2, "y.opus", b"X")], &c)
+        .await
+        .unwrap();
+    let s = seen(&c);
+    assert_finishes(&s);
+    // 更新 + 移動は送る（4 バイト）。純粋な移動は送らない
+    assert_eq!(s.last().unwrap().bytes_total, 4);
+    // 送った曲の size 分（4）が、バッチを終える前に Move の段で数えられている（begin の 0 では満たされない）
+    assert!(
+        s.iter()
+            .any(|p| p.phase == SyncPhase::Move && p.bytes_done == 4 && p.done < p.total),
+        "{s:?}"
+    );
+}
+
+#[tokio::test]
+async fn progress_finishes_when_a_shrunk_batch_drops_a_track() {
+    let fs = device_at(&[(1, "a.opus", b"OLD1"), (2, "b.opus", b"OLD2")], 1 << 30).await;
+    let want: &[Want] = &[(1, "A/a.opus", b"NEW11"), (2, "B/b.opus", b"NEW222")];
+    let c = TestControl::default();
+    let r = sync_full(&fs, want, &[], &[1], &c).await.unwrap();
+    // 1 を外してやり直した（報告に 1 件のエラーが残る）
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    let s = seen(&c);
+    assert_finishes(&s);
+    assert_eq!(s.last().unwrap().bytes_total, 11);
+}
+
+#[tokio::test]
+async fn progress_finishes_when_a_source_cannot_be_opened() {
+    let fs = device_at(&[], 1 << 30).await;
+    let want: &[Want] = &[(1, "a.opus", b"AAA"), (2, "b.opus", b"BBBBB")];
+    let c = TestControl::default();
+    let r = sync_full(&fs, want, &[], &[1], &c).await.unwrap();
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    let s = seen(&c);
+    assert_finishes(&s);
+    assert_eq!(s.last().unwrap().bytes_total, 8);
+}
+
+#[tokio::test]
+async fn progress_of_deletes_only_has_no_bytes() {
+    let fs = device_at(&[(1, "A/a.opus", b"A")], 1 << 30).await;
+    let c = TestControl::default();
+    sync_to(&fs, &[], &c).await.unwrap();
+    let s = seen(&c);
+    assert_finishes(&s);
+    assert_eq!(s.last().unwrap().bytes_total, 0);
+    assert!(
+        s.iter()
+            .any(|p| p.phase == SyncPhase::Delete && p.current.as_deref() == Some("a.opus")),
+        "{s:?}"
+    );
+}
+
+#[tokio::test]
+async fn progress_of_pure_moves_shows_each_track() {
+    let fs = device_at(&[(1, "a.opus", b"A"), (2, "b.opus", b"B")], 1 << 30).await;
+    let c = TestControl::default();
+    sync_to(&fs, &[(1, "X/c.opus", b"A"), (2, "Y/d.opus", b"B")], &c)
+        .await
+        .unwrap();
+    let s = seen(&c);
+    assert_finishes(&s);
+    assert_eq!(s.last().unwrap().total, 2);
+    // 送り先のファイル名が Move の相で出る
+    for name in ["c.opus", "d.opus"] {
+        assert!(
+            s.iter()
+                .any(|p| p.phase == SyncPhase::Move && p.current.as_deref() == Some(name)),
+            "{name}: {s:?}"
+        );
+    }
+    // 置くたびに 1 件ずつ進む（バッチの終わりにまとめて増えるのではない）
+    assert!(s.iter().any(|p| p.done == 1), "{s:?}");
+}
+
+#[tokio::test]
+async fn progress_of_a_mixed_batch_shows_the_move_track() {
+    let fs = device_at(&[(1, "a.opus", b"OLD"), (2, "x.opus", b"X")], 1 << 30).await;
+    let c = TestControl::default();
+    sync_to(&fs, &[(1, "Dir/b.opus", b"NEW!"), (2, "y.opus", b"X")], &c)
+        .await
+        .unwrap();
+    let s = seen(&c);
+    assert_finishes(&s);
+    // 純粋な移動の曲の名前が出る（更新 + 移動の名前が残り続けない）
+    assert!(
+        s.iter()
+            .any(|p| p.phase == SyncPhase::Move && p.current.as_deref() == Some("y.opus")),
+        "{s:?}"
+    );
+}

@@ -13,7 +13,13 @@ import type {
   UnregisteredAdb,
 } from '../api/types'
 import type { SyncProgress } from '../api/types'
-import { phaseLabel, progressAgeSecs, progressRatio, progressSummary } from '../lib/syncProgress'
+import {
+  phaseLabel,
+  progressAgeSecs,
+  progressRatio,
+  progressSummary,
+  type ProgressCounts,
+} from '../lib/syncProgress'
 import type { Devices } from '../hooks/useDevices'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
 import { useNow } from '../hooks/useNow'
@@ -457,6 +463,9 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
   const shown = rows.slice(0, DIFF_ROW_LIMIT)
   const sync = syncSummary(diff)
   const button = syncButton(device, diff)
+  // Android の同期の進捗（job イベントで届く）。開き直した直後は次のイベントまで無いので「同期中…」
+  // 表は running の間だけ項目を持つので、一覧の state が queued のままでも出してよい（取り直しを待たない）
+  const adbProgress = device.sync_job != null ? devices.jobProgress.get(device.sync_job.id) : undefined
 
   return (
     <div className="devices-diff">
@@ -516,8 +525,12 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
               </div>
             </div>
           )}
-          {device.sync_job != null && (
-            <p className="small">{device.sync_job.state === 'running' ? '同期中…' : queuedSyncText(device)}</p>
+          {adbProgress != null ? (
+            <SyncProgressLine p={adbProgress} age={null} />
+          ) : (
+            device.sync_job != null && (
+              <p className="small">{device.sync_job.state === 'running' ? '同期中…' : queuedSyncText(device)}</p>
+            )
           )}
           <div className="op-row">
             <button
@@ -552,7 +565,9 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
             </div>
           )}
           {/* 進捗はサーバが open な計画の分だけ返し・流す。確定はイベントを流さないので plan_open は見ない */}
-          {device.sync_progress && <SyncProgressLine p={device.sync_progress} now={tick} />}
+          {device.sync_progress && (
+            <SyncProgressLine p={device.sync_progress} age={progressAgeSecs(device.sync_progress, tick)} />
+          )}
           <p className="small">
             Mac で <code>spindle-agent sync</code> を実行すると反映される。最終報告:{' '}
             {device.last_synced_at != null ? formatDateTime(device.last_synced_at) : 'まだ報告なし'}
@@ -891,10 +906,20 @@ function PairCodeCell({ device, devices }: { device: Device; devices: Devices })
   )
 }
 
-/** Mac の同期の進捗。経過時間は受信時刻から 1 秒ごとに数え直す（サーバの age は受信時の値） */
-function SyncProgressLine({ p, now }: { p: SyncProgress & { receivedAt?: number }; now: number }) {
-  const age = progressAgeSecs(p, now)
+/**
+ * 同期の進捗。`age` は最後の進捗からの経過秒（Mac は受信時刻から 1 秒ごとに数え直す。サーバの age は
+ * 受信時の値）。null なら「応答なし」を出さない（Android。ジョブの生死はワーカーが管理する）
+ */
+function SyncProgressLine({
+  p,
+  age,
+}: {
+  p: ProgressCounts & Pick<SyncProgress, 'phase' | 'current'>
+  age: number | null
+}) {
   const ratio = progressRatio(p)
+  // age が無い（Android）なら経過 0 で「応答なし」を出さない
+  const summary = age == null ? progressSummary(p, 0, { stale: false }) : progressSummary(p, age, { stale: true })
   return (
     <div className="sync-progress small">
       <div className="sync-progress-head">
@@ -902,7 +927,7 @@ function SyncProgressLine({ p, now }: { p: SyncProgress & { receivedAt?: number 
         {p.current != null && <span className="muted sync-progress-current">{p.current}</span>}
       </div>
       <progress className="sync-progress-bar" value={ratio} max={1} aria-label="同期の進捗" />
-      <div className="muted">{progressSummary(p, age)}</div>
+      <div className="muted">{summary}</div>
     </div>
   )
 }
