@@ -13,9 +13,10 @@ import type {
   UnregisteredAdb,
 } from '../api/types'
 import type { SyncProgress } from '../api/types'
-import { phaseLabel, progressRatio, progressSummary, receivedAtOf } from '../lib/syncProgress'
+import { phaseLabel, progressAgeSecs, progressRatio, progressSummary } from '../lib/syncProgress'
 import type { Devices } from '../hooks/useDevices'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
+import { useNow } from '../hooks/useNow'
 import type { Playlists } from '../hooks/usePlaylists'
 import { ApiError } from '../api/client'
 import {
@@ -449,6 +450,8 @@ function AndroidCandidate({
 function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff | null; devices: Devices }) {
   // 評価時刻の説明の基準（描画のたびに時計を読まない）
   const [now] = useState(() => Math.floor(Date.now() / 1000))
+  // 進捗の経過秒と「同期中か」の判定は毎秒読み直す（進捗がある間だけ）
+  const tick = useNow(1000, device.sync_progress != null)
   if (diff == null) return <p className="muted">差分を計算中…</p>
   const rows = sortDiffItems(diff.items)
   const shown = rows.slice(0, DIFF_ROW_LIMIT)
@@ -530,9 +533,9 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
         </>
       ) : (
         <>
-          {agentPlanText(device) != null && (
+          {agentPlanText(device, tick) != null && (
             <div className="devices-warn small">
-              <p>{agentPlanText(device)}</p>
+              <p>{agentPlanText(device, tick)}</p>
               <div className="op-row">
                 <button
                   type="button"
@@ -549,7 +552,7 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
             </div>
           )}
           {/* 進捗はサーバが open な計画の分だけ返し・流す。確定はイベントを流さないので plan_open は見ない */}
-          {device.sync_progress && <SyncProgressLine p={device.sync_progress} />}
+          {device.sync_progress && <SyncProgressLine p={device.sync_progress} now={tick} />}
           <p className="small">
             Mac で <code>spindle-agent sync</code> を実行すると反映される。最終報告:{' '}
             {device.last_synced_at != null ? formatDateTime(device.last_synced_at) : 'まだ報告なし'}
@@ -889,14 +892,8 @@ function PairCodeCell({ device, devices }: { device: Device; devices: Devices })
 }
 
 /** Mac の同期の進捗。経過時間は受信時刻から 1 秒ごとに数え直す（サーバの age は受信時の値） */
-function SyncProgressLine({ p }: { p: SyncProgress & { receivedAt?: number } }) {
-  const [tick, setTick] = useState(() => Date.now())
-  useEffect(() => {
-    const id = window.setInterval(() => setTick(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [])
-  const received = p.receivedAt ?? receivedAtOf(p, tick)
-  const age = Math.max(0, Math.floor((tick - received) / 1000))
+function SyncProgressLine({ p, now }: { p: SyncProgress & { receivedAt?: number }; now: number }) {
+  const age = progressAgeSecs(p, now)
   const ratio = progressRatio(p)
   return (
     <div className="sync-progress small">

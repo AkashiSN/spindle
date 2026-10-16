@@ -59,6 +59,12 @@ export function receivedAtOf(p: Pick<SyncProgress, 'age'>, nowMs: number): numbe
   return nowMs - p.age * 1000
 }
 
+/** 最後の進捗からの経過秒。受信時刻が無ければサーバの age をそのまま使う */
+export function progressAgeSecs(p: SyncProgress & { receivedAt?: number }, nowMs: number): number {
+  const received = p.receivedAt ?? receivedAtOf(p, nowMs)
+  return Math.max(0, Math.floor((nowMs - received) / 1000))
+}
+
 type Progressive = { id: number; sync_progress?: SyncProgress | null }
 
 /**

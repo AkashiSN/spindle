@@ -178,10 +178,27 @@ describe('nextPollDelay', () => {
 })
 
 describe('agentPlanText', () => {
+  const NOW = 1_000_000
+  const progress = (receivedAt: number): NonNullable<Device['sync_progress']> => ({
+    plan_id: 1, done: 1, total: 2, bytes_done: 0, bytes_total: 0, rate: 0, phase: 'fetch', current: null,
+    updated_at: 0, age: 0, receivedAt,
+  })
   it('iPhone の途中の計画だけ案内する', () => {
-    expect(agentPlanText({ ...device(1, {}), transport: 'agent', plan_open: true })).toMatch('Mac で同期が途中')
-    expect(agentPlanText({ ...device(1, {}), transport: 'agent', plan_open: false })).toBeNull()
-    expect(agentPlanText({ ...device(1, {}), transport: 'adb', plan_open: true })).toBeNull()
+    expect(agentPlanText({ ...device(1, {}), transport: 'agent', plan_open: true }, NOW)).toMatch('Mac で同期が途中')
+    expect(agentPlanText({ ...device(1, {}), transport: 'agent', plan_open: false }, NOW)).toBeNull()
+    expect(agentPlanText({ ...device(1, {}), transport: 'adb', plan_open: true }, NOW)).toBeNull()
+  })
+  it('進捗が新しい間は同期中なので案内しない', () => {
+    const d = { ...device(1, {}), transport: 'agent' as const, plan_open: true }
+    expect(agentPlanText({ ...d, sync_progress: progress(NOW - 30_000) }, NOW)).toBeNull()
+  })
+  it('進捗が 30 秒より古ければ案内する', () => {
+    const d = { ...device(1, {}), transport: 'agent' as const, plan_open: true }
+    expect(agentPlanText({ ...d, sync_progress: progress(NOW - 31_000) }, NOW)).toMatch('Mac で同期が途中')
+  })
+  it('進捗が無ければ案内する', () => {
+    const d = { ...device(1, {}), transport: 'agent' as const, plan_open: true }
+    expect(agentPlanText({ ...d, sync_progress: null }, NOW)).toMatch('Mac で同期が途中')
   })
 })
 

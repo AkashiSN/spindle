@@ -3,6 +3,7 @@
 import { ApiError } from '../api/client'
 import type { AdbVolume, AdoptPreview, Device, DeviceCounts, DeviceDiff, DiffItem, DiffOp, JobEvent, JobState } from '../api/types'
 import { formatDateTime } from './history'
+import { progressAgeSecs, STALE_SECS } from './syncProgress'
 
 /** 未反映の件数（ナビのバッジ・一覧）。待ちはハッシュ計算などを待っているだけなので数えない */
 export function unsyncedCount(c: DeviceCounts): number {
@@ -170,9 +171,13 @@ export function offerForceAbandon(d: Device, lastErrorCode: string | null): bool
 export const AGENT_FORCE_ABANDON_CONFIRM =
   'Mac につながずに途中の計画を破棄します。iPhone 側の状態とキャッシュには触りません。よろしいですか？'
 
-/** iPhone の途中の計画の案内（P5-4a）。計画は Mac の spindle-agent が閉じるので、ここでは案内と強制破棄だけ */
-export function agentPlanText(d: Device): string | null {
+/**
+ * iPhone の途中の計画の案内（P5-4a）。計画は Mac の spindle-agent が閉じるので、ここでは案内と強制破棄だけ。
+ * 進捗が新しい間（STALE_SECS 以内）は Mac が同期している最中なので出さない（強制破棄も出さない）
+ */
+export function agentPlanText(d: Device, nowMs: number): string | null {
   if (d.transport !== 'agent' || !d.plan_open) return null
+  if (d.sync_progress && progressAgeSecs(d.sync_progress, nowMs) <= STALE_SECS) return null
   return 'Mac で同期が途中です。Mac で spindle-agent sync をもう一度実行するか、Mac が使えなければ強制破棄します'
 }
 
