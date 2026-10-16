@@ -236,8 +236,13 @@ describe('applyJobProgress', () => {
     const m = new Map([[7, prog]])
     expect(applyJobProgress(m, ev({ detail: undefined }))).toBe(m)
   })
-  it('queued は表を変えない', () => {
+  it('queued へ戻ったら消す（回収で戻った古い値を残さない）', () => {
     const m = new Map([[7, prog]])
+    const out = applyJobProgress(m, ev({ state: 'queued', detail: undefined }))
+    expect(out.has(7)).toBe(false)
+  })
+  it('表に無いジョブの queued は同じ表を返す', () => {
+    const m = new Map([[8, prog]])
     expect(applyJobProgress(m, ev({ state: 'queued', detail: undefined }))).toBe(m)
   })
   it('表に無いジョブの終端は同じ表を返す', () => {

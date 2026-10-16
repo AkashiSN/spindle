@@ -160,8 +160,8 @@ export function adbProgressFrom(e: JobEvent): AdbProgress | null {
 }
 
 /**
- * ジョブ id → Android の進捗の表を job イベントで更新する。running で進捗が読めれば入れ、終端
- * （running でも queued でもない状態）なら消す。それ以外は同じ表を返す（React の state を無駄に変えない）
+ * ジョブ id → Android の進捗の表を job イベントで更新する。running で進捗が読めれば入れ、
+ * running 以外（queued へ戻った・終端）なら消す。それ以外は同じ表を返す（React の state を無駄に変えない）
  */
 export function applyJobProgress(
   map: ReadonlyMap<number, AdbProgress>,
@@ -174,7 +174,7 @@ export function applyJobProgress(
     next.set(e.id, p)
     return next
   }
-  if (e.state === 'queued' || !map.has(e.id)) return map
+  if (!map.has(e.id)) return map
   const next = new Map(map)
   next.delete(e.id)
   return next

@@ -1735,9 +1735,10 @@ async fn progress_counts_update_moves_in_the_batch() {
     assert_finishes(&s);
     // 更新 + 移動は送る（4 バイト）。純粋な移動は送らない
     assert_eq!(s.last().unwrap().bytes_total, 4);
+    // 送った曲の size 分（4）が、バッチを終える前に Move の段で数えられている（begin の 0 では満たされない）
     assert!(
         s.iter()
-            .any(|p| p.phase == SyncPhase::Move && p.bytes_done < p.bytes_total),
+            .any(|p| p.phase == SyncPhase::Move && p.bytes_done == 4 && p.done < p.total),
         "{s:?}"
     );
 }
@@ -1747,7 +1748,9 @@ async fn progress_finishes_when_a_shrunk_batch_drops_a_track() {
     let fs = device_at(&[(1, "a.opus", b"OLD1"), (2, "b.opus", b"OLD2")], 1 << 30).await;
     let want: &[Want] = &[(1, "A/a.opus", b"NEW11"), (2, "B/b.opus", b"NEW222")];
     let c = TestControl::default();
-    sync_full(&fs, want, &[], &[1], &c).await.unwrap();
+    let r = sync_full(&fs, want, &[], &[1], &c).await.unwrap();
+    // 1 を外してやり直した（報告に 1 件のエラーが残る）
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
     let s = seen(&c);
     assert_finishes(&s);
     assert_eq!(s.last().unwrap().bytes_total, 11);

@@ -420,7 +420,6 @@ export type SyncProgress = {
   /** サーバが数えた、最後の進捗からの経過秒 */
   age: number
 }
-/** SSE device_progress。計画が閉じたら progress は null */
 /**
  * Android の同期（device_sync ジョブ）の進捗。job イベントの detail と件数（done / total）から作る
  * （lib/syncProgress.ts の adbProgressFrom）。Mac と違い計画の id・経過時間は持たない
@@ -428,6 +427,7 @@ export type SyncProgress = {
 export type AdbProgress = Pick<SyncProgress, 'done' | 'total' | 'bytes_done' | 'bytes_total' | 'rate' | 'current'> & {
   phase: 'delete' | 'move' | 'send' | 'playlist'
 }
+/** SSE device_progress。計画が閉じたら progress は null */
 export type DeviceProgressEvent = { device_id: number; progress: SyncProgress | null }
 /**
  * pending: 次の同期で送る収録曲の数。waiting: 準備待ち（Derived 未生成など。同期しても送られない）の収録曲の数。

@@ -464,8 +464,8 @@ function DiffTab({ device, diff, devices }: { device: Device; diff: DeviceDiff |
   const sync = syncSummary(diff)
   const button = syncButton(device, diff)
   // Android の同期の進捗（job イベントで届く）。開き直した直後は次のイベントまで無いので「同期中…」
-  const adbProgress =
-    device.sync_job?.state === 'running' ? devices.jobProgress.get(device.sync_job.id) : undefined
+  // 表は running の間だけ項目を持つので、一覧の state が queued のままでも出してよい（取り直しを待たない）
+  const adbProgress = device.sync_job != null ? devices.jobProgress.get(device.sync_job.id) : undefined
 
   return (
     <div className="devices-diff">
@@ -918,6 +918,8 @@ function SyncProgressLine({
   age: number | null
 }) {
   const ratio = progressRatio(p)
+  // age が無い（Android）なら経過 0 で「応答なし」を出さない
+  const summary = age == null ? progressSummary(p, 0, { stale: false }) : progressSummary(p, age, { stale: true })
   return (
     <div className="sync-progress small">
       <div className="sync-progress-head">
@@ -925,7 +927,7 @@ function SyncProgressLine({
         {p.current != null && <span className="muted sync-progress-current">{p.current}</span>}
       </div>
       <progress className="sync-progress-bar" value={ratio} max={1} aria-label="同期の進捗" />
-      <div className="muted">{progressSummary(p, age ?? 0, { stale: age != null })}</div>
+      <div className="muted">{summary}</div>
     </div>
   )
 }
