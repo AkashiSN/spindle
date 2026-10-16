@@ -1679,9 +1679,10 @@ fn seen(c: &TestControl) -> Vec<SyncProgress> {
     c.seen.lock().unwrap().clone()
 }
 
-/// バイト数が減らず、最後に件数もバイト数も揃う
+/// 件数もバイト数も減らず、最後に件数もバイト数も揃う
 fn assert_finishes(s: &[SyncProgress]) {
     let last = s.last().expect("進捗が出ていない");
+    assert!(s.windows(2).all(|w| w[0].done <= w[1].done), "{s:?}");
     assert_eq!(last.done, last.total, "{s:?}");
     assert_eq!(last.bytes_done, last.bytes_total, "{s:?}");
     assert!(
@@ -1779,6 +1780,45 @@ async fn progress_of_deletes_only_has_no_bytes() {
     assert!(
         s.iter()
             .any(|p| p.phase == SyncPhase::Delete && p.current.as_deref() == Some("a.opus")),
+        "{s:?}"
+    );
+}
+
+#[tokio::test]
+async fn progress_of_pure_moves_shows_each_track() {
+    let fs = device_at(&[(1, "a.opus", b"A"), (2, "b.opus", b"B")], 1 << 30).await;
+    let c = TestControl::default();
+    sync_to(&fs, &[(1, "X/c.opus", b"A"), (2, "Y/d.opus", b"B")], &c)
+        .await
+        .unwrap();
+    let s = seen(&c);
+    assert_finishes(&s);
+    assert_eq!(s.last().unwrap().total, 2);
+    // 送り先のファイル名が Move の相で出る
+    for name in ["c.opus", "d.opus"] {
+        assert!(
+            s.iter()
+                .any(|p| p.phase == SyncPhase::Move && p.current.as_deref() == Some(name)),
+            "{name}: {s:?}"
+        );
+    }
+    // 置くたびに 1 件ずつ進む（バッチの終わりにまとめて増えるのではない）
+    assert!(s.iter().any(|p| p.done == 1), "{s:?}");
+}
+
+#[tokio::test]
+async fn progress_of_a_mixed_batch_shows_the_move_track() {
+    let fs = device_at(&[(1, "a.opus", b"OLD"), (2, "x.opus", b"X")], 1 << 30).await;
+    let c = TestControl::default();
+    sync_to(&fs, &[(1, "Dir/b.opus", b"NEW!"), (2, "y.opus", b"X")], &c)
+        .await
+        .unwrap();
+    let s = seen(&c);
+    assert_finishes(&s);
+    // 純粋な移動の曲の名前が出る（更新 + 移動の名前が残り続けない）
+    assert!(
+        s.iter()
+            .any(|p| p.phase == SyncPhase::Move && p.current.as_deref() == Some("y.opus")),
         "{s:?}"
     );
 }

@@ -15,7 +15,7 @@ use crate::device::ondevice::{
     self, Book, DeviceManifest, ManifestItem, ManifestPlaylist, MOVING_DIR, TMP_SUFFIX,
 };
 use crate::device::plan::{path_components, PlanItem, PlanPlaylist, Runnable};
-use crate::device::recover::complete_batch;
+use crate::device::recover::{complete_batch, BatchProgress};
 use crate::device::remote::{DeviceFs, RemoteError};
 use crate::device::store::{append_durable, compact, StoreError};
 use crate::domain::device::{
@@ -247,6 +247,25 @@ impl SyncReport {
 
     pub fn playlists(&self) -> Vec<PlaylistState> {
         Book::from(self.manifest.clone()).playlist_states()
+    }
+}
+
+/// パス変更のバッチの仕上げ（空ける・置く）で、メンバーごとに今の曲と件数を出す
+struct MoveProgress<'b, C> {
+    progress: &'b mut SyncProgress,
+    control: &'b C,
+}
+
+impl<C: Control> BatchProgress for MoveProgress<'_, C> {
+    async fn begin(&mut self, m: &BatchMember) {
+        self.progress.phase = SyncPhase::Move;
+        self.progress.current = Some(file_name(&m.to));
+        self.control.sync_progress(self.progress).await;
+    }
+
+    async fn placed(&mut self, _m: &BatchMember) {
+        self.progress.done += 1;
+        self.control.sync_progress(self.progress).await;
     }
 }
 
@@ -797,6 +816,8 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         let mut ops = drop_components(ops, &no_origin);
         // 進捗のバイト数: やり直しで減らさないよう、試行内で送り終えた量の最大を見せ、終えたら全体で確定する
         let base = self.progress.bytes_done;
+        // 件数: 仕上げで置くたびに進め、終えたらバッチの開始時 + total で確定する（二重に足さない）
+        let base_done = self.progress.done;
         let mut shown: u64 = 0;
         self.begin(SyncPhase::Move, None).await;
         let mut superseded: Option<(String, Vec<BatchMember>)> = None;
@@ -805,7 +826,8 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
                 if let Some((old, members)) = superseded.take() {
                     self.abort_batch(&old, None, &members).await?;
                 }
-                self.finish_batch(total, base + batch_bytes).await;
+                self.finish_batch(base_done + total, base + batch_bytes)
+                    .await;
                 return Ok(());
             }
             self.guard().await?;
@@ -858,9 +880,14 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
                     Phase::Vacating,
                     false,
                     &mut self.book,
+                    &mut MoveProgress {
+                        progress: &mut self.progress,
+                        control: self.control,
+                    },
                 )
                 .await?;
-                self.finish_batch(total, base + batch_bytes).await;
+                self.finish_batch(base_done + total, base + batch_bytes)
+                    .await;
                 return Ok(());
             }
             ops = drop_components(ops, &failed);
@@ -869,8 +896,8 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
     }
 
     /// パス変更のバッチを終えた（成功・中断のどちらでも）: 件数とバイト数を確定させて進捗を出す
-    async fn finish_batch(&mut self, count: u64, bytes_done: u64) {
-        self.progress.done += count;
+    async fn finish_batch(&mut self, done: u64, bytes_done: u64) {
+        self.progress.done = done;
         self.progress.bytes_done = bytes_done;
         self.control.sync_progress(&self.progress).await;
     }
