@@ -361,6 +361,39 @@ async fn sync_sends_the_plan_and_completes_it() {
 }
 
 #[tokio::test]
+async fn sync_broadcasts_progress_detail_with_bytes() {
+    let fx = Fx::new().await;
+    fx.connect();
+    fx.initialize().await;
+    fx.start();
+    let plan_id = fx.confirm().await;
+    let mut rx = fx.jobs.subscribe();
+    let id = fx
+        .jobs
+        .enqueue(sync_job(fx.device.id, plan_id))
+        .await
+        .unwrap()
+        .id();
+    fx.wait(id, JobState::Done).await;
+    let mut details = Vec::new();
+    while let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+        if let spindle::jobs::Event::Job(j) = ev {
+            if j.id == id {
+                if let Some(d) = j.detail {
+                    details.push(d);
+                }
+            }
+        }
+    }
+    let last = details.last().expect("detail が流れていない");
+    assert_eq!(last["kind"], "device_sync");
+    assert_eq!(last["bytes_total"], 4);
+    assert_eq!(last["bytes_done"], 4);
+    assert!(last["rate"].is_u64(), "{last}");
+    assert!(last.get("phase").is_some() && last.get("current").is_some());
+}
+
+#[tokio::test]
 async fn sync_waits_without_spending_attempts_until_connected() {
     let fx = Fx::new().await;
     fx.initialize().await; // fs_for は接続状態を見ないので初期化はできる
