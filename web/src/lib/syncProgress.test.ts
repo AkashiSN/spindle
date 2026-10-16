@@ -6,6 +6,7 @@ import {
   mergeListProgress,
   phaseLabel,
   ProgressEventSeq,
+  progressAgeSecs,
   progressRatio,
   progressSummary,
   STALE_SECS,
@@ -38,6 +39,18 @@ describe('progressRatio', () => {
   it('どちらも 0 なら 0、範囲は 0..1', () => {
     expect(progressRatio(p({ bytes_total: 0, total: 0, done: 0 }))).toBe(0)
     expect(progressRatio(p({ bytes_done: 300, bytes_total: 200 }))).toBe(1)
+  })
+})
+
+describe('progressAgeSecs', () => {
+  it('受信時刻からの経過秒（切り捨て）', () => {
+    expect(progressAgeSecs({ ...p(), receivedAt: 10_000 }, 41_900)).toBe(31)
+  })
+  it('受信時刻が無ければサーバの age', () => {
+    expect(progressAgeSecs(p({ age: 7 }), 50_000)).toBe(7)
+  })
+  it('時計が戻っても負にしない', () => {
+    expect(progressAgeSecs({ ...p(), receivedAt: 60_000 }, 50_000)).toBe(0)
   })
 })
 
