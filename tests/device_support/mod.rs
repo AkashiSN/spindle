@@ -373,7 +373,8 @@ use spindle::device::plan::{runnable, Runnable, StoredPlan};
 use spindle::device::recover::{recover, Expect};
 use spindle::device::store::initialize;
 use spindle::device::sync::{
-    self, origins_of, Control, Origin, SourceError, Sources, SyncError, SyncInput, SyncReport,
+    self, origins_of, Control, Origin, SourceError, Sources, SyncError, SyncInput, SyncProgress,
+    SyncReport,
 };
 use spindle::domain::device::{delivery_token, diff, DesiredItem, Manifest, Source, SourceKind};
 
@@ -399,6 +400,8 @@ pub struct TestControl {
     pub stale_from: Option<usize>,
     pub cancel_calls: AtomicUsize,
     pub gen_calls: AtomicUsize,
+    /// `sync_progress` で受け取ったスナップショット（順に）
+    pub seen: Mutex<Vec<SyncProgress>>,
 }
 
 impl Control for TestControl {
@@ -413,6 +416,12 @@ impl Control for TestControl {
     }
 
     async fn progress(&self, _done: u64, _total: u64) {}
+
+    async fn sync_progress(&self, p: &SyncProgress) {
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.push(p.clone());
+        }
+    }
 }
 
 pub fn expect() -> Expect {
