@@ -1229,6 +1229,20 @@ button.primary {
   align-items: center;
   border: 1px dashed transparent;
 }
+.playlist-node {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.playlist-node .playlist-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.playlist-node .device-chip {
+  flex: none;
+}
 .playlist-row.drop-over {
   border-color: var(--accent);
   background: var(--accent-bg);
@@ -3383,16 +3397,17 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
   color: var(--error);
 }
 
-/* プレイリストの行の送り先チップ（P5-2、仕様 ④ 選曲の近道） */
+/* プレイリストの行の送り先の印（P5-2、仕様 ④ 選曲の近道）。端末ごとにアイコン 1 つ、端末名はホバーで出す */
 .device-chip {
   display: inline-block;
   margin-left: 4px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0 4px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 14px;
   white-space: nowrap;
+  cursor: default;
+}
+.device-chip.removing {
+  opacity: 0.45;
 }
 .menu-heading {
   padding: 4px 12px 2px;

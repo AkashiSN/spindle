@@ -887,3 +887,106 @@ fn estimate_excludes_adopted_updates() {
     let e = estimate(&diff, &current);
     assert_eq!((e.transfer_bytes, e.peak_bytes), (0, 0));
 }
+
+fn pl_op(kind: PlaylistOpKind, playlist_id: i64) -> PlaylistOp {
+    PlaylistOp {
+        kind,
+        playlist_id,
+        from: None,
+        to: None,
+        token: None,
+    }
+}
+
+fn pl_input(playlist_id: i64, track_ids: &[i64]) -> PlaylistInput {
+    PlaylistInput {
+        playlist_id,
+        name: format!("p{playlist_id}"),
+        track_ids: track_ids.to_vec(),
+    }
+}
+
+#[test]
+fn playlist_sync_states_summarize_members_and_the_playlist_file() {
+    let diff = Diff {
+        items: vec![op(OpKind::Add, 3, None, Some("c"), 10)],
+        held: vec![
+            HeldItem {
+                track_id: 4,
+                hold: Hold::Wait(Wait::NoDerived),
+                has_copy: false,
+            },
+            HeldItem {
+                track_id: 5,
+                hold: Hold::Error(ItemError::PathTooLong),
+                has_copy: false,
+            },
+        ],
+        playlists: vec![
+            pl_op(PlaylistOpKind::Add, 12),
+            pl_op(PlaylistOpKind::Delete, 90),
+        ],
+        playlist_errors: vec![(14, "パス衝突")],
+    };
+    let current = vec![item(1, "a", 1), item(2, "b", 1)];
+    let states = track_states(&diff, &current, &[], &Default::default());
+    let inputs = vec![
+        // 曲もプレイリストのファイルも反映済み
+        pl_input(10, &[1, 2]),
+        // 曲の追加と、準備待ちの曲
+        pl_input(11, &[1, 3, 4]),
+        // 曲は反映済みだが、プレイリストのファイルがまだ
+        pl_input(12, &[2]),
+        // 送れない曲がある（待ちの曲より優先）
+        pl_input(13, &[4, 5]),
+        // プレイリストのファイル自体が書けない。ライブラリに無い曲（99）は数えない
+        pl_input(14, &[1, 99]),
+    ];
+    let got = playlist_sync_states(&inputs, &diff, &states, &[(13, "前回 書けない".into())]);
+    let by: std::collections::HashMap<i64, &PlaylistSyncState> =
+        got.iter().map(|s| (s.playlist_id, s)).collect();
+    assert_eq!(got.len(), 6);
+    assert_eq!(
+        *by[&10],
+        PlaylistSyncState {
+            playlist_id: 10,
+            state: PlaylistSync::Synced,
+            pending: 0,
+            waiting: 0,
+            errors: 0,
+            reason: None,
+        }
+    );
+    assert_eq!(
+        (
+            by[&11].state,
+            by[&11].pending,
+            by[&11].waiting,
+            by[&11].errors
+        ),
+        (PlaylistSync::Pending, 1, 1, 0)
+    );
+    assert_eq!(
+        (
+            by[&12].state,
+            by[&12].pending,
+            by[&12].waiting,
+            by[&12].errors
+        ),
+        (PlaylistSync::Pending, 0, 0, 0)
+    );
+    assert_eq!(
+        (
+            by[&13].state,
+            by[&13].pending,
+            by[&13].waiting,
+            by[&13].errors
+        ),
+        (PlaylistSync::Error, 0, 1, 1)
+    );
+    assert_eq!(by[&13].reason.as_deref(), Some("前回 書けない"));
+    assert_eq!(by[&14].state, PlaylistSync::Error);
+    assert_eq!(by[&14].reason.as_deref(), Some("パス衝突"));
+    // 選曲から外したが端末に残っている
+    assert_eq!(by[&90].state, PlaylistSync::Removing);
+}

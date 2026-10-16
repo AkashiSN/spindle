@@ -296,6 +296,11 @@ async fn put_playlists_rejects_cycle_and_unknown() {
         .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["playlist_ids"], json!([5]));
+    // まだ端末に無いプレイリストは同期待ち
+    assert_eq!(
+        v["playlist_states"],
+        json!([{"playlist_id": 5, "state": "pending", "pending": 0, "waiting": 0, "errors": 0, "reason": null}])
+    );
 }
 
 #[tokio::test]

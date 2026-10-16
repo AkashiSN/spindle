@@ -2359,6 +2359,14 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
                                  // add + update + move + delete + error の全端末の合計（待ちは含めない）
   "last_synced_at": 1700000000,  // adb は同期の完了、agent は報告の受理
   "playlist_ids": [1, 4],        // 印（device_playlists）
+  "playlist_states": [           // プレイリストごとの同期の状況（表示用のスナップショットから。少し古いことがある）
+    { "playlist_id": 1, "state": "synced", "pending": 0, "waiting": 0, "errors": 0, "reason": null },
+    { "playlist_id": 4, "state": "pending", "pending": 3, "waiting": 1, "errors": 0, "reason": null } ],
+                                 // 選曲の各プレイリストと、外したが端末に残るもの（removing）。state は
+                                 // error（送れない収録曲があるか、ファイル自体のエラー。reason）> pending（次の同期で
+                                 // 送る収録曲・準備待ちの収録曲・ファイルの追加か更新のどれかがある）> synced の順に
+                                 // 決める。pending は送る曲、waiting は準備待ち（Derived 未生成など）、errors は送れない
+                                 // 曲の数（ライブラリから消えた曲は数えない）
   "open_plan": false,            // open な計画か待ち・実行中の device_sync がある（設定を変えられない）
   "plan_open": false,            // open な計画がある（「続きを実行」「破棄」の対象）
   "sync_job": null,             // 待ち・実行中の device_sync { id, state } か null
@@ -2576,7 +2584,12 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
   **中心の表の集合を差し替えるだけ**で、列・ソート・選択の仕組みは共通
   - ツリー: Category → AlbumArtist → Album（`GET /api/albums` から構築。選ぶと scope を置き換える）
   - プレイリスト: 手動 / スマート。表からドラッグで追加。**選曲の近道**（P5-2、D-95）: 印の付いた端末を行に
-    チップ（`📱 <端末名>`）で出し、右クリックと … のメニューの「端末へ送る」に端末ごとのチェックを並べる
+    端末ごとの 📱 で出す。同期の状況（Device の `playlist_states`）を記号で添える: 同期済みは 📱 だけ、
+    同期待ち・同期中は 📱⏳、送れないものがあれば 📱⚠、選曲から外したが端末に残るものは薄い 📱🗑。
+    「同期中」は同期の実行中（Android は device_sync ジョブが running、iPhone は `sync_progress` が届いている間）の
+    同期待ちのうち、送る曲かファイルがあるものだけ（送れないもの・準備待ちだけのものは実行中の同期で片付かない）。
+    端末名と状況はホバーで出す（名前が長くても印は切らず、名前のほうを省略する）。
+    右クリックと … のメニューの「端末へ送る」に端末ごとのチェックを並べる
     （端末タブの選曲と同じ `PUT /api/devices/:id/playlists` を触る。端末が 1 台も無ければ追加を案内する。
     同期が途中の端末は変えられない）
   - フィルタ（固定）: 未検証 / 重複 / missing / RG なし / 反映待ち / conflict / hardlink。

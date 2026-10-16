@@ -8,7 +8,7 @@ const counts = (p: Partial<DeviceCounts> = {}): DeviceCounts => ({
 })
 const device = (id: number, c: Partial<DeviceCounts>): Device => ({
   id, name: `d${id}`, transport: 'agent', variant: 'aac', selection: 'all', generation: 1,
-  connected: null, counts: counts(c), last_synced_at: null, playlist_ids: [], open_plan: false,
+  connected: null, counts: counts(c), last_synced_at: null, playlist_ids: [], playlist_states: [], open_plan: false,
   adb_state: null, adb_volume: null, adb_root: null, plan_open: false, sync_job: null,
 })
 const item = (op: DiffItem['op'], title: string, size = 0): DiffItem => ({
@@ -71,7 +71,7 @@ describe('選んでいる端末', () => {
 
 const base: Device = {
   id: 1, name: 'Xperia', transport: 'adb', variant: 'opus', selection: 'all', generation: 1,
-  connected: true, counts: counts({ add: 1 }), last_synced_at: null, playlist_ids: [], open_plan: false,
+  connected: true, counts: counts({ add: 1 }), last_synced_at: null, playlist_ids: [], playlist_states: [], open_plan: false,
   adb_state: 'device', adb_volume: 'E1C6-6113', adb_root: 'Music/spindle', plan_open: false, sync_job: null,
 }
 

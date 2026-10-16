@@ -18,7 +18,10 @@ use crate::domain::device::{
     utf16_len, DesiredItem, DesiredPlaylist, DeviceItem, Diff, PlaylistInput, PlaylistState,
     SourceHash, SourceKind, TrackInput, Transport,
 };
-use crate::domain::device::{counts, track_states, Counts, EntryKind, PendingSets, TrackState};
+use crate::domain::device::{
+    counts, playlist_sync_states, track_states, Counts, EntryKind, PendingSets, PlaylistSyncState,
+    TrackState,
+};
 use crate::domain::relpath::canonical_key;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,6 +542,8 @@ pub struct Computed {
     pub desired: Vec<DesiredItem>,
     /// 衝突を解いた後の desired から組み立てたプレイリスト（中身を含む）
     pub playlists: Vec<DesiredPlaylist>,
+    /// 選曲のプレイリストとその収録曲（プレイリストごとの同期の状況の集計に使う）
+    pub playlist_inputs: Vec<PlaylistInput>,
 }
 
 /// 端末上の root の前置き（区切りの `/` を含む）の UTF-16 長。パス長の上限（SPEC §5）の計算に使う。
@@ -601,12 +606,8 @@ pub(crate) fn compute_in(conn: &Connection, device_id: i64) -> Result<Option<Com
         &build_manifest(&settings, root_prefix_utf16(&device), &tracks),
         &current,
     );
-    let (playlists, pl_errors) = build_playlists(
-        device.transport,
-        &playlist_inputs(conn, device_id)?,
-        &manifest,
-        &current,
-    );
+    let inputs = playlist_inputs(conn, device_id)?;
+    let (playlists, pl_errors) = build_playlists(device.transport, &inputs, &manifest, &current);
     let d = diff(
         &manifest,
         &current,
@@ -622,6 +623,7 @@ pub(crate) fn compute_in(conn: &Connection, device_id: i64) -> Result<Option<Com
         needs_hash: manifest.needs_hash,
         desired: manifest.desired,
         playlists,
+        playlist_inputs: inputs,
     }))
 }
 
@@ -749,6 +751,8 @@ pub struct DeviceSnapshot {
     pub playlist_errors_reported: Vec<(i64, String)>,
     /// 反映済みの行（見積もりに使う）
     pub current: Vec<DeviceItem>,
+    /// 選曲のプレイリストごとの同期の状況と、選曲から外したが端末に残るもの
+    pub playlists: Vec<PlaylistSyncState>,
 }
 
 pub struct Snapshot {
@@ -801,7 +805,7 @@ pub fn snapshot(conn: &Connection) -> Result<Snapshot> {
             .filter(|(k, _, _)| k == "track")
             .map(|(_, id, r)| (*id, r.clone()))
             .collect();
-        let playlist_errors_reported = errors
+        let playlist_errors_reported: Vec<(i64, String)> = errors
             .into_iter()
             .filter(|(k, _, _)| k == "playlist")
             .map(|(_, id, r)| (id, r))
@@ -814,6 +818,12 @@ pub fn snapshot(conn: &Connection) -> Result<Snapshot> {
             &synced_at_map(&tx, device.id)?,
         );
         let counts = counts(&states);
+        let playlists = playlist_sync_states(
+            &computed.playlist_inputs,
+            &computed.diff,
+            &states,
+            &playlist_errors_reported,
+        );
         out.push(DeviceSnapshot {
             device,
             computed,
@@ -821,6 +831,7 @@ pub fn snapshot(conn: &Connection) -> Result<Snapshot> {
             counts,
             playlist_errors_reported,
             current,
+            playlists,
         });
     }
     tx.finish()?;

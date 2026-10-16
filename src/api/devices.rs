@@ -21,7 +21,7 @@ use crate::device::runtime::AdbRuntime;
 use crate::device::store::{self, InitError, StoreError};
 use crate::domain::derived::Variant;
 use crate::domain::device::PendingSets;
-use crate::domain::device::{Counts, Hold, TrackState, Transport};
+use crate::domain::device::{Counts, Hold, PlaylistSyncState, TrackState, Transport};
 use crate::domain::filter::Filter;
 use crate::jobs::handlers::device::{scan_job, sync_job, verify_job};
 use crate::playlist::dsl::Rule;
@@ -82,6 +82,8 @@ pub struct DeviceView {
     pub counts: Counts,
     pub last_synced_at: Option<i64>,
     pub playlist_ids: Vec<i64>,
+    /// プレイリストごとの同期の状況（表示用のスナップショットから。少し古いことがある）
+    pub playlist_states: Vec<PlaylistSyncState>,
     /// open な計画か同期ジョブがある（設定を変えられない）
     pub open_plan: bool,
     /// open な計画がある（同期の途中。続き・破棄の対象）
@@ -154,6 +156,10 @@ fn view(
         counts: snap.get(d.id).map(|s| s.counts).unwrap_or_default(),
         last_synced_at: d.last_synced_at,
         playlist_ids: extras.playlist_ids,
+        playlist_states: snap
+            .get(d.id)
+            .map(|s| s.playlists.clone())
+            .unwrap_or_default(),
         open_plan: extras.open_plan,
         plan_open: extras.plan_open,
         sync_job: extras.sync_job,
