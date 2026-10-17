@@ -424,7 +424,12 @@ function Shell({ onLogout }: { onLogout: () => void }) {
 
   // ---------------------------------------------------------------- 表示
 
-  const handleSort = useCallback((key: SortKey) => setSort((s) => toggleSort(s, key)), [])
+  // 表示中のソート（effectiveSort）を基準に切り替える。position を退避したままルールの編集に入ったとき、
+  // 退避した position から切り替えると表示中と同じソートになり、最初のクリックが効かない
+  const handleSort = useCallback(
+    (key: SortKey) => setSort((s) => toggleSort(effectiveSort(filter, s), key)),
+    [filter],
+  )
   const handleRange = useCallback((end: number) => {
     visibleEnd.current = end
   }, [])
