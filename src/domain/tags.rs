@@ -680,10 +680,20 @@ where
     rest.merge_tag(generic)
 }
 
-/// ID3v2 で標準フレーム（または lofty が名前を知っている TXXX）に写像できるキーか
+/// ID3v2 で標準フレーム（または lofty が名前を知っている TXXX）に写像できるキーか。読み側は
+/// `ItemKey` を正規の Vorbis 名で返すので、別名（`TOTALTRACKS` → `TRACKTOTAL` 等）は写像せず TXXX に
+/// 書く。写像すると読み戻しが別のキーになり、照合が必ず外れる
 fn id3v2_mapped(key: &str) -> bool {
-    ItemKey::from_key(TagType::VorbisComments, key)
-        .is_some_and(|k| k.map_key(TagType::Id3v2).is_some())
+    ItemKey::from_key(TagType::VorbisComments, key).is_some_and(|k| {
+        k.map_key(TagType::Id3v2).is_some()
+            && k.map_key(TagType::VorbisComments)
+                .is_some_and(|name| name.to_uppercase() == key)
+    })
+}
+
+/// TXXX の description が `key`（大文字化済み）と同じキーとして読まれるか（読み側と同じ正規化）
+fn txxx_is_key(description: &str, key: &str) -> bool {
+    description.to_uppercase() == key
 }
 
 /// ID3v2 の `changes` を当てる（D-110）。写像できるキーは [`apply_split`]（generic `Tag`）で、
@@ -700,7 +710,7 @@ fn apply_id3v2(
     for c in changes {
         tag.retain(|f| {
             !matches!(f, Frame::UserText(ExtendedTextFrame { description, .. })
-                if description.eq_ignore_ascii_case(&c.key))
+                if txxx_is_key(description, &c.key))
         });
         if id3v2_mapped(&c.key) {
             mapped.push(c.clone());

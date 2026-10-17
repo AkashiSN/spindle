@@ -4770,14 +4770,18 @@ mp3 13 曲が「書き込み結果が意図と一致しない（この形式で�
 
 1. MP3 の書き込みは `MpegFile` を読み、ブロック（ID3v2 / ID3v1 / APE）ごとに `split_tag` → generic `Tag` に変更と画像を
    当てる → `merge_tag` で戻す。写像できないフレーム・項目は残る
-2. ID3v2 では、Vorbis 名を `ItemKey` に写像でき、かつその `ItemKey` が ID3v2 に写像を持つキーだけを generic `Tag` で書く。
-   それ以外は description = キー（大文字）の TXXX に書く。多値は NUL 区切りの 1 フレーム（ID3v2.4 の多値）
-3. どのキーでも、書く前に description が大小文字を無視して一致する既存の TXXX を消す（外部が `replaygain_track_gain` や
-   `MyKey` で書いたものを置き換えても二重化しない）
+2. ID3v2 では、Vorbis 名を `ItemKey` に写像でき、その `ItemKey` が ID3v2 に写像を持ち、**かつ `ItemKey` の正規の Vorbis 名が
+   キーそのもの**であるキーだけを generic `Tag` で書く。別名（`TOTALTRACKS` → `TRACKTOTAL`、`ORGANIZATION` → `LABEL` 等）を
+   標準フレームに書くと正規の名前で読み戻され、読み戻し照合が必ず外れるので、別名は TXXX に書く。それ以外も
+   description = キー（大文字）の TXXX に書く。多値は NUL 区切りの 1 フレーム（ID3v2.4 の多値）
+3. どのキーでも、書く前に description を読み側と同じ規則（Unicode の大文字化）で大文字にしてキーと一致する既存の TXXX を
+   消す（外部が `replaygain_track_gain` や `MyKey`、`äkey` で書いたものを置き換えても二重化しない）
 4. 読みは従来の generic の集約（primary 優先、副ブロックは primary に無いキーだけ）の間に、ID3v2 の TXXX のうち generic に
    載らないもの（description を大文字化したキー、NUL で多値に分ける）を primary の一部として差し込む。description の
    無い TXXX は読まない
-5. WAV / AIFF / WavPack / APE の形式は従来どおり（generic `Tag`。対象の曲がほぼ無く、WAV は FLAC に正規化される）
+5. 書いた mp3 の ID3v2 は v2.4 になる（lofty の既定。v2.3 の入力も読み書きでき、書くと v2.4 に上がる）。NUL 区切りの多値は
+   v2.4 の形で、foobar2000 / Picard / ffmpeg は読める
+6. WAV / AIFF / WavPack / APE の形式は従来どおり（generic `Tag`。対象の曲がほぼ無く、WAV は FLAC に正規化される）
 
 **影響**: 既存の mp3 で、これまで読めていなかった TXXX がある曲は、次のスキャンでタグの集合が増えて `tag_version` が進む
 （本番の mp3 は 30 曲程度）。
