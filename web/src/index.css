@@ -3358,6 +3358,9 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 }
 .sync-progress-head {
   display: flex;
+  /* 段の名前（日本語）と曲名（半角だけのことがある）でフォールバックの字形が変わり行の高さが違う。
+     既定の stretch は上端で揃えるので、半角だけの曲名が浮いて見える。ベースラインで揃える */
+  align-items: baseline;
   gap: 8px;
   min-width: 0;
 }
