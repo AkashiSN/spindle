@@ -31,6 +31,12 @@ export const VERIFICATION: Record<Verification, { icon: string; label: string; c
 
 export type Badge = { key: string; icon: string; label: string; cls: string }
 
+/** Derived のバッジ（系統と文字。並びはこの順） */
+const DERIVED_BADGES: ReadonlyArray<readonly ['opus' | 'aac', string]> = [
+  ['opus', 'O'],
+  ['aac', 'A'],
+]
+
 export function badgesOf(t: TrackRow): Badge[] {
   const out: Badge[] = []
   const v = VERIFICATION[t.verification] ?? VERIFICATION.not_attempted
@@ -49,15 +55,14 @@ export function badgesOf(t: TrackRow): Badge[] {
       cls: `badge b-rg${unwritten ? ' b-faded' : ''}`,
     })
   }
-  // D バッジは配布ビューの opus 系統だけ（aac 系統はプロパティで見せる。SPEC §7.6）
-  const opus = t.derived.opus
-  if (opus) {
+  // Derived は系統ごとに 1 つ（O = opus、A = aac。D-112）。• はタグが古い（追随待ち）
+  for (const [variant, icon] of DERIVED_BADGES) {
+    const d = t.derived[variant]
+    if (!d) continue
     out.push({
-      key: 'derived',
-      icon: opus.stale_tags ? 'D•' : 'D',
-      label: opus.stale_tags
-        ? `Derived あり（${opus.codec}、タグが古い）`
-        : `Derived あり（${opus.codec}）`,
+      key: `derived-${variant}`,
+      icon: d.stale_tags ? `${icon}•` : icon,
+      label: d.stale_tags ? `Derived（${variant}）あり、タグが古い` : `Derived（${variant}）あり`,
       cls: 'badge b-derived',
     })
   }
@@ -202,8 +207,10 @@ export const BADGE_LEGEND: ReadonlyArray<{ title: string; items: LegendEntry[] }
     items: [
       { key: 'rg', icon: 'RG', cls: 'badge b-rg', label: 'ReplayGain 書き込み済み' },
       { key: 'rg', icon: 'RG', cls: 'badge b-rg b-faded', label: 'ReplayGain 計測済み（タグ未書き込み。薄い表示）' },
-      { key: 'derived', icon: 'D', cls: 'badge b-derived', label: 'Derived（配布用の Opus）あり' },
-      { key: 'derived', icon: 'D•', cls: 'badge b-derived', label: 'Derived あり、タグが古い（追随待ち）' },
+      { key: 'derived-opus', icon: 'O', cls: 'badge b-derived', label: 'Derived（Opus。Android・再生用）あり' },
+      { key: 'derived-opus', icon: 'O•', cls: 'badge b-derived', label: 'Derived（Opus）あり、タグが古い（追随待ち）' },
+      { key: 'derived-aac', icon: 'A', cls: 'badge b-derived', label: 'Derived（AAC。iPhone 用）あり' },
+      { key: 'derived-aac', icon: 'A•', cls: 'badge b-derived', label: 'Derived（AAC）あり、タグが古い（追随待ち）' },
     ],
   },
   {

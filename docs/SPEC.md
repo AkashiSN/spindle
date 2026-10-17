@@ -2628,7 +2628,7 @@ rel_path（既定非表示）
 | 検証 | `verification` を検証済み / 不一致 / 検証不能 / 未検証の 4 つの見え方で出す。`verified_ctdb` と `verified_ar` は同じ「検証済み」（どちらで一致したかはプロパティの General の CTDB / AccurateRip 行。D-96）。`unverifiable` は「未検証」と別の見え方 | tracks |
 | 可逆 / 非可逆 | `lossless` | tracks |
 | RG | `rg_scanned_at` の有無。書き込み未反映（`rg_written_at < rg_scanned_at`）は半透明 | tracks |
-| Derived | `derived_files` の `opus` 系統あり（= 配布ビュー）。`stale_tags` は点付き。`aac` 系統はバッジにせずプロパティの Location 列に行を出す（§7.6） | delivery |
+| Derived | 系統ごとに 1 つ: **O** = `derived_files` の `opus` 系統あり（= 配布ビュー）、**A** = `aac` 系統あり。この順に並べ、`stale_tags` は点付き（O• / A•）。プロパティの Location 列にも系統ごとの行を出す（§7.6、D-112） | delivery |
 | 反映待ち ⏳ | `edit_ops.result = 'pending'` がある | edit_ops |
 | conflict ⚠ | このトラックの**最新の op**（`edit_ops` を `id DESC` で 1 件）が `skipped_conflict` | edit_ops |
 | 重複 | `duplicate_groups` に属する | view |
