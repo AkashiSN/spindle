@@ -184,6 +184,13 @@ describe('badgesOf', () => {
     for (const r of rows) {
       for (const b of badgesOf(r)) expect(legend.has(norm(b)), `凡例に無い: ${norm(b)}`).toBe(true)
     }
+    // Derived は点付きも凡例に個別の行がある（O• / A•。D-112）。• を落とさずに照合する
+    const exact = new Set(BADGE_LEGEND.flatMap((g) => g.items.map((it) => `${it.key}|${it.icon}|${it.cls}`)))
+    for (const r of rows) {
+      for (const b of badgesOf(r).filter((x) => x.key.startsWith('derived-'))) {
+        expect(exact.has(`${b.key}|${b.icon}|${b.cls}`), `凡例に無い: ${b.key}|${b.icon}`).toBe(true)
+      }
+    }
     const dbs = deviceBadges(withDevices, devs)
     expect(dbs).toHaveLength(4)
     for (const b of dbs) expect(legend.has(norm(b)), `凡例に無い: ${norm(b)}`).toBe(true)

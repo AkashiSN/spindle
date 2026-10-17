@@ -208,8 +208,9 @@ export const BADGE_LEGEND: ReadonlyArray<{ title: string; items: LegendEntry[] }
       { key: 'rg', icon: 'RG', cls: 'badge b-rg', label: 'ReplayGain 書き込み済み' },
       { key: 'rg', icon: 'RG', cls: 'badge b-rg b-faded', label: 'ReplayGain 計測済み（タグ未書き込み。薄い表示）' },
       { key: 'derived-opus', icon: 'O', cls: 'badge b-derived', label: 'Derived（Opus。Android・再生用）あり' },
+      { key: 'derived-opus', icon: 'O•', cls: 'badge b-derived', label: 'Derived（Opus）あり、タグが古い（追随待ち）' },
       { key: 'derived-aac', icon: 'A', cls: 'badge b-derived', label: 'Derived（AAC。iPhone 用）あり' },
-      { key: 'derived-opus', icon: 'O•', cls: 'badge b-derived', label: 'Derived あり、タグが古い（追随待ち。A• も同じ）' },
+      { key: 'derived-aac', icon: 'A•', cls: 'badge b-derived', label: 'Derived（AAC）あり、タグが古い（追随待ち）' },
     ],
   },
   {
