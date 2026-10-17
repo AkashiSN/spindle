@@ -65,17 +65,20 @@ describe('badgesOf', () => {
     expect(keys(t)).toEqual([
       'verification',
       'lossless',
-      'derived',
+      'derived-opus',
       'pending',
       'conflict',
       'dup',
       'hardlink',
       'missing',
     ])
-    expect(badgesOf(t).find((b) => b.key === 'derived')!.icon).toBe('D•')
-    // aac 系統だけでは D バッジは出ない（配布ビューは opus。SPEC §7.6）
+    expect(badgesOf(t).find((b) => b.key === 'derived-opus')!.icon).toBe('O•')
+    // 系統ごとに 1 つ（O = opus、A = aac）。aac だけなら A だけ、両方なら O A の順
     const aacOnly = { ...t, derived: { opus: null, aac: { codec: 'aac', stale_tags: false } } }
-    expect(badgesOf(aacOnly).find((b) => b.key === 'derived')).toBeUndefined()
+    expect(badgesOf(aacOnly).find((b) => b.key === 'derived-opus')).toBeUndefined()
+    expect(badgesOf(aacOnly).find((b) => b.key === 'derived-aac')!.icon).toBe('A')
+    const both = { ...t, derived: { opus: { codec: 'opus', stale_tags: false }, aac: { codec: 'aac', stale_tags: true } } }
+    expect(badgesOf(both).filter((b) => b.key.startsWith('derived-')).map((b) => b.icon)).toEqual(['O', 'A•'])
     expect(badgesOf(t).find((b) => b.key === 'pending')!.label).toContain('#42')
   })
 
@@ -149,6 +152,8 @@ describe('badgesOf', () => {
       { ...base, rg_scanned_at: 2, rg_written_at: 1, rg: { track_gain: 0, track_peak: 0, album_gain: null, album_peak: null } },
       { ...base, derived: { opus: { codec: 'opus', stale_tags: false }, aac: null } },
       { ...base, derived: { opus: { codec: 'opus', stale_tags: true }, aac: null } },
+      { ...base, derived: { opus: null, aac: { codec: 'aac', stale_tags: false } } },
+      { ...base, derived: { opus: null, aac: { codec: 'aac', stale_tags: true } } },
       { ...base, flac_check: { status: 'md5_missing', checked_at: 1, stale: true, error: null } },
       { ...base, flac_check: { status: 'decode_error', checked_at: 1, stale: false, error: 'x' } },
       { ...base, hires_check: { ...hires, status: 'upsampled' } },
