@@ -30,8 +30,10 @@ describe('suggestTrackType', () => {
   it('普通の曲は候補なし。サントラでも作曲者が分からなければ候補なし', () => {
     expect(suggestTrackType({ title: 'ライラック', artist: 'Mrs. GREEN APPLE' }, album('10'))).toBeNull()
     expect(suggestTrackType({ title: 't', artist: 'X' }, album('X Original Soundtrack', null))).toBeNull()
-    // 英単語の一部に MC / OST を含むだけのものは拾わない
+    // 英単語の一部に MC / OST / instrumental / soundtrack を含むだけのものは拾わない
     expect(suggestTrackType({ title: 'MCMXCIX', artist: 'A' }, album('Hostile'))).toBeNull()
+    expect(suggestTrackType({ title: 'Instrumentality', artist: 'A' }, album('Single'))).toBeNull()
+    expect(suggestTrackType({ title: 't', artist: 'Composer' }, album('The Soundtrackers'))).toBeNull()
   })
 })
 
@@ -40,6 +42,9 @@ describe('mainArtist', () => {
     expect(mainArtist(['a', 'b', 'b', 'a', 'c'])).toBe('a')
     expect(mainArtist(['x', 'y', 'y'])).toBe('y')
     expect(mainArtist([])).toBeNull()
+    // 空（アーティストが分からない行）は数えない。全部空なら null（サントラの全行を BGM にしない）
+    expect(mainArtist(['', '', 'a'])).toBe('a')
+    expect(mainArtist(['', ' '])).toBeNull()
   })
 })
 

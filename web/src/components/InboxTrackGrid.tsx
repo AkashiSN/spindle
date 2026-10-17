@@ -582,7 +582,7 @@ export function InboxTrackGrid({
             ariaLabel="追加するタグのキー"
             placeholder="新しいタグ（例: LYRICIST）"
             value={newKey}
-            exclude={tagKeys}
+            accept={(k) => newTagKeyProblem(k, tagKeys) == null}
             onChange={setNewKey}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {

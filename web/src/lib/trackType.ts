@@ -19,16 +19,17 @@ export function trackTypeLabel(value: string): string {
   return TRACK_TYPES.find((t) => t.value === value)?.label ?? value
 }
 
-const KARAOKE = /instrumental|\binst\.|off[\s-]?vocal|karaoke|カラオケ|歌無し|without vocal|backing track/i
+const KARAOKE = /\binstrumental\b|\binst\.|\boff[\s-]?vocal\b|\bkaraoke\b|カラオケ|歌無し|\bwithout vocals?\b|\bbacking track\b/i
 const DRAMA = /ドラマ|\bdrama\b|ボーナス・?トラック/i
 const TALK = /^mc\s*\d*$|ラジオ|トーク|コメント|DJトラック/i
-const SOUNDTRACK = /サウンドトラック|サントラ|soundtrack|sound track|\bost\b|music collection|劇伴/i
+const SOUNDTRACK = /サウンドトラック|サントラ|\bsound ?tracks?\b|\bost\b|\bmusic collection\b|劇伴/i
 
 /** アルバムで一番多いアーティスト（作曲者の推定）。同数なら先に出たもの */
 export function mainArtist(artists: readonly string[]): string | null {
   // Map は最初に出た順を保つので、同数なら先に出たものが残る
   const count = new Map<string, number>()
-  for (const a of artists) count.set(a, (count.get(a) ?? 0) + 1)
+  // 空（アーティストが分からない行）は数えない
+  for (const a of artists) if (a.trim() !== '') count.set(a, (count.get(a) ?? 0) + 1)
   let best: string | null = null
   for (const [a, n] of count) if (best == null || n > (count.get(best) ?? 0)) best = a
   return best

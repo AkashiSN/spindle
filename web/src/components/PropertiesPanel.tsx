@@ -249,7 +249,7 @@ export function PropertiesPanel({
                     disabled={busy}
                     placeholder="キー（例: CATALOGNUMBER）"
                     ariaLabel="追加するフィールドのキー"
-                    exclude={metadata.map((r) => r.key)}
+                    accept={(k) => newFieldKeyProblem(k, metadata.map((r) => r.key)) == null}
                     onChange={(key) => setEditing({ mode: 'add', key, text: editing.text })}
                     onKeyDown={onKeyDown}
                   />
