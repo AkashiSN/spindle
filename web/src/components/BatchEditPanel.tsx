@@ -5,9 +5,10 @@
 import { useState } from 'react'
 import type { BatchEdit } from '../hooks/useBatchEdit'
 import { formatCount } from '../lib/format'
-import { COMMON_KEYS, moveOp, newOp, OP_KINDS, OP_LABELS, type OpKind, type TagOp } from '../lib/tagops'
+import { moveOp, newOp, OP_KINDS, OP_LABELS, type OpKind, type TagOp } from '../lib/tagops'
 import { PanelTargetStep, type PanelTarget } from './PanelTargetStep'
 import { Step } from './Step'
+import { TagKeyInput } from './TagKeyInput'
 
 export function BatchEditPanel({
   edit,
@@ -36,11 +37,6 @@ export function BatchEditPanel({
 
   return (
     <div className="batch-edit panel-steps">
-      <datalist id="tag-keys">
-        {COMMON_KEYS.map((k) => (
-          <option key={k} value={k} />
-        ))}
-      </datalist>
       <PanelTargetStep target={target} hasSelection={hasSelection} />
       <Step no={2} title="操作" aside="上から順に適用" done={ops.length > 0}>
         <ol className="op-list">
@@ -67,12 +63,11 @@ export function BatchEditPanel({
                 </button>
               </div>
               <div className="op-fields">
-                <input
-                  list="tag-keys"
+                <TagKeyInput
                   placeholder="キー（TITLE など）"
                   value={o.key}
-                  onChange={(e) => update(o.id, { key: e.target.value })}
-                  aria-label="キー"
+                  onChange={(key) => update(o.id, { key })}
+                  ariaLabel="キー"
                 />
                 {o.op === 'set' && (
                   <input

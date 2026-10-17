@@ -3507,3 +3507,51 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 .jobs-table tr.job-detail pre.job-error {
   color: var(--error);
 }
+
+/* ---------------------------------------------------------------- タグのキーの候補（D-113） */
+.tagkey-input {
+  position: relative;
+  display: inline-block;
+}
+.tagkey-input > input {
+  width: 100%;
+}
+.tagkey-list {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 30;
+  min-width: 100%;
+  max-height: 240px;
+  overflow: auto;
+  margin: 2px 0 0;
+  padding: 2px 0;
+  list-style: none;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 12px var(--shadow);
+  text-align: left;
+}
+.tagkey-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tagkey-list li:hover,
+.tagkey-list li.active {
+  background: var(--bg-alt);
+}
+.inbox-kind-cell {
+  white-space: nowrap;
+}
+.inbox-kind-cell .inbox-suggest {
+  margin-left: 4px;
+  padding: 0 4px;
+  color: var(--accent);
+}
+.inbox-exclude-cell {
+  text-align: center;
+}

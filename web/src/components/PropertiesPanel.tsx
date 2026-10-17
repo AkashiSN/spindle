@@ -23,6 +23,7 @@ import { singleAlbumId } from '../lib/records'
 import type { Selection } from '../lib/selection'
 import { toSelectionBody } from '../lib/selection'
 import { normKey } from '../lib/tagops'
+import { TagKeyInput } from './TagKeyInput'
 
 /** 編集中の状態: 値の編集（既存の行）か、フィールドの追加（新しいキー） */
 type Editing = { mode: 'value'; key: string; text: string } | { mode: 'add'; key: string; text: string }
@@ -241,14 +242,15 @@ export function PropertiesPanel({
             {editing?.mode === 'add' ? (
               <tr className="editing props-add">
                 <th>
-                  <input
+                  <TagKeyInput
                     autoFocus
                     className="props-add-key"
                     value={editing.key}
                     disabled={busy}
                     placeholder="キー（例: CATALOGNUMBER）"
-                    aria-label="追加するフィールドのキー"
-                    onChange={(e) => setEditing({ mode: 'add', key: e.target.value, text: editing.text })}
+                    ariaLabel="追加するフィールドのキー"
+                    exclude={metadata.map((r) => r.key)}
+                    onChange={(key) => setEditing({ mode: 'add', key, text: editing.text })}
                     onKeyDown={onKeyDown}
                   />
                 </th>

@@ -1934,6 +1934,9 @@ GET    /api/categories, POST /api/categories        統制語彙 { "items": [{ i
 DELETE /api/categories/:id                        使われていない語彙だけ消す（D-92）。204 / 404 / 409 `in_use`
                                                   （active な album・GENRE の写像・購読・Inbox の下書きのどれかが
                                                   使っている。`message` に理由）。missing の album は SET NULL
+GET    /api/tags/keys                             ライブラリにあるタグのキーと、そのキーを持つ曲数 → { items: [{ key, tracks }] }
+                                                  （曲数の多い順、同数はキーの順。多値も 1 曲、missing の曲と PICTURE は数えない）。
+                                                  タグのキーの入力欄の前方一致の候補（D-113）
 GET    /api/search?q=                             FTS5 trigram（3 文字未満は LIKE）。/api/tracks と同じ
                                                   レスポンス形で、filter / sort / cursor / limit も受ける
 
@@ -2668,7 +2671,9 @@ scope・固定フィルタ・検索語・ルール編集中の DSL）が変わ�
 **プロパティタブの Metadata**（D-58 / D-72、P4-3）: 値のダブルクリックで選択全体への `set`（`;` で多値）。
 foobar2000 の Properties と同じく、行末の × か右クリックのメニューで**フィールドの削除**（選択全体への
 `delete` op。値の無い行は消せない）、表の下の「フィールドを追加」で**新しいキー**に `set`（キーは大文字化、
-`=` と制御文字は不可、`PICTURE` 不可、表に既にあるキーはその行の編集を案内、空の値は追加しない）。
+`=` と制御文字は不可、`PICTURE` 不可、表に既にあるキーはその行の編集を案内、空の値は追加しない）。キーの入力欄は Inbox の「タグを追加」・一括編集の
+操作のキーと同じく、入力のたびに**前方一致の候補**（`GET /api/tags/keys` のキーを曲数の多い順に、ライブラリに
+無いよく使うキーを後ろに。既にあるキーは除く）を出し、↑↓ と Enter / Tab かクリックで選ぶ（`TagKeyInput`、D-113）。
 どれも 1 op のバッチ（preview → apply、履歴から巻き戻せる）。サーバの変更は無い。
 
 **プロパティタブの「端末」節**（P5-2、D-95 の可視化 A）: Location の下に、端末が 1 台でもあれば端末ごとに
@@ -2877,12 +2882,18 @@ GC は削除件数・バイト数と区分ごとの内訳・見送りと失敗�
   disc / # / タイトル / アーティストはその行だけ、**画像**はその曲だけ差し替える（ファイルを選ぶかドロップ）、
   アルバム / アルバムアーティスト / 日付は**アルバム単位**（どの行で直しても全行と ② に反映。列を薄く塗る）、
   **ファイルの全タグ**（取り込みのファイルと下書きで足したキーのうち、固定列が出している TITLE / ARTIST / ALBUM /
-  ALBUMARTIST / DATE / TRACKNUMBER / DISCNUMBER と PICTURE を除いたもの。ABC 順、多値は `"; "` で結合）は
+  ALBUMARTIST / DATE / TRACKNUMBER / DISCNUMBER と PICTURE、種類・除外の列が出す TRACK_TYPE / PLAYLIST_EXCLUDE を
+  除いたもの。ABC 順、多値は `"; "` で結合）は
   その行だけ直し、空にするとそのタグを消す（`setTrackTag`）。表の下の「タグを追加」で新しいキーの列を足す
   （`newTagKeyProblem`）。長さ / codec / ファイル / 判定 / category と、**🔒 の付いた同一性のタグ**
   （`SOURCE_URL` / `MUSICBRAINZ_*`）と DISCTOTAL は直せない。変更したセルは色で示し、ツールチップに元の値。
   ARTIST が多値の行はセルに「多値を保つ」のチェック（D-70）。disc / # / 画像 / タイトルは横スクロールしても
-  左端に残す（`stickyColumns`）。列の組み立ては `inboxColumns` / `extraTagKeys`。「列」メニューで
+  左端に残す（`stickyColumns`）。アーティストの右に**種類**（`TRACK_TYPE`。曲（空）/ カラオケ / BGM / ドラマ / トークの
+  選択欄）と**除外**（`PLAYLIST_EXCLUDE=1` のチェック）の列を置き、どちらもその行の下書きのタグとして配置のときに
+  書く。種類が空の行には、タイトルとアルバム名からの候補（`suggestTrackType`: instrumental / off vocal / カラオケ /
+  歌無し → カラオケ、ドラマ / ボーナス・トラック → ドラマ、MC / ラジオ / トーク / コメント → トーク、サントラの
+  アルバムで一番多いアーティスト（作曲者）の曲 → BGM）を「候補: …」のボタンで出し、表の上の「種類の候補をすべて
+  適用」でまとめて入れる。候補は自動では入れない（D-113）。列の組み立ては `inboxColumns` / `extraTagKeys`。「列」メニューで
   disc / # / タイトル以外を隠せ、隠した列は localStorage（`inbox.columns.hidden`）に覚える。
   **④ 確認して配置**: 赤（`validateDraft` の問題。あると承認できない）/ 黄（判定できなかった曲・Library に
   同名・画像の無い曲）/ 緑（タグを直す曲数・画像を差し替える曲数）の一覧、配置先の見込み
