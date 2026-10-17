@@ -52,7 +52,7 @@ import { useSubscriptions } from './hooks/useSubscriptions'
 import { OPENED_WITH_URL, useYoutube } from './hooks/useYoutube'
 import { albumsOfRows } from './lib/albumGain'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
-import { scopeAfterPlaylistDelete, sortForScope } from './lib/playlists'
+import { effectiveSort, scopeAfterPlaylistDelete, sortForScope } from './lib/playlists'
 import { hasSidebar, type View } from './lib/views'
 import {
   DEFAULT_SORT,
@@ -131,9 +131,11 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     [scope, query, ruleDraft, draftDsl],
   )
   const filterParam = filterToParam(filter)
+  // 表・選択の操作に使うソート（position はプレイリストの中だけ。lib/playlists）
+  const tableSort = useMemo(() => effectiveSort(filter, sort), [filter, sort])
 
   // 一覧は SSE を開いてから取る（開く前のイベントを失わない。D-36）
-  const tracks = useTracks(filter, sort, sseOpen)
+  const tracks = useTracks(filter, tableSort, sseOpen)
   const albums = useAlbums(sseOpen, filterParam, view === 'albums')
   const playlists = usePlaylists(sseOpen)
   const refreshPlaylists = playlists.refresh
@@ -394,8 +396,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
 
   // ---------------------------------------------------------------- 一括編集
 
-  const edit = useBatchEdit(selection, sortToParam(sort))
-  const operations = useOperations(selection, sortToParam(sort))
+  const edit = useBatchEdit(selection, sortToParam(tableSort))
+  const operations = useOperations(selection, sortToParam(tableSort))
   // 操作タブの album gain 切り替え（選択行が属する album。D-74）
   const [albumGainError, setAlbumGainError] = useState<string | null>(null)
   const albumGainAlbums = useMemo(() => albumsOfRows(selectedRows, albums.albums), [selectedRows, albums.albums])
@@ -468,7 +470,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   }
   const addToPlaylist = async (playlistId: number, what: Selection | number[]) => {
     try {
-      const r = await playlists.addTracks(playlistId, what, sortToParam(sort))
+      const r = await playlists.addTracks(playlistId, what, sortToParam(tableSort))
       if (!r) return
       setPlaylistNotice(
         `「${playlistName(playlistId)}」に ${r.added} 件を追加${r.skipped > 0 ? `（${r.skipped} 件は既に入っている）` : ''}`,
@@ -622,7 +624,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             loading={tracks.snapshot.loading}
             error={tracks.snapshot.error}
             ensure={tracks.ensure}
-            sort={sort}
+            sort={tableSort}
             onSort={handleSort}
             selection={selection}
             highlightFilterSelection={selection.kind === 'filter' && selection.filter === filterParam}
@@ -639,7 +641,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
               currentPlaylist && currentPlaylist.kind === 'manual' && !ruleDraft
                 ? {
                     name: currentPlaylist.name,
-                    reorderable: sort.key === 'position' && !sort.desc,
+                    reorderable: tableSort.key === 'position' && !tableSort.desc,
                     onRemoveSelected: () => void removeSelectedFromPlaylist(),
                     onReorder: (ids, before) => void reorderPlaylist(ids, before),
                   }

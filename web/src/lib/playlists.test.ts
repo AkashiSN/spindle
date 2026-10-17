@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_SORT } from './filter'
 import {
   dropTarget,
+  effectiveSort,
   exportNotice,
   parseDragIds,
   scopeAfterPlaylistDelete,
@@ -32,6 +33,20 @@ describe('sortForScope', () => {
     expect(
       sortForScope({ playlist_id: 3 }, { playlist_id: 3, flags: ['missing'] }, { key: 'position', desc: false }),
     ).toEqual({ key: 'position', desc: false })
+  })
+})
+
+describe('effectiveSort', () => {
+  it('playlist_id の無いフィルタ（ルール編集中の DSL など）では position を既定に倒す', () => {
+    const position = { key: 'position' as const, desc: false }
+    expect(effectiveSort({ dsl: '%category% IS Drama' }, position)).toEqual(DEFAULT_SORT)
+    expect(effectiveSort({}, position)).toEqual(DEFAULT_SORT)
+  })
+  it('プレイリストの中、または position 以外のソートはそのまま', () => {
+    const position = { key: 'position' as const, desc: false }
+    expect(effectiveSort({ playlist_id: 3 }, position)).toBe(position)
+    const title = { key: 'title' as const, desc: true }
+    expect(effectiveSort({ dsl: 'x' }, title)).toBe(title)
   })
 })
 
