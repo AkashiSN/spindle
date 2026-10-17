@@ -910,7 +910,7 @@ D-9 追記、D-75）。系統の設定は `config.toml` が正で、起動時に
 | 出力仕様の世代 | 系統ごとに 2 つの文字列を設定から作り、行に保存する。**`audio_profile`**（音声に効く設定: codec / bitrate / サンプルレート規則 / RG 焼き込み方式の版。例 `opus:256:v1`、`aac:256:48k:bake1`）と **`tag_profile`**（タグに効く設定: `multi_value_separator` / iTunNORM 規則の版。例 `aac:sep= & :itunnorm0:v1`）。エンコーダの引数や規則を変えるときは版を上げる |
 | 判定 | `audio_version` 差分・**行の `audio_profile` が設定と食い違う** → 再エンコード / `tag_version`・埋めた画像（`src_artwork_id`）・RG の解析世代（`src_rg_scanned_at`）・**`tag_profile`** の差分のみ → タグ上書き（**`aac` は RG を音声に焼き込むので RG 世代の差分は再エンコード**）/ パスの差分のみ → rename。優先順はこの順（再エンコードは残りを兼ねる） |
 | RG の前提 | **どの系統も RG が揃ってから作る**: 解析済み（`rg_scanned_at` と `rg_track_gain` / `rg_track_peak`）で、`[replaygain].write_tags = true` なら Library のタグへの書き込みも確認済み（`rg_written_at >= rg_scanned_at`）。揃っていない間は凍結と同じく既存の行とファイルに触らない。順序は rg → rgwrite → tagwrite の applied → transcode（D-97） |
-| 投入 | scan ジョブの完了時に食い違う全トラック × 系統、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（`(track_id, variant)` 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める。P4-1 の共通並列予算の対象 |
+| 投入 | scan ジョブの完了時に食い違う全トラック × 系統、tagwrite / rename の applied、RG 解析の保存（D-51）。ジョブは `transcode`（`(track_id, variant)` 単位、`audio_version` で dedup）で、ハンドラが現在値から必要な処理を決める。決めた処理（エンコード / タグ更新 / 移動 / 移動 + タグ更新）を実行中から `jobs.note` に書き、完了時は実際に行った処理（移動・タグ更新が Derived の消失でエンコードに倒れたら「エンコード」、何もしなければ「変更なし」「対象外」）を残す。種別はどれも「Derived 生成」なので、ジョブ画面の結果列で見分ける（D-111）。P4-1 の共通並列予算の対象 |
 | 追随 | Library の移動に追随（Derived を rename）。削除には追随せず（missing は可逆）、`retention_days` 超の回収と孤児（行に無いファイル。`Derived/` 全体）は GC ジョブ |
 | マルチch | どの系統も既定で対象外（チャンネル数不明も対象外）。トラック単位の `-ac 2` ダウンミックスは需要が出たら（D-51。実データは全件 2ch） |
 | 配布ビュー | `delivery` は **`opus` 系統に固定**（Android の m3u8、`?transcode=opus`、`has_derived`）。`aac` は配布ビューを持たない。端末へは、Android に `opus` 系統、iPhone に `aac` 系統を既定で送る（端末ごとに選べる）。iPhone へは Mac のエージェントが `aac` を取り込み、曲は `~/Music/spindle` に置き、プレイリストはミュージック.app の「spindle」フォルダに作る（§7.11、D-75、D-95） |
@@ -2746,7 +2746,7 @@ foobar2000 の Properties と同じく、行末の × か右クリックのメ�
 各 300 件。`limits`）。表示中のタブが上限に達していれば「表示は最新 N 件まで」と添える。種別表の下に CPU 系の実行中の合計と共通予算（`cpu_budget`。D-73）。編集バッチ由来のジョブは `edit_batch_id` で記録画面（編集履歴）へリンク。
 SSE `/api/events` で更新し、リロードしても DB の値で復元する。
 
-**結果**列は完了したジョブの `note` の 1 行目を出す。`note` かエラーのある行は、クリックで開いて全文を読む
+**結果**列は完了したジョブの `note` の 1 行目を出す（`transcode` は実行中から処理の名前を出す。§7.6）。`note` かエラーのある行は、クリックで開いて全文を読む
 （verify の行には「ログを見る」で、記録 > ログをその album で絞って開き、最新の実行の本文を開く）。GC・スキャン・バックアップは複数行の `note` を残す:
 GC は削除件数・バイト数と区分ごとの内訳・見送りと失敗・掃除したジョブ行と計画の数、スキャンは見たファイル数・新規・更新・
 移動・missing・エラーの件数と、読めなかったファイルと対象外のパス（対象外は 20 件まで）、バックアップは作った

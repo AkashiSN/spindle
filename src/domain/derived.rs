@@ -183,6 +183,19 @@ impl Plan {
     pub fn needs_job(self) -> bool {
         !matches!(self, Plan::Skip | Plan::UpToDate)
     }
+
+    /// ジョブ一覧の結果列に出す処理の名前（`jobs.note`。種別はどれも「Derived 生成」なので、
+    /// タグの更新か再エンコードかをここで見分ける）
+    pub fn label(self) -> &'static str {
+        match self {
+            Plan::Skip => "対象外",
+            Plan::Encode => "エンコード",
+            Plan::Move => "移動",
+            Plan::Retag => "タグ更新",
+            Plan::MoveAndRetag => "移動 + タグ更新",
+            Plan::UpToDate => "変更なし",
+        }
+    }
 }
 
 /// RG の準備ができているか（D-97）。解析済みで、`rg_write_required` なら Library のタグへの書き込みも

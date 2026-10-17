@@ -858,6 +858,16 @@ pub fn backoff_secs(attempts: i64) -> i64 {
     BASE.saturating_mul(1i64 << exp).min(MAX)
 }
 
+/// 実行中のジョブの `note` を書く（何をしているかを一覧に出す。完了時の `note` で上書きされる）。
+/// `running` でなければ何もしない
+pub fn set_running_note(conn: &Connection, id: i64, note: &str) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE jobs SET note = ?2 WHERE id = ?1 AND state = 'running'",
+        params![id, note],
+    )?;
+    Ok(changed > 0)
+}
+
 /// 正常終了。`running` からのみ遷移する。`note` は完了時の結果 1 行（無ければ触らない）
 pub fn mark_done(conn: &Connection, id: i64, now: i64, note: Option<&str>) -> Result<bool> {
     let changed = conn.execute(
