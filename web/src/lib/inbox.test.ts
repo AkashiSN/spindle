@@ -698,6 +698,9 @@ describe('承認画面の表の列', () => {
         ['MUSICBRAINZ_ALBUMID', 'm'],
         ['GENRE', 'Pop'],
         ['TRACKNUMBER', '1'],
+        // 種類・除外は専用の列で出す（D-113）
+        ['TRACK_TYPE', 'karaoke'],
+        ['PLAYLIST_EXCLUDE', '1'],
       ]),
     ])
     expect(keys).toEqual(['GENRE', 'ISRC', 'MUSICBRAINZ_ALBUMID'])
@@ -717,6 +720,8 @@ describe('承認画面の表の列', () => {
       'no',
       'title',
       'artist',
+      'kind',
+      'exclude',
       'album',
       'albumartist',
       'date',
@@ -787,6 +792,8 @@ describe('タグの変更（D-86）', () => {
     expect(newTagKeyProblem('title', [])).toContain('TITLE')
     expect(newTagKeyProblem('source_url', [])).toContain('識別')
     expect(newTagKeyProblem('genre', ['GENRE'])).toContain('既にある')
+    expect(newTagKeyProblem('track_type', [])).toContain('種類')
+    expect(newTagKeyProblem('PLAYLIST_EXCLUDE', [])).toContain('除外')
     expect(isLockedTagKey('MUSICBRAINZ_DISCID')).toBe(true)
     expect(isLockedTagKey('GENRE')).toBe(false)
   })

@@ -32,6 +32,7 @@ pub mod spa;
 mod state;
 pub mod stream;
 pub mod subscriptions;
+pub mod tags;
 pub mod tracks;
 pub mod verify;
 pub mod ytmusic;
@@ -65,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/devices/{id}/plans/open/abandon", post(devices::abandon))
         .route("/devices/{id}/verify", post(devices::verify))
         .route("/devices/{id}/pair-code", post(devices::pair_code))
+        .route("/tags/keys", get(tags::keys))
         .route("/tracks", get(tracks::list))
         .route("/tracks/{id}", get(tracks::get))
         .route("/tracks/batch", patch(batch::apply))

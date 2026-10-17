@@ -38,6 +38,16 @@ import {
   type InboxItem,
   type InboxSource,
 } from '../lib/inbox'
+import {
+  mainArtist,
+  PLAYLIST_EXCLUDE_KEY,
+  suggestTrackType,
+  TRACK_TYPE_KEY,
+  TRACK_TYPES,
+  trackTypeLabel,
+  type TrackType,
+} from '../lib/trackType'
+import { TagKeyInput } from './TagKeyInput'
 
 type Cell = { row: number; col: string }
 
@@ -47,6 +57,7 @@ const GROUP_TITLES: Record<InboxColumn['group'], string> = {
   file: 'ファイルから（表示のみ）',
   tag: 'ファイルのタグ。ダブルクリックで編集、空にすると消す',
 }
+const CONTROL_TITLE = '選んで直す（この行だけ）。種類が無ければ普通の曲、除外は 00_ などのプレイリストから外す'
 const LOCK_TITLE =
   '曲・盤の同一性の判定に使うタグ（YouTube の二重取り込みの判定・CD の盤の識別）。書き換えると判定が壊れるので直せない'
 
@@ -159,6 +170,27 @@ export function InboxTrackGrid({
   }
   const updTrack = (i: number, f: (t: DraftTrack) => DraftTrack) =>
     update((d) => ({ ...d, tracks: d.tracks.map((t, j) => (j === i ? f(t) : t)) }))
+
+  // 種類の候補（D-113）。サントラの作曲者はアルバムで一番多いアーティストとみなす
+  const artistOf = (t: DraftTrack) => t.artist.trim() || draft.albumartist
+  const albumMain = useMemo(
+    () => mainArtist(draft.tracks.map((t) => t.artist.trim() || draft.albumartist)),
+    [draft.tracks, draft.albumartist],
+  )
+  const kindOf = (t: DraftTrack) => effectiveTag(files.get(t.rel_path), t, TRACK_TYPE_KEY)
+  const suggestionOf = (t: DraftTrack): TrackType | null =>
+    kindOf(t) !== '' ? null : suggestTrackType({ title: t.title, artist: artistOf(t) }, { album: draft.album, mainArtist: albumMain })
+  const setKind = (i: number, value: string) =>
+    updTrack(i, (t) => setTrackTag(t, files.get(t.rel_path), TRACK_TYPE_KEY, value))
+  const suggested = editable ? draft.tracks.filter((t) => suggestionOf(t) != null).length : 0
+  const applySuggestions = () =>
+    update((d) => ({
+      ...d,
+      tracks: d.tracks.map((t) => {
+        const s = suggestionOf(t)
+        return s == null ? t : setTrackTag(t, files.get(t.rel_path), TRACK_TYPE_KEY, s)
+      }),
+    }))
 
   const takePicture = async (file: File | undefined, row: number) => {
     if (file == null) return
@@ -375,6 +407,62 @@ export function InboxTrackGrid({
           </td>
         )
       }
+      case 'kind': {
+        const value = kindOf(t)
+        const suggestion = editable ? suggestionOf(t) : null
+        const known = value === '' || TRACK_TYPES.some((k) => k.value === value)
+        return (
+          <td
+            key={c.id}
+            className={cls(`inbox-kind-cell${tagChanged(f, t, TRACK_TYPE_KEY) ? ' inbox-cell-changed' : ''}`)}
+            style={p.style}
+          >
+            <select
+              className="small"
+              aria-label={`${t.rel_path} の種類`}
+              value={value}
+              disabled={!editable}
+              onChange={(e) => setKind(i, e.target.value)}
+            >
+              <option value="">曲</option>
+              {TRACK_TYPES.map((k) => (
+                <option key={k.value} value={k.value}>
+                  {k.label}
+                </option>
+              ))}
+              {!known && <option value={value}>{value}</option>}
+            </select>
+            {suggestion != null && (
+              <button
+                type="button"
+                className="ghost small inbox-suggest"
+                title="タイトル・アルバム名からの候補。クリックで適用"
+                onClick={() => setKind(i, suggestion)}
+              >
+                候補: {trackTypeLabel(suggestion)}
+              </button>
+            )}
+          </td>
+        )
+      }
+      case 'exclude': {
+        const on = effectiveTag(f, t, PLAYLIST_EXCLUDE_KEY) !== ''
+        return (
+          <td
+            key={c.id}
+            className={cls(`inbox-exclude-cell${tagChanged(f, t, PLAYLIST_EXCLUDE_KEY) ? ' inbox-cell-changed' : ''}`)}
+            style={p.style}
+          >
+            <input
+              type="checkbox"
+              aria-label={`${t.rel_path} をプレイリストから除外`}
+              checked={on}
+              disabled={!editable}
+              onChange={(e) => updTrack(i, (x) => setTrackTag(x, f, PLAYLIST_EXCLUDE_KEY, e.target.checked ? '1' : ''))}
+            />
+          </td>
+        )
+      }
       case 'verdict':
         return (
           <td key={c.id} className="inbox-verdict">
@@ -423,6 +511,11 @@ export function InboxTrackGrid({
   return (
     <>
       <div className="inbox-tracks-head inbox-grid-tools">
+        {suggested > 0 && (
+          <button type="button" className="small" title="種類が空の行に、タイトル・アルバム名からの候補を入れる" onClick={applySuggestions}>
+            種類の候補をすべて適用（{suggested} 件）
+          </button>
+        )}
         <span className="spacer" />
         <ColumnMenu columns={columns} hidden={hidden} onChange={setHidden} />
       </div>
@@ -446,7 +539,7 @@ export function InboxTrackGrid({
                       .filter(Boolean)
                       .join(' ')}
                     style={p.style}
-                    title={c.locked ? LOCK_TITLE : c.editable ? GROUP_TITLES[c.group] : GROUP_TITLES.file}
+                    title={c.locked ? LOCK_TITLE : c.control ? CONTROL_TITLE : c.editable ? GROUP_TITLES[c.group] : GROUP_TITLES.file}
                   >
                     {c.locked ? '🔒 ' : ''}
                     {c.label}
@@ -484,13 +577,13 @@ export function InboxTrackGrid({
       </div>
       {editable && (
         <div className="op-row inbox-addtag">
-          <input
-            type="text"
+          <TagKeyInput
             className="small"
-            aria-label="追加するタグのキー"
+            ariaLabel="追加するタグのキー"
             placeholder="新しいタグ（例: LYRICIST）"
             value={newKey}
-            onChange={(e) => setNewKey(e.target.value)}
+            accept={(k) => newTagKeyProblem(k, tagKeys) == null}
+            onChange={setNewKey}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault()

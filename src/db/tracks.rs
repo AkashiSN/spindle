@@ -913,3 +913,30 @@ pub fn album_by_release(conn: &Connection, release_id: &str) -> Result<Option<Al
         .query_row([release_id.trim().to_ascii_lowercase()], read_album_ref)
         .optional()?)
 }
+
+/// ライブラリにあるタグのキーと、そのキーを持つ曲数（多値も 1 曲）。missing の曲と `PICTURE`
+/// （画像の疑似キー）は数えない。曲数の多い順、同数はキーの順（D-113。キーの入力欄の候補）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TagKeyUsage {
+    pub key: String,
+    pub tracks: i64,
+}
+
+pub fn tag_keys(conn: &Connection) -> Result<Vec<TagKeyUsage>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT g.key, count(DISTINCT g.track_id) AS n
+         FROM track_tags g JOIN tracks t ON t.id = g.track_id
+         WHERE t.missing_since IS NULL AND g.key <> 'PICTURE'
+         GROUP BY g.key
+         ORDER BY n DESC, g.key",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(TagKeyUsage {
+                key: r.get(0)?,
+                tracks: r.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}

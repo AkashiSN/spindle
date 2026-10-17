@@ -2,6 +2,7 @@ import { parsePictureValue } from './artwork'
 import type { ReleaseCandidate } from './cd'
 import { formatDuration } from './format'
 import { splitValues } from './properties'
+import { PLAYLIST_EXCLUDE_KEY, TRACK_TYPE_KEY } from './trackType'
 
 // Inbox の承認キュー（SPEC §7.8、D-68）の純粋ロジック。件 = 音声ファイルのあるディレクトリ。
 // 下書き（InboxDraft）はアルバム単位 + トラック単位の補正で、承認時にサーバへ送り、配置時にタグへ書く。
@@ -812,6 +813,8 @@ export function newTagKeyProblem(raw: string, existing: readonly string[]): stri
   if (!isValidTagKey(key)) return 'キーが空か、使えない文字（= や制御文字）を含んでいる'
   if (COVERED_TAG_KEYS.includes(key)) return `${key} は左の列（または ②）で直す`
   if (isLockedTagKey(key)) return `${key} は曲・盤の識別に使うので追加できない`
+  if (key === TRACK_TYPE_KEY) return `${key} は「種類」の列で選ぶ`
+  if (key === PLAYLIST_EXCLUDE_KEY) return `${key} は「除外」の列で付ける`
   if (existing.includes(key)) return `${key} の列は既にある`
   return null
 }
@@ -889,7 +892,19 @@ export function usesCaaPicture(item: Pick<InboxItem, 'caa_picture'>, d: Pick<Inb
 // ---------------------------------------------------------------- 承認画面の表の列（§12.6 Inbox）
 
 /** 固定列が出しているタグ（全タグの列から外す） */
-const COLUMN_TAGS = new Set(['TITLE', 'ARTIST', 'ALBUM', 'ALBUMARTIST', 'DATE', 'TRACKNUMBER', 'DISCNUMBER', 'PICTURE'])
+const COLUMN_TAGS = new Set([
+  'TITLE',
+  'ARTIST',
+  'ALBUM',
+  'ALBUMARTIST',
+  'DATE',
+  'TRACKNUMBER',
+  'DISCNUMBER',
+  'PICTURE',
+  // 種類・除外は専用の列（D-113）
+  TRACK_TYPE_KEY,
+  PLAYLIST_EXCLUDE_KEY,
+])
 
 /** 件のファイルが持つタグと、下書きで足したキーのうち、固定列に無いもの（全タグの列）。ABC 順 */
 export function extraTagKeys(files: Pick<InboxFile, 'tags'>[], tracks: Pick<DraftTrack, 'tags'>[] = []): string[] {
@@ -918,6 +933,8 @@ export type InboxColumn = {
   editable: boolean
   /** 同一性に使うタグ（鍵。D-86） */
   locked?: boolean
+  /** ダブルクリックの入力欄ではなく、セルの中の選択欄・チェックで直す（種類・除外。D-113） */
+  control?: boolean
 }
 
 /** 表の列（左から）。サムネイル・判定は件に該当するものがあるときだけ */
@@ -930,6 +947,8 @@ export function inboxColumns(opts: { hasPicture: boolean; hasSource: boolean; ta
   cols.push(
     { id: 'title', label: 'タイトル', group: 'edit', hideable: false, editable: true },
     { id: 'artist', label: 'アーティスト', group: 'edit', hideable: true, editable: true },
+    { id: 'kind', label: '種類', group: 'edit', hideable: true, editable: false, control: true },
+    { id: 'exclude', label: '除外', group: 'edit', hideable: true, editable: false, control: true },
     { id: 'album', label: 'アルバム', group: 'album', hideable: true, editable: true },
     { id: 'albumartist', label: 'アルバムアーティスト', group: 'album', hideable: true, editable: true },
     { id: 'date', label: '日付', group: 'album', hideable: true, editable: true },
