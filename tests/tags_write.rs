@@ -410,3 +410,125 @@ fn mp4_leaves_other_mean_freeform_atoms_alone() {
     });
     assert!(other.is_some(), "他の mean の atom が消えた");
 }
+
+/// mp3 の ID3v2 に TXXX を直接置く（外部ツールが書いた独自フィールドの模擬）
+fn put_txxx(path: &Path, description: &str, value: &str) {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile as _;
+    use std::io::Seek as _;
+
+    let mut f = File::options().read(true).write(true).open(path).unwrap();
+    let mut mp3 = lofty::mpeg::MpegFile::read_from(&mut f, ParseOptions::new()).unwrap();
+    let mut id3 = mp3.id3v2().cloned().unwrap_or_default();
+    let _ = id3.insert_user_text(description.to_owned(), value.to_owned());
+    mp3.set_id3v2(id3);
+    f.seek(std::io::SeekFrom::Start(0)).unwrap();
+    mp3.save_to(&mut f, WriteOptions::default()).unwrap();
+}
+
+/// mp3 の TXXX を description ごとに集める（lofty で直接読む）
+fn txxx(path: &Path) -> Vec<(String, String)> {
+    use lofty::config::ParseOptions;
+    use lofty::file::AudioFile as _;
+    use lofty::id3::v2::{ExtendedTextFrame, Frame};
+
+    let mp3 = lofty::mpeg::MpegFile::read_from(&mut File::open(path).unwrap(), ParseOptions::new())
+        .unwrap();
+    let Some(id3) = mp3.id3v2() else {
+        return Vec::new();
+    };
+    id3.into_iter()
+        .filter_map(|f| match f {
+            Frame::UserText(ExtendedTextFrame {
+                description,
+                content,
+                ..
+            }) => Some((description.to_string(), content.to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// D-110: 写像表に無いキーは ID3v2 の TXXX（description = キー）として書き、同じキーで読み戻せる
+/// （多値も）。標準キーは標準フレームのまま
+#[test]
+fn mp3_writes_arbitrary_keys_as_txxx_and_reads_them_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    write(
+        &p,
+        "mp3",
+        &[
+            change("SPINDLETEST", Some(&["one", "two"])),
+            change("PLAYLIST_EXCLUDE", Some(&["1"])),
+            change("TITLE", Some(&["new"])),
+        ],
+    );
+    assert_eq!(values(&p, "mp3", "SPINDLETEST"), ["one", "two"]);
+    assert_eq!(values(&p, "mp3", "PLAYLIST_EXCLUDE"), ["1"]);
+    assert_eq!(values(&p, "mp3", "TITLE"), ["new"]);
+    assert_eq!(values(&p, "mp3", "ALBUM"), ["alb"]);
+    let frames = txxx(&p);
+    assert!(
+        frames.iter().any(|(d, _)| d == "PLAYLIST_EXCLUDE"),
+        "{frames:?}"
+    );
+    assert!(
+        !frames.iter().any(|(d, _)| d.eq_ignore_ascii_case("TITLE")),
+        "標準キーが TXXX に逃げている: {frames:?}"
+    );
+
+    write(&p, "mp3", &[change("SPINDLETEST", None)]);
+    assert!(values(&p, "mp3", "SPINDLETEST").is_empty());
+    assert_eq!(values(&p, "mp3", "PLAYLIST_EXCLUDE"), ["1"]);
+}
+
+/// 外部が書いた TXXX は読み、別のキーの書き込みでは消さない。大小文字違いは置き換えで二重化しない
+#[test]
+fn mp3_keeps_foreign_txxx_and_replaces_case_insensitively() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    put_txxx(&p, "MyKey", "old");
+    put_txxx(&p, "Other Field", "keep");
+    assert_eq!(values(&p, "mp3", "MYKEY"), ["old"]);
+    assert_eq!(values(&p, "mp3", "OTHER FIELD"), ["keep"]);
+
+    write(&p, "mp3", &[change("TITLE", Some(&["x"]))]);
+    assert_eq!(
+        values(&p, "mp3", "OTHER FIELD"),
+        ["keep"],
+        "無関係な TXXX が消えた"
+    );
+
+    write(&p, "mp3", &[change("MYKEY", Some(&["new"]))]);
+    assert_eq!(values(&p, "mp3", "MYKEY"), ["new"]);
+    let frames = txxx(&p);
+    assert!(
+        !frames.iter().any(|(d, _)| d == "MyKey"),
+        "旧綴りの TXXX が残っている: {frames:?}"
+    );
+}
+
+/// lofty が名前を知っている TXXX（REPLAYGAIN_*）は標準の綴りで書き、外部の小文字綴りを残さない
+#[test]
+fn mp3_mapped_txxx_replaces_lowercase_variant() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    put_txxx(&p, "replaygain_track_gain", "-1.00 dB");
+    assert_eq!(values(&p, "mp3", "REPLAYGAIN_TRACK_GAIN"), ["-1.00 dB"]);
+    write(
+        &p,
+        "mp3",
+        &[change("REPLAYGAIN_TRACK_GAIN", Some(&["-7.50 dB"]))],
+    );
+    assert_eq!(values(&p, "mp3", "REPLAYGAIN_TRACK_GAIN"), ["-7.50 dB"]);
+    let frames = txxx(&p);
+    let rg: Vec<_> = frames
+        .iter()
+        .filter(|(d, _)| d.eq_ignore_ascii_case("REPLAYGAIN_TRACK_GAIN"))
+        .collect();
+    assert_eq!(rg.len(), 1, "{frames:?}");
+}

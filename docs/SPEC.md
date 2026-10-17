@@ -818,7 +818,11 @@ ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成�
   綴りを固定。D-77）。読み側は同じ写像で、フリーフォーム atom を名前を大文字化したキーとして取り込む。
   置き換え・削除は名前の大小文字を無視して既存 atom を消す（外部ツールが `MyKey` で書いた atom を
   `MYKEY` で上書きしても二重化しない）。`trkn` / `disk` は番号と総数が同居するので、片側だけの変更は
-  相方を保つ。写像と書き手（`apply_ilst`）は Derived の `aac` 系統（§7.6）と共有する。MP3 / WAV 等は
+  相方を保つ。写像と書き手（`apply_ilst`）は Derived の `aac` 系統（§7.6）と共有する。MP3 は ID3v2 の
+  標準フレーム（lofty が名前を知っている TXXX を含む）に写像し、写像表に無いキーは description = キーの
+  TXXX に書く（多値は NUL 区切りの 1 フレーム。ID3v2.4）。読み側は TXXX の description を大文字化した
+  キーとして取り込み、置き換え・削除は description の大小文字を無視して既存の TXXX を消す。ブロック
+  （ID3v2 / ID3v1 / APE）ごとに split / merge で書き、写像できないフレームを保つ（D-110）。WAV / AIFF 等は
   lofty の generic `Tag` 経由で、写像できないキーは書けない（読み戻し照合で failed に閉じる）
 - **事前条件に `ctime_ns` と `tag_hash` を含める。** inode も mtime も保ったままの in-place
   更新（`touch -r` を伴うタグツール）は dev/inode/mtime では見えない。ただし外部 rename も
