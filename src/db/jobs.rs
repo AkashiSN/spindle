@@ -153,6 +153,16 @@ impl JobType {
             _ => None,
         }
     }
+
+    /// 実行せずに終えた（stale・トラックが無い）ときに `note` に残す文言。前の試行が書いた `note`
+    /// （実行中の処理名）を置き換える。`None` の種別は `note` に触らない（D-111）
+    pub fn noop_note(self) -> Option<&'static str> {
+        match self {
+            // domain::derived::Plan::UpToDate の名前と同じ（テストで揃っていることを確かめる）
+            JobType::Transcode => Some("変更なし"),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for JobType {
@@ -856,6 +866,31 @@ pub fn backoff_secs(attempts: i64) -> i64 {
     const MAX: i64 = 3600;
     let exp = (attempts.max(1) - 1).min(30) as u32;
     BASE.saturating_mul(1i64 << exp).min(MAX)
+}
+
+/// 実行中のジョブの `note` を書く（何をしているかを一覧に出す。完了時の `note` で上書きされる）。
+/// `running` でなければ何もしない
+pub fn set_running_note(conn: &Connection, id: i64, note: &str) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE jobs SET note = ?2 WHERE id = ?1 AND state = 'running'",
+        params![id, note],
+    )?;
+    Ok(changed > 0)
+}
+
+/// 実行せずに正常終了する（stale・トラックが無い）。[`JobType::noop_note`] があれば `note` を
+/// それで置き換え、無ければ [`mark_done`] と同じく触らない
+pub fn mark_done_noop(conn: &Connection, id: i64, ty: JobType, now: i64) -> Result<bool> {
+    let Some(note) = ty.noop_note() else {
+        return mark_done(conn, id, now, None);
+    };
+    let changed = conn.execute(
+        "UPDATE jobs SET state = 'done', finished_at = ?2, progress = 1.0,
+                         done = COALESCE(total, done), note = ?3
+         WHERE id = ?1 AND state = 'running'",
+        params![id, now, note],
+    )?;
+    Ok(changed > 0)
 }
 
 /// 正常終了。`running` からのみ遷移する。`note` は完了時の結果 1 行（無ければ触らない）

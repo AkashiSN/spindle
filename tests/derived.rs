@@ -571,3 +571,11 @@ fn opus_tags_transfer_items_replace_rg_and_pictures() {
         .any(|(k, _)| k.starts_with("REPLAYGAIN_") || k.starts_with("R128_")));
     assert!(out.pictures.is_empty());
 }
+
+/// 実行せずに終えた transcode の `note`（ワーカーの stale 判定が書く）は、ハンドラの「変更なし」と同じ（D-111）
+#[test]
+fn transcode_noop_note_matches_the_up_to_date_label() {
+    use spindle::db::jobs::JobType;
+    assert_eq!(JobType::Transcode.noop_note(), Some(Plan::UpToDate.label()));
+    assert_eq!(JobType::Tagwrite.noop_note(), None);
+}

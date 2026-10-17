@@ -36,6 +36,7 @@ use lofty::picture::{MimeType, Picture, PictureType};
 
 use crate::db::artwork as dbart;
 use crate::db::derived::{self as dbderived, Profiles, TagState};
+use crate::db::jobs as dbjobs;
 use crate::db::replaygain::{self as dbrg, Member};
 use crate::db::{now_epoch, DbError};
 use crate::domain::derived::{
@@ -238,12 +239,12 @@ impl TranscodeHandler {
         };
         let Some(r) = self.resolve(&ctx, track_id, variant).await? else {
             tracing::info!(job_id, track_id, %variant, "トラックか系統の設定が無いので何もしない");
-            return Ok(Outcome::Done);
+            return Ok(Outcome::DoneWith(Plan::Skip.label().to_owned()));
         };
         let what = plan(&r.settings, &r.target, r.current.as_ref());
         tracing::debug!(job_id, track_id, %variant, ?what, "Derived の判定");
         if !what.needs_job() {
-            return Ok(Outcome::Done);
+            return Ok(Outcome::DoneWith(what.label().to_owned()));
         }
         // 期待パスの排他予約（物理的な書き込みの前。encode / move / retag の全経路で持つ）。
         // 別のジョブが持っていれば試行回数を数えずに再キュー
@@ -278,9 +279,26 @@ impl TranscodeHandler {
         result
     }
 
-    /// 予約を持った状態で `what` を実行する
+    /// 実行中の処理の名前を `jobs.note` に書く（ジョブ一覧の結果列。書けなくても処理は続ける）
+    async fn announce(&self, ctx: &JobContext, what: Plan) {
+        let job_id = ctx.job.id;
+        let label = what.label();
+        if let Err(e) = ctx
+            .db()
+            .write(move |c| dbjobs::set_running_note(c, job_id, label))
+            .await
+        {
+            tracing::warn!(job_id, error = %e, "ジョブの処理名を書けない");
+        }
+    }
+
+    /// 予約を持った状態で `what` を実行する。結果の `note` は実際に行った処理（移動・タグ更新が
+    /// Derived の消失でエンコードに倒れたら「エンコード」。[`Self::encode`] が自分で書く）
     async fn execute(&self, ctx: &JobContext, r: &Resolved, what: Plan) -> HandlerResult {
-        match what {
+        if what != Plan::Encode {
+            self.announce(ctx, what).await;
+        }
+        let result = match what {
             Plan::Skip | Plan::UpToDate => Ok(Outcome::Done),
             Plan::Encode => self.encode(ctx, r).await,
             Plan::Move => match self.do_move(ctx, r).await? {
@@ -294,6 +312,10 @@ impl TranscodeHandler {
                 Step::Blocked => Ok(Outcome::Requeue),
             },
             Plan::Retag => self.retag(ctx, r).await,
+        };
+        match result {
+            Ok(Outcome::Done) => Ok(Outcome::DoneWith(what.label().to_owned())),
+            other => other,
         }
     }
 
@@ -493,6 +515,8 @@ impl TranscodeHandler {
     async fn encode(&self, ctx: &JobContext, r: &Resolved) -> HandlerResult {
         let job_id = ctx.job.id;
         let track_id = r.target.track_id;
+        // 移動・タグ更新から倒れてきたときも、一覧には実際に行うエンコードを出す
+        self.announce(ctx, Plan::Encode).await;
         ctx.check_cancel().await?;
         let dst_rel = parse_rel(&r.expected())?;
         // 期待パスの占有を先に確定する（エンコードしてから気付くと無駄になる。配置の直前にもう一度見る）
@@ -636,7 +660,7 @@ impl TranscodeHandler {
             );
             return Ok(Outcome::Requeue);
         }
-        Ok(Outcome::Done)
+        Ok(Outcome::DoneWith(Plan::Encode.label().to_owned()))
     }
 
     // ---- Move

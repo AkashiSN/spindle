@@ -382,6 +382,24 @@ impl Lib {
         self.wait_job(job).await
     }
 
+    fn job_note(&self, job: i64) -> Option<String> {
+        self.conn()
+            .query_row("SELECT note FROM jobs WHERE id = ?1", [job], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// [`Self::run`] に加えて、完了時の `jobs.note`（実際に行った処理）を返す
+    async fn run_note(&self, id: i64) -> (JobState, Option<String>) {
+        let (av, tv) = self.versions(id);
+        let job = self.enqueue(id, av, tv).await;
+        let st = self.wait_job(job).await;
+        let note = self
+            .conn()
+            .query_row("SELECT note FROM jobs WHERE id = ?1", [job], |r| r.get(0))
+            .unwrap();
+        (st, note)
+    }
+
     async fn wait_job(&self, id: i64) -> JobState {
         // CI のランナーは I/O が遅く回数ベースでは足りないので、経過時間で待つ
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
@@ -707,7 +725,10 @@ async fn tag_version_bump_retags_without_reencoding() {
     lib.scan().await;
     lib.start();
     let id = lib.track_id("A/01.flac");
-    assert_eq!(lib.run(id).await, JobState::Done);
+    assert_eq!(
+        lib.run_note(id).await,
+        (JobState::Done, Some("エンコード".into()))
+    );
     let opus = lib.derived().join("opus/A/01.opus");
     let audio_before = audio_md5(&opus);
     // 外部でタグを書き換えて再スキャン → tag_version++
@@ -715,7 +736,16 @@ async fn tag_version_bump_retags_without_reencoding() {
     lib.scan().await;
     assert_eq!(lib.versions(id), (1, 2));
     assert_eq!(lib.delivery(id).2, 1, "stale_tags");
-    assert_eq!(lib.run(id).await, JobState::Done);
+    // ジョブ一覧の結果列に、再エンコードではなくタグの更新だったことを出す
+    assert_eq!(
+        lib.run_note(id).await,
+        (JobState::Done, Some("タグ更新".into()))
+    );
+    // 最新の行への再投入は何もしない
+    assert_eq!(
+        lib.run_note(id).await,
+        (JobState::Done, Some("変更なし".into()))
+    );
     assert_eq!(lib.derived_row(id).unwrap().2, 2);
     assert_eq!(
         lib.delivery(id),
@@ -771,6 +801,28 @@ async fn stale_job_is_noop() {
     assert_eq!(lib.wait_job(job).await, JobState::Done);
     assert!(lib.derived_row(id).is_none());
     assert!(!lib.derived().join("opus/A/01.opus").exists());
+    assert_eq!(lib.job_note(job).as_deref(), Some("変更なし"));
+}
+
+/// 前の試行が処理名を書いてから再キューされ、次の試行で stale になったときも、前の名前を残さず
+/// 「変更なし」で終える（D-111）
+#[tokio::test]
+async fn stale_job_overwrites_the_note_of_an_earlier_attempt() {
+    require_tools!();
+    let lib = Lib::new();
+    lib.add("A/01.flac", 1, "a");
+    lib.scan().await;
+    let id = lib.track_id("A/01.flac");
+    lib.conn()
+        .execute("UPDATE tracks SET audio_version = 2 WHERE id = ?1", [id])
+        .unwrap();
+    let job = lib.enqueue(id, 1, 1).await;
+    lib.conn()
+        .execute("UPDATE jobs SET note = '移動' WHERE id = ?1", [job])
+        .unwrap();
+    lib.start();
+    assert_eq!(lib.wait_job(job).await, JobState::Done);
+    assert_eq!(lib.job_note(job).as_deref(), Some("変更なし"));
 }
 
 #[tokio::test]
@@ -787,7 +839,10 @@ async fn external_move_renames_derived() {
     std::fs::rename(&p, lib.lib().join("B/01 new.flac")).unwrap();
     lib.scan().await;
     assert_eq!(lib.track_id("B/01 new.flac"), id);
-    assert_eq!(lib.run(id).await, JobState::Done);
+    assert_eq!(
+        lib.run_note(id).await,
+        (JobState::Done, Some("移動".into()))
+    );
     assert_eq!(lib.derived_row(id).unwrap().0, "opus/B/01 new.opus");
     assert!(!lib.derived().join("opus/A/01.opus").exists());
     assert_eq!(sha256(&lib.derived().join("opus/B/01 new.opus")), before);
@@ -806,7 +861,11 @@ async fn move_with_lost_derived_reencodes() {
     std::fs::remove_file(lib.derived().join("opus/A/01.opus")).unwrap();
     std::fs::rename(&p, lib.lib().join("A/02.flac")).unwrap();
     lib.scan().await;
-    assert_eq!(lib.run(id).await, JobState::Done);
+    assert_eq!(
+        lib.run_note(id).await,
+        (JobState::Done, Some("エンコード".into())),
+        "移動のつもりでも実際に行ったエンコードを出す"
+    );
     assert!(lib.derived().join("opus/A/02.opus").is_file());
     assert_eq!(lib.derived_row(id).unwrap().0, "opus/A/02.opus");
 }
@@ -823,9 +882,32 @@ async fn retag_with_lost_derived_reencodes() {
     std::fs::remove_file(lib.derived().join("opus/A/01.opus")).unwrap();
     common::retag(&p, |t| t.set_title("b".to_owned()));
     lib.scan().await;
-    assert_eq!(lib.run(id).await, JobState::Done);
+    assert_eq!(
+        lib.run_note(id).await,
+        (JobState::Done, Some("エンコード".into()))
+    );
     assert!(lib.derived().join("opus/A/01.opus").is_file());
     assert_eq!(lib.derived_row(id).unwrap().2, 2);
+}
+
+#[tokio::test]
+async fn move_and_retag_is_noted_as_both() {
+    require_tools!();
+    let lib = Lib::new();
+    let p = lib.add("A/01.flac", 1, "a");
+    lib.scan().await;
+    lib.start();
+    let id = lib.track_id("A/01.flac");
+    assert_eq!(lib.run(id).await, JobState::Done);
+    let moved = lib.lib().join("A/02.flac");
+    std::fs::rename(&p, &moved).unwrap();
+    common::retag(&moved, |t| t.set_title("b".to_owned()));
+    lib.scan().await;
+    assert_eq!(
+        lib.run_note(id).await,
+        (JobState::Done, Some("移動 + タグ更新".into()))
+    );
+    assert_eq!(lib.derived_row(id).unwrap().0, "opus/A/02.opus");
 }
 
 #[tokio::test]
