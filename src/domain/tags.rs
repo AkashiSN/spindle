@@ -104,7 +104,7 @@ use lofty::ogg::tag::VorbisComments;
 use lofty::ogg::OggPictureStorage as _;
 use lofty::probe::Probe;
 use lofty::properties::FileProperties;
-use lofty::tag::{ItemKey, ItemValue, Tag, TagItem, TagType};
+use lofty::tag::{ItemKey, ItemValue, MergeTag, SplitTag, Tag, TagItem, TagType};
 
 /// `tracks.codec` の値（スキーマの CHECK と一致させる）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -316,6 +316,15 @@ fn read_parts(
             (codec, f.properties().clone().into())
         }
         FileType::Mpeg | FileType::Wav | FileType::WavPack | FileType::Ape | FileType::Aiff => {
+            // mp3 の ID3v2 のうち写像表に無い TXXX は generic `Tag` が落とすので、先に直接読む
+            // （D-110。書き側の [`apply_id3v2`] と対）
+            let user_text = if ty == FileType::Mpeg {
+                let f = lofty::mpeg::MpegFile::read_from(&mut *reader, opts)?;
+                reader.seek(SeekFrom::Start(0))?;
+                f.id3v2().map(id3v2_user_text).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let tagged = Probe::new(reader).set_file_type(ty).read()?;
             let codec = match ty {
                 FileType::Mpeg => Codec::Mp3,
@@ -328,11 +337,17 @@ fn read_parts(
             // primary に無いキーだけを補う。単純に連結すると同じ値が多値として二重になる
             let primary = tagged.primary_tag_type();
             let mut seen: HashSet<String> = HashSet::new();
-            let ordered = tagged
-                .primary_tag()
+            if let Some(tag) = tagged.primary_tag() {
+                collect_generic(&mut set, &mut pictures, tag, &mut seen);
+            }
+            // TXXX は ID3v2（primary）の一部なので、副ブロックより先に取り込む
+            let user_text: Vec<(String, String)> = user_text
                 .into_iter()
-                .chain(tagged.tags().iter().filter(|t| t.tag_type() != primary));
-            for tag in ordered {
+                .filter(|(k, _)| !seen.contains(k))
+                .collect();
+            seen.extend(user_text.iter().map(|(k, _)| k.clone()));
+            set.extend(user_text);
+            for tag in tagged.tags().iter().filter(|t| t.tag_type() != primary) {
                 collect_generic(&mut set, &mut pictures, tag, &mut seen);
             }
             (codec, tagged.properties().clone())
@@ -555,7 +570,23 @@ pub fn write_tag_changes(
             file.seek(SeekFrom::Start(0))?;
             f.save_to(file, write_opts)?;
         }
-        FileType::Mpeg | FileType::Wav | FileType::WavPack | FileType::Ape | FileType::Aiff => {
+        FileType::Mpeg => {
+            // ブロックごとに split / merge で書く。generic `Tag` から作り直すと写像できない
+            // フレーム（外部の TXXX 等）が消える（D-110）。ID3v2 は primary なので無ければ作る
+            let mut f = lofty::mpeg::MpegFile::read_from(&mut *file, opts)?;
+            let id3v2 = f.id3v2().cloned().unwrap_or_default();
+            f.set_id3v2(apply_id3v2(id3v2, &changes, pictures));
+            // 読み側は全ブロックを集約するので、副ブロックにも同じ変更を当てる
+            if let Some(id3v1) = f.id3v1().cloned() {
+                f.set_id3v1(apply_split(id3v1, &changes, pictures));
+            }
+            if let Some(ape) = f.ape().cloned() {
+                f.set_ape(apply_split(ape, &changes, pictures));
+            }
+            file.seek(SeekFrom::Start(0))?;
+            f.save_to(file, write_opts)?;
+        }
+        FileType::Wav | FileType::WavPack | FileType::Ape | FileType::Aiff => {
             let mut tagged = Probe::new(&mut *file)
                 .set_file_type(ty)
                 .options(opts)
@@ -570,16 +601,8 @@ pub fn write_tag_changes(
             for tt in types {
                 if let Some(tag) = tagged.tag_mut(tt) {
                     apply_generic(tag, &changes);
-                    if let Some(pics) = pictures {
-                        // 読み側は最初に画像を持つブロックだけを採る。書きは全ブロックを揃える
-                        // （ID3v1 のように画像を持てないブロックは push が無視される）
-                        while !tag.pictures().is_empty() {
-                            tag.remove_picture(0);
-                        }
-                        for pic in pics {
-                            tag.push_picture(pic.clone());
-                        }
-                    }
+                    // 読み側は最初に画像を持つブロックだけを採る。書きは全ブロックを揃える
+                    replace_generic_pictures(tag, pictures);
                 }
             }
             file.seek(SeekFrom::Start(0))?;
@@ -629,6 +652,97 @@ fn apply_vorbis(vc: &mut VorbisComments, changes: &[TagChange]) {
             }
         }
     }
+}
+
+/// 画像を `pics` に揃える（`None` なら触らない）。画像を持てないブロック（ID3v1）は push が無視される
+fn replace_generic_pictures(tag: &mut Tag, pictures: Option<&[lofty::picture::Picture]>) {
+    let Some(pics) = pictures else {
+        return;
+    };
+    while !tag.pictures().is_empty() {
+        tag.remove_picture(0);
+    }
+    for pic in pics {
+        tag.push_picture(pic.clone());
+    }
+}
+
+/// 形式固有のタグを generic `Tag` に分けて `changes` と画像を当て、分けなかった残り（写像できない
+/// フレーム・項目）と合わせて戻す
+fn apply_split<T>(tag: T, changes: &[TagChange], pictures: Option<&[lofty::picture::Picture]>) -> T
+where
+    T: SplitTag,
+    T::Remainder: MergeTag<Merged = T>,
+{
+    let (rest, mut generic) = tag.split_tag();
+    apply_generic(&mut generic, changes);
+    replace_generic_pictures(&mut generic, pictures);
+    rest.merge_tag(generic)
+}
+
+/// ID3v2 で標準フレーム（または lofty が名前を知っている TXXX）に写像できるキーか。読み側は
+/// `ItemKey` を正規の Vorbis 名で返すので、別名（`TOTALTRACKS` → `TRACKTOTAL` 等）は写像せず TXXX に
+/// 書く。写像すると読み戻しが別のキーになり、照合が必ず外れる
+fn id3v2_mapped(key: &str) -> bool {
+    ItemKey::from_key(TagType::VorbisComments, key).is_some_and(|k| {
+        k.map_key(TagType::Id3v2).is_some()
+            && k.map_key(TagType::VorbisComments)
+                .is_some_and(|name| name.to_uppercase() == key)
+    })
+}
+
+/// TXXX の description が `key`（大文字化済み）と同じキーとして読まれるか（読み側と同じ正規化）
+fn txxx_is_key(description: &str, key: &str) -> bool {
+    description.to_uppercase() == key
+}
+
+/// ID3v2 の `changes` を当てる（D-110）。写像できるキーは [`apply_split`]（generic `Tag`）で、
+/// できないキーは description = キーの TXXX に多値を NUL で連ねて置く（ID3v2.4 の多値）。
+/// どちらの場合も大小文字違いの既存 TXXX を先に消す（読み側はキーを大文字化するので二重化する）
+fn apply_id3v2(
+    mut tag: lofty::id3::v2::Id3v2Tag,
+    changes: &[TagChange],
+    pictures: Option<&[lofty::picture::Picture]>,
+) -> lofty::id3::v2::Id3v2Tag {
+    use lofty::id3::v2::{ExtendedTextFrame, Frame};
+
+    let mut mapped: Vec<TagChange> = Vec::new();
+    for c in changes {
+        tag.retain(|f| {
+            !matches!(f, Frame::UserText(ExtendedTextFrame { description, .. })
+                if txxx_is_key(description, &c.key))
+        });
+        if id3v2_mapped(&c.key) {
+            mapped.push(c.clone());
+        } else if let Some(values) = &c.values {
+            let _ = tag.insert_user_text(c.key.clone(), values.join("\0"));
+        }
+    }
+    apply_split(tag, &mapped, pictures)
+}
+
+/// ID3v2 のうち generic `Tag` に載らない TXXX を `(大文字のキー, 値)` で返す（NUL 区切りの多値は
+/// 分ける）。description の無い TXXX は読まない
+fn id3v2_user_text(tag: &lofty::id3::v2::Id3v2Tag) -> Vec<(String, String)> {
+    use lofty::id3::v2::{ExtendedTextFrame, Frame};
+
+    let (rest, _) = tag.clone().split_tag();
+    let mut out = Vec::new();
+    for frame in &*rest {
+        if let Frame::UserText(ExtendedTextFrame {
+            description,
+            content,
+            ..
+        }) = frame
+        {
+            if description.is_empty() {
+                continue;
+            }
+            let key = description.to_uppercase();
+            out.extend(content.split('\0').map(|v| (key.clone(), v.to_owned())));
+        }
+    }
+    out
 }
 
 fn apply_generic(tag: &mut Tag, changes: &[TagChange]) {

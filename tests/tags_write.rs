@@ -410,3 +410,279 @@ fn mp4_leaves_other_mean_freeform_atoms_alone() {
     });
     assert!(other.is_some(), "他の mean の atom が消えた");
 }
+
+/// mp3 の ID3v2 に TXXX を直接置く（外部ツールが書いた独自フィールドの模擬）
+fn put_txxx(path: &Path, description: &str, value: &str) {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile as _;
+    use std::io::Seek as _;
+
+    let mut f = File::options().read(true).write(true).open(path).unwrap();
+    let mut mp3 = lofty::mpeg::MpegFile::read_from(&mut f, ParseOptions::new()).unwrap();
+    let mut id3 = mp3.id3v2().cloned().unwrap_or_default();
+    let _ = id3.insert_user_text(description.to_owned(), value.to_owned());
+    mp3.set_id3v2(id3);
+    f.seek(std::io::SeekFrom::Start(0)).unwrap();
+    mp3.save_to(&mut f, WriteOptions::default()).unwrap();
+}
+
+/// mp3 の TXXX を description ごとに集める（lofty で直接読む）
+fn txxx(path: &Path) -> Vec<(String, String)> {
+    use lofty::config::ParseOptions;
+    use lofty::file::AudioFile as _;
+    use lofty::id3::v2::{ExtendedTextFrame, Frame};
+
+    let mp3 = lofty::mpeg::MpegFile::read_from(&mut File::open(path).unwrap(), ParseOptions::new())
+        .unwrap();
+    let Some(id3) = mp3.id3v2() else {
+        return Vec::new();
+    };
+    id3.into_iter()
+        .filter_map(|f| match f {
+            Frame::UserText(ExtendedTextFrame {
+                description,
+                content,
+                ..
+            }) => Some((description.to_string(), content.to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// D-110: 写像表に無いキーは ID3v2 の TXXX（description = キー）として書き、同じキーで読み戻せる
+/// （多値も）。標準キーは標準フレームのまま
+#[test]
+fn mp3_writes_arbitrary_keys_as_txxx_and_reads_them_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    write(
+        &p,
+        "mp3",
+        &[
+            change("SPINDLETEST", Some(&["one", "two"])),
+            change("PLAYLIST_EXCLUDE", Some(&["1"])),
+            change("TITLE", Some(&["new"])),
+        ],
+    );
+    assert_eq!(values(&p, "mp3", "SPINDLETEST"), ["one", "two"]);
+    assert_eq!(values(&p, "mp3", "PLAYLIST_EXCLUDE"), ["1"]);
+    assert_eq!(values(&p, "mp3", "TITLE"), ["new"]);
+    assert_eq!(values(&p, "mp3", "ALBUM"), ["alb"]);
+    let frames = txxx(&p);
+    assert!(
+        frames.iter().any(|(d, _)| d == "PLAYLIST_EXCLUDE"),
+        "{frames:?}"
+    );
+    assert!(
+        !frames.iter().any(|(d, _)| d.eq_ignore_ascii_case("TITLE")),
+        "標準キーが TXXX に逃げている: {frames:?}"
+    );
+
+    write(&p, "mp3", &[change("SPINDLETEST", None)]);
+    assert!(values(&p, "mp3", "SPINDLETEST").is_empty());
+    assert_eq!(values(&p, "mp3", "PLAYLIST_EXCLUDE"), ["1"]);
+}
+
+/// 外部が書いた TXXX は読み、別のキーの書き込みでは消さない。大小文字違いは置き換えで二重化しない
+#[test]
+fn mp3_keeps_foreign_txxx_and_replaces_case_insensitively() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    put_txxx(&p, "MyKey", "old");
+    put_txxx(&p, "Other Field", "keep");
+    assert_eq!(values(&p, "mp3", "MYKEY"), ["old"]);
+    assert_eq!(values(&p, "mp3", "OTHER FIELD"), ["keep"]);
+
+    write(&p, "mp3", &[change("TITLE", Some(&["x"]))]);
+    assert_eq!(
+        values(&p, "mp3", "OTHER FIELD"),
+        ["keep"],
+        "無関係な TXXX が消えた"
+    );
+
+    write(&p, "mp3", &[change("MYKEY", Some(&["new"]))]);
+    assert_eq!(values(&p, "mp3", "MYKEY"), ["new"]);
+    let frames = txxx(&p);
+    assert!(
+        !frames.iter().any(|(d, _)| d == "MyKey"),
+        "旧綴りの TXXX が残っている: {frames:?}"
+    );
+}
+
+/// lofty が名前を知っている TXXX（REPLAYGAIN_*）は標準の綴りで書き、外部の小文字綴りを残さない
+#[test]
+fn mp3_mapped_txxx_replaces_lowercase_variant() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    put_txxx(&p, "replaygain_track_gain", "-1.00 dB");
+    assert_eq!(values(&p, "mp3", "REPLAYGAIN_TRACK_GAIN"), ["-1.00 dB"]);
+    write(
+        &p,
+        "mp3",
+        &[change("REPLAYGAIN_TRACK_GAIN", Some(&["-7.50 dB"]))],
+    );
+    assert_eq!(values(&p, "mp3", "REPLAYGAIN_TRACK_GAIN"), ["-7.50 dB"]);
+    let frames = txxx(&p);
+    let rg: Vec<_> = frames
+        .iter()
+        .filter(|(d, _)| d.eq_ignore_ascii_case("REPLAYGAIN_TRACK_GAIN"))
+        .collect();
+    assert_eq!(rg.len(), 1, "{frames:?}");
+}
+
+/// Vorbis 名の別名（TOTALTRACKS → TRACKTOTAL 等）は ID3v2 の標準フレームに写像すると別のキーで
+/// 読み戻されるので、TXXX に書いて同じキーで読み戻す
+#[test]
+fn mp3_alias_keys_round_trip_under_their_own_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    put_txxx(&p, "TOTALTRACKS", "9");
+    assert_eq!(values(&p, "mp3", "TOTALTRACKS"), ["9"]);
+    write(&p, "mp3", &[change("TOTALTRACKS", Some(&["12"]))]);
+    assert_eq!(values(&p, "mp3", "TOTALTRACKS"), ["12"]);
+    assert_eq!(values(&p, "mp3", "TRACKNUMBER"), ["3"], "TRCK を壊した");
+}
+
+/// description の大小文字は読み側と同じ（Unicode の大文字化）で比べる。ASCII 以外でも二重化しない
+#[test]
+fn mp3_replaces_non_ascii_txxx_case_insensitively() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    put_txxx(&p, "äkey", "old");
+    assert_eq!(values(&p, "mp3", "ÄKEY"), ["old"]);
+    write(&p, "mp3", &[change("ÄKEY", Some(&["new"]))]);
+    assert_eq!(values(&p, "mp3", "ÄKEY"), ["new"]);
+}
+
+/// TRCK / TPOS は番号と総数が同居する。片側だけの変更で相方を保つ
+#[test]
+fn mp3_keeps_the_other_half_of_number_pairs() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    write(
+        &p,
+        "mp3",
+        &[
+            change("TRACKNUMBER", Some(&["3"])),
+            change("TRACKTOTAL", Some(&["10"])),
+            change("DISCNUMBER", Some(&["1"])),
+            change("DISCTOTAL", Some(&["2"])),
+        ],
+    );
+    write(&p, "mp3", &[change("TRACKNUMBER", Some(&["5"]))]);
+    write(&p, "mp3", &[change("DISCTOTAL", Some(&["3"]))]);
+    assert_eq!(values(&p, "mp3", "TRACKNUMBER"), ["5"]);
+    assert_eq!(values(&p, "mp3", "TRACKTOTAL"), ["10"]);
+    assert_eq!(values(&p, "mp3", "DISCNUMBER"), ["1"]);
+    assert_eq!(values(&p, "mp3", "DISCTOTAL"), ["3"]);
+}
+
+/// APIC は画像を指定しない書き込みで保ち、指定すれば差し替える
+#[test]
+fn mp3_keeps_and_replaces_pictures() {
+    use lofty::picture::{MimeType, Picture, PictureType};
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    let pic = |b: u8| {
+        Picture::unchecked(vec![0xff, 0xd8, b, b, b])
+            .pic_type(PictureType::CoverFront)
+            .mime_type(MimeType::Jpeg)
+            .build()
+    };
+    common::retag(&p, |t| t.push_picture(pic(1)));
+    let before = read_audio_file(File::open(&p).unwrap(), Some("mp3")).unwrap();
+    assert!(before.tags.first("PICTURE").is_some());
+    write(&p, "mp3", &[change("PLAYLIST_EXCLUDE", Some(&["1"]))]);
+    let kept = read_audio_file(File::open(&p).unwrap(), Some("mp3")).unwrap();
+    assert_eq!(kept.tags.first("PICTURE"), before.tags.first("PICTURE"));
+
+    let mut f = File::options().read(true).write(true).open(&p).unwrap();
+    write_tag_changes(&mut f, Some("mp3"), &[], Some(&[pic(2)])).unwrap();
+    drop(f);
+    let replaced = read_audio_file(File::open(&p).unwrap(), Some("mp3")).unwrap();
+    assert_eq!(replaced.tags.values("PICTURE").count(), 1);
+    assert_ne!(replaced.tags.first("PICTURE"), before.tags.first("PICTURE"));
+}
+
+/// ID3v2 + ID3v1 + APE が同居する mp3 で、APE の写像できない項目と ID3v2 の COMM を保つ
+#[test]
+fn mp3_keeps_unknown_ape_items_and_comments() {
+    use lofty::ape::{ApeItem, ApeTag};
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile as _;
+    use lofty::tag::{Accessor, ItemValue};
+    use std::io::Seek as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::set_basic_tags(&p, "old", "art", "alb", "aa", 3, 1);
+    {
+        let mut f = File::options().read(true).write(true).open(&p).unwrap();
+        let mut mp3 = lofty::mpeg::MpegFile::read_from(&mut f, ParseOptions::new()).unwrap();
+        let mut id3 = mp3.id3v2().cloned().unwrap();
+        id3.set_comment("hello".to_owned());
+        mp3.set_id3v2(id3);
+        let mut ape = ApeTag::new();
+        ape.set_title("old".to_owned());
+        ape.insert(
+            ApeItem::new("MyApeOnly".to_owned(), ItemValue::Text("ape".to_owned())).unwrap(),
+        );
+        mp3.set_ape(ape);
+        let mut v1 = lofty::id3::v1::Id3v1Tag::new();
+        v1.set_title("old".to_owned());
+        mp3.set_id3v1(v1);
+        f.seek(std::io::SeekFrom::Start(0)).unwrap();
+        mp3.save_to(&mut f, WriteOptions::default()).unwrap();
+    }
+    write(&p, "mp3", &[change("TITLE", Some(&["new"]))]);
+    assert_eq!(values(&p, "mp3", "TITLE"), ["new"]);
+    assert_eq!(values(&p, "mp3", "COMMENT"), ["hello"]);
+    let mp3 = lofty::mpeg::MpegFile::read_from(&mut File::open(&p).unwrap(), ParseOptions::new())
+        .unwrap();
+    let ape = mp3.ape().expect("APE が消えた");
+    assert!(ape.get("MyApeOnly").is_some(), "APE の未知項目が消えた");
+    assert_eq!(ape.title().as_deref(), Some("new"));
+    assert_eq!(mp3.id3v1().and_then(|t| t.title()).as_deref(), Some("new"));
+}
+
+/// ID3v2.3 の mp3 も読み書きでき、書いた後は ID3v2.4 になる（NUL 区切りの多値は v2.4 の形。D-110）
+#[test]
+fn mp3_v23_input_is_written_as_v24() {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile as _;
+    use lofty::id3::v2::Id3v2Version;
+    use std::io::Seek as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = require_ffmpeg!(common::make_audio(dir.path(), "a.mp3", "mp3", 0));
+    common::set_basic_tags(&p, "t", "art", "alb", "aa", 3, 1);
+    {
+        let mut f = File::options().read(true).write(true).open(&p).unwrap();
+        let mut mp3 = lofty::mpeg::MpegFile::read_from(&mut f, ParseOptions::new()).unwrap();
+        let mut id3 = mp3.id3v2().cloned().unwrap();
+        let _ = id3.insert_user_text("OLDKEY".to_owned(), "v23".to_owned());
+        mp3.set_id3v2(id3);
+        f.seek(std::io::SeekFrom::Start(0)).unwrap();
+        mp3.save_to(&mut f, WriteOptions::default().use_id3v23(true))
+            .unwrap();
+    }
+    let version = |p: &Path| {
+        lofty::mpeg::MpegFile::read_from(&mut File::open(p).unwrap(), ParseOptions::new())
+            .unwrap()
+            .id3v2()
+            .unwrap()
+            .original_version()
+    };
+    assert_eq!(version(&p), Id3v2Version::V3);
+    assert_eq!(values(&p, "mp3", "OLDKEY"), ["v23"]);
+    write(&p, "mp3", &[change("SPINDLETEST", Some(&["a", "b"]))]);
+    assert_eq!(version(&p), Id3v2Version::V4);
+    assert_eq!(values(&p, "mp3", "SPINDLETEST"), ["a", "b"]);
+    assert_eq!(values(&p, "mp3", "OLDKEY"), ["v23"]);
+    assert_eq!(values(&p, "mp3", "TITLE"), ["t"]);
+}
