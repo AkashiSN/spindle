@@ -334,7 +334,7 @@ async fn run_one(
             .write(move |c| {
                 let tx = c.transaction()?;
                 if !dbjobs::track_exists(&tx, track_id)? {
-                    dbjobs::mark_done(&tx, id, now_epoch(), None)?;
+                    dbjobs::mark_done_noop(&tx, id, ty, now_epoch())?;
                     tx.commit()?;
                     return Ok(Gate::Stale);
                 }
@@ -346,7 +346,7 @@ async fn run_one(
                 if dbjobs::is_stale(&tx, &job)? {
                     dbjobs::release_track_locks(&tx, id)?;
                     dbjobs::release_mutexes(&tx, id)?;
-                    dbjobs::mark_done(&tx, id, now_epoch(), None)?;
+                    dbjobs::mark_done_noop(&tx, id, ty, now_epoch())?;
                     tx.commit()?;
                     return Ok(Gate::Stale);
                 }

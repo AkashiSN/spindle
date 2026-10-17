@@ -382,6 +382,12 @@ impl Lib {
         self.wait_job(job).await
     }
 
+    fn job_note(&self, job: i64) -> Option<String> {
+        self.conn()
+            .query_row("SELECT note FROM jobs WHERE id = ?1", [job], |r| r.get(0))
+            .unwrap()
+    }
+
     /// [`Self::run`] に加えて、完了時の `jobs.note`（実際に行った処理）を返す
     async fn run_note(&self, id: i64) -> (JobState, Option<String>) {
         let (av, tv) = self.versions(id);
@@ -795,6 +801,28 @@ async fn stale_job_is_noop() {
     assert_eq!(lib.wait_job(job).await, JobState::Done);
     assert!(lib.derived_row(id).is_none());
     assert!(!lib.derived().join("opus/A/01.opus").exists());
+    assert_eq!(lib.job_note(job).as_deref(), Some("変更なし"));
+}
+
+/// 前の試行が処理名を書いてから再キューされ、次の試行で stale になったときも、前の名前を残さず
+/// 「変更なし」で終える（D-111）
+#[tokio::test]
+async fn stale_job_overwrites_the_note_of_an_earlier_attempt() {
+    require_tools!();
+    let lib = Lib::new();
+    lib.add("A/01.flac", 1, "a");
+    lib.scan().await;
+    let id = lib.track_id("A/01.flac");
+    lib.conn()
+        .execute("UPDATE tracks SET audio_version = 2 WHERE id = ?1", [id])
+        .unwrap();
+    let job = lib.enqueue(id, 1, 1).await;
+    lib.conn()
+        .execute("UPDATE jobs SET note = '移動' WHERE id = ?1", [job])
+        .unwrap();
+    lib.start();
+    assert_eq!(lib.wait_job(job).await, JobState::Done);
+    assert_eq!(lib.job_note(job).as_deref(), Some("変更なし"));
 }
 
 #[tokio::test]
