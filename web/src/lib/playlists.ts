@@ -26,6 +26,15 @@ export function sortForScope(prev: Omit<Filter, 'q'>, next: Omit<Filter, 'q'>, s
   return sort
 }
 
+/**
+ * 表と選択の操作に使うソート。`position` はプレイリストの中でだけ有効なので、`playlist_id` の無いフィルタ
+ * （プレイリストを開いたままルールの編集に入り、表が編集中の DSL に差し替わったとき等）では既定に倒す。
+ * 利用者が選んだソート（state）は書き換えない（編集を閉じてプレイリストに戻れば position のまま）
+ */
+export function effectiveSort(filter: Omit<Filter, 'q'>, sort: Sort): Sort {
+  return sort.key === 'position' && filter.playlist_id == null ? DEFAULT_SORT : sort
+}
+
 /** プレイリストを消したとき、表がそれを表示していたら scope を「すべて」に戻す（それ以外は同じ値） */
 export function scopeAfterPlaylistDelete<S extends Omit<Filter, 'q'>>(scope: S, deletedId: number): S | Record<string, never> {
   return scope.playlist_id === deletedId ? {} : scope
