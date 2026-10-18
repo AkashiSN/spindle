@@ -23,7 +23,7 @@
 use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -35,7 +35,7 @@ use crate::domain::pathgen::sanitize_component;
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::domain::tags::{write_tag_changes, TagChange};
 use crate::fsroot::{FsError, RootDir};
-use crate::import::sidecar::{FileEntry, Sidecar};
+use crate::import::sidecar::{FileEntry, Sidecar, SidecarError};
 use crate::import::ytmusic::metadata::SOURCE_URL_KEY;
 use crate::import::ytmusic::{Item, MetadataProvider, Outcome, ProviderError, Track};
 use crate::jobs::process::{ExternalCommand, PathStyle, ProcessError};
@@ -170,11 +170,24 @@ pub struct DownloaderEnv {
 }
 
 impl DownloaderEnv {
-    /// サイドカーの鍵を取る。毒されていても（鍵を持ったまま panic した）中身の無い鍵なので続ける
-    pub(crate) fn lock_sidecar(&self) -> MutexGuard<'_, ()> {
-        self.sidecar_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// サイドカーの鍵を取って `f` を走らせる。鍵の待ちと読み書きは同期処理なので spawn_blocking で回し、
+    /// tokio のワーカーを塞がない（塞ぐと、鍵を持つ側を進める仕事まで止まりうる）。毒されていても
+    /// （鍵を持ったまま panic した）中身の無い鍵なので続ける
+    pub(crate) async fn with_sidecar_lock<T, F>(&self, f: F) -> Result<T, SidecarError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&RootDir) -> Result<T, SidecarError> + Send + 'static,
+    {
+        let lock = Arc::clone(&self.sidecar_lock);
+        let inbox = Arc::clone(&self.inbox);
+        tokio::task::spawn_blocking(move || {
+            let _guard = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            f(&inbox)
+        })
+        .await
+        .map_err(|e| SidecarError::Io(std::io::Error::other(e)))?
     }
 }
 
@@ -821,12 +834,12 @@ async fn finish_staging(
     category: Option<&str>,
     entry: FileEntry,
 ) -> Result<(), DownloadError> {
-    {
-        let _guard = env.lock_sidecar();
-        Sidecar::upsert(&env.inbox, dir, category, name, entry).map_err(|e| {
+    let (d, c, n) = (dir.clone(), category.map(str::to_owned), name.to_owned());
+    env.with_sidecar_lock(move |inbox| Sidecar::upsert(inbox, &d, c.as_deref(), &n, entry))
+        .await
+        .map_err(|e| {
             DownloadError::Failed(anyhow::anyhow!("spindle-inbox.json を更新できない: {e}"))
         })?;
-    }
     env.inbox.fsync_dir(Some(dir))?;
     env.jobs
         .enqueue(crate::jobs::handlers::inbox::new_inbox_job())
