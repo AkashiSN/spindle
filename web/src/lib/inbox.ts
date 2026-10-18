@@ -749,6 +749,53 @@ export function verdictLabel(s: InboxSource): { text: string; ok: boolean } {
   return s.verdict === 'ok' ? { text: '判定済み', ok: true } : { text: `未判定（${s.verdict}）`, ok: false }
 }
 
+// ---------------------------------------------------------------- 再判定（D-114）
+
+/** 再判定できる件か（承認前で、ダウンローダの判定がある曲を含む） */
+export function canRejudge(item: Pick<InboxItem, 'state' | 'tracks'>): boolean {
+  return item.state === 'pending' && item.tracks.some((f) => f.source != null)
+}
+
+/** 見出しの「判定: <プラグインの版>」。判定のある曲が無ければ null。版が混ざれば辞書順で最小の版に「ほか」 */
+export function pluginVersionLabel(tracks: Array<Pick<InboxFile, 'source'>>): string | null {
+  const sources = tracks.map((f) => f.source).filter((s): s is InboxSource => s != null)
+  if (sources.length === 0) return null
+  const versions = sources.map((s) => s.plugin_version ?? null)
+  const known = [...new Set(versions.filter((v): v is string => v != null))].sort()
+  if (known.length === 0) return '判定: 版不明'
+  if (known.length === 1 && versions.every((v) => v != null)) return `判定: spindle-ytmusic-meta ${known[0]}`
+  return `判定: ${known[0]} ほか`
+}
+
+/** 再判定の確認文。失うものが無ければ null（確認なしで実行してよい）。保存済みの下書きがある方を優先して言う */
+export function rejudgeConfirmText(item: Pick<InboxItem, 'draft'>, dirty: boolean): string | null {
+  if (item.draft != null) return '保存済みの補正は消え、判定結果で置き換わります。再判定しますか？'
+  if (dirty) return '未保存の補正は消えます。再判定しますか？'
+  return null
+}
+
+/**
+ * 再判定のあと、押した件の曲（`prevUrls` = 押した時点の `source.url`）がどこへ行ったか。
+ * 移した数 = 元の件以外に今ある URL の数。元の件が消え、全 URL が別の 1 件に揃っていればそれが移動先
+ */
+export function rejudgeLanding(
+  prevId: number,
+  prevUrls: string[],
+  items: InboxItem[],
+): { target: InboxItem | null; moved: number } {
+  const wanted = new Set(prevUrls)
+  const others = items.filter((i) => i.id !== prevId)
+  const moved = new Set(
+    others.flatMap((i) => i.tracks.map((f) => f.source?.url ?? null).filter((u): u is string => u != null && wanted.has(u))),
+  ).size
+  if (items.some((i) => i.id === prevId) || wanted.size === 0) return { target: null, moved }
+  const target = others.find((i) => {
+    const have = new Set(i.tracks.map((f) => f.source?.url ?? null))
+    return prevUrls.every((u) => have.has(u))
+  })
+  return { target: target ?? null, moved }
+}
+
 
 // ---------------------------------------------------------------- タグの変更（D-86）
 

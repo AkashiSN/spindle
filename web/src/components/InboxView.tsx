@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { apiPost, apiText } from '../api/client'
 import { useArtworkUpload } from '../hooks/useArtworkUpload'
 import type { InboxState } from '../hooks/useInbox'
+import { useInboxRejudge, type InboxRejudge } from '../hooks/useInboxRejudge'
 import { useInboxPreview } from '../hooks/useInboxPreview'
 import { describeLookupError } from '../hooks/useCdLookup'
 import {
@@ -25,6 +26,7 @@ import { logErrorText } from '../lib/records'
 import {
   applyCandidate,
   applyTracklist,
+  canRejudge,
   codecSummary,
   destinationText,
   discardLabel,
@@ -38,6 +40,9 @@ import {
   itemTitle,
   nextStage,
   pictureState,
+  pluginVersionLabel,
+  rejudgeConfirmText,
+  rejudgeLanding,
   refreshedDraft,
   sameTitleCount,
   stageText,
@@ -81,6 +86,39 @@ export function InboxView({
   }, [focusHit, selectedId, onFocused])
   // 選んでいた件が消えたら（placed の期限切れ・ディレクトリの消失）最初の件を出す
   const selected = items.find((i) => i.id === selectedId) ?? items[0] ?? null
+
+  // 再判定: 押した件の曲の URL を控えておき、終わって一覧が取り直されたら移動先を開く / 移した数を知らせる。
+  // 終わった時点の一覧は古いので、取り直しで items が入れ替わるのを待つ
+  const rejudgePending = useRef<{ id: number; urls: string[]; stale: InboxItem[] | null } | null>(null)
+  const [rejudgeSettled, setRejudgeSettled] = useState(false)
+  const { refresh, items: latestItems, setNotice } = inbox
+  const rejudge = useInboxRejudge(() => {
+    refresh()
+    if (rejudgePending.current != null) {
+      rejudgePending.current.stale = latestItems
+      setRejudgeSettled(true)
+    }
+  })
+  useEffect(() => {
+    const p = rejudgePending.current
+    if (!rejudgeSettled || p == null || latestItems == null || latestItems === p.stale) return
+    rejudgePending.current = null
+    setRejudgeSettled(false)
+    const { target, moved } = rejudgeLanding(p.id, p.urls, latestItems)
+    if (target != null) setSelectedId(target.id)
+    const where = target ?? latestItems.find((i) => i.id !== p.id && i.tracks.some((f) => f.source?.url != null && p.urls.includes(f.source.url)))
+    setNotice(moved > 0 && where != null ? `再判定した。${moved} 曲を ${where.rel_dir} へ移した` : '再判定した')
+  }, [rejudgeSettled, latestItems, setNotice])
+  const startRejudge = async (item: InboxItem) => {
+    const urls = item.tracks.map((f) => f.source?.url ?? null).filter((u): u is string => u != null)
+    rejudgePending.current = { id: item.id, urls, stale: null }
+    const msg = await rejudge.start(item.id)
+    if (msg != null) {
+      rejudgePending.current = null
+      setNotice(msg)
+      refresh()
+    }
+  }
 
   return (
     <section className="cd inbox">
@@ -147,7 +185,14 @@ export function InboxView({
             })}
           </ul>
           {selected != null && (
-            <ItemForm key={selected.id} item={selected} inbox={inbox} onOpenAlbum={onOpenAlbum} />
+            <ItemForm
+              key={selected.id}
+              item={selected}
+              inbox={inbox}
+              rejudge={rejudge}
+              onRejudge={startRejudge}
+              onOpenAlbum={onOpenAlbum}
+            />
           )}
         </div>
       )}
@@ -158,10 +203,14 @@ export function InboxView({
 function ItemForm({
   item,
   inbox,
+  rejudge,
+  onRejudge,
   onOpenAlbum,
 }: {
   item: InboxItem
   inbox: InboxState
+  rejudge: InboxRejudge
+  onRejudge: (item: InboxItem) => Promise<void>
   onOpenAlbum: (albumId: number) => void
 }) {
   // 初期値は保存済みの下書き（無ければ提案）。編集中は一覧が取り直されても上書きしない。
@@ -199,6 +248,16 @@ function ItemForm({
   const dest = destinationText(item, draft)
   const sync = syncNote(item, draft, inbox.subscriptions, formatDateTime)
 
+  const rejudgeProgress = rejudge.running.get(item.id)
+  const versionLabel = pluginVersionLabel(item.tracks)
+  const rejudgeNow = () => {
+    // 未送信の編集 = フォームの今の下書きが、サーバの値から作った下書きと違う
+    const dirty = JSON.stringify(draft) !== JSON.stringify(fresh)
+    const ask = rejudgeConfirmText(item, dirty)
+    if (ask != null && !window.confirm(ask)) return
+    void onRejudge(item)
+  }
+
   const approve = async () => {
     setSubmitError(null)
     const msg = await inbox.approve(item.id, draftForSubmit(draft))
@@ -232,6 +291,7 @@ function ItemForm({
             <span className="badge">{source}</span>
             <span className={`badge inbox-state-${item.state}`}>{stateLabel(item.state)}</span>
             {changes > 0 && <span className="badge inbox-changed-badge">変更 {changes} 件</span>}
+            {versionLabel != null && <span className="badge">{versionLabel}</span>}
           </div>
           {item.stages != null && item.stages.length > 0 && (
             <ol className="inbox-stages" aria-label="配置後の処理の進み">
@@ -397,6 +457,11 @@ function ItemForm({
           {(item.state === 'approved' || item.state === 'rejected' || item.state === 'failed') && (
             <button type="button" disabled={inbox.busy} onClick={() => void inbox.reopen(item.id)}>
               下書きに戻す
+            </button>
+          )}
+          {canRejudge(item) && (
+            <button type="button" disabled={inbox.busy || rejudgeProgress != null} onClick={rejudgeNow}>
+              {rejudgeProgress != null ? `再判定中 ${rejudgeProgress.done}/${rejudgeProgress.total}` : '再判定'}
             </button>
           )}
           {item.state === 'rejected' && item.discard_requested_at == null && (

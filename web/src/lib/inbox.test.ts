@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  canRejudge,
+  pluginVersionLabel,
+  rejudgeConfirmText,
+  rejudgeLanding,
   applyPicture,
   nextStage,
   stageText,
@@ -1008,5 +1012,52 @@ describe('Inbox の段', () => {
     expect(nextStage({ stages: [st('place', 'done'), st('rg', 'na'), st('opus', 'running'), st('aac', 'todo')] })?.key).toBe('opus')
     expect(nextStage({ stages: [st('place', 'done')] })).toBeNull()
     expect(nextStage({})).toBeNull()
+  })
+})
+
+describe('再判定', () => {
+  const src = (over: Partial<NonNullable<InboxFile['source']>> = {}): InboxFile['source'] => ({
+    source: 'youtube',
+    url: 'https://www.youtube.com/watch?v=a',
+    channel: null,
+    verdict: 'ok',
+    message: null,
+    ...over,
+  })
+  const yt = (rel: string, over: Partial<NonNullable<InboxFile['source']>> = {}): InboxFile => ({
+    ...file(rel),
+    source: src({ url: `https://www.youtube.com/watch?v=${rel}`, ...over }),
+  })
+
+  it('canRejudge: pending で source のある曲があるときだけ', () => {
+    expect(canRejudge(item({ tracks: [yt('d/a')] }))).toBe(true)
+    expect(canRejudge(item({ state: 'approved', tracks: [yt('d/a')] }))).toBe(false)
+    expect(canRejudge(item())).toBe(false)
+  })
+
+  it('pluginVersionLabel', () => {
+    const v = (x?: string) => yt('d/a', x == null ? {} : { plugin_version: x })
+    expect(pluginVersionLabel([v('v0.1.0-rc.2'), v('v0.1.0-rc.2')])).toBe('判定: spindle-ytmusic-meta v0.1.0-rc.2')
+    expect(pluginVersionLabel([v('v0.1.0-rc.2'), v('v0.1.0-rc.1')])).toBe('判定: v0.1.0-rc.1 ほか')
+    expect(pluginVersionLabel([v(), v()])).toBe('判定: 版不明')
+    expect(pluginVersionLabel([file('d/a')])).toBeNull()
+  })
+
+  it('rejudgeConfirmText', () => {
+    const saved = proposal
+    expect(rejudgeConfirmText({ draft: saved }, false)).toBe('保存済みの補正は消え、判定結果で置き換わります。再判定しますか？')
+    expect(rejudgeConfirmText({ draft: null }, true)).toBe('未保存の補正は消えます。再判定しますか？')
+    expect(rejudgeConfirmText({ draft: saved }, true)).toBe('保存済みの補正は消え、判定結果で置き換わります。再判定しますか？')
+    expect(rejudgeConfirmText({ draft: null }, false)).toBeNull()
+  })
+
+  it('rejudgeLanding', () => {
+    const urls = ['https://www.youtube.com/watch?v=d/a', 'https://www.youtube.com/watch?v=d/b']
+    const dest = item({ id: 9, rel_dir: 'x', tracks: [yt('d/a'), yt('d/b')] })
+    expect(rejudgeLanding(7, urls, [dest])).toEqual({ target: dest, moved: 2 })
+    const part = item({ id: 9, rel_dir: 'x', tracks: [yt('d/a')] })
+    const rest = item({ id: 7, tracks: [yt('d/b')] })
+    expect(rejudgeLanding(7, urls, [part, rest])).toEqual({ target: null, moved: 1 })
+    expect(rejudgeLanding(7, urls, [item({ id: 7, tracks: [yt('d/a'), yt('d/b')] })])).toEqual({ target: null, moved: 0 })
   })
 })

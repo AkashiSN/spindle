@@ -1527,6 +1527,56 @@ async fn rejudge_api_accepts_pending_youtube_items_only() {
     assert_eq!(body["error"], "duplicate");
 }
 
+/// 直近の再判定で失敗した曲があれば、一覧の警告に曲数と読み先が出る
+#[tokio::test]
+async fn list_warns_about_tracks_the_last_rejudge_failed_on() {
+    use spindle::import::sidecar::{FileEntry, Sidecar};
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = youtube_item(&app, "Yt", None, "unmatched").await;
+    let root = RootDir::open(&app.dir.path().join("Inbox")).unwrap();
+    let dir = spindle::domain::relpath::RelPath::parse("Yt").unwrap();
+    Sidecar::upsert(
+        &root,
+        &dir,
+        None,
+        "20260901 New [abc].opus",
+        FileEntry {
+            source: "youtube".into(),
+            url: Some("https://www.youtube.com/watch?v=abc".into()),
+            channel: Some("CH".into()),
+            verdict: "unmatched".into(),
+            message: None,
+            subscription_id: None,
+            position: None,
+            item: None,
+            plugin_version: None,
+            judged_at: None,
+            plugin_tags: None,
+            rejudge_error: Some("プラグインが落ちた".into()),
+        },
+    )
+    .unwrap();
+    let (st, body) = app.get(&c, "/api/inbox").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    let w: Vec<&str> = it["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        w.contains(&"再判定できなかった曲が 1 曲（③ の判定列を開くと理由が読める）"),
+        "{w:?}"
+    );
+}
+
 /// `[ytmusic].enabled = false` なら再判定のハンドラが無いので 404
 #[tokio::test]
 async fn rejudge_api_is_not_found_when_ytmusic_is_disabled() {

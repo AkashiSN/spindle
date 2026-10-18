@@ -753,7 +753,7 @@ pub fn propose(
         .unwrap_or(0)
         + 1;
     number_missing(&mut draft, start);
-    let sources = files
+    let sources: Vec<Option<crate::import::sidecar::FileEntry>> = files
         .iter()
         .map(|f| {
             let name = f.rel_path.rsplit('/').next().unwrap_or(&f.rel_path);
@@ -771,6 +771,16 @@ pub fn propose(
         None => draft.tracks.iter().map(|_| Vec::new()).collect(),
     };
     warnings.extend(self::warnings(files, &draft));
+    // 直近の再判定で失敗した曲（理由は ③ の判定列に出る）
+    let rejudge_failed = sources
+        .iter()
+        .filter(|s| s.as_ref().is_some_and(|e| e.rejudge_error.is_some()))
+        .count();
+    if rejudge_failed > 0 {
+        warnings.push(format!(
+            "再判定できなかった曲が {rejudge_failed} 曲（③ の判定列を開くと理由が読める）"
+        ));
+    }
     // 吸い出しの記録が件と合わなければ配置で止まる（D-67 追記）。承認の前に見せる
     if let Some(entry) = sidecar.as_ref().and_then(|s| s.rip.as_ref()) {
         if let Err(r) = bind_rip(entry, &draft) {
