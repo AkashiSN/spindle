@@ -99,7 +99,9 @@ pub async fn rejudge_item(
         ..RejudgeReport::default()
     };
     if !stale.is_empty() {
-        report.dropped = drop_stale_entries(env, &dir, &stale).map_err(sidecar_failed)?;
+        report.dropped = drop_stale_entries(env, &dir, &stale)
+            .await
+            .map_err(sidecar_failed)?;
     }
     let mut touched: Vec<Option<RelPath>> = vec![Some(dir.clone())];
     let result = rejudge_targets(
@@ -187,6 +189,7 @@ async fn rejudge_targets(
                 entry.rejudge_error = Some(reason.clone());
                 report.failed.push((file_name, reason));
                 update_sidecar(env, dir, None, None, Some((&entry_name, entry)))
+                    .await
                     .map_err(sidecar_failed)?;
             }
         }
@@ -314,29 +317,32 @@ fn targets(root: &RootDir, dir: &RelPath) -> Result<(Vec<Target>, Vec<String>), 
 /// 足すので、ファイルの無い項は前回の移動の途中（宛先の項を書いて元を消した後、元の項を消す前）に
 /// 落ちた残りか、人が消したファイルの項。どちらも消してよい（宛先の項は先に書いてある）。鍵の中で
 /// ファイルがまだ無いことを確かめ直す
-fn drop_stale_entries(
+async fn drop_stale_entries(
     env: &DownloaderEnv,
     dir: &RelPath,
     names: &[String],
 ) -> Result<Vec<String>, SidecarError> {
-    let _guard = env.lock_sidecar();
-    let Some(mut s) = Sidecar::read(&env.inbox, dir)? else {
-        return Ok(Vec::new());
-    };
-    let mut dropped = Vec::new();
-    for name in names {
-        let missing = dir
-            .join(name)
-            .is_ok_and(|r| matches!(env.inbox.stat(&r), Err(FsError::NotFound)));
-        if missing && s.files.remove(name).is_some() {
-            tracing::info!(dir = %dir, name, "サイドカーの項のファイルが無いので項を消す");
-            dropped.push(name.clone());
+    let (dir, names) = (dir.clone(), names.to_vec());
+    env.with_sidecar_lock(move |inbox| {
+        let Some(mut s) = Sidecar::read(inbox, &dir)? else {
+            return Ok(Vec::new());
+        };
+        let mut dropped = Vec::new();
+        for name in &names {
+            let missing = dir
+                .join(name)
+                .is_ok_and(|r| matches!(inbox.stat(&r), Err(FsError::NotFound)));
+            if missing && s.files.remove(name).is_some() {
+                tracing::info!(dir = %dir, name, "サイドカーの項のファイルが無いので項を消す");
+                dropped.push(name.clone());
+            }
         }
-    }
-    if !dropped.is_empty() {
-        s.write(&env.inbox, dir)?;
-    }
-    Ok(dropped)
+        if !dropped.is_empty() {
+            s.write(inbox, &dir)?;
+        }
+        Ok(dropped)
+    })
+    .await
 }
 
 /// 1 曲の成功
@@ -510,9 +516,10 @@ async fn rejudge_track(
             set_category,
             None,
             Some((&final_name, new_entry)),
-        )?;
+        )
+        .await?;
         unlink_if_exists(&env.inbox, &current)?;
-        update_sidecar(env, dir, None, Some(entry_name), None)?;
+        update_sidecar(env, dir, None, Some(entry_name), None).await?;
     } else {
         // 元を先に消す（サイドカーの前に落ちても、次の実行が SOURCE_URL で新しい名前を拾う）
         if !in_place {
@@ -524,7 +531,8 @@ async fn rejudge_track(
             set_category,
             Some(entry_name),
             Some((&final_name, new_entry)),
-        )?;
+        )
+        .await?;
     }
     tracing::info!(from = %current, to = %final_rel, verdict = judged.verdict, "判定し直した");
     Ok(TrackDone {
@@ -620,25 +628,31 @@ fn unlink_if_exists(root: &RootDir, rel: &RelPath) -> Result<(), FsError> {
 /// `dir` のサイドカーを読んで、`remove` の項を消し、`insert` の項を足して書く。`category` が `Some` なら
 /// 件の category もその値（`None` なら消す）にし、`None` なら触らない。読んでから書くまでサイドカーの
 /// 鍵を持つ（並んで走る ytdl の項を消さない）
-fn update_sidecar(
+async fn update_sidecar(
     env: &DownloaderEnv,
     dir: &RelPath,
     category: Option<Option<&str>>,
     remove: Option<&str>,
     insert: Option<(&str, FileEntry)>,
 ) -> Result<(), SidecarError> {
-    let _guard = env.lock_sidecar();
-    let mut s = Sidecar::read(&env.inbox, dir)?.unwrap_or_default();
-    if let Some(c) = category {
-        s.category = c.map(str::to_owned);
-    }
-    if let Some(name) = remove {
-        s.files.remove(name);
-    }
-    if let Some((name, entry)) = insert {
-        s.files.insert(name.to_owned(), entry);
-    }
-    s.write(&env.inbox, dir)
+    let dir = dir.clone();
+    let category = category.map(|c| c.map(str::to_owned));
+    let remove = remove.map(str::to_owned);
+    let insert = insert.map(|(n, e)| (n.to_owned(), e));
+    env.with_sidecar_lock(move |inbox| {
+        let mut s = Sidecar::read(inbox, &dir)?.unwrap_or_default();
+        if let Some(c) = category {
+            s.category = c;
+        }
+        if let Some(name) = remove {
+            s.files.remove(&name);
+        }
+        if let Some((name, entry)) = insert {
+            s.files.insert(name, entry);
+        }
+        s.write(inbox, &dir)
+    })
+    .await
 }
 
 fn sidecar_failed(e: SidecarError) -> RejudgeError {
