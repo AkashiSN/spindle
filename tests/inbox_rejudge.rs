@@ -7,6 +7,7 @@
 mod common;
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
@@ -644,4 +645,62 @@ async fn rejudge_is_deduplicated_per_item() {
     assert!(matches!(second, EnqueueResult::Duplicate(_)));
     let other = lib.jobs.enqueue(new_inbox_rejudge_job(8)).await.unwrap();
     assert!(matches!(other, EnqueueResult::Inserted(_)));
+}
+
+/// ytdl と再判定はサイドカーの鍵を共有する: 鍵を持たれている間、再判定はファイルを置いてもサイドカーを
+/// 書かずに待ち、放されてから書く（読んで直して書くが ytdl の upsert と混ざらない）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejudge_waits_for_the_shared_sidecar_lock() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    lib.start();
+    lib.mode("a");
+    stage(&lib, U1).await;
+    let id = pending_item(&lib, ALBUM_DIR);
+    let env = lib.env();
+    // ハンドラごとの環境は clone で作る（main.rs）。clone は同じ鍵を指す
+    assert!(std::sync::Arc::ptr_eq(
+        &env.sidecar_lock,
+        &env.clone().sidecar_lock
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &env.sidecar_lock,
+        &lib.env().sidecar_lock
+    ));
+
+    // 別スレッドで鍵を持つ（ytdl の upsert の最中を模す）
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock = lib.sidecar_lock.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = lock.lock().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().unwrap();
+
+    lib.mode("b");
+    let task = tokio::spawn(async move {
+        let (tx, _rx) = tokio::sync::watch::channel((0, 0));
+        rejudge_item(&env, id, &CancellationToken::new(), &tx).await
+    });
+    let new_name = "20260901 Song Two [v1].opus";
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while audio_names(&lib, ALBUM_DIR) != vec![new_name.to_owned()] {
+        assert!(Instant::now() < deadline, "ファイルが置かれない");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!task.is_finished(), "鍵を待たずに終わった");
+    let s = sidecar(&lib, ALBUM_DIR);
+    assert!(
+        !s.files.contains_key(new_name),
+        "鍵を待たずにサイドカーを書いた"
+    );
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    task.await.unwrap().unwrap();
+    let s = sidecar(&lib, ALBUM_DIR);
+    assert_eq!(s.files[new_name].plugin_version.as_deref(), Some("v-b"));
 }

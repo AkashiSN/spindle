@@ -578,7 +578,8 @@ async fn main() -> anyhow::Result<()> {
             std::time::Duration::from_secs(u64::from(state.config.ytmusic.metadata_timeout_secs)),
         )
         .context("ytmusic.metadata_command が空")?;
-        let downloader_env = || DownloaderEnv {
+        // ytdl と再判定で 1 つの環境を共有する（clone はサイドカーの鍵を共有する）
+        let downloader_env = DownloaderEnv {
             db: Arc::clone(&state.db),
             inbox: Arc::clone(&inbox_root),
             archive: Arc::clone(&archive_root),
@@ -590,12 +591,16 @@ async fn main() -> anyhow::Result<()> {
             download_timeout: std::time::Duration::from_secs(u64::from(
                 state.config.ytmusic.download_timeout_secs,
             )),
+            sidecar_lock: Arc::new(std::sync::Mutex::new(())),
         };
-        registry.register(JobType::Ytdl, Arc::new(YtdlHandler::new(downloader_env())));
+        registry.register(
+            JobType::Ytdl,
+            Arc::new(YtdlHandler::new(downloader_env.clone())),
+        );
         // Inbox の件の再判定（Ytdl と同じ環境。作業領域は使わない）
         registry.register(
             JobType::InboxRejudge,
-            Arc::new(InboxRejudgeHandler::new(downloader_env())),
+            Arc::new(InboxRejudgeHandler::new(downloader_env)),
         );
         // 再生リストの購読の同期（P4-16、D-78）。列挙 → 番号揃え → ytdl 投入
         let (pending_wait, pending_poll) = SyncEnv::default_waits();

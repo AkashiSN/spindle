@@ -23,7 +23,7 @@
 use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -149,6 +149,8 @@ pub fn subscription_target(
     }))
 }
 
+/// ytdl と再判定が共有する環境。`clone` はサイドカーの鍵を共有する（ハンドラごとに作り直さない）
+#[derive(Clone)]
 pub struct DownloaderEnv {
     pub db: Arc<Db>,
     pub inbox: Arc<RootDir>,
@@ -161,6 +163,19 @@ pub struct DownloaderEnv {
     /// 作業領域の親（`<tmp_root>/<job_id>/`）
     pub tmp_root: PathBuf,
     pub download_timeout: Duration,
+    /// Inbox のサイドカー（`spindle-inbox.json`）の読んで直して書くを直列にするプロセス内の鍵。ytdl と
+    /// 再判定は別のジョブ枠で並んで走るので、鍵が無いと後に書いた方が先の項を消す。ファイルのロックでは
+    /// ない（他のプロセス・SMB は縛らない。不変条件 5）
+    pub sidecar_lock: Arc<Mutex<()>>,
+}
+
+impl DownloaderEnv {
+    /// サイドカーの鍵を取る。毒されていても（鍵を持ったまま panic した）中身の無い鍵なので続ける
+    pub(crate) fn lock_sidecar(&self) -> MutexGuard<'_, ()> {
+        self.sidecar_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -806,9 +821,12 @@ async fn finish_staging(
     category: Option<&str>,
     entry: FileEntry,
 ) -> Result<(), DownloadError> {
-    Sidecar::upsert(&env.inbox, dir, category, name, entry).map_err(|e| {
-        DownloadError::Failed(anyhow::anyhow!("spindle-inbox.json を更新できない: {e}"))
-    })?;
+    {
+        let _guard = env.lock_sidecar();
+        Sidecar::upsert(&env.inbox, dir, category, name, entry).map_err(|e| {
+            DownloadError::Failed(anyhow::anyhow!("spindle-inbox.json を更新できない: {e}"))
+        })?;
+    }
     env.inbox.fsync_dir(Some(dir))?;
     env.jobs
         .enqueue(crate::jobs::handlers::inbox::new_inbox_job())

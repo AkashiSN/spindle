@@ -124,7 +124,7 @@ pub async fn rejudge_item(
             Err(TrackError::Failed(reason)) => {
                 tracing::warn!(item_id, file = %file_name, reason, "再判定できない");
                 entry.rejudge_error = Some(reason.clone());
-                update_sidecar(&env.inbox, &dir, None, None, Some((&entry_name, entry)))
+                update_sidecar(env, &dir, None, None, Some((&entry_name, entry)))
                     .map_err(sidecar_failed)?;
                 report.failed.push((file_name, reason));
             }
@@ -375,21 +375,21 @@ async fn rejudge_track(
     if moved {
         // 宛先の項を先に書く（元を消した後に落ちても、宛先は自分の成果物として揃っている）
         update_sidecar(
-            &env.inbox,
+            env,
             &dest,
             category.as_deref(),
             None,
             Some((&final_name, new_entry)),
         )?;
         unlink_if_exists(&env.inbox, &current)?;
-        update_sidecar(&env.inbox, dir, None, Some(entry_name), None)?;
+        update_sidecar(env, dir, None, Some(entry_name), None)?;
     } else {
         // 元を先に消す（サイドカーの前に落ちても、次の実行が SOURCE_URL で新しい名前を拾う）
         if !in_place {
             unlink_if_exists(&env.inbox, &current)?;
         }
         update_sidecar(
-            &env.inbox,
+            env,
             dir,
             category.as_deref(),
             Some(entry_name),
@@ -488,15 +488,16 @@ fn unlink_if_exists(root: &RootDir, rel: &RelPath) -> Result<(), FsError> {
 }
 
 /// `dir` のサイドカーを読んで、`remove` の項を消し、`insert` の項を足して書く。`category` が `Some` なら
-/// 件の category も置き換える
+/// 件の category も置き換える。読んでから書くまでサイドカーの鍵を持つ（並んで走る ytdl の項を消さない）
 fn update_sidecar(
-    root: &RootDir,
+    env: &DownloaderEnv,
     dir: &RelPath,
     category: Option<&str>,
     remove: Option<&str>,
     insert: Option<(&str, FileEntry)>,
 ) -> Result<(), SidecarError> {
-    let mut s = Sidecar::read(root, dir)?.unwrap_or_default();
+    let _guard = env.lock_sidecar();
+    let mut s = Sidecar::read(&env.inbox, dir)?.unwrap_or_default();
     if let Some(c) = category {
         s.category = Some(c.to_owned());
     }
@@ -506,7 +507,7 @@ fn update_sidecar(
     if let Some((name, entry)) = insert {
         s.files.insert(name.to_owned(), entry);
     }
-    s.write(root, dir)
+    s.write(&env.inbox, dir)
 }
 
 fn sidecar_failed(e: SidecarError) -> RejudgeError {

@@ -49,6 +49,8 @@ pub struct Lib {
     pub inbox: Arc<RootDir>,
     pub fake: PathBuf,
     pub shutdown: CancellationToken,
+    /// サイドカーの鍵（本番と同じく、`env()` の全部で共有する）
+    pub sidecar_lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl Lib {
@@ -91,6 +93,7 @@ impl Lib {
             inbox,
             fake,
             shutdown: CancellationToken::new(),
+            sidecar_lock: Arc::new(std::sync::Mutex::new(())),
         })
     }
 
@@ -114,6 +117,7 @@ impl Lib {
             ffmpeg: super::ffmpeg().unwrap_or_else(|| PathBuf::from("ffmpeg")),
             tmp_root: self.dir.path().join("tmp").join("ytdl"),
             download_timeout: Duration::from_secs(60),
+            sidecar_lock: self.sidecar_lock.clone(),
         }
     }
 
