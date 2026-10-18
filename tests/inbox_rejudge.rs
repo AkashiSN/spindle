@@ -20,10 +20,15 @@ use spindle::jobs::handlers::inbox_rejudge::new_inbox_rejudge_job;
 use spindle::jobs::{EnqueueResult, JobState};
 
 /// 偽のプラグイン。`fake/mode` の中身で応答を切り替える（BrokenCh は `fake/broken` があれば不正な JSON、
-/// SlowCh は `fake/slow` があれば返さずに眠る）。mode が無ければ KnownCh → a、他 → unmatched
+/// SlowCh は `fake/slow` があれば返さずに眠る）。mode が無ければ KnownCh → a、他 → unmatched。
+/// `fake/hold` があれば `fake/judging` を置いて、hold が消えるまで応答を待つ
 const PLUGIN: &str = r#"
 IN=$(cat)
 FAKE=$(dirname "$0")
+if [ -f "$FAKE/hold" ]; then
+  touch "$FAKE/judging"
+  while [ -f "$FAKE/hold" ]; do sleep 0.05; done
+fi
 case "$IN" in
   *'"channel":"BrokenCh"'*) if [ -f "$FAKE/broken" ]; then echo 'not json'; exit 0; fi ;;
   *'"channel":"SlowCh"'*) if [ -f "$FAKE/slow" ]; then exec sleep 30; fi ;;
@@ -39,6 +44,7 @@ case "$mode" in
   a) echo '{"protocol":1,"ok":true,"track":{"title":"Song One","artists":["Artist A"],"albumartist":"Artist A","album":"Songs of A","category":"Pop","date":"2026","tags":[["ORIGINALARTIST","Someone"]]},"plugin":{"name":"fake","version":"v-a"}}' ;;
   b) echo '{"protocol":1,"ok":true,"track":{"title":"Song Two","artists":["Artist A","Guest"],"albumartist":"Artist A","album":"Songs of A","category":"Pop","date":"2026"},"plugin":{"name":"fake","version":"v-b"}}' ;;
   c) echo '{"protocol":1,"ok":true,"track":{"title":"Song One","artists":["Artist A"],"albumartist":"Artist A","album":"Other Album","category":"Pop","date":"2026"},"plugin":{"name":"fake","version":"v-c"}}' ;;
+  nocat) echo '{"protocol":1,"ok":true,"track":{"title":"Song One","artists":["Artist A"],"albumartist":"Artist A","album":"Songs of A","date":"2026"},"plugin":{"name":"fake","version":"v-n"}}' ;;
   skip) echo '{"protocol":1,"ok":false,"reason":"skip","message":"配信の告知","plugin":{"name":"fake","version":"v-s"}}' ;;
   *) echo '{"protocol":1,"ok":false,"reason":"unmatched","message":"ルールを足してください","plugin":{"name":"fake","version":"v-u"}}' ;;
 esac
@@ -783,4 +789,132 @@ async fn rejudge_waits_for_the_shared_sidecar_lock() {
     task.await.unwrap().unwrap();
     let s = sidecar(&lib, ALBUM_DIR);
     assert_eq!(s.files[new_name].plugin_version.as_deref(), Some("v-b"));
+}
+
+/// 移動で宛先の項を書き、元を消した後・元の項を消す前に落ちた状態から、もう一度で元の項だけを消して
+/// 収束する（宛先はそのまま。失敗には数えない）
+#[tokio::test]
+async fn rerun_after_move_before_source_entry_removal_drops_the_stale_entry() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "UnknownCh", "Song One (Official Video)", true);
+    lib.start();
+    stage(&lib, U1).await;
+    let src = "youtube/_unmatched/UnknownCh";
+    let id = pending_item(&lib, src);
+    let before = sidecar(&lib, src);
+
+    lib.mode("a");
+    let report = rejudge(&lib, id).await.unwrap();
+    assert_eq!(report.moved.len(), 1, "{report:?}");
+    // 元の項を消す前に落ちた状態へ戻す（元のファイルは消えている）
+    before.write(&lib.inbox, &rel(src)).unwrap();
+    assert!(audio_names(&lib, src).is_empty());
+    let dest_before = sidecar(&lib, ALBUM_DIR);
+    lib.conn()
+        .execute("DELETE FROM jobs WHERE type = 'inbox'", [])
+        .unwrap();
+
+    let report = rejudge(&lib, id).await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!((report.total, report.rejudged), (0, 0), "{report:?}");
+    assert_eq!(
+        report.dropped,
+        vec!["20260901 Song One (Official Video) [v1].opus".to_owned()]
+    );
+    assert!(sidecar(&lib, src).files.is_empty());
+    let name = "20260901 Song One [v1].opus";
+    assert_eq!(audio_names(&lib, ALBUM_DIR), vec![name.to_owned()]);
+    assert_eq!(sidecar(&lib, ALBUM_DIR), dest_before);
+    // サイドカーを書き換えたので走査に見せる
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'inbox' AND state = 'queued'"),
+        1
+    );
+}
+
+/// プラグインの応答を待っている間に件が承認されたら、その曲を書かずに止まる
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_during_the_plugin_call_stops_before_writing() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    lib.start();
+    lib.mode("a");
+    stage(&lib, U1).await;
+    let id = pending_item(&lib, ALBUM_DIR);
+    let name = "20260901 Song One [v1].opus";
+    let sidecar_before = sidecar(&lib, ALBUM_DIR);
+    lib.conn()
+        .execute("DELETE FROM jobs WHERE type = 'inbox'", [])
+        .unwrap();
+
+    lib.mode("b");
+    std::fs::write(lib.fake.join("hold"), "").unwrap();
+    let env = lib.env();
+    let task = tokio::spawn(async move {
+        let (tx, _rx) = tokio::sync::watch::channel((0, 0));
+        rejudge_item(&env, id, &CancellationToken::new(), &tx).await
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !lib.fake.join("judging").exists() {
+        assert!(Instant::now() < deadline, "プラグインが呼ばれない");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    lib.conn()
+        .execute(
+            "UPDATE inbox_items SET state = 'approved' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    std::fs::remove_file(lib.fake.join("hold")).unwrap();
+    let r = task.await.unwrap();
+    assert!(matches!(r, Err(RejudgeError::NotPending(_))), "{r:?}");
+    assert_eq!(audio_names(&lib, ALBUM_DIR), vec![name.to_owned()]);
+    assert_eq!(
+        tags_of(&lib.inbox_path(&format!("{ALBUM_DIR}/{name}"))).first("TITLE"),
+        Some("Song One")
+    );
+    assert_eq!(sidecar(&lib, ALBUM_DIR), sidecar_before);
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'inbox'"),
+        0
+    );
+}
+
+/// 判定の category が無くなったら、件の category も消す（Some → None）
+#[tokio::test]
+async fn category_is_cleared_when_the_judged_track_has_none() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    lib.start();
+    lib.mode("a");
+    stage(&lib, U1).await;
+    assert_eq!(sidecar(&lib, ALBUM_DIR).category.as_deref(), Some("Pop"));
+    let id = pending_item(&lib, ALBUM_DIR);
+
+    lib.mode("nocat");
+    let report = rejudge(&lib, id).await.unwrap();
+    assert_eq!(report.rejudged, 1, "{report:?}");
+    let s = sidecar(&lib, ALBUM_DIR);
+    assert_eq!(s.category, None);
+    assert_eq!(
+        s.files["20260901 Song One [v1].opus"]
+            .plugin_version
+            .as_deref(),
+        Some("v-n")
+    );
+}
+
+/// skip（タグを触らない）では件の category も触らない
+#[tokio::test]
+async fn skip_keeps_the_item_category() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    lib.start();
+    lib.mode("a");
+    stage(&lib, U1).await;
+    let id = pending_item(&lib, ALBUM_DIR);
+
+    lib.mode("skip");
+    rejudge(&lib, id).await.unwrap();
+    assert_eq!(sidecar(&lib, ALBUM_DIR).category.as_deref(), Some("Pop"));
 }

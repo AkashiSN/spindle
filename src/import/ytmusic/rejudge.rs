@@ -5,10 +5,11 @@
 //! ```text
 //! 件     pending でなければ NotPending。下書き（inbox_items.draft）を消す
 //! 対象   サイドカーに source = youtube の項がある音声ファイル（名前順）。項の名前のファイルが無ければ、
-//!        項を持たないファイルのうち SOURCE_URL が項の url と同じもの（前回の途中で名前を変えた後に落ちた）
-//! 1 曲   Item（項の item か yt-dlp の dump）→ judge → タグ → 宛先（移動の規則）→ 新しい名前 →
-//!        tmp に写してタグ → RENAME_NOREPLACE（同名は SOURCE_URL が同じときだけ自分の成果物）→
-//!        サイドカー → 元を unlink
+//!        項を持たないファイルのうち SOURCE_URL が項の url と同じもの（前回の途中で名前を変えた後に落ちた）。
+//!        それも無い項は消す（前回の移動で宛先の項を書いて元を消した後、元の項を消す前に落ちた残り）
+//! 1 曲   Item（項の item か yt-dlp の dump）→ judge → 件がまだ pending か → タグ → 宛先（移動の規則）→
+//!        新しい名前 → tmp に写してタグ → RENAME_NOREPLACE（同名は SOURCE_URL が同じときだけ自分の
+//!        成果物）→ サイドカー → 元を unlink
 //! 仕上げ ディレクトリ（新しく作った親を含む）を fsync して inbox ジョブを投入。途中で止まっても、
 //!        書いた曲があれば投入する
 //! ```
@@ -45,6 +46,8 @@ pub struct RejudgeReport {
     pub failed: Vec<(String, String)>,
     /// (ファイル名, 移動先の件の state)
     pub not_moved: Vec<(String, String)>,
+    /// ファイルが無いので消したサイドカーの項（前回の移動の途中で落ちた残り）
+    pub dropped: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,13 +91,16 @@ pub async fn rejudge_item(
     }
     let dir = RelPath::parse(&item.rel_dir)
         .map_err(|e| DownloadError::Fatal(format!("件のディレクトリが不正: {e}")))?;
-    let targets = targets(&env.inbox, &dir)?;
+    let (targets, stale) = targets(&env.inbox, &dir)?;
     let total = targets.len();
     progress.send_replace((0, total));
     let mut report = RejudgeReport {
         total,
         ..RejudgeReport::default()
     };
+    if !stale.is_empty() {
+        report.dropped = drop_stale_entries(env, &dir, &stale).map_err(sidecar_failed)?;
+    }
     let mut touched: Vec<Option<RelPath>> = vec![Some(dir.clone())];
     let result = rejudge_targets(
         env,
@@ -108,7 +114,7 @@ pub async fn rejudge_item(
     )
     .await;
     // 途中で止まっても（キャンセル・件が承認された等）、書き換えた曲があれば走査に見せる（行はキャッシュ）
-    let wrote = report.rejudged > 0 || !report.failed.is_empty();
+    let wrote = report.rejudged > 0 || !report.failed.is_empty() || !report.dropped.is_empty();
     if result.is_ok() || wrote {
         if let Err(e) = finish(env, &touched).await {
             if result.is_ok() {
@@ -156,6 +162,7 @@ async fn rejudge_targets(
         } = target;
         match rejudge_track(
             env,
+            item_id,
             dir,
             &file_name,
             &entry_name,
@@ -249,10 +256,10 @@ struct Target {
     entry: FileEntry,
 }
 
-/// 件のディレクトリの対象の曲（項の名前順）
-fn targets(root: &RootDir, dir: &RelPath) -> Result<Vec<Target>, RejudgeError> {
+/// 件のディレクトリの対象の曲（項の名前順）と、ファイルが見つからない項の名前
+fn targets(root: &RootDir, dir: &RelPath) -> Result<(Vec<Target>, Vec<String>), RejudgeError> {
     let Some(sidecar) = Sidecar::read(root, dir).map_err(sidecar_failed)? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let audio: Vec<String> = root
         .read_dir(Some(dir))?
@@ -270,6 +277,7 @@ fn targets(root: &RootDir, dir: &RelPath) -> Result<Vec<Target>, RejudgeError> {
     let entry_keys: HashSet<String> = sidecar.files.keys().map(|n| canonical_key(n)).collect();
     let mut claimed: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
+    let mut stale = Vec::new();
     for (name, entry) in &sidecar.files {
         if entry.source != "youtube" {
             continue;
@@ -289,7 +297,7 @@ fn targets(root: &RootDir, dir: &RelPath) -> Result<Vec<Target>, RejudgeError> {
             }),
         };
         let Some(file_name) = file else {
-            tracing::info!(dir = %dir, name, "サイドカーの項のファイルが無いので飛ばす");
+            stale.push(name.clone());
             continue;
         };
         claimed.insert(canonical_key(&file_name));
@@ -299,7 +307,36 @@ fn targets(root: &RootDir, dir: &RelPath) -> Result<Vec<Target>, RejudgeError> {
             entry: entry.clone(),
         });
     }
-    Ok(out)
+    Ok((out, stale))
+}
+
+/// ファイルが無い項（`names`）をサイドカーから消し、消した名前を返す。ytdl はファイルを置いてから項を
+/// 足すので、ファイルの無い項は前回の移動の途中（宛先の項を書いて元を消した後、元の項を消す前）に
+/// 落ちた残りか、人が消したファイルの項。どちらも消してよい（宛先の項は先に書いてある）。鍵の中で
+/// ファイルがまだ無いことを確かめ直す
+fn drop_stale_entries(
+    env: &DownloaderEnv,
+    dir: &RelPath,
+    names: &[String],
+) -> Result<Vec<String>, SidecarError> {
+    let _guard = env.lock_sidecar();
+    let Some(mut s) = Sidecar::read(&env.inbox, dir)? else {
+        return Ok(Vec::new());
+    };
+    let mut dropped = Vec::new();
+    for name in names {
+        let missing = dir
+            .join(name)
+            .is_ok_and(|r| matches!(env.inbox.stat(&r), Err(FsError::NotFound)));
+        if missing && s.files.remove(name).is_some() {
+            tracing::info!(dir = %dir, name, "サイドカーの項のファイルが無いので項を消す");
+            dropped.push(name.clone());
+        }
+    }
+    if !dropped.is_empty() {
+        s.write(&env.inbox, dir)?;
+    }
+    Ok(dropped)
 }
 
 /// 1 曲の成功
@@ -345,8 +382,10 @@ impl From<SidecarError> for TrackError {
 }
 
 /// 1 曲を判定し直して書く。`entry` は yt-dlp で取り直した `item` を書き足したもの（失敗の記録に使う）
+#[allow(clippy::too_many_arguments)]
 async fn rejudge_track(
     env: &DownloaderEnv,
+    item_id: i64,
     dir: &RelPath,
     file_name: &str,
     entry_name: &str,
@@ -376,6 +415,10 @@ async fn rejudge_track(
         None => None,
     };
     let judged = judge(env, &item, subscription.as_ref(), token).await?;
+    // yt-dlp・プラグインを待つ間に人が承認した等。書く前に確かめ直す（曲の前の確認だけでは遅い）
+    ensure_pending(env, item_id)
+        .await
+        .map_err(TrackError::Abort)?;
     let from_subscription = entry.subscription_id.is_some();
     let ok = judged.verdict == "ok";
     // 3. / 4. タグを書くか。skip（購読でない）と「購読が消えて ok でない」は触らない
@@ -439,8 +482,10 @@ async fn rejudge_track(
         let url = entry.url.as_deref().or(item.url.as_deref()).unwrap_or("");
         place(&env.inbox, &current, &dest, &final_rel, &changes, url)?;
     }
-    // 6. サイドカー（件の category は判定の値。語彙に無ければ足す）
+    // 6. サイドカー（件の category は判定の値。無くなったら消す。語彙に無ければ足す）。タグを触らない
+    //    判定（skip 等）では category も触らない
     let category = track.and_then(|t| t.category.clone());
+    let set_category = rewrite.then_some(category.as_deref());
     if let Some(cat) = category.clone() {
         env.db
             .write(move |c| crate::db::categories::ensure(c, &cat).map(|_| ()))
@@ -462,7 +507,7 @@ async fn rejudge_track(
         update_sidecar(
             env,
             &dest,
-            category.as_deref(),
+            set_category,
             None,
             Some((&final_name, new_entry)),
         )?;
@@ -476,7 +521,7 @@ async fn rejudge_track(
         update_sidecar(
             env,
             dir,
-            category.as_deref(),
+            set_category,
             Some(entry_name),
             Some((&final_name, new_entry)),
         )?;
@@ -573,18 +618,19 @@ fn unlink_if_exists(root: &RootDir, rel: &RelPath) -> Result<(), FsError> {
 }
 
 /// `dir` のサイドカーを読んで、`remove` の項を消し、`insert` の項を足して書く。`category` が `Some` なら
-/// 件の category も置き換える。読んでから書くまでサイドカーの鍵を持つ（並んで走る ytdl の項を消さない）
+/// 件の category もその値（`None` なら消す）にし、`None` なら触らない。読んでから書くまでサイドカーの
+/// 鍵を持つ（並んで走る ytdl の項を消さない）
 fn update_sidecar(
     env: &DownloaderEnv,
     dir: &RelPath,
-    category: Option<&str>,
+    category: Option<Option<&str>>,
     remove: Option<&str>,
     insert: Option<(&str, FileEntry)>,
 ) -> Result<(), SidecarError> {
     let _guard = env.lock_sidecar();
     let mut s = Sidecar::read(&env.inbox, dir)?.unwrap_or_default();
     if let Some(c) = category {
-        s.category = Some(c.to_owned());
+        s.category = c.map(str::to_owned);
     }
     if let Some(name) = remove {
         s.files.remove(name);
