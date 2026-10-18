@@ -890,6 +890,11 @@ fn sidecar_entry() -> spindle::import::sidecar::FileEntry {
         message: None,
         subscription_id: None,
         position: None,
+        item: None,
+        plugin_version: None,
+        judged_at: None,
+        plugin_tags: None,
+        rejudge_error: None,
     }
 }
 

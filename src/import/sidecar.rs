@@ -20,6 +20,7 @@ use crate::cd::riplog::RipReport;
 use crate::cd::toc::{Toc, TocError};
 use crate::domain::relpath::{canonical_key, RelPath};
 use crate::fsroot::{FsError, RootDir};
+use crate::import::ytmusic::Item;
 
 pub const SIDECAR_NAME: &str = "spindle-inbox.json";
 const VERSION: u32 = 1;
@@ -54,6 +55,21 @@ pub struct FileEntry {
     pub subscription_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<u32>,
+    /// プラグインへ渡した Item（再判定の材料。これより前の取り込みには無い）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<Item>,
+    /// 判定したプラグインの版（応答の plugin.version。無ければ None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_version: Option<String>,
+    /// 判定した時刻（UNIX epoch 秒）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged_at: Option<i64>,
+    /// プラグインが書いた追加タグのキー（大文字。ok のときだけ。再判定で消す対象）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_tags: Option<Vec<String>>,
+    /// 直近の再判定がこの曲で失敗した理由（成功で消す）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejudge_error: Option<String>,
 }
 
 /// CD の吸い出しの記録（件のディレクトリ = 1 枚。P2-5、D-67 追記）

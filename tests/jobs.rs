@@ -2372,7 +2372,7 @@ fn device_mutex_is_per_device() {
 
 #[test]
 fn device_job_types_round_trip() {
-    assert_eq!(JobType::ALL.len(), 21);
+    assert_eq!(JobType::ALL.len(), 22);
     for (t, s) in [
         (JobType::DeviceScan, "device_scan"),
         (JobType::DeviceSync, "device_sync"),

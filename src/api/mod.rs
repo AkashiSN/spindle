@@ -150,6 +150,7 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox/summary", get(inbox::summary))
         .route("/inbox/scan", post(inbox::scan))
         .route("/inbox/{id}/approve", post(inbox::approve))
+        .route("/inbox/{id}/rejudge", post(inbox::rejudge))
         .route("/inbox/{id}/reject", post(inbox::reject))
         .route("/inbox/{id}/reopen", post(inbox::reopen))
         .route("/inbox/{id}/discard", post(inbox::discard))

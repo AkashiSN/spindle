@@ -423,6 +423,7 @@ async fn discard_and_undiscard_only_on_rejected_items() {
     assert!(list["items"][0]["discard_requested_at"].is_i64(), "{list}");
     assert_eq!(list["items"][0]["state"], "rejected");
     assert_eq!(list["discard_retention_days"], 7);
+    assert_eq!(list["ytmusic_enabled"], true);
     // 二度目は 409、取り消しで null に戻る
     let (st, _) = app.post(&c, &discard, json!({})).await;
     assert_eq!(st, StatusCode::CONFLICT);
@@ -499,6 +500,11 @@ async fn youtube_item(app: &App, rel_dir: &str, category: Option<&str>, verdict:
             message: (verdict != "ok").then(|| "ルールを足してください".to_owned()),
             subscription_id: None,
             position: None,
+            item: None,
+            plugin_version: None,
+            judged_at: None,
+            plugin_tags: None,
+            rejudge_error: None,
         },
     )
     .unwrap();
@@ -722,6 +728,11 @@ async fn list_carries_the_last_sync_of_referenced_subscriptions() {
             message: None,
             subscription_id: Some(3),
             position: Some(165),
+            item: None,
+            plugin_version: None,
+            judged_at: None,
+            plugin_tags: None,
+            rejudge_error: None,
         },
     )
     .unwrap();
@@ -1461,4 +1472,248 @@ async fn inbox_files_404s_when_the_item_dir_became_a_file() {
         .get_text(&c, &format!("/api/inbox/{id}/files/rip.log"))
         .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+/// `POST /api/inbox/:id/rejudge`: pending で YouTube 由来の曲がある件だけ 202。
+/// approved・手置きだけの件は 409 state、無い id は 404、続けての 2 回目は 409 duplicate
+#[tokio::test]
+async fn rejudge_api_accepts_pending_youtube_items_only() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let yt = youtube_item(&app, "Yt", None, "unmatched").await;
+    let uri = format!("/api/inbox/{yt}/rejudge");
+
+    let (st, body) = app.post(&c, "/api/inbox/9999/rejudge", json!({})).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"], "not_found");
+
+    // 手置きだけの件（サイドカー無し）
+    let manual = app.item("Manual").await;
+    let (st, body) = app
+        .post(&c, &format!("/api/inbox/{manual}/rejudge"), json!({}))
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "state");
+
+    // pending でない件
+    let approved = youtube_item(&app, "Yt2", None, "unmatched").await;
+    app.db
+        .write(move |c| inbox::set_state(c, approved, ItemState::Approved, None, 2000))
+        .await
+        .unwrap();
+    let (st, body) = app
+        .post(&c, &format!("/api/inbox/{approved}/rejudge"), json!({}))
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "state");
+
+    // 受理され、inbox_rejudge ジョブが入る。続けての 2 回目は重複
+    let (st, body) = app.post(&c, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    let job_id = body["job_id"].as_i64().unwrap();
+    let ty: String = app
+        .db
+        .read(move |c| {
+            Ok(
+                c.query_row("SELECT type FROM jobs WHERE id = ?1", [job_id], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(ty, "inbox_rejudge");
+    let (st, body) = app.post(&c, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "duplicate");
+}
+
+/// 直近の再判定で失敗した曲があれば、一覧の警告に曲数と読み先が出る
+#[tokio::test]
+async fn list_warns_about_tracks_the_last_rejudge_failed_on() {
+    use spindle::import::sidecar::{FileEntry, Sidecar};
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = youtube_item(&app, "Yt", None, "unmatched").await;
+    let root = RootDir::open(&app.dir.path().join("Inbox")).unwrap();
+    let dir = spindle::domain::relpath::RelPath::parse("Yt").unwrap();
+    Sidecar::upsert(
+        &root,
+        &dir,
+        None,
+        "20260901 New [abc].opus",
+        FileEntry {
+            source: "youtube".into(),
+            url: Some("https://www.youtube.com/watch?v=abc".into()),
+            channel: Some("CH".into()),
+            verdict: "unmatched".into(),
+            message: None,
+            subscription_id: None,
+            position: None,
+            item: None,
+            plugin_version: None,
+            judged_at: None,
+            plugin_tags: None,
+            rejudge_error: Some("プラグインが落ちた".into()),
+        },
+    )
+    .unwrap();
+    let (st, body) = app.get(&c, "/api/inbox").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    let w: Vec<&str> = it["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        w.contains(&"再判定できなかった曲が 1 曲（③ の判定列を開くと理由が読める）"),
+        "{w:?}"
+    );
+}
+
+/// `[ytmusic].enabled = false` なら再判定のハンドラが無いので 404
+#[tokio::test]
+async fn rejudge_api_is_not_found_when_ytmusic_is_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("Inbox")).unwrap();
+    let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
+    let mut root: toml::Table = toml::from_str(EXAMPLE).unwrap();
+    root.insert(
+        "ytmusic".into(),
+        toml::Value::Table(toml::from_str("enabled = false").unwrap()),
+    );
+    let config = Arc::new(Config::parse(&toml::to_string(&root).unwrap()).unwrap());
+    let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
+        .await
+        .unwrap();
+    let inbox = Arc::new(RootDir::open(&dir.path().join("Inbox")).unwrap());
+    let router = api::router(AppState::new(config, db.clone(), mode).with_inbox(inbox));
+    let login = req(Method::POST, "/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from(r#"{"password":"correct horse"}"#))
+        .unwrap();
+    let res = router.clone().oneshot(login).await.unwrap();
+    let cookie = res
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let r = req(Method::POST, "/api/inbox/1/rejudge")
+        .header(header::COOKIE, cookie.clone())
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from("{}"))
+        .unwrap();
+    let res = router.clone().oneshot(r).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    // 一覧は YouTube 機能が無効と知らせる（画面は再判定のボタンを出さない）
+    let r = req(Method::GET, "/api/inbox")
+        .header(header::COOKIE, cookie.clone())
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(r).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let list: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(list["ytmusic_enabled"], false, "{list}");
+
+    // 無効の間は再判定のジョブが走らないので、待ちが残っていても件の操作は止めない
+    let id = db
+        .write(|c| inbox::insert_item(c, "Yt", "yt", 1000))
+        .await
+        .unwrap();
+    spindle::jobs::Jobs::new(db.clone())
+        .enqueue(spindle::jobs::handlers::inbox_rejudge::new_inbox_rejudge_job(id))
+        .await
+        .unwrap();
+    let r = req(Method::POST, &format!("/api/inbox/{id}/reject"))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from("{}"))
+        .unwrap();
+    let res = router.oneshot(r).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+}
+
+/// 件の再判定ジョブが queued / running の間は approve / reject / reopen を 409 rejudging にする
+/// （再判定が書いている最中に承認すると、走査が承認を pending に戻してしまう）。終われば通る
+#[tokio::test]
+async fn approve_reject_and_reopen_are_refused_while_rejudging() {
+    use spindle::jobs::handlers::inbox_rejudge::new_inbox_rejudge_job;
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = app.item("AlbumA").await;
+    // ワーカーは動かないので queued のまま残る
+    let jobs = spindle::jobs::Jobs::new(app.db.clone());
+    let job = jobs.enqueue(new_inbox_rejudge_job(id)).await.unwrap().id();
+    // 他の件の再判定は関係ない
+    jobs.enqueue(new_inbox_rejudge_job(id + 1000))
+        .await
+        .unwrap();
+
+    let set_job = |state: &'static str| {
+        let db = app.db.clone();
+        async move {
+            db.write(move |c| {
+                c.execute(
+                    "UPDATE jobs SET state = ?1 WHERE id = ?2",
+                    rusqlite::params![state, job],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap()
+        }
+    };
+    for st in ["queued", "running"] {
+        set_job(st).await;
+        let (s, body) = app
+            .post(&c, &format!("/api/inbox/{id}/approve"), draft("AlbumA"))
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{st} {body}");
+        assert_eq!(body["error"], "rejudging");
+        assert!(body["message"].as_str().unwrap().contains("再判定"));
+        let (s, body) = app
+            .post(&c, &format!("/api/inbox/{id}/reject"), json!({}))
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{st} {body}");
+        assert_eq!(body["error"], "rejudging");
+        assert_eq!(app.state(id).await, ItemState::Pending);
+    }
+    // reopen（rejected の件）も止める
+    app.db
+        .write(move |c| inbox::set_state(c, id, ItemState::Rejected, None, 2000))
+        .await
+        .unwrap();
+    let (s, body) = app
+        .post(&c, &format!("/api/inbox/{id}/reopen"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "rejudging");
+    assert_eq!(app.state(id).await, ItemState::Rejected);
+
+    // 終われば通る
+    set_job("failed").await;
+    let (s, body) = app
+        .post(&c, &format!("/api/inbox/{id}/reopen"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    let (s, body) = app
+        .post(&c, &format!("/api/inbox/{id}/approve"), draft("AlbumA"))
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
 }

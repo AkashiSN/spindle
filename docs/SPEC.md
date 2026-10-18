@@ -1007,12 +1007,17 @@ multi_value_separator = " & "   # 多値フィールドの結合
     "track": { "title": "…", "artists": ["…"], "albumartist": "…", "album": "…",
                "category": "<統制語彙の名前>" | null,   // null は未分類（_Unsorted）
                "date": "YYYY[-MM[-DD]]" | null,
-               "tags": [["ORIGINALARTIST", "…"]] } }   // 追加のタグ（キー, 値）
+               "tags": [["ORIGINALARTIST", "…"]] },    // 追加のタグ（キー, 値）
+    "plugin": { "name": "spindle-ytmusic-meta", "version": "v0.1.0-rc.2" } }   // 任意。判定したプラグインの版（D-114）
   { "protocol": 1, "ok": false,
     "reason": "unmatched" | "unknown_channel" | "skip" | "unsupported",   // 未知の値も通す（前方互換）
-    "message": "…" }   // unmatched / unknown_channel は要対応（メッセージをそのまま見せる）、skip は取り込まない。
+    "message": "…",    // unmatched / unknown_channel は要対応（メッセージをそのまま見せる）、skip は取り込まない。
                        // reason / message は必須
+    "plugin": { "name": "…", "version": "…" } }   // 任意（ok の応答にも同じ）
   ```
+  `plugin` は**任意**（未知の欄はプラグインが無視する規則と同じく後方互換）。無い・形が違う（name / version が空でない
+  文字列でない）ときは「不明」として扱い、応答は不正にしない。spindle は応答の `plugin.version` をサイドカーに残し、
+  Inbox に表示する（再判定、§7.8、D-114）。`spindle-ytmusic-meta` は `--version` と同じ値（git describe）を返す
 - **spindle 側の写像**: `track` → タグ（TITLE / ARTIST 多値 / ALBUM / ALBUMARTIST / DATE / TRACKNUMBER +
   `tags`）と `pathgen::TrackFields`（category / albumartist / artist（先頭）/ album / title / track_no / year）。
   `category` は `categories` に同じ canonical key の語彙が無ければ追加する（プラグインの定義が正。
@@ -1063,8 +1068,15 @@ multi_value_separator = " & "   # 多値フィールドの結合
     "files": { "<ファイル名>": { "source": "youtube", "url": "<webpage_url>", "channel": "<uploader>",
                                  "verdict": "ok" | "unmatched" | "unknown_channel" | "skip" | "<未知の reason>",
                                  "message": "…" | null,
-                                 "subscription_id": 3, "position": 17 } } }   // 購読由来のときだけ（P4-16）
+                                 "subscription_id": 3, "position": 17,   // 購読由来のときだけ（P4-16）
+                                 "item": { … },                // プラグインへ渡した Item（再判定の材料。D-114）
+                                 "plugin_version": "v0.1.0-rc.2" | null,   // 判定したプラグインの版（Response の plugin.version）
+                                 "judged_at": 1760000000,      // 判定した時刻（UNIX epoch 秒）
+                                 "plugin_tags": ["ORIGINALARTIST"],   // ok のときにプラグインが書いた追加タグのキー（大文字）
+                                 "rejudge_error": "…" } } }    // 直近の再判定がこの曲で失敗した理由（成功で消す）
   ```
+  `item` 以降の 4 欄は任意（無いサイドカーも読める。`version` は 1 のまま）。ダウンローダが初回の判定で `item` /
+  `plugin_version` / `judged_at` / `plugin_tags` を書き、再判定（§7.8）が書き換える
 - **失敗の区分**: `Fatal`（再試行なし）は webm の音声なし・プラグインの故障・対応していない URL・宛先の
   同名で別の内容（取り込み済みは失敗でなく `done` + note）。それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O、仕上げ）は `Failed` で指数
   バックオフ。作業領域はどの終わり方でも消す。**再実行は冪等**: Archive は同じ id なら採用、Inbox は
@@ -1324,6 +1336,50 @@ Inbox/ に配置（ポーリング検出）
   登録の直前と消す前に照合し、変わっていれば登録せず `pending`（登録後なら消さずに残す）
 - **承認後にファイルが増えた取り込み**（同じ album への追加ダウンロード）は既存の規則で `pending` に戻る。そのとき
   提案は「保存した下書き（既知のファイルの分）+ 新しいファイルの提案」を merge して返す（補正をやり直させない）
+
+- **再判定**（`inbox_rejudge` ジョブ、`src/import/ytmusic/rejudge.rs`、D-114）: プラグインのルールを直した後に、承認前の
+  YouTube の件をボタン 1 つで判定し直す。`POST /api/inbox/:id/rejudge`（pending で、サイドカーに `source = youtube` の項が
+  ある件だけ）が、その件の YouTube 由来の全曲を対象にジョブを投入する。出どころの無い曲は触らない。プラグインはバイナリを
+  判定のたびに起動するので、`cp` で置き換えれば再起動は要らない。
+  - **材料**: 項の `item`（プラグインへ渡した Item）。無い既存の曲は、ダウンローダの手順 1 と同じ引数で yt-dlp を呼んで
+    取り直して項に書き足す。取れなければその曲は失敗（`rejudge_error`。タグは触らない）で、他の曲は続ける
+  - **1 曲**: 初回と同じ判定と写像（`downloader::judge` / `tag_changes_for` を共有）。購読由来（購読が残る）は albumartist /
+    album / category を購読の値で上書きし、`ok: false` でも初回と同じ合成 Track を書く。購読由来でない曲は `ok` →
+    TITLE / ARTIST / ALBUM / ALBUMARTIST / DATE / 追加タグを書き、前回書いた追加タグ（`plugin_tags`）のうち今回の応答に無い
+    ものを消す（記録の無い曲は上書きだけ）。`ok: false` → TITLE を動画タイトルに戻しプラグイン由来のタグを消す。`skip` →
+    判定の記録だけでタグは触らない。プラグインの故障 → その曲は失敗でタグもサイドカーも触らない。購読が消えた購読由来の
+    曲で `ok` でないときは今のタグを保ち、判定だけ記録する。ファイル名も `<YYYYMMDD> <title> [<id>].opus` で付け直し、
+    TRACKNUMBER / PICTURE / SOURCE_URL は触らない。件の `category` は判定の値で書き換え（判定に無ければ消す。タグを
+    触らない判定では category も触らない）、語彙に無ければ足す。サイドカーの項に `verdict` / `message` / `plugin_version` / `judged_at` / `plugin_tags` を書く
+  - **移動**: 判定が ok か否かと、曲が**今いるディレクトリ**（`youtube/_unmatched/` の下か）が食い違うときだけ、初回の規則の
+    宛先へ移す（unmatched → ok は `youtube/<albumartist>/<album>/`、ok → unmatched は `youtube/_unmatched/<channel>/`）。
+    ok のまま宛先だけ違う場合と購読由来の曲（購読が消えていても）は移さない。移動先に件が無いか `pending` のときだけ移し、
+    それ以外は移さずタグだけ直して結果に「移せなかった（移動先が <state>）」を出す。宛先のサイドカーに項を先に書き、
+    元のファイルを消してから元の項を消す。空になった件は走査が消す
+  - **下書きは捨てる**: ジョブの最初に件の `draft` を消す（提案でタグより勝つため）。画面は、保存済みの下書きがある件では
+    「保存済みの補正は消え、判定結果で置き換わります」、画面に未送信の編集がある件では「未保存の補正は消えます」と確認し、
+    どちらも無ければ確認しない
+  - **冪等・排他**: 開始時と曲ごと、それに曲ごとの判定（yt-dlp・プラグインの応答）の後でファイルを書く前に件が
+    `pending` かを確かめ、外れたら止める（続けると走査が承認を pending に戻す）。件の再判定ジョブが queued / running の
+    間は、件の承認・却下・再開を API が 409 `rejudging` で断る（状態の検査と同じトランザクションで見るので、確かめてから
+    書くまでの間に承認されることはない）。曲ごとに「tmp に写してタグ → `RENAME_NOREPLACE` で新しい名前 → 元を unlink → サイドカー」。新しい名前に同名があれば、
+    その `SOURCE_URL` が同じときは前回の途中の自分の成果物として今回の書いたもので置き換える。項のファイルが無いときは
+    項を持たないファイルのうち `SOURCE_URL` が項の `url` と同じものを拾う。それも無い項は消す（移動で宛先の項を書いて
+    元を消した後、元の項を消す前に落ちた残り。失敗には数えない）。ファイルは排他ロックしない。サイドカーの
+    読んで直して書くは、並んで走る ytdl と共有するプロセス内の鍵（`DownloaderEnv::sidecar_lock`）で直列にする。ジョブは
+    `max_attempts` 1・dedup `inbox_rejudge:<item_id>`。終わったら書いたディレクトリ（移動で新しく作ったディレクトリの
+    親を含む）を fsync して `inbox` の走査を投入する。キャンセル・件が pending でなくなって途中で止まっても、書き換えた
+    曲があれば同じく投入する。結果（`note`）は
+    `再判定: N/M 曲、移動 K 曲、失敗 F 曲` と、移せなかった曲・失敗した曲の行
+  - **画面**: 件の見出しに「再判定」（YouTube 機能が無効なら出さない。実行中は無効で `再判定中 done/total`、承認・却下・
+    下書きに戻すも無効）と `判定: spindle-ytmusic-meta v…`（版が混ざれば `判定: v… ほか`、記録が無ければ `判定: 版不明`）。
+    ③ の判定列の詳細に版と判定時刻、失敗の理由。失敗した曲があれば件の `warnings` に「再判定できなかった曲が N 曲」。
+    終わったら一覧を取り直し、押した件が消えるか曲の形（名前・判定の記録）が変わった一覧が届いたところで、全曲が別の件へ
+    移ったらその件を開き、一部なら「N 曲を <移動先> へ移した」と知らせる（終わってから 30 秒届かなければ「再判定した」
+    だけ）。押してから投入が受理されて一覧に載るまでも無効（二度押し）。控えは件ごとに持ち、後から失敗した投入
+    （409 `duplicate` 等）は受理済みの控えを消さない。`lib/inbox.ts` の `canRejudge` / `pluginVersionLabel` /
+    `rejudgeConfirmText` / `rejudgeLanding` / `rejudgeSettle` / `rejudgeOutcome` / `rejudgeBusy` / `rejudgeStarting*` /
+    `rejudgeWatch*`、`hooks/useInboxRejudge`
 
 ### 7.9 FLAC 健全性チェック（移行時 + 任意）
 
@@ -1818,6 +1874,7 @@ CLAUDE.md の不変条件と禁止事項は Library（ユーザデータ）を�
 | `inbox` | 1 | 固定 |
 | `ytdl` | 1 | `ytdl:<url>`（playlist の展開・購読の同期で投入する分も同じ。D-70、D-78） |
 | `playlist_sync` | 1 | `playlist_sync:<subscription_id>`（列挙 → 番号揃え → ytdl 投入。§7.7「再生リストの購読と同期」、D-78） |
+| `inbox_rejudge` | 1 | `inbox_rejudge:<item_id>`（Inbox の件の再判定。`max_attempts` 1。§7.8、D-114） |
 | `source_hash` | 2（CPU 系の共通予算も取る） | `source_hash:<track_id>:<source>`（source = `master` / `opus` / `aac`。送る元の SHA-256。§7.11、D-95） |
 | `device_scan` | 2（同じ端末は排他。下記） | `device_scan:<device_id>`（回復してキャッシュを置き換える。未接続なら待たずに終わる。§7.11） |
 | `device_sync` | 2（同上） | `device_sync:<device_id>`（payload に `plan_id`。最大 3 回。確定した計画を実行。§7.11「同期」） |
@@ -2140,7 +2197,7 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   proposal, draft, warnings, destination, tracks: [{ rel_path, codec, lossless,
                                                   sample_rate, bit_depth, channels, duration_ms, tags, source,
                                                   same_title: [{ track_id, rel_path, duration_ms }] }] }],
-                                                  watch: { checked_at, poll_interval_secs }, discard_retention_days,
+                                                  watch: { checked_at, poll_interval_secs }, discard_retention_days, ytmusic_enabled,
                                                   subscriptions: [{ id, album, synced_at, moved, renamed, tags_batch_id,
                                                   rename_batch_id }] }   # P4-18 / P4-19 / P4-22 / D-90
                                                   （§7.8、D-68。destination と source は D-70: source は spindle-inbox.json の
@@ -2157,12 +2214,17 @@ GET    /api/inbox/:id/artwork/:hash               取り込みのファイルの
 POST   /api/inbox/scan                            inbox ジョブを投入（202 + job_id。queued / running があれば 409 duplicate）
 POST   /api/inbox/:id/approve                     { category, albumartist, album, date, album_gain?, tracks: [{ rel_path, disc_no,
                                                   track_no, title, artist, keep_artists?, tags?, picture? }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved +
-                                                  ジョブ投入。album_gain は既定 false（D-74）。tags / picture は §7.8（D-86）。
+                                                  ジョブ投入。件の再判定ジョブが queued / running なら 409 `rejudging`（message 付き。
+                                                  YouTube 機能が無効なら見ない。§7.8、D-114）。album_gain は既定 false（D-74）。tags / picture は §7.8（D-86）。
                                                   差し替える画像の artwork 行が無ければ 400
 POST   /api/inbox/:id/preview                     { draft }（approve と同じ形）。音声を読まずに配置の計画を引く →
                                                   200 { rel_dir, paths, error }（決められなければ rel_dir は null で error に
                                                   理由）。自分の成果物の再利用は見ないので見込み（D-86）
-POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）
+POST   /api/inbox/:id/rejudge                     pending の件の YouTube 由来の曲を今のプラグインで判定し直すジョブを投入（202 + job_id）。
+                                                  `[ytmusic].enabled` でなければ 404 / 件が無ければ 404 / pending でない・YouTube 由来の曲が
+                                                  無ければ 409 `state` / 同じ件のジョブがあれば 409 `duplicate` / 503 `inbox_unavailable`（§7.8、D-114）
+POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）。件の再判定ジョブが
+                                                  queued / running なら 409 `rejudging`（approve と同じ）
 POST   /api/inbox/:id/discard, /undiscard         却下した取り込みを破棄待ちにする / 取り消す（rejected だけ。消すのは GC。D-90）
 POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
 POST   /api/ytmusic/lookup                        { urls: [string] }（200 件まで）→ { items: [{ url, kind: video|playlist|other|invalid,
@@ -2912,6 +2974,19 @@ GC は削除件数・バイト数と区分ごとの内訳・見送りと失敗�
   横並びで出す: `配置 → RG → opus → aac → <端末…>`（`GET /api/inbox` の `stages`）。段ごとに 完了 / 進行中
   （n/m）/ 未 / 対象外。RG は書き込みが要る設定なら書き込みまで、系統は無効なら「（無効）」で対象外、端末は
   その端末の選曲に入る曲の数を母数に反映済みを数える（対象外へ向かう曲は数えない）
+- **Inbox の再判定**（D-114、§7.8）: 件の見出しの操作群に「再判定」。出すのは YouTube 機能が有効（`GET /api/inbox` の
+  `ytmusic_enabled`）で、`pending` で YouTube 由来の曲（`source` を持つ）がある件だけ。実行中は無効にして
+  `再判定中 done/total`（ジョブの進捗）を出し、「承認して配置」「却下」「下書きに戻す」も無効にする（押してから投入が
+  受理されて一覧に載るまでも同じ。`rejudgeBusy`。API も再判定の間は 409 `rejudging`）。押す前に、保存済みの下書きがある件は
+  「保存済みの補正は消え、判定結果で置き換わります。再判定しますか？」、画面に未送信の編集がある件は「未保存の補正は消えます。
+  再判定しますか？」と確認し、どちらも無ければ確認しない（`rejudgeConfirmText`）。見出しのバッジは
+  `判定: spindle-ytmusic-meta <版>`（曲ごとの版が揃うとき）/ `判定: <版> ほか`（混ざるとき）/ `判定: 版不明`
+  （`pluginVersionLabel`）。③ の判定列を開いた詳細に、判定の版（無ければ「不明」）と判定時刻、再判定が失敗した曲は
+  赤字で `再判定できなかった: <理由>`。ジョブが終わったら一覧を取り直す。ジョブの終わりは走査より先に来るので、終わった
+  後に取り直した一覧で押した件が消えるか曲の形（名前・判定の記録）が押した時点と変わるまで待ち（`rejudgeSettle`）、
+  押した件が消えて全曲が別の 1 件に揃っていればその件を開き、一部だけ移ったら「再判定した。N 曲を <移動先> へ移した」と
+  知らせる（移していなければ「再判定した」。`rejudgeOutcome` / `rejudgeLanding`）。終わってから 30 秒変わらなければ
+  「再判定した」とだけ知らせる。失敗した曲があれば件の警告に「再判定できなかった曲が N 曲」
 - **操作タブの「album gain」**（P4-5、D-74）: 「ReplayGain / FLAC」節に、選択行が属する album ごとの
   チェックボックス（`PATCH /api/albums/:id`。20 album を超えたら絞るよう促す）。アルバム画面は無く
   アルバム一覧は表を絞るだけなので、切り替えはここに置く

@@ -7,6 +7,7 @@ pub mod flaccheck;
 pub mod gc;
 pub mod hirescheck;
 pub mod inbox;
+pub mod inbox_rejudge;
 pub mod normalize;
 pub mod playlist_sync;
 pub mod rename;

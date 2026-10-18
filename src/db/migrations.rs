@@ -183,7 +183,8 @@ pub fn apply_list(conn: &mut Connection, list: &[Migration]) -> Result<Vec<u32>,
 /// CHECK を ALTER できないので、列挙値を足すたびに表を作り直す版がここに載る
 /// - 2: jobs.type に端末配信の 4 種を足す（D-95）
 /// - 4: jobs.type に rgwrite を足す（D-97）
-const FOREIGN_KEYS_OFF: &[u32] = &[2, 4];
+/// - 5: jobs.type に inbox_rejudge を足す（D-114）
+const FOREIGN_KEYS_OFF: &[u32] = &[2, 4, 5];
 
 /// 1 版を 1 トランザクションで適用する。`check_fk` なら commit 前に `PRAGMA foreign_key_check` で
 /// 参照の整合を確かめる（違反があればロールバック）

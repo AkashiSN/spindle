@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use spindle::db::open_memory_connection;
-use spindle::import::ytmusic::{Item, MetadataProvider, Outcome, ProviderError, Track};
+use spindle::import::ytmusic::{Item, MetadataProvider, Outcome, PluginInfo, ProviderError, Track};
 use tokio_util::sync::CancellationToken;
 
 struct Fake {
@@ -67,7 +67,8 @@ async fn round_trip_sends_request_and_reads_track() {
         .provider(10)
         .resolve(&item(), &CancellationToken::new())
         .await
-        .unwrap();
+        .unwrap()
+        .outcome;
     let Outcome::Track(t) = out else {
         panic!("{out:?}")
     };
@@ -125,7 +126,8 @@ async fn declined_reasons_are_reported_not_errors() {
             .provider(10)
             .resolve(&item(), &CancellationToken::new())
             .await
-            .unwrap_or_else(|e| panic!("{reason}: {e}"));
+            .unwrap_or_else(|e| panic!("{reason}: {e}"))
+            .outcome;
         assert_eq!(
             out,
             Outcome::Declined {
@@ -264,4 +266,43 @@ fn category_is_added_to_the_vocabulary_when_missing() {
         date: None,
         tags: vec![],
     };
+}
+
+#[tokio::test]
+async fn plugin_version_is_read_when_present_and_none_otherwise() {
+    const TRACK: &str = r#""track":{"title":"T","artists":["A"],"albumartist":"A","album":"B"}"#;
+    for (extra, want) in [
+        (
+            r#","plugin":{"name":"p","version":"v1.2.3"}"#,
+            Some(PluginInfo {
+                name: "p".into(),
+                version: "v1.2.3".into(),
+            }),
+        ),
+        ("", None),
+        (r#","plugin":{"version":""}"#, None),
+        (r#","plugin":"p""#, None),
+    ] {
+        let fake = Fake::new(&format!(
+            "echo '{{\"protocol\":1,\"ok\":true,{TRACK}{extra}}}'"
+        ));
+        let r = fake
+            .provider(10)
+            .resolve(&item(), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(r.outcome, Outcome::Track(_)), "{extra}");
+        assert_eq!(r.plugin, want, "{extra}");
+    }
+    // ok: false でも版は読む
+    let fake = Fake::new(
+        r#"echo '{"protocol":1,"ok":false,"reason":"skip","message":"m","plugin":{"name":"p","version":"v9"}}'"#,
+    );
+    let r = fake
+        .provider(10)
+        .resolve(&item(), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(r.outcome.is_skip());
+    assert_eq!(r.plugin.map(|p| p.version), Some("v9".to_owned()));
 }

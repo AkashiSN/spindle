@@ -15,6 +15,7 @@ import { useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type Mou
 import type { ArtworkUploadState } from '../hooks/useArtworkUpload'
 import { editSession } from '../lib/editSession'
 import { formatDuration } from '../lib/format'
+import { formatDateTime } from '../lib/history'
 import {
   ARTIST_JOIN,
   applyPicture,
@@ -615,11 +616,13 @@ export function InboxTrackGrid({
 /** 判定バッジ。判定できなかったものは行を開くと message（ルールの足し方）と URL が読める */
 function VerdictCell({ source }: { source: InboxSource }) {
   const v = verdictLabel(source)
-  const badge = <span className={`badge ${v.ok ? 'inbox-verdict-ok' : 'inbox-verdict-ng'}`}>{v.text}</span>
-  if (v.ok && source.url == null) return badge
+  const failed = source.rejudge_error != null
+  const badge = <span className={`badge ${v.ok && !failed ? 'inbox-verdict-ok' : 'inbox-verdict-ng'}`}>{v.text}</span>
+  if (v.ok && !failed && source.url == null && source.plugin_version == null && source.judged_at == null) return badge
   return (
     <details className="inbox-verdict-details">
       <summary>{badge}</summary>
+      {failed && <pre className="inbox-verdict-message small error">再判定できなかった: {source.rejudge_error}</pre>}
       {source.message != null && <pre className="inbox-verdict-message small">{source.message}</pre>}
       {source.url != null && (
         <a className="small" href={source.url} target="_blank" rel="noreferrer">
@@ -627,6 +630,8 @@ function VerdictCell({ source }: { source: InboxSource }) {
         </a>
       )}
       {source.channel != null && <div className="muted small">channel: {source.channel}</div>}
+      <div className="muted small">版: {source.plugin_version ?? '不明'}</div>
+      {source.judged_at != null && <div className="muted small">判定: {formatDateTime(source.judged_at)}</div>}
     </details>
   )
 }

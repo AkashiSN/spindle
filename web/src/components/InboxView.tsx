@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { apiPost, apiText } from '../api/client'
 import { useArtworkUpload } from '../hooks/useArtworkUpload'
 import type { InboxState } from '../hooks/useInbox'
+import { useInboxRejudge, type InboxRejudge } from '../hooks/useInboxRejudge'
 import { useInboxPreview } from '../hooks/useInboxPreview'
 import { describeLookupError } from '../hooks/useCdLookup'
 import {
@@ -25,6 +26,7 @@ import { logErrorText } from '../lib/records'
 import {
   applyCandidate,
   applyTracklist,
+  canRejudge,
   codecSummary,
   destinationText,
   discardLabel,
@@ -38,6 +40,15 @@ import {
   itemTitle,
   nextStage,
   pictureState,
+  pluginVersionLabel,
+  rejudgeBusy,
+  rejudgeConfirmText,
+  rejudgeOutcome,
+  rejudgeWatchAbort,
+  rejudgeWatchBegin,
+  rejudgeWatchFinish,
+  rejudgeWatchSettle,
+  REJUDGE_SETTLE_TIMEOUT_MS,
   refreshedDraft,
   sameTitleCount,
   stageText,
@@ -49,6 +60,7 @@ import {
   type InboxDraft,
   type InboxFile,
   type InboxItem,
+  type RejudgeWatches,
   type RipLookup,
 } from '../lib/inbox'
 import { parseTracklist } from '../lib/tracklist'
@@ -81,6 +93,68 @@ export function InboxView({
   }, [focusHit, selectedId, onFocused])
   // 選んでいた件が消えたら（placed の期限切れ・ディレクトリの消失）最初の件を出す
   const selected = items.find((i) => i.id === selectedId) ?? items[0] ?? null
+
+  // 再判定: 押した件ごとに曲の URL と形を控えておき、ジョブが終わった後に取り直した一覧で押した件が変わったら
+  // （ジョブの終わりは走査より先に来る）移動先を開く / 移した数を知らせる。変わらないまま 30 秒過ぎたらあきらめる
+  const rejudgeWatches = useRef<RejudgeWatches>(new Map())
+  const [rejudgeTick, setRejudgeTick] = useState(0)
+  const rejudgeTimers = useRef<Map<number, number>>(new Map())
+  const { refresh, items: latestItems, setNotice } = inbox
+  const clearRejudgeTimer = (id: number) => {
+    const t = rejudgeTimers.current.get(id)
+    if (t != null) window.clearTimeout(t)
+    rejudgeTimers.current.delete(id)
+  }
+  const rejudge = useInboxRejudge((finished) => {
+    refresh()
+    const { watches, marked } = rejudgeWatchFinish(rejudgeWatches.current, finished, latestItems, Date.now())
+    rejudgeWatches.current = watches
+    if (marked.length === 0) return
+    setRejudgeTick((t) => t + 1)
+    for (const id of marked) {
+      clearRejudgeTimer(id)
+      rejudgeTimers.current.set(
+        id,
+        window.setTimeout(() => {
+          rejudgeTimers.current.delete(id)
+          setRejudgeTick((t) => t + 1)
+        }, REJUDGE_SETTLE_TIMEOUT_MS),
+      )
+    }
+  })
+  useEffect(() => {
+    const timers = rejudgeTimers.current
+    return () => {
+      for (const t of timers.values()) window.clearTimeout(t)
+    }
+  }, [])
+  useEffect(() => {
+    if (latestItems == null || rejudgeWatches.current.size === 0) return
+    const { watches, landed } = rejudgeWatchSettle(rejudgeWatches.current, latestItems, Date.now())
+    rejudgeWatches.current = watches
+    for (const { watch, settle } of landed) {
+      clearRejudgeTimer(watch.id)
+      if (settle === 'timeout') {
+        setNotice('再判定した')
+        continue
+      }
+      const { select, notice } = rejudgeOutcome(watch, latestItems)
+      if (select != null) setSelectedId(select)
+      setNotice(notice)
+    }
+  }, [rejudgeTick, latestItems, setNotice])
+  const startRejudge = async (item: InboxItem) => {
+    // 投入の途中・実行中の二度押しは何もしない（控えも置き換えない）
+    if (rejudge.isBusy(item.id)) return
+    const { watches, mine, prior } = rejudgeWatchBegin(rejudgeWatches.current, item)
+    rejudgeWatches.current = watches
+    const msg = await rejudge.start(item.id)
+    if (msg != null) {
+      rejudgeWatches.current = rejudgeWatchAbort(rejudgeWatches.current, mine, prior)
+      setNotice(msg)
+      refresh()
+    }
+  }
 
   return (
     <section className="cd inbox">
@@ -147,7 +221,14 @@ export function InboxView({
             })}
           </ul>
           {selected != null && (
-            <ItemForm key={selected.id} item={selected} inbox={inbox} onOpenAlbum={onOpenAlbum} />
+            <ItemForm
+              key={selected.id}
+              item={selected}
+              inbox={inbox}
+              rejudge={rejudge}
+              onRejudge={startRejudge}
+              onOpenAlbum={onOpenAlbum}
+            />
           )}
         </div>
       )}
@@ -158,10 +239,14 @@ export function InboxView({
 function ItemForm({
   item,
   inbox,
+  rejudge,
+  onRejudge,
   onOpenAlbum,
 }: {
   item: InboxItem
   inbox: InboxState
+  rejudge: InboxRejudge
+  onRejudge: (item: InboxItem) => Promise<void>
   onOpenAlbum: (albumId: number) => void
 }) {
   // 初期値は保存済みの下書き（無ければ提案）。編集中は一覧が取り直されても上書きしない。
@@ -199,6 +284,18 @@ function ItemForm({
   const dest = destinationText(item, draft)
   const sync = syncNote(item, draft, inbox.subscriptions, formatDateTime)
 
+  const rejudgeProgress = rejudge.running.get(item.id)
+  // 再判定の間（押してから受理されて取得に載るまでを含む）は承認・却下・下書きに戻すを止める（API も 409 rejudging）
+  const rejudging = rejudgeBusy(item.id, rejudge.starting, rejudge.running)
+  const versionLabel = pluginVersionLabel(item.tracks)
+  const rejudgeNow = () => {
+    // 未送信の編集 = フォームの今の下書きが、サーバの値から作った下書きと違う
+    const dirty = JSON.stringify(draft) !== JSON.stringify(fresh)
+    const ask = rejudgeConfirmText(item, dirty)
+    if (ask != null && !window.confirm(ask)) return
+    void onRejudge(item)
+  }
+
   const approve = async () => {
     setSubmitError(null)
     const msg = await inbox.approve(item.id, draftForSubmit(draft))
@@ -232,6 +329,7 @@ function ItemForm({
             <span className="badge">{source}</span>
             <span className={`badge inbox-state-${item.state}`}>{stateLabel(item.state)}</span>
             {changes > 0 && <span className="badge inbox-changed-badge">変更 {changes} 件</span>}
+            {versionLabel != null && <span className="badge">{versionLabel}</span>}
           </div>
           {item.stages != null && item.stages.length > 0 && (
             <ol className="inbox-stages" aria-label="配置後の処理の進み">
@@ -383,20 +481,29 @@ function ItemForm({
             <button
               type="button"
               className="primary"
-              disabled={inbox.busy || artwork.busy || problems.length > 0}
+              disabled={inbox.busy || artwork.busy || problems.length > 0 || rejudging}
               onClick={() => void approve()}
             >
               承認して配置
             </button>
           )}
           {(item.state === 'pending' || item.state === 'failed' || item.state === 'approved') && (
-            <button type="button" disabled={inbox.busy} onClick={() => void inbox.reject(item.id)}>
+            <button type="button" disabled={inbox.busy || rejudging} onClick={() => void inbox.reject(item.id)}>
               却下
             </button>
           )}
           {(item.state === 'approved' || item.state === 'rejected' || item.state === 'failed') && (
-            <button type="button" disabled={inbox.busy} onClick={() => void inbox.reopen(item.id)}>
+            <button type="button" disabled={inbox.busy || rejudging} onClick={() => void inbox.reopen(item.id)}>
               下書きに戻す
+            </button>
+          )}
+          {canRejudge(item, inbox.ytmusicEnabled) && (
+            <button type="button" disabled={inbox.busy || rejudging} onClick={rejudgeNow}>
+              {rejudgeProgress != null
+                ? `再判定中 ${rejudgeProgress.done}/${rejudgeProgress.total}`
+                : rejudging
+                  ? '再判定中'
+                  : '再判定'}
             </button>
           )}
           {item.state === 'rejected' && item.discard_requested_at == null && (

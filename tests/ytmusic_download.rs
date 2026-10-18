@@ -6,267 +6,32 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::Connection;
-use tokio_util::sync::CancellationToken;
-
-use spindle::db::Db;
-use spindle::fsroot::RootDir;
+use common::ytmusic::*;
 use spindle::import::sidecar::Sidecar;
-use spindle::import::ytmusic::downloader::{DownloaderEnv, DEDUP_PREFIX};
-use spindle::import::ytmusic::MetadataProvider;
-use spindle::jobs::handlers::ytdl::{new_ytdl_job, YtdlHandler};
-use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};
-
-/// 偽の yt-dlp。`--dump-single-json` なら `dump/<url をキー化した名前>.json` を返し、download なら
-/// `-o` のテンプレートに `audio.webm` と `thumb.jpg` を置く。呼び出しは `calls.log` に残す
-const FAKE_YTDLP: &str = r#"
-FAKE="$1"; shift
-printf '%s\n' "$*" >> "$FAKE/calls.log"
-url="${@: -1}"
-key=$(printf '%s' "$url" | tr -c 'A-Za-z0-9' '_')
-if [[ " $* " == *" --dump-single-json "* ]]; then
-  if [ -f "$FAKE/dump/$key.json" ]; then cat "$FAKE/dump/$key.json"; exit 0; fi
-  if [ -f "$FAKE/unsupported" ]; then echo "ERROR: Unsupported URL: $url" >&2; exit 1; fi
-  echo "ERROR: [youtube] $url: Video unavailable" >&2; exit 1
-fi
-if [ -f "$FAKE/fail_download" ]; then echo "ERROR: unable to download: network down" >&2; exit 1; fi
-tmpl=""
-prev=""
-for a in "$@"; do
-  if [ "$prev" = "-o" ]; then tmpl="$a"; fi
-  prev="$a"
-done
-id=$(grep -o '"id": *"[^"]*"' "$FAKE/dump/$key.json" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-out="${tmpl//%(id)s/$id}"; out="${out//%(ext)s/webm}"
-cp "$FAKE/audio.webm" "$out"
-cp "$FAKE/thumb.jpg" "${out%.webm}.jpg"
-"#;
+use spindle::import::ytmusic::downloader::DEDUP_PREFIX;
+use spindle::jobs::handlers::ytdl::YtdlHandler;
+use spindle::jobs::{EnqueueResult, JobState, JobType, Registry};
 
 /// 偽のプラグイン。channel で分岐: KnownCh → ok、SkipCh → skip、BrokenCh → 不正な JSON、他 → unmatched
 const FAKE_PLUGIN: &str = r#"
 IN=$(cat)
 case "$IN" in
-  *'"channel":"KnownCh"'*) echo '{"protocol":1,"ok":true,"track":{"title":"Song One","artists":["Artist A"],"albumartist":"Artist A","album":"Songs of A","category":"Pop","date":"2026","tags":[["ORIGINALARTIST","Someone"]]}}' ;;
+  *'"channel":"KnownCh"'*) echo '{"protocol":1,"ok":true,"track":{"title":"Song One","artists":["Artist A"],"albumartist":"Artist A","album":"Songs of A","category":"Pop","date":"2026","tags":[["ORIGINALARTIST","Someone"]]},"plugin":{"name":"fake","version":"v9.9.9"}}' ;;
   *'"channel":"SkipCh"'*) echo '{"protocol":1,"ok":false,"reason":"skip","message":"配信の告知"}' ;;
   *'"channel":"BrokenCh"'*) echo 'not json' ;;
   *) echo '{"protocol":1,"ok":false,"reason":"unmatched","message":"ルールを足してください"}' ;;
 esac
 "#;
 
-struct Lib {
-    dir: tempfile::TempDir,
-    db_path: PathBuf,
-    db: Arc<Db>,
-    jobs: Arc<Jobs>,
-    inbox: Arc<RootDir>,
-    fake: PathBuf,
-    shutdown: CancellationToken,
-}
-
-impl Lib {
-    fn new() -> Option<Self> {
-        let dir = tempfile::tempdir().unwrap();
-        for d in ["Inbox", "Archive", "tmp", "fake", "fake/dump"] {
-            std::fs::create_dir(dir.path().join(d)).unwrap();
-        }
-        let fake = dir.path().join("fake");
-        common::make_audio(&fake, "audio.webm", "webm", 1)?;
-        // サムネイル（ffmpeg で 16x16 の JPEG を作る）
-        let st = std::process::Command::new(common::ffmpeg()?)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-            ])
-            .arg("color=c=red:s=16x16")
-            .args(["-frames:v", "1"])
-            .arg(fake.join("thumb.jpg"))
-            .status()
-            .unwrap();
-        assert!(st.success());
-        std::fs::write(fake.join("ytdlp.sh"), FAKE_YTDLP).unwrap();
-        std::fs::write(fake.join("plugin.sh"), FAKE_PLUGIN).unwrap();
-        let db_path = dir.path().join("spindle.db");
-        let db = Arc::new(Db::open(&db_path).unwrap());
-        let jobs = Jobs::new(db.clone());
-        let inbox = Arc::new(RootDir::open(&dir.path().join("Inbox")).unwrap());
-        Some(Self {
-            dir,
-            db_path,
-            db,
-            jobs,
-            inbox,
-            fake,
-            shutdown: CancellationToken::new(),
-        })
-    }
-
-    fn env(&self) -> DownloaderEnv {
-        let plugin = vec![
-            "/bin/bash".to_owned(),
-            self.fake.join("plugin.sh").display().to_string(),
-        ];
-        DownloaderEnv {
-            db: self.db.clone(),
-            inbox: self.inbox.clone(),
-            archive: Arc::new(RootDir::open(&self.dir.path().join("Archive")).unwrap()),
-            jobs: self.jobs.clone(),
-            provider: MetadataProvider::new(&plugin, Duration::from_secs(10)).unwrap(),
-            // 引数配列の先頭にスクリプトと fake ディレクトリを固定する（`ytdlp` は引数配列）
-            ytdlp: vec![
-                "/bin/bash".to_owned(),
-                self.fake.join("ytdlp.sh").display().to_string(),
-                self.fake.display().to_string(),
-            ],
-            ffmpeg: common::ffmpeg().unwrap_or_else(|| PathBuf::from("ffmpeg")),
-            tmp_root: self.dir.path().join("tmp").join("ytdl"),
-            download_timeout: Duration::from_secs(60),
-        }
-    }
-
-    fn start(&self) {
-        let mut reg = Registry::new();
-        reg.register(JobType::Ytdl, Arc::new(YtdlHandler::new(self.env())));
-        self.jobs.start(reg, self.shutdown.clone());
-    }
-
-    /// dump の JSON を置く（動画）
-    fn video(&self, url: &str, id: &str, uploader: &str, title: &str, webm: bool) {
-        let formats = if webm {
-            r#"[{"format_id":"251","ext":"webm","acodec":"opus","vcodec":"none"},{"format_id":"140","ext":"m4a","acodec":"mp4a.40.2","vcodec":"none"}]"#
-        } else {
-            r#"[{"format_id":"140","ext":"m4a","acodec":"mp4a.40.2","vcodec":"none"}]"#
-        };
-        let json = format!(
-            r#"{{"id":"{id}","title":"{title}","uploader":"{uploader}","channel":"{uploader} Channel",
-                 "webpage_url":"https://www.youtube.com/watch?v={id}","upload_date":"20260901",
-                 "duration":123.4,"_type":"video","formats":{formats}}}"#
-        );
-        self.dump(url, &json);
-    }
-
-    fn dump(&self, url: &str, json: &str) {
-        let key: String = url
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        std::fs::write(self.fake.join("dump").join(format!("{key}.json")), json).unwrap();
-    }
-
-    fn calls(&self) -> Vec<String> {
-        std::fs::read_to_string(self.fake.join("calls.log"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
-
-    async fn run(&self, url: &str) -> (i64, JobState) {
-        let id = match self.jobs.enqueue(new_ytdl_job(url)).await.unwrap() {
-            EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
-        };
-        (id, self.wait(id).await)
-    }
-
-    async fn wait(&self, id: i64) -> JobState {
-        let deadline = std::time::Instant::now() + Duration::from_secs(120);
-        while std::time::Instant::now() < deadline {
-            let (s, attempts): (String, i64) = self
-                .conn()
-                .query_row(
-                    "SELECT state, attempts FROM jobs WHERE id = ?1",
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .unwrap();
-            let st: JobState = s.parse().unwrap();
-            // 再試行待ち（queued + attempts > 0）も終端として返す
-            if st.is_terminal() || (st == JobState::Queued && attempts > 0) {
-                return st;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("ytdl ジョブが終わらない");
-    }
-
-    fn note(&self, id: i64) -> Option<String> {
-        self.conn()
-            .query_row("SELECT note FROM jobs WHERE id = ?1", [id], |r| r.get(0))
-            .unwrap()
-    }
-
-    fn job(&self, id: i64) -> (i64, Option<String>) {
-        self.conn()
-            .query_row(
-                "SELECT attempts, last_error FROM jobs WHERE id = ?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap()
-    }
-
-    fn conn(&self) -> Connection {
-        Connection::open(&self.db_path).unwrap()
-    }
-
-    fn inbox_path(&self, rel: &str) -> PathBuf {
-        self.dir.path().join("Inbox").join(rel)
-    }
-
-    fn count(&self, sql: &str) -> i64 {
-        self.conn().query_row(sql, [], |r| r.get(0)).unwrap()
-    }
-}
-
-impl Drop for Lib {
-    fn drop(&mut self) {
-        self.shutdown.cancel();
-    }
-}
-
-/// テスト用: ファイルのタグを直接書き換える（`write_tag_changes` を tmp 無しで当てる）
-fn set_tags(path: &std::path::Path, ext: &str, tags: &[(&str, &[&str])]) {
-    let changes: Vec<spindle::domain::tags::TagChange> = tags
-        .iter()
-        .map(|(k, vs)| spindle::domain::tags::TagChange {
-            key: (*k).to_owned(),
-            values: Some(vs.iter().map(|v| (*v).to_owned()).collect()),
-        })
-        .collect();
-    let mut f = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open(path)
-        .unwrap();
-    spindle::domain::tags::write_tag_changes(&mut f, Some(ext), &changes, None).unwrap();
-}
-
-macro_rules! lib {
-    () => {
-        match Lib::new() {
-            Some(l) => l,
-            None => {
-                eprintln!("ffmpeg が無いので skip");
-                return;
-            }
-        }
-    };
-}
-
 const U1: &str = "https://youtu.be/v1";
 const U2: &str = "https://youtu.be/v2";
 
 #[tokio::test]
 async fn ok_video_is_staged_in_inbox_with_tags_sidecar_and_archive() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
     lib.start();
     let (id, st) = lib.run(U1).await;
@@ -303,6 +68,14 @@ async fn ok_video_is_staged_in_inbox_with_tags_sidecar_and_archive() {
     assert_eq!(e.channel.as_deref(), Some("KnownCh"));
     assert_eq!(e.url.as_deref(), Some("https://www.youtube.com/watch?v=v1"));
     assert!(e.message.is_none());
+    // 再判定の材料（Item・プラグインの版・時刻・追加タグのキー）
+    let item = e.item.as_ref().unwrap();
+    assert_eq!(item.title, "Song One (Official Video)");
+    assert_eq!(item.channel, "KnownCh");
+    assert_eq!(item.uploaded_at.as_deref(), Some("2026-09-01"));
+    assert!(e.judged_at.is_some());
+    assert_eq!(e.plugin_tags, Some(vec!["ORIGINALARTIST".to_owned()]));
+    assert_eq!(e.plugin_version.as_deref(), Some("v9.9.9"));
     // Archive の webm、inbox ジョブの投入、作業領域の後始末
     assert!(lib.dir.path().join("Archive/youtube/v1.webm").exists());
     assert_eq!(
@@ -321,7 +94,7 @@ async fn ok_video_is_staged_in_inbox_with_tags_sidecar_and_archive() {
 
 #[tokio::test]
 async fn unmatched_video_goes_to_the_catch_all_directory_with_the_message() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "OtherCh", "Some Title", true);
     lib.start();
     let (id, st) = lib.run(U1).await;
@@ -343,12 +116,14 @@ async fn unmatched_video_goes_to_the_catch_all_directory_with_the_message() {
     let e = &s.files["20260901 Some Title [v1].opus"];
     assert_eq!(e.verdict, "unmatched");
     assert_eq!(e.message.as_deref(), Some("ルールを足してください"));
+    assert!(e.item.is_some());
+    assert_eq!(e.plugin_tags, None);
     assert!(lib.dir.path().join("Archive/youtube/v1.webm").exists());
 }
 
 #[tokio::test]
 async fn skip_is_done_without_downloading() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "SkipCh", "Announcement", true);
     lib.start();
     let (id, st) = lib.run(U1).await;
@@ -371,7 +146,7 @@ async fn skip_is_done_without_downloading() {
 
 #[tokio::test]
 async fn playlist_is_expanded_into_one_job_per_entry() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     let pl = "https://www.youtube.com/playlist?list=PL1";
     lib.dump(
         pl,
@@ -445,7 +220,7 @@ async fn playlist_is_expanded_into_one_job_per_entry() {
 /// 同名のファイルの SOURCE_URL が同じなら自分の成果物として採用し、サイドカーと投入を済ませる
 #[tokio::test]
 async fn rerun_after_placing_the_opus_adopts_it_and_finishes() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "KnownCh", "Song One", true);
     lib.start();
     let (id, st) = lib.run(U1).await;
@@ -491,7 +266,7 @@ async fn rerun_after_placing_the_opus_adopts_it_and_finishes() {
 /// 同じなら、ダウンロードせずにサイドカーと投入だけ済ませる
 #[tokio::test]
 async fn rerun_after_the_scan_registered_the_file_completes_without_downloading() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "KnownCh", "Song One", true);
     lib.start();
     let (id, st) = lib.run(U1).await;
@@ -522,7 +297,7 @@ async fn rerun_after_the_scan_registered_the_file_completes_without_downloading(
 /// SOURCE_URL を読み直す（走査後に差し替えられていれば採用しない）
 #[tokio::test]
 async fn adoption_of_a_scanned_file_uses_the_path_key_and_rereads_the_file() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "KnownCh", "Song One", true);
     lib.start();
     let (id, st) = lib.run(U1).await;
@@ -575,7 +350,7 @@ async fn adoption_of_a_scanned_file_uses_the_path_key_and_rereads_the_file() {
 /// done（note に所在）にして、上部バーの赤丸を本当の失敗だけにする（P4-18）
 #[tokio::test]
 async fn already_imported_url_is_done_with_a_note() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "KnownCh", "One", true);
     // Library に SOURCE_URL を持つ active なトラック
     lib.conn()
@@ -624,7 +399,7 @@ async fn already_imported_url_is_done_with_a_note() {
 
 #[tokio::test]
 async fn download_failure_is_retried_but_a_missing_webm_format_is_fatal() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "KnownCh", "One", true);
     std::fs::write(lib.fake.join("fail_download"), b"").unwrap();
     lib.start();
@@ -652,7 +427,7 @@ async fn download_failure_is_retried_but_a_missing_webm_format_is_fatal() {
 
 #[tokio::test]
 async fn plugin_fault_and_unknown_video_are_fatal() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "BrokenCh", "One", true);
     lib.start();
     let (id, st) = lib.run(U1).await;
@@ -812,7 +587,7 @@ fn sweep_tmp_removes_leftover_work_dirs() {
 #[tokio::test]
 #[ignore]
 async fn real_ytdlp_end_to_end() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     let mut env = lib.env();
     env.ytdlp = vec!["yt-dlp".to_owned()];
     env.download_timeout = Duration::from_secs(300);
@@ -853,7 +628,7 @@ async fn real_ytdlp_end_to_end() {
 /// 失敗ジョブで一覧を埋めない）
 #[tokio::test]
 async fn playlist_expansion_skips_videos_already_imported() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     let pl = "https://www.youtube.com/playlist?list=PL2";
     lib.dump(
         pl,
@@ -930,31 +705,6 @@ async fn playlist_expansion_skips_videos_already_imported() {
 
 // ---------------------------------------------------------------- 購読由来（P4-16、D-78）
 
-/// 購読を登録して id を返す
-async fn subscribe(
-    lib: &Lib,
-    albumartist: &str,
-    album: &str,
-    category: Option<&str>,
-    align: bool,
-) -> i64 {
-    use spindle::db::subscriptions::{insert, NewSubscription, WriteOutcome};
-    let s = NewSubscription {
-        list_id: "PL1".to_owned(),
-        url: "https://www.youtube.com/playlist?list=PL1".to_owned(),
-        albumartist: albumartist.to_owned(),
-        album: album.to_owned(),
-        category: category.map(str::to_owned),
-        align,
-        enabled: true,
-        max_enqueue: 50,
-    };
-    match lib.db.write(move |c| insert(c, &s, 1)).await.unwrap() {
-        WriteOutcome::Ok(id) => id,
-        other => panic!("{other:?}"),
-    }
-}
-
 async fn run_for(lib: &Lib, url: &str, sub: i64, position: u32) -> (i64, JobState) {
     use spindle::jobs::handlers::ytdl::new_subscription_ytdl_job;
     let id = match lib
@@ -972,7 +722,7 @@ async fn run_for(lib: &Lib, url: &str, sub: i64, position: u32) -> (i64, JobStat
 /// align なら TRACKNUMBER = 位置。サイドカーに購読 id と位置
 #[tokio::test]
 async fn subscription_download_uses_the_subscription_target_and_position() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
     let sub = subscribe(&lib, "Sub Artist", "Sub Album", Some("Rock"), true).await;
     lib.start();
@@ -1000,7 +750,7 @@ async fn subscription_download_uses_the_subscription_target_and_position() {
 /// off なら TRACKNUMBER は書かない
 #[tokio::test]
 async fn subscription_download_ignores_plugin_skip_and_unmatched() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "SkipCh", "Announcement", true);
     lib.video(U2, "v2", "OtherCh", "Some Title", true);
     let sub = subscribe(&lib, "Sub Artist", "Sub Album", None, false).await;
@@ -1042,7 +792,7 @@ async fn subscription_download_ignores_plugin_skip_and_unmatched() {
 /// 購読が消えていれば通常の ytdl として振る舞う（プラグインの宛先、購読の情報なし）
 #[tokio::test]
 async fn subscription_download_falls_back_when_the_subscription_is_gone() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "KnownCh", "Song One", true);
     lib.start();
     let (id, st) = run_for(&lib, U1, 999, 3).await;
@@ -1060,7 +810,7 @@ async fn subscription_download_falls_back_when_the_subscription_is_gone() {
 /// 束ねた album の category が未推定（NULL）なら購読の category を使う（宛先のディレクトリは category で決まる）
 #[tokio::test]
 async fn subscription_download_uses_the_bound_album_but_falls_back_to_its_own_category() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "KnownCh", "Song One", true);
     let sub = subscribe(&lib, "Old Artist", "Old Album", Some("Rock"), true).await;
     lib.conn()
@@ -1085,7 +835,7 @@ async fn subscription_download_uses_the_bound_album_but_falls_back_to_its_own_ca
 /// 購読が消えていれば skip も通常どおり（ダウンロードしない）
 #[tokio::test]
 async fn subscription_download_respects_skip_when_the_subscription_is_gone() {
-    let lib = lib!();
+    let lib = lib!(FAKE_PLUGIN);
     lib.video(U1, "v1", "SkipCh", "Announcement", true);
     lib.start();
     let (id, st) = run_for(&lib, U1, 999, 3).await;

@@ -461,3 +461,23 @@ fn playlist_subscriptions_constraints_and_ids_not_reused() {
         "消した id を再利用しない"
     );
 }
+
+/// 再判定（D-114）: jobs.type が inbox_rejudge を受け付け、列挙にも載る
+#[test]
+fn inbox_rejudge_job_type_is_accepted_by_the_schema() {
+    use spindle::db::jobs::JobType;
+    let conn = open_memory_connection().unwrap();
+    assert!(JobType::ALL.contains(&JobType::InboxRejudge));
+    assert_eq!(JobType::InboxRejudge.as_str(), "inbox_rejudge");
+    conn.execute(
+        "INSERT INTO jobs (type, payload, created_at) VALUES (?1, '{\"item_id\":1}', 1)",
+        [JobType::InboxRejudge.as_str()],
+    )
+    .unwrap();
+    assert!(conn
+        .execute(
+            "INSERT INTO jobs (type, payload, created_at) VALUES ('no_such_type', '{}', 1)",
+            [],
+        )
+        .is_err());
+}

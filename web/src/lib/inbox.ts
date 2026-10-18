@@ -119,6 +119,12 @@ export type InboxSource = {
   /** 再生リストの購読から落とした曲の購読 id と再生リスト上の位置（D-78）。それ以外は無い */
   subscription_id?: number
   position?: number
+  /** 判定したプラグインの版。無ければ null（旧サーバ・旧サイドカーでは無い） */
+  plugin_version?: string | null
+  /** 判定した時刻（UNIX epoch 秒） */
+  judged_at?: number | null
+  /** 直近の再判定がこの曲で失敗した理由 */
+  rejudge_error?: string | null
 }
 
 /** 追記先の既存 album（GET /api/inbox の destination。D-70） */
@@ -741,6 +747,213 @@ export function syncNote(
 /** 判定バッジの文言（D-70） */
 export function verdictLabel(s: InboxSource): { text: string; ok: boolean } {
   return s.verdict === 'ok' ? { text: '判定済み', ok: true } : { text: `未判定（${s.verdict}）`, ok: false }
+}
+
+// ---------------------------------------------------------------- 再判定（D-114）
+
+/** 再判定できる件か（YouTube 機能が有効で、承認前で、ダウンローダの判定がある曲を含む） */
+export function canRejudge(item: Pick<InboxItem, 'state' | 'tracks'>, ytmusicEnabled: boolean): boolean {
+  return ytmusicEnabled && item.state === 'pending' && item.tracks.some((f) => f.source != null)
+}
+
+/** 見出しの「判定: <プラグインの版>」。判定のある曲が無ければ null。版が混ざれば辞書順で最小の版に「ほか」 */
+export function pluginVersionLabel(tracks: Array<Pick<InboxFile, 'source'>>): string | null {
+  const sources = tracks.map((f) => f.source).filter((s): s is InboxSource => s != null)
+  if (sources.length === 0) return null
+  const versions = sources.map((s) => s.plugin_version ?? null)
+  const known = [...new Set(versions.filter((v): v is string => v != null))].sort()
+  if (known.length === 0) return '判定: 版不明'
+  if (known.length === 1 && versions.every((v) => v != null)) return `判定: spindle-ytmusic-meta ${known[0]}`
+  return `判定: ${known[0]} ほか`
+}
+
+/** 再判定の確認文。失うものが無ければ null（確認なしで実行してよい）。保存済みの下書きがある方を優先して言う */
+export function rejudgeConfirmText(item: Pick<InboxItem, 'draft'>, dirty: boolean): string | null {
+  if (item.draft != null) return '保存済みの補正は消え、判定結果で置き換わります。再判定しますか？'
+  if (dirty) return '未保存の補正は消えます。再判定しますか？'
+  return null
+}
+
+/**
+ * 再判定のあと、押した件の曲（`prevUrls` = 押した時点の `source.url`）がどこへ行ったか。
+ * 移した数 = 元の件以外に今ある URL の数。元の件が消え、全 URL が別の 1 件に揃っていればそれが移動先
+ */
+export function rejudgeLanding(
+  prevId: number,
+  prevUrls: string[],
+  items: InboxItem[],
+): { target: InboxItem | null; moved: number } {
+  const wanted = new Set(prevUrls)
+  const others = items.filter((i) => i.id !== prevId)
+  const moved = new Set(
+    others.flatMap((i) => i.tracks.map((f) => f.source?.url ?? null).filter((u): u is string => u != null && wanted.has(u))),
+  ).size
+  if (items.some((i) => i.id === prevId) || wanted.size === 0) return { target: null, moved }
+  const target = others.find((i) => {
+    const have = new Set(i.tracks.map((f) => f.source?.url ?? null))
+    return prevUrls.every((u) => have.has(u))
+  })
+  return { target: target ?? null, moved }
+}
+
+/** 再判定を押した件の控え。`finished` はジョブが終わったと気づいた時点の一覧（参照）と時刻 */
+export type RejudgeWatch = {
+  id: number
+  /** 押した時点の曲の `source.url` */
+  urls: string[]
+  /** 押した時点の曲の形（`rejudgeShape`） */
+  before: string
+  finished: { items: InboxItem[] | null; at: number } | null
+}
+
+/** ジョブが終わってから、一覧に結果が届くのを待つ上限（過ぎたら移動先を探さずに知らせる） */
+export const REJUDGE_SETTLE_TIMEOUT_MS = 30_000
+
+/** 件の曲の形: 名前と判定の記録（判定・版・時刻・失敗）。再判定の結果が一覧に届いたかを見分ける */
+function rejudgeShape(item: Pick<InboxItem, 'tracks'>): string {
+  return item.tracks
+    .map((f) =>
+      JSON.stringify([
+        f.rel_path,
+        f.source?.url ?? null,
+        f.source?.verdict ?? null,
+        f.source?.plugin_version ?? null,
+        f.source?.judged_at ?? null,
+        f.source?.rejudge_error ?? null,
+      ]),
+    )
+    .sort()
+    .join('\n')
+}
+
+export function rejudgeWatchOf(item: InboxItem): RejudgeWatch {
+  return {
+    id: item.id,
+    urls: item.tracks.map((f) => f.source?.url ?? null).filter((u): u is string => u != null),
+    before: rejudgeShape(item),
+    finished: null,
+  }
+}
+
+/**
+ * 再判定の着地を決めてよいか。ジョブの終わりは走査（一覧の作り直し）より先に来るので、終わった後に
+ * 取り直した一覧で、押した件が消えたか曲の形が押した時点と変わったら `land`。変わらない一覧（走査の前・
+ * 古い取得）では待ち、終わってから `REJUDGE_SETTLE_TIMEOUT_MS` 過ぎたら `timeout`
+ */
+export function rejudgeSettle(w: RejudgeWatch, items: InboxItem[], now: number): 'wait' | 'land' | 'timeout' {
+  if (w.finished == null) return 'wait'
+  if (items !== w.finished.items) {
+    const it = items.find((i) => i.id === w.id)
+    if (it == null || rejudgeShape(it) !== w.before) return 'land'
+  }
+  return now - w.finished.at >= REJUDGE_SETTLE_TIMEOUT_MS ? 'timeout' : 'wait'
+}
+
+/** 着地: 全曲が別の 1 件へ移ったらその件を選び、移した数を知らせる（`rejudgeLanding`） */
+export function rejudgeOutcome(w: RejudgeWatch, items: InboxItem[]): { select: number | null; notice: string } {
+  const { target, moved } = rejudgeLanding(w.id, w.urls, items)
+  const where =
+    target ??
+    items.find((i) => i.id !== w.id && i.tracks.some((f) => f.source?.url != null && w.urls.includes(f.source.url)))
+  return {
+    select: target?.id ?? null,
+    notice: moved > 0 && where != null ? `再判定した。${moved} 曲を ${where.rel_dir} へ移した` : '再判定した',
+  }
+}
+
+/**
+ * 再判定の投入の途中の件: POST の応答を待つ間は `posting`、受理された後、投入より後に出したジョブの取得が届くまでは
+ * `accepted`（その取得で待ち / 実行中に載るか、もう終わったと分かる）。この間も押せない（二度押し）
+ */
+export type RejudgeStarting = ReadonlyMap<number, 'posting' | 'accepted'>
+
+/** 件 `id` の再判定を押せないか（投入の途中か、待ち / 実行中） */
+export function rejudgeBusy(id: number, starting: RejudgeStarting, running: ReadonlyMap<number, unknown>): boolean {
+  return starting.has(id) || running.has(id)
+}
+
+/** 押した: POST の応答待ちにする */
+export function rejudgeStartingBegin(starting: RejudgeStarting, id: number): RejudgeStarting {
+  return new Map(starting).set(id, 'posting')
+}
+
+/** POST の応答: 受理なら最初の取得を待ち、失敗なら外す（また押せる） */
+export function rejudgeStartingSettle(starting: RejudgeStarting, id: number, accepted: boolean): RejudgeStarting {
+  const next = new Map(starting)
+  if (accepted) next.set(id, 'accepted')
+  else next.delete(id)
+  return next
+}
+
+/** 受理後に出した取得が届いた: 受理済みの件を外す（以後は取得の待ち / 実行中で見る）。応答待ちの件は残す */
+export function rejudgeStartingPolled(starting: RejudgeStarting): RejudgeStarting {
+  return new Map([...starting].filter(([, s]) => s === 'posting'))
+}
+
+/** 件 id → 再判定を押した件の控え（件ごと。別の件を押しても前の件の着地を失わない） */
+export type RejudgeWatches = ReadonlyMap<number, RejudgeWatch>
+
+/**
+ * 押した件の控えを置く。同じ件の控えが既にあれば置き換え、元の控えを `prior` で返す（投入が失敗したら
+ * `rejudgeWatchAbort` で戻す）
+ */
+export function rejudgeWatchBegin(
+  watches: RejudgeWatches,
+  item: InboxItem,
+): { watches: RejudgeWatches; mine: RejudgeWatch; prior: RejudgeWatch | undefined } {
+  const mine = rejudgeWatchOf(item)
+  return { watches: new Map(watches).set(item.id, mine), mine, prior: watches.get(item.id) }
+}
+
+/**
+ * 投入に失敗した: 置いた控え（`mine`）がまだその件の控えなら、元の控え（無ければ外す）に戻す。後から失敗した
+ * 投入（409 duplicate 等）が、受理済みのジョブの控えを消さないため
+ */
+export function rejudgeWatchAbort(
+  watches: RejudgeWatches,
+  mine: RejudgeWatch,
+  prior: RejudgeWatch | undefined,
+): RejudgeWatches {
+  if (watches.get(mine.id) !== mine) return watches
+  const next = new Map(watches)
+  if (prior != null) next.set(mine.id, prior)
+  else next.delete(mine.id)
+  return next
+}
+
+/** ジョブが終わった件（`finished`）の控えに、その時点の一覧と時刻を付ける。`marked` は新しく付けた件 */
+export function rejudgeWatchFinish(
+  watches: RejudgeWatches,
+  finished: number[],
+  items: InboxItem[] | null,
+  now: number,
+): { watches: RejudgeWatches; marked: number[] } {
+  const next = new Map(watches)
+  const marked: number[] = []
+  for (const id of finished) {
+    const w = next.get(id)
+    if (w == null || w.finished != null) continue
+    next.set(id, { ...w, finished: { items, at: now } })
+    marked.push(id)
+  }
+  return { watches: next, marked }
+}
+
+/** 控えごとに着地を決め（`rejudgeSettle`）、着地した控えを外す */
+export function rejudgeWatchSettle(
+  watches: RejudgeWatches,
+  items: InboxItem[],
+  now: number,
+): { watches: RejudgeWatches; landed: Array<{ watch: RejudgeWatch; settle: 'land' | 'timeout' }> } {
+  const next = new Map(watches)
+  const landed: Array<{ watch: RejudgeWatch; settle: 'land' | 'timeout' }> = []
+  for (const w of watches.values()) {
+    const settle = rejudgeSettle(w, items, now)
+    if (settle === 'wait') continue
+    next.delete(w.id)
+    landed.push({ watch: w, settle })
+  }
+  return { watches: next, landed }
 }
 
 

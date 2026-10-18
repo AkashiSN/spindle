@@ -45,10 +45,12 @@ pub enum JobType {
     DeviceSync,
     /// 端末の内容の検証（全曲の sha256）
     DeviceVerify,
+    /// Inbox の 1 件の再判定（メタデータの取り直し。D-114）
+    InboxRejudge,
 }
 
 impl JobType {
-    pub const ALL: [JobType; 21] = [
+    pub const ALL: [JobType; 22] = [
         JobType::Scan,
         JobType::Rip,
         JobType::Verify,
@@ -70,6 +72,7 @@ impl JobType {
         JobType::DeviceScan,
         JobType::DeviceSync,
         JobType::DeviceVerify,
+        JobType::InboxRejudge,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -95,6 +98,7 @@ impl JobType {
             JobType::DeviceScan => "device_scan",
             JobType::DeviceSync => "device_sync",
             JobType::DeviceVerify => "device_verify",
+            JobType::InboxRejudge => "inbox_rejudge",
         }
     }
 
@@ -139,6 +143,8 @@ impl JobType {
             JobType::Rgwrite => 1,
             // 端末ごとの排他は `job_mutexes` の `device:<id>`。別の端末なら並べてよい
             JobType::DeviceScan | JobType::DeviceSync | JobType::DeviceVerify => 2,
+            // 1 件ずつ外部のメタデータを引き直す。Inbox の取り込みと同じく直列
+            JobType::InboxRejudge => 1,
         }
     }
 
@@ -350,6 +356,7 @@ pub fn subject_of(
         JobType::DeviceScan | JobType::DeviceSync | JobType::DeviceVerify => {
             id_of("device_id").map(|id| format!("device #{id}"))
         }
+        JobType::InboxRejudge => id_of("item_id").map(|id| format!("item #{id}")),
         JobType::Rip | JobType::Inbox | JobType::Gc | JobType::Backup => None,
     }
 }

@@ -4,5 +4,6 @@
 pub mod downloader;
 pub mod metadata;
 pub mod playlist;
+pub mod rejudge;
 
-pub use metadata::{Item, MetadataProvider, Outcome, ProviderError, Track};
+pub use metadata::{Item, MetadataProvider, Outcome, PluginInfo, ProviderError, Resolved, Track};

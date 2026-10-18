@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod ytmusic;
+
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};

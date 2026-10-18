@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import {
+  canRejudge,
+  pluginVersionLabel,
+  rejudgeConfirmText,
+  rejudgeLanding,
+  rejudgeOutcome,
+  rejudgeSettle,
+  rejudgeWatchOf,
+  rejudgeBusy,
+  rejudgeStartingBegin,
+  rejudgeStartingSettle,
+  rejudgeStartingPolled,
+  rejudgeWatchBegin,
+  rejudgeWatchAbort,
+  rejudgeWatchFinish,
+  rejudgeWatchSettle,
+  REJUDGE_SETTLE_TIMEOUT_MS,
   applyPicture,
   nextStage,
   stageText,
@@ -1008,5 +1024,181 @@ describe('Inbox の段', () => {
     expect(nextStage({ stages: [st('place', 'done'), st('rg', 'na'), st('opus', 'running'), st('aac', 'todo')] })?.key).toBe('opus')
     expect(nextStage({ stages: [st('place', 'done')] })).toBeNull()
     expect(nextStage({})).toBeNull()
+  })
+})
+
+describe('再判定', () => {
+  const src = (over: Partial<NonNullable<InboxFile['source']>> = {}): InboxFile['source'] => ({
+    source: 'youtube',
+    url: 'https://www.youtube.com/watch?v=a',
+    channel: null,
+    verdict: 'ok',
+    message: null,
+    ...over,
+  })
+  const yt = (rel: string, over: Partial<NonNullable<InboxFile['source']>> = {}): InboxFile => ({
+    ...file(rel),
+    source: src({ url: `https://www.youtube.com/watch?v=${rel}`, ...over }),
+  })
+
+  it('canRejudge: YouTube 機能が有効で、pending で source のある曲があるときだけ', () => {
+    expect(canRejudge(item({ tracks: [yt('d/a')] }), true)).toBe(true)
+    expect(canRejudge(item({ tracks: [yt('d/a')] }), false)).toBe(false)
+    expect(canRejudge(item({ state: 'approved', tracks: [yt('d/a')] }), true)).toBe(false)
+    expect(canRejudge(item(), true)).toBe(false)
+  })
+
+  it('pluginVersionLabel', () => {
+    const v = (x?: string) => yt('d/a', x == null ? {} : { plugin_version: x })
+    expect(pluginVersionLabel([v('v0.1.0-rc.2'), v('v0.1.0-rc.2')])).toBe('判定: spindle-ytmusic-meta v0.1.0-rc.2')
+    expect(pluginVersionLabel([v('v0.1.0-rc.2'), v('v0.1.0-rc.1')])).toBe('判定: v0.1.0-rc.1 ほか')
+    expect(pluginVersionLabel([v(), v()])).toBe('判定: 版不明')
+    expect(pluginVersionLabel([file('d/a')])).toBeNull()
+  })
+
+  it('rejudgeConfirmText', () => {
+    const saved = proposal
+    expect(rejudgeConfirmText({ draft: saved }, false)).toBe('保存済みの補正は消え、判定結果で置き換わります。再判定しますか？')
+    expect(rejudgeConfirmText({ draft: null }, true)).toBe('未保存の補正は消えます。再判定しますか？')
+    expect(rejudgeConfirmText({ draft: saved }, true)).toBe('保存済みの補正は消え、判定結果で置き換わります。再判定しますか？')
+    expect(rejudgeConfirmText({ draft: null }, false)).toBeNull()
+  })
+
+  it('rejudgeLanding', () => {
+    const urls = ['https://www.youtube.com/watch?v=d/a', 'https://www.youtube.com/watch?v=d/b']
+    const dest = item({ id: 9, rel_dir: 'x', tracks: [yt('d/a'), yt('d/b')] })
+    expect(rejudgeLanding(7, urls, [dest])).toEqual({ target: dest, moved: 2 })
+    const part = item({ id: 9, rel_dir: 'x', tracks: [yt('d/a')] })
+    const rest = item({ id: 7, tracks: [yt('d/b')] })
+    expect(rejudgeLanding(7, urls, [part, rest])).toEqual({ target: null, moved: 1 })
+    expect(rejudgeLanding(7, urls, [item({ id: 7, tracks: [yt('d/a'), yt('d/b')] })])).toEqual({ target: null, moved: 0 })
+  })
+  describe('再判定の着地', () => {
+    const pressed = item({ id: 7, tracks: [yt('d/a', { judged_at: 100 }), yt('d/b', { judged_at: 100 })] })
+    const finishedWith = (items: InboxItem[] | null, at = 1000) => ({ ...rejudgeWatchOf(pressed), finished: { items, at } })
+
+    it('ジョブが終わるまでは待つ', () => {
+      expect(rejudgeSettle(rejudgeWatchOf(pressed), [pressed], 1000)).toBe('wait')
+    })
+
+    it('終わった時点の一覧のままなら待つ（取り直しを待つ）', () => {
+      const atFinish = [item({ id: 7, tracks: [yt('d/a', { judged_at: 200 })] })]
+      expect(rejudgeSettle(finishedWith(atFinish), atFinish, 1000)).toBe('wait')
+    })
+
+    it('取り直しても押した件が変わっていなければ待つ（走査の前・古い取得）', () => {
+      const w = finishedWith([pressed])
+      const stale = [item({ ...pressed, tracks: [...pressed.tracks] })]
+      expect(rejudgeSettle(w, stale, 1000 + 5000)).toBe('wait')
+    })
+
+    it('押した件の曲の名前か判定が変わったら着地する', () => {
+      const w = finishedWith([pressed])
+      const renamed = item({ id: 7, tracks: [yt('d/a2', { url: 'https://www.youtube.com/watch?v=d/a', judged_at: 100 }), yt('d/b', { judged_at: 100 })] })
+      expect(rejudgeSettle(w, [renamed], 1001)).toBe('land')
+      const rejudged = item({ id: 7, tracks: [yt('d/a', { judged_at: 200 }), yt('d/b', { judged_at: 200 })] })
+      expect(rejudgeSettle(w, [rejudged], 1001)).toBe('land')
+    })
+
+    it('押した件が一覧から消えたら着地する', () => {
+      const w = finishedWith([pressed])
+      expect(rejudgeSettle(w, [item({ id: 9, rel_dir: 'x', tracks: [yt('d/a'), yt('d/b')] })], 1001)).toBe('land')
+    })
+
+    it('変わらないまま時間が過ぎたらあきらめる', () => {
+      const w = finishedWith([pressed])
+      const stale = [item({ ...pressed })]
+      expect(rejudgeSettle(w, stale, 1000 + REJUDGE_SETTLE_TIMEOUT_MS - 1)).toBe('wait')
+      expect(rejudgeSettle(w, stale, 1000 + REJUDGE_SETTLE_TIMEOUT_MS)).toBe('timeout')
+    })
+
+    it('rejudgeOutcome: 全曲が移った先を開き、一部なら移した数を知らせる', () => {
+      const w = rejudgeWatchOf(pressed)
+      const dest = item({ id: 9, rel_dir: 'x', tracks: [yt('d/a'), yt('d/b')] })
+      expect(rejudgeOutcome(w, [dest])).toEqual({ select: 9, notice: '再判定した。2 曲を x へ移した' })
+      const part = item({ id: 9, rel_dir: 'x', tracks: [yt('d/a')] })
+      const rest = item({ id: 7, tracks: [yt('d/b')] })
+      expect(rejudgeOutcome(w, [part, rest])).toEqual({ select: null, notice: '再判定した。1 曲を x へ移した' })
+      expect(rejudgeOutcome(w, [pressed])).toEqual({ select: null, notice: '再判定した' })
+    })
+  })
+
+  describe('投入の途中（二度押し）', () => {
+    const none = new Map<number, unknown>()
+
+    it('押した時点から、受理されて最初の取得が届くまで押せない', () => {
+      let s = rejudgeStartingBegin(new Map(), 7)
+      expect(rejudgeBusy(7, s, none)).toBe(true)
+      expect(rejudgeBusy(8, s, none)).toBe(false)
+      s = rejudgeStartingSettle(s, 7, true)
+      expect(rejudgeBusy(7, s, none)).toBe(true)
+      // 応答待ちの件は取得が届いても残す
+      s = rejudgeStartingBegin(s, 8)
+      s = rejudgeStartingPolled(s)
+      expect(rejudgeBusy(7, s, none)).toBe(false)
+      expect(rejudgeBusy(8, s, none)).toBe(true)
+    })
+
+    it('投入に失敗したら押せるように戻す', () => {
+      const s = rejudgeStartingSettle(rejudgeStartingBegin(new Map(), 7), 7, false)
+      expect(rejudgeBusy(7, s, none)).toBe(false)
+    })
+
+    it('待ち / 実行中の件は押せない', () => {
+      expect(rejudgeBusy(7, new Map(), new Map([[7, { done: 0, total: 1 }]]))).toBe(true)
+    })
+
+    it('元の写しは変えない', () => {
+      const s0 = new Map<number, 'posting' | 'accepted'>()
+      rejudgeStartingBegin(s0, 7)
+      expect(s0.size).toBe(0)
+    })
+  })
+
+  describe('件ごとの控え', () => {
+    const a = item({ id: 7, tracks: [yt('d/a', { judged_at: 100 })] })
+    const b = item({ id: 8, rel_dir: 'y', tracks: [yt('y/b', { judged_at: 100 })] })
+
+    it('別の件を押しても前の件の控えは残る', () => {
+      let w = rejudgeWatchBegin(new Map(), a).watches
+      w = rejudgeWatchBegin(w, b).watches
+      expect([...w.keys()].sort()).toEqual([7, 8])
+    })
+
+    it('後から失敗した投入（409 duplicate 等）は、受理済みの控えを消さない', () => {
+      const first = rejudgeWatchBegin(new Map(), a)
+      const again = rejudgeWatchBegin(first.watches, a)
+      expect(again.prior).toBe(first.mine)
+      const w = rejudgeWatchAbort(again.watches, again.mine, again.prior)
+      expect(w.get(7)).toBe(first.mine)
+      // 控えの無かった件の失敗は消す
+      const solo = rejudgeWatchBegin(new Map(), b)
+      expect(rejudgeWatchAbort(solo.watches, solo.mine, solo.prior).has(8)).toBe(false)
+    })
+
+    it('失敗の前に置き換わっていたら触らない', () => {
+      const one = rejudgeWatchBegin(new Map(), a)
+      const two = rejudgeWatchBegin(one.watches, a)
+      expect(rejudgeWatchAbort(two.watches, one.mine, one.prior).get(7)).toBe(two.mine)
+    })
+
+    it('終わった件だけ印を付け、件ごとに着地する', () => {
+      let w = rejudgeWatchBegin(rejudgeWatchBegin(new Map(), a).watches, b).watches
+      const atFinish = [a, b]
+      const f = rejudgeWatchFinish(w, [7], atFinish, 1000)
+      expect(f.marked).toEqual([7])
+      w = f.watches
+      expect(w.get(7)?.finished).toEqual({ items: atFinish, at: 1000 })
+      expect(w.get(8)?.finished).toBeNull()
+      // 二度目は印を付け直さない
+      expect(rejudgeWatchFinish(w, [7], [], 2000).marked).toEqual([])
+
+      const moved = item({ id: 9, rel_dir: 'x', tracks: [yt('d/a')] })
+      const s = rejudgeWatchSettle(w, [moved, b], 1001)
+      expect(s.landed.map((l) => [l.watch.id, l.settle])).toEqual([[7, 'land']])
+      expect([...s.watches.keys()]).toEqual([8])
+      const t = rejudgeWatchSettle(w, atFinish, 1000 + REJUDGE_SETTLE_TIMEOUT_MS)
+      expect(t.landed.map((l) => [l.watch.id, l.settle])).toEqual([[7, 'timeout']])
+    })
   })
 })
