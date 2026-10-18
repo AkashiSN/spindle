@@ -33,6 +33,8 @@ export type InboxState = {
   discardRetentionDays: number | null
   /** 件が参照する購読の直近の同期（承認画面の「同期が番号を空けた経緯」。P4-22）。旧サーバでは空 */
   subscriptions: InboxSubscriptionSync[]
+  /** YouTube 機能（`[ytmusic].enabled`）。無効・旧サーバ・取得前は false（再判定のボタンを出さない） */
+  ytmusicEnabled: boolean
   setNotice: (s: string | null) => void
 }
 
@@ -56,6 +58,7 @@ export function useInbox(enabled: boolean, onChanged?: () => void): InboxState {
   const [busy, setBusy] = useState(false)
   const [discardRetentionDays, setDiscardRetentionDays] = useState<number | null>(null)
   const [subscriptions, setSubscriptions] = useState<InboxSubscriptionSync[]>([])
+  const [ytmusicEnabled, setYtmusicEnabled] = useState(false)
   const timer = useRef<number | null>(null)
 
   const fetchNow = useCallback(() => {
@@ -64,12 +67,14 @@ export function useInbox(enabled: boolean, onChanged?: () => void): InboxState {
       watch?: InboxWatch
       discard_retention_days?: number
       subscriptions?: InboxSubscriptionSync[]
+      ytmusic_enabled?: boolean
     }>('/api/inbox')
       .then((r) => {
         setItems(r.items)
         setWatch(r.watch ?? null)
         setDiscardRetentionDays(r.discard_retention_days ?? null)
         setSubscriptions(r.subscriptions ?? [])
+        setYtmusicEnabled(r.ytmusic_enabled ?? false)
         setError(null)
         setUnavailable(false)
       })
@@ -202,6 +207,7 @@ export function useInbox(enabled: boolean, onChanged?: () => void): InboxState {
     undiscard,
     discardRetentionDays,
     subscriptions,
+    ytmusicEnabled,
     setNotice,
   }
 }

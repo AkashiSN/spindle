@@ -423,6 +423,7 @@ async fn discard_and_undiscard_only_on_rejected_items() {
     assert!(list["items"][0]["discard_requested_at"].is_i64(), "{list}");
     assert_eq!(list["items"][0]["state"], "rejected");
     assert_eq!(list["discard_retention_days"], 7);
+    assert_eq!(list["ytmusic_enabled"], true);
     // 二度目は 409、取り消しで null に戻る
     let (st, _) = app.post(&c, &discard, json!({})).await;
     assert_eq!(st, StatusCode::CONFLICT);
@@ -1611,11 +1612,21 @@ async fn rejudge_api_is_not_found_when_ytmusic_is_disabled() {
         .unwrap()
         .to_owned();
     let r = req(Method::POST, "/api/inbox/1/rejudge")
-        .header(header::COOKIE, cookie)
+        .header(header::COOKIE, cookie.clone())
         .header(header::CONTENT_TYPE, "application/json")
         .header("sec-fetch-site", "same-origin")
         .body(Body::from("{}"))
         .unwrap();
-    let res = router.oneshot(r).await.unwrap();
+    let res = router.clone().oneshot(r).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    // 一覧は YouTube 機能が無効と知らせる（画面は再判定のボタンを出さない）
+    let r = req(Method::GET, "/api/inbox")
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap();
+    let res = router.oneshot(r).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let list: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(list["ytmusic_enabled"], false, "{list}");
 }

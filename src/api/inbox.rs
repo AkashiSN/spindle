@@ -64,6 +64,8 @@ pub struct ItemList {
     pub watch: WatchView,
     /// 破棄待ちの件を GC が消すまでの日数（`[gc].retention_days`。D-90）
     pub discard_retention_days: u32,
+    /// YouTube 機能（`[ytmusic].enabled`）。無効なら画面は再判定のボタンを出さない（D-114）
+    pub ytmusic_enabled: bool,
 }
 
 /// 購読の直近の同期の要約（`last_result` から。P4-22）
@@ -252,6 +254,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
             poll_interval_secs: state.config.inbox.poll_interval_secs,
         },
         discard_retention_days: state.config.gc.retention_days,
+        ytmusic_enabled: state.config.ytmusic.enabled,
     })
     .into_response())
 }
