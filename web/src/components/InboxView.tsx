@@ -41,10 +41,13 @@ import {
   nextStage,
   pictureState,
   pluginVersionLabel,
+  rejudgeBusy,
   rejudgeConfirmText,
   rejudgeOutcome,
-  rejudgeSettle,
-  rejudgeWatchOf,
+  rejudgeWatchAbort,
+  rejudgeWatchBegin,
+  rejudgeWatchFinish,
+  rejudgeWatchSettle,
   REJUDGE_SETTLE_TIMEOUT_MS,
   refreshedDraft,
   sameTitleCount,
@@ -57,7 +60,7 @@ import {
   type InboxDraft,
   type InboxFile,
   type InboxItem,
-  type RejudgeWatch,
+  type RejudgeWatches,
   type RipLookup,
 } from '../lib/inbox'
 import { parseTracklist } from '../lib/tracklist'
@@ -91,53 +94,63 @@ export function InboxView({
   // 選んでいた件が消えたら（placed の期限切れ・ディレクトリの消失）最初の件を出す
   const selected = items.find((i) => i.id === selectedId) ?? items[0] ?? null
 
-  // 再判定: 押した件の曲の URL と形を控えておき、ジョブが終わった後に取り直した一覧で押した件が変わったら
+  // 再判定: 押した件ごとに曲の URL と形を控えておき、ジョブが終わった後に取り直した一覧で押した件が変わったら
   // （ジョブの終わりは走査より先に来る）移動先を開く / 移した数を知らせる。変わらないまま 30 秒過ぎたらあきらめる
-  const rejudgeWatch = useRef<RejudgeWatch | null>(null)
+  const rejudgeWatches = useRef<RejudgeWatches>(new Map())
   const [rejudgeTick, setRejudgeTick] = useState(0)
-  const rejudgeTimer = useRef<number | null>(null)
+  const rejudgeTimers = useRef<Map<number, number>>(new Map())
   const { refresh, items: latestItems, setNotice } = inbox
+  const clearRejudgeTimer = (id: number) => {
+    const t = rejudgeTimers.current.get(id)
+    if (t != null) window.clearTimeout(t)
+    rejudgeTimers.current.delete(id)
+  }
   const rejudge = useInboxRejudge((finished) => {
     refresh()
-    const w = rejudgeWatch.current
-    if (w == null || w.finished != null || !finished.includes(w.id)) return
-    w.finished = { items: latestItems, at: Date.now() }
+    const { watches, marked } = rejudgeWatchFinish(rejudgeWatches.current, finished, latestItems, Date.now())
+    rejudgeWatches.current = watches
+    if (marked.length === 0) return
     setRejudgeTick((t) => t + 1)
-    if (rejudgeTimer.current != null) window.clearTimeout(rejudgeTimer.current)
-    rejudgeTimer.current = window.setTimeout(() => {
-      rejudgeTimer.current = null
-      setRejudgeTick((t) => t + 1)
-    }, REJUDGE_SETTLE_TIMEOUT_MS)
+    for (const id of marked) {
+      clearRejudgeTimer(id)
+      rejudgeTimers.current.set(
+        id,
+        window.setTimeout(() => {
+          rejudgeTimers.current.delete(id)
+          setRejudgeTick((t) => t + 1)
+        }, REJUDGE_SETTLE_TIMEOUT_MS),
+      )
+    }
   })
-  useEffect(
-    () => () => {
-      if (rejudgeTimer.current != null) window.clearTimeout(rejudgeTimer.current)
-    },
-    [],
-  )
   useEffect(() => {
-    const w = rejudgeWatch.current
-    if (w == null || latestItems == null) return
-    const settle = rejudgeSettle(w, latestItems, Date.now())
-    if (settle === 'wait') return
-    rejudgeWatch.current = null
-    if (rejudgeTimer.current != null) {
-      window.clearTimeout(rejudgeTimer.current)
-      rejudgeTimer.current = null
+    const timers = rejudgeTimers.current
+    return () => {
+      for (const t of timers.values()) window.clearTimeout(t)
     }
-    if (settle === 'timeout') {
-      setNotice('再判定した')
-      return
+  }, [])
+  useEffect(() => {
+    if (latestItems == null || rejudgeWatches.current.size === 0) return
+    const { watches, landed } = rejudgeWatchSettle(rejudgeWatches.current, latestItems, Date.now())
+    rejudgeWatches.current = watches
+    for (const { watch, settle } of landed) {
+      clearRejudgeTimer(watch.id)
+      if (settle === 'timeout') {
+        setNotice('再判定した')
+        continue
+      }
+      const { select, notice } = rejudgeOutcome(watch, latestItems)
+      if (select != null) setSelectedId(select)
+      setNotice(notice)
     }
-    const { select, notice } = rejudgeOutcome(w, latestItems)
-    if (select != null) setSelectedId(select)
-    setNotice(notice)
   }, [rejudgeTick, latestItems, setNotice])
   const startRejudge = async (item: InboxItem) => {
-    rejudgeWatch.current = rejudgeWatchOf(item)
+    // 投入の途中・実行中の二度押しは何もしない（控えも置き換えない）
+    if (rejudge.isBusy(item.id)) return
+    const { watches, mine, prior } = rejudgeWatchBegin(rejudgeWatches.current, item)
+    rejudgeWatches.current = watches
     const msg = await rejudge.start(item.id)
     if (msg != null) {
-      rejudgeWatch.current = null
+      rejudgeWatches.current = rejudgeWatchAbort(rejudgeWatches.current, mine, prior)
       setNotice(msg)
       refresh()
     }
@@ -272,8 +285,8 @@ function ItemForm({
   const sync = syncNote(item, draft, inbox.subscriptions, formatDateTime)
 
   const rejudgeProgress = rejudge.running.get(item.id)
-  // 再判定の間は承認・却下・下書きに戻すを止める（ジョブは件が pending でなくなると途中で止まる）
-  const rejudging = rejudgeProgress != null
+  // 再判定の間（押してから受理されて取得に載るまでを含む）は承認・却下・下書きに戻すを止める（API も 409 rejudging）
+  const rejudging = rejudgeBusy(item.id, rejudge.starting, rejudge.running)
   const versionLabel = pluginVersionLabel(item.tracks)
   const rejudgeNow = () => {
     // 未送信の編集 = フォームの今の下書きが、サーバの値から作った下書きと違う
@@ -486,7 +499,11 @@ function ItemForm({
           )}
           {canRejudge(item, inbox.ytmusicEnabled) && (
             <button type="button" disabled={inbox.busy || rejudging} onClick={rejudgeNow}>
-              {rejudgeProgress != null ? `再判定中 ${rejudgeProgress.done}/${rejudgeProgress.total}` : '再判定'}
+              {rejudgeProgress != null
+                ? `再判定中 ${rejudgeProgress.done}/${rejudgeProgress.total}`
+                : rejudging
+                  ? '再判定中'
+                  : '再判定'}
             </button>
           )}
           {item.state === 'rejected' && item.discard_requested_at == null && (

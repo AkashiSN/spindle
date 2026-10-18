@@ -7,6 +7,14 @@ import {
   rejudgeOutcome,
   rejudgeSettle,
   rejudgeWatchOf,
+  rejudgeBusy,
+  rejudgeStartingBegin,
+  rejudgeStartingSettle,
+  rejudgeStartingPolled,
+  rejudgeWatchBegin,
+  rejudgeWatchAbort,
+  rejudgeWatchFinish,
+  rejudgeWatchSettle,
   REJUDGE_SETTLE_TIMEOUT_MS,
   applyPicture,
   nextStage,
@@ -1112,6 +1120,85 @@ describe('再判定', () => {
       const rest = item({ id: 7, tracks: [yt('d/b')] })
       expect(rejudgeOutcome(w, [part, rest])).toEqual({ select: null, notice: '再判定した。1 曲を x へ移した' })
       expect(rejudgeOutcome(w, [pressed])).toEqual({ select: null, notice: '再判定した' })
+    })
+  })
+
+  describe('投入の途中（二度押し）', () => {
+    const none = new Map<number, unknown>()
+
+    it('押した時点から、受理されて最初の取得が届くまで押せない', () => {
+      let s = rejudgeStartingBegin(new Map(), 7)
+      expect(rejudgeBusy(7, s, none)).toBe(true)
+      expect(rejudgeBusy(8, s, none)).toBe(false)
+      s = rejudgeStartingSettle(s, 7, true)
+      expect(rejudgeBusy(7, s, none)).toBe(true)
+      // 応答待ちの件は取得が届いても残す
+      s = rejudgeStartingBegin(s, 8)
+      s = rejudgeStartingPolled(s)
+      expect(rejudgeBusy(7, s, none)).toBe(false)
+      expect(rejudgeBusy(8, s, none)).toBe(true)
+    })
+
+    it('投入に失敗したら押せるように戻す', () => {
+      const s = rejudgeStartingSettle(rejudgeStartingBegin(new Map(), 7), 7, false)
+      expect(rejudgeBusy(7, s, none)).toBe(false)
+    })
+
+    it('待ち / 実行中の件は押せない', () => {
+      expect(rejudgeBusy(7, new Map(), new Map([[7, { done: 0, total: 1 }]]))).toBe(true)
+    })
+
+    it('元の写しは変えない', () => {
+      const s0 = new Map<number, 'posting' | 'accepted'>()
+      rejudgeStartingBegin(s0, 7)
+      expect(s0.size).toBe(0)
+    })
+  })
+
+  describe('件ごとの控え', () => {
+    const a = item({ id: 7, tracks: [yt('d/a', { judged_at: 100 })] })
+    const b = item({ id: 8, rel_dir: 'y', tracks: [yt('y/b', { judged_at: 100 })] })
+
+    it('別の件を押しても前の件の控えは残る', () => {
+      let w = rejudgeWatchBegin(new Map(), a).watches
+      w = rejudgeWatchBegin(w, b).watches
+      expect([...w.keys()].sort()).toEqual([7, 8])
+    })
+
+    it('後から失敗した投入（409 duplicate 等）は、受理済みの控えを消さない', () => {
+      const first = rejudgeWatchBegin(new Map(), a)
+      const again = rejudgeWatchBegin(first.watches, a)
+      expect(again.prior).toBe(first.mine)
+      const w = rejudgeWatchAbort(again.watches, again.mine, again.prior)
+      expect(w.get(7)).toBe(first.mine)
+      // 控えの無かった件の失敗は消す
+      const solo = rejudgeWatchBegin(new Map(), b)
+      expect(rejudgeWatchAbort(solo.watches, solo.mine, solo.prior).has(8)).toBe(false)
+    })
+
+    it('失敗の前に置き換わっていたら触らない', () => {
+      const one = rejudgeWatchBegin(new Map(), a)
+      const two = rejudgeWatchBegin(one.watches, a)
+      expect(rejudgeWatchAbort(two.watches, one.mine, one.prior).get(7)).toBe(two.mine)
+    })
+
+    it('終わった件だけ印を付け、件ごとに着地する', () => {
+      let w = rejudgeWatchBegin(rejudgeWatchBegin(new Map(), a).watches, b).watches
+      const atFinish = [a, b]
+      const f = rejudgeWatchFinish(w, [7], atFinish, 1000)
+      expect(f.marked).toEqual([7])
+      w = f.watches
+      expect(w.get(7)?.finished).toEqual({ items: atFinish, at: 1000 })
+      expect(w.get(8)?.finished).toBeNull()
+      // 二度目は印を付け直さない
+      expect(rejudgeWatchFinish(w, [7], [], 2000).marked).toEqual([])
+
+      const moved = item({ id: 9, rel_dir: 'x', tracks: [yt('d/a')] })
+      const s = rejudgeWatchSettle(w, [moved, b], 1001)
+      expect(s.landed.map((l) => [l.watch.id, l.settle])).toEqual([[7, 'land']])
+      expect([...s.watches.keys()]).toEqual([8])
+      const t = rejudgeWatchSettle(w, atFinish, 1000 + REJUDGE_SETTLE_TIMEOUT_MS)
+      expect(t.landed.map((l) => [l.watch.id, l.settle])).toEqual([[7, 'timeout']])
     })
   })
 })

@@ -861,6 +861,101 @@ export function rejudgeOutcome(w: RejudgeWatch, items: InboxItem[]): { select: n
   }
 }
 
+/**
+ * 再判定の投入の途中の件: POST の応答を待つ間は `posting`、受理された後、投入より後に出したジョブの取得が届くまでは
+ * `accepted`（その取得で待ち / 実行中に載るか、もう終わったと分かる）。この間も押せない（二度押し）
+ */
+export type RejudgeStarting = ReadonlyMap<number, 'posting' | 'accepted'>
+
+/** 件 `id` の再判定を押せないか（投入の途中か、待ち / 実行中） */
+export function rejudgeBusy(id: number, starting: RejudgeStarting, running: ReadonlyMap<number, unknown>): boolean {
+  return starting.has(id) || running.has(id)
+}
+
+/** 押した: POST の応答待ちにする */
+export function rejudgeStartingBegin(starting: RejudgeStarting, id: number): RejudgeStarting {
+  return new Map(starting).set(id, 'posting')
+}
+
+/** POST の応答: 受理なら最初の取得を待ち、失敗なら外す（また押せる） */
+export function rejudgeStartingSettle(starting: RejudgeStarting, id: number, accepted: boolean): RejudgeStarting {
+  const next = new Map(starting)
+  if (accepted) next.set(id, 'accepted')
+  else next.delete(id)
+  return next
+}
+
+/** 受理後に出した取得が届いた: 受理済みの件を外す（以後は取得の待ち / 実行中で見る）。応答待ちの件は残す */
+export function rejudgeStartingPolled(starting: RejudgeStarting): RejudgeStarting {
+  return new Map([...starting].filter(([, s]) => s === 'posting'))
+}
+
+/** 件 id → 再判定を押した件の控え（件ごと。別の件を押しても前の件の着地を失わない） */
+export type RejudgeWatches = ReadonlyMap<number, RejudgeWatch>
+
+/**
+ * 押した件の控えを置く。同じ件の控えが既にあれば置き換え、元の控えを `prior` で返す（投入が失敗したら
+ * `rejudgeWatchAbort` で戻す）
+ */
+export function rejudgeWatchBegin(
+  watches: RejudgeWatches,
+  item: InboxItem,
+): { watches: RejudgeWatches; mine: RejudgeWatch; prior: RejudgeWatch | undefined } {
+  const mine = rejudgeWatchOf(item)
+  return { watches: new Map(watches).set(item.id, mine), mine, prior: watches.get(item.id) }
+}
+
+/**
+ * 投入に失敗した: 置いた控え（`mine`）がまだその件の控えなら、元の控え（無ければ外す）に戻す。後から失敗した
+ * 投入（409 duplicate 等）が、受理済みのジョブの控えを消さないため
+ */
+export function rejudgeWatchAbort(
+  watches: RejudgeWatches,
+  mine: RejudgeWatch,
+  prior: RejudgeWatch | undefined,
+): RejudgeWatches {
+  if (watches.get(mine.id) !== mine) return watches
+  const next = new Map(watches)
+  if (prior != null) next.set(mine.id, prior)
+  else next.delete(mine.id)
+  return next
+}
+
+/** ジョブが終わった件（`finished`）の控えに、その時点の一覧と時刻を付ける。`marked` は新しく付けた件 */
+export function rejudgeWatchFinish(
+  watches: RejudgeWatches,
+  finished: number[],
+  items: InboxItem[] | null,
+  now: number,
+): { watches: RejudgeWatches; marked: number[] } {
+  const next = new Map(watches)
+  const marked: number[] = []
+  for (const id of finished) {
+    const w = next.get(id)
+    if (w == null || w.finished != null) continue
+    next.set(id, { ...w, finished: { items, at: now } })
+    marked.push(id)
+  }
+  return { watches: next, marked }
+}
+
+/** 控えごとに着地を決め（`rejudgeSettle`）、着地した控えを外す */
+export function rejudgeWatchSettle(
+  watches: RejudgeWatches,
+  items: InboxItem[],
+  now: number,
+): { watches: RejudgeWatches; landed: Array<{ watch: RejudgeWatch; settle: 'land' | 'timeout' }> } {
+  const next = new Map(watches)
+  const landed: Array<{ watch: RejudgeWatch; settle: 'land' | 'timeout' }> = []
+  for (const w of watches.values()) {
+    const settle = rejudgeSettle(w, items, now)
+    if (settle === 'wait') continue
+    next.delete(w.id)
+    landed.push({ watch: w, settle })
+  }
+  return { watches: next, landed }
+}
+
 
 // ---------------------------------------------------------------- タグの変更（D-86）
 
