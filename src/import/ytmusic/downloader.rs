@@ -513,22 +513,25 @@ pub async fn download_one(
     };
     // 2. プラグイン（ダウンロードの前。skip ならここで終わり、宛先もここで決まる）
     let item = video.item();
-    let (track, verdict, message) = match env.provider.resolve(&item, token).await {
-        Ok(Outcome::Track(t)) => (Some(t), "ok".to_owned(), None),
-        // 購読由来は skip でも投入する（再生リストは人が選んだもの。P4-16）
-        Ok(Outcome::Declined { reason, message }) if reason == "skip" && subscription.is_none() => {
-            tracing::info!(url, message, "プラグインが skip");
-            return Ok(Downloaded::Skipped { message });
-        }
-        Ok(Outcome::Declined { reason, message }) => {
-            tracing::info!(url, reason, "判定できないので受け皿へ");
-            (None, reason, Some(message))
-        }
-        Err(ProviderError::Process(ProcessError::Cancelled)) => {
-            return Err(DownloadError::Cancelled)
-        }
-        Err(e) => return Err(DownloadError::Fatal(e.to_string())),
-    };
+    let (track, verdict, message) =
+        match env.provider.resolve(&item, token).await.map(|r| r.outcome) {
+            Ok(Outcome::Track(t)) => (Some(t), "ok".to_owned(), None),
+            // 購読由来は skip でも投入する（再生リストは人が選んだもの。P4-16）
+            Ok(Outcome::Declined { reason, message })
+                if reason == "skip" && subscription.is_none() =>
+            {
+                tracing::info!(url, message, "プラグインが skip");
+                return Ok(Downloaded::Skipped { message });
+            }
+            Ok(Outcome::Declined { reason, message }) => {
+                tracing::info!(url, reason, "判定できないので受け皿へ");
+                (None, reason, Some(message))
+            }
+            Err(ProviderError::Process(ProcessError::Cancelled)) => {
+                return Err(DownloadError::Cancelled)
+            }
+            Err(e) => return Err(DownloadError::Fatal(e.to_string())),
+        };
     // 購読由来（P4-16）: 追記先（albumartist / album / category）は購読の値。プラグインの判定は
     // TITLE / ARTIST に使い、skip / 判定不能でも投入する（再生リストは人が選んだもの）
     let (track, verdict) = match &subscription {

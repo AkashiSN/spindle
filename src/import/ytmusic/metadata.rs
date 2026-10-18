@@ -118,6 +118,39 @@ struct Response {
     reason: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    /// 応答したプラグインの名前と版。形が違えば捨てる（応答全体は不正にしない）
+    #[serde(default)]
+    plugin: Option<serde_json::Value>,
+}
+
+/// 応答したプラグインの名前と版（再判定の要否を決めるために sidecar へ残す）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInfo {
+    pub name: String,
+    pub version: String,
+}
+
+impl PluginInfo {
+    /// name / version が空でない文字列のときだけ読む
+    fn from_value(v: &serde_json::Value) -> Option<PluginInfo> {
+        let field = |k: &str| {
+            v.get(k)
+                .and_then(|x| x.as_str())
+                .filter(|x| !x.trim().is_empty())
+                .map(str::to_owned)
+        };
+        Some(PluginInfo {
+            name: field("name")?,
+            version: field("version")?,
+        })
+    }
+}
+
+/// `resolve` の結果（判定と、応答したプラグインの版）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub outcome: Outcome,
+    pub plugin: Option<PluginInfo>,
 }
 
 /// プラグインの判定
@@ -173,7 +206,7 @@ impl MetadataProvider {
         &self,
         item: &Item,
         token: &CancellationToken,
-    ) -> Result<Outcome, ProviderError> {
+    ) -> Result<Resolved, ProviderError> {
         let request = serde_json::to_vec(&Request {
             protocol: PROTOCOL,
             op: "metadata",
@@ -200,6 +233,7 @@ impl MetadataProvider {
         if res.protocol != PROTOCOL {
             return Err(ProviderError::Protocol(res.protocol));
         }
+        let plugin = res.plugin.as_ref().and_then(PluginInfo::from_value);
         if !res.ok {
             // reason / message の欠落と空はプロトコル不正（未知の reason は前方互換で通す）
             let reason = res
@@ -210,13 +244,19 @@ impl MetadataProvider {
                 .message
                 .filter(|m| !m.trim().is_empty())
                 .ok_or_else(|| ProviderError::Invalid("ok: false なのに message が無い".into()))?;
-            return Ok(Outcome::Declined { reason, message });
+            return Ok(Resolved {
+                outcome: Outcome::Declined { reason, message },
+                plugin,
+            });
         }
         let track = res
             .track
             .ok_or_else(|| ProviderError::Invalid("ok なのに track が無い".into()))?;
         validate(&track)?;
-        Ok(Outcome::Track(track))
+        Ok(Resolved {
+            outcome: Outcome::Track(track),
+            plugin,
+        })
     }
 }
 
