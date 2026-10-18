@@ -24,6 +24,7 @@ use spindle::jobs::handlers::flaccheck::FlaccheckHandler;
 use spindle::jobs::handlers::gc::{self as gc_job, GcHandler};
 use spindle::jobs::handlers::hirescheck::HirescheckHandler;
 use spindle::jobs::handlers::inbox::{self as inbox_job, InboxHandler};
+use spindle::jobs::handlers::inbox_rejudge::InboxRejudgeHandler;
 use spindle::jobs::handlers::normalize::NormalizeHandler;
 use spindle::jobs::handlers::playlist_sync::{self, PlaylistSyncHandler, SyncEnv};
 use spindle::jobs::handlers::rename::RenameHandler;
@@ -577,21 +578,24 @@ async fn main() -> anyhow::Result<()> {
             std::time::Duration::from_secs(u64::from(state.config.ytmusic.metadata_timeout_secs)),
         )
         .context("ytmusic.metadata_command が空")?;
+        let downloader_env = || DownloaderEnv {
+            db: Arc::clone(&state.db),
+            inbox: Arc::clone(&inbox_root),
+            archive: Arc::clone(&archive_root),
+            jobs: Arc::clone(&state.jobs),
+            provider: provider.clone(),
+            ytdlp: state.config.ytdlp_command(),
+            ffmpeg: PathBuf::from(&state.config.bin.ffmpeg),
+            tmp_root: ytdl_tmp.clone(),
+            download_timeout: std::time::Duration::from_secs(u64::from(
+                state.config.ytmusic.download_timeout_secs,
+            )),
+        };
+        registry.register(JobType::Ytdl, Arc::new(YtdlHandler::new(downloader_env())));
+        // Inbox の件の再判定（Ytdl と同じ環境。作業領域は使わない）
         registry.register(
-            JobType::Ytdl,
-            Arc::new(YtdlHandler::new(DownloaderEnv {
-                db: Arc::clone(&state.db),
-                inbox: Arc::clone(&inbox_root),
-                archive: Arc::clone(&archive_root),
-                jobs: Arc::clone(&state.jobs),
-                provider,
-                ytdlp: state.config.ytdlp_command(),
-                ffmpeg: PathBuf::from(&state.config.bin.ffmpeg),
-                tmp_root: ytdl_tmp,
-                download_timeout: std::time::Duration::from_secs(u64::from(
-                    state.config.ytmusic.download_timeout_secs,
-                )),
-            })),
+            JobType::InboxRejudge,
+            Arc::new(InboxRejudgeHandler::new(downloader_env())),
         );
         // 再生リストの購読の同期（P4-16、D-78）。列挙 → 番号揃え → ytdl 投入
         let (pending_wait, pending_poll) = SyncEnv::default_waits();

@@ -15,7 +15,8 @@ use spindle::domain::relpath::RelPath;
 use spindle::domain::tags::{read_audio_file, read_audio_file_with_pictures};
 use spindle::import::sidecar::Sidecar;
 use spindle::import::ytmusic::rejudge::{rejudge_item, RejudgeError, RejudgeReport};
-use spindle::jobs::JobState;
+use spindle::jobs::handlers::inbox_rejudge::new_inbox_rejudge_job;
+use spindle::jobs::{EnqueueResult, JobState};
 
 /// 偽のプラグイン。`fake/mode` の中身で応答を切り替える（BrokenCh は `fake/broken` があれば不正な JSON）。
 /// mode が無ければ KnownCh → a、他 → unmatched
@@ -584,4 +585,63 @@ async fn item_that_is_not_pending_is_refused() {
         audio_names(&lib, ALBUM_DIR),
         vec!["20260901 Song One [v1].opus"]
     );
+}
+
+/// ジョブとして走らせると done になり、note に件数が残る
+#[tokio::test]
+async fn rejudge_job_runs_and_leaves_a_note() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    lib.start();
+    lib.mode("a");
+    stage(&lib, U1).await;
+    let id = pending_item(&lib, ALBUM_DIR);
+    lib.mode("b");
+    let job = match lib.jobs.enqueue(new_inbox_rejudge_job(id)).await.unwrap() {
+        EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+    };
+    assert_eq!(lib.wait(job).await, JobState::Done, "{:?}", lib.job(job));
+    let note = lib.note(job).unwrap();
+    assert!(
+        note.starts_with("再判定: 1/1 曲、移動 0 曲、失敗 0 曲"),
+        "{note}"
+    );
+}
+
+/// 投入後・実行前に件が approved になったら、ジョブは failed でファイルは変わらない
+#[tokio::test]
+async fn rejudge_stops_when_the_item_is_no_longer_pending() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    lib.start();
+    stage(&lib, U1).await;
+    let id = pending_item(&lib, ALBUM_DIR);
+    lib.conn()
+        .execute(
+            "UPDATE inbox_items SET state = 'approved' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    lib.mode("b");
+    let job = match lib.jobs.enqueue(new_inbox_rejudge_job(id)).await.unwrap() {
+        EnqueueResult::Inserted(j) | EnqueueResult::Duplicate(j) => j,
+    };
+    assert_eq!(lib.wait(job).await, JobState::Failed, "{:?}", lib.job(job));
+    assert_eq!(
+        audio_names(&lib, ALBUM_DIR),
+        vec!["20260901 Song One [v1].opus"]
+    );
+}
+
+/// 同じ件の投入は 1 つにまとまる（走行中・待ちの間）
+#[tokio::test]
+async fn rejudge_is_deduplicated_per_item() {
+    let lib = lib!(PLUGIN);
+    // ワーカーを起動しないので、1 つ目は queued のまま残る
+    let first = lib.jobs.enqueue(new_inbox_rejudge_job(7)).await.unwrap();
+    assert!(matches!(first, EnqueueResult::Inserted(_)));
+    let second = lib.jobs.enqueue(new_inbox_rejudge_job(7)).await.unwrap();
+    assert!(matches!(second, EnqueueResult::Duplicate(_)));
+    let other = lib.jobs.enqueue(new_inbox_rejudge_job(8)).await.unwrap();
+    assert!(matches!(other, EnqueueResult::Inserted(_)));
 }

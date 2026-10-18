@@ -12,6 +12,7 @@ use spindle::db::Db;
 use spindle::fsroot::RootDir;
 use spindle::import::ytmusic::downloader::DownloaderEnv;
 use spindle::import::ytmusic::MetadataProvider;
+use spindle::jobs::handlers::inbox_rejudge::InboxRejudgeHandler;
 use spindle::jobs::handlers::ytdl::{new_ytdl_job, YtdlHandler};
 use spindle::jobs::{EnqueueResult, JobState, JobType, Jobs, Registry};
 
@@ -119,6 +120,10 @@ impl Lib {
     pub fn start(&self) {
         let mut reg = Registry::new();
         reg.register(JobType::Ytdl, Arc::new(YtdlHandler::new(self.env())));
+        reg.register(
+            JobType::InboxRejudge,
+            Arc::new(InboxRejudgeHandler::new(self.env())),
+        );
         self.jobs.start(reg, self.shutdown.clone());
     }
 
