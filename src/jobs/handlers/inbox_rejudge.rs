@@ -22,6 +22,18 @@ pub fn new_inbox_rejudge_job(item_id: i64) -> NewJob {
     .max_attempts(1)
 }
 
+/// 件 `item_id` の再判定ジョブが queued / running か。その間 approve / reject / reopen は 409 rejudging
+/// にする（再判定が書いている最中に状態を動かすと、走査が承認を pending に戻す・却下した件に足す）。
+/// 書き込みは単一コネクションなので、この検査と遷移を同じ閉包で行えば投入と競合しない
+pub fn rejudge_active(conn: &rusqlite::Connection, item_id: i64) -> crate::db::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM jobs WHERE dedup_key = ?1 AND state IN ('queued', 'running')",
+        [format!("{DEDUP_PREFIX}{item_id}")],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 pub struct InboxRejudgeHandler {
     env: Arc<DownloaderEnv>,
 }

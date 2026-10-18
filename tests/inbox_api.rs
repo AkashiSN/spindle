@@ -1594,7 +1594,7 @@ async fn rejudge_api_is_not_found_when_ytmusic_is_disabled() {
         .await
         .unwrap();
     let inbox = Arc::new(RootDir::open(&dir.path().join("Inbox")).unwrap());
-    let router = api::router(AppState::new(config, db, mode).with_inbox(inbox));
+    let router = api::router(AppState::new(config, db.clone(), mode).with_inbox(inbox));
     let login = req(Method::POST, "/api/auth/login")
         .header(header::CONTENT_TYPE, "application/json")
         .header("sec-fetch-site", "same-origin")
@@ -1621,12 +1621,99 @@ async fn rejudge_api_is_not_found_when_ytmusic_is_disabled() {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     // 一覧は YouTube 機能が無効と知らせる（画面は再判定のボタンを出さない）
     let r = req(Method::GET, "/api/inbox")
-        .header(header::COOKIE, cookie)
+        .header(header::COOKIE, cookie.clone())
         .body(Body::empty())
         .unwrap();
-    let res = router.oneshot(r).await.unwrap();
+    let res = router.clone().oneshot(r).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let list: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(list["ytmusic_enabled"], false, "{list}");
+
+    // 無効の間は再判定のジョブが走らないので、待ちが残っていても件の操作は止めない
+    let id = db
+        .write(|c| inbox::insert_item(c, "Yt", "yt", 1000))
+        .await
+        .unwrap();
+    spindle::jobs::Jobs::new(db.clone())
+        .enqueue(spindle::jobs::handlers::inbox_rejudge::new_inbox_rejudge_job(id))
+        .await
+        .unwrap();
+    let r = req(Method::POST, &format!("/api/inbox/{id}/reject"))
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from("{}"))
+        .unwrap();
+    let res = router.oneshot(r).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+}
+
+/// 件の再判定ジョブが queued / running の間は approve / reject / reopen を 409 rejudging にする
+/// （再判定が書いている最中に承認すると、走査が承認を pending に戻してしまう）。終われば通る
+#[tokio::test]
+async fn approve_reject_and_reopen_are_refused_while_rejudging() {
+    use spindle::jobs::handlers::inbox_rejudge::new_inbox_rejudge_job;
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let id = app.item("AlbumA").await;
+    // ワーカーは動かないので queued のまま残る
+    let jobs = spindle::jobs::Jobs::new(app.db.clone());
+    let job = jobs.enqueue(new_inbox_rejudge_job(id)).await.unwrap().id();
+    // 他の件の再判定は関係ない
+    jobs.enqueue(new_inbox_rejudge_job(id + 1000))
+        .await
+        .unwrap();
+
+    let set_job = |state: &'static str| {
+        let db = app.db.clone();
+        async move {
+            db.write(move |c| {
+                c.execute(
+                    "UPDATE jobs SET state = ?1 WHERE id = ?2",
+                    rusqlite::params![state, job],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap()
+        }
+    };
+    for st in ["queued", "running"] {
+        set_job(st).await;
+        let (s, body) = app
+            .post(&c, &format!("/api/inbox/{id}/approve"), draft("AlbumA"))
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{st} {body}");
+        assert_eq!(body["error"], "rejudging");
+        assert!(body["message"].as_str().unwrap().contains("再判定"));
+        let (s, body) = app
+            .post(&c, &format!("/api/inbox/{id}/reject"), json!({}))
+            .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{st} {body}");
+        assert_eq!(body["error"], "rejudging");
+        assert_eq!(app.state(id).await, ItemState::Pending);
+    }
+    // reopen（rejected の件）も止める
+    app.db
+        .write(move |c| inbox::set_state(c, id, ItemState::Rejected, None, 2000))
+        .await
+        .unwrap();
+    let (s, body) = app
+        .post(&c, &format!("/api/inbox/{id}/reopen"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "rejudging");
+    assert_eq!(app.state(id).await, ItemState::Rejected);
+
+    // 終われば通る
+    set_job("failed").await;
+    let (s, body) = app
+        .post(&c, &format!("/api/inbox/{id}/reopen"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    let (s, body) = app
+        .post(&c, &format!("/api/inbox/{id}/approve"), draft("AlbumA"))
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
 }

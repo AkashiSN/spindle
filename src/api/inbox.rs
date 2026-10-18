@@ -21,7 +21,7 @@ use crate::import::inbox::{
 };
 use crate::import::sidecar::FileEntry;
 use crate::jobs::handlers::inbox::new_inbox_job;
-use crate::jobs::handlers::inbox_rejudge::new_inbox_rejudge_job;
+use crate::jobs::handlers::inbox_rejudge::{new_inbox_rejudge_job, rejudge_active};
 use crate::jobs::EnqueueResult;
 
 use super::error::{error_response, error_response_with_message, ApiError};
@@ -282,6 +282,7 @@ pub async fn approve(
     let value = serde_json::to_value(&draft)
         .map_err(|e| ApiError::Internal(format!("下書きを JSON にできない: {e}")))?;
     let layout = state.config.layout.clone();
+    let ytmusic = state.config.ytmusic.enabled;
     // 状態の検査・下書きの検証・保存・遷移を 1 トランザクションで行い、遷移は CAS
     // （読んでから書くまでに worker / 走査 / 別の API が動かした件を上書きしない）
     let outcome = state
@@ -290,6 +291,9 @@ pub async fn approve(
             let Some(item) = dbinbox::get(c, id)? else {
                 return Ok(Approve::NotFound);
             };
+            if ytmusic && rejudge_active(c, id)? {
+                return Ok(Approve::Rejudging);
+            }
             if !matches!(item.state, ItemState::Pending | ItemState::Failed) {
                 return Ok(Approve::State);
             }
@@ -336,6 +340,7 @@ pub async fn approve(
     match outcome {
         Approve::NotFound => return Ok(error_response(StatusCode::NOT_FOUND, "not_found")),
         Approve::State => return Ok(error_response(StatusCode::CONFLICT, "state")),
+        Approve::Rejudging => return Ok(rejudging("承認")),
         Approve::Bad(msg) => {
             return Ok(error_response_with_message(
                 StatusCode::BAD_REQUEST,
@@ -399,6 +404,8 @@ pub async fn rejudge(
 enum Approve {
     NotFound,
     State,
+    /// 件の再判定ジョブが queued / running
+    Rejudging,
     Bad(String),
     Ok,
 }
@@ -452,30 +459,60 @@ pub async fn preview(
     })
 }
 
+/// 409 rejudging: 件の再判定ジョブが queued / running の間は `action`（承認・却下・再開）できない。
+/// YouTube 機能が無効ならハンドラが登録されず待ちのジョブは走らないので、見ない（件を塞ぎ続けない）
+fn rejudging(action: &str) -> Response {
+    error_response_with_message(
+        StatusCode::CONFLICT,
+        "rejudging",
+        format!("再判定の実行中は{action}できない。終わるまで待つ"),
+    )
+}
+
+enum Transition {
+    Done,
+    State,
+    Rejudging,
+    NotFound,
+}
+
 async fn transition(
     state: &AppState,
     id: i64,
     from: &[ItemState],
     to: ItemState,
+    action: &'static str,
 ) -> Result<Response, ApiError> {
     if let Some(r) = unavailable(state) {
         return Ok(r);
     }
-    // 遷移は CAS（今の状態が `from` のどれかのときだけ）。外れたら 404 か 409 を状態で分ける
+    // 遷移は CAS（今の状態が `from` のどれかのときだけ）。外れたら 404 か 409 を状態で分ける。
+    // 件の再判定が queued / running なら動かさない（同じトランザクションで見るので投入と競合しない）
     let from = from.to_vec();
+    let ytmusic = state.config.ytmusic.enabled;
     let moved = state
         .db
         .transaction(move |c| {
-            if dbinbox::transition(c, id, &from, to, None, now_epoch())? {
-                return Ok(Some(true));
+            if dbinbox::get(c, id)?.is_none() {
+                return Ok(Transition::NotFound);
             }
-            Ok(dbinbox::get(c, id)?.map(|_| false))
+            if ytmusic && rejudge_active(c, id)? {
+                return Ok(Transition::Rejudging);
+            }
+            Ok(
+                if dbinbox::transition(c, id, &from, to, None, now_epoch())? {
+                    Transition::Done
+                } else {
+                    Transition::State
+                },
+            )
         })
         .await?;
     Ok(match moved {
-        Some(true) => StatusCode::NO_CONTENT.into_response(),
-        Some(false) => error_response(StatusCode::CONFLICT, "state"),
-        None => error_response(StatusCode::NOT_FOUND, "not_found"),
+        Transition::Done => StatusCode::NO_CONTENT.into_response(),
+        Transition::State => error_response(StatusCode::CONFLICT, "state"),
+        Transition::Rejudging => rejudging(action),
+        Transition::NotFound => error_response(StatusCode::NOT_FOUND, "not_found"),
     })
 }
 
@@ -488,6 +525,7 @@ pub async fn reject(
         id,
         &[ItemState::Pending, ItemState::Failed, ItemState::Approved],
         ItemState::Rejected,
+        "却下",
     )
     .await
 }
@@ -501,6 +539,7 @@ pub async fn reopen(
         id,
         &[ItemState::Approved, ItemState::Rejected, ItemState::Failed],
         ItemState::Pending,
+        "再開",
     )
     .await
 }
