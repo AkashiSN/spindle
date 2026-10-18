@@ -35,6 +35,7 @@ fi
 case "$mode" in
   a) echo '{"protocol":1,"ok":true,"track":{"title":"Song One","artists":["Artist A"],"albumartist":"Artist A","album":"Songs of A","category":"Pop","date":"2026","tags":[["ORIGINALARTIST","Someone"]]},"plugin":{"name":"fake","version":"v-a"}}' ;;
   b) echo '{"protocol":1,"ok":true,"track":{"title":"Song Two","artists":["Artist A","Guest"],"albumartist":"Artist A","album":"Songs of A","category":"Pop","date":"2026"},"plugin":{"name":"fake","version":"v-b"}}' ;;
+  c) echo '{"protocol":1,"ok":true,"track":{"title":"Song One","artists":["Artist A"],"albumartist":"Artist A","album":"Other Album","category":"Pop","date":"2026"},"plugin":{"name":"fake","version":"v-c"}}' ;;
   skip) echo '{"protocol":1,"ok":false,"reason":"skip","message":"配信の告知","plugin":{"name":"fake","version":"v-s"}}' ;;
   *) echo '{"protocol":1,"ok":false,"reason":"unmatched","message":"ルールを足してください","plugin":{"name":"fake","version":"v-u"}}' ;;
 esac
@@ -436,6 +437,75 @@ async fn move_is_skipped_when_the_target_item_is_not_pending() {
     assert_eq!(t.first("TITLE"), Some("Song One"));
     assert_eq!(t.first("ARTIST"), Some("Artist A"));
     assert_eq!(sidecar(&lib, src).files[name].verdict, "ok");
+}
+
+/// 移せなかった曲は、移動先の件が pending に戻れば次の再判定で移る（置き場所は実際のディレクトリで見る）
+#[tokio::test]
+async fn not_moved_track_moves_once_the_target_item_is_pending_again() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "UnknownCh", "Song One (Official Video)", true);
+    lib.start();
+    stage(&lib, U1).await;
+    let src = "youtube/_unmatched/UnknownCh";
+    let id = pending_item(&lib, src);
+    let target = pending_item(&lib, ALBUM_DIR);
+    lib.conn()
+        .execute(
+            "UPDATE inbox_items SET state = 'approved' WHERE id = ?1",
+            [target],
+        )
+        .unwrap();
+    lib.mode("a");
+    let report = rejudge(&lib, id).await.unwrap();
+    assert_eq!(report.not_moved.len(), 1, "{report:?}");
+    let name = "20260901 Song One [v1].opus";
+    assert_eq!(sidecar(&lib, src).files[name].verdict, "ok");
+
+    lib.conn()
+        .execute(
+            "UPDATE inbox_items SET state = 'pending' WHERE id = ?1",
+            [target],
+        )
+        .unwrap();
+    let report = rejudge(&lib, id).await.unwrap();
+    assert_eq!(
+        report.moved,
+        vec![(name.to_owned(), rel(&format!("{ALBUM_DIR}/{name}")))],
+        "{report:?}"
+    );
+    assert!(audio_names(&lib, src).is_empty());
+    assert_eq!(audio_names(&lib, ALBUM_DIR), vec![name.to_owned()]);
+    assert_eq!(sidecar(&lib, ALBUM_DIR).files[name].verdict, "ok");
+}
+
+/// 件のディレクトリにある曲は、前回の判定が skip でも、ok で別のアルバムが返ったときに移さない
+#[tokio::test]
+async fn track_in_an_album_dir_does_not_move_after_skip_then_ok() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    lib.start();
+    stage(&lib, U1).await;
+    let id = pending_item(&lib, ALBUM_DIR);
+    let name = "20260901 Song One [v1].opus";
+    lib.mode("skip");
+    rejudge(&lib, id).await.unwrap();
+    assert_eq!(sidecar(&lib, ALBUM_DIR).files[name].verdict, "skip");
+
+    lib.mode("c");
+    let report = rejudge(&lib, id).await.unwrap();
+    assert!(
+        report.moved.is_empty() && report.not_moved.is_empty() && report.failed.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(audio_names(&lib, ALBUM_DIR), vec![name.to_owned()]);
+    assert!(!lib.inbox_path("youtube/Artist A/Other Album").exists());
+    let t = tags_of(&lib.inbox_path(&format!("{ALBUM_DIR}/{name}")));
+    assert_eq!(t.first("ALBUM"), Some("Other Album"));
+    let e = &sidecar(&lib, ALBUM_DIR).files[name];
+    assert_eq!(
+        (e.verdict.as_str(), e.plugin_version.as_deref()),
+        ("ok", Some("v-c"))
+    );
 }
 
 /// 新しい名前に置いた後（元のファイルは消えた）・サイドカーの前に落ちた状態から、もう一度で収束する

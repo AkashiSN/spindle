@@ -26,7 +26,7 @@ use crate::fsroot::{copy_attrs, FileKind, FsError, RootDir};
 use crate::import::sidecar::{FileEntry, Sidecar, SidecarError};
 use crate::import::ytmusic::downloader::{
     dump_video, inbox_dir, inbox_file_name_for, is_own_product, judge, plugin_tag_keys,
-    subscription_target, tag_changes_for, DownloadError, DownloaderEnv,
+    subscription_target, tag_changes_for, DownloadError, DownloaderEnv, SUBDIR, UNMATCHED_DIR,
 };
 use crate::import::ytmusic::metadata::SOURCE_URL_KEY;
 use crate::import::ytmusic::{Item, Track};
@@ -312,10 +312,12 @@ async fn rejudge_track(
     } else {
         track.filter(|_| ok).map(plugin_tag_keys)
     };
-    // 移動の規則: 購読由来は移さない。ok → ok で宛先だけ違っても移さない
+    // 移動の規則: 判定（ok か否か）と今の置き場所（受け皿か件のディレクトリか）が食い違うときだけ移す。
+    // 置き場所はサイドカーの前回の判定でなく実際のディレクトリで見る（移せなかった曲を次で移せる）。
+    // 購読由来は移さない。ok のまま宛先だけ違っても移さない
     let mut not_moved = None;
     let mut dest = dir.clone();
-    if rewrite && !from_subscription && !(entry.verdict == "ok" && ok) {
+    if rewrite && !from_subscription && ok == in_unmatched_dir(dir) {
         let channel = entry.channel.as_deref().unwrap_or(&item.channel);
         let d = inbox_dir(track, channel).map_err(TrackError::Failed)?;
         if d.key() != dir.key() {
@@ -399,6 +401,12 @@ async fn rejudge_track(
         moved: moved.then_some(final_rel),
         not_moved,
     })
+}
+
+/// `dir` が判定できなかったものの受け皿（`youtube/_unmatched/...`）か
+fn in_unmatched_dir(dir: &RelPath) -> bool {
+    let mut c = dir.components().map(canonical_key);
+    c.next() == Some(canonical_key(SUBDIR)) && c.next() == Some(canonical_key(UNMATCHED_DIR))
 }
 
 /// 再判定で書くタグ: TITLE / ARTIST / ALBUM / ALBUMARTIST / DATE（今回無ければ削除）+ 応答の追加タグ +
