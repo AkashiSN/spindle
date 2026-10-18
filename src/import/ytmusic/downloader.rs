@@ -868,9 +868,9 @@ fn ytdlp(env: &DownloaderEnv) -> ExternalCommand {
     ExternalCommand::new(program).args(env.ytdlp.iter().skip(1))
 }
 
-/// ファイルに書くタグ。判定できたら `Track::tags(track_no)`（`track_no` は購読の位置。無ければ
-/// TRACKNUMBER 無しで採番は Inbox）、できなければ TITLE に動画タイトル。どちらも `SOURCE_URL`
-/// 初回のダウンロードで Opus に書くタグ（`track` が無ければ TITLE だけ。SOURCE_URL は常に）
+/// 初回のダウンロードで Opus に書くタグ。判定できたら `Track::tags(track_no)`（`track_no` は購読の
+/// 位置。無ければ TRACKNUMBER 無しで採番は Inbox）、できなければ TITLE に動画タイトルだけ。どちらも
+/// `SOURCE_URL` を足す
 pub fn tag_changes_for(
     track: Option<&Track>,
     video_title: &str,
