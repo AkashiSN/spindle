@@ -9,7 +9,8 @@
 //! 1 曲   Item（項の item か yt-dlp の dump）→ judge → タグ → 宛先（移動の規則）→ 新しい名前 →
 //!        tmp に写してタグ → RENAME_NOREPLACE（同名は SOURCE_URL が同じときだけ自分の成果物）→
 //!        サイドカー → 元を unlink
-//! 仕上げ ディレクトリを fsync して inbox ジョブを投入
+//! 仕上げ ディレクトリ（新しく作った親を含む）を fsync して inbox ジョブを投入。途中で止まっても、
+//!        書いた曲があれば投入する
 //! ```
 //!
 //! 曲ごとに独立に失敗させ（理由はサイドカーの項の `rejudge_error`）、他の曲は続ける。どこで落ちても、
@@ -94,7 +95,54 @@ pub async fn rejudge_item(
         total,
         ..RejudgeReport::default()
     };
-    let mut touched: Vec<RelPath> = vec![dir.clone()];
+    let mut touched: Vec<Option<RelPath>> = vec![Some(dir.clone())];
+    let result = rejudge_targets(
+        env,
+        item_id,
+        &dir,
+        targets,
+        token,
+        progress,
+        &mut report,
+        &mut touched,
+    )
+    .await;
+    // 途中で止まっても（キャンセル・件が承認された等）、書き換えた曲があれば走査に見せる（行はキャッシュ）
+    let wrote = report.rejudged > 0 || !report.failed.is_empty();
+    if result.is_ok() || wrote {
+        if let Err(e) = finish(env, &touched).await {
+            if result.is_ok() {
+                return Err(e);
+            }
+            tracing::warn!(item_id, error = %e, "止まった再判定の仕上げに失敗した");
+        }
+    }
+    result?;
+    tracing::info!(
+        item_id,
+        total,
+        rejudged = report.rejudged,
+        moved = report.moved.len(),
+        failed = report.failed.len(),
+        "Inbox の件を判定し直した"
+    );
+    Ok(report)
+}
+
+/// 対象の曲を順に判定し直す。止まる（キャンセル・件が pending でなくなった・サイドカーを書けない）と
+/// それまでの曲は書いたまま Err。書いた曲は `report` に、fsync するディレクトリは `touched` に積む
+#[allow(clippy::too_many_arguments)]
+async fn rejudge_targets(
+    env: &DownloaderEnv,
+    item_id: i64,
+    dir: &RelPath,
+    targets: Vec<Target>,
+    token: &CancellationToken,
+    progress: &tokio::sync::watch::Sender<(usize, usize)>,
+    report: &mut RejudgeReport,
+    touched: &mut Vec<Option<RelPath>>,
+) -> Result<(), RejudgeError> {
+    let total = targets.len();
     for (i, target) in targets.into_iter().enumerate() {
         if token.is_cancelled() {
             return Err(DownloadError::Cancelled.into());
@@ -106,15 +154,21 @@ pub async fn rejudge_item(
             file_name,
             mut entry,
         } = target;
-        match rejudge_track(env, &dir, &file_name, &entry_name, &mut entry, token).await {
+        match rejudge_track(
+            env,
+            dir,
+            &file_name,
+            &entry_name,
+            &mut entry,
+            token,
+            touched,
+        )
+        .await
+        {
             Ok(done) => {
                 report.rejudged += 1;
                 if let Some(to) = done.moved {
-                    if let Some(p) = to.parent() {
-                        if !touched.iter().any(|d| d.key() == p.key()) {
-                            touched.push(p);
-                        }
-                    }
+                    touch(touched, to.parent());
                     report.moved.push((file_name, to));
                 } else if let Some(state) = done.not_moved {
                     report.not_moved.push((file_name, state));
@@ -124,29 +178,54 @@ pub async fn rejudge_item(
             Err(TrackError::Failed(reason)) => {
                 tracing::warn!(item_id, file = %file_name, reason, "再判定できない");
                 entry.rejudge_error = Some(reason.clone());
-                update_sidecar(env, &dir, None, None, Some((&entry_name, entry)))
-                    .map_err(sidecar_failed)?;
                 report.failed.push((file_name, reason));
+                update_sidecar(env, dir, None, None, Some((&entry_name, entry)))
+                    .map_err(sidecar_failed)?;
             }
         }
         progress.send_replace((i + 1, total));
     }
-    for d in &touched {
-        env.inbox.fsync_dir(Some(d))?;
+    Ok(())
+}
+
+/// 仕上げ: 書いたディレクトリ（`None` は root）を fsync して inbox の走査を投入する
+async fn finish(env: &DownloaderEnv, touched: &[Option<RelPath>]) -> Result<(), RejudgeError> {
+    for d in touched {
+        env.inbox.fsync_dir(d.as_ref())?;
     }
     env.jobs
         .enqueue(crate::jobs::handlers::inbox::new_inbox_job())
         .await
         .map_err(DownloadError::from)?;
-    tracing::info!(
-        item_id,
-        total,
-        rejudged = report.rejudged,
-        moved = report.moved.len(),
-        failed = report.failed.len(),
-        "Inbox の件を判定し直した"
-    );
-    Ok(report)
+    Ok(())
+}
+
+/// fsync するディレクトリに足す（同じものは 1 つ）
+fn touch(touched: &mut Vec<Option<RelPath>>, d: Option<RelPath>) {
+    let key = d.as_ref().map(RelPath::key);
+    if !touched.iter().any(|t| t.as_ref().map(RelPath::key) == key) {
+        touched.push(d);
+    }
+}
+
+/// `dir` とその祖先のうち、まだ無いディレクトリ（浅い順）
+fn missing_dirs(root: &RootDir, dir: &RelPath) -> Vec<RelPath> {
+    let mut out = Vec::new();
+    let mut prefix: Option<RelPath> = None;
+    for name in dir.components() {
+        let p = match &prefix {
+            Some(p) => p.join(name),
+            None => RelPath::parse(name),
+        };
+        let Ok(p) = p else {
+            break;
+        };
+        if root.stat(&p).is_err() {
+            out.push(p.clone());
+        }
+        prefix = Some(p);
+    }
+    out
 }
 
 /// 件を読み、pending でなければ NotPending
@@ -273,6 +352,7 @@ async fn rejudge_track(
     entry_name: &str,
     entry: &mut FileEntry,
     token: &CancellationToken,
+    touched: &mut Vec<Option<RelPath>>,
 ) -> Result<TrackDone, TrackError> {
     let current = dir
         .join(file_name)
@@ -349,7 +429,12 @@ async fn rejudge_track(
     let final_rel = if in_place { current.clone() } else { target };
     if !(changes.is_empty() && in_place) {
         if moved {
+            // 新しく作ったディレクトリは、その項を持つ親も fsync する
+            let created = missing_dirs(&env.inbox, &dest);
             env.inbox.create_dir_all(&dest)?;
+            for c in created {
+                touch(touched, c.parent());
+            }
         }
         let url = entry.url.as_deref().or(item.url.as_deref()).unwrap_or("");
         place(&env.inbox, &current, &dest, &final_rel, &changes, url)?;

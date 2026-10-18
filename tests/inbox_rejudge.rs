@@ -19,13 +19,14 @@ use spindle::import::ytmusic::rejudge::{rejudge_item, RejudgeError, RejudgeRepor
 use spindle::jobs::handlers::inbox_rejudge::new_inbox_rejudge_job;
 use spindle::jobs::{EnqueueResult, JobState};
 
-/// 偽のプラグイン。`fake/mode` の中身で応答を切り替える（BrokenCh は `fake/broken` があれば不正な JSON）。
-/// mode が無ければ KnownCh → a、他 → unmatched
+/// 偽のプラグイン。`fake/mode` の中身で応答を切り替える（BrokenCh は `fake/broken` があれば不正な JSON、
+/// SlowCh は `fake/slow` があれば返さずに眠る）。mode が無ければ KnownCh → a、他 → unmatched
 const PLUGIN: &str = r#"
 IN=$(cat)
 FAKE=$(dirname "$0")
 case "$IN" in
   *'"channel":"BrokenCh"'*) if [ -f "$FAKE/broken" ]; then echo 'not json'; exit 0; fi ;;
+  *'"channel":"SlowCh"'*) if [ -f "$FAKE/slow" ]; then exec sleep 30; fi ;;
 esac
 mode=$(cat "$FAKE/mode" 2>/dev/null)
 if [ -z "$mode" ]; then
@@ -645,6 +646,85 @@ async fn rejudge_is_deduplicated_per_item() {
     assert!(matches!(second, EnqueueResult::Duplicate(_)));
     let other = lib.jobs.enqueue(new_inbox_rejudge_job(8)).await.unwrap();
     assert!(matches!(other, EnqueueResult::Inserted(_)));
+}
+
+/// 途中でキャンセルされても、書き換えた曲があれば inbox の走査を投入する（行はキャッシュ）
+#[tokio::test]
+async fn cancel_after_a_rewritten_track_still_enqueues_the_scan() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    lib.video(U2, "v2", "SlowCh", "Song One (Official Video)", true);
+    lib.start();
+    lib.mode("a");
+    stage(&lib, U1).await;
+    stage(&lib, U2).await;
+    let id = pending_item(&lib, ALBUM_DIR);
+    lib.conn()
+        .execute("DELETE FROM jobs WHERE type = 'inbox'", [])
+        .unwrap();
+
+    // 1 曲目（v1）を書いた後、2 曲目（v2）のプラグインが眠っている間にキャンセルする
+    lib.mode("b");
+    std::fs::write(lib.fake.join("slow"), "").unwrap();
+    let token = CancellationToken::new();
+    let (tx, mut rx) = tokio::sync::watch::channel((0, 0));
+    let canceller = {
+        let token = token.clone();
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                if rx.borrow_and_update().0 == 1 {
+                    token.cancel();
+                    break;
+                }
+            }
+        })
+    };
+    let r = rejudge_item(&lib.env(), id, &token, &tx).await;
+    canceller.await.unwrap();
+    assert!(
+        matches!(
+            r,
+            Err(RejudgeError::Download(
+                spindle::import::ytmusic::downloader::DownloadError::Cancelled
+            ))
+        ),
+        "{r:?}"
+    );
+    assert_eq!(
+        audio_names(&lib, ALBUM_DIR),
+        vec!["20260901 Song One [v2].opus", "20260901 Song Two [v1].opus"]
+    );
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'inbox' AND state = 'queued'"),
+        1
+    );
+}
+
+/// 何も書かずに止まった（件が pending でない）なら走査を投入しない
+#[tokio::test]
+async fn refusal_without_writes_does_not_enqueue_the_scan() {
+    let lib = lib!(PLUGIN);
+    lib.video(U1, "v1", "KnownCh", "Song One (Official Video)", true);
+    lib.start();
+    stage(&lib, U1).await;
+    let id = pending_item(&lib, ALBUM_DIR);
+    lib.conn()
+        .execute("DELETE FROM jobs WHERE type = 'inbox'", [])
+        .unwrap();
+    lib.conn()
+        .execute(
+            "UPDATE inbox_items SET state = 'approved' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    assert!(matches!(
+        rejudge(&lib, id).await,
+        Err(RejudgeError::NotPending(_))
+    ));
+    assert_eq!(
+        lib.count("SELECT count(*) FROM jobs WHERE type = 'inbox'"),
+        0
+    );
 }
 
 /// ytdl と再判定はサイドカーの鍵を共有する: 鍵を持たれている間、再判定はファイルを置いてもサイドカーを
