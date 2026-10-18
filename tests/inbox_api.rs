@@ -1472,3 +1472,100 @@ async fn inbox_files_404s_when_the_item_dir_became_a_file() {
         .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+/// `POST /api/inbox/:id/rejudge`: pending で YouTube 由来の曲がある件だけ 202。
+/// approved・手置きだけの件は 409 state、無い id は 404、続けての 2 回目は 409 duplicate
+#[tokio::test]
+async fn rejudge_api_accepts_pending_youtube_items_only() {
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let yt = youtube_item(&app, "Yt", None, "unmatched").await;
+    let uri = format!("/api/inbox/{yt}/rejudge");
+
+    let (st, body) = app.post(&c, "/api/inbox/9999/rejudge", json!({})).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"], "not_found");
+
+    // 手置きだけの件（サイドカー無し）
+    let manual = app.item("Manual").await;
+    let (st, body) = app
+        .post(&c, &format!("/api/inbox/{manual}/rejudge"), json!({}))
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "state");
+
+    // pending でない件
+    let approved = youtube_item(&app, "Yt2", None, "unmatched").await;
+    app.db
+        .write(move |c| inbox::set_state(c, approved, ItemState::Approved, None, 2000))
+        .await
+        .unwrap();
+    let (st, body) = app
+        .post(&c, &format!("/api/inbox/{approved}/rejudge"), json!({}))
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "state");
+
+    // 受理され、inbox_rejudge ジョブが入る。続けての 2 回目は重複
+    let (st, body) = app.post(&c, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    let job_id = body["job_id"].as_i64().unwrap();
+    let ty: String = app
+        .db
+        .read(move |c| {
+            Ok(
+                c.query_row("SELECT type FROM jobs WHERE id = ?1", [job_id], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(ty, "inbox_rejudge");
+    let (st, body) = app.post(&c, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "duplicate");
+}
+
+/// `[ytmusic].enabled = false` なら再判定のハンドラが無いので 404
+#[tokio::test]
+async fn rejudge_api_is_not_found_when_ytmusic_is_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("Inbox")).unwrap();
+    let db = Arc::new(Db::open(&dir.path().join("spindle.db")).unwrap());
+    let mut root: toml::Table = toml::from_str(EXAMPLE).unwrap();
+    root.insert(
+        "ytmusic".into(),
+        toml::Value::Table(toml::from_str("enabled = false").unwrap()),
+    );
+    let config = Arc::new(Config::parse(&toml::to_string(&root).unwrap()).unwrap());
+    let mode = auth::bootstrap(&db, Some("correct horse".to_owned()))
+        .await
+        .unwrap();
+    let inbox = Arc::new(RootDir::open(&dir.path().join("Inbox")).unwrap());
+    let router = api::router(AppState::new(config, db, mode).with_inbox(inbox));
+    let login = req(Method::POST, "/api/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from(r#"{"password":"correct horse"}"#))
+        .unwrap();
+    let res = router.clone().oneshot(login).await.unwrap();
+    let cookie = res
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let r = req(Method::POST, "/api/inbox/1/rejudge")
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from("{}"))
+        .unwrap();
+    let res = router.oneshot(r).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

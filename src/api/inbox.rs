@@ -21,6 +21,7 @@ use crate::import::inbox::{
 };
 use crate::import::sidecar::FileEntry;
 use crate::jobs::handlers::inbox::new_inbox_job;
+use crate::jobs::handlers::inbox_rejudge::new_inbox_rejudge_job;
 use crate::jobs::EnqueueResult;
 
 use super::error::{error_response, error_response_with_message, ApiError};
@@ -343,6 +344,53 @@ pub async fn approve(
     }
     let job_id = state.jobs.enqueue(new_inbox_job()).await?.id();
     Ok((StatusCode::ACCEPTED, Json(Accepted { job_id })).into_response())
+}
+
+/// `POST /api/inbox/{id}/rejudge`: pending の件の YouTube 由来の曲を、今のプラグイン・ルールで
+/// 判定し直すジョブを投入する。YouTube 機能が無効なら 404（ハンドラが登録されない）
+pub async fn rejudge(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    if !state.config.ytmusic.enabled {
+        return Ok(error_response(StatusCode::NOT_FOUND, "not_found"));
+    }
+    let Some(inbox) = state.inbox.clone() else {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "inbox_unavailable",
+        ));
+    };
+    let Some(item) = state.db.read(move |c| dbinbox::get(c, id)).await? else {
+        return Ok(error_response(StatusCode::NOT_FOUND, "not_found"));
+    };
+    if item.state != ItemState::Pending {
+        return Ok(error_response(StatusCode::CONFLICT, "state"));
+    }
+    // サイドカーの読みはファイル I/O。YouTube 由来の曲が 1 つも無い件（手置き・CD）は対象外
+    let from_youtube = tokio::task::spawn_blocking(move || {
+        let sidecar = match RelPath::parse(&item.rel_dir) {
+            Ok(dir) if !item.rel_dir.is_empty() => {
+                crate::import::sidecar::Sidecar::read(&inbox, &dir)
+            }
+            _ => return false,
+        };
+        sidecar
+            .ok()
+            .flatten()
+            .is_some_and(|s| s.files.values().any(|f| f.source == "youtube"))
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("サイドカーの読み込みが異常終了: {e}")))?;
+    if !from_youtube {
+        return Ok(error_response(StatusCode::CONFLICT, "state"));
+    }
+    Ok(match state.jobs.enqueue(new_inbox_rejudge_job(id)).await? {
+        EnqueueResult::Inserted(job_id) => {
+            (StatusCode::ACCEPTED, Json(Accepted { job_id })).into_response()
+        }
+        EnqueueResult::Duplicate(_) => error_response(StatusCode::CONFLICT, "duplicate"),
+    })
 }
 
 enum Approve {
