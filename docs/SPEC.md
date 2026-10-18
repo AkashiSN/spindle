@@ -1362,14 +1362,19 @@ Inbox/ に配置（ポーリング検出）
   - **冪等・排他**: 開始時と曲ごとに件が `pending` かを確かめ、外れたら止める（続けると走査が承認を pending に戻す）。
     曲ごとに「tmp に写してタグ → `RENAME_NOREPLACE` で新しい名前 → 元を unlink → サイドカー」。新しい名前に同名があれば、
     その `SOURCE_URL` が同じときは前回の途中の自分の成果物として今回の書いたもので置き換える。項のファイルが無いときは
-    項を持たないファイルのうち `SOURCE_URL` が項の `url` と同じものを拾う。ファイルは排他ロックしない。ジョブは
-    `max_attempts` 1・dedup `inbox_rejudge:<item_id>`。終わったら `inbox` の走査を投入する。結果（`note`）は
+    項を持たないファイルのうち `SOURCE_URL` が項の `url` と同じものを拾う。ファイルは排他ロックしない。サイドカーの
+    読んで直して書くは、並んで走る ytdl と共有するプロセス内の鍵（`DownloaderEnv::sidecar_lock`）で直列にする。ジョブは
+    `max_attempts` 1・dedup `inbox_rejudge:<item_id>`。終わったら書いたディレクトリ（移動で新しく作ったディレクトリの
+    親を含む）を fsync して `inbox` の走査を投入する。キャンセル・件が pending でなくなって途中で止まっても、書き換えた
+    曲があれば同じく投入する。結果（`note`）は
     `再判定: N/M 曲、移動 K 曲、失敗 F 曲` と、移せなかった曲・失敗した曲の行
-  - **画面**: 件の見出しに「再判定」（実行中は無効で `再判定中 done/total`）と `判定: spindle-ytmusic-meta v…`（版が混ざれば
-    `判定: v… ほか`、記録が無ければ `判定: 版不明`）。③ の判定列の詳細に版と判定時刻、失敗の理由。失敗した曲があれば
-    件の `warnings` に「再判定できなかった曲が N 曲」。終わったら一覧を取り直し、全曲が別の件へ移ったらその件を開き、
-    一部なら「N 曲を <移動先> へ移した」と知らせる。`lib/inbox.ts` の `canRejudge` / `pluginVersionLabel` /
-    `rejudgeConfirmText` / `rejudgeLanding`、`hooks/useInboxRejudge`
+  - **画面**: 件の見出しに「再判定」（YouTube 機能が無効なら出さない。実行中は無効で `再判定中 done/total`、承認・却下・
+    下書きに戻すも無効）と `判定: spindle-ytmusic-meta v…`（版が混ざれば `判定: v… ほか`、記録が無ければ `判定: 版不明`）。
+    ③ の判定列の詳細に版と判定時刻、失敗の理由。失敗した曲があれば件の `warnings` に「再判定できなかった曲が N 曲」。
+    終わったら一覧を取り直し、押した件が消えるか曲の形（名前・判定の記録）が変わった一覧が届いたところで、全曲が別の件へ
+    移ったらその件を開き、一部なら「N 曲を <移動先> へ移した」と知らせる（終わってから 30 秒届かなければ「再判定した」
+    だけ）。`lib/inbox.ts` の `canRejudge` / `pluginVersionLabel` / `rejudgeConfirmText` / `rejudgeLanding` /
+    `rejudgeSettle` / `rejudgeOutcome`、`hooks/useInboxRejudge`
 
 ### 7.9 FLAC 健全性チェック（移行時 + 任意）
 
@@ -2187,7 +2192,7 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   proposal, draft, warnings, destination, tracks: [{ rel_path, codec, lossless,
                                                   sample_rate, bit_depth, channels, duration_ms, tags, source,
                                                   same_title: [{ track_id, rel_path, duration_ms }] }] }],
-                                                  watch: { checked_at, poll_interval_secs }, discard_retention_days,
+                                                  watch: { checked_at, poll_interval_secs }, discard_retention_days, ytmusic_enabled,
                                                   subscriptions: [{ id, album, synced_at, moved, renamed, tags_batch_id,
                                                   rename_batch_id }] }   # P4-18 / P4-19 / P4-22 / D-90
                                                   （§7.8、D-68。destination と source は D-70: source は spindle-inbox.json の
@@ -2962,15 +2967,18 @@ GC は削除件数・バイト数と区分ごとの内訳・見送りと失敗�
   横並びで出す: `配置 → RG → opus → aac → <端末…>`（`GET /api/inbox` の `stages`）。段ごとに 完了 / 進行中
   （n/m）/ 未 / 対象外。RG は書き込みが要る設定なら書き込みまで、系統は無効なら「（無効）」で対象外、端末は
   その端末の選曲に入る曲の数を母数に反映済みを数える（対象外へ向かう曲は数えない）
-- **Inbox の再判定**（D-114、§7.8）: 件の見出しの操作群に「再判定」。出すのは `pending` で YouTube 由来の曲（`source` を
-  持つ）がある件だけ。実行中は無効にして `再判定中 done/total`（ジョブの進捗）を出す。押す前に、保存済みの下書きがある件は
+- **Inbox の再判定**（D-114、§7.8）: 件の見出しの操作群に「再判定」。出すのは YouTube 機能が有効（`GET /api/inbox` の
+  `ytmusic_enabled`）で、`pending` で YouTube 由来の曲（`source` を持つ）がある件だけ。実行中は無効にして
+  `再判定中 done/total`（ジョブの進捗）を出し、「承認して配置」「却下」「下書きに戻す」も無効にする。押す前に、保存済みの下書きがある件は
   「保存済みの補正は消え、判定結果で置き換わります。再判定しますか？」、画面に未送信の編集がある件は「未保存の補正は消えます。
   再判定しますか？」と確認し、どちらも無ければ確認しない（`rejudgeConfirmText`）。見出しのバッジは
   `判定: spindle-ytmusic-meta <版>`（曲ごとの版が揃うとき）/ `判定: <版> ほか`（混ざるとき）/ `判定: 版不明`
   （`pluginVersionLabel`）。③ の判定列を開いた詳細に、判定の版（無ければ「不明」）と判定時刻、再判定が失敗した曲は
-  赤字で `再判定できなかった: <理由>`。ジョブが終わったら一覧を取り直し、押した件が消えて全曲が別の 1 件に揃っていれば
-  その件を開き、一部だけ移ったら「再判定した。N 曲を <移動先> へ移した」と知らせる（移していなければ「再判定した」。
-  `rejudgeLanding`）。失敗した曲があれば件の警告に「再判定できなかった曲が N 曲」
+  赤字で `再判定できなかった: <理由>`。ジョブが終わったら一覧を取り直す。ジョブの終わりは走査より先に来るので、終わった
+  後に取り直した一覧で押した件が消えるか曲の形（名前・判定の記録）が押した時点と変わるまで待ち（`rejudgeSettle`）、
+  押した件が消えて全曲が別の 1 件に揃っていればその件を開き、一部だけ移ったら「再判定した。N 曲を <移動先> へ移した」と
+  知らせる（移していなければ「再判定した」。`rejudgeOutcome` / `rejudgeLanding`）。終わってから 30 秒変わらなければ
+  「再判定した」とだけ知らせる。失敗した曲があれば件の警告に「再判定できなかった曲が N 曲」
 - **操作タブの「album gain」**（P4-5、D-74）: 「ReplayGain / FLAC」節に、選択行が属する album ごとの
   チェックボックス（`PATCH /api/albums/:id`。20 album を超えたら絞るよう促す）。アルバム画面は無く
   アルバム一覧は表を絞るだけなので、切り替えはここに置く

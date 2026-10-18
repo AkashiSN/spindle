@@ -751,9 +751,9 @@ export function verdictLabel(s: InboxSource): { text: string; ok: boolean } {
 
 // ---------------------------------------------------------------- 再判定（D-114）
 
-/** 再判定できる件か（承認前で、ダウンローダの判定がある曲を含む） */
-export function canRejudge(item: Pick<InboxItem, 'state' | 'tracks'>): boolean {
-  return item.state === 'pending' && item.tracks.some((f) => f.source != null)
+/** 再判定できる件か（YouTube 機能が有効で、承認前で、ダウンローダの判定がある曲を含む） */
+export function canRejudge(item: Pick<InboxItem, 'state' | 'tracks'>, ytmusicEnabled: boolean): boolean {
+  return ytmusicEnabled && item.state === 'pending' && item.tracks.some((f) => f.source != null)
 }
 
 /** 見出しの「判定: <プラグインの版>」。判定のある曲が無ければ null。版が混ざれば辞書順で最小の版に「ほか」 */
@@ -794,6 +794,71 @@ export function rejudgeLanding(
     return prevUrls.every((u) => have.has(u))
   })
   return { target: target ?? null, moved }
+}
+
+/** 再判定を押した件の控え。`finished` はジョブが終わったと気づいた時点の一覧（参照）と時刻 */
+export type RejudgeWatch = {
+  id: number
+  /** 押した時点の曲の `source.url` */
+  urls: string[]
+  /** 押した時点の曲の形（`rejudgeShape`） */
+  before: string
+  finished: { items: InboxItem[] | null; at: number } | null
+}
+
+/** ジョブが終わってから、一覧に結果が届くのを待つ上限（過ぎたら移動先を探さずに知らせる） */
+export const REJUDGE_SETTLE_TIMEOUT_MS = 30_000
+
+/** 件の曲の形: 名前と判定の記録（判定・版・時刻・失敗）。再判定の結果が一覧に届いたかを見分ける */
+function rejudgeShape(item: Pick<InboxItem, 'tracks'>): string {
+  return item.tracks
+    .map((f) =>
+      JSON.stringify([
+        f.rel_path,
+        f.source?.url ?? null,
+        f.source?.verdict ?? null,
+        f.source?.plugin_version ?? null,
+        f.source?.judged_at ?? null,
+        f.source?.rejudge_error ?? null,
+      ]),
+    )
+    .sort()
+    .join('\n')
+}
+
+export function rejudgeWatchOf(item: InboxItem): RejudgeWatch {
+  return {
+    id: item.id,
+    urls: item.tracks.map((f) => f.source?.url ?? null).filter((u): u is string => u != null),
+    before: rejudgeShape(item),
+    finished: null,
+  }
+}
+
+/**
+ * 再判定の着地を決めてよいか。ジョブの終わりは走査（一覧の作り直し）より先に来るので、終わった後に
+ * 取り直した一覧で、押した件が消えたか曲の形が押した時点と変わったら `land`。変わらない一覧（走査の前・
+ * 古い取得）では待ち、終わってから `REJUDGE_SETTLE_TIMEOUT_MS` 過ぎたら `timeout`
+ */
+export function rejudgeSettle(w: RejudgeWatch, items: InboxItem[], now: number): 'wait' | 'land' | 'timeout' {
+  if (w.finished == null) return 'wait'
+  if (items !== w.finished.items) {
+    const it = items.find((i) => i.id === w.id)
+    if (it == null || rejudgeShape(it) !== w.before) return 'land'
+  }
+  return now - w.finished.at >= REJUDGE_SETTLE_TIMEOUT_MS ? 'timeout' : 'wait'
+}
+
+/** 着地: 全曲が別の 1 件へ移ったらその件を選び、移した数を知らせる（`rejudgeLanding`） */
+export function rejudgeOutcome(w: RejudgeWatch, items: InboxItem[]): { select: number | null; notice: string } {
+  const { target, moved } = rejudgeLanding(w.id, w.urls, items)
+  const where =
+    target ??
+    items.find((i) => i.id !== w.id && i.tracks.some((f) => f.source?.url != null && w.urls.includes(f.source.url)))
+  return {
+    select: target?.id ?? null,
+    notice: moved > 0 && where != null ? `再判定した。${moved} 曲を ${where.rel_dir} へ移した` : '再判定した',
+  }
 }
 
 
