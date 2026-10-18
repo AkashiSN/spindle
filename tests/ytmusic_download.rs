@@ -50,7 +50,7 @@ cp "$FAKE/thumb.jpg" "${out%.webm}.jpg"
 const FAKE_PLUGIN: &str = r#"
 IN=$(cat)
 case "$IN" in
-  *'"channel":"KnownCh"'*) echo '{"protocol":1,"ok":true,"track":{"title":"Song One","artists":["Artist A"],"albumartist":"Artist A","album":"Songs of A","category":"Pop","date":"2026","tags":[["ORIGINALARTIST","Someone"]]}}' ;;
+  *'"channel":"KnownCh"'*) echo '{"protocol":1,"ok":true,"track":{"title":"Song One","artists":["Artist A"],"albumartist":"Artist A","album":"Songs of A","category":"Pop","date":"2026","tags":[["ORIGINALARTIST","Someone"]]},"plugin":{"name":"fake","version":"v9.9.9"}}' ;;
   *'"channel":"SkipCh"'*) echo '{"protocol":1,"ok":false,"reason":"skip","message":"配信の告知"}' ;;
   *'"channel":"BrokenCh"'*) echo 'not json' ;;
   *) echo '{"protocol":1,"ok":false,"reason":"unmatched","message":"ルールを足してください"}' ;;
@@ -303,6 +303,14 @@ async fn ok_video_is_staged_in_inbox_with_tags_sidecar_and_archive() {
     assert_eq!(e.channel.as_deref(), Some("KnownCh"));
     assert_eq!(e.url.as_deref(), Some("https://www.youtube.com/watch?v=v1"));
     assert!(e.message.is_none());
+    // 再判定の材料（Item・プラグインの版・時刻・追加タグのキー）
+    let item = e.item.as_ref().unwrap();
+    assert_eq!(item.title, "Song One (Official Video)");
+    assert_eq!(item.channel, "KnownCh");
+    assert_eq!(item.uploaded_at.as_deref(), Some("2026-09-01"));
+    assert!(e.judged_at.is_some());
+    assert_eq!(e.plugin_tags, Some(vec!["ORIGINALARTIST".to_owned()]));
+    assert_eq!(e.plugin_version.as_deref(), Some("v9.9.9"));
     // Archive の webm、inbox ジョブの投入、作業領域の後始末
     assert!(lib.dir.path().join("Archive/youtube/v1.webm").exists());
     assert_eq!(
@@ -343,6 +351,8 @@ async fn unmatched_video_goes_to_the_catch_all_directory_with_the_message() {
     let e = &s.files["20260901 Some Title [v1].opus"];
     assert_eq!(e.verdict, "unmatched");
     assert_eq!(e.message.as_deref(), Some("ルールを足してください"));
+    assert!(e.item.is_some());
+    assert_eq!(e.plugin_tags, None);
     assert!(lib.dir.path().join("Archive/youtube/v1.webm").exists());
 }
 

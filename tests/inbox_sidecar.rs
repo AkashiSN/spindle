@@ -20,6 +20,11 @@ fn entry(verdict: &str) -> FileEntry {
         message: (verdict != "ok").then(|| "見つからない".to_owned()),
         subscription_id: None,
         position: None,
+        item: None,
+        plugin_version: None,
+        judged_at: None,
+        plugin_tags: None,
+        rejudge_error: None,
     }
 }
 
@@ -206,4 +211,16 @@ fn rip_entry_check_rejects_broken_shapes() {
     let mut e = ok;
     e.toc = "garbage".into();
     assert!(matches!(e.check(), Err(RipEntryError::Toc(_))));
+}
+
+#[test]
+fn old_sidecar_without_new_fields_still_parses() {
+    let json = r#"{"version":1,"files":{"a.opus":{"source":"youtube","verdict":"ok"}}}"#;
+    let s = Sidecar::parse(json.as_bytes()).unwrap();
+    let e = &s.files["a.opus"];
+    assert_eq!(e.item, None);
+    assert_eq!(e.plugin_version, None);
+    assert_eq!(e.judged_at, None);
+    assert_eq!(e.plugin_tags, None);
+    assert_eq!(e.rejudge_error, None);
 }

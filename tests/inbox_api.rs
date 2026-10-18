@@ -499,6 +499,11 @@ async fn youtube_item(app: &App, rel_dir: &str, category: Option<&str>, verdict:
             message: (verdict != "ok").then(|| "ルールを足してください".to_owned()),
             subscription_id: None,
             position: None,
+            item: None,
+            plugin_version: None,
+            judged_at: None,
+            plugin_tags: None,
+            rejudge_error: None,
         },
     )
     .unwrap();
@@ -722,6 +727,11 @@ async fn list_carries_the_last_sync_of_referenced_subscriptions() {
             message: None,
             subscription_id: Some(3),
             position: Some(165),
+            item: None,
+            plugin_version: None,
+            judged_at: None,
+            plugin_tags: None,
+            rejudge_error: None,
         },
     )
     .unwrap();

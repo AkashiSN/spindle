@@ -119,6 +119,12 @@ export type InboxSource = {
   /** 再生リストの購読から落とした曲の購読 id と再生リスト上の位置（D-78）。それ以外は無い */
   subscription_id?: number
   position?: number
+  /** 判定したプラグインの版。無ければ null（旧サーバ・旧サイドカーでは無い） */
+  plugin_version?: string | null
+  /** 判定した時刻（UNIX epoch 秒） */
+  judged_at?: number | null
+  /** 直近の再判定がこの曲で失敗した理由 */
+  rejudge_error?: string | null
 }
 
 /** 追記先の既存 album（GET /api/inbox の destination。D-70） */

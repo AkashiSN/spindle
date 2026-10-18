@@ -392,28 +392,33 @@ impl VideoInfo {
         }
     }
 
-    /// Inbox に置くファイル名 `<YYYYMMDD> <title> [<id>].opus`（名前順 = 公開順 = 採番順。
-    /// 日付が無ければ日付なし）。`title` は判定できたトラック名か動画タイトル
+    /// Inbox に置くファイル名 `<YYYYMMDD> <title> [<id>].opus`（[`inbox_file_name_for`] に委ねる）
     pub fn inbox_file_name(&self, title: &str) -> String {
-        let id = sanitize_component(&self.id);
-        // 切り詰めは title だけに効かせる（id と日付は落とさない）
-        let suffix = format!(" [{id}].opus");
-        let prefix = self
-            .upload_date
-            .as_deref()
-            .map(|d| format!("{d} "))
-            .unwrap_or_default();
-        let budget = crate::domain::relpath::MAX_COMPONENT_BYTES
-            .saturating_sub(prefix.len() + suffix.len())
-            .max(1);
-        let mut title = sanitize_component(title);
-        while title.len() > budget {
-            title.pop();
-        }
-        let title = title.trim_end();
-        let title = if title.is_empty() { "_" } else { title };
-        format!("{prefix}{title}{suffix}")
+        inbox_file_name_for(&self.item(), title)
     }
+}
+
+/// Inbox に置くファイル名 `<YYYYMMDD> <title> [<id>].opus`（名前順 = 公開順 = 採番順。
+/// 日付が無ければ日付なし）。`title` は判定できたトラック名か動画タイトル。`uploaded_at` は YYYY-MM-DD
+pub fn inbox_file_name_for(item: &Item, title: &str) -> String {
+    let id = sanitize_component(item.id.as_deref().unwrap_or(""));
+    // 切り詰めは title だけに効かせる（id と日付は落とさない）
+    let suffix = format!(" [{id}].opus");
+    let prefix = item
+        .uploaded_at
+        .as_deref()
+        .map(|d| format!("{} ", d.replace('-', "")))
+        .unwrap_or_default();
+    let budget = crate::domain::relpath::MAX_COMPONENT_BYTES
+        .saturating_sub(prefix.len() + suffix.len())
+        .max(1);
+    let mut title = sanitize_component(title);
+    while title.len() > budget {
+        title.pop();
+    }
+    let title = title.trim_end();
+    let title = if title.is_empty() { "_" } else { title };
+    format!("{prefix}{title}{suffix}")
 }
 
 /// Inbox のディレクトリ: `youtube/<albumartist>/<album>`（判定できたとき）か
@@ -428,6 +433,68 @@ pub fn inbox_dir(track: Option<&Track>, channel: &str) -> Result<RelPath, String
     };
     let b = if b.is_empty() { "_".to_owned() } else { b };
     RelPath::parse(&format!("{SUBDIR}/{a}/{b}")).map_err(|e| e.to_string())
+}
+
+/// プラグインの判定（購読の上書き後）
+pub struct Judged {
+    pub track: Option<Track>,
+    /// `ok` か、判定できなかった reason（`skip` / `unmatched` / `unknown_channel` 等）
+    pub verdict: String,
+    pub message: Option<String>,
+    /// 応答の `plugin.version`（無ければ None）
+    pub plugin_version: Option<String>,
+}
+
+/// プラグインへの問い合わせと購読の上書き（初回と再判定で共通）。購読由来（P4-16）は追記先
+/// （albumartist / album / category）を購読の値にし、判定不能でも合成した Track を返す
+pub async fn judge(
+    env: &DownloaderEnv,
+    item: &Item,
+    subscription: Option<&SubscriptionTarget>,
+    token: &CancellationToken,
+) -> Result<Judged, DownloadError> {
+    let resolved = match env.provider.resolve(item, token).await {
+        Ok(r) => r,
+        Err(ProviderError::Process(ProcessError::Cancelled)) => {
+            return Err(DownloadError::Cancelled)
+        }
+        Err(e) => return Err(DownloadError::Fatal(e.to_string())),
+    };
+    let plugin_version = resolved.plugin.map(|p| p.version);
+    let (track, verdict, message) = match resolved.outcome {
+        Outcome::Track(t) => (Some(t), "ok".to_owned(), None),
+        Outcome::Declined { reason, message } => {
+            tracing::info!(url = ?item.url, reason, "判定できない");
+            (None, reason, Some(message))
+        }
+    };
+    // 購読由来: プラグインの判定は TITLE / ARTIST に使い、skip / 判定不能でも投入する
+    let track = match subscription {
+        Some(t) => Some(match track {
+            Some(mut tr) => {
+                tr.albumartist = t.albumartist.clone();
+                tr.album = t.album.clone();
+                tr.category = t.category.clone();
+                tr
+            }
+            None => Track {
+                title: item.title.clone(),
+                artists: vec![t.albumartist.clone()],
+                albumartist: t.albumartist.clone(),
+                album: t.album.clone(),
+                category: t.category.clone(),
+                date: item.uploaded_at.clone(),
+                tags: Vec::new(),
+            },
+        }),
+        None => track,
+    };
+    Ok(Judged {
+        track,
+        verdict,
+        message,
+        plugin_version,
+    })
 }
 
 // ---------------------------------------------------------------- 本体
@@ -513,53 +580,31 @@ pub async fn download_one(
     };
     // 2. プラグイン（ダウンロードの前。skip ならここで終わり、宛先もここで決まる）
     let item = video.item();
-    let (track, verdict, message) =
-        match env.provider.resolve(&item, token).await.map(|r| r.outcome) {
-            Ok(Outcome::Track(t)) => (Some(t), "ok".to_owned(), None),
-            // 購読由来は skip でも投入する（再生リストは人が選んだもの。P4-16）
-            Ok(Outcome::Declined { reason, message })
-                if reason == "skip" && subscription.is_none() =>
-            {
-                tracing::info!(url, message, "プラグインが skip");
-                return Ok(Downloaded::Skipped { message });
+    let judged = judge(env, &item, subscription.as_ref(), token).await?;
+    // 購読由来は skip でも投入する（再生リストは人が選んだもの。P4-16）
+    if judged.verdict == "skip" && subscription.is_none() {
+        tracing::info!(url, message = ?judged.message, "プラグインが skip");
+        return Ok(Downloaded::Skipped {
+            message: judged.message.unwrap_or_default(),
+        });
+    }
+    let Judged {
+        track,
+        verdict,
+        message,
+        plugin_version,
+    } = judged;
+    // 再判定で消す対象（プラグインが書いた追加タグのキー）は ok のときだけ
+    let plugin_tags = track.as_ref().filter(|_| verdict == "ok").map(|t| {
+        let mut keys: Vec<String> = Vec::new();
+        for (k, _) in &t.tags {
+            let k = k.to_ascii_uppercase();
+            if !keys.contains(&k) {
+                keys.push(k);
             }
-            Ok(Outcome::Declined { reason, message }) => {
-                tracing::info!(url, reason, "判定できないので受け皿へ");
-                (None, reason, Some(message))
-            }
-            Err(ProviderError::Process(ProcessError::Cancelled)) => {
-                return Err(DownloadError::Cancelled)
-            }
-            Err(e) => return Err(DownloadError::Fatal(e.to_string())),
-        };
-    // 購読由来（P4-16）: 追記先（albumartist / album / category）は購読の値。プラグインの判定は
-    // TITLE / ARTIST に使い、skip / 判定不能でも投入する（再生リストは人が選んだもの）
-    let (track, verdict) = match &subscription {
-        Some(t) => {
-            let track = match track {
-                Some(mut tr) => {
-                    tr.albumartist = t.albumartist.clone();
-                    tr.album = t.album.clone();
-                    tr.category = t.category.clone();
-                    tr
-                }
-                None => Track {
-                    title: video.title.clone(),
-                    artists: vec![t.albumartist.clone()],
-                    albumartist: t.albumartist.clone(),
-                    album: t.album.clone(),
-                    category: t.category.clone(),
-                    date: video
-                        .upload_date
-                        .as_deref()
-                        .map(|d| format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..8])),
-                    tags: Vec::new(),
-                },
-            };
-            (Some(track), verdict)
         }
-        None => (track, verdict),
-    };
+        keys
+    });
     let title = track
         .as_ref()
         .map(|t| t.title.clone())
@@ -577,6 +622,11 @@ pub async fn download_one(
         message,
         subscription_id: subscription.as_ref().and(request.subscription_id),
         position: subscription.as_ref().and(request.position),
+        item: Some(item),
+        plugin_version,
+        judged_at: Some(crate::db::now_epoch()),
+        plugin_tags,
+        rejudge_error: None,
     };
     let category = track.as_ref().and_then(|t| t.category.clone());
     // 揃える購読なら TRACKNUMBER = 再生リストの位置（同期が先に既存の行を揃えて隙間を空けている）
@@ -669,7 +719,7 @@ pub async fn download_one(
         .run(token)
         .await?;
     // 6. タグ
-    let changes = tag_changes(track.as_ref(), &video, track_no);
+    let changes = tag_changes_for(track.as_ref(), &video.title, &video.webpage_url, track_no);
     let picture = match std::fs::read(&thumb) {
         Ok(bytes) if !bytes.is_empty() => Some(
             lofty::picture::Picture::unchecked(bytes)
@@ -775,10 +825,16 @@ fn ytdlp(env: &DownloaderEnv) -> ExternalCommand {
 
 /// ファイルに書くタグ。判定できたら `Track::tags(track_no)`（`track_no` は購読の位置。無ければ
 /// TRACKNUMBER 無しで採番は Inbox）、できなければ TITLE に動画タイトル。どちらも `SOURCE_URL`
-fn tag_changes(track: Option<&Track>, video: &VideoInfo, track_no: Option<i64>) -> Vec<TagChange> {
+/// 初回のダウンロードで Opus に書くタグ（`track` が無ければ TITLE だけ。SOURCE_URL は常に）
+pub fn tag_changes_for(
+    track: Option<&Track>,
+    video_title: &str,
+    url: &str,
+    track_no: Option<i64>,
+) -> Vec<TagChange> {
     let pairs: Vec<(String, String)> = match track {
         Some(t) => t.tags(track_no),
-        None => vec![("TITLE".to_owned(), video.title.clone())],
+        None => vec![("TITLE".to_owned(), video_title.to_owned())],
     };
     let mut changes: Vec<TagChange> = Vec::new();
     for (k, v) in pairs {
@@ -792,7 +848,7 @@ fn tag_changes(track: Option<&Track>, video: &VideoInfo, track_no: Option<i64>) 
     }
     changes.push(TagChange {
         key: SOURCE_URL_KEY.to_owned(),
-        values: Some(vec![video.webpage_url.clone()]),
+        values: Some(vec![url.to_owned()]),
     });
     changes
 }
