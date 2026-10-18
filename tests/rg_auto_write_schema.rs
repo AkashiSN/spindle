@@ -11,7 +11,12 @@ use spindle::db::migrations;
 fn upgrade_from_0003_keeps_jobs_children_and_adds_rgwrite() {
     let mut c = Connection::open_in_memory().unwrap();
     c.pragma_update(None, "foreign_keys", "ON").unwrap();
-    let all = migrations::embedded().unwrap();
+    // 0004 の性質を見る試験なので、後続の版（0005〜）は流さない
+    let all: Vec<_> = migrations::embedded()
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.version <= 4)
+        .collect();
     let upto3: Vec<_> = all.iter().filter(|m| m.version <= 3).cloned().collect();
     assert_eq!(
         migrations::apply_list(&mut c, &upto3).unwrap(),
