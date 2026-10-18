@@ -359,6 +359,15 @@ pub fn set_draft(conn: &Connection, id: i64, draft: &serde_json::Value) -> Resul
     Ok(())
 }
 
+/// pending の件の下書きを消す（再判定の開始時）。pending でなければ何もせず false
+pub fn clear_pending_draft(conn: &Connection, id: i64) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE inbox_items SET draft = NULL WHERE id = ?1 AND state = 'pending'",
+        [id],
+    )?;
+    Ok(n > 0)
+}
+
 /// 配置済み
 pub fn set_placed(conn: &Connection, id: i64, album_id: i64, now: i64) -> Result<()> {
     conn.execute(

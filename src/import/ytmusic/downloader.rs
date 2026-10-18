@@ -499,22 +499,13 @@ pub async fn judge(
 
 // ---------------------------------------------------------------- 本体
 
-/// URL 1 件を処理する。`job_id` は作業領域の名前に使う
-pub async fn download_one(
+/// 手順 1 の dump（`--dump-single-json --flat-playlist`）。初回と再判定（`item` の無い既存の曲）で同じ
+/// 引数を使う
+async fn dump(
     env: &DownloaderEnv,
-    job_id: i64,
-    request: &DownloadRequest,
+    url: &str,
     token: &CancellationToken,
-) -> Result<Downloaded, DownloadError> {
-    let url = request.url.as_str();
-    let check_cancel = || {
-        if token.is_cancelled() {
-            Err(DownloadError::Cancelled)
-        } else {
-            Ok(())
-        }
-    };
-    // 1. dump
+) -> Result<Dump, DownloadError> {
     let out = match ytdlp(env)
         .args([
             "--dump-single-json",
@@ -539,9 +530,39 @@ pub async fn download_one(
         }
         Err(e) => return Err(e.into()),
     };
-    let video = match parse_dump(&out.stdout)
-        .map_err(|e| DownloadError::Fatal(format!("yt-dlp の出力を読めない: {e}")))?
-    {
+    parse_dump(&out.stdout)
+        .map_err(|e| DownloadError::Fatal(format!("yt-dlp の出力を読めない: {e}")))
+}
+
+/// 動画 1 本の dump（再判定がプラグインへ渡す `Item` を取り直す）。再生リストなら Fatal
+pub async fn dump_video(
+    env: &DownloaderEnv,
+    url: &str,
+    token: &CancellationToken,
+) -> Result<VideoInfo, DownloadError> {
+    match dump(env, url, token).await? {
+        Dump::Video(v) => Ok(v),
+        Dump::Playlist(_) => Err(DownloadError::Fatal(format!("動画でなく再生リスト: {url}"))),
+    }
+}
+
+/// URL 1 件を処理する。`job_id` は作業領域の名前に使う
+pub async fn download_one(
+    env: &DownloaderEnv,
+    job_id: i64,
+    request: &DownloadRequest,
+    token: &CancellationToken,
+) -> Result<Downloaded, DownloadError> {
+    let url = request.url.as_str();
+    let check_cancel = || {
+        if token.is_cancelled() {
+            Err(DownloadError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    // 1. dump
+    let video = match dump(env, url, token).await? {
         Dump::Playlist(urls) => {
             let mut enqueued = 0;
             let mut skipped = 0;
@@ -595,16 +616,10 @@ pub async fn download_one(
         plugin_version,
     } = judged;
     // 再判定で消す対象（プラグインが書いた追加タグのキー）は ok のときだけ
-    let plugin_tags = track.as_ref().filter(|_| verdict == "ok").map(|t| {
-        let mut keys: Vec<String> = Vec::new();
-        for (k, _) in &t.tags {
-            let k = k.to_ascii_uppercase();
-            if !keys.contains(&k) {
-                keys.push(k);
-            }
-        }
-        keys
-    });
+    let plugin_tags = track
+        .as_ref()
+        .filter(|_| verdict == "ok")
+        .map(plugin_tag_keys);
     let title = track
         .as_ref()
         .map(|t| t.title.clone())
@@ -801,8 +816,20 @@ async fn finish_staging(
     Ok(())
 }
 
+/// プラグインの追加タグのキー（大文字。重複なし。サイドカーの `plugin_tags`）
+pub(crate) fn plugin_tag_keys(track: &Track) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for (k, _) in &track.tags {
+        let k = k.to_ascii_uppercase();
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
+}
+
 /// `target` の `SOURCE_URL` が `url` なら自分の成果物（同じ動画の同じ remux）
-fn is_own_product(inbox: &RootDir, target: &RelPath, url: &str) -> bool {
+pub(crate) fn is_own_product(inbox: &RootDir, target: &RelPath, url: &str) -> bool {
     let Ok(file) = inbox.open_file(target) else {
         return false;
     };
