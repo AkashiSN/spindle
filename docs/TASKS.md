@@ -2065,3 +2065,8 @@ ALAC は無傷）。D-89 は「ffmpeg は `stts` 末尾の長さ 0 のサンプ�
       保持中を既定に 100 件ずつ、照合・吸い出しログを API で読む（`GET /api/logs`）、ジョブ画面の結果列と行の展開、
       GC・スキャン・バックアップの結果をジョブの note に、設定画面の category を使用数つきの表に。
       仕様 docs/superpowers/specs/2026-10-15-records-view-design.md
+- [x] Inbox の再判定（2026-10-18。D-114）: pending の件の YouTube 由来の曲を `POST /api/inbox/:id/rejudge`（`inbox_rejudge`
+      ジョブ）で今のプラグインに問い合わせ直し、タグ・ファイル名・置き場所・サイドカーを初回と同じ形に書き直す。
+      未判定 → ok は本来の件へ移す（移動先が pending のときだけ）。Response に任意の `plugin`、サイドカーに `item` /
+      `plugin_version` / `judged_at` / `plugin_tags` / `rejudge_error` を足し、判定の版を件の見出しと判定列に出す。
+      仕様 docs/superpowers/specs/2026-10-18-inbox-rejudge-design.md
