@@ -472,3 +472,30 @@ input {
   gap: 8px;
   padding: 16px;
 }
+
+/* フォルダのパンくず */
+.m-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--m-border, rgba(128, 128, 128, 0.25));
+}
+.m-crumb-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.m-crumb {
+  min-height: 44px;
+  padding: 0 4px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+}
+.m-crumb:disabled {
+  font-weight: 600;
+  opacity: 1;
+}

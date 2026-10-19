@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react'
 import { ApiError, onUnauthorized } from '../api/client'
 import type { TrackRow } from '../api/types'
 import { getSession } from './api'
+import { FolderTab } from './components/FolderTab'
 import { LibraryTab } from './components/LibraryTab'
 import { Login } from './components/Login'
 import { TabBar } from './components/TabBar'
@@ -87,7 +88,7 @@ function Shell() {
       content = <LibraryTab route={route} navigate={navigate} onOpenTrack={setOpenTrack} />
       break
     case 'folders':
-      content = <EmptyTab title="フォルダ" />
+      content = <FolderTab route={route} navigate={navigate} onOpenTrack={setOpenTrack} />
       break
     case 'playlists':
       content = <EmptyTab title="プレイリスト" />
