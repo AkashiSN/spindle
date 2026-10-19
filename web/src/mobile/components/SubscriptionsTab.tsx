@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
 import type { AlbumRow, Subscription } from '../../api/types'
 import { TrailingDebounce } from '../../lib/debounce'
+import { Latest } from '../../lib/latest'
 import {
   getSubscriptionProgress,
   inboxSummary,
@@ -18,6 +19,7 @@ import {
   type SubscriptionProgress,
 } from '../api'
 import type { Route } from '../route'
+import { LatestByKey } from '../latestByKey'
 import { cardSummary, syncButton, syncedAgo, syncPhase } from '../subscriptions'
 import { useEventSubscription } from '../useEvents'
 import { SubscriptionDetail } from './SubscriptionDetail'
@@ -56,31 +58,44 @@ export function SubscriptionsTab({
     latest.current = { ids: list.kind === 'ok' ? list.items.map((s) => s.id) : [], progress }
   })
 
+  // 同じ購読の取り直しが重なったとき、後から返った古い応答で上書きしない
+  const [progressGen] = useState(() => new LatestByKey<number>())
+  useEffect(() => () => progressGen.invalidate(), [progressGen])
   const loadProgress = useCallback(async (id: number) => {
+    const gen = progressGen.next(id)
     try {
       const p = await getSubscriptionProgress(id)
-      setProgress((m) => ({ ...m, [id]: p }))
+      if (progressGen.isCurrent(id, gen)) setProgress((m) => ({ ...m, [id]: p }))
     } catch {
       // 一覧の取り直しで消えた購読など。次の取り直しに任せる
     }
-  }, [])
+  }, [progressGen])
 
   /** 一覧・各購読の進み具合・Inbox の件数を取り直す */
+  const [listGen] = useState(() => new Latest())
+  useEffect(() => () => listGen.invalidate(), [listGen])
   const load = useCallback(() => {
+    const g = listGen.next()
     inboxSummary()
-      .then((s) => setPending(s?.pending ?? null))
-      .catch(() => setPending(null))
+      .then((s) => {
+        if (listGen.isCurrent(g)) setPending(s?.pending ?? null)
+      })
+      .catch(() => {
+        if (listGen.isCurrent(g)) setPending(null)
+      })
     listSubscriptions()
       .then((items) => {
+        if (!listGen.isCurrent(g)) return
         setNow(nowSecs())
         setList({ kind: 'ok', items })
         for (const s of items) void loadProgress(s.id)
       })
       .catch((e: unknown) => {
+        if (!listGen.isCurrent(g)) return
         if (e instanceof ApiError && (e.status === 404 || e.status === 503)) setList({ kind: 'disabled' })
         else setList({ kind: 'error', message: `読み込みに失敗しました（${errorText(e)}）` })
       })
-  }, [loadProgress])
+  }, [loadProgress, listGen])
 
   useEffect(() => load(), [load])
 

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ApiError } from '../../api/client'
 import type { Playlist, TrackRow } from '../../api/types'
 import { TrailingDebounce } from '../../lib/debounce'
+import { Latest } from '../../lib/latest'
 import { createPlaylist, listPlaylists } from '../api'
 import { nameErrorMessage, playlistSubtitle } from '../playlists'
 import type { Route } from '../route'
@@ -27,15 +28,22 @@ export function PlaylistsTab({
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
 
+  // 取り直しが重なったとき、後から返った古い応答で上書きしない
+  const [gen] = useState(() => new Latest())
   const load = useCallback(() => {
+    const g = gen.next()
     listPlaylists()
       .then((xs) => {
+        if (!gen.isCurrent(g)) return
         setLists(xs)
         setError(null)
       })
-      .catch((e: unknown) => setError(e instanceof ApiError ? `読み込みに失敗しました（${e.code}）` : '読み込みに失敗しました'))
-  }, [])
+      .catch((e: unknown) => {
+        if (gen.isCurrent(g)) setError(e instanceof ApiError ? `読み込みに失敗しました（${e.code}）` : '読み込みに失敗しました')
+      })
+  }, [gen])
   useEffect(() => load(), [load])
+  useEffect(() => () => gen.invalidate(), [gen])
   const [refetch] = useState(() => new TrailingDebounce(() => load(), 500, 3000))
   useEffect(() => () => refetch.cancel(), [refetch])
   useEventSubscription({

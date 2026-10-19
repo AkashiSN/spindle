@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
 import type { TrackRow, TrackWithDetail } from '../../api/types'
 import { artworkUrl } from '../../lib/artwork'
+import { Latest } from '../../lib/latest'
 import { formatTime } from '../../lib/playback'
 import { generalRows, joinValues, locationRows, metadataRows, type PropRow } from '../../lib/properties'
 import { getTrack } from '../api'
@@ -65,18 +66,24 @@ export function TrackSheet({
   const [expanded, setExpanded] = useState(false)
   const [adding, setAdding] = useState(false)
 
+  // 取り直しが重なったとき（トラックの切り替えを含む）、後から返った古い応答で上書きしない
+  const [gen] = useState(() => new Latest())
   const reload = useCallback(() => {
+    const g = gen.next()
     getTrack(trackId)
       .then((t) => {
+        if (!gen.isCurrent(g)) return
         setTrack(t)
         setLoadError(null)
         if (editBlockReason(t) == null) setNotice(null)
       })
-      .catch((e: unknown) =>
-        setLoadError(e instanceof ApiError ? `読み込みに失敗しました（${e.code}）` : '読み込みに失敗しました'),
-      )
-  }, [trackId])
+      .catch((e: unknown) => {
+        if (gen.isCurrent(g))
+          setLoadError(e instanceof ApiError ? `読み込みに失敗しました（${e.code}）` : '読み込みに失敗しました')
+      })
+  }, [trackId, gen])
   useEffect(() => reload(), [reload])
+  useEffect(() => () => gen.invalidate(), [gen])
   useEventSubscription({
     // 保存直後は反映待ち。バッチが進んだら取り直して値と反映待ちの表示を最新にする
     onBatch: () => reload(),
