@@ -173,6 +173,10 @@ pub fn router(state: AppState) -> Router {
             "/ytmusic/subscriptions/{id}/sync",
             post(subscriptions::sync),
         )
+        .route(
+            "/ytmusic/subscriptions/{id}/progress",
+            get(subscriptions::progress),
+        )
         .fallback(api_not_found);
 
     let protected = Router::new()
