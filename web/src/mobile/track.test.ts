@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { splitValues } from '../lib/properties'
-import { audioSpec, editBlockReason, fallbackSource, formatSize, mobileSource, sourceCodecLabel, sheetFromHistory, tagEditOps, tagEditProblem } from './track'
+import { audioSpec, editBlockReason, fallbackSource, formatSize, mobileSource, playErrorMessage, sourceCodecLabel, sheetFromHistory, tagEditOps, tagEditProblem } from './track'
 
 const yes = { flac: true, opus: true, aac: true, alac: true, wav: true, mp3: true }
 
@@ -67,5 +67,15 @@ describe('track', () => {
     expect(sourceCodecLabel({ url: '/api/stream/7?transcode=opus', transcode: true })).toBe('Opus')
     expect(sourceCodecLabel({ url: '/api/stream/7?transcode=aac', transcode: true })).toBe('AAC')
     expect(sourceCodecLabel({ url: '/api/stream/8', transcode: false })).toBe('原本')
+  })
+})
+
+describe('playErrorMessage', () => {
+  it('操作の外の play() を拒まれた（NotAllowedError）ときはもう一度押すよう促す', () => {
+    expect(playErrorMessage(new DOMException('denied', 'NotAllowedError'))).toBe('もう一度 ▶ を押してください')
+  })
+  it('それ以外はそのままの文言', () => {
+    expect(playErrorMessage(new DOMException('boom', 'NotSupportedError'))).toBe('boom')
+    expect(playErrorMessage('x')).toBe('x')
   })
 })

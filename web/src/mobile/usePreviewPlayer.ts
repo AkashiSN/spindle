@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { TrackRow } from '../api/types'
 import { detectSupport, resolvePendingSeek, withStart, type Source, type Support } from '../lib/playback'
-import { fallbackSource, mobileSource, sourceCodecLabel } from './track'
+import { fallbackSource, mobileSource, playErrorMessage, sourceCodecLabel } from './track'
 
 type MediaState = 'loading' | 'seekable' | 'chunked'
 
@@ -102,7 +102,9 @@ export function usePreviewPlayer(): PreviewPlayer {
       // 次の読み直し・曲の切り替えで中断された play() は失敗ではない
       if (e instanceof DOMException && e.name === 'AbortError') return
       if (e instanceof DOMException && e.name === 'NotSupportedError' && tryFallback()) return
-      setError(e instanceof Error ? e.message : String(e))
+      // NotAllowedError（iOS が操作の外の play() を拒んだ）は source を読み込んだまま残し、次の ▶ で鳴らす
+      setError(playErrorMessage(e))
+      setPlaying(false)
     },
     [tryFallback],
   )
@@ -123,8 +125,10 @@ export function usePreviewPlayer(): PreviewPlayer {
   const toggle = useCallback(() => {
     const audio = audioRef.current
     if (!audio || source.current == null) return
-    if (audio.paused) audio.play().catch(fail)
-    else audio.pause()
+    if (audio.paused) {
+      setError(null)
+      audio.play().catch(fail)
+    } else audio.pause()
   }, [fail])
 
   const seek = useCallback(

@@ -32,6 +32,15 @@ export function sourceCodecLabel(src: Source): string {
 }
 
 /** タグを編集できない理由。編集できるなら null */
+/**
+ * play() が失敗したときの文言。AAC への切り替え後など、操作の外の play() は iOS が
+ * NotAllowedError で拒むことがある。読み込みは済んでいるので、もう一度押せば鳴る
+ */
+export function playErrorMessage(e: unknown): string {
+  if (e instanceof DOMException && e.name === 'NotAllowedError') return 'もう一度 ▶ を押してください'
+  return e instanceof Error ? e.message : String(e)
+}
+
 export function editBlockReason(
   row: Pick<TrackRow, 'pending_batch_id' | 'conflict_batch_id' | 'missing_since'>,
 ): string | null {
