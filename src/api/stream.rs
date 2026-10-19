@@ -7,6 +7,10 @@
 //!   同じ Range 対応で直送する（Derived が変換結果のキャッシュ）。無ければ ffmpeg を stdout パイプで
 //!   起動して Ogg/Opus を chunked で返す（Range 非対応、`?start=<秒>` を `-ss` に渡す）。非可逆は
 //!   変換せず原本を返す（多重劣化の回避。D-8）
+//! - `?transcode=aac` は Ogg/Opus を再生できないブラウザ（iPhone の Safari 等）向け。`derived_files` の
+//!   aac 系統の行が音声版と一致すれば Derived の m4a を同じ Range 対応で直送する（`audio/mp4`）。
+//!   無ければ ffmpeg で ADTS の AAC に変換して chunked で返す（`audio/aac`、Range 非対応、`?start=`）。
+//!   非可逆は opus と同じく原本を返す
 //! - trusted_cidrs からはセッション無しで通る（`auth::is_allowlisted`）
 
 use std::fs::File;
@@ -30,6 +34,7 @@ use tokio::process::{ChildStdout, Command};
 use tokio_util::io::ReaderStream;
 
 use crate::db::Result as DbResult;
+use crate::domain::derived::Variant;
 use crate::domain::relpath::RelPath;
 use crate::domain::tags::Codec;
 use crate::fsroot::{self, FsError, RootDir};
@@ -46,6 +51,59 @@ pub const TRANSCODE_GRACE: Duration = Duration::from_secs(60);
 const TRANSCODE_DEFAULT_LIMIT: Duration = Duration::from_secs(3600);
 /// Opus のビットレート（D-9）
 const TRANSCODE_BITRATE: &str = "128k";
+/// オンザフライ変換の AAC のビットレート
+const TRANSCODE_AAC_BITRATE: &str = "192k";
+
+/// `?transcode=` の値
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transcode {
+    Opus,
+    Aac,
+}
+
+impl Transcode {
+    /// Derived を直送するときの `Content-Type`
+    fn derived_mime(self) -> &'static str {
+        match self {
+            Transcode::Opus => "audio/ogg",
+            Transcode::Aac => "audio/mp4",
+        }
+    }
+
+    /// オンザフライ変換の `Content-Type`
+    fn pipe_mime(self) -> &'static str {
+        match self {
+            Transcode::Opus => "audio/ogg",
+            Transcode::Aac => "audio/aac",
+        }
+    }
+
+    /// オンザフライ変換の ffmpeg の出力側の引数（`-c:a` 以降）
+    fn encoder_args(self) -> &'static [&'static str] {
+        match self {
+            Transcode::Opus => &[
+                "-c:a",
+                "libopus",
+                "-b:a",
+                TRANSCODE_BITRATE,
+                "-vbr",
+                "on",
+                "-f",
+                "ogg",
+                "pipe:1",
+            ],
+            Transcode::Aac => &[
+                "-c:a",
+                "aac",
+                "-b:a",
+                TRANSCODE_AAC_BITRATE,
+                "-f",
+                "adts",
+                "pipe:1",
+            ],
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
@@ -69,6 +127,8 @@ struct StreamRow {
     duration_ms: Option<i64>,
     /// `delivery` ビューの path（`Derived/...` なら Derived が使える）
     delivery_path: String,
+    /// aac 系統の Derived の相対パス（Derived root から）。可逆で音声版が一致するときだけ
+    aac_path: Option<String>,
 }
 
 fn load_row(conn: &Connection, id: i64) -> DbResult<Option<StreamRow>> {
@@ -76,10 +136,13 @@ fn load_row(conn: &Connection, id: i64) -> DbResult<Option<StreamRow>> {
         .query_row(
             "SELECT t.rel_path, t.codec, t.lossless, t.missing_since IS NOT NULL,
                     t.inode, t.size, t.mtime_ns, t.ctime_ns, t.duration_ms,
-                    COALESCE(d.path, 'Library/' || t.rel_path)
+                    COALESCE(d.path, 'Library/' || t.rel_path),
+                    (SELECT a.rel_path FROM derived_files a
+                     WHERE a.track_id = t.id AND a.variant = ?2
+                       AND t.lossless = 1 AND a.src_audio_version = t.audio_version)
              FROM tracks t LEFT JOIN delivery d ON d.track_id = t.id
              WHERE t.id = ?1",
-            [id],
+            rusqlite::params![id, Variant::Aac.as_str()],
             |r| {
                 Ok(StreamRow {
                     rel_path: r.get(0)?,
@@ -92,6 +155,7 @@ fn load_row(conn: &Connection, id: i64) -> DbResult<Option<StreamRow>> {
                     ctime_ns: r.get(7)?,
                     duration_ms: r.get(8)?,
                     delivery_path: r.get(9)?,
+                    aac_path: r.get(10)?,
                 })
             },
         )
@@ -214,13 +278,14 @@ pub async fn get(
         ));
     };
     let transcode = match q.transcode.as_deref() {
-        None => false,
-        Some("opus") => true,
+        None => None,
+        Some("opus") => Some(Transcode::Opus),
+        Some("aac") => Some(Transcode::Aac),
         Some(other) => {
             return Ok(error_response_with_message(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
-                format!("transcode は opus のみ: {other:?}"),
+                format!("transcode は opus か aac: {other:?}"),
             ))
         }
     };
@@ -232,17 +297,23 @@ pub async fn get(
     }
 
     // Derived を直送できるか（可逆で音声版が一致）
-    if transcode && row.lossless {
-        if let Some(rel) = row.delivery_path.strip_prefix("Derived/") {
-            let rel = RelPath::parse(rel).map_err(|e| ApiError::Internal(e.to_string()))?;
-            match open_blocking(&derived, &rel).await? {
-                Some((file, st)) => {
-                    return serve_file(file, &st, "audio/ogg", &method, &headers).await;
-                }
-                None => {
-                    // 行はあるが実体が無い（GC 待ち等）。変換に倒す
-                    tracing::warn!(track_id = id, path = %rel, "Derived の実体が無いので変換する");
-                }
+    let derived_rel = match transcode.filter(|_| row.lossless) {
+        Some(Transcode::Opus) => row
+            .delivery_path
+            .strip_prefix("Derived/")
+            .map(|r| (Transcode::Opus, r)),
+        Some(Transcode::Aac) => row.aac_path.as_deref().map(|r| (Transcode::Aac, r)),
+        None => None,
+    };
+    if let Some((kind, rel)) = derived_rel {
+        let rel = RelPath::parse(rel).map_err(|e| ApiError::Internal(e.to_string()))?;
+        match open_blocking(&derived, &rel).await? {
+            Some((file, st)) => {
+                return serve_file(file, &st, kind.derived_mime(), &method, &headers).await;
+            }
+            None => {
+                // 行はあるが実体が無い（GC 待ち等）。変換に倒す
+                tracing::warn!(track_id = id, path = %rel, "Derived の実体が無いので変換する");
             }
         }
     }
@@ -259,8 +330,8 @@ pub async fn get(
             "ファイルが DB の行と一致しない（再スキャン待ち）",
         ));
     }
-    if transcode && row.lossless {
-        return transcode_opus(&state, id, file, q.start, row.duration_ms, &method);
+    if let Some(kind) = transcode.filter(|_| row.lossless) {
+        return transcode_pipe(&state, id, file, q.start, row.duration_ms, &method, kind);
     }
     serve_file(file, &st, mime_of(&row.codec), &method, &headers).await
 }
@@ -499,13 +570,16 @@ impl Stream for FfmpegBody {
     }
 }
 
-fn transcode_opus(
+/// ffmpeg で `kind` に変換して stdout を本文にする（Range 非対応）。タイムアウト・stderr のログ・
+/// HEAD の扱いは kind によらず共通で、引数と `Content-Type` だけが変わる
+fn transcode_pipe(
     state: &AppState,
     track_id: i64,
     source: File,
     start: Option<f64>,
     duration_ms: Option<i64>,
     method: &Method,
+    kind: Transcode,
 ) -> Result<Response, ApiError> {
     let mut cmd = Command::new(&state.config.bin.ffmpeg);
     cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
@@ -520,16 +594,8 @@ fn transcode_opus(
         "-vn",
         "-map_metadata",
         "-1",
-        "-c:a",
-        "libopus",
-        "-b:a",
-        TRANSCODE_BITRATE,
-        "-vbr",
-        "on",
-        "-f",
-        "ogg",
-        "pipe:1",
     ])
+    .args(kind.encoder_args())
     .stdin(Stdio::from(source))
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
@@ -576,7 +642,10 @@ fn transcode_opus(
     };
     let mut res = (StatusCode::OK, body).into_response();
     let h = res.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/ogg"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(kind.pipe_mime()),
+    );
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
     h.insert(
         header::CACHE_CONTROL,

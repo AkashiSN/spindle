@@ -1999,6 +1999,7 @@ GET    /api/search?q=                             FTS5 trigram（3 文字未満�
 
 GET    /api/stream/:id                            Range 対応。原本
 GET    /api/stream/:id?transcode=opus             オンザフライ変換
+GET    /api/stream/:id?transcode=aac              AAC（スマホ版の試し聴きの退避。§11、§12.7、D-115）
 GET    /api/artwork/:hash?size=                   size = 256 | 768 で WebP のサムネイル、無しで原画像
                                                   （元の MIME）。hash は albums.artwork_hash。未生成なら
                                                   原画像へ倒す（no-cache）。ハッシュアドレスなので immutable
@@ -2241,6 +2242,7 @@ PATCH  /api/ytmusic/subscriptions/:id             { albumartist?, album?, catego
                                                   追記先を変えると album_id は NULL に戻る。同期が queued / running の間は sync_running
 DELETE /api/ytmusic/subscriptions/:id             → 204 | 404 | 409 sync_running（PATCH と同じ。Library のファイルは消えない）
 POST   /api/ytmusic/subscriptions/:id/sync        → 202 { job_id } | 404 | 409 { error: "duplicate" }（走行中。latch は残るので終わった後に走る）
+GET    /api/ytmusic/subscriptions/:id/progress    → { sync: Job | null, items: [Job] } | 404（直近の playlist_sync と、それより後に作られた（jobs.id が大きい）その購読の ytdl を position 昇順で。created_at は秒単位で前回の同期の終わった件と同じ秒になりうるので、境界は id で取る。投入が走行中の古い ytdl に dedup されて新しい行ができない同期もあるので、この購読の ytdl で queued / running のものは作られた順によらず含める。スマホ版の購読の「完了」の判定に使う。§12.7）
                                                   [ytmusic].enabled でなければすべて 404
 // Subscription = { id, list_id, url, album_id, albumartist, album, category, align, enabled, max_enqueue,
 //                  created_at, updated_at, last_attempted_at, last_synced_at, sync_requested_at,
@@ -2598,7 +2600,7 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 | コーデック | ブラウザ | 方針 |
 |---|---|---|
 | FLAC | Chrome / Firefox / Safari 対応 | 直送 |
-| Opus | Chrome / Firefox / Safari 18.4+ 対応 | 直送（Opus 不可のブラウザ向けの AAC 変換は作らない。D-52） |
+| Opus | Chrome / Firefox / Safari 18.4+ 対応 | 直送（Opus 不可のブラウザ向けの AAC 変換は作らない。D-52。スマホ版の試し聴きは例外で `?transcode=aac` を使う。D-115） |
 | AAC (m4a) | 全対応 | 直送 |
 | WAV | 全対応 | 直送（サイズ大） |
 | **ALAC** | **Safari のみ** | **既定で Opus へ変換** |
@@ -2606,6 +2608,9 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 
 - `GET /api/stream/:id` は原本を Range で直送。`?transcode=opus` は `delivery` が Derived を指せば
   Derived を Range で直送し、無いときだけ ffmpeg を `stdout` パイプで起動して chunked で返す（D-52）
+- `?transcode=aac` は `aac` 系統の Derived（m4a）が現在値なら Range で直送し、無いときは ffmpeg で AAC を ADTS として
+  chunked で返す（`audio/aac`。Range なし。シークは `?start=`）。非可逆の原本は `opus` / `aac` のどちらでも変換せずそのまま
+  返す（世代劣化させない）。スマホ版の試し聴きが、Ogg/Opus を再生できない端末で使う（§12.7、D-115）
 - 変換中のシークは該当位置から ffmpeg を再起動（`?start=` → `-ss`）
 - 変換結果はキャッシュしない（Derived がそのキャッシュ）
 - クライアント能力は起動時に `canPlayType()` で判定し、再生時に URL で選ぶ（サーバへは通知しない）。
@@ -2615,7 +2620,7 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 
 ## 12. UI
 
-デスクトップブラウザ専用。レスポンシブ・アニメーションは対象外。配色はライト / ダーク
+デスクトップブラウザ専用（スマホ用の別ページは §12.7）。レスポンシブ・アニメーションは対象外。配色はライト / ダーク
 （設定「表示」。既定は OS に従う。P4-10、D-58 追記）。キーボードは Ctrl+A / Delete / Enter / Esc と
 一覧のカーソル移動（§12.2「キーボード」）。
 
@@ -3066,6 +3071,43 @@ GC は削除件数・バイト数と区分ごとの内訳・見送りと失敗�
   `config.toml` の閲覧、再スキャン / deep scan / GC dry-run のボタン、
   category（統制語彙）の表（使用数 = アルバム / ジャンル / 購読 / Inbox の下書き。使用中は削除ボタンを無効にする）。
   退避 WAV（`archived_files`）の一覧と復元は記録画面（§12.4）へ移した（D-106）
+
+### 12.7 スマホ版（`/m/`、D-115）
+
+外出先で眺める・探す・試し聴きする・誤字を直す・プレイリストを手直しする・購読を同期する、ための別ページ。
+一括編集・巻き戻し・CD・Inbox の承認・端末同期・ジョブ・設定は PC で行う（スマホ版には置かない）。
+
+- **PC 版に手を入れない**: コードは `web/src/mobile/`、ビルドは PC と別の vite 設定（`web/vite.mobile.config.ts`）で
+  `web/dist/m/` に出す（`npm run build` が PC のビルドの後に実行）。入口を足すと共通チャンクが変わり PC の JS が
+  変わるため。`web/src/components/` `hooks/` `App.tsx` `main.tsx` `index.css` は import も編集もしない。`api/` と `lib/` は
+  編集せず import だけする。`dist/m/` 以外の出力が変更前と同一であることを `scripts/pc-dist-hash.sh` で確かめる。
+  配色はライト / ダークとも PC の `index.css` と同じ値を持ち、テーマの保存値は PC と共有する。指で押す要素は 44px 以上
+- **入口と振り分け**（`src/api/spa.rs`）: `/` を `User-Agent` に `Mobi` / `Android` / `iPhone` を含むときだけ `/m/` へ 302 で
+  飛ばす（iPad は Mac の UA を名乗るので PC 版）。スマホ版のメニューの「PC 版を開く」は Cookie `spindle_view=pc` を立てて
+  `/` を開き、以後は振り分けない。PC 版からの戻り導線は PC を触らないと作れないので `/m/` を直接開く。`/m/` を開くと
+  Cookie を消す。`/m/` 以下の未知のパスは mobile の HTML を返す。認証と CSRF は PC と同じ（未ログインはスマホ版のログイン画面）
+- **4 タブ**（下部。再生中だけタブの上に小さな再生バー）:
+  - **ライブラリ**: 検索欄（`GET /api/tracks` の検索）と「アーティスト（albumartist）/ アルバム / 曲」の切り替え（最後の見方を
+    localStorage に覚える）。1 段ずつ降り、一覧は仮想スクロール。行は曲名・アーティスト・アルバムと形式のバッジ
+  - **フォルダ**: パンくずと、カテゴリ → アルバムアーティスト → アルバム → 曲の木（`GET /api/albums` からクライアントで組む）
+  - **プレイリスト**: 普通とスマートの一覧（曲数・長さ付き）。普通は中身の外す・並べ替え。スマートは条件を
+    「フィールド / 演算子 / 値」で組み立てる（AND / OR、条件ごとの NOT、ORDER BY、LIMIT。入力のたびに
+    `POST /api/playlists/preview` で検証と件数）。組み立て画面で表せない規則（入れ子、AND と OR の混在）は開いた時点から、
+    それ以外も「文で編集する」でルール文の編集へ移る（組み立てから表せなければ文のまま）。値の `"` と `\\` はエスケープして
+    書く（DSL.md）。新規作成・名前の変更・削除（確認あり。409 `open_plan` はその旨を出す）ができる
+  - **購読**: 先頭に Inbox の未確認の件数（0 件なら出さない。確認は PC）。購読ごとのカード（最後の同期、「同期」）。
+    同期は**手動のまま**（自動にしない）。「完了」は `playlist_sync` の終了ではなく**投入した ytdl のダウンロードがすべて
+    終わった時点**で、それまで進捗バー（`GET /api/ytmusic/subscriptions/:id/progress`、SSE のジョブイベントで取り直す）。
+    結果は 1 行（新しい曲の数・非公開・失敗と「再試行」）、カードの詳細に曲ごとの状態。購読の追加・変更・削除は PC
+- **曲のシート**: 曲をタップで下から出る。半分は ジャケット・曲名・再生・バッジ・主要タグ、引き上げると全タグ・ファイル情報・RG。
+  「プレイリストに追加」（`POST /api/playlists/:id/items`）。戻るボタンで シート → 一覧 → 上の階層
+- **タグの修正**: 1 曲だけ。値の修正のみで、フィールドの追加・削除と空にすることはしない。PC と同じ
+  `batch/preview` → `apply`（`ids: [id]`）を通り、`edit_batches` に載るので PC の「履歴」から巻き戻せる。pending / conflict
+  のときは保存させない
+- **試し聴き**: 開いている間だけ（バックグラウンド再生・ロック画面・キューは無い）。LTE + Cloudflare 経由のため原本は流さず
+  `?transcode=opus`（Derived があればそれ、無ければその場で変換。非可逆の原本はそのまま）。Opus が鳴らない端末（iOS Safari の
+  判定は当てにならない）では、再生前にエラーになったとき**1 回だけ** `?transcode=aac` で同じ曲を引き直す。シートに使った
+  コーデックを出す。ReplayGain は掛けない
 
 ---
 

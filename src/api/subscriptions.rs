@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::db::jobs::{self as dbjobs, Job};
 use crate::db::now_epoch;
 use crate::db::subscriptions::{
     self as dbsubs, NewSubscription, Patch, Subscription, WriteOutcome,
@@ -49,6 +50,12 @@ fn default_max_enqueue() -> i64 {
 #[derive(Serialize)]
 pub struct ListResponse {
     pub items: Vec<Subscription>,
+}
+
+#[derive(Serialize)]
+pub struct ProgressResponse {
+    pub sync: Option<Job>,
+    pub items: Vec<Job>,
 }
 
 #[derive(Serialize)]
@@ -276,5 +283,28 @@ pub async fn sync(
             (StatusCode::ACCEPTED, Json(Accepted { job_id })).into_response()
         }
         EnqueueResult::Duplicate(_) => error_response(StatusCode::CONFLICT, "duplicate"),
+    })
+}
+
+/// 購読の直近の同期とそれ以降の ytdl ジョブ（モバイルの購読タブの進み具合表示）
+pub async fn progress(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    if let Some(r) = disabled(&state) {
+        return Ok(r);
+    }
+    let found = state
+        .db
+        .read(move |c| {
+            if dbsubs::get(c, id)?.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(dbjobs::subscription_progress(c, id)?))
+        })
+        .await?;
+    Ok(match found {
+        None => error_response(StatusCode::NOT_FOUND, "not_found"),
+        Some((sync, items)) => Json(ProgressResponse { sync, items }).into_response(),
     })
 }

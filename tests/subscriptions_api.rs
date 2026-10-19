@@ -279,16 +279,206 @@ async fn disabled_ytmusic_hides_the_endpoints() {
         .post(json!({ "url": PL, "albumartist": "A", "album": "B" }))
         .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = app
+        .call(Method::GET, "/api/ytmusic/subscriptions/1/progress", None)
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn endpoints_require_a_session() {
     let app = App::new(true).await;
-    let r = req(Method::GET, "/api/ytmusic/subscriptions")
-        .body(Body::empty())
+    for uri in [
+        "/api/ytmusic/subscriptions",
+        "/api/ytmusic/subscriptions/1/progress",
+    ] {
+        let r = req(Method::GET, uri).body(Body::empty()).unwrap();
+        let res = app.router.clone().oneshot(r).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+async fn make_sub(app: &App, list: &str, album: &str) -> i64 {
+    let url = format!("https://www.youtube.com/playlist?list={list}");
+    let (st, body) = app
+        .post(json!({ "url": url, "albumartist": "A", "album": album }))
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    body["id"].as_i64().unwrap()
+}
+
+async fn enqueue_ytdl(app: &App, url: &str, sub: i64, position: u32) -> i64 {
+    let job = spindle::import::ytmusic::downloader::new_subscription_ytdl_job(url, sub, position);
+    app.db
+        .write(move |c| spindle::db::jobs::enqueue(c, &job, spindle::db::now_epoch()))
+        .await
+        .unwrap()
+        .id()
+}
+
+async fn progress(app: &App, id: i64) -> (StatusCode, Value) {
+    app.call(
+        Method::GET,
+        &format!("/api/ytmusic/subscriptions/{id}/progress"),
+        None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn progress_lists_the_latest_sync_and_its_downloads() {
+    let app = App::new(true).await;
+    let id = make_sub(&app, "PLone", "B").await;
+    let other = make_sub(&app, "PLtwo", "C").await;
+    let (st, _) = app
+        .call(
+            Method::POST,
+            &format!("/api/ytmusic/subscriptions/{id}/sync"),
+            None,
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    enqueue_ytdl(&app, "https://youtu.be/a", id, 3).await;
+    enqueue_ytdl(&app, "https://youtu.be/b", id, 1).await;
+    enqueue_ytdl(&app, "https://youtu.be/c", other, 1).await;
+    let (st, body) = progress(&app, id).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["sync"]["type"], "playlist_sync");
+    let pos: Vec<i64> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["payload"]["position"].as_i64().unwrap())
+        .collect();
+    assert_eq!(pos, [1, 3], "{body}");
+}
+
+#[tokio::test]
+async fn progress_ignores_downloads_of_an_older_sync() {
+    let app = App::new(true).await;
+    let id = make_sub(&app, "PLone", "B").await;
+    let old = enqueue_ytdl(&app, "https://youtu.be/old", id, 1).await;
+    app.call(
+        Method::POST,
+        &format!("/api/ytmusic/subscriptions/{id}/sync"),
+        None,
+    )
+    .await;
+    let new = enqueue_ytdl(&app, "https://youtu.be/new", id, 2).await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "UPDATE jobs SET created_at = 10, state = 'done' WHERE id = ?1",
+                [old],
+            )?;
+            c.execute(
+                "UPDATE jobs SET created_at = 100 WHERE type = 'playlist_sync'
+                   AND json_extract(payload, '$.subscription_id') = ?1",
+                [id],
+            )?;
+            c.execute("UPDATE jobs SET created_at = 100 WHERE id = ?1", [new])?;
+            Ok(())
+        })
+        .await
         .unwrap();
-    let res = app.router.clone().oneshot(r).await.unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let (_, body) = progress(&app, id).await;
+    let ids: Vec<i64> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [new], "{body}");
+}
+
+/// 前回の同期の終わった ytdl が新しい playlist_sync と同じ秒に作られていても items に出ない
+/// （created_at は秒単位なので、境界は id で取る）
+#[tokio::test]
+async fn progress_ignores_older_finished_downloads_in_the_same_second() {
+    let app = App::new(true).await;
+    let id = make_sub(&app, "PLone", "B").await;
+    let old = enqueue_ytdl(&app, "https://youtu.be/old", id, 1).await;
+    app.call(
+        Method::POST,
+        &format!("/api/ytmusic/subscriptions/{id}/sync"),
+        None,
+    )
+    .await;
+    let new = enqueue_ytdl(&app, "https://youtu.be/new", id, 2).await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "UPDATE jobs SET state = 'failed', last_error = 'x' WHERE id = ?1",
+                [old],
+            )?;
+            c.execute(
+                "UPDATE jobs SET created_at = 100
+                 WHERE json_extract(payload, '$.subscription_id') = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = progress(&app, id).await;
+    assert!(body["sync"]["id"].as_i64().unwrap() > old, "{body}");
+    let ids: Vec<i64> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [new], "{body}");
+}
+
+/// 投入が走行中の古いジョブに dedup されても、その件は items に残る。終わった古い件は出ない
+#[tokio::test]
+async fn progress_keeps_older_live_downloads() {
+    let app = App::new(true).await;
+    let id = make_sub(&app, "PLone", "B").await;
+    let queued = enqueue_ytdl(&app, "https://youtu.be/q", id, 1).await;
+    let running = enqueue_ytdl(&app, "https://youtu.be/r", id, 2).await;
+    let done = enqueue_ytdl(&app, "https://youtu.be/d", id, 3).await;
+    app.call(
+        Method::POST,
+        &format!("/api/ytmusic/subscriptions/{id}/sync"),
+        None,
+    )
+    .await;
+    app.db
+        .write(move |c| {
+            c.execute("UPDATE jobs SET created_at = 10 WHERE type = 'ytdl'", [])?;
+            c.execute("UPDATE jobs SET state = 'running' WHERE id = ?1", [running])?;
+            c.execute("UPDATE jobs SET state = 'done' WHERE id = ?1", [done])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = progress(&app, id).await;
+    let ids: Vec<i64> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [queued, running], "{body}");
+}
+
+#[tokio::test]
+async fn progress_without_any_sync_is_empty() {
+    let app = App::new(true).await;
+    let id = make_sub(&app, "PLone", "B").await;
+    let (st, body) = progress(&app, id).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body, json!({ "sync": null, "items": [] }));
+}
+
+#[tokio::test]
+async fn progress_of_unknown_subscription_is_404() {
+    let app = App::new(true).await;
+    let (st, body) = progress(&app, 999).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "not_found");
 }
 
 /// 同期が queued / running の間は PATCH を 409 にする（走行中の同期が古い追記先で揃えたり投入したりしない）。
