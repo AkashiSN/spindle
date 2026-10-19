@@ -28,8 +28,8 @@ export async function login(password: string): Promise<void> {
   await apiPost<unknown>('/api/auth/login', { password })
 }
 
-export function listTracks(filter: Filter, sort: Sort, cursor?: string | null): Promise<TrackPage> {
-  return apiFetch<TrackPage>(tracksUrl({ filter, sort, cursor }))
+export function listTracks(filter: Filter, sort: Sort, cursor?: string | null, limit?: number): Promise<TrackPage> {
+  return apiFetch<TrackPage>(tracksUrl({ filter, sort, cursor, limit }))
 }
 
 export function getTrack(id: number): Promise<TrackWithDetail> {

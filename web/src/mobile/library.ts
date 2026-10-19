@@ -2,6 +2,7 @@
 // アーティストは albumartist（PC のツリーと同じ）で、GET /api/albums からクライアント側で組む
 
 import type { AlbumRow } from '../api/types'
+import { PAGE_LIMIT } from '../lib/filter'
 import { loadJson, saveJson } from '../lib/storage'
 import { EMPTY_LABEL } from '../lib/tree'
 import type { LibraryView } from './route'
@@ -78,4 +79,22 @@ const PREFETCH_ROWS = 50
 /** 見えている最後の行から読み込み済みの末尾までが 50 行以内で、続きがあるときだけ次のページを読む */
 export function nextPageNeeded(lastVisibleIndex: number, loaded: number, hasMore: boolean): boolean {
   return hasMore && loaded - 1 - lastVisibleIndex <= PREFETCH_ROWS
+}
+
+/** `GET /api/tracks` の `limit` の上限（サーバの MAX_LIMIT。超えると丸められる） */
+export const SERVER_MAX_LIMIT = 1000
+
+/**
+ * SSE で取り直すときに読む各ページの `limit`。読み込み済みの行数（最低 1 ページ分）を覆うまで
+ * サーバの上限で区切る。一覧が縮まないのでスクロール位置が保たれる
+ */
+export function refetchLimits(loaded: number): number[] {
+  let rest = Math.max(PAGE_LIMIT, loaded)
+  const out: number[] = []
+  while (rest > 0) {
+    const n = Math.min(rest, SERVER_MAX_LIMIT)
+    out.push(n)
+    rest -= n
+  }
+  return out
 }

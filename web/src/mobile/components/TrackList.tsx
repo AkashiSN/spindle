@@ -1,5 +1,5 @@
 // 曲の一覧（仮想スクロール）。GET /api/tracks を next_cursor で継ぎ足し、末尾 50 行に近づいたら次を読む。
-// SSE の library（と再接続）で先頭から取り直す。ライブラリ・フォルダ・プレイリストで共用する
+// SSE の library（と再接続・resync）では読み込み済みの行数ぶんを先頭から取り直し、スクロール位置を保つ。ライブラリ・フォルダ・プレイリストで共用する
 
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -9,7 +9,7 @@ import { TrailingDebounce } from '../../lib/debounce'
 import { filterToParam, sortToParam, type Filter, type Sort } from '../../lib/filter'
 import { formatCount } from '../../lib/format'
 import { listTracks } from '../api'
-import { nextPageNeeded } from '../library'
+import { nextPageNeeded, refetchLimits } from '../library'
 import { useEventSubscription } from '../useEvents'
 
 const ROW_H = 60
@@ -53,6 +53,11 @@ export function TrackList({
   const gen = useRef(0)
   const busy = useRef(false)
   const parentRef = useRef<HTMLDivElement>(null)
+  // SSE で取り直すときに覆う行数（読み込み済みの行数）
+  const loadedCount = useRef(0)
+  useEffect(() => {
+    loadedCount.current = state.items.length
+  })
 
   const reload = useCallback(() => {
     const g = ++gen.current
@@ -63,6 +68,40 @@ export function TrackList({
       .then((p) => {
         if (g === gen.current) setState({ items: p.items, cursor: p.next_cursor, total: p.total, error: null })
       })
+      .catch((e: unknown) => {
+        if (g === gen.current) setState((s) => ({ ...s, cursor: null, error: message(e) }))
+      })
+      .finally(() => {
+        if (g === gen.current) {
+          busy.current = false
+          setLoading(false)
+        }
+      })
+  }, [])
+
+  // SSE で取り直す。一覧を縮めないよう読み込み済みの行数ぶん（最低 1 ページ）を先頭から読み、
+  // 置き換えるまで今の行を出したままにする。スクロール位置には触らない
+  const reloadKeep = useCallback(() => {
+    const g = ++gen.current
+    busy.current = true
+    setLoading(true)
+    const { filter, sort } = args.current
+    const limits = refetchLimits(loadedCount.current)
+    const run = async () => {
+      let items: TrackRow[] = []
+      let cursor: string | null = null
+      let total: number | null = null
+      for (const [i, limit] of limits.entries()) {
+        if (i > 0 && cursor == null) break
+        const p = await listTracks(filter, sort, cursor, limit)
+        if (g !== gen.current) return
+        items = [...items, ...p.items]
+        cursor = p.next_cursor
+        total = p.total
+      }
+      setState({ items, cursor, total, error: null })
+    }
+    run()
       .catch((e: unknown) => {
         if (g === gen.current) setState((s) => ({ ...s, cursor: null, error: message(e) }))
       })
@@ -112,7 +151,7 @@ export function TrackList({
   }, [key, reload])
 
   // 走査中は library が続けて届くので間引く
-  const [refetch] = useState(() => new TrailingDebounce(() => reload(), 500, 3000))
+  const [refetch] = useState(() => new TrailingDebounce(() => reloadKeep(), 500, 3000))
   useEffect(() => () => refetch.cancel(), [refetch])
   const firstToken = useRef(refreshToken)
   useEffect(() => {

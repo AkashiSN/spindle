@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AlbumRow } from '../api/types'
-import { albumsOf, artistsOf, nextPageNeeded } from './library'
+import { albumsOf, artistsOf, nextPageNeeded, refetchLimits } from './library'
 
 const a = (id: number, albumartist: string | null, album: string, extra: Partial<AlbumRow> = {}): AlbumRow =>
   ({
@@ -54,5 +54,14 @@ describe('library', () => {
     expect(nextPageNeeded(449, 500, true)).toBe(true)
     expect(nextPageNeeded(400, 500, true)).toBe(false)
     expect(nextPageNeeded(499, 500, false)).toBe(false)
+  })
+
+  it('refetchLimits は読み込み済みの行数（最低 500）をサーバの上限 1000 で区切って覆う', () => {
+    expect(refetchLimits(0)).toEqual([500])
+    expect(refetchLimits(120)).toEqual([500])
+    expect(refetchLimits(500)).toEqual([500])
+    expect(refetchLimits(1000)).toEqual([1000])
+    expect(refetchLimits(1500)).toEqual([1000, 500])
+    expect(refetchLimits(2000)).toEqual([1000, 1000])
   })
 })
