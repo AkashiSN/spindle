@@ -1004,3 +1004,96 @@ input {
 .m-dir button {
   white-space: nowrap;
 }
+
+/* ---------------------------------------------------------------- 購読 */
+.m-sub-card {
+  border-bottom: 1px solid var(--row-border);
+  padding-bottom: 8px;
+}
+.m-sub-top {
+  display: flex;
+  align-items: center;
+  padding-right: 12px;
+}
+.m-sub-open {
+  flex: 1;
+  min-width: 0;
+  border-bottom: none;
+}
+.m-sub-sync {
+  flex: none;
+  min-width: 72px;
+  min-height: 44px;
+}
+.m-sub-bar {
+  height: 6px;
+  margin: 0 16px 4px;
+  border-radius: 3px;
+  background: var(--bg-alt);
+  overflow: hidden;
+}
+.m-sub-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+.m-sub-bar-fill.indeterminate {
+  width: 30% !important;
+  animation: m-sub-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes m-sub-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+.m-sub-summary {
+  margin: 0 16px;
+  font-size: 14px;
+}
+.m-ok-text {
+  color: var(--ok);
+}
+.m-error-text {
+  color: var(--error);
+}
+.m-sub-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--row-border);
+}
+.m-sub-icon {
+  flex: none;
+  width: 20px;
+  text-align: center;
+  color: var(--muted);
+}
+.m-sub-item-done .m-sub-icon {
+  color: var(--ok);
+}
+.m-sub-item-running .m-sub-icon {
+  color: var(--accent);
+}
+.m-sub-item-failed .m-sub-icon,
+.m-sub-item-cancelled .m-sub-icon,
+.m-sub-item-failed .m-sub-trail {
+  color: var(--error);
+}
+.m-sub-trail {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--muted);
+}
+.m-sub-foot {
+  margin: 12px 16px;
+}

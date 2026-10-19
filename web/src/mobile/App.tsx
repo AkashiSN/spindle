@@ -14,6 +14,7 @@ import { LibraryTab } from './components/LibraryTab'
 import { Login } from './components/Login'
 import { MiniPlayer } from './components/MiniPlayer'
 import { PlaylistsTab } from './components/PlaylistsTab'
+import { SubscriptionsTab } from './components/SubscriptionsTab'
 import { TabBar } from './components/TabBar'
 import { TrackSheet } from './components/TrackSheet'
 import { TABS, useRoute, type Route, type Tab } from './route'
@@ -146,7 +147,7 @@ function Shell() {
       content = <PlaylistsTab route={route} navigate={navigate} onOpenTrack={setOpenTrack} />
       break
     case 'subscriptions':
-      content = <EmptyTab title="購読" />
+      content = <SubscriptionsTab route={route} navigate={navigate} />
       break
   }
 
@@ -185,9 +186,4 @@ function Shell() {
       )}
     </div>
   )
-}
-
-/** このタスクでは各タブは空。後続のタスクで LibraryTab などに置き換える */
-function EmptyTab({ title }: { title: string }) {
-  return <p className="m-placeholder">{title}</p>
 }

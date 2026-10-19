@@ -6,10 +6,13 @@ import type {
   AlbumRow,
   AppendResponse,
   ApplyResponse,
+  Job,
   Playlist,
   PlaylistList,
   PreviewResponse,
   RulePreview,
+  Subscription,
+  SubscriptionList,
   TrackPage,
   TrackWithDetail,
 } from '../api/types'
@@ -120,4 +123,30 @@ export function previewRule(rule: string, signal?: AbortSignal): Promise<RulePre
     body: JSON.stringify({ rule }),
     signal,
   })
+}
+
+// ---------------------------------------------------------------- 購読
+
+/** 直近の同期の進み具合（`GET /api/ytmusic/subscriptions/:id/progress`） */
+export type SubscriptionProgress = { sync: Job | null; items: Job[] }
+
+/** ytmusic が無効なら 404 の ApiError のまま投げる */
+export async function listSubscriptions(): Promise<Subscription[]> {
+  const r = await apiFetch<SubscriptionList>('/api/ytmusic/subscriptions')
+  return r.items
+}
+
+/** 202 → started、409 duplicate（同期が既に待ち・走行中）→ already。それ以外は ApiError */
+export async function syncSubscription(id: number): Promise<'started' | 'already'> {
+  try {
+    await apiPost<unknown>(`/api/ytmusic/subscriptions/${id}/sync`, {})
+    return 'started'
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 409 && e.code === 'duplicate') return 'already'
+    throw e
+  }
+}
+
+export function getSubscriptionProgress(id: number): Promise<SubscriptionProgress> {
+  return apiFetch<SubscriptionProgress>(`/api/ytmusic/subscriptions/${id}/progress`)
 }
