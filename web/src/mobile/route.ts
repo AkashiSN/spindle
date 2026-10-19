@@ -8,7 +8,7 @@
 //   /m/subscriptions/{id}
 // 曲のシートは route ではなく history.state（{ sheet: trackId }）で持ち、戻るで閉じる
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type Tab = 'library' | 'folders' | 'playlists' | 'subscriptions'
 export type LibraryView = 'artists' | 'albums' | 'tracks'
@@ -131,16 +131,25 @@ function current(): Route {
 /** 現在の route と、移動する関数。移動は pushState（`replace` か、今と同じ URL なら replaceState） */
 export function useRoute(): [Route, (r: Route, opts?: { replace?: boolean }) => void] {
   const [route, setRoute] = useState<Route>(current)
+  // 最後に route に反映した URL。曲のシートの開け閉め（history.state だけが変わる）では route を作り直さない
+  const lastUrl = useRef(window.location.pathname + window.location.search)
   useEffect(() => {
-    const onPop = () => setRoute(current())
+    const onPop = () => {
+      const url = window.location.pathname + window.location.search
+      if (url === lastUrl.current) return
+      lastUrl.current = url
+      setRoute(current())
+    }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
   const navigate = useCallback((r: Route, opts?: { replace?: boolean }) => {
     const url = formatRoute(r)
+    // 置き換えは history.state（開いている曲のシート）を引き継ぐ。積むときは新しい画面なのでシートは無い
     if (opts?.replace || sameUrl(url, window.location.pathname, window.location.search))
-      window.history.replaceState(null, '', url)
+      window.history.replaceState(window.history.state, '', url)
     else window.history.pushState(null, '', url)
+    lastUrl.current = window.location.pathname + window.location.search
     setRoute(r)
   }, [])
   return [route, navigate]

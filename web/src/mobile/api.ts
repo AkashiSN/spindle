@@ -1,9 +1,10 @@
 // スマホ版が使う API の呼び出し。本体は既存の API（SPEC §9）を呼ぶだけ。
 // 後続のタスクで関数を足していく
 
-import { ApiError, apiFetch, apiPost } from '../api/client'
-import type { AlbumRow, TrackPage, TrackWithDetail } from '../api/types'
+import { ApiError, apiFetch, apiPost, parseErrorBody } from '../api/client'
+import type { AlbumRow, ApplyResponse, PreviewResponse, TrackPage, TrackWithDetail } from '../api/types'
 import { tracksUrl, type Filter, type Sort } from '../lib/filter'
+import { tagEditOps } from './track'
 
 /** ログイン済みか。未ログインなら ApiError(401) で落ちる */
 export async function getSession(): Promise<void> {
@@ -35,5 +36,28 @@ export async function inboxSummary(): Promise<{ pending: number; failed: number 
   } catch (e) {
     if (e instanceof ApiError && e.status === 503) return null
     throw e
+  }
+}
+
+/**
+ * 1 曲の 1 フィールドを書き換える。PC と同じ preview → apply（edit_batches に載り、PC の「履歴」から
+ * 巻き戻せる）。成功（変化なしを含む）は null、失敗は文言
+ */
+export async function editTag(trackId: number, key: string, text: string): Promise<string | null> {
+  const ops = tagEditOps(key, text)
+  try {
+    const pv = await apiPost<PreviewResponse>('/api/tracks/batch/preview', { selection: { ids: [trackId] }, ops })
+    if (pv.pending_excluded > 0) return '反映待ちの間は編集できません'
+    if (pv.changed === 0) return null
+    const r = await parseErrorBody<ApplyResponse>('/api/tracks/batch', {
+      method: 'PATCH',
+      body: JSON.stringify({ selection_token: pv.selection_token, ops }),
+    })
+    if (r.ok) return null
+    const body = r.body as { error?: string; message?: string } | null
+    if (body?.error === 'pending') return '反映待ちの行は編集できません'
+    return body?.message ?? `${body?.error ?? 'http_error'} (HTTP ${r.status})`
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e)
   }
 }

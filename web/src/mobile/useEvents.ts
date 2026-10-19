@@ -2,13 +2,15 @@
 // 各画面は useEventSubscription(handlers) で必要なイベントだけ受け取る
 
 import { createContext, createElement, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import type { JobEvent, LibraryEvent, PlaylistEvent } from '../api/types'
+import type { BatchEvent, JobEvent, LibraryEvent, PlaylistEvent } from '../api/types'
 import { connectEvents } from '../lib/events'
 
 export type MobileEventHandlers = {
   /** 接続が開いた。`reconnect` が true なら切断中の取りこぼしがあり得るので取り直す */
   onOpen?: (reconnect: boolean) => void
   onJob?: (e: JobEvent) => void
+  /** 編集バッチの状態が変わった（反映待ち・競合の表示が変わる） */
+  onBatch?: (e: BatchEvent) => void
   onLibrary?: (e: LibraryEvent) => void
   onPlaylist?: (e: PlaylistEvent) => void
 }
@@ -34,6 +36,7 @@ export function EventsProvider({ enabled, children }: { enabled: boolean; childr
     return connectEvents(() => ({
       onOpen: (reconnect) => each((h) => h.onOpen?.(reconnect)),
       onJob: (e) => each((h) => h.onJob?.(e)),
+      onBatch: (e) => each((h) => h.onBatch?.(e)),
       onLibrary: (e) => each((h) => h.onLibrary?.(e)),
       onPlaylist: (e) => each((h) => h.onPlaylist?.(e)),
     }))
