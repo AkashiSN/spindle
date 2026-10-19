@@ -55,8 +55,9 @@ export function FolderTab({
     if (gone) navigate({ tab: 'folders', path: [] }, { replace: true })
   }, [gone, navigate])
 
-  const albumId = level?.albumIds?.[0]
-  const albumFilter = useMemo<Filter>(() => ({ album_id: albumId }), [albumId])
+  // 同じ名前のアルバムは 1 ノードにまとまるので、配下の全 album を対象にする
+  const albumIds = level?.albumIds ?? null
+  const albumFilter = useMemo<Filter>(() => ({ album_ids: albumIds ?? [] }), [albumIds])
 
   if (error != null && albums == null) {
     return (

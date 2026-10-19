@@ -38,4 +38,11 @@ describe('folderLevel', () => {
     expect(folderLevel(tree, ['Game'])).toBeNull()
     expect(folderLevel(tree, ['J-Pop', 'YOASOBI', 'nope'])).toBeNull()
   })
+  it('同じ名前のアルバムは 1 ノードにまとまり、album id を全部返す', () => {
+    const t = buildTree(
+      [a(5, 'YOASOBI', 'THE BOOK'), a(4, 'YOASOBI', 'THE BOOK')],
+      parsePattern('%category%|%albumartist%|%album%') as Pattern,
+    )
+    expect(folderLevel(t, ['J-Pop', 'YOASOBI', 'THE BOOK'])).toEqual({ nodes: [], albumIds: [4, 5] })
+  })
 })
