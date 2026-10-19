@@ -22,8 +22,10 @@ export function getTrack(id: number): Promise<TrackWithDetail> {
   return apiFetch<TrackWithDetail>(`/api/tracks/${id}`)
 }
 
-export function listAlbums(): Promise<AlbumRow[]> {
-  return apiFetch<AlbumRow[]>('/api/albums')
+/** `GET /api/albums` は `{ items }` で返る */
+export async function listAlbums(): Promise<AlbumRow[]> {
+  const r = await apiFetch<{ items: AlbumRow[] }>('/api/albums')
+  return r.items
 }
 
 /** Inbox の件数。Inbox が設定されていない（503）なら null */
