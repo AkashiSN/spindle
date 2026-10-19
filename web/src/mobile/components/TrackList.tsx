@@ -33,7 +33,18 @@ function trackTitle(r: TrackRow): string {
   return r.rel_path.split('/').pop() ?? r.rel_path
 }
 
-export function TrackList({ filter, sort, onOpen }: { filter: Filter; sort: Sort; onOpen: (row: TrackRow) => void }) {
+export function TrackList({
+  filter,
+  sort,
+  onOpen,
+  refreshToken,
+}: {
+  filter: Filter
+  sort: Sort
+  onOpen: (row: TrackRow) => void
+  /** 変わるたびに（空にせず）先頭から取り直す。プレイリストの中身を手で変えたときなど */
+  refreshToken?: number
+}) {
   const key = `${filterToParam(filter)}|${sortToParam(sort)}`
   const [state, setState] = useState<State>(EMPTY)
   const [loading, setLoading] = useState(false)
@@ -103,6 +114,12 @@ export function TrackList({ filter, sort, onOpen }: { filter: Filter; sort: Sort
   // 走査中は library が続けて届くので間引く
   const [refetch] = useState(() => new TrailingDebounce(() => reload(), 500, 3000))
   useEffect(() => () => refetch.cancel(), [refetch])
+  const firstToken = useRef(refreshToken)
+  useEffect(() => {
+    if (refreshToken === firstToken.current) return
+    firstToken.current = refreshToken
+    reload()
+  }, [refreshToken, reload])
   useEventSubscription({
     onLibrary: () => refetch.trigger(),
     onOpen: (reconnect) => {

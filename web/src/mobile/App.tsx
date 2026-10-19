@@ -13,6 +13,7 @@ import { FolderTab } from './components/FolderTab'
 import { LibraryTab } from './components/LibraryTab'
 import { Login } from './components/Login'
 import { MiniPlayer } from './components/MiniPlayer'
+import { PlaylistsTab } from './components/PlaylistsTab'
 import { TabBar } from './components/TabBar'
 import { TrackSheet } from './components/TrackSheet'
 import { TABS, useRoute, type Route, type Tab } from './route'
@@ -142,7 +143,7 @@ function Shell() {
       content = <FolderTab route={route} navigate={navigate} onOpenTrack={setOpenTrack} />
       break
     case 'playlists':
-      content = <EmptyTab title="プレイリスト" />
+      content = <PlaylistsTab route={route} navigate={navigate} onOpenTrack={setOpenTrack} />
       break
     case 'subscriptions':
       content = <EmptyTab title="購読" />

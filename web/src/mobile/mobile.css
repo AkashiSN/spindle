@@ -786,3 +786,87 @@ input {
   font-weight: 400;
   color: var(--muted-2);
 }
+
+/* プレイリスト */
+.m-pl-icon {
+  flex: none;
+  width: 28px;
+  text-align: center;
+  font-size: 18px;
+  color: var(--accent);
+}
+.m-pl-head {
+  padding: 4px 4px 4px 0;
+  gap: 4px;
+}
+.m-pl-name {
+  font-weight: 600;
+}
+.m-pl-menu-wrap {
+  position: relative;
+}
+.m-menu-danger,
+.m-danger {
+  color: var(--error);
+}
+.m-danger {
+  border-color: var(--error);
+}
+.m-pl-rule {
+  flex: none;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--row-border);
+}
+.m-pl-rule code {
+  display: block;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 4.5em;
+  overflow: hidden;
+}
+.m-kind {
+  margin: 0;
+}
+.m-confirm-msg {
+  margin: 0 0 8px;
+}
+.m-notice-ok {
+  background: var(--badge-green-bg);
+  color: var(--badge-green-fg);
+}
+.m-edit-row {
+  position: relative;
+  padding: 0 0 0 4px;
+  gap: 4px;
+  background: var(--bg);
+  transition: transform 0.15s ease;
+}
+.m-edit-row.dragging {
+  z-index: 1;
+  transition: none;
+  box-shadow: 0 4px 16px var(--shadow-strong);
+}
+.m-remove {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--error);
+  font-size: 22px;
+  padding: 0;
+}
+.m-handle {
+  flex: none;
+  width: 52px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: var(--muted);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  cursor: grab;
+}

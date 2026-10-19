@@ -1,8 +1,18 @@
 // スマホ版が使う API の呼び出し。本体は既存の API（SPEC §9）を呼ぶだけ。
 // 後続のタスクで関数を足していく
 
-import { ApiError, apiFetch, apiPost, parseErrorBody } from '../api/client'
-import type { AlbumRow, ApplyResponse, PreviewResponse, TrackPage, TrackWithDetail } from '../api/types'
+import { ApiError, apiFetch, apiPatch, apiPost, parseErrorBody } from '../api/client'
+import type {
+  AlbumRow,
+  AppendResponse,
+  ApplyResponse,
+  Playlist,
+  PlaylistList,
+  PreviewResponse,
+  RulePreview,
+  TrackPage,
+  TrackWithDetail,
+} from '../api/types'
 import { tracksUrl, type Filter, type Sort } from '../lib/filter'
 import { tagEditOps } from './track'
 
@@ -60,4 +70,54 @@ export async function editTag(trackId: number, key: string, text: string): Promi
   } catch (e) {
     return e instanceof Error ? e.message : String(e)
   }
+}
+
+// ---------------------------------------------------------------- プレイリスト
+
+export async function listPlaylists(): Promise<Playlist[]> {
+  const r = await apiFetch<PlaylistList>('/api/playlists')
+  return r.items
+}
+
+/** 201 で作ったプレイリストを返す。rule があればスマート */
+export function createPlaylist(body: { name: string; rule?: string }): Promise<Playlist> {
+  return apiPost<Playlist>('/api/playlists', body)
+}
+
+/** 変更後のプレイリストを返す */
+export function updatePlaylist(id: number, body: { name?: string; rule?: string }): Promise<Playlist> {
+  return apiPatch<Playlist>(`/api/playlists/${id}`, body)
+}
+
+/** 204。印の付いた端末に作業が残っていれば 409 open_plan の ApiError のまま投げる */
+export async function deletePlaylist(id: number): Promise<void> {
+  await apiFetch<unknown>(`/api/playlists/${id}`, { method: 'DELETE' })
+}
+
+/** 末尾に足す（送った順）。既に入っている曲は skipped に数える */
+export function addToPlaylist(id: number, trackIds: number[]): Promise<AppendResponse> {
+  return apiPost<AppendResponse>(`/api/playlists/${id}/items`, { selection: { ids: trackIds } })
+}
+
+/** 応答は { removed } だが使わない */
+export async function removeFromPlaylist(id: number, trackIds: number[]): Promise<void> {
+  await apiFetch<unknown>(`/api/playlists/${id}/items`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ track_ids: trackIds }),
+  })
+}
+
+/** before の前へ動かす（null は末尾）。204 */
+export async function moveInPlaylist(id: number, trackIds: number[], before: number | null): Promise<void> {
+  await apiPost<unknown>(`/api/playlists/${id}/items/move`, { track_ids: trackIds, before })
+}
+
+export function previewRule(rule: string, signal?: AbortSignal): Promise<RulePreview> {
+  return apiFetch<RulePreview>('/api/playlists/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rule }),
+    signal,
+  })
 }

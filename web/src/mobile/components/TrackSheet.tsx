@@ -1,6 +1,7 @@
 // 曲の詳細シート（下から出す）。半分 = 要点と主要タグ、引き上げると全部（全タグ・ファイル情報・RG・シーク）。
 // - 詳細は GET /api/tracks/:id。保存後と、batch イベント・この曲を含む library イベントで取り直す
 // - タグの行をタップすると修正シート（反映待ち・競合・missing は理由を出して開かない）
+// - 「プレイリストに追加」は普通のプレイリストを選ぶシート（AddToPlaylistSheet。履歴は積まない）
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
@@ -12,6 +13,7 @@ import { getTrack } from '../api'
 import { audioSpec, editBlockReason, formatSize } from '../track'
 import type { PreviewPlayer } from '../usePreviewPlayer'
 import { useEventSubscription } from '../useEvents'
+import { AddToPlaylistSheet } from './AddToPlaylistSheet'
 import { BottomSheet } from './BottomSheet'
 import { TagEditSheet } from './TagEditSheet'
 
@@ -61,6 +63,7 @@ export function TrackSheet({
   const [loadError, setLoadError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
+  const [adding, setAdding] = useState(false)
 
   const reload = useCallback(() => {
     getTrack(trackId)
@@ -208,14 +211,14 @@ export function TrackSheet({
             )}
 
             <div className="m-sheet-actions">
-              {/* Task 8 で普通のプレイリストを選んで末尾に足す */}
-              <button type="button" disabled>
+              <button type="button" onClick={() => setAdding(true)}>
                 プレイリストに追加
               </button>
             </div>
           </div>
         )}
       </BottomSheet>
+      {adding && <AddToPlaylistSheet trackId={trackId} onClose={() => setAdding(false)} />}
       {editing && track && (
         <TagEditSheet
           key={`${track.id}:${editing.key}`}
