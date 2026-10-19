@@ -1,0 +1,300 @@
+/* スマホ版（/m/）の CSS。PC の index.css は読み込まない。
+   配色の変数は PC の index.css の :root / :root[data-theme='dark'] と同じ値を複製する
+   （mobile/theme.test.ts で一致を確かめる）。指で押す要素は 44px 以上 */
+
+:root {
+  --m-tab-h: 56px;
+  --m-header-h: 48px;
+  --m-row-h: 48px;
+  --border: #d0d4da;
+  --bg: #fff;
+  --bg-alt: #f6f7f9;
+  --fg: #1d2129;
+  --muted: #6b7280;
+  --muted-2: #9ca3af;
+  --accent: #2563eb;
+  --accent-bg: #dbe7ff;
+  --pending-bg: #eceef1;
+  --pending-selected-bg: #cfdcf7;
+  --error: #b91c1c;
+  --warn: #b45309;
+  --ok: #16a34a;
+  --row-border: #eef0f3;
+  --missing-fg: #9ca3af;
+  --missing-line: #d1d5db;
+  --skeleton-a: #f3f4f6;
+  --skeleton-b: #fafafa;
+  --conflict-bg: #fff7ed;
+  --shadow: rgba(0, 0, 0, 0.12);
+  --shadow-strong: rgba(0, 0, 0, 0.2);
+  --backdrop: rgba(0, 0, 0, 0.25);
+  /* バッジ（色相ごとに bg / fg の対） */
+  --badge-bg: #e5e7eb;
+  --badge-fg: #374151;
+  --badge-missing-fg: #4b5563;
+  --badge-faint-bg: #f3f4f6;
+  --badge-faint-fg: #6b7280;
+  --badge-green-bg: #dcfce7;
+  --badge-green-fg: #15803d;
+  --badge-teal-bg: #d1fae5;
+  --badge-teal-fg: #047857;
+  --badge-red-bg: #fee2e2;
+  --badge-red-strong-bg: #fecaca;
+  --badge-red-fg: #991b1b;
+  --badge-indigo-bg: #e0e7ff;
+  --badge-indigo-fg: #3730a3;
+  --badge-amber-bg: #fef3c7;
+  --badge-amber-fg: #92400e;
+  --badge-amber-strong-bg: #fde68a;
+  --badge-amber-strong-fg: #78350f;
+  --badge-cyan-bg: #cffafe;
+  --badge-cyan-fg: #0e7490;
+  --badge-pink-bg: #fce7f3;
+  --badge-pink-fg: #9d174d;
+  --badge-violet-bg: #ede9fe;
+  --badge-violet-fg: #5b21b6;
+  color-scheme: light;
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+  font-size: 16px;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+:root[data-theme='dark'] {
+  --border: #3a3f47;
+  --bg: #16181d;
+  --bg-alt: #1f2229;
+  --fg: #e5e7eb;
+  --muted: #9aa3b2;
+  --muted-2: #9ca3af;
+  --accent: #60a5fa;
+  --accent-bg: #1e3a6e;
+  --pending-bg: #2a2d33;
+  --pending-selected-bg: #1c3358;
+  --error: #f87171;
+  --warn: #fbbf24;
+  --ok: #4ade80;
+  --row-border: #23262d;
+  --missing-fg: #c4c9d1;
+  --missing-line: #4b5563;
+  --skeleton-a: #1f2229;
+  --skeleton-b: #262a31;
+  --conflict-bg: #3b2a14;
+  --shadow: rgba(0, 0, 0, 0.5);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --backdrop: rgba(0, 0, 0, 0.55);
+  --badge-bg: #374151;
+  --badge-fg: #d1d5db;
+  --badge-missing-fg: #c4c9d1;
+  --badge-faint-bg: #2a2e35;
+  --badge-faint-fg: #9aa3b2;
+  --badge-green-bg: #14532d;
+  --badge-green-fg: #86efac;
+  --badge-teal-bg: #064e3b;
+  --badge-teal-fg: #6ee7b7;
+  --badge-red-bg: #4c1d1d;
+  --badge-red-strong-bg: #5b1f1f;
+  --badge-red-fg: #fca5a5;
+  --badge-indigo-bg: #312e81;
+  --badge-indigo-fg: #c7d2fe;
+  --badge-amber-bg: #4a3a0a;
+  --badge-amber-fg: #fcd34d;
+  --badge-amber-strong-bg: #5a4408;
+  --badge-amber-strong-fg: #fde68a;
+  --badge-cyan-bg: #164e63;
+  --badge-cyan-fg: #67e8f9;
+  --badge-pink-bg: #831843;
+  --badge-pink-fg: #fbcfe8;
+  --badge-violet-bg: #4c1d95;
+  --badge-violet-fg: #ddd6fe;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  min-height: 44px;
+  min-width: 44px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-alt);
+  padding: 0 12px;
+}
+
+button:disabled {
+  opacity: 0.5;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  padding: 0 12px;
+}
+
+.m-error {
+  color: var(--error);
+}
+
+.m-center {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  color: var(--muted);
+}
+
+/* ログイン */
+.m-login {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.m-login form {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.m-login h1 {
+  margin: 0;
+  text-align: center;
+}
+
+.m-login label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.m-login button[type='submit'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* 骨格: 上の見出し / 中身 / 下タブ */
+.m-app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.m-header {
+  position: relative;
+  flex: none;
+  height: calc(var(--m-header-h) + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) 4px 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.m-header h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.m-icon {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+}
+
+.m-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+}
+
+.m-menu {
+  position: absolute;
+  right: 8px;
+  top: calc(100% + 4px);
+  z-index: 11;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px var(--shadow-strong);
+  overflow: hidden;
+}
+
+.m-menu button {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  min-height: var(--m-row-h);
+  padding: 0 16px;
+}
+
+.m-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.m-placeholder {
+  margin: 16px;
+  color: var(--muted);
+}
+
+.m-tabbar {
+  flex: none;
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: var(--bg-alt);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.m-tabbar button {
+  flex: 1;
+  height: var(--m-tab-h);
+  min-width: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 0 2px;
+}
+
+.m-tabbar button.active {
+  color: var(--accent);
+  font-weight: 600;
+}
