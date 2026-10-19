@@ -504,9 +504,11 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Job>> {
         .optional()?)
 }
 
-/// 購読の直近の playlist_sync ジョブ（created_at 最大、同値なら id 最大）と、それ以降に作られた
-/// （または今も queued / running の。投入が既存の走行中ジョブに dedup された場合）
-/// payload.subscription_id = id の ytdl ジョブ（payload.position 昇順、無ければ末尾、次に id 順）
+/// 購読の直近の playlist_sync ジョブ（id 最大）と、それより後に作られた（id が大きい。または今も
+/// queued / running の。投入が既存の走行中ジョブに dedup された場合）payload.subscription_id = id の
+/// ytdl ジョブ（payload.position 昇順、無ければ末尾、次に id 順）。
+/// 境界は created_at ではなく id で取る。created_at は秒単位なので、前回の同期の終わった ytdl が
+/// 新しい playlist_sync と同じ秒に作られていると紛れ込む（古い失敗で成功した同期が失敗に見える）
 pub fn subscription_progress(
     conn: &Connection,
     subscription_id: i64,
@@ -516,7 +518,7 @@ pub fn subscription_progress(
             &format!(
                 "SELECT {JOB_COLUMNS} FROM jobs
                  WHERE type = ?1 AND json_extract(payload, '$.subscription_id') = ?2
-                 ORDER BY created_at DESC, id DESC LIMIT 1"
+                 ORDER BY id DESC LIMIT 1"
             ),
             params![JobType::PlaylistSync.as_str(), subscription_id],
             job_from_row,
@@ -528,13 +530,13 @@ pub fn subscription_progress(
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {JOB_COLUMNS} FROM jobs
          WHERE type = ?1 AND json_extract(payload, '$.subscription_id') = ?2
-           AND (created_at >= ?3 OR state IN ('queued','running'))
+           AND (id > ?3 OR state IN ('queued','running'))
          ORDER BY json_extract(payload, '$.position') IS NULL,
                   json_extract(payload, '$.position'), id"
     ))?;
     let items = stmt
         .query_map(
-            params![JobType::Ytdl.as_str(), subscription_id, sync_job.created_at],
+            params![JobType::Ytdl.as_str(), subscription_id, sync_job.id],
             job_from_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;

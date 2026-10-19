@@ -2242,7 +2242,7 @@ PATCH  /api/ytmusic/subscriptions/:id             { albumartist?, album?, catego
                                                   追記先を変えると album_id は NULL に戻る。同期が queued / running の間は sync_running
 DELETE /api/ytmusic/subscriptions/:id             → 204 | 404 | 409 sync_running（PATCH と同じ。Library のファイルは消えない）
 POST   /api/ytmusic/subscriptions/:id/sync        → 202 { job_id } | 404 | 409 { error: "duplicate" }（走行中。latch は残るので終わった後に走る）
-GET    /api/ytmusic/subscriptions/:id/progress    → { sync: Job | null, items: [Job] } | 404（直近の playlist_sync と、それ以降に作られたその購読の ytdl を position 昇順で。投入が走行中の古い ytdl に dedup されて新しい行ができない同期もあるので、この購読の ytdl で queued / running のものは作られた時刻によらず含める。スマホ版の購読の「完了」の判定に使う。§12.7）
+GET    /api/ytmusic/subscriptions/:id/progress    → { sync: Job | null, items: [Job] } | 404（直近の playlist_sync と、それより後に作られた（jobs.id が大きい）その購読の ytdl を position 昇順で。created_at は秒単位で前回の同期の終わった件と同じ秒になりうるので、境界は id で取る。投入が走行中の古い ytdl に dedup されて新しい行ができない同期もあるので、この購読の ytdl で queued / running のものは作られた順によらず含める。スマホ版の購読の「完了」の判定に使う。§12.7）
                                                   [ytmusic].enabled でなければすべて 404
 // Subscription = { id, list_id, url, album_id, albumartist, album, category, align, enabled, max_enqueue,
 //                  created_at, updated_at, last_attempted_at, last_synced_at, sync_requested_at,

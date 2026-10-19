@@ -391,6 +391,46 @@ async fn progress_ignores_downloads_of_an_older_sync() {
     assert_eq!(ids, [new], "{body}");
 }
 
+/// 前回の同期の終わった ytdl が新しい playlist_sync と同じ秒に作られていても items に出ない
+/// （created_at は秒単位なので、境界は id で取る）
+#[tokio::test]
+async fn progress_ignores_older_finished_downloads_in_the_same_second() {
+    let app = App::new(true).await;
+    let id = make_sub(&app, "PLone", "B").await;
+    let old = enqueue_ytdl(&app, "https://youtu.be/old", id, 1).await;
+    app.call(
+        Method::POST,
+        &format!("/api/ytmusic/subscriptions/{id}/sync"),
+        None,
+    )
+    .await;
+    let new = enqueue_ytdl(&app, "https://youtu.be/new", id, 2).await;
+    app.db
+        .write(move |c| {
+            c.execute(
+                "UPDATE jobs SET state = 'failed', last_error = 'x' WHERE id = ?1",
+                [old],
+            )?;
+            c.execute(
+                "UPDATE jobs SET created_at = 100
+                 WHERE json_extract(payload, '$.subscription_id') = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = progress(&app, id).await;
+    assert!(body["sync"]["id"].as_i64().unwrap() > old, "{body}");
+    let ids: Vec<i64> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [new], "{body}");
+}
+
 /// 投入が走行中の古いジョブに dedup されても、その件は items に残る。終わった古い件は出ない
 #[tokio::test]
 async fn progress_keeps_older_live_downloads() {
