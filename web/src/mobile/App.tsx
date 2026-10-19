@@ -1,14 +1,17 @@
 // スマホ版（/m/）の骨格。ログイン → タブの中身 + 下タブ。
 // - 認証: getSession() が 401 ならログイン画面。API の 401（onUnauthorized）でも戻す
-// - 位置は URL（route.ts）。タブを切り替えるたびに履歴を積むので、戻るで前のタブに戻る
+// - 位置は URL（route.ts）。タブを切り替えるたびに履歴を積むので、戻るで前のタブに戻る（今と同じ URL なら積まない）
 // - SSE は EventsProvider が 1 本だけ開く
 
 import { useEffect, useState } from 'react'
 import { ApiError, onUnauthorized } from '../api/client'
+import type { TrackRow } from '../api/types'
 import { getSession } from './api'
+import { LibraryTab } from './components/LibraryTab'
 import { Login } from './components/Login'
 import { TabBar } from './components/TabBar'
 import { TABS, useRoute, type Route, type Tab } from './route'
+import { loadLibraryView } from './library'
 import { EventsProvider } from './useEvents'
 import { pcPreferenceCookie } from './view'
 
@@ -18,7 +21,7 @@ type Auth = 'checking' | 'login' | 'ok' | 'error'
 function tabRoot(tab: Tab): Route {
   switch (tab) {
     case 'library':
-      return { tab: 'library', view: 'albums' }
+      return { tab: 'library', view: loadLibraryView() }
     case 'folders':
       return { tab: 'folders', path: [] }
     case 'playlists':
@@ -74,12 +77,14 @@ export function App() {
 function Shell() {
   const [route, navigate] = useRoute()
   const [menuOpen, setMenuOpen] = useState(false)
+  // 曲のシート（Task 7）で開く曲。いまは選んだ曲を覚えるだけ
+  const [, setOpenTrack] = useState<TrackRow | null>(null)
   const title = TABS.find(([t]) => t === route.tab)?.[1] ?? ''
 
   let content
   switch (route.tab) {
     case 'library':
-      content = <EmptyTab title="ライブラリ" />
+      content = <LibraryTab route={route} navigate={navigate} onOpenTrack={setOpenTrack} />
       break
     case 'folders':
       content = <EmptyTab title="フォルダ" />

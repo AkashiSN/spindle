@@ -112,11 +112,23 @@ export function formatRoute(r: Route): string {
   }
 }
 
+/** URL のパスにライブラリの見方（/m/library/{view}）が書かれているか。無ければ覚えた見方を使う */
+export function hasExplicitLibraryView(pathname: string): boolean {
+  if (!pathname.startsWith(`${BASE}/`)) return false
+  const segs = pathname.slice(BASE.length + 1).split('/').filter((s) => s !== '')
+  return segs[0] === 'library' && isView(segs[1])
+}
+
+/** 行き先の URL（formatRoute の出力）が今の URL と同じか。同じなら履歴を積まずに置き換える */
+export function sameUrl(url: string, pathname: string, search: string): boolean {
+  return url === pathname + search
+}
+
 function current(): Route {
   return parseRoute(window.location.pathname, window.location.search)
 }
 
-/** 現在の route と、移動する関数。移動は pushState（`replace` なら replaceState） */
+/** 現在の route と、移動する関数。移動は pushState（`replace` か、今と同じ URL なら replaceState） */
 export function useRoute(): [Route, (r: Route, opts?: { replace?: boolean }) => void] {
   const [route, setRoute] = useState<Route>(current)
   useEffect(() => {
@@ -126,7 +138,8 @@ export function useRoute(): [Route, (r: Route, opts?: { replace?: boolean }) => 
   }, [])
   const navigate = useCallback((r: Route, opts?: { replace?: boolean }) => {
     const url = formatRoute(r)
-    if (opts?.replace) window.history.replaceState(null, '', url)
+    if (opts?.replace || sameUrl(url, window.location.pathname, window.location.search))
+      window.history.replaceState(null, '', url)
     else window.history.pushState(null, '', url)
     setRoute(r)
   }, [])

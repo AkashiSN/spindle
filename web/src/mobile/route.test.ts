@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatRoute, parseRoute, type Route } from './route'
+import { formatRoute, parseRoute, sameUrl, hasExplicitLibraryView, type Route } from './route'
 
 describe('route', () => {
   it('タブとパラメータを往復できる', () => {
@@ -33,5 +33,20 @@ describe('route', () => {
   it('不正な数値は無視する', () => {
     expect(parseRoute('/m/playlists/abc', '?edit=zzz')).toEqual({ tab: 'playlists' })
     expect(parseRoute('/m/library/albums', '?album=-1')).toEqual({ tab: 'library', view: 'albums' })
+  })
+  it('sameUrl は今の URL と同じ行き先かを見る（同じなら履歴を積まない）', () => {
+    expect(sameUrl('/m/library/albums', '/m/library/albums', '')).toBe(true)
+    expect(sameUrl('/m/library/albums?q=a', '/m/library/albums', '?q=a')).toBe(true)
+    expect(sameUrl('/m/library/albums', '/m/library/albums', '?q=a')).toBe(false)
+    expect(sameUrl('/m/folders', '/m/library/albums', '')).toBe(false)
+  })
+  it('hasExplicitLibraryView は URL に見方があるときだけ true', () => {
+    expect(hasExplicitLibraryView('/m/library/tracks')).toBe(true)
+    expect(hasExplicitLibraryView('/m/library/artists/')).toBe(true)
+    expect(hasExplicitLibraryView('/m/')).toBe(false)
+    expect(hasExplicitLibraryView('/m')).toBe(false)
+    expect(hasExplicitLibraryView('/m/library')).toBe(false)
+    expect(hasExplicitLibraryView('/m/library/zzz')).toBe(false)
+    expect(hasExplicitLibraryView('/m/folders')).toBe(false)
   })
 })

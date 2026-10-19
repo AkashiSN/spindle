@@ -298,3 +298,177 @@ input {
   color: var(--accent);
   font-weight: 600;
 }
+
+/* ライブラリ: 検索欄 / 切り替え / 一覧（一覧だけがスクロールする） */
+.m-library {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.m-search {
+  flex: none;
+  position: relative;
+  padding: 8px 12px 0;
+}
+
+.m-search input {
+  width: 100%;
+  padding-right: 44px;
+  /* iOS がフォーカスで拡大しないよう 16px 以上 */
+  font-size: 16px;
+}
+
+.m-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.m-search-clear {
+  position: absolute;
+  right: 12px;
+  top: 8px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+}
+
+.m-segmented {
+  flex: none;
+  display: flex;
+  margin: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.m-segmented button {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--muted);
+}
+
+.m-segmented button + button {
+  border-left: 1px solid var(--border);
+}
+
+.m-segmented button.active {
+  background: var(--accent-bg);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.m-tracklist {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.m-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.m-count {
+  flex: none;
+  padding: 4px 16px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.m-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.m-row {
+  width: 100%;
+  min-height: var(--m-row-h);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  border: none;
+  border-bottom: 1px solid var(--row-border);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.m-row:active {
+  background: var(--bg-alt);
+}
+
+.m-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.m-row-title,
+.m-row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-row-sub {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.m-track-row.missing .m-row-title {
+  color: var(--missing-fg);
+  text-decoration: line-through;
+  text-decoration-color: var(--missing-line);
+}
+
+.m-chevron {
+  color: var(--muted-2);
+  font-size: 20px;
+}
+
+.m-art {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: var(--skeleton-a);
+}
+
+.m-badge {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--badge-bg);
+  color: var(--badge-fg);
+}
+
+.m-subhead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.m-center-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+}
