@@ -2600,7 +2600,7 @@ NAS 上の `/library/...` をそのまま書いても foobar からは開けな�
 | コーデック | ブラウザ | 方針 |
 |---|---|---|
 | FLAC | Chrome / Firefox / Safari 対応 | 直送 |
-| Opus | Chrome / Firefox / Safari 18.4+ 対応 | 直送（Opus 不可のブラウザ向けの AAC 変換は作らない。D-52） |
+| Opus | Chrome / Firefox / Safari 18.4+ 対応 | 直送（Opus 不可のブラウザ向けの AAC 変換は作らない。D-52。スマホ版の試し聴きは例外で `?transcode=aac` を使う。D-115） |
 | AAC (m4a) | 全対応 | 直送 |
 | WAV | 全対応 | 直送（サイズ大） |
 | **ALAC** | **Safari のみ** | **既定で Opus へ変換** |
