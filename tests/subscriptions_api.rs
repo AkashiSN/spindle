@@ -367,10 +367,14 @@ async fn progress_ignores_downloads_of_an_older_sync() {
     let new = enqueue_ytdl(&app, "https://youtu.be/new", id, 2).await;
     app.db
         .write(move |c| {
-            c.execute("UPDATE jobs SET created_at = 10 WHERE id = ?1", [old])?;
             c.execute(
-                "UPDATE jobs SET created_at = 100 WHERE type = 'playlist_sync'",
-                [],
+                "UPDATE jobs SET created_at = 10, state = 'done' WHERE id = ?1",
+                [old],
+            )?;
+            c.execute(
+                "UPDATE jobs SET created_at = 100 WHERE type = 'playlist_sync'
+                   AND json_extract(payload, '$.subscription_id') = ?1",
+                [id],
             )?;
             c.execute("UPDATE jobs SET created_at = 100 WHERE id = ?1", [new])?;
             Ok(())
@@ -385,6 +389,39 @@ async fn progress_ignores_downloads_of_an_older_sync() {
         .map(|j| j["id"].as_i64().unwrap())
         .collect();
     assert_eq!(ids, [new], "{body}");
+}
+
+/// 投入が走行中の古いジョブに dedup されても、その件は items に残る。終わった古い件は出ない
+#[tokio::test]
+async fn progress_keeps_older_live_downloads() {
+    let app = App::new(true).await;
+    let id = make_sub(&app, "PLone", "B").await;
+    let queued = enqueue_ytdl(&app, "https://youtu.be/q", id, 1).await;
+    let running = enqueue_ytdl(&app, "https://youtu.be/r", id, 2).await;
+    let done = enqueue_ytdl(&app, "https://youtu.be/d", id, 3).await;
+    app.call(
+        Method::POST,
+        &format!("/api/ytmusic/subscriptions/{id}/sync"),
+        None,
+    )
+    .await;
+    app.db
+        .write(move |c| {
+            c.execute("UPDATE jobs SET created_at = 10 WHERE type = 'ytdl'", [])?;
+            c.execute("UPDATE jobs SET state = 'running' WHERE id = ?1", [running])?;
+            c.execute("UPDATE jobs SET state = 'done' WHERE id = ?1", [done])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = progress(&app, id).await;
+    let ids: Vec<i64> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [queued, running], "{body}");
 }
 
 #[tokio::test]

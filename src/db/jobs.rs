@@ -505,6 +505,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Job>> {
 }
 
 /// 購読の直近の playlist_sync ジョブ（created_at 最大、同値なら id 最大）と、それ以降に作られた
+/// （または今も queued / running の。投入が既存の走行中ジョブに dedup された場合）
 /// payload.subscription_id = id の ytdl ジョブ（payload.position 昇順、無ければ末尾、次に id 順）
 pub fn subscription_progress(
     conn: &Connection,
@@ -527,7 +528,7 @@ pub fn subscription_progress(
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {JOB_COLUMNS} FROM jobs
          WHERE type = ?1 AND json_extract(payload, '$.subscription_id') = ?2
-           AND created_at >= ?3
+           AND (created_at >= ?3 OR state IN ('queued','running'))
          ORDER BY json_extract(payload, '$.position') IS NULL,
                   json_extract(payload, '$.position'), id"
     ))?;
