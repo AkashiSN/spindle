@@ -119,10 +119,26 @@ impl App {
 
     /// Derived の Opus を置いて derived_files を揃える（transcode ジョブは使わない）
     fn add_derived(&self, id: i64, rel_opus: &str, seed: u32) -> std::path::PathBuf {
-        let p = self.derived().join("opus").join(rel_opus);
+        self.add_derived_variant(id, spindle::domain::derived::Variant::Opus, rel_opus, seed)
+    }
+
+    /// Derived の実体（opus / aac）を置いて derived_files を揃える
+    fn add_derived_variant(
+        &self,
+        id: i64,
+        variant: spindle::domain::derived::Variant,
+        rel: &str,
+        seed: u32,
+    ) -> std::path::PathBuf {
+        use spindle::domain::derived::Variant;
+        let (dir, ext, bitrate, audio_profile, tag_profile) = match variant {
+            Variant::Opus => ("opus", "opus", 128, "opus:128:v1", "opus:v1"),
+            Variant::Aac => ("aac", "m4a", 256, "aac:256:v1", "aac:v1"),
+        };
+        let p = self.derived().join(dir).join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         let name = p.file_name().unwrap().to_str().unwrap().to_owned();
-        let made = common::make_audio(p.parent().unwrap(), &name, "opus", seed).unwrap();
+        let made = common::make_audio(p.parent().unwrap(), &name, ext, seed).unwrap();
         let (av, tv): (i64, i64) = self
             .conn()
             .query_row(
@@ -134,9 +150,9 @@ impl App {
         derived::upsert(
             &self.conn(),
             id,
-            spindle::domain::derived::Variant::Opus,
-            &format!("opus/{rel_opus}"),
-            Some(128),
+            variant,
+            &format!("{dir}/{rel}"),
+            Some(bitrate),
             av,
             derived::TagState {
                 src_tag_version: tv,
@@ -144,8 +160,8 @@ impl App {
                 src_rg_scanned_at: None,
             },
             &derived::Profiles {
-                audio_profile: "opus:128:v1".into(),
-                tag_profile: "opus:v1".into(),
+                audio_profile: audio_profile.into(),
+                tag_profile: tag_profile.into(),
             },
             0,
         )
@@ -510,6 +526,121 @@ async fn transcode_falls_back_to_ffmpeg_and_supports_start() {
         .get(Some(&c), &format!("/api/stream/{id}?transcode=mp3"), &[])
         .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------- transcode=aac
+
+/// ADTS の同期語（12 bit の 1）
+fn is_adts(b: &[u8]) -> bool {
+    b.len() >= 2 && b[0] == 0xFF && (b[1] & 0xF0) == 0xF0
+}
+
+#[tokio::test]
+async fn aac_transcode_of_lossless_returns_adts() {
+    require_ffmpeg!();
+    let app = App::new().await;
+    app.add("A/01.flac", "flac", 1);
+    app.scan().await;
+    let id = app.track_id("A/01.flac");
+    let c = app.cookie().await;
+    let uri = format!("/api/stream/{id}?transcode=aac");
+    let res = app.get(Some(&c), &uri, &[("range", "bytes=0-9")]).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(hdr(&res, "content-type"), Some("audio/aac"));
+    assert_eq!(hdr(&res, "accept-ranges"), Some("none"));
+    assert!(hdr(&res, "content-length").is_none());
+    let full = body_of(res).await;
+    assert!(
+        is_adts(&full),
+        "ADTS の同期語で始まらない: {:02x?}",
+        &full[..full.len().min(4)]
+    );
+    // ?start= も通る（-ss）。後半だけなので短くなる
+    let res = app.get(Some(&c), &format!("{uri}&start=0.5"), &[]).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let part = body_of(res).await;
+    assert!(is_adts(&part));
+    assert!(part.len() < full.len(), "{} >= {}", part.len(), full.len());
+    // HEAD は本文無し
+    let res = app.send(Method::HEAD, Some(&c), &uri, &[]).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(hdr(&res, "content-type"), Some("audio/aac"));
+    assert!(body_of(res).await.is_empty());
+}
+
+#[tokio::test]
+async fn aac_serves_the_derived_m4a_when_current() {
+    require_ffmpeg!();
+    let app = App::new().await;
+    app.add("A/01.flac", "flac", 1);
+    app.scan().await;
+    let id = app.track_id("A/01.flac");
+    // opus の Derived もあるが、aac の要求では aac の行を使う
+    app.add_derived(id, "A/01.opus", 1);
+    let d = app.add_derived_variant(id, spindle::domain::derived::Variant::Aac, "A/01.m4a", 1);
+    let bytes = std::fs::read(&d).unwrap();
+    let c = app.cookie().await;
+    let uri = format!("/api/stream/{id}?transcode=aac");
+    let res = app.get(Some(&c), &uri, &[]).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(hdr(&res, "content-type"), Some("audio/mp4"));
+    assert_eq!(hdr(&res, "accept-ranges"), Some("bytes"));
+    assert_eq!(body_of(res).await, bytes);
+    let res = app.get(Some(&c), &uri, &[("range", "bytes=10-19")]).await;
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(hdr(&res, "content-type"), Some("audio/mp4"));
+    assert_eq!(body_of(res).await, &bytes[10..20]);
+    // opus の要求は従来どおり opus の Derived
+    let res = app
+        .get(Some(&c), &format!("/api/stream/{id}?transcode=opus"), &[])
+        .await;
+    assert_eq!(hdr(&res, "content-type"), Some("audio/ogg"));
+    assert_eq!(hdr(&res, "accept-ranges"), Some("bytes"));
+    // 音声版が古い aac の Derived は使わず ADTS に変換する
+    app.conn()
+        .execute("UPDATE tracks SET audio_version = 2 WHERE id = ?1", [id])
+        .unwrap();
+    let res = app.get(Some(&c), &uri, &[]).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(hdr(&res, "content-type"), Some("audio/aac"));
+    assert_eq!(hdr(&res, "accept-ranges"), Some("none"));
+    assert!(is_adts(&body_of(res).await));
+}
+
+#[tokio::test]
+async fn aac_of_lossy_returns_the_original() {
+    require_ffmpeg!();
+    let app = App::new().await;
+    let p = app.add("A/01.opus", "opus", 1);
+    app.scan().await;
+    let id = app.track_id("A/01.opus");
+    let bytes = std::fs::read(&p).unwrap();
+    let c = app.cookie().await;
+    let res = app
+        .get(Some(&c), &format!("/api/stream/{id}?transcode=aac"), &[])
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(hdr(&res, "content-type"), Some("audio/ogg"));
+    assert_eq!(hdr(&res, "accept-ranges"), Some("bytes"));
+    assert_eq!(body_of(res).await, bytes);
+}
+
+#[tokio::test]
+async fn unknown_transcode_is_400() {
+    require_ffmpeg!();
+    let app = App::new().await;
+    app.add("A/01.flac", "flac", 1);
+    app.scan().await;
+    let id = app.track_id("A/01.flac");
+    let c = app.cookie().await;
+    let res = app
+        .get(Some(&c), &format!("/api/stream/{id}?transcode=mp3"), &[])
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_slice(&body_of(res).await).unwrap();
+    assert_eq!(body["error"], "bad_request");
+    let msg = body["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("opus") && msg.contains("aac"), "{body}");
 }
 
 #[tokio::test]
