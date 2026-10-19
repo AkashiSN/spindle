@@ -870,3 +870,137 @@ input {
   -webkit-touch-callout: none;
   cursor: grab;
 }
+
+/* スマートプレイリスト: 条件の編集（組み立て画面 / ルール文の画面） */
+.m-pl-rule-edit {
+  margin-top: 6px;
+}
+.m-rule-edit {
+  flex: none;
+  max-height: 60%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.m-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.m-builder-join {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.m-builder-join .m-segmented {
+  margin: 0;
+}
+.m-cond {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--row-border);
+  border-radius: 8px;
+  background: var(--bg-alt);
+}
+.m-cond-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.m-cond-line select,
+.m-cond-line input {
+  flex: 1;
+  min-width: 0;
+}
+.m-rule-edit select,
+.m-tagedit-form select {
+  font: inherit;
+  font-size: 16px;
+  color: inherit;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  padding: 0 8px;
+}
+.m-cond input,
+.m-builder-opt input {
+  font-size: 16px;
+}
+.m-cond-remove {
+  flex: none;
+}
+.m-cond-not {
+  flex: none;
+  color: var(--muted);
+}
+.m-cond-not.active {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--fg);
+  font-weight: 600;
+}
+.m-builder-add {
+  align-self: flex-start;
+}
+.m-builder-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.m-dir {
+  flex: none;
+  margin: 0;
+}
+.m-rule-status {
+  margin: 4px 0 0;
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.m-rule-ok {
+  color: var(--ok);
+  font-weight: 600;
+}
+.m-rule-switch {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 8px;
+}
+.m-ruletext {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.m-ruletext-area {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 16px;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  resize: vertical;
+}
+.m-snippets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.m-snippets button {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  padding: 0 10px;
+}
+.m-join button,
+.m-dir button {
+  white-space: nowrap;
+}

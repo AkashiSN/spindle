@@ -1,9 +1,11 @@
-// 曲のシートの「プレイリストに追加」。普通のプレイリストを並べ、選ぶと末尾に足す（POST /api/playlists/:id/items）
+// 曲のシートの「プレイリストに追加」。普通のプレイリストを並べ、選ぶと末尾に足す（POST /api/playlists/:id/items）。
+// 戻るでこのシートだけ閉じる（曲のシートは残る。useBackClose）
 
 import { useEffect, useState } from 'react'
 import { ApiError } from '../../api/client'
 import type { Playlist } from '../../api/types'
 import { addToPlaylist, listPlaylists } from '../api'
+import { useBackClose } from '../backClose'
 import { playlistSubtitle } from '../playlists'
 import { BottomSheet } from './BottomSheet'
 
@@ -14,6 +16,7 @@ function failText(e: unknown, what: string): string {
 }
 
 export function AddToPlaylistSheet({ trackId, onClose }: { trackId: number; onClose: () => void }) {
+  const close = useBackClose(onClose)
   const [lists, setLists] = useState<Playlist[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState<number | null>(null)
@@ -54,7 +57,7 @@ export function AddToPlaylistSheet({ trackId, onClose }: { trackId: number; onCl
   }
 
   return (
-    <BottomSheet label="プレイリストに追加" expanded={false} onClose={onClose}>
+    <BottomSheet label="プレイリストに追加" expanded={false} onClose={() => close()}>
       <h2 className="m-sheet-h">プレイリストに追加</h2>
       {result != null && <p className={result.ok ? 'm-notice m-notice-ok' : 'm-notice'}>{result.text}</p>}
       {loadError != null && <p className="m-error m-sheet-pad">{loadError}</p>}
@@ -78,7 +81,7 @@ export function AddToPlaylistSheet({ trackId, onClose }: { trackId: number; onCl
         </ul>
       )}
       <div className="m-sheet-actions">
-        <button type="button" onClick={onClose}>
+        <button type="button" onClick={() => close()}>
           閉じる
         </button>
       </div>

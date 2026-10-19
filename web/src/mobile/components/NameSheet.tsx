@@ -1,11 +1,17 @@
 // プレイリストの名前を入れるシート（新規作成と名前の変更で共用）。
-// 新規のときだけ「普通 / スマート」を選ばせる。スマートの作成は Task 9（条件の組み立て）で入る
+// 新規のときだけ「普通 / スマート」を選ばせる。スマートは空のルールで作れないので、最初の条件を 1 つ組ませて
+// rule に入れる（続きは作った後の「条件を編集」で）。戻るで閉じる（useBackClose）
 
 import { useState, type FormEvent } from 'react'
 import type { Playlist } from '../../api/types'
+import { useBackClose } from '../backClose'
+import { dslOrError, NEW_CONDITION, type Condition } from '../ruleBuilder'
+import { useRulePreview } from '../useRulePreview'
 import { BottomSheet } from './BottomSheet'
+import { ConditionRow, PreviewStatus } from './SmartEditor'
 
-export type NameSheetResult = { name: string; kind: Playlist['kind'] }
+/** スマートなら rule（DSL）がある */
+export type NameSheetResult = { name: string; kind: Playlist['kind']; rule?: string }
 
 export function NameSheet({
   label,
@@ -20,14 +26,20 @@ export function NameSheet({
   /** 新規作成なら true（種類を選ばせる） */
   chooseKind: boolean
   submitLabel: string
-  /** 失敗の文言か null（成功。閉じるのは呼び出し側） */
-  onSubmit: (r: NameSheetResult) => Promise<string | null>
+  /** 失敗の文言、null（成功。シートを閉じる）、または関数（シートを閉じた後に呼ぶ。画面を移るとき） */
+  onSubmit: (r: NameSheetResult) => Promise<string | null | (() => void)>
+  /** シートが閉じた（戻る・やめる・成功） */
   onClose: () => void
 }) {
+  const close = useBackClose(onClose)
   const [name, setName] = useState(initial)
   const [kind, setKind] = useState<Playlist['kind']>('manual')
+  const [cond, setCond] = useState<Condition>(NEW_CONDITION)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const smart = chooseKind && kind === 'smart'
+  const built = smart ? dslOrError({ join: 'and', conditions: [cond], order: null, limit: null }) : null
+  const preview = useRulePreview(built != null && 'dsl' in built ? built.dsl : null)
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
@@ -37,17 +49,30 @@ export function NameSheet({
       setError('名前を入れてください')
       return
     }
+    let rule: string | undefined
+    if (built != null) {
+      if ('error' in built) {
+        setError(built.error)
+        return
+      }
+      if (preview.kind !== 'ok') {
+        setError(preview.kind === 'error' ? preview.message : '条件を確かめています。少し待ってから押してください')
+        return
+      }
+      rule = built.dsl
+    }
     setSaving(true)
     setError(null)
-    onSubmit({ name: trimmed, kind })
-      .then((err) => {
-        if (err != null) setError(err)
+    onSubmit(rule != null ? { name: trimmed, kind, rule } : { name: trimmed, kind })
+      .then((r) => {
+        if (typeof r === 'string') setError(r)
+        else close(r ?? undefined)
       })
       .finally(() => setSaving(false))
   }
 
   return (
-    <BottomSheet label={label} expanded={false} onClose={onClose} className="m-tagedit">
+    <BottomSheet label={label} expanded={false} onClose={() => close()} className="m-tagedit">
       <form className="m-tagedit-form" onSubmit={submit}>
         <label>
           <span className="m-tagedit-key">名前</span>
@@ -74,17 +99,28 @@ export function NameSheet({
               >
                 ♪ 普通
               </button>
-              {/* Task 9: スマートを選べるようにし、作成画面で最初の条件を 1 つ組ませてから createPlaylist({ name, rule }) */}
-              <button type="button" role="radio" aria-checked={false} disabled>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={kind === 'smart'}
+                className={kind === 'smart' ? 'active' : undefined}
+                onClick={() => setKind('smart')}
+              >
                 ✦ スマート
               </button>
             </div>
-            <p className="m-note">スマートプレイリストの作成はまだスマホ版ではできません（PC で作成してください）</p>
+            {smart && (
+              <>
+                <span className="m-tagedit-key">最初の条件（続きは作った後に「条件を編集」で足せます）</span>
+                <ConditionRow c={cond} onChange={setCond} />
+                <PreviewStatus state={preview} error={built != null && 'error' in built ? built.error : null} />
+              </>
+            )}
           </>
         )}
         {error != null && <p className="m-error">{error}</p>}
         <div className="m-tagedit-actions">
-          <button type="button" onClick={onClose} disabled={saving}>
+          <button type="button" onClick={() => close()} disabled={saving}>
             やめる
           </button>
           <button type="submit" className="m-primary" disabled={saving}>

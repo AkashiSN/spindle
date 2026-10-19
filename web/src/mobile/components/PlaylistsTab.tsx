@@ -9,7 +9,7 @@ import { createPlaylist, listPlaylists } from '../api'
 import { nameErrorMessage, playlistSubtitle } from '../playlists'
 import type { Route } from '../route'
 import { useEventSubscription } from '../useEvents'
-import { NameSheet } from './NameSheet'
+import { NameSheet, type NameSheetResult } from './NameSheet'
 import { PlaylistDetail } from './PlaylistDetail'
 
 type PlaylistsRoute = Extract<Route, { tab: 'playlists' }>
@@ -69,14 +69,13 @@ export function PlaylistsTab({
     )
   }
 
-  const create = async ({ name }: { name: string }): Promise<string | null> => {
+  const create = async ({ name, rule }: NameSheetResult): Promise<string | null | (() => void)> => {
     try {
-      const p = await createPlaylist({ name })
-      setCreating(false)
+      const p = await createPlaylist(rule != null ? { name, rule } : { name })
       setLists((xs) => (xs ? [...xs, p] : xs))
       load()
-      navigate({ tab: 'playlists', playlistId: p.id })
-      return null
+      // シートの段を戻してから中身へ積む（先に積むと戻るで中身が消える）
+      return () => navigate({ tab: 'playlists', playlistId: p.id })
     } catch (e) {
       return nameErrorMessage(e)
     }

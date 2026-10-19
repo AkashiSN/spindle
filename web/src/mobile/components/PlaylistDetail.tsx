@@ -1,18 +1,30 @@
 // プレイリストの中身。見出しに 戻る / 名前・曲数 / （普通なら）編集 / … メニュー（名前を変更・削除）。
 // - 普段は TrackList（position 順）。SSE の playlist でこのプレイリストが変わったら取り直す
 // - 普通のプレイリストの「編集」: 全件を読み、行に ⊖（外す）と ≡（長押しでドラッグして並べ替え）を出す
-// - スマートは読むだけ。条件の編集は Task 9（route.edit = 'rule' | 'text'）
+// - スマートはルールの原文と「条件を編集」。route.edit = 'rule'（組み立て画面）| 'text'（ルール文の画面）で
+//   編集画面に切り替える。組み立て画面で表せないルールは開いた時点でルール文の画面に移す（置き換え）
 
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react'
 import { ApiError } from '../../api/client'
 import type { Playlist, TrackRow } from '../../api/types'
-import type { Filter, Sort } from '../../lib/filter'
-import { deletePlaylist, listTracks, moveInPlaylist, removeFromPlaylist, updatePlaylist } from '../api'
+import { DEFAULT_SORT, type Filter, type Sort } from '../../lib/filter'
+import {
+  deletePlaylist,
+  listTracks,
+  moveInPlaylist,
+  previewRule,
+  removeFromPlaylist,
+  updatePlaylist,
+} from '../api'
 import { deleteErrorMessage, moveTarget, nameErrorMessage, playlistSubtitle } from '../playlists'
 import type { Route } from '../route'
+import { astToModel, type BuilderModel } from '../ruleBuilder'
+import { useRulePreview } from '../useRulePreview'
 import { useEventSubscription } from '../useEvents'
 import { ConfirmSheet } from './ConfirmSheet'
 import { NameSheet } from './NameSheet'
+import { RuleTextEditor } from './RuleTextEditor'
+import { SmartEditor } from './SmartEditor'
 import { TrackList } from './TrackList'
 
 type PlaylistsRoute = Extract<Route, { tab: 'playlists' }>
@@ -40,6 +52,11 @@ export function PlaylistDetail({
   const [token, setToken] = useState(0)
   const filter: Filter = { playlist_id: playlist.id }
   const manual = playlist.kind === 'manual'
+  // 編集画面をこの画面から積んだか（積んだなら閉じるときは戻る。URL から直に開いたなら置き換える）
+  const pushedEdit = useRef(false)
+  useEffect(() => {
+    if (route.edit == null) pushedEdit.current = false
+  }, [route.edit])
 
   useEventSubscription({
     onPlaylist: (e) => {
@@ -56,7 +73,6 @@ export function PlaylistDetail({
   const rename = async ({ name }: { name: string }): Promise<string | null> => {
     try {
       await updatePlaylist(playlist.id, { name })
-      setRenaming(false)
       onChanged()
       return null
     } catch (e) {
@@ -64,15 +80,36 @@ export function PlaylistDetail({
     }
   }
 
-  const remove = async (): Promise<string | null> => {
+  const remove = async (): Promise<string | null | (() => void)> => {
     try {
       await deletePlaylist(playlist.id)
-      navigate({ tab: 'playlists' }, { replace: true })
-      onChanged()
-      return null
+      // シートの段を戻してから一覧へ
+      return () => {
+        navigate({ tab: 'playlists' }, { replace: true })
+        onChanged()
+      }
     } catch (e) {
       return deleteErrorMessage(e)
     }
+  }
+
+  if (!manual && route.edit != null) {
+    const leave = () => {
+      if (pushedEdit.current) {
+        pushedEdit.current = false
+        window.history.back()
+      } else navigate({ tab: 'playlists', playlistId: playlist.id }, { replace: true })
+    }
+    return (
+      <SmartEditScreen
+        playlist={playlist}
+        mode={route.edit}
+        onMode={(edit) => navigate({ ...route, edit }, { replace: true })}
+        onLeave={leave}
+        onChanged={onChanged}
+        onOpenTrack={onOpenTrack}
+      />
+    )
   }
 
   return (
@@ -138,7 +175,15 @@ export function PlaylistDetail({
         </span>
       </div>
 
-      {!manual && <SmartRuleSummary playlist={playlist} route={route} />}
+      {!manual && (
+        <SmartRuleSummary
+          playlist={playlist}
+          onEdit={() => {
+            pushedEdit.current = true
+            navigate({ ...route, edit: 'rule' })
+          }}
+        />
+      )}
 
       {editing ? (
         <EditableTracks playlistId={playlist.id} onChanged={onChanged} />
@@ -170,15 +215,163 @@ export function PlaylistDetail({
   )
 }
 
-/**
- * スマートプレイリストのルール。Task 9 がここに「条件を編集」（navigate({ ...route, edit: 'rule' })）と
- * route.edit に応じた組み立て画面 / ルール文の画面を入れる
- */
-function SmartRuleSummary({ playlist }: { playlist: Playlist; route: PlaylistsRoute }) {
+/** スマートプレイリストのルールの原文と「条件を編集」 */
+function SmartRuleSummary({ playlist, onEdit }: { playlist: Playlist; onEdit: () => void }) {
   return (
     <div className="m-pl-rule">
       <code>{playlist.rule_source ?? ''}</code>
-      <p className="m-note">条件の編集は PC で行ってください</p>
+      <button type="button" className="m-pl-rule-edit" onClick={onEdit}>
+        条件を編集 ›
+      </button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------- 条件の編集（組み立て画面 / ルール文の画面）
+
+type BuilderDraft = { dsl: string } | { error: string }
+
+/**
+ * 編集中の文（draft）は 2 つの画面で共有する。組み立て画面は DSL にできたときだけ draft を更新し、
+ * できなければ文言（draftError）を出して保存させない。組み立て画面へは、今の文が組み立てで表せるときだけ戻れる
+ */
+function SmartEditScreen({
+  playlist,
+  mode,
+  onMode,
+  onLeave,
+  onChanged,
+  onOpenTrack,
+}: {
+  playlist: Playlist
+  mode: 'rule' | 'text'
+  onMode: (m: 'rule' | 'text') => void
+  onLeave: () => void
+  onChanged: () => void
+  onOpenTrack: (row: TrackRow) => void
+}) {
+  const [draft, setDraft] = useState(playlist.rule_source ?? '')
+  const [draftError, setDraftError] = useState<string | null>(null)
+  // 組み立て画面の初期値（undefined は読み込み中）。画面を切り替えるたびに作り直すので key も変える
+  const [model, setModel] = useState<BuilderModel | undefined>(undefined)
+  const [modelKey, setModelKey] = useState(0)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const preview = useRulePreview(draftError != null ? null : draft)
+  const rule = draft.trim()
+  // 下の一覧は最後に通った文で出す（確かめ中に一覧を消さない）
+  const [listRule, setListRule] = useState<string | null>(null)
+  if (preview.kind === 'ok' && listRule !== rule) setListRule(rule)
+
+  // 組み立て画面で開いたのに初期値が無い（URL から直に開いた・一覧から開いた）。AST を取って組み立てる。
+  // 表せなければルール文の画面へ置き換える
+  const needModel = mode === 'rule' && model === undefined
+  useEffect(() => {
+    if (!needModel) return
+    const ac = new AbortController()
+    previewRule(rule, ac.signal)
+      .then((r) => {
+        if (ac.signal.aborted) return
+        const m = astToModel(r.ast)
+        if (m) setModel(m)
+        else onMode('text')
+      })
+      .catch(() => {
+        if (!ac.signal.aborted) onMode('text')
+      })
+    return () => ac.abort()
+    // 開いたときの 1 回だけ（rule を追わない）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needModel])
+
+  const okModel = preview.kind === 'ok' ? astToModel(preview.ast) : null
+  const toBuilder = () => {
+    if (!okModel) return
+    setModel(okModel)
+    setModelKey((k) => k + 1)
+    onMode('rule')
+  }
+  const toText = () => {
+    // DSL にできない入力（値に " など）は捨て、最後に DSL にできた文で開く
+    setDraftError(null)
+    setModel(undefined)
+    onMode('text')
+  }
+  const onBuilderDraft = (r: BuilderDraft) => {
+    if ('dsl' in r) {
+      setDraft(r.dsl)
+      setDraftError(null)
+    } else setDraftError(r.error)
+  }
+
+  const canSave = !saving && draftError == null && rule !== '' && preview.kind === 'ok'
+  const save = () => {
+    if (!canSave) return
+    setSaving(true)
+    setSaveError(null)
+    updatePlaylist(playlist.id, { rule })
+      .then(() => {
+        onChanged()
+        onLeave()
+      })
+      .catch((e: unknown) => {
+        setSaveError(
+          e instanceof ApiError ? (e.status === 400 ? e.message : `保存できませんでした（${e.code}）`) : '保存できませんでした',
+        )
+        setSaving(false)
+      })
+  }
+
+  return (
+    <div className="m-library">
+      <div className="m-subhead m-pl-head">
+        <button type="button" className="m-icon" aria-label="編集をやめて戻る" onClick={onLeave}>
+          ‹
+        </button>
+        <span className="m-row-main">
+          <span className="m-row-title m-pl-name">
+            <span aria-hidden>✦</span> {playlist.name}
+          </span>
+          <span className="m-row-sub">{mode === 'rule' ? '条件を編集' : 'ルール文を編集'}</span>
+        </span>
+        <button type="button" className="m-primary" onClick={save} disabled={!canSave}>
+          {saving ? '保存中…' : '保存'}
+        </button>
+      </div>
+      <div className="m-rule-edit">
+        {mode === 'rule' ? (
+          model === undefined ? (
+            <p className="m-placeholder">読み込み中…</p>
+          ) : (
+            <SmartEditor key={modelKey} initial={model} preview={preview} onDraft={onBuilderDraft} />
+          )
+        ) : (
+          <RuleTextEditor value={draft} preview={preview} onChange={setDraft} />
+        )}
+        {saveError != null && <p className="m-error m-rule-status">{saveError}</p>}
+        <div className="m-rule-switch">
+          {mode === 'rule' ? (
+            <button type="button" onClick={toText}>
+              文で編集する ›
+            </button>
+          ) : (
+            <>
+              <button type="button" onClick={toBuilder} disabled={!okModel}>
+                組み立て画面で編集する ›
+              </button>
+              {preview.kind === 'ok' && !okModel && (
+                <p className="m-note">括弧の入れ子や AND と OR の混在は組み立て画面では表せません</p>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      {listRule != null && (
+        <>
+          <div className="m-count">一致する曲（並び順・上限は保存後に効きます）</div>
+          <TrackList filter={{ dsl: listRule }} sort={DEFAULT_SORT} onOpen={onOpenTrack} />
+        </>
+      )}
     </div>
   )
 }

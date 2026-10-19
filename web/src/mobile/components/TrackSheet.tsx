@@ -1,7 +1,7 @@
 // 曲の詳細シート（下から出す）。半分 = 要点と主要タグ、引き上げると全部（全タグ・ファイル情報・RG・シーク）。
 // - 詳細は GET /api/tracks/:id。保存後と、batch イベント・この曲を含む library イベントで取り直す
 // - タグの行をタップすると修正シート（反映待ち・競合・missing は理由を出して開かない）
-// - 「プレイリストに追加」は普通のプレイリストを選ぶシート（AddToPlaylistSheet。履歴は積まない）
+// - 「プレイリストに追加」は普通のプレイリストを選ぶシート（AddToPlaylistSheet。戻るでそのシートだけ閉じる）
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
