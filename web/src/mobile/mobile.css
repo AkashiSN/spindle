@@ -781,3 +781,8 @@ input {
   width: 52px;
   height: 52px;
 }
+.m-codec {
+  margin-left: 8px;
+  font-weight: 400;
+  color: var(--muted-2);
+}

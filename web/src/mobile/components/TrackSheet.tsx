@@ -186,7 +186,10 @@ export function TrackSheet({
 
             {expanded && track && (
               <>
-                <h2 className="m-sheet-h">再生</h2>
+                <h2 className="m-sheet-h">
+                  再生
+                  {isCurrent && player.codec != null && <span className="m-codec">{player.codec} で再生中</span>}
+                </h2>
                 <SeekBar player={player} active={isCurrent} fallbackDuration={(row.duration_ms ?? 0) / 1000} />
 
                 <h2 className="m-sheet-h">ファイル</h2>

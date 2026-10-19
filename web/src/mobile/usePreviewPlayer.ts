@@ -3,11 +3,13 @@
 // - キュー・次曲は無い。曲が終われば止まる
 // - Derived の直送（Range あり）は duration が有限なのでネイティブにシーク。ffmpeg の chunked
 //   （Infinity / NaN）は `start=` で読み直し、表示時刻を offset で補正する（PC の usePlayer と同じ考え方）
+// - canPlayType が Opus を鳴らせると言っても鳴らない端末がある（素の 'audio/ogg' で真になる iOS など）。
+//   Opus で再生が始まる前に失敗したら、同じ位置から 1 回だけ AAC で読み直し、以後この画面では AAC にする
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { TrackRow } from '../api/types'
 import { detectSupport, resolvePendingSeek, withStart, type Source, type Support } from '../lib/playback'
-import { mobileSource } from './track'
+import { fallbackSource, mobileSource, sourceCodecLabel } from './track'
 
 type MediaState = 'loading' | 'seekable' | 'chunked'
 
@@ -20,8 +22,8 @@ export type PreviewPlayer = {
   duration: number
   /** 再生に失敗したときの文言 */
   error: string | null
-  /** 端末が Opus を鳴らせるか（鳴らせなければ AAC で流す） */
-  codec: 'opus' | 'aac'
+  /** いま鳴らしている形式（Opus / AAC / 原本）。何も鳴らしていなければ null */
+  codec: string | null
   play(row: TrackRow): void
   toggle(): void
   seek(seconds: number): void
@@ -38,6 +40,12 @@ export function usePreviewPlayer(): PreviewPlayer {
   const [position, setPosition] = useState(0)
   const [duration, setDuration] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [codec, setCodec] = useState<string | null>(null)
+  const currentRef = useRef<TrackRow | null>(null)
+  /** 今の読み込みで再生が始まったか（始まる前の失敗だけ AAC に倒す） */
+  const started = useRef(false)
+  /** この画面で Opus が鳴らなかった。以後は最初から AAC */
+  const opusBroken = useRef(false)
   const media = useRef<MediaState>('loading')
   const source = useRef<Source | null>(null)
   const offset = useRef(0)
@@ -55,33 +63,59 @@ export function usePreviewPlayer(): PreviewPlayer {
     }
   }, [])
 
-  const fail = useCallback((e: unknown) => {
-    // 次の読み直し・曲の切り替えで中断された play() は失敗ではない
-    if (e instanceof DOMException && e.name === 'AbortError') return
-    setError(e instanceof Error ? e.message : String(e))
+  // load は fail（AAC への切り替えで load を呼ぶ）より先に定義するので、最新の fail を ref 経由で呼ぶ
+  const failRef = useRef<(e: unknown) => void>(() => {})
+  const loadGen = useRef(0)
+  const load = useCallback((src: Source, start: number) => {
+    const audio = audioRef.current
+    if (!audio) return
+    source.current = src
+    started.current = false
+    setCodec(sourceCodecLabel(src))
+    offset.current = start
+    pendingSeek.current = null
+    media.current = 'loading'
+    setError(null)
+    setPosition(start)
+    audio.src = withStart(src, start)
+    // 読み直した後に前の play() が遅れて失敗しても、今の読み込みの失敗としては扱わない
+    const g = ++loadGen.current
+    audio.play().catch((e: unknown) => {
+      if (g === loadGen.current) failRef.current(e)
+    })
   }, [])
 
-  const load = useCallback(
-    (src: Source, start: number) => {
-      const audio = audioRef.current
-      if (!audio) return
-      source.current = src
-      offset.current = start
-      pendingSeek.current = null
-      media.current = 'loading'
-      setError(null)
-      setPosition(start)
-      audio.src = withStart(src, start)
-      audio.play().catch(fail)
+  /** 再生が始まる前の失敗なら AAC に倒して読み直す。倒せたら true */
+  const tryFallback = useCallback((): boolean => {
+    const row = currentRef.current
+    const src = source.current
+    if (started.current || !row || !src) return false
+    const next = fallbackSource(row, src)
+    if (!next) return false
+    opusBroken.current = true
+    load(next, offset.current)
+    return true
+  }, [load])
+
+  const fail = useCallback(
+    (e: unknown) => {
+      // 次の読み直し・曲の切り替えで中断された play() は失敗ではない
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      if (e instanceof DOMException && e.name === 'NotSupportedError' && tryFallback()) return
+      setError(e instanceof Error ? e.message : String(e))
     },
-    [fail],
+    [tryFallback],
   )
+  useEffect(() => {
+    failRef.current = fail
+  })
 
   const play = useCallback(
     (row: TrackRow) => {
+      currentRef.current = row
       setCurrent(row)
       setDuration(row.duration_ms != null ? row.duration_ms / 1000 : 0)
-      load(mobileSource(row, support), 0)
+      load(mobileSource(row, opusBroken.current ? { ...support, opus: false } : support), 0)
     },
     [load, support],
   )
@@ -120,6 +154,9 @@ export function usePreviewPlayer(): PreviewPlayer {
     if (!audio) return
     const onTime = () => setPosition(offset.current + audio.currentTime)
     const onPlay = () => setPlaying(true)
+    const onPlaying = () => {
+      started.current = true
+    }
     const onPause = () => setPlaying(false)
     const onDuration = () => {
       if (Number.isFinite(audio.duration) && audio.duration > 0) setDuration(offset.current + audio.duration)
@@ -134,6 +171,7 @@ export function usePreviewPlayer(): PreviewPlayer {
       else if (action.kind === 'reload' && source.current) load(source.current, action.start)
     }
     const onError = () => {
+      if (tryFallback()) return
       const code = audio.error?.code
       setError(code != null ? `再生に失敗しました（code ${code}）` : '再生に失敗しました')
       setPlaying(false)
@@ -141,6 +179,7 @@ export function usePreviewPlayer(): PreviewPlayer {
     const onEnded = () => setPlaying(false)
     audio.addEventListener('timeupdate', onTime)
     audio.addEventListener('play', onPlay)
+    audio.addEventListener('playing', onPlaying)
     audio.addEventListener('pause', onPause)
     audio.addEventListener('durationchange', onDuration)
     audio.addEventListener('loadedmetadata', onMetadata)
@@ -149,13 +188,14 @@ export function usePreviewPlayer(): PreviewPlayer {
     return () => {
       audio.removeEventListener('timeupdate', onTime)
       audio.removeEventListener('play', onPlay)
+      audio.removeEventListener('playing', onPlaying)
       audio.removeEventListener('pause', onPause)
       audio.removeEventListener('durationchange', onDuration)
       audio.removeEventListener('loadedmetadata', onMetadata)
       audio.removeEventListener('error', onError)
       audio.removeEventListener('ended', onEnded)
     }
-  }, [load])
+  }, [load, tryFallback])
 
   return {
     current,
@@ -163,7 +203,7 @@ export function usePreviewPlayer(): PreviewPlayer {
     position,
     duration,
     error,
-    codec: support.opus ? 'opus' : 'aac',
+    codec,
     play,
     toggle,
     seek,

@@ -13,6 +13,24 @@ export function mobileSource(track: Pick<TrackRow, 'id' | 'lossless'>, support: 
   return { url: `${base}?transcode=${support.opus ? 'opus' : 'aac'}`, transcode: true }
 }
 
+/**
+ * Opus の変換で鳴らなかった（再生が始まる前に error）ときの代わり。可逆の Opus なら AAC、
+ * それ以外は null（もう倒す先が無い）。canPlayType は素の 'audio/ogg' でも真を返すことがあり（iOS）、
+ * 判定だけでは Opus が鳴るか分からないため
+ */
+export function fallbackSource(track: Pick<TrackRow, 'id' | 'lossless'>, failed: Source): Source | null {
+  if (!track.lossless || !failed.transcode) return null
+  const opus = mobileSource(track, { flac: false, opus: true, aac: true, alac: false, wav: false, mp3: false })
+  if (failed.url !== opus.url) return null
+  return mobileSource(track, { flac: false, opus: false, aac: true, alac: false, wav: false, mp3: false })
+}
+
+/** 鳴らしている形式の表示（Opus / AAC / 原本） */
+export function sourceCodecLabel(src: Source): string {
+  if (!src.transcode) return '原本'
+  return src.url.endsWith('transcode=aac') ? 'AAC' : 'Opus'
+}
+
 /** タグを編集できない理由。編集できるなら null */
 export function editBlockReason(
   row: Pick<TrackRow, 'pending_batch_id' | 'conflict_batch_id' | 'missing_since'>,

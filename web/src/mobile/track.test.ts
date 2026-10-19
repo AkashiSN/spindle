@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { splitValues } from '../lib/properties'
-import { audioSpec, editBlockReason, formatSize, mobileSource, sheetFromHistory, tagEditOps, tagEditProblem } from './track'
+import { audioSpec, editBlockReason, fallbackSource, formatSize, mobileSource, sourceCodecLabel, sheetFromHistory, tagEditOps, tagEditProblem } from './track'
 
 const yes = { flac: true, opus: true, aac: true, alac: true, wav: true, mp3: true }
 
@@ -53,5 +53,19 @@ describe('track', () => {
     expect(formatSize(2048)).toBe('2.0 KB')
     expect(formatSize(34_200_000)).toBe('32.6 MB')
     expect(formatSize(3 * 1024 ** 3)).toBe('3.00 GB')
+  })
+
+  it('Opus で鳴らなかった可逆は 1 回だけ AAC に倒す', () => {
+    const opus = { url: '/api/stream/7?transcode=opus', transcode: true }
+    const aac = { url: '/api/stream/7?transcode=aac', transcode: true }
+    expect(fallbackSource({ id: 7, lossless: true }, opus)).toEqual(aac)
+    expect(fallbackSource({ id: 7, lossless: true }, aac)).toBeNull()
+    expect(fallbackSource({ id: 8, lossless: false }, { url: '/api/stream/8', transcode: false })).toBeNull()
+  })
+
+  it('鳴らしている形式の表示', () => {
+    expect(sourceCodecLabel({ url: '/api/stream/7?transcode=opus', transcode: true })).toBe('Opus')
+    expect(sourceCodecLabel({ url: '/api/stream/7?transcode=aac', transcode: true })).toBe('AAC')
+    expect(sourceCodecLabel({ url: '/api/stream/8', transcode: false })).toBe('原本')
   })
 })
