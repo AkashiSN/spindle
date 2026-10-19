@@ -46,7 +46,7 @@ pub fn should_redirect_to_mobile(path: &str, headers: &HeaderMap) -> bool {
 pub async fn serve(uri: Uri, headers: HeaderMap) -> Response {
     let path = uri.path().trim_start_matches('/');
     if should_redirect_to_mobile(path, &headers) {
-        return redirect(StatusCode::FOUND, "/m/");
+        return mobile_redirect();
     }
     // `/m` は相対の assets を解決させるため `/m/` へ寄せる
     if path == "m" {
@@ -72,6 +72,20 @@ pub async fn serve(uri: Uri, headers: HeaderMap) -> Response {
         )
             .into_response(),
     }
+}
+
+/// `/` → `/m/` の 302。応答が UA と Cookie で変わるので、間のキャッシュ（Cloudflare 等）が
+/// PC のブラウザへこの 302 を返さないよう `no-store` と `Vary` を付ける。PC 向けの 200 には付けない
+fn mobile_redirect() -> Response {
+    (
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, "/m/"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::VARY, "User-Agent, Cookie"),
+        ],
+    )
+        .into_response()
 }
 
 fn redirect(status: StatusCode, to: &'static str) -> Response {
@@ -128,6 +142,34 @@ mod tests {
             &ua_cookie(iphone, "xspindle_view=pc")
         ));
         assert!(!should_redirect_to_mobile("", &HeaderMap::new()));
+    }
+
+    #[tokio::test]
+    async fn serve_redirects_iphone_root_with_no_store_and_vary() {
+        let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
+        let res = serve(Uri::from_static("/"), ua(iphone)).await;
+        assert_eq!(res.status(), StatusCode::FOUND);
+        let h = res.headers();
+        assert_eq!(h.get(header::LOCATION).unwrap(), "/m/");
+        assert_eq!(h.get(header::CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(h.get(header::VARY).unwrap(), "User-Agent, Cookie");
+    }
+
+    #[tokio::test]
+    async fn serve_does_not_redirect_desktop_root_and_adds_no_cache_headers() {
+        let mac =
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15";
+        let res = serve(Uri::from_static("/"), ua(mac)).await;
+        assert_ne!(res.status(), StatusCode::FOUND);
+        let h = res.headers();
+        assert!(h.get(header::LOCATION).is_none());
+        assert!(h.get(header::CACHE_CONTROL).is_none());
+        assert!(h.get(header::VARY).is_none());
+        // PC の Cookie を持つ iPhone も振り分けない
+        let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148";
+        let res = serve(Uri::from_static("/"), ua_cookie(iphone, "spindle_view=pc")).await;
+        assert_ne!(res.status(), StatusCode::FOUND);
+        assert!(res.headers().get(header::LOCATION).is_none());
     }
 
     #[test]
