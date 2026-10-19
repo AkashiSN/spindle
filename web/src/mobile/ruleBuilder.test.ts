@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   FIELD_CHOICES,
   InvalidField,
-  QuoteInValue,
   SNIPPETS,
   astToModel,
   dslOrError,
@@ -121,14 +120,14 @@ describe('modelToDsl', () => {
     )
   })
 
-  it('値に " を含むと QuoteInValue を投げる', () => {
+  it('値の " と \\ は引用の中でエスケープする（サーバの quoted は \\" と \\\\ を読む）', () => {
     const m: BuilderModel = {
       join: 'and',
-      conditions: [{ kind: 'cmp', not: false, field: 'title', cmp: 'is', value: 'say "hi"' }],
+      conditions: [{ kind: 'cmp', not: false, field: 'title', cmp: 'is', value: 'a"b\\c' }],
       order: null,
       limit: null,
     }
-    expect(() => modelToDsl(m)).toThrow(QuoteInValue)
+    expect(modelToDsl(m)).toBe('%title% IS "a\\"b\\\\c"')
   })
 
   it('フィールド名に使えない文字があると InvalidField を投げる', () => {
@@ -154,12 +153,11 @@ describe('quoteValue', () => {
     expect(quoteValue('a\tb')).toBe('"a\tb"')
     expect(quoteValue('全角　空白')).toBe('"全角　空白"')
   })
-  it('囲むときは \\ を \\\\ にする（サーバは引用の中だけ \\\\ → \\ と読む）', () => {
-    expect(quoteValue('a\\b')).toBe('a\\b')
+  it('" か \\ を含めば囲み、\\ → \\\\、" → \\" にする', () => {
+    expect(quoteValue('a\\b')).toBe('"a\\\\b"')
     expect(quoteValue('a \\')).toBe('"a \\\\"')
-  })
-  it('" を含むと QuoteInValue', () => {
-    expect(() => quoteValue('"x')).toThrow(QuoteInValue)
+    expect(quoteValue('"x')).toBe('"\\"x"')
+    expect(quoteValue('say "hi"')).toBe('"say \\"hi\\""')
   })
 })
 
@@ -201,10 +199,10 @@ describe('insertSnippet', () => {
 })
 
 describe('dslOrError', () => {
-  it('" を含む値はルール文へ促す文言、正しければ文', () => {
+  it('正しければ文、フィールド名が不正なら文言', () => {
     const m: BuilderModel = { join: 'and', conditions: [{ kind: 'present', field: 'genre' }], order: null, limit: null }
     expect(dslOrError(m)).toEqual({ dsl: 'PRESENT %genre%' })
-    const bad = dslOrError({ ...m, conditions: [{ kind: 'cmp', not: false, field: 'title', cmp: 'is', value: 'a"b' }] })
-    expect('error' in bad && bad.error).toContain('文で編集する')
+    const bad = dslOrError({ ...m, conditions: [{ kind: 'present', field: 'a%b' }] })
+    expect('error' in bad && bad.error).toContain('a%b')
   })
 })

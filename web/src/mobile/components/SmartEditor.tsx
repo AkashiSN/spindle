@@ -46,7 +46,9 @@ export function ConditionRow({
   onChange: (c: Condition) => void
   onRemove?: () => void
 }) {
-  const known = FIELD_CHOICES.includes(c.field)
+  // 「その他のタグ…」を選んだら、入力が候補と同じ名前になっても自由入力のまま（選び直すまで）
+  const [custom, setCustom] = useState(() => !FIELD_CHOICES.includes(c.field))
+  const known = !custom && FIELD_CHOICES.includes(c.field)
   const op: OpChoice = c.kind === 'cmp' ? c.cmp : c.kind
   const setOp = (v: OpChoice) => {
     if (v === 'present' || v === 'missing') onChange({ kind: v, field: c.field })
@@ -59,7 +61,11 @@ export function ConditionRow({
         <select
           aria-label="フィールド"
           value={known ? c.field : OTHER}
-          onChange={(e) => onChange({ ...c, field: e.target.value === OTHER ? '' : e.target.value })}
+          onChange={(e) => {
+            const other = e.target.value === OTHER
+            setCustom(other)
+            onChange({ ...c, field: other ? '' : e.target.value })
+          }}
         >
           {FIELD_CHOICES.map((f) => (
             <option key={f} value={f}>
@@ -146,9 +152,19 @@ export function SmartEditor({
     setM(next)
     onDraft(badLimit ? { error: LIMIT_ERROR } : dslOrError(next))
   }
+  // 行の key（消しても他の行の入力状態がずれないように、位置ではなく採番した値）
+  const [keys, setKeys] = useState(() => initial.conditions.map((_, i) => i))
+  const [nextKey, setNextKey] = useState(initial.conditions.length)
   const setCond = (i: number, c: Condition) => update({ ...m, conditions: m.conditions.map((x, j) => (j === i ? c : x)) })
-  const removeCond = (i: number) => update({ ...m, conditions: m.conditions.filter((_, j) => j !== i) })
-  const addCond = () => update({ ...m, conditions: [...m.conditions, { ...NEW_CONDITION }] })
+  const removeCond = (i: number) => {
+    setKeys((ks) => ks.filter((_, j) => j !== i))
+    update({ ...m, conditions: m.conditions.filter((_, j) => j !== i) })
+  }
+  const addCond = () => {
+    setKeys((ks) => [...ks, nextKey])
+    setNextKey((k) => k + 1)
+    update({ ...m, conditions: [...m.conditions, { ...NEW_CONDITION }] })
+  }
 
   const orderValue = m.order == null ? '' : 'desc' in m.order ? m.order.field : RANDOM
   const orderFields = m.order != null && 'desc' in m.order && !FIELD_CHOICES.includes(m.order.field)
@@ -202,7 +218,7 @@ export function SmartEditor({
 
       {m.conditions.map((c, i) => (
         <ConditionRow
-          key={i}
+          key={keys[i] ?? `x${i}`}
           c={c}
           onChange={(x) => setCond(i, x)}
           onRemove={m.conditions.length > 1 ? () => removeCond(i) : undefined}

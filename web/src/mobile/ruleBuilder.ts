@@ -48,16 +48,6 @@ export const FIELD_CHOICES: readonly string[] = [
   'effectivebits',
 ]
 
-/** 値に `"` がある（組み立て画面からは保存させず、ルール文の画面へ移るよう促す） */
-export class QuoteInValue extends Error {
-  readonly value: string
-  constructor(value: string) {
-    super('値に " を含む条件は組み立て画面では書けません。ルール文で編集してください')
-    this.name = 'QuoteInValue'
-    this.value = value
-  }
-}
-
 /** フィールド名に使えない文字がある（文法の ident は英数字・_・空白だけ） */
 export class InvalidField extends Error {
   readonly field: string
@@ -152,13 +142,12 @@ export function astToModel(ast: unknown): BuilderModel | null {
 // ---------------------------------------------------------------- モデル → DSL
 
 /**
- * 値を DSL に書く形にする。空白（WHITESPACE）・`)` を含むか空なら二重引用符で囲む
- * （文法の bare は空白と `)` で終わる）。囲むときは `\` を `\\` にする（サーバは引用の中の `\\` を `\` と読む）。
- * `"` は組み立て画面では扱わない（QuoteInValue）
+ * 値を DSL に書く形にする。空白（WHITESPACE）・`)`・`"`・`\` を含むか空なら二重引用符で囲む
+ * （文法の bare は空白と `)` で終わり、`"` で始められない）。囲むときは `\` → `\\`、`"` → `\"`
+ * （サーバの quoted は `\"` と `\\` だけを読み替える。src/playlist/dsl.rs の unescape）
  */
 export function quoteValue(v: string): string {
-  if (v.includes('"')) throw new QuoteInValue(v)
-  if (v === '' || /[\s)]/.test(v)) return `"${v.replace(/\\/g, '\\\\')}"`
+  if (v === '' || /[\s)"\\]/.test(v)) return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
   return v
 }
 
@@ -172,7 +161,7 @@ function conditionToDsl(c: Condition): string {
   return `${c.not ? 'NOT ' : ''}${fieldRef(c.field)} ${c.cmp.toUpperCase()} ${quoteValue(c.value)}`
 }
 
-/** 組み立て画面の形を DSL の文にする。値に `"` があれば QuoteInValue、フィールド名が不正なら InvalidField */
+/** 組み立て画面の形を DSL の文にする。フィールド名が不正なら InvalidField */
 export function modelToDsl(m: BuilderModel): string {
   const parts = [m.conditions.map(conditionToDsl).join(m.join === 'and' ? ' AND ' : ' OR ')]
   if (m.order != null) {
@@ -191,8 +180,6 @@ export function dslOrError(m: BuilderModel): { dsl: string } | { error: string }
   try {
     return { dsl: modelToDsl(m) }
   } catch (e) {
-    if (e instanceof QuoteInValue)
-      return { error: '値に " を含む条件は組み立て画面では書けません。「文で編集する」でルール文として書いてください' }
     return { error: e instanceof Error ? e.message : String(e) }
   }
 }

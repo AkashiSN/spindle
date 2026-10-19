@@ -12,7 +12,6 @@ import {
   deletePlaylist,
   listTracks,
   moveInPlaylist,
-  previewRule,
   removeFromPlaylist,
   updatePlaylist,
 } from '../api'
@@ -263,26 +262,16 @@ function SmartEditScreen({
   const [listRule, setListRule] = useState<string | null>(null)
   if (preview.kind === 'ok' && listRule !== rule) setListRule(rule)
 
-  // 組み立て画面で開いたのに初期値が無い（URL から直に開いた・一覧から開いた）。AST を取って組み立てる。
-  // 表せなければルール文の画面へ置き換える
+  // 初期値は件数の問い合わせ（useRulePreview。開いた直後の draft は rule_source）の AST から作り、別に問い合わせない
   const needModel = mode === 'rule' && model === undefined
+  const initialModel = needModel && preview.kind === 'ok' ? astToModel(preview.ast) : undefined
+  if (initialModel) setModel(initialModel)
+  const cannotBuild = needModel && (preview.kind === 'error' || (preview.kind === 'ok' && initialModel == null))
   useEffect(() => {
-    if (!needModel) return
-    const ac = new AbortController()
-    previewRule(rule, ac.signal)
-      .then((r) => {
-        if (ac.signal.aborted) return
-        const m = astToModel(r.ast)
-        if (m) setModel(m)
-        else onMode('text')
-      })
-      .catch(() => {
-        if (!ac.signal.aborted) onMode('text')
-      })
-    return () => ac.abort()
-    // 開いたときの 1 回だけ（rule を追わない）
+    if (cannotBuild) onMode('text')
+    // onMode は描画ごとに作り直される。表せないと分かった時点の 1 回だけ移す
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needModel])
+  }, [cannotBuild])
 
   const okModel = preview.kind === 'ok' ? astToModel(preview.ast) : null
   const toBuilder = () => {
@@ -292,7 +281,7 @@ function SmartEditScreen({
     onMode('rule')
   }
   const toText = () => {
-    // DSL にできない入力（値に " など）は捨て、最後に DSL にできた文で開く
+    // DSL にできない入力（不正なフィールド名・件数の上限）は捨て、最後に DSL にできた文で開く
     setDraftError(null)
     setModel(undefined)
     onMode('text')
