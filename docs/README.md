@@ -37,4 +37,4 @@
 | `docs/DSL.md` | [user-guide/dsl.md](user-guide/dsl.md) |
 | `docs/OPERATIONS.md` | [admin-guide/operations.md](admin-guide/operations.md) |
 | `docs/MIGRATION.md` | [admin-guide/migration.md](admin-guide/migration.md) |
-| `docs/superpowers/specs/*`、`docs/superpowers/plans/*` | 要点を [spec/](spec/README.md) と [decisions/](decisions/README.md) に移して削除。端末への配信（`2026-09-29-device-delivery-design.md` など）は [§7.11](spec/07-pipeline/11-device-delivery.md) と [D-95](decisions/D-095.md) 以降 |
+| `docs/superpowers/specs/*`、`docs/superpowers/plans/*`（リポジトリに入れていなかった作業用の設計書。`db/migrations/0002_devices.sql` などが参照する） | 要点を [spec/](spec/README.md) と [decisions/](decisions/README.md) に移した。端末への配信の設計（`2026-09-29-device-delivery-design.md`）の ①〜⑥ は [§7.11](spec/07-pipeline/11-device-delivery.md) と [§6](spec/06-data-model.md)「端末への配信の表」、[§12.6](spec/12-ui/06-other-screens.md)「端末」、[D-95](decisions/D-095.md) 以降 |
