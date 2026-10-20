@@ -1,4 +1,4 @@
-//! AST → パラメータ化 SQL と `:memory:` での評価（docs/DSL.md「SQL 生成」、D-54）。
+//! AST → パラメータ化 SQL と `:memory:` での評価（docs/user-guide/dsl.md「SQL 生成」、D-54）。
 //! 列名はホワイトリスト、値はすべてバインド、任意タグは track_tags の EXISTS、
 //! `missing` を参照しない限り active だけ
 

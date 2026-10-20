@@ -1,4 +1,4 @@
-//! `flaccheck` ジョブ（SPEC §7.9 / §8、docs/TASKS.md P1-5、D-57）。`flac -t` と STREAMINFO の MD5 から
+//! `flaccheck` ジョブ（SPEC §7.9 / §8、docs/development/tasks-history.md P1-5、D-57）。`flac -t` と STREAMINFO の MD5 から
 //! ok / md5_missing / decode_error を版付きで記録する。ファイルは書かない。
 //! 合成ファイルは ffmpeg で作り、検査は flac で行う（無ければ skip）
 

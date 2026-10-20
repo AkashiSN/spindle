@@ -1,4 +1,4 @@
-//! `POST /api/rg/write`（SPEC §9、docs/TASKS.md P1-2）。selection の解析済みトラックへ解析値を
+//! `POST /api/rg/write`（SPEC §9、docs/development/tasks-history.md P1-2）。selection の解析済みトラックへ解析値を
 //! タグとして書く編集バッチを記録する。合成ファイルは ffmpeg で作る（無ければ skip）
 
 #![cfg(target_os = "linux")]

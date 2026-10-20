@@ -1,4 +1,4 @@
-//! 4 相スキャン（SPEC §7.1、§6、D-24 / D-30 / D-32、docs/TASKS.md P0-6）。
+//! 4 相スキャン（SPEC §7.1、§6、D-24 / D-30 / D-32、docs/development/tasks-history.md P0-6）。
 //! 合成ツリーは ffmpeg で作る（無ければ skip）。
 
 #![cfg(target_os = "linux")]

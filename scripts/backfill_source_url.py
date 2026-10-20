@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-spindle — 既存の webm 由来トラックへの SOURCE_URL 補填（docs/TASKS.md P4-14、D-70）
+spindle — 既存の webm 由来トラックへの SOURCE_URL 補填（docs/development/tasks-history.md P4-14、D-70）
 
 旧パイプラインは YouTube の再生リストごとに「再生リスト名 = アルバム名、リスト内の位置 =
 TRACKNUMBER」でファイルを並べていた。その再生リストを yt-dlp で列挙し、位置と番号で Library の

@@ -1,5 +1,5 @@
 //! `GET /api/history`、`GET /api/history/:id`、`POST /api/history/:id/revert`、
-//! `POST /api/history/:id/cancel`（SPEC §9 / §7.5 / §12.4、docs/TASKS.md P0-12）。
+//! `POST /api/history/:id/cancel`（SPEC §9 / §7.5 / §12.4、docs/development/tasks-history.md P0-12）。
 //! 合成ファイルは ffmpeg で 1 本作り、コピーして増やす
 
 #![cfg(target_os = "linux")]

@@ -1,4 +1,4 @@
-//! 編集履歴の API（SPEC §9 / §7.5「巻き戻し」/ §12.4、docs/TASKS.md P0-12）。
+//! 編集履歴の API（SPEC §9 / §7.5「巻き戻し」/ §12.4、docs/development/tasks-history.md P0-12）。
 //!
 //! - `GET /api/history`: バッチ一覧（新しい順）。state / affected / applied / conflict / failed /
 //!   reverts_batch_id / reverted_by

@@ -1,4 +1,4 @@
-//! ReplayGain の解析（SPEC §6「ReplayGain の内部表現」、docs/TASKS.md P1-1）。
+//! ReplayGain の解析（SPEC §6「ReplayGain の内部表現」、docs/development/tasks-history.md P1-1）。
 //! 内部表現は RG 2.0 / -18 LUFS 基準の dB。ebur128 の積分ラウドネスと true peak から
 //! track / album の値を出す
 

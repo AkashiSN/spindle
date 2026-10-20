@@ -1,5 +1,5 @@
 //! `config.toml` の読み込みと検証。
-//! 仕様: docs/SPEC.md §13。実体は deploy/config.example.toml と一致させる。
+//! 仕様: SPEC §13。実体は deploy/config.example.toml と一致させる。
 
 use std::net::SocketAddr;
 
@@ -62,7 +62,7 @@ fn inbox_section_is_optional_and_accepts_zero() {
 fn spec_config_block_matches_example() {
     // SPEC §13 の toml ブロックと deploy/config.example.toml は「一致させる」規約。
     // 構造（キー集合と値）が一致することを固定する。コメントと空白は無視。
-    let spec = include_str!("../docs/SPEC.md");
+    let spec = include_str!("../docs/spec/13-config.md");
     let start = spec.find("## 13. 設定").expect("SPEC §13 が存在すること");
     let block = &spec[start..];
     let begin = block.find("```toml").expect("§13 に toml ブロック") + "```toml".len();

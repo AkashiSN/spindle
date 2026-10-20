@@ -1,4 +1,4 @@
-//! `rg` ジョブ（SPEC §6「ReplayGain の内部表現」/ §8、D-22、docs/TASKS.md P1-1）。
+//! `rg` ジョブ（SPEC §6「ReplayGain の内部表現」/ §8、D-22、docs/development/tasks-history.md P1-1）。
 //! album 単位で構成トラックを解析し、track / album の gain と peak を DB に書く。
 //! タグには書かない（P1-2）。合成ファイルは ffmpeg で作る（無ければ skip）
 

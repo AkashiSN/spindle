@@ -1,4 +1,4 @@
-//! Derived 用の Opus エンコード（SPEC §7.6、D-9、docs/TASKS.md P1-10）。ffmpeg でデコード →
+//! Derived 用の Opus エンコード（SPEC §7.6、D-9、docs/development/tasks-history.md P1-10）。ffmpeg でデコード →
 //! opusenc。タグは lofty で後から書く。ffmpeg / opusenc が無い環境では skip
 
 #![cfg(target_os = "linux")]

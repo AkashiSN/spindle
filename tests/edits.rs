@@ -1,4 +1,4 @@
-//! 編集履歴の記録機構（SPEC §7.5、docs/TASKS.md P0-9、D-24）。
+//! 編集履歴の記録機構（SPEC §7.5、docs/development/tasks-history.md P0-9、D-24）。
 //! 記録 → DB 先行更新 → track 単位の tagwrite → 事前条件 → overlay の解消 → 集計 → キャンセル →
 //! 起動時リカバリ。合成ファイルは ffmpeg で作る（無ければ skip）。
 

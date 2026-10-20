@@ -19,7 +19,7 @@ ORDER BY %date% DESC LIMIT 100
   `channels` `category` `added` `duration` `has_derived` `missing` `hirescheck` `cutoff` `cliff`
   `effectivebits`、端末の状態を引く `on_device` / `device_pending`（値は端末名、`IS` だけ。端末名はバインドし、
   未反映の集合は JSON 配列をバインドして `json_each` で展開する。これらを使うスマートプレイリストは端末の
-  選曲に載せられない。§7.11、docs/DSL.md）
+  選曲に載せられない。§7.11、[DSL](../user-guide/dsl.md)）
 - 独自拡張（foobar に無い）: `MATCHES` / `LIMIT` / `ORDER BY random`
 - SQL 生成はホワイトリスト列へのマッピング。任意タグは
   `EXISTS (SELECT 1 FROM track_tags ...)` に展開。値は全てバインドパラメータ
@@ -41,7 +41,7 @@ ORDER BY %date% DESC LIMIT 100
 ### foobar クエリへの変換
 
 1. **フィールド名の写像。** foobar はスペース区切り: `ALBUMARTIST` → `%album artist%`、
-   `TRACKNUMBER` → `%tracknumber%`。写像表を持つ（docs/DSL.md）。技術情報（`codec` `samplerate`
+   `TRACKNUMBER` → `%tracknumber%`。写像表を持つ（[DSL](../user-guide/dsl.md)）。技術情報（`codec` `samplerate`
    `bitrate` `channels` `bitdepth` `duration`）は foobar の技術フィールドへ、spindle 固有
    （`verification` `category` `source_type` `lossless` `added` `has_derived` `missing` `hirescheck`
    `cutoff` `cliff` `effectivebits` `on_device` `device_pending`）と `MATCHES` は

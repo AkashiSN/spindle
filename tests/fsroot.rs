@@ -1,6 +1,6 @@
 //! root dirfd 基準のファイル操作（SPEC §5「パスの表現と境界」、D-31）。
 //! `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`、`O_EXCL` の tmp、`RENAME_NOREPLACE`。
-//! 受け入れ: docs/TASKS.md P0-5 (i)
+//! 受け入れ: docs/development/tasks-history.md P0-5 (i)
 
 #![cfg(target_os = "linux")]
 

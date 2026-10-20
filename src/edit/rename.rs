@@ -1,4 +1,4 @@
-//! 一括リネームの coordinator（SPEC §7.5「リネーム」、§5、D-7、docs/TASKS.md P0-11）。
+//! 一括リネームの coordinator（SPEC §7.5「リネーム」、§5、D-7、docs/development/tasks-history.md P0-11）。
 //!
 //! ```text
 //! plan_rename:     テンプレートと album のメタデータからパスを計画する（`domain::pathgen`）。

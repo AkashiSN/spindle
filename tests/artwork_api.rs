@@ -1,5 +1,5 @@
 //! `GET /api/artwork/:hash?size=` と `GET /api/albums` の `artwork_hash`（SPEC §9、
-//! docs/TASKS.md P1-3、D-49）。合成ファイルは ffmpeg で作る（無ければ skip）
+//! docs/development/tasks-history.md P1-3、D-49）。合成ファイルは ffmpeg で作る（無ければ skip）
 
 #![cfg(target_os = "linux")]
 

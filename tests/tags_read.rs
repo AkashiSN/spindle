@@ -1,4 +1,4 @@
-//! lofty ラッパによるタグ・音声属性の読み取り（SPEC §6、docs/TASKS.md P0-6）。
+//! lofty ラッパによるタグ・音声属性の読み取り（SPEC §6、docs/development/tasks-history.md P0-6）。
 //! 形式差を Vorbis Comment 名に揃え、任意キー・多値を保つ。
 
 mod common;

@@ -1,6 +1,6 @@
 //! 外部コマンドの共通ラッパ（SPEC §5「パスの表現と境界」、コーディング規約）。
 //! 引数配列、`--` / `./` 前置、タイムアウト、終了コード検査、stderr の保持。
-//! 受け入れ: docs/TASKS.md P0-5 (i) `-x.flac` を外部コマンドへ安全に渡せる
+//! 受け入れ: docs/development/tasks-history.md P0-5 (i) `-x.flac` を外部コマンドへ安全に渡せる
 
 use std::fs;
 use std::time::{Duration, Instant};

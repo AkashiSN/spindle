@@ -1,4 +1,4 @@
-//! アートワーク（SPEC §5 / §7.1、docs/TASKS.md P1-3、D-49）: 同梱カバー画像の名前、画像の判別、
+//! アートワーク（SPEC §5 / §7.1、docs/development/tasks-history.md P1-3、D-49）: 同梱カバー画像の名前、画像の判別、
 //! 埋め込み画像の選択、ハッシュアドレスのキャッシュ
 
 mod common;

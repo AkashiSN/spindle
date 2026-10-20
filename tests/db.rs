@@ -1,5 +1,5 @@
 //! DB 層: マイグレーション適用、PRAGMA、書き込み単一 / 読み取りプール、FTS5 の挙動。
-//! 仕様: docs/SPEC.md §6「全文検索」、docs/TASKS.md P0-2
+//! 仕様: SPEC §6「全文検索」、docs/development/tasks-history.md P0-2
 
 use rusqlite::{params, Connection};
 

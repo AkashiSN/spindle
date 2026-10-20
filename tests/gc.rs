@@ -1,4 +1,4 @@
-//! `gc` ジョブ（SPEC §6「論理削除」/ §8、docs/TASKS.md P1-11、D-56）。物理削除を行う唯一の経路。
+//! `gc` ジョブ（SPEC §6「論理削除」/ §8、docs/development/tasks-history.md P1-11、D-56）。物理削除を行う唯一の経路。
 //! 5 区分（missing トラック / missing アルバム / Archive の退避 / Derived の孤児 / アートワークの
 //! 孤児）の判定と実行、dry-run が何も消さないこと、scan 実行中は走らないことを固定する
 

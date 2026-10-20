@@ -1,4 +1,4 @@
-//! `playlists` / `playlist_items` / `playlist_exports` の読み書き（docs/TASKS.md P1-6、D-53）。
+//! `playlists` / `playlist_items` / `playlist_exports` の読み書き（docs/development/tasks-history.md P1-6、D-53）。
 //! `:memory:` にマイグレーションを流し、tracks を直接 INSERT する
 
 use rusqlite::{params, Connection};

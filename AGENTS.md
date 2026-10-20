@@ -6,11 +6,11 @@ spindle の実装作業を始める前に、このファイルを最初に読む
 
 TrueNAS 上で動く単一コンテナの音楽ライブラリ管理アプリ。CD リッピング、
 メタデータ一括編集、ReplayGain、プレイリスト、簡易再生。
-**設計は完了している。** 仕様は `docs/SPEC.md`、判断の理由は `docs/DECISIONS.md`、
-着手順は `docs/TASKS.md` にある。
+**設計は完了している。** 仕様は `docs/spec/`、判断の理由は `docs/decisions/`、
+着手順は `docs/development/tasks-history.md` にある。
 
-読む順序: `docs/TASKS.md` で担当タスクを確認 → 該当する `docs/SPEC.md` の節 →
-`docs/DECISIONS.md` で背景を確認。
+読む順序: `docs/development/tasks-history.md` で担当タスクを確認 → 該当する `docs/spec/` の節 →
+`docs/decisions/` で背景を確認。
 
 ## 絶対に守る不変条件
 
@@ -48,7 +48,7 @@ TrueNAS 上で動く単一コンテナの音楽ライブラリ管理アプリ。
   200GB の書き直しとスナップショット肥大に見合わない。
 - **非可逆 → 非可逆の再エンコード。** 世代劣化する。配布ビューは原本を返す。
 - **仕様にない判断を黙って入れること。** 迷ったら実装を止めて質問する。
-  決めた場合は `docs/DECISIONS.md` に追記案を出す。
+  決めた場合は `docs/decisions/` に追記案を出す。
 - **`db/migrations/*.sql` の既存ファイルの書き換え。** スキーマ変更は
   必ず新しい連番ファイルを追加する。
 
@@ -147,10 +147,10 @@ docker build -f deploy/Dockerfile -t spindle .
 
 ## 作業の進め方
 
-1. `docs/TASKS.md` から次のタスクを 1 つ取る。依存関係を確認する
+1. `docs/development/tasks-history.md` から次のタスクを 1 つ取る。依存関係を確認する
 2. 受け入れ条件を満たすテストを先に書く
 3. 実装し、`cargo clippy -- -D warnings` と `cargo test` を通す
-4. タスクにチェックを入れ、仕様との差異があれば `docs/SPEC.md` も更新する
+4. タスクにチェックを入れ、仕様との差異があれば `docs/spec/` も更新する
 
 タスクをまたいで実装を先回りしない。P0 の完了条件は「既存ライブラリ全曲が
 表に出て、一括編集と巻き戻しができる」ことであり、それ以外は後回しで良い。

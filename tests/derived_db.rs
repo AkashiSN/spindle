@@ -1,4 +1,4 @@
-//! `derived_files` の読み書きと transcode ジョブの投入判定（docs/TASKS.md P1-10、D-51）。
+//! `derived_files` の読み書きと transcode ジョブの投入判定（docs/development/tasks-history.md P1-10、D-51）。
 //! `:memory:` にマイグレーションを流し、tracks / albums / artwork を直接 INSERT して判定だけを見る
 
 use rusqlite::{params, Connection};

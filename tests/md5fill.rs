@@ -1,4 +1,4 @@
-//! FLAC の MD5 補填（SPEC §7.9、docs/TASKS.md P1-5b、D-57 / D-59）。
+//! FLAC の MD5 補填（SPEC §7.9、docs/development/tasks-history.md P1-5b、D-57 / D-59）。
 //! STREAMINFO の MD5 が全ゼロの FLAC に、デコードした PCM MD5 を書く編集バッチ（`md5` op）。
 //! 音声もタグも変わらないので `audio_version` / `tag_version` は据え置き、inode / mtime は追随、
 //! 旧値（全ゼロ）を `edits` に残して巻き戻せる。合成ファイルは ffmpeg で作る（無ければ skip）

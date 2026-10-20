@@ -1,6 +1,6 @@
-//! スマートプレイリスト DSL のパース（docs/DSL.md、D-16、D-54）。
+//! スマートプレイリスト DSL のパース（docs/user-guide/dsl.md、D-16、D-54）。
 //!
-//! `pest` で `dsl.pest` の文法を読み、[`Rule`]（AST）にする。AST は DSL.md の JSON 形で
+//! `pest` で `dsl.pest` の文法を読み、[`Rule`]（AST）にする。AST は docs/user-guide/dsl.md の JSON 形で
 //! `playlists.rule_ast` に保存し、実行時に `playlist::compile` がパラメータ化 SQL へ変換する。
 //! 原文は `rule_source` に別途残す（AST から逆生成すると整形が変わる）
 
@@ -324,7 +324,7 @@ fn build_order(p: Pair<GrammarRule>) -> Order {
     Order { field, desc }
 }
 
-// ---------------------------------------------------------------- JSON 形（DSL.md）
+// ---------------------------------------------------------------- JSON 形（docs/user-guide/dsl.md）
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]

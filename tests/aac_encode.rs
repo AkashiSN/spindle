@@ -1,4 +1,4 @@
-//! Derived 用の AAC エンコード（SPEC §7.6「aac 系統」、D-75、docs/TASKS.md P4-8）。ffmpeg 1 パスで
+//! Derived 用の AAC エンコード（SPEC §7.6「aac 系統」、D-75、docs/development/tasks-history.md P4-8）。ffmpeg 1 パスで
 //! gain の焼き込みと 48 kHz 上限。ffmpeg が無ければ skip
 
 #![cfg(target_os = "linux")]

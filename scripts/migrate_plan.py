@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-spindle — 移行の振り分け計画（docs/MIGRATION.md §1、docs/DECISIONS.md D-45）
+spindle — 移行の振り分け計画（docs/admin-guide/migration.md §1、D-45）
 
 旧ライブラリ（`Opus/` と `Original/` が 1:1 で対になっている構成）を、役割別の
 Library / Derived / Archive に振り分ける rsync 用のファイル一覧を作る。

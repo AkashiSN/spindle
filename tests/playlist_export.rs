@@ -1,4 +1,4 @@
-//! m3u8 の生成とパス写像（SPEC §10、docs/TASKS.md P1-6、D-53）。
+//! m3u8 の生成とパス写像（SPEC §10、docs/development/tasks-history.md P1-6、D-53）。
 //! 純粋関数: プロファイル + 行 → 文字列。ファイルへの書き出しは API テストで見る
 
 use spindle::playlist::export::{render_m3u8, ExportProfile, ExportTrack, PathStyle, Source};

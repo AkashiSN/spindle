@@ -1,5 +1,5 @@
 //! スマートプレイリストのルール → foobar2000 Autoplaylist のクエリ + ソートパターン
-//! （docs/DSL.md「foobar2000 へのエクスポート」、D-55）。
+//! （docs/user-guide/dsl.md「foobar2000 へのエクスポート」、D-55）。
 //! 写像表・演算子・引用規則・変換不能な項の脱落・ORDER BY の分離を固定する
 
 use spindle::playlist::dsl::parse;

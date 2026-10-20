@@ -1,4 +1,4 @@
-//! Derived の純粋な判定（docs/TASKS.md P1-10、D-51）。期待パス、必要な処理の判定、Opus に書く
+//! Derived の純粋な判定（docs/development/tasks-history.md P1-10、D-51）。期待パス、必要な処理の判定、Opus に書く
 //! タグ集合
 
 use lofty::picture::{MimeType, Picture, PictureType};

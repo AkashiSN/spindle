@@ -1,6 +1,6 @@
 //! 音声フィンガープリント（SPEC §6「変更検出と版の遷移」、D-30）。
 //! FLAC は STREAMINFO の MD5、ALAC / WAV はデコードした PCM の MD5、非可逆はパケット列の SHA-256。
-//! 受け入れ: docs/TASKS.md P0-5 (c) (l)
+//! 受け入れ: docs/development/tasks-history.md P0-5 (c) (l)
 //!
 //! 圧縮形式のファイルは ffmpeg で作る。ffmpeg が無い環境ではそのテストを skip する
 //! （CI には ffmpeg を入れる）。

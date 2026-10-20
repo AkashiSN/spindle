@@ -44,7 +44,7 @@ pub struct Filter {
     /// 固定フィルタ（SPEC §12.1 サイドバー）。複数は AND
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<Flag>,
-    /// スマートプレイリスト DSL（docs/DSL.md）の原文。WHERE 句だけを使い、ORDER BY / LIMIT は
+    /// スマートプレイリスト DSL（docs/user-guide/dsl.md）の原文。WHERE 句だけを使い、ORDER BY / LIMIT は
     /// 無視する（プレビュー用。D-39 / D-54）。`parse` で構文・型を検証済み
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsl: Option<String>,

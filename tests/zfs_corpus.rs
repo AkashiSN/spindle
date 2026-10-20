@@ -73,7 +73,7 @@ fn record_fs_vs_key_equivalence_on_zfs() {
     if differences.is_empty() {
         eprintln!("差なし");
     } else {
-        eprintln!("差あり（D-31 の限界として docs/DECISIONS.md に記録すること）:");
+        eprintln!("差あり（D-31 の限界として docs/decisions/ に記録すること）:");
         for d in &differences {
             eprintln!("  - {d}");
         }

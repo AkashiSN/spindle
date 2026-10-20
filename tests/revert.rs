@@ -1,4 +1,4 @@
-//! 巻き戻し（SPEC §7.5「巻き戻し」、docs/TASKS.md P0-12）。tags / rename / delete の逆バッチ、
+//! 巻き戻し（SPEC §7.5「巻き戻し」、docs/development/tasks-history.md P0-12）。tags / rename / delete の逆バッチ、
 //! 対象集合（applied − 逆バッチで applied 済み）、conflict、reverted_at、redo。
 //! 合成ファイルは ffmpeg で 1 本作り、コピーして増やす
 

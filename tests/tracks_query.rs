@@ -1,6 +1,6 @@
 //! トラック一覧クエリ（P0-7）: キーセットページング、ソート、フィルタ、検索の FTS / LIKE
 //! フォールバック、バッジ列、selection の解決、EXPLAIN QUERY PLAN。
-//! 仕様: docs/SPEC.md §9、docs/DECISIONS.md D-33 / D-39
+//! 仕様: SPEC §9、D-33 / D-39
 
 use std::collections::HashSet;
 

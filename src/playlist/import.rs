@@ -1,4 +1,4 @@
-//! m3u8 の取り込み（docs/TASKS.md P1-6、D-53）。
+//! m3u8 の取り込み（docs/development/tasks-history.md P1-6、D-53）。
 //!
 //! 行を Library のトラックへ解決する規則:
 //! 1. `\` を `/` に。相対なら先頭の `./` `../` を剥がし先頭の `Library/` / `Derived/` を落とす。

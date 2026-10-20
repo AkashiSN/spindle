@@ -1,7 +1,7 @@
 # 運用手順
 
 移行後の日常運用で、コードを読まずに済ませたい手順をまとめる。移行そのものは
-`docs/MIGRATION.md`。
+[移行手順](migration.md)。
 
 ## イメージの更新（TrueNAS カスタムアプリ）
 
@@ -84,7 +84,7 @@ nginx（Nginx Proxy Manager など）を挟むときは、その接続元も `tr
 
 まずイメージを更新する（yt-dlp が古いと YouTube の抽出が壊れる。新版は Renovate が PR にし、マージ
 すると `edge`、次のリリースで `latest` に届く）。`/health` の `ytdlp` で版を確認する。それでも駄目なら
-`config.toml` の `[ytmusic].ytdlp_args`（`USERGUIDE.md` §11.3「YouTube」）。
+`config.toml` の `[ytmusic].ytdlp_args`（[操作手順](../user-guide/README.md) §11.3「YouTube」）。
 
 ## バックアップ
 
@@ -151,7 +151,7 @@ docker compose -f /path/to/compose.yaml start spindle
 - `GET /api/jobs` で起動時 `scan` が `done` になり、`backup` が投入される（復元した DB
   には古い記録しか無いので、すぐ 1 世代取れる）
 - トラック数がライブラリの音声ファイル数と一致する（移行時の照合と同じ。
-  `docs/MIGRATION.md` §3）
+  [移行手順](migration.md) §3）
 - 編集履歴（`GET /api/history`）とプレイリストがバックアップ時点の内容で見える
 
 ### 何が失われるか

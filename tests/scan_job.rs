@@ -1,4 +1,4 @@
-//! `scan` ジョブハンドラと `POST /api/scan`（SPEC §8 / §9、docs/TASKS.md P0-6、D-38）。
+//! `scan` ジョブハンドラと `POST /api/scan`（SPEC §8 / §9、docs/development/tasks-history.md P0-6、D-38）。
 
 #![cfg(target_os = "linux")]
 

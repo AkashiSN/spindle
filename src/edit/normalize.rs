@@ -1,4 +1,4 @@
-//! ロスレス → FLAC 正規化の coordinator（SPEC §7.4、D-10 / D-45 / D-46、docs/TASKS.md P1-4）。
+//! ロスレス → FLAC 正規化の coordinator（SPEC §7.4、D-10 / D-45 / D-46、docs/development/tasks-history.md P1-4）。
 //!
 //! ```text
 //! plan_normalize:     対象トラックの宛先（拡張子を .flac にした同じパス）と、対象外・衝突の理由を

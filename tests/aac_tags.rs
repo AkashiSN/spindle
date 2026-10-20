@@ -1,4 +1,4 @@
-//! aac 系統に書くタグ集合と MP4 への書き込み（SPEC §7.6「aac 系統」、D-75、docs/TASKS.md P4-8）。
+//! aac 系統に書くタグ集合と MP4 への書き込み（SPEC §7.6「aac 系統」、D-75、docs/development/tasks-history.md P4-8）。
 //! 多値の結合、RG 系キーの除去、iTunNORM、標準 atom / フリーフォームの写像。ffmpeg / ffprobe が
 //! 無ければ書き込みのテストは skip
 

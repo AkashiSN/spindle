@@ -1,4 +1,4 @@
-//! m3u8 の取り込み: 行の解析と Library のトラックへの解決（docs/TASKS.md P1-6、D-53）。
+//! m3u8 の取り込み: 行の解析と Library のトラックへの解決（docs/development/tasks-history.md P1-6、D-53）。
 //! 旧ライブラリの `Playlists/m3u8/` は `../Anime/…/1.01. Crow Song.opus` のような旧 `Opus/`
 //! 相対で、拡張子が今の Library（`.m4a` → 正規化後 `.flac`）と違う。完全一致 → stem 一致で解決する
 

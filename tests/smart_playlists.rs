@@ -1,4 +1,4 @@
-//! スマートプレイリストの API（SPEC §9 / §10、docs/TASKS.md P1-7、D-54）: ルール付きの作成・更新、
+//! スマートプレイリストの API（SPEC §9 / §10、docs/development/tasks-history.md P1-7、D-54）: ルール付きの作成・更新、
 //! プレビュー、再評価、materialize された項目、手動用の項目操作の拒否
 
 #![cfg(target_os = "linux")]

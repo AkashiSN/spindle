@@ -1,5 +1,5 @@
 //! プレイリスト（`playlists` / `playlist_items` / `playlist_exports` / `export_profiles`。
-//! SPEC §10、docs/TASKS.md P1-6、D-53）。
+//! SPEC §10、docs/development/tasks-history.md P1-6、D-53）。
 //!
 //! `playlist_items.position` は 0 から連続。追加・除外・移動のたびに振り直す（1 プレイリストは
 //! 高々数千件なので全行の書き直しで足りる）。同じトラックは 1 プレイリストに 1 回だけ
@@ -22,7 +22,7 @@ pub struct Playlist {
     pub name: String,
     /// `manual` / `smart`
     pub kind: String,
-    /// smart: DSL の原文（docs/DSL.md）。manual は None
+    /// smart: DSL の原文（docs/user-guide/dsl.md）。manual は None
     pub rule_source: Option<String>,
     pub auto_export: bool,
     pub created_at: i64,

@@ -1,4 +1,4 @@
-//! `POST /api/normalize/preview` / `POST /api/normalize/apply`（SPEC §9 / §7.4、docs/TASKS.md P1-4、
+//! `POST /api/normalize/preview` / `POST /api/normalize/apply`（SPEC §9 / §7.4、docs/development/tasks-history.md P1-4、
 //! D-33）。合成ファイルは ffmpeg で作り、エンコードには flac を使う（どちらかが無ければ skip）
 
 #![cfg(target_os = "linux")]

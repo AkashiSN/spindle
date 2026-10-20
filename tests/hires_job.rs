@@ -1,4 +1,4 @@
-//! `hirescheck` ジョブ（SPEC §7.10 / §8、docs/TASKS.md P3-5、D-71）。合成した 24/96 の可逆を
+//! `hirescheck` ジョブ（SPEC §7.10 / §8、docs/development/tasks-history.md P3-5、D-71）。合成した 24/96 の可逆を
 //! デコードして判定と計測値を版付きで記録する。ファイルは書かない。
 //! 合成ファイルは ffmpeg で作る（無ければ skip）
 

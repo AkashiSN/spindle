@@ -1,5 +1,5 @@
 //! TOC と各種 DiscID（SPEC §7.2「ID 算出」、§7.3「TOC 再構成」）。
-//! 受け入れ: docs/TASKS.md P2-2（ID 算出部分）
+//! 受け入れ: docs/development/tasks-history.md P2-2（ID 算出部分）
 //!
 //! 参照値は実在のディスクから取った:
 //! - MusicBrainz「Disc ID Calculation」の 6 トラック例と CD-Extra（8 トラック、末尾がデータ）例。

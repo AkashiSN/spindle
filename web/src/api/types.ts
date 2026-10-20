@@ -272,7 +272,7 @@ export type Playlist = {
   id: number
   name: string
   kind: 'manual' | 'smart'
-  /** smart のルール原文（docs/DSL.md）。manual は null */
+  /** smart のルール原文（docs/user-guide/dsl.md）。manual は null */
   rule_source: string | null
   auto_export: boolean
   created_at: number

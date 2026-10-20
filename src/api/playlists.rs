@@ -1,4 +1,4 @@
-//! `/api/playlists`（SPEC §9 / §10、docs/TASKS.md P1-6、D-53）。
+//! `/api/playlists`（SPEC §9 / §10、docs/development/tasks-history.md P1-6、D-53）。
 //!
 //! - `GET /api/playlists`、`POST { name, rule? }`（rule があれば smart）、`GET /:id`、
 //!   `PATCH /:id { name?, auto_export?, rule? }`、`DELETE /:id`
@@ -58,7 +58,7 @@ pub struct PlaylistList {
 #[derive(Deserialize)]
 pub struct CreateBody {
     pub name: String,
-    /// あればスマートプレイリスト（docs/DSL.md）。構文・型エラーは 400
+    /// あればスマートプレイリスト（docs/user-guide/dsl.md）。構文・型エラーは 400
     #[serde(default)]
     pub rule: Option<String>,
 }

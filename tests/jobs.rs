@@ -1,6 +1,6 @@
 //! ジョブシステム（P0-4）: dedup、起動時リカバリ、バックオフ、協調キャンセル、進捗 SSE、
 //! `track_locks` による直列化、版付きジョブの stale 判定、`/api/jobs`。
-//! 仕様: docs/SPEC.md §8 / §9、docs/DECISIONS.md D-23
+//! 仕様: SPEC §8 / §9、D-23
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

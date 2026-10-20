@@ -1,7 +1,7 @@
 # 移行手順
 
 旧ライブラリ（`ssd/musics`）から spindle のデータセット構成へ移す手順。振り分けの判断は
-`docs/DECISIONS.md` D-45、旧構成の実態もそこに書いてある。
+[設計判断](../decisions/README.md) D-45、旧構成の実態もそこに書いてある。
 **`casesensitivity` と `normalization` はデータセット作成時のみ指定可能**で後から変更できない
 ため、既存データセットの `zfs rename` による流用はしない（D-19）。
 
@@ -114,7 +114,7 @@ sudo chown -R 1000:1000 /mnt/ssd/media /mnt/hdd/media /mnt/ssd/apps/spindle
 `[ytmusic].ytdlp_args` に `["--extractor-args", "youtube:lang=ja"]` を入れる（無いと翻訳タイトルのある動画は英語の
 タイトルとチャンネル名が返り、日本語の曲名が取れない）。
 
-コピーと検証が済んだら、`docs/OPERATIONS.md`「カスタムアプリの作り方」でアプリを作って起動する。
+コピーと検証が済んだら、[運用手順](operations.md)「カスタムアプリの作り方」でアプリを作って起動する。
 起動すると初回スキャン（deep）が走る（2026-09-24 のリハーサルで 9,098 本 9 分）。
 
 **ACL は rsync で引き継げない。** TrueNAS の SMB データセットは NFSv4 ACL を使うが、
@@ -181,7 +181,7 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
    `zfs destroy -r`（Derived / DB / バックアップも開発用なので捨てる）
 2. §0 から本手順をやり直す（preflight → migrate_plan → データセット作成 → readonly → snapshot →
    rsync → 検証 → chown → ACL / スナップショット設定 → 起動 → 照合）
-3. **移行後の一度きりの手順**（webm 由来の `〜のお歌` アルバム。docs/TASKS.md P4-14 / P4-15）。
+3. **移行後の一度きりの手順**（webm 由来の `〜のお歌` アルバム。[タスクの履歴](../development/tasks-history.md) P4-14 / P4-15）。
    入力（アーティストごとの YouTube 再生リスト URL の TSV と前回の計画 CSV）はリポジトリ外に
    保管してある。旧パイプラインは「再生リスト名 = アルバム名、リスト内の位置 = `TRACKNUMBER`」で
    並べていたので、この順を正とする:

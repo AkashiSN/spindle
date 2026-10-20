@@ -1,4 +1,4 @@
-//! AST → パラメータ化 SQL（docs/DSL.md「SQL 生成」、D-54）。
+//! AST → パラメータ化 SQL（docs/user-guide/dsl.md「SQL 生成」、D-54）。
 //!
 //! - 列名はここのホワイトリスト（[`resolve`]）でだけ解決する。AST のフィールド名を SQL に埋めない
 //! - 値はすべてバインドパラメータ

@@ -1,11 +1,11 @@
 # 操作手順
 
-spindle の画面の使い方。起動・更新・バックアップは `OPERATIONS.md`、旧ライブラリからの移行は
-`MIGRATION.md`、スマートプレイリストの文法は `DSL.md` を見る。画面の仕様そのものは `SPEC.md` §12。
+spindle の画面の使い方。起動・更新・バックアップは [運用手順](../admin-guide/operations.md)、旧ライブラリからの移行は
+[移行手順](../admin-guide/migration.md)、スマートプレイリストの文法は [DSL](dsl.md) を見る。画面の仕様そのものは [仕様](../spec/README.md) §12。
 
 ## 1. 初回起動とログイン
 
-1. `deploy/compose.yaml` を TrueNAS のカスタムアプリとして起動する（作り方は `OPERATIONS.md`
+1. `deploy/compose.yaml` を TrueNAS のカスタムアプリとして起動する（作り方は [運用手順](../admin-guide/operations.md)
    「イメージの更新」）。初回だけ環境変数 `SPINDLE_INITIAL_PASSWORD` を渡す。パスワードは
    argon2id で DB に保存され、以後この環境変数は読まれない
 2. ブラウザで `http://<ホスト>:8080/` を開き、パスワードを入れてログインする（ユーザ名は無い）。
@@ -207,7 +207,7 @@ General の「CTDB」「AccurateRip」の行には、手法ごとの最新の照
 - **スマートプレイリスト**（⚙）: 「新しいスマートプレイリスト」でルールを書く。中央にエディタが出て、
   入力しながら件数と表の結果が追随する（Ctrl+Enter で保存）。例:
   `%albumartist% IS ヰ世界情緒 AND NOT %category% IS _Unsorted ORDER BY %date% DESC LIMIT 100`。
-  文法は `DSL.md`。ライブラリが変わると自動で再評価される（「再評価」で手動も可）。
+  文法は [DSL](dsl.md)。ライブラリが変わると自動で再評価される（「再評価」で手動も可）。
   項目の追加・並べ替えはできない
 - **メニュー**（行末の「操作」）: 改名 / 削除 / ルールを編集 / 再評価 / foobar クエリ / 書き出し
 - **書き出し**: プロファイル（foobar / android / internal）を選ぶと `Playlists/<profile>/<名前>.m3u8`
@@ -293,7 +293,7 @@ General の「CTDB」「AccurateRip」の行には、手法ごとの最新の照
 
 ### 11.2 CD
 
-上部バーの「CD」。吸い出しは未実装（`TASKS.md` P2-5）で、いまはディスクの読み取りとメタデータを
+上部バーの「CD」。吸い出しは未実装（[タスクの履歴](../development/tasks-history.md) P2-5）で、いまはディスクの読み取りとメタデータを
 そろえるところまでが動く。**取り込んだものは Inbox に入る**（入力 → Inbox → ライブラリ）ので、
 この画面では値を直さない。
 
@@ -354,7 +354,7 @@ URL を貼る手間を減らすブックマークレット（ブックマーク�
 既定）。言語を指定しないと、投稿者が翻訳タイトルを付けた動画は英語のタイトル（とチャンネル名）が返り、日本語の
 曲名が取れない。
 
-YouTube に弾かれるようになったら、まず yt-dlp を新しくする（イメージの更新。`OPERATIONS.md`）。それでも
+YouTube に弾かれるようになったら、まず yt-dlp を新しくする（イメージの更新。[運用手順](../admin-guide/operations.md)）。それでも
 駄目なら `[ytmusic].ytdlp_args` に `--extractor-args`（`youtube:lang=ja;player_client=…` のように `;` で並べる）や
 `--cookies` を足す。
 
@@ -396,6 +396,6 @@ YouTube に弾かれるようになったら、まず yt-dlp を新しくする�
 | ⚠ conflict が付いた | 履歴画面でそのバッチを開き「現在値」を確認。外部の変更を取り込んだ後に再適用する |
 | ⏳ が消えない | ジョブ画面で `tagwrite` / `rename` が失敗していないか。失敗理由を見て「再試行」 |
 | ∅ missing が付いた | ファイルを移動・削除した。戻せば次のスキャンで復帰する。7 日（`[gc].retention_days`）で GC が行を消す |
-| YouTube の取り込みが失敗する | まずイメージを更新して yt-dlp を新しくする（`OPERATIONS.md`） |
+| YouTube の取り込みが失敗する | まずイメージを更新して yt-dlp を新しくする（[運用手順](../admin-guide/operations.md)） |
 | 再生が始まらない | 「原本」を外して Derived を使う。Derived が無ければ ジョブ画面の `transcode` を待つ |
-| DB が壊れた | `OPERATIONS.md`「復元」。バックアップから戻して deep scan |
+| DB が壊れた | [運用手順](../admin-guide/operations.md)「復元」。バックアップから戻して deep scan |
