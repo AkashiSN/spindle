@@ -11,6 +11,8 @@ ORDER BY %date% DESC LIMIT 100
 
 ## 文法
 
+簡略形。正は `src/playlist/dsl.pest`（キーワードは `^"IS"` のように大小文字を無視し、語の途中では切らない）。
+
 ```pest
 query      = { SOI ~ expr ~ order? ~ limit? ~ EOI }
 
@@ -39,28 +41,37 @@ bare       = @{ !"\"" ~ (!(WHITESPACE | ")") ~ ANY)+ }
 ident      = { (ASCII_ALPHANUMERIC | "_" | " ")+ }
 ```
 
-- キーワード（`AND` `IS` など）は大文字小文字を区別しない
-- 値に空白を含める場合は二重引用符で囲む。引用符の中では `\"` が `"`、`\\` が `\` を表す（それ以外の `\` はそのまま）。
+- キーワード（`AND` `IS` など）は大文字小文字を区別しない。`ISLAND` のような語を `IS` + `LAND` とは読まない
+- フィールド名は空白を除いて小文字にしてから引く（`%Album Artist%` も `%ALBUMARTIST%` も `albumartist`）
+- 値に空白か `)` を含める場合は二重引用符で囲む。引用符の中では `\"` が `"`、`\\` が `\` を表す（それ以外の `\` はそのまま）。
   値に `"` や `\` を含めるときはこのエスケープで書く（スマホ版のルール組み立てもこれで書き出す）
 - 演算子の優先順位: `NOT` > `AND` > `OR`。括弧で明示できる
+- `ORDER BY` は既定で昇順（`ASC`）。値の無い曲は向きにかかわらず末尾に回る。`ORDER BY random` は無作為順
+- `LIMIT` は 1 以上の整数
 
 ## 演算子
 
 | 演算子 | 意味 | 備考 |
 |---|---|---|
-| `IS` | 完全一致 | 文字列は大小文字を区別しない |
-| `HAS` | 部分一致 | foobar も部分一致（実機で確認。[D-55](../decisions/D-055.md)） |
-| `GREATER` / `LESS` | 数値・日付の比較 | 対象フィールドが数値型でなければエラー |
-| `MATCHES` | 正規表現 | **独自拡張。** foobar には無い |
-| `PRESENT` / `MISSING` | タグの有無 | 値を取らない |
+| `IS` | 完全一致 | 文字列は大小文字を区別しない（ASCII の範囲）。数値は等値、`duration` は秒に丸めて比べる、`added` はその日（UTC）に含まれるか |
+| `HAS` | 部分一致 | 大小文字を区別しない（ASCII の範囲）。foobar も部分一致（実機で確認。[D-55](../decisions/D-055.md)）。整数のフィールドは数字の文字列として比べる |
+| `GREATER` / `LESS` | 数値・日付の比較 | 数値のフィールドと `date`（`YYYY-MM-DD` の文字列順）、`added`（`YYYY-MM-DD` か epoch 秒。`GREATER` はその日の終わりより後、`LESS` はその日の始まりより前）。それ以外（任意タグを含む）はエラー |
+| `MATCHES` | 正規表現 | **独自拡張。** foobar には無い。Rust の `fancy-regex` の構文で、大小文字を区別する（`(?i)` で無視） |
+| `PRESENT` / `MISSING` | 値の有無 | 値を取らない。任意タグはキーの有無、標準タグの文字列は空文字も無いとみなす。真偽のフィールドは常に PRESENT、端末のフィールドには使えない |
+
+真偽のフィールドは `IS true` / `IS false` だけ（`1` / `0`、`yes` / `no`、`on` / `off` も可）。型に合わない演算子と値は
+保存の前にエラーになる（例: `%duration% HAS 3`、`%samplerate% IS abc`）。
 
 ## フィールド
 
 ### 標準タグ
 
-`title` `artist` `albumartist` `album` `date` `genre` `tracknumber`
-`discnumber` `composer` `comment` — およびファイルに存在する任意のタグ名。
-ホワイトリストにない名前は `track_tags` への `EXISTS` サブクエリに展開する。
+`title` `artist` `albumartist` `album` `date` `tracknumber`（整数）`discnumber`（整数）は
+キャッシュ列を引く。`artist` は多値を `, ` で結合した表示用の値なので、多値のアーティストの 1 つを探すときは `HAS` を使う。
+
+それ以外（`genre` `composer` `comment` `track_type` `playlist_exclude` など）は、ファイルに存在する任意のタグ名として
+`track_tags` を引く（キーは大文字にして比べる。多値ならどれか 1 つが一致すればよい）。任意タグは文字列なので
+`GREATER` / `LESS` は使えない。
 
 ### 拡張フィールド（spindle 固有）
 
@@ -68,21 +79,21 @@ ident      = { (ASCII_ALPHANUMERIC | "_" | " ")+ }
 |---|---|---|
 | `category` | 文字列 | 統制語彙のカテゴリ名 |
 | `verification` | 文字列 | `verified_ar` / `verified_ctdb` / `mismatch` / `unverifiable` / `not_attempted` |
-| `source_type` | 文字列 | `cd_rip` / `download` / `youtube` / `unknown` |
+| `source_type`（`sourcetype`） | 文字列 | `cd_rip` / `download` / `youtube` / `unknown` |
 | `lossless` | 真偽 | |
-| `codec` | 文字列 | `flac` / `opus` / `alac` / `aac` / `mp3` / `wav` |
+| `codec` | 文字列 | `flac` / `opus` / `alac` / `aac` / `mp3` / `wav` / `aiff` / `ogg` / `wv` / `ape` |
 | `samplerate` | 数値 | Hz |
 | `bitdepth` | 数値 | |
 | `channels` | 数値 | |
 | `bitrate` | 数値 | kbps |
-| `duration` | 数値 | 秒 |
-| `added` | 日付 | 初回スキャン日時 |
-| `has_derived` | 真偽 | Derived が生成済みか |
+| `duration` | 数値 | 秒（小数可） |
+| `added` | 日付 | 初回スキャン日時。値は `YYYY-MM-DD`（UTC）か epoch 秒 |
+| `has_derived`（`hasderived`） | 真偽 | Opus の Derived が生成済みか（AAC だけの曲は偽） |
 | `missing` | 真偽 | 論理削除されているか |
-| `hirescheck` | 文字列 | `ok` / `upsampled` / `padded` / `both` / `inconclusive` / `decode_error`（未検査は MISSING） |
+| `hirescheck`（`hires_check`） | 文字列 | `ok` / `upsampled` / `padded` / `both` / `inconclusive` / `decode_error`（未検査は MISSING） |
 | `cutoff` | 数値 | 偽ハイレゾ検出のカットオフ周波数（Hz） |
-| `cliff` | 数値 | 偽ハイレゾ検出のカットオフ前後 1 kHz の落差（dB） |
-| `effectivebits` | 数値 | 偽ハイレゾ検出の実効ビット数 |
+| `cliff` | 数値（小数） | 偽ハイレゾ検出のカットオフ前後 1 kHz の落差（dB）。`HAS` / `MATCHES` は不可 |
+| `effectivebits`（`effective_bits`） | 数値 | 偽ハイレゾ検出の実効ビット数 |
 | `on_device` | 端末名 | その端末に反映済みの写しがある（`device_items` に行がある）。`IS` だけ |
 | `device_pending` | 端末名 | その端末のマニフェストに載るが未反映（追加・更新・移動・更新 + 移動）。前回の同期・報告で失敗したものも含む。削除・待ち・エラー（パス衝突などの保留と、反映済みの写しの失敗）は含まない。`IS` だけ |
 

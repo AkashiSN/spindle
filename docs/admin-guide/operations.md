@@ -1,37 +1,13 @@
 # 運用手順
 
-移行後の日常運用で、コードを読まずに済ませたい手順をまとめる。移行そのものは
-[移行手順](migration.md)。
+動かし始めた後の日常運用で、コードを読まずに済ませたい手順をまとめる。最初に動かすまでは
+[導入](install.md)、既存ライブラリの持ち込みは [移行手順](migration.md)。
 
 ## イメージの更新（TrueNAS カスタムアプリ）
 
-イメージは GHCR `ghcr.io/akashisn/spindle`（public。pull にトークン不要）。タグは `latest`（最新の
-リリース `vX.Y.Z`）/ `X.Y` / `X.Y.Z`、リリース候補の `X.Y.Z-rc.N`（`vX.Y.Z-rc.N` タグ。`latest` / `X.Y` は
-付かない）と、開発用の `edge`（`main` の最新）/ `sha-<7 桁>`。本番は `latest` か `X.Y` を指す。`edge` は DB の互換を（前進のマイグレーション以外）約束しない。
+イメージのタグは [導入](install.md)「イメージ」。本番は `latest` か `X.Y` を指す。
 
-### カスタムアプリの作り方
-
-TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deploy/compose.yaml` を写す。
-そのまま使えない箇所:
-
-- `devices` / `device_cgroup_rules` / `group_add`: CD ドライブ（`/dev/sr0` と cdrom グループの GID。
-  `/dev/sg*` は要らない）。ドライブが無い機体では 3 つとも消す（残すと compose が起動に失敗する。
-  アプリ側はデバイスを開けなくても起動し、CD 画面に「ドライブが無い」と出す）。
-  **ドライブのつなぎ先に注意**: 一部の SATA コントローラでは、複数セクタの READ CD の中のセクタ境界で
-  音声が 16 バイト（4 サンプル）ずれ、C2 もエラーも出ないまま照合（AccurateRip / CTDB）が全曲通らない。
-  実機（AMD 600 シリーズのチップセット SATA、1022:43f6）で起き、同じドライブを USB-SATA 変換につなぐと
-  消えた。PCIe カードの ASMedia ASM1062（1b21:0612）の SATA でも起きない（2026-09-25、TASKS P2-5）。
-  照合が一度も通らず rip.log の「ずれ」が毎回数百〜千回出るなら、まずつなぎ先を変える
-- `user`: 既存ライブラリの所有者の UID:GID に合わせる（違うとタグ書き込みが全滅する）
-- `volumes`: Library / Derived / Archive / Inbox / Playlists / data の実パスと、メタデータプラグイン
-  （`spindle-ytmusic-meta`。イメージには入っていない）のマウント
-- `SPINDLE_INITIAL_PASSWORD`: 初回だけ。カスタムアプリには `.env` が無いので、`${…:?…}` の行を
-  `- SPINDLE_INITIAL_PASSWORD=<生成したパスワード>` の値に書き換える。ログの「SPINDLE_INITIAL_PASSWORD から
-  パスワードを初期化した」とログインを確かめたら、アプリの Edit で `environment` ごと消す
-- **イメージは作る前に pull しておく。** ホストに同じタグ（`edge` など）の古いイメージが残っていると、
-  カスタムアプリはそれをそのまま使う（2026-09-24 のリハーサルで旧 compose の `edge` が起動した）。
-  `sudo docker pull ghcr.io/akashisn/spindle:<tag>` を先に打つか、作った直後に `/health` の `version` を見て、
-  違えば止める → `/data` の DB を消す → Pull image → 起動し直す
+初めて作るときは [導入](install.md)「カスタムアプリの作り方」。
 
 ### 更新
 
@@ -56,7 +32,7 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
 
 1. `main` の確かめたいコミットに `vX.Y.Z-rc.N` タグを打って push する。CI が `X.Y.Z-rc.N` のイメージと
    pre-release の Release を作る
-2. 更新前のスナップショットを取る（例 `zfs snapshot ssd/apps/spindle@pre-vX.Y.Z-rc.N-<日付>`）
+2. 更新前のスナップショットを取る（例 `zfs snapshot <プール>/apps/spindle@pre-vX.Y.Z-rc.N-<日付>`）
 3. `sudo docker pull ghcr.io/akashisn/spindle:X.Y.Z-rc.N && sudo docker tag ghcr.io/akashisn/spindle:X.Y.Z-rc.N ghcr.io/akashisn/spindle:latest && sudo midclt call -j app.redeploy spindle`
 4. `/health` の `version` が `vX.Y.Z-rc.N` になったことを見て、画面で変更点を確かめる
 5. 問題なければ**同じコミット**に `vX.Y.Z` を打つ。CI が `latest` を公開したら
@@ -70,12 +46,11 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
 プロキシが spindle へ http で転送するときは、`config.toml` の `[auth].trusted_proxies` にプロキシの接続元を入れる。
 入れないと spindle は `X-Forwarded-Proto: https` を信用せず、自分を `http://<host>` とみなすので、ブラウザの
 `Origin: https://<host>` と一致せず**ログインなど変更系の要求が CSRF 検査で 403 になる**（Cookie にも Secure が付かない）。
-接続元は spindle のログの `ログイン失敗 ip=` などで分かる。実機は cloudflared が host ネットワークから
-`172.16.100.24:80` へ転送するので、接続元は NAS 自身の `172.16.100.5`（`trusted_proxies = ["172.16.100.5/32"]`。
-2026-09-26）。変えたら再起動する
+接続元は spindle のログの `ログイン失敗 ip=` などで分かる。例えば cloudflared を NAS の host ネットワークで
+動かして spindle の公開ポートへ転送するなら、接続元は NAS 自身のアドレス（`trusted_proxies = ["<NAS のアドレス>/32"]`）。
+同じホストのコンテナから Docker のブリッジ経由で届くなら、接続元はそのゲートウェイのアドレスになる。変えたら再起動する
 
-nginx（Nginx Proxy Manager など）を挟むときは、その接続元も `trusted_proxies` に入れる（実機は
-`172.16.100.20`。2026-10-15）。nginx は既定で応答を溜める（`proxy_buffering`）ので、SSE（`/api/events`）が
+nginx（Nginx Proxy Manager など）を挟むときは、その接続元も `trusted_proxies` に入れる。nginx は既定で応答を溜める（`proxy_buffering`）ので、SSE（`/api/events`）が
 届かず、右上の点が赤のまま曲が 1 件も出なくなる（画面は SSE が開いてから一覧を取る。[D-36](../decisions/D-036.md)）。spindle は
 `/api/events` の応答に `X-Accel-Buffering: no` を付けてこれを避けている。それより古い版や、ヘッダを捨てる
 プロキシでは、プロキシ側で `proxy_buffering off;` にする
@@ -205,15 +180,16 @@ state）は `track_id` で曲を指すので、バックアップより後に同
 ## ロスレスの FLAC 化（正規化）
 
 Library の WAV / ALAC / AIFF を FLAC に置き換える（[SPEC §7.4](../spec/07-pipeline/04-lossless-normalize.md)、[D-45](../decisions/D-045.md) / [D-46](../decisions/D-046.md)）。移行で取り込んだ
-ALAC 7,572 本が主対象。UI は未着手なので API を直接叩く。変換は `normalize` ジョブ（並列 2）が
+ALAC が主な対象。画面では全選択 → 操作タブの「正規化をプレビュー」→ 適用で行える
+（[操作手順](../user-guide/README.md) §7）。以下は API を直接叩く手順。変換は `normalize` ジョブ（並列 2）が
 1 曲ずつ行い、元ファイルは `Archive/` の同じ相対パスへ退避される（`archived_files` 台帳、
-既定 7 日後に GC が回収。それまでは履歴画面の [巻き戻す] で元に戻せる）。
+既定 7 日後に GC が回収。それまでは記録画面の編集履歴の [巻き戻す] で元に戻せる）。
 
-前提: Archive（`/mnt/hdd/media/Archive`）に退避ぶんの空き（ALAC 全件で約 220G）がある。
+前提: Archive に退避ぶんの空き（対象の ALAC などと同じ量）がある。
 `config.toml` の `[normalize].wav_to_flac = true`。
 
 ```bash
-BASE=http://truenas:8080
+BASE=http://<ホスト>:8080
 # 1. ログイン（Cookie を保存）
 curl -s -c cookie.txt -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-origin' \
   -d '{"password":"…"}' "$BASE/api/auth/login"
@@ -225,13 +201,13 @@ curl -s -b cookie.txt -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: sa
 TOKEN=$(jq -r .selection_token preview.json)
 curl -s -b cookie.txt -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-origin' \
   -d "{\"selection_token\":\"$TOKEN\",\"description\":\"ALAC → FLAC\"}" "$BASE/api/normalize/apply"
-# 4. 進み具合はジョブ一覧か履歴画面で（batch_id の applied / conflict / failed）
+# 4. 進み具合はジョブ一覧か記録画面で（batch_id の applied / conflict / failed）
 curl -s -b cookie.txt "$BASE/api/jobs" | jq .summary
 ```
 
 - 一部だけ試すなら `"selection":{"ids":[…]}`（表で選んだ id）で 1 アルバムぶんから
 - `conflict` は宛先（`.flac`）を別のトラックが占有している行。`failed` は PCM MD5 の不一致か
-  ビット深度非対応で、元ファイルは無傷のまま残る。履歴画面の op の `error` を見る
+  ビット深度非対応で、元ファイルは無傷のまま残る。記録画面の編集履歴で op の `error` を見る
 - 変換中（op が pending）のトラックはタグ編集・リネームが 409 になる。バッチ単位のキャンセルは
   `POST /api/history/:batch/cancel`（変換中の 1 曲は止め、配置を始めた曲は完了を待つ）
 - 変換後の再スキャンで差分が出ないことを確認する（`new` / `moved` / `missing` が 0）
