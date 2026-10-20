@@ -2043,7 +2043,7 @@ ALAC は無傷）。[D-89](../decisions/D-089.md) は「ffmpeg は `stts` 末尾
 - [x] P5-4c 実機の Mac で JXA を固定（`add` / `refresh` / `location` の付け替え / persistent ID /
       コピー設定 / TCC）し、CI の macOS ランナーでバイナリを作って Release に置く。
       `Music` の JXA 実装、`Secrets` の Keychain 実装、コピー設定の読み取り
-      （[D-101](../decisions/D-101.md)。実機 mbp14 で JXA を固定、Release に macOS arm64 バイナリ）
+      （[D-101](../decisions/D-101.md)。実機 検証用の Mac で JXA を固定、Release に macOS arm64 バイナリ）
 - [x] P5-5 文書の改訂（[SPEC §1](../spec/01-scope.md)・§7.6・§7.7・§9・§10・§12・§13・§14、DSL.md、CLAUDE.md の禁止事項の注記）
       （[SPEC §7.11](../spec/07-pipeline/11-device-delivery.md) を新設）
 - [x] P5-6 端末配信の残課題のうち小さい 2 件: 印のついたプレイリストの削除を印の変更と同じ規則にする
