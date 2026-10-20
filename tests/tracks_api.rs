@@ -1,5 +1,5 @@
 //! `GET /api/tracks` / `/api/tracks/:id` / `/api/search` / `/api/albums`（P0-7）と
-//! selection のスナップショット（D-33）。仕様: docs/SPEC.md §9、docs/DECISIONS.md D-27 / D-39
+//! selection のスナップショット（D-33）。仕様: SPEC §9、D-27 / D-39
 
 use std::net::SocketAddr;
 use std::sync::Arc;

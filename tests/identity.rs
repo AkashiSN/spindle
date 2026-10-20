@@ -1,6 +1,6 @@
 //! 同一性解決: `(dev, inode)` → `audio_md5` → `rel_path_key` の順に、inventory 全体を入力に
 //! 取って各段で候補を検証する（SPEC §6「同一性解決の優先順位」、D-26 / D-29 / D-30）。
-//! 受け入れ: docs/TASKS.md P0-5 (a) (b) (c) (d) (e) (f) (g) (h) (k)
+//! 受け入れ: docs/development/tasks-history.md P0-5 (a) (b) (c) (d) (e) (f) (g) (h) (k)
 
 use std::cell::RefCell;
 use std::collections::HashMap;

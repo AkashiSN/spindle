@@ -1,4 +1,4 @@
-//! `source_hash` ジョブ（docs/superpowers/specs/2026-09-29-device-delivery-design.md ③、D-95）。payload は
+//! `source_hash` ジョブ（SPEC §7.11「`source_hash` ジョブ」、D-95）。payload は
 //! `{"track_id", "source"}`（source は `master` / `opus` / `aac`）、dedup `source_hash:<track_id>:<source>`。
 //!
 //! 送る元を root の dirfd から `openat2` で開き（`RootDir::open_file`）、開いた FD の identity（inode・size・

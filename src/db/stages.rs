@@ -1,4 +1,4 @@
-//! Inbox の承認済みの件の段（④ 可視化 B）: 配置 → RG → 系統 → 端末
+//! Inbox の承認済みの件の段（D-95 の可視化 B）: 配置 → RG → 系統 → 端末
 
 use rusqlite::{params, Connection, OptionalExtension as _};
 use serde::Serialize;

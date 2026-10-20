@@ -1,4 +1,4 @@
-//! `thumbnail` ジョブ（SPEC §8、docs/TASKS.md P1-3、D-49）。原画像から WebP のサムネイルを
+//! `thumbnail` ジョブ（SPEC §8、docs/development/tasks-history.md P1-3、D-49）。原画像から WebP のサムネイルを
 //! ffmpeg で作る。ffmpeg が無ければ skip
 
 #![cfg(target_os = "linux")]

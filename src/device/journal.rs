@@ -1,4 +1,4 @@
-//! 端末側のジャーナル `<root>/.spindle/journal`（仕様 ⑤「ジャーナルと中断からの回復」）。
+//! 端末側のジャーナル `<root>/.spindle/journal`（SPEC §7.11 Android「ジャーナルと中断からの回復」）。
 //! 1 行 1 レコードの NDJSON。各操作は意図を耐久化してから副作用を起こし、終わったら完了を書く。
 //! パス変更（移動・更新 + 移動）はバッチとして記録し、相（prepared → vacating → vacated → placing →
 //! done）で進める。バッチ以外の意図は `put` と `rm` だけ（D-95 の P5-3a 追記）

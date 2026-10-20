@@ -1,4 +1,4 @@
-//! lofty ラッパによるタグ書き換え（SPEC §7.5、docs/TASKS.md P0-9）。
+//! lofty ラッパによるタグ書き換え（SPEC §7.5、docs/development/tasks-history.md P0-9）。
 //! 指定キーだけを置き換え・削除し、他のキー（任意キー・多値・画像）は保つ。
 
 mod common;

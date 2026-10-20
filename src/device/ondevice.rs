@@ -1,4 +1,4 @@
-//! 端末側の正本 `<root>/.spindle/manifest.json`（仕様 ⑤「端末側の正本」）。
+//! 端末側の正本 `<root>/.spindle/manifest.json`（SPEC §7.11 Android「端末側の正本」）。
 //! 端末側が正で、`device_items` はキャッシュ。書き直すのは spindle だけなので、未知のフィールドは
 //! 読み捨てて保持しない
 

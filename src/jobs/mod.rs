@@ -33,10 +33,10 @@ pub use crate::db::jobs::{
 pub use context::{JobContext, TempGuard};
 pub use queue::{Jobs, EVENT_CAPACITY, LIST_LIMITS};
 
-/// 未接続の端末ジョブを待たせる秒数（仕様 ⑤「同期」。繋がったら `Jobs::wake_device` で前倒し）
+/// 未接続の端末ジョブを待たせる秒数（SPEC §7.11 Android「同期」。繋がったら `Jobs::wake_device` で前倒し）
 pub const DISCONNECTED_REQUEUE_SECS: i64 = 300;
 
-/// 端末ごとの名前付き排他（scan / sync / verify を同じ端末で並べない。仕様 ③）
+/// 端末ごとの名前付き排他（scan / sync / verify を同じ端末で並べない。SPEC §7.11）
 pub fn device_mutex(device_id: i64) -> String {
     format!("device:{device_id}")
 }

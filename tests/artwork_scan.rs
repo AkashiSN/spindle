@@ -1,4 +1,4 @@
-//! スキャンの Phase 5（アートワークの解決。SPEC §7.1、docs/TASKS.md P1-3、D-49）。
+//! スキャンの Phase 5（アートワークの解決。SPEC §7.1、docs/development/tasks-history.md P1-3、D-49）。
 //! 同梱カバー画像 → 最初のトラックの埋め込み画像の順で album のアートワークを決め、原画像を
 //! ハッシュアドレスのキャッシュへ置き、thumbnail ジョブを投入する。合成ファイルは ffmpeg で作る
 //! （無ければ skip）。画像はヘッダだけの最小 JPEG / PNG（寸法が読めればよい）

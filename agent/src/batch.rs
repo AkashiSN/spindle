@@ -1,4 +1,4 @@
-//! パス変更（移動・更新 + 移動）のバッチ（仕様 ⑥「パス変更は ADB と同じバッチ」、③「例外: 始まった
+//! パス変更（移動・更新 + 移動）のバッチ（SPEC §7.11 iPhone「パス変更は ADB と同じバッチ」、③「例外: 始まった
 //! パス変更のバッチ」）。本体の `device::sync` の `path_batch` / `abort_batch` / `batch_members` と
 //! `device::recover` の `complete_batch` / `vacate` / `place` の移植。ジャーナルの代わりに state.json の
 //! `pending_batches`（1 回の書き込みに全メンバーと相）を、端末の `mv` の代わりにローカルの rename と
@@ -405,7 +405,7 @@ fn place<M: Music, S: Server>(
 }
 
 /// 前回の実行が途中で止まったバッチを先頭から片付ける（`recover::recover` が `pending_ops` より先に呼ぶ。
-/// バッチの途中は track の location が `.moving/` を指すので、仕様 ⑥「回復の順序」）。
+/// バッチの途中は track の location が `.moving/` を指すので、SPEC §7.11 iPhone「回復の順序」）。
 /// sealed / prepared は破棄（縮めない）、vacating 以降は完遂する
 pub fn recover_batches<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<()> {
     let batches = cx.state.pending_batches.clone();

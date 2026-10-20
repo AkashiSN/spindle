@@ -1,4 +1,4 @@
-//! 接続のたびに行う回復（仕様 ⑤「ジャーナルと中断からの回復」）。DB は見ない。
+//! 接続のたびに行う回復（SPEC §7.11 Android「ジャーナルと中断からの回復」）。DB は見ない。
 //! manifest とジャーナルを読み、完了の無い意図を実ファイルの sha256 で判定して取り込み、
 //! 封印済みで `vacating` 以降のバッチは前進して完遂する（`prepared` 以前は `batch_abort` を
 //! 耐久化してから一時ファイルを消す）。`.spindle-tmp` の残骸を消し、`.spindle/moving/` の残りは
@@ -132,7 +132,7 @@ pub async fn recover<F: DeviceFs>(fs: &F, expect: &Expect) -> Result<Recovered, 
     })
 }
 
-/// 完了の無い意図を判定して取り込む（仕様 ⑤ の表の「追加・更新」「削除」「プレイリスト」の行）
+/// 完了の無い意図を判定して取り込む（SPEC §7.11 Android の表の「追加・更新」「削除」「プレイリスト」の行）
 async fn apply_intent<F: DeviceFs>(
     fs: &F,
     it: &Intent,
@@ -363,7 +363,7 @@ pub(crate) async fn complete_batch<F: DeviceFs>(
 }
 
 /// 旧パスを空ける: 移動は `from → staging`、更新 + 移動は旧版を消す。
-/// 回復（verify）の位置判定は「在るかどうか」で行う（仕様 ⑤: from にあれば未着手、staging にあれば
+/// 回復（verify）の位置判定は「在るかどうか」で行う（SPEC §7.11 Android: from にあれば未着手、staging にあれば
 /// 空け済み）。内容の食い違いはここでは見ない。最後のサイズ照合（STALE_TOKEN）と「内容を検証」に任せる
 async fn vacate<F: DeviceFs>(fs: &F, m: &BatchMember, verify: bool) -> Result<(), StoreError> {
     match m.op {

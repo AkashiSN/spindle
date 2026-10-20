@@ -1,4 +1,4 @@
-//! AST → foobar2000 Autoplaylist のクエリとソートパターン（docs/DSL.md「foobar2000 へのエクスポート」、
+//! AST → foobar2000 Autoplaylist のクエリとソートパターン（docs/user-guide/dsl.md「foobar2000 へのエクスポート」、
 //! SPEC §10、D-55）。
 //!
 //! foobar の Autoplaylist はファイルとして保存できないので、クエリ文字列を出してユーザが貼る。

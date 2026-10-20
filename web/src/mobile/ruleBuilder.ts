@@ -1,4 +1,4 @@
-// スマートプレイリストの組み立て画面のモデル（docs/DSL.md）。
+// スマートプレイリストの組み立て画面のモデル（docs/user-guide/dsl.md）。
 // - astToModel: サーバの AST（POST /api/playlists/preview の ast）を組み立て画面の形にする。
 //   表せない式（括弧の入れ子、AND と OR の混在、NOT の下の and / or / present / missing）は null
 //   → ルール文の画面で開く
@@ -17,7 +17,7 @@ export type BuilderModel = {
 
 export const CMP_OPS: readonly CmpOp[] = ['is', 'has', 'greater', 'less', 'matches']
 
-/** DSL.md の標準タグ + 拡張フィールド（端末のフィールド on_device / device_pending は除く）。任意のタグ名は自由入力 */
+/** docs/user-guide/dsl.md の標準タグ + 拡張フィールド（端末のフィールド on_device / device_pending は除く）。任意のタグ名は自由入力 */
 export const FIELD_CHOICES: readonly string[] = [
   'title',
   'artist',

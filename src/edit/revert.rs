@@ -1,4 +1,4 @@
-//! 巻き戻し（SPEC §7.5「巻き戻し」、§9 `/api/history/:batch/revert`、docs/TASKS.md P0-12、D-44）。
+//! 巻き戻し（SPEC §7.5「巻き戻し」、§9 `/api/history/:batch/revert`、docs/development/tasks-history.md P0-12、D-44）。
 //!
 //! 巻き戻しは**通常のバッチ**として記録し、`reverts_batch_id` で元を指す。
 //!

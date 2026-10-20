@@ -1,4 +1,4 @@
-//! `GET /api/stream/:id`（SPEC §11、docs/TASKS.md P1-9、D-52）。原本と Derived の Range 直送、
+//! `GET /api/stream/:id`（SPEC §11、docs/development/tasks-history.md P1-9、D-52）。原本と Derived の Range 直送、
 //! Derived が無いときの ffmpeg によるオンザフライ変換。ffmpeg が無ければ skip
 
 #![cfg(target_os = "linux")]

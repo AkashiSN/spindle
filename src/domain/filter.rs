@@ -44,14 +44,14 @@ pub struct Filter {
     /// 固定フィルタ（SPEC §12.1 サイドバー）。複数は AND
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<Flag>,
-    /// スマートプレイリスト DSL（docs/DSL.md）の原文。WHERE 句だけを使い、ORDER BY / LIMIT は
+    /// スマートプレイリスト DSL（docs/user-guide/dsl.md）の原文。WHERE 句だけを使い、ORDER BY / LIMIT は
     /// 無視する（プレビュー用。D-39 / D-54）。`parse` で構文・型を検証済み
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsl: Option<String>,
     /// 検索語。`FTS_MIN_CHARS` 以上なら FTS5 trigram、未満なら LIKE
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
-    /// 端末に未反映（端末 id。追加・更新・移動。④ C）
+    /// 端末に未反映（端末 id。追加・更新・移動。D-95 の可視化 C）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_pending: Option<i64>,
     /// `device_pending` と DSL の端末フィールドを引く集合。JSON には出さず、API が

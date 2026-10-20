@@ -1,4 +1,4 @@
-//! ジャーナル（仕様 ⑤「ジャーナルと中断からの回復」）
+//! ジャーナル（SPEC §7.11 Android「ジャーナルと中断からの回復」）
 
 use spindle::device::journal::*;
 use spindle::domain::device::EntryKind;

@@ -1,5 +1,5 @@
 //! 認証（P0-3）: 初期パスワード、セッション Cookie、CSRF、trusted_cidrs、ロックモード。
-//! 仕様: docs/SPEC.md §9「認証」、docs/DECISIONS.md D-27 / D-28
+//! 仕様: SPEC §9「認証」、D-27 / D-28
 
 use std::net::SocketAddr;
 use std::sync::Arc;

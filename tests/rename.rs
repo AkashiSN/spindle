@@ -1,4 +1,4 @@
-//! 一括リネームの coordinator（SPEC §7.5「リネーム」、§7.1、docs/TASKS.md P0-11）。
+//! 一括リネームの coordinator（SPEC §7.5「リネーム」、§7.1、docs/development/tasks-history.md P0-11）。
 //! 記録 → DB 先行更新（2 段階）→ rename ジョブの 2 phase → 事前条件 → 衝突 → キャンセル →
 //! phase 境界でのクラッシュ復旧 → album の追随。合成ファイルは ffmpeg で作る（無ければ skip）
 

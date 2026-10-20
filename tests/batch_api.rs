@@ -1,5 +1,5 @@
 //! `POST /api/tracks/batch/preview` / `PATCH /api/tracks/batch`（SPEC §9 / §7.5 / §12.3、
-//! docs/TASKS.md P0-10、D-33 / D-42）。合成ファイルは ffmpeg で 1 本作り、コピーして増やす
+//! docs/development/tasks-history.md P0-10、D-33 / D-42）。合成ファイルは ffmpeg で 1 本作り、コピーして増やす
 
 #![cfg(target_os = "linux")]
 

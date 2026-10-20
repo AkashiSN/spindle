@@ -1,4 +1,4 @@
-//! Derived の追随ジョブが投入される契機（docs/TASKS.md P1-10、D-51）: scan 完了、tagwrite applied、
+//! Derived の追随ジョブが投入される契機（docs/development/tasks-history.md P1-10、D-51）: scan 完了、tagwrite applied、
 //! rename applied、RG 解析の保存。transcode ハンドラを登録せずに queued の transcode を数える。
 //! 最後に scan → transcode の自動連鎖で `delivery` ビューが版に追随することを通す。
 //! ffmpeg / opusenc が無ければ skip

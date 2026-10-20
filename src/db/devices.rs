@@ -1,4 +1,4 @@
-//! 端末への配信の DB 層（docs/superpowers/specs/2026-09-29-device-delivery-design.md ②③、D-95）。
+//! 端末への配信の DB 層（SPEC §6「端末への配信の表」・§7.11「マニフェスト（あるべき状態）」「計画」、D-95）。
 //! 判定は `domain::device` の純粋関数に任せ、ここは入力を組み立てて呼ぶだけ
 
 use std::collections::{BTreeMap, HashMap};
@@ -200,7 +200,7 @@ pub fn list(conn: &Connection) -> Result<Vec<Device>> {
     Ok(rows.into_iter().flatten().collect())
 }
 
-/// 印の全置換。generation を進める（仕様 ③「端末の設定変更と同期の排他」。排他の検査は API 側）。
+/// 印の全置換。generation を進める（SPEC §7.11「端末の設定変更と同期の排他」。排他の検査は API 側）。
 /// SAVEPOINT で囲むので、未知の playlist_id による FK 違反などで失敗しても、印も generation も
 /// 呼び出し前のまま（`INSERT OR IGNORE` は UNIQUE 違反は黙らせるが FK 違反は黙らせない）
 pub fn set_playlists(
@@ -309,7 +309,7 @@ struct TrackIdentity {
     ctime_ns: i64,
 }
 
-/// 送る元のハッシュが、その `tracks` 行の**現在の**物理同一性と一致するか（仕様 ③「送る元のハッシュ」）。
+/// 送る元のハッシュが、その `tracks` 行の**現在の**物理同一性と一致するか（SPEC §7.11「送る元のハッシュ」）。
 /// `tracks.inode` が NULL（未解決）なら常に不一致扱い。dev は比較しない（D-62）
 fn identity_matches(h: &SourceHash, id: &TrackIdentity) -> bool {
     id.inode.is_some_and(|inode| inode as u64 == h.inode)
@@ -908,7 +908,7 @@ pub fn delete(conn: &Connection, id: i64) -> Result<bool> {
     Ok(conn.execute("DELETE FROM devices WHERE id = ?1", [id])? > 0)
 }
 
-/// open な計画か、queued / running の `device_sync` があるか（仕様 ③「端末の設定変更と同期の排他」）
+/// open な計画か、queued / running の `device_sync` があるか（SPEC §7.11「端末の設定変更と同期の排他」）
 pub fn has_open_work(conn: &Connection, id: i64) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM device_sync_plans WHERE device_id = ?1 AND state = 'open')
@@ -1210,7 +1210,7 @@ pub fn agent_by_selector(conn: &Connection, selector: &str) -> Result<Option<Age
         .optional()?)
 }
 
-/// 端末の open な計画（仕様 ③「計画の終端」。端末ごとに 1 つまで）
+/// 端末の open な計画（SPEC §7.11「計画の終端」。端末ごとに 1 つまで）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenPlan {
     pub id: i64,
@@ -1277,7 +1277,7 @@ pub enum Confirm {
     NotFound,
 }
 
-/// 計画を確定する（仕様 ③「計画トークン」）。計算し直した計画の `plan_token` が一致すれば
+/// 計画を確定する（SPEC §7.11「計画トークン」）。計算し直した計画の `plan_token` が一致すれば
 /// `device_sync_plans` に不変のまま保存する。呼び出し側のトランザクションの中で呼べる
 /// （P5-3b はここで同じトランザクションにジョブを投入する）
 pub fn confirm_plan(
@@ -1356,7 +1356,7 @@ pub fn close_plan(
 /// 同期・報告で出た項目ごとのエラー（種類、track_id / playlist_id、理由）
 pub type ReportedError = (EntryKind, i64, String);
 
-/// 端末側の正本を読んだ結果でキャッシュを全置換する（仕様 ②）。`errors` が None なら
+/// 端末側の正本を読んだ結果でキャッシュを全置換する（SPEC §6「端末への配信の表」）。`errors` が None なら
 /// `device_errors` は触らない（差分の計算だけの `device_scan` は前回の同期のエラーを残す）。
 /// `synced` なら `last_synced_at` を進める
 pub fn apply_device_state(
@@ -1401,7 +1401,7 @@ pub enum PlaylistCheck {
     Cycle(i64),
 }
 
-/// 印を付けてよいか: 実在し、端末のフィールドを使うスマートプレイリストでないこと（③ 循環の禁止）
+/// 印を付けてよいか: 実在し、端末のフィールドを使うスマートプレイリストでないこと（SPEC §7.11「循環の禁止」）
 pub fn check_playlists(conn: &Connection, ids: &[i64]) -> Result<PlaylistCheck> {
     for id in ids {
         if dbpl::kind(conn, *id)?.is_none() {
@@ -1451,7 +1451,7 @@ pub fn playlist_names(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Str
     Ok(rows)
 }
 
-/// 端末に載っているスマートプレイリストの評価時刻（④ 差分画面）
+/// 端末に載っているスマートプレイリストの評価時刻（SPEC §12.6「端末」の差分）
 pub fn smart_evaluations(
     conn: &Connection,
     device_id: i64,

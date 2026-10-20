@@ -1,4 +1,4 @@
-//! DSL の端末フィールド（仕様 ④ C）。値は端末名、演算子は IS だけ。device_pending は呼び出し側が渡す集合を引く
+//! DSL の端末フィールド（D-95 の可視化 C）。値は端末名、演算子は IS だけ。device_pending は呼び出し側が渡す集合を引く
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! 端末ジョブ（P5-3b、仕様 ⑤、D-98）: `device_scan`（回復してキャッシュを置き換える）、`device_sync`（確定した
+//! 端末ジョブ（P5-3b、SPEC §7.11 Android、D-98）: `device_scan`（回復してキャッシュを置き換える）、`device_sync`（確定した
 //! 計画を実行）、`device_verify`（全曲の sha256 を検証）。どれも端末ごとの排他（`job_mutexes` の
 //! `device:<id>` と `AdbRuntime::device_lock`）の下で、最初に回復を行う。未接続なら attempts を消費せずに
 //! `DISCONNECTED_REQUEUE_SECS` 待つ（scan は待たずに終わる。次の接続でまた投入される）

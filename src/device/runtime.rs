@@ -142,7 +142,7 @@ impl Default for WatchOptions {
 
 pub type OnConnect = Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>;
 
-/// `adb track-devices -l` を購読し続ける常駐タスク（仕様 ⑤「ホットプラグ」）。EOF・エラーで一覧を空にし、
+/// `adb track-devices -l` を購読し続ける常駐タスク（SPEC §7.11 Android「ホットプラグ」）。EOF・エラーで一覧を空にし、
 /// 上限付きの backoff で張り直す（60 秒以上続いた接続の後は最短に戻す）。停止でプロセスグループごと kill
 pub fn spawn_watcher(
     rt: Arc<AdbRuntime>,

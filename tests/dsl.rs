@@ -1,4 +1,4 @@
-//! スマートプレイリスト DSL のパース（docs/DSL.md、D-16、D-54）。
+//! スマートプレイリスト DSL のパース（docs/user-guide/dsl.md、D-16、D-54）。
 //! 文法・優先順位・値の引用・キーワードの大小文字・AST の JSON 形を固定する
 
 use serde_json::json;

@@ -1,4 +1,4 @@
-//! 編集バッチの coordinator（SPEC §7.5 / §8、D-24、docs/TASKS.md P0-9）。
+//! 編集バッチの coordinator（SPEC §7.5 / §8、D-24、docs/development/tasks-history.md P0-9）。
 //!
 //! ```text
 //! prepare_tags:  1 トランザクションで edit_batches(prepared) / edit_ops(pending) / edits を記録

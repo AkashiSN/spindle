@@ -1,4 +1,4 @@
-//! sync の進捗の数え方と書式（docs/superpowers/specs/2026-10-15-agent-sync-progress-design.md）。
+//! sync の進捗の数え方と書式（SPEC §7.11「iPhone」の「進捗」、D-108）。
 //! 外界（標準エラー・時計）は `ProgressSink` と `Clock` に閉じ込め、ここは純粋に数えて整形するだけ
 
 use agent_proto::{ProgressPhase, ProgressRequest, PROGRESS_CURRENT_MAX};

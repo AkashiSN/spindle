@@ -5,12 +5,14 @@ spindle の実装作業を始める前に、このファイルを最初に読む
 ## このプロジェクトは何か
 
 TrueNAS 上で動く単一コンテナの音楽ライブラリ管理アプリ。CD リッピング、
-メタデータ一括編集、ReplayGain、プレイリスト、簡易再生。
-**設計は完了している。** 仕様は `docs/SPEC.md`、判断の理由は `docs/DECISIONS.md`、
-着手順は `docs/TASKS.md` にある。
+メタデータ一括編集、ReplayGain、プレイリスト、簡易再生、端末（Android / iPhone）への配信。
+P0〜P5 は実装済みで、v0.6.0 を本番で運用している。ドキュメントの地図は `docs/README.md`。
 
-読む順序: `docs/TASKS.md` で担当タスクを確認 → 該当する `docs/SPEC.md` の節 →
-`docs/DECISIONS.md` で背景を確認。
+- 仕様: `docs/spec/`（章ごと。`SPEC §7.5` は `docs/spec/README.md` の目次で引く）
+- 判断の理由: `docs/decisions/`（`D-62` は `docs/decisions/D-062.md`）
+- 過去のタスクと受け入れ条件: `docs/development/tasks-history.md`（履歴。新しいタスクは書かない）
+
+読む順序: 依頼に関係する `docs/spec/` の章・節 → そこから参照される `docs/decisions/` で背景を確認。
 
 ## 絶対に守る不変条件
 
@@ -47,8 +49,10 @@ TrueNAS 上で動く単一コンテナの音楽ライブラリ管理アプリ。
 - **圧縮レベルを揃えるための FLAC 一括再エンコード。** 削減は 1% 未満で、
   200GB の書き直しとスナップショット肥大に見合わない。
 - **非可逆 → 非可逆の再エンコード。** 世代劣化する。配布ビューは原本を返す。
+  - 明示の例外: Apple 向けの `aac` 系統だけは非可逆の原本も AAC に変換する（`lossy_sources`。
+    ミュージック.app は Opus を読めない）。D-75。
 - **仕様にない判断を黙って入れること。** 迷ったら実装を止めて質問する。
-  決めた場合は `docs/DECISIONS.md` に追記案を出す。
+  決めた場合は `docs/decisions/` に追記案を出す。
 - **`db/migrations/*.sql` の既存ファイルの書き換え。** スキーマ変更は
   必ず新しい連番ファイルを追加する。
 
@@ -140,17 +144,22 @@ cd web && npm install && npm run dev      # フロント単体（API は SPINDLE
 cd web && npm run build                   # 同梱用ビルド（tsc -b + vite）
 cd web && npx vitest run && npm run lint  # 純粋ロジックのテストと oxlint
 
-python3 scripts/preflight.py /mnt/ssd/musics/Opus --dest /mnt/ssd     # 移行前チェック
-python3 scripts/migrate_plan.py /mnt/ssd/musics --out /tmp/plan        # 振り分け一覧
+python3 scripts/preflight.py <旧ライブラリ> --dest <コピー先>       # 移行前チェック（docs/admin-guide/migration.md）
+python3 scripts/migrate_plan.py <旧ライブラリ> --out /tmp/plan     # 振り分け一覧
 docker build -f deploy/Dockerfile -t spindle .
 ```
 
 ## 作業の進め方
 
-1. `docs/TASKS.md` から次のタスクを 1 つ取る。依存関係を確認する
+1. 設計を書き、ユーザの了承を得る。設計書と実装計画は**作業中だけ** `docs/development/` に置く
+   （`YYYY-MM-DD-<topic>-design.md` / `YYYY-MM-DD-<topic>.md`）。superpowers などのスキルが既定で
+   書き出す `docs/superpowers/` には置かない
 2. 受け入れ条件を満たすテストを先に書く
-3. 実装し、`cargo clippy -- -D warnings` と `cargo test` を通す
-4. タスクにチェックを入れ、仕様との差異があれば `docs/SPEC.md` も更新する
+3. 実装し、`cargo clippy -- -D warnings` と `cargo test`（フロントは `npx vitest run` と `npm run lint`）を通す
+4. 設計書の要点を `docs/spec/` の該当する章へ、判断とその理由を `docs/decisions/` へ移し
+   （新しい判断は次の番号の `D-NNN.md` を作り、`docs/decisions/README.md` の一覧に足す）、
+   設計書と計画を `docs/development/` から消す。利用者の操作が変わるなら `docs/user-guide/` も直す
+5. レビュー（codex）→ PR → CI。リリースは `vX.Y.Z-rc.N` を本番で確かめてから `vX.Y.Z`
+   （`docs/admin-guide/operations.md`「リリース候補（RC）を本番で確かめてから出す」）。`CHANGELOG.md` に版の要点を書く
 
-タスクをまたいで実装を先回りしない。P0 の完了条件は「既存ライブラリ全曲が
-表に出て、一括編集と巻き戻しができる」ことであり、それ以外は後回しで良い。
+依頼の範囲を超えて実装を先回りしない。

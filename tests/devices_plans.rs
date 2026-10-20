@@ -1,4 +1,4 @@
-//! 計画の確定・終端とキャッシュの全置換（仕様 ②③「計画の終端」）
+//! 計画の確定・終端とキャッシュの全置換（SPEC §6「端末への配信の表」③「計画の終端」）
 
 use rusqlite::{params, Connection};
 use spindle::config::{DerivedConfig, OpusVariantConfig};

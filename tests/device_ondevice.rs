@@ -1,4 +1,4 @@
-//! 端末側の正本 `.spindle/manifest.json` の形式（仕様 ⑤「端末側の正本」）
+//! 端末側の正本 `.spindle/manifest.json` の形式（SPEC §7.11 Android「端末側の正本」）
 
 use spindle::device::ondevice::*;
 use spindle::domain::device::{EntryKind, OpKind, PlaylistOpKind};

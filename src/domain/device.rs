@@ -1,4 +1,4 @@
-//! 端末への配信の純粋関数（docs/superpowers/specs/2026-09-29-device-delivery-design.md ③、D-95）。
+//! 端末への配信の純粋関数（SPEC §7.11「マニフェスト（あるべき状態）」、D-95）。
 //! DB も HTTP も知らない。入力は `db::devices` が組み立てる。
 //!
 //! トークンはすべて不透明な値（解析しない）。構成要素を正準 JSON（serde_json の Map は BTreeMap なので
@@ -145,7 +145,7 @@ impl Wait {
     }
 }
 
-/// 送る元を決める（仕様 ③「送る元の決定」）。ハッシュの有無はここでは見ない（`build_manifest` が見る）
+/// 送る元を決める（SPEC §7.11「送る元の決定」）。ハッシュの有無はここでは見ない（`build_manifest` が見る）
 pub fn decide_source(s: &VariantSettings, t: &TrackInput) -> Result<Source, Wait> {
     if s.variant == Variant::Opus && !t.lossless {
         return Ok(Source {
@@ -271,7 +271,7 @@ pub struct DeviceItem {
     pub sha256: String,
 }
 
-/// 選曲に入った曲からマニフェストを作る（仕様 ③）。`root_prefix_utf16` は端末の root を前置きする長さ
+/// 選曲に入った曲からマニフェストを作る（SPEC §7.11）。`root_prefix_utf16` は端末の root を前置きする長さ
 /// （区切りの `/` を含む）
 pub fn build_manifest(
     s: &VariantSettings,
@@ -463,7 +463,7 @@ pub fn build_playlists(
     (out, errors)
 }
 
-/// 差分の操作。並び順は実行順（削除 → パス変更 → 更新 → 追加。仕様 ⑤）
+/// 差分の操作。並び順は実行順（削除 → パス変更 → 更新 → 追加。SPEC §7.11 Android）
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -568,7 +568,7 @@ pub struct Diff {
     pub playlist_errors: Vec<(i64, &'static str)>,
 }
 
-/// 行き先の衝突を不動点まで解く（仕様 ③「差分」）。行き先が「動かない管理下の曲」に占められていれば、
+/// 行き先の衝突を不動点まで解く（SPEC §7.11「差分」）。行き先が「動かない管理下の曲」に占められていれば、
 /// その曲をパス衝突で保留にし、その曲自身も動かなくなるので不動点まで繰り返す（入れ替えの片側が保留に
 /// なれば、もう片側も保留になる）。返すマニフェストの desired と hold が最終的なもの（needs_hash は
 /// そのまま）。解いた結果をもう一度渡しても変わらない（冪等）。プレイリストは解いた後の desired と
@@ -615,7 +615,7 @@ pub fn resolve_collisions(manifest: &Manifest, current: &[DeviceItem]) -> Manife
     }
 }
 
-/// 差分（仕様 ③「3 つの集合」「差分」）。desired と現状を track_id で突き合わせ、hold は触らず、
+/// 差分（SPEC §7.11「3 つの集合」「差分」）。desired と現状を track_id で突き合わせ、hold は触らず、
 /// マニフェストに無い（remove）ものを削除にする。行き先の衝突は内部で `resolve_collisions` を通して
 /// 解く（冪等なので、解いた後のマニフェストを渡してもよい。`db::devices::compute` はプレイリストを
 /// 組み立てる前に解いたものを渡す）
@@ -747,7 +747,7 @@ pub fn plan_token(generation: i64, d: &Diff) -> String {
     }))
 }
 
-/// 曲ごとの端末の状態（④ 可視化 A / D、`device_pending`）。対象外で端末にも無い曲は持たない
+/// 曲ごとの端末の状態（D-95 の可視化 A / D、`device_pending`）。対象外で端末にも無い曲は持たない
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum TrackState {
@@ -947,14 +947,14 @@ pub fn playlist_sync_states(
     out
 }
 
-/// 送る量と、実行順（削除 → パス変更のバッチ → 更新 → 追加。仕様 ⑤）に沿った「今より増える量」の最大値
+/// 送る量と、実行順（削除 → パス変更のバッチ → 更新 → 追加。SPEC §7.11 Android）に沿った「今より増える量」の最大値
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Estimate {
     pub transfer_bytes: u64,
     pub peak_bytes: u64,
 }
 
-/// 実行順（削除 → パス変更のバッチ → 更新 → 追加。仕様 ⑤）に沿った送る量と「今より増える量」の最大値。
+/// 実行順（削除 → パス変更のバッチ → 更新 → 追加。SPEC §7.11 Android）に沿った送る量と「今より増える量」の最大値。
 /// `ops` は (操作, track_id, 新しい内容の size)
 pub fn peak_bytes(ops: &[(OpKind, i64, u64)], current: &[DeviceItem]) -> Estimate {
     let old: HashMap<i64, i64> = current

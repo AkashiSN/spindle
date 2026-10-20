@@ -1,4 +1,4 @@
-//! ReplayGain のタグ書き込み（SPEC §6「ReplayGain の内部表現」、docs/TASKS.md P1-2）。
+//! ReplayGain のタグ書き込み（SPEC §6「ReplayGain の内部表現」、docs/development/tasks-history.md P1-2）。
 //! 解析値（DB の `rg_*`）を形式ごとのタグへ変換し、通常の編集バッチ（tags op）として書く。
 //! `rg_written_at` は「ファイルの RG タグが解析値と一致している」ことを確認した時刻で、
 //! 書き込みの applied だけでなく、既に一致していた行・外れた行の追随でも動く。

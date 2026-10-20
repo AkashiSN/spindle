@@ -1,4 +1,4 @@
-//! DB 全損後の保存先の引き継ぎ（仕様 ⑤「引き継ぎ」、D-103）。manifest の `rel_path` で今の `tracks` を
+//! DB 全損後の保存先の引き継ぎ（SPEC §7.11 Android「引き継ぎ」、D-103）。manifest の `rel_path` で今の `tracks` を
 //! 引いて `track_id` を付け替え（remap）、プレイリストは名前で付け替える。引けない・曖昧な項目は
 //! manifest から外して管理外にする（ファイルは消さない）
 

@@ -1,4 +1,4 @@
-//! 一括編集の操作（SPEC §12.3、docs/TASKS.md P0-10）: 固定値代入 / フィールド参照 /
+//! 一括編集の操作（SPEC §12.3、docs/development/tasks-history.md P0-10）: 固定値代入 / フィールド参照 /
 //! 正規表現置換 / 連番 / 削除。JSON から解釈し、正規化タグ集合へ順に適用する
 
 use spindle::domain::tagops::{apply_ops, parse_ops, Op, TagOpsError};

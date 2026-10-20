@@ -1,5 +1,5 @@
 //! spindle: TrueNAS 上で動く単一コンテナの音楽ライブラリ管理アプリ。
-//! 仕様は docs/SPEC.md、判断の理由は docs/DECISIONS.md
+//! 仕様は docs/spec/、判断の理由は docs/decisions/
 
 pub mod api;
 pub mod cd;

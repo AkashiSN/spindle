@@ -1,4 +1,4 @@
-//! 端末配信の純粋関数（仕様 ③）。DB を使わない
+//! 端末配信の純粋関数（SPEC §7.11）。DB を使わない
 
 use serde_json::json;
 use spindle::domain::derived::{Current, Variant};

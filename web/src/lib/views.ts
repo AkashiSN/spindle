@@ -11,7 +11,7 @@ export const VIEWS: Array<[View, string]> = [
   ['cd', 'CD'],
   ['youtube', 'YouTube'],
   ['inbox', 'Inbox'],
-  // 取り込みの流れの終点（仕様 ④）。端末に未反映の件数を黄色で出す
+  // 取り込みの流れの終点（SPEC §12.6「端末」）。端末に未反映の件数を黄色で出す
   ['devices', '端末'],
 ]
 

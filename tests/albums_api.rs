@@ -1,4 +1,4 @@
-//! `PATCH /api/albums/:id { album_gain }`（P4-5、D-74）。仕様: docs/SPEC.md §9
+//! `PATCH /api/albums/:id { album_gain }`（P4-5、D-74）。仕様: SPEC §9
 
 use std::net::SocketAddr;
 use std::sync::Arc;

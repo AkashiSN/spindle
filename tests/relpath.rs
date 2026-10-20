@@ -1,5 +1,5 @@
 //! 相対パスの検証と canonical key（SPEC §5「パスの表現と境界」、D-31）。
-//! 受け入れ: docs/TASKS.md P0-5 (i) (j)
+//! 受け入れ: docs/development/tasks-history.md P0-5 (i) (j)
 
 use spindle::domain::relpath::{canonical_key, RelPath, RelPathError};
 

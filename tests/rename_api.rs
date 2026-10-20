@@ -1,4 +1,4 @@
-//! `POST /api/rename/preview` / `POST /api/rename/apply`（SPEC §9 / §7.5、docs/TASKS.md P0-11、
+//! `POST /api/rename/preview` / `POST /api/rename/apply`（SPEC §9 / §7.5、docs/development/tasks-history.md P0-11、
 //! D-33）。合成ファイルは ffmpeg で 1 本作り、コピーして増やす
 
 #![cfg(target_os = "linux")]

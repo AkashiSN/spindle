@@ -1,4 +1,4 @@
-//! ロスレス → FLAC 正規化の coordinator（SPEC §7.4、D-10 / D-45 / D-46、docs/TASKS.md P1-4）。
+//! ロスレス → FLAC 正規化の coordinator（SPEC §7.4、D-10 / D-45 / D-46、docs/development/tasks-history.md P1-4）。
 //! 記録 → normalize ジョブ → MD5 照合 → Archive 退避 → 台帳 → 巻き戻し（restore / redo）→
 //! 事前条件 → クラッシュ復旧 → スキャンとの並走 → キャンセル。
 //! 合成ファイルは ffmpeg で作り、エンコードには flac を使う（どちらかが無ければ skip）

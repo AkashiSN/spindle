@@ -1,5 +1,5 @@
 //! AccurateRip v1/v2 CRC と CTDB CRC32（SPEC §7.2「CRC 計算」、D-13）。
-//! 受け入れ: docs/TASKS.md P2-6
+//! 受け入れ: docs/development/tasks-history.md P2-6
 //!
 //! 除外規則（先頭トラックの頭 5×588−1、末尾トラックの尻 5×588、CTDB の 10 セクタ）は
 //! 壊れても画面上は「不一致」に見えるだけで発見できないので、

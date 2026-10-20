@@ -3,7 +3,7 @@
 //!
 //! debug ビルドでは bundled SQLite も最適化なしで遅いので `#[ignore]`。計測は
 //! `cargo test --release --test tracks_perf -- --ignored --nocapture` で行い、結果は
-//! docs/TASKS.md に参照マシンと一緒に記す
+//! docs/development/tasks-history.md に参照マシンと一緒に記す
 
 use std::time::{Duration, Instant};
 

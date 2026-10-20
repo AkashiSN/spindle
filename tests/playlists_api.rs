@@ -1,4 +1,4 @@
-//! `/api/playlists`（SPEC §9 / §10、docs/TASKS.md P1-6、D-53）: CRUD、項目の追加・除外・移動、
+//! `/api/playlists`（SPEC §9 / §10、docs/development/tasks-history.md P1-6、D-53）: CRUD、項目の追加・除外・移動、
 //! m3u8 の書き出し（GET は本文、POST は Playlists root へ書く）、Playlists root からの取り込み
 
 #![cfg(target_os = "linux")]

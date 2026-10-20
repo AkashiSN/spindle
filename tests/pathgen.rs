@@ -1,4 +1,4 @@
-//! パス生成（SPEC §5「パステンプレート」「ファイル名正規化」、D-7、docs/TASKS.md P0-11）。
+//! パス生成（SPEC §5「パステンプレート」「ファイル名正規化」、D-7、docs/development/tasks-history.md P0-11）。
 //! テンプレート展開・置換テーブル・SMB 制約・切り詰め・衝突降格の単体テスト
 
 use std::collections::{HashMap, HashSet};

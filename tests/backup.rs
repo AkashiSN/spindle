@@ -1,4 +1,4 @@
-//! `backup` ジョブと復元ドリル（SPEC §8 / §14「バックアップ」、docs/TASKS.md P0-13）。
+//! `backup` ジョブと復元ドリル（SPEC §8 / §14「バックアップ」、docs/development/tasks-history.md P0-13）。
 //! `VACUUM INTO` → tmp fsync → rename → 親 fsync → 世代 GC、容量不足の中断、
 //! スケジューラの due 判定、バックアップから復元した DB での再スキャン一致
 

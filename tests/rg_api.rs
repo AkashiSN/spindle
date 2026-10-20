@@ -1,4 +1,4 @@
-//! `POST /api/rg`（SPEC §9、docs/TASKS.md P1-1）。selection に含まれるトラックの album ごとに
+//! `POST /api/rg`（SPEC §9、docs/development/tasks-history.md P1-1）。selection に含まれるトラックの album ごとに
 //! `rg` ジョブを投入する。album を持たないトラックは track 単位。合成ファイルは ffmpeg で作る
 
 #![cfg(target_os = "linux")]

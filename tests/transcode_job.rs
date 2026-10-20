@@ -1,4 +1,4 @@
-//! `transcode` ジョブ（SPEC §7.6 / §8、docs/TASKS.md P1-10、D-51）。Library の可逆から Derived の
+//! `transcode` ジョブ（SPEC §7.6 / §8、docs/development/tasks-history.md P1-10、D-51）。Library の可逆から Derived の
 //! Opus を作り、音声版・タグ版・パス・アートワークの変化に追随する。`delivery` ビューの版一致
 //! フォールバックもここで見る。ffmpeg / opusenc が無ければ skip
 

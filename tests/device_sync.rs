@@ -1,4 +1,4 @@
-//! 保存した計画の実行（仕様 ⑤「同期」）
+//! 保存した計画の実行（SPEC §7.11 Android「同期」）
 
 mod device_support;
 
