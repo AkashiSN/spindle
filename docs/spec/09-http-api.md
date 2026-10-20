@@ -1,4 +1,4 @@
-## 9. HTTP API
+# 9. HTTP API
 
 ```
 GET    /health                                    認証の外。{ status: "ok" | "locked", version, ytdlp }
@@ -327,7 +327,7 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 - 一括編集は必ず preview → apply の 2 段階
 - SSE は単一チャネル。イベント種別で多重化
 
-### レスポンス形（UI が依存するもの）
+## レスポンス形（UI が依存するもの）
 
 ```jsonc
 // GET /api/tracks?filter=...&sort=title&cursor=...&limit=100
@@ -481,9 +481,9 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 再取得、`bulk` は無条件に再取得。選択（`selection`）はイベントで変えない。
 
 `pending_batch_id` / `conflict_batch_id` / `duplicate_group` / `hardlink` は一覧の
-バッジ列（§12.2）が直接使う。`GET /api/tracks` は 1 クエリで返す: `edit_ops` の pending と
+バッジ列（[§12.2](12-ui/02-track-list.md)）が直接使う。`GET /api/tracks` は 1 クエリで返す: `edit_ops` の pending と
 最新 op は LEFT JOIN、重複は `audio_md5` 索引への相関 EXISTS で行ごとに引く
-（`duplicate_groups` ビューを JOIN すると毎回 GROUP BY の実体化が走る。D-39）。
+（`duplicate_groups` ビューを JOIN すると毎回 GROUP BY の実体化が走る。[D-39](../decisions/D-039.md)）。
 
 // GET /api/albums
 { "items": [ { "id": 1, "rel_dir": "J-Pop/…/…", "category": "J-Pop", "albumartist": "…", "album": "…",
@@ -537,14 +537,14 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
   "counts": { … } }                            // Device の counts と同じ
 ```
 
-### 認証
+## 認証
 
 LAN 限定でも必須とする。攻撃者対策というより事故対策で、この API は 300GB の
 ライブラリをリネーム・削除・タグ上書きできる。認証がないと、別タブのスクリプト、
 家族の端末、うっかり有効にしたポートフォワードがそのまま破壊的操作に届く。
 
 - 単一パスワード。argon2id でハッシュして DB に保存
-- **初期パスワードは環境変数 `SPINDLE_INITIAL_PASSWORD`** で与える（D-28）。DB に
+- **初期パスワードは環境変数 `SPINDLE_INITIAL_PASSWORD`** で与える（[D-28](../decisions/D-028.md)）。DB に
   パスワードが無い初回起動でハッシュ化して保存し、以後は無視する。環境変数も DB も
   無い場合は**ロックモード**で起動し、SPA の配信を含めて `/health` 以外は 503 で
   短い JSON（設定手順）を返す。`/health` は `{"status":"locked"}` を返して機械可読にする。
@@ -560,7 +560,7 @@ LAN 限定でも必須とする。攻撃者対策というより事故対策で�
   ならない）。reverse proxy 越しの外部 origin は `trusted_proxies` からの `X-Forwarded-Host` /
   `X-Forwarded-Proto` だけで構成する
 - CORS は全面禁止（SPA は同一オリジンで配信するため不要）
-- `trusted_cidrs` からの接続は **route allowlist だけ認証をスキップ**する（D-27）:
+- `trusted_cidrs` からの接続は **route allowlist だけ認証をスキップ**する（[D-27](../decisions/D-027.md)）:
   `GET /api/stream/:id`、`GET /api/artwork/:hash`、`GET /api/tracks/:id`（限定フィールド）、
   `GET /api/playlists/:id/export`。それ以外（一覧・検索・SSE・history・jobs・設定・session）は
   CIDR 内でもセッション必須。変更系は当然セッション必須。用途は他プレイヤーや curl からの
@@ -568,7 +568,7 @@ LAN 限定でも必須とする。攻撃者対策というより事故対策で�
   判定に使うのは接続元 socket のアドレスで、`X-Forwarded-For` は `trusted_proxies` に列挙した
   proxy からのものだけ採用する
 - `/health` と `/api/agent/*` 以外の全ルート（SSE / stream / artwork 含む）が同じ認証ミドルウェアを通る
-- **エージェントの経路**（`/api/agent/*`。Mac の `spindle-agent`、D-99）: セッションの認証ミドルウェアの
+- **エージェントの経路**（`/api/agent/*`。Mac の `spindle-agent`、[D-99](../decisions/D-099.md)）: セッションの認証ミドルウェアの
   **外**に置き、`Authorization: Bearer <selector>.<secret>` だけで通す専用のミドルウェアを載せる。
   Cookie・CSRF・`trusted_cidrs` はどれも見ず、逆にセッション側は Bearer では通らない（同じ経路に分岐を
   足すと、どちらかの検査が緩む事故が起きやすい）。セレクタで端末の行を 1 つ引き、シークレットの SHA-256 を
@@ -579,6 +579,3 @@ LAN 限定でも必須とする。攻撃者対策というより事故対策で�
   要らない明示的な例外。コードを発行し直すと旧トークンは即失効する。ロックモードでは pair を含めて 503。
   トークンとコードはログに出さない
 - Subsonic 非対応が確定したため、salt+md5 方式との併存を考慮する必要はない
-
----
-

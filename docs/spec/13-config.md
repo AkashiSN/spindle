@@ -1,4 +1,4 @@
-## 13. 設定
+# 13. 設定
 
 ```toml
 [server]
@@ -120,7 +120,7 @@ adb_transfer_timeout_secs = 3600
 
 実体は `deploy/config.example.toml`。両者は一致させる。
 
-端末への配信（§7.11）の設定（P5-3b、D-98）:
+端末への配信（[§7.11](07-pipeline/11-device-delivery.md)）の設定（P5-3b、[D-98](../decisions/D-098.md)）:
 
 - `[bin].adb`: adb クライアント。イメージに platform-tools の adb（版と sha256 を固定）を同梱し、compose の adb
   サイドカーも同じイメージの adb をサーバとして使う（クライアントとサーバの版を揃える）。省略時は `adb`、空と前後の
@@ -137,7 +137,4 @@ adb_transfer_timeout_secs = 3600
 `[bin].cdparanoia` の `cd-paranoia` は libcdio 版（Debian パッケージ cd-paranoia）で、xiph の `cdparanoia` ではない。
 
 iPhone（Mac の `spindle-agent`）はサーバ側の設定を持たない（エージェントは pair のときに spindle の URL を
-受け取る。§7.11、`agent/README.md`）。
-
----
-
+受け取る。[§7.11](07-pipeline/11-device-delivery.md)、`agent/README.md`）。

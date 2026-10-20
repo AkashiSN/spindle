@@ -1,16 +1,16 @@
-### 7.7 ytmusic 統合
+# 7.7 ytmusic 統合
 
 | 元モジュール | 移行先 | 備考 |
 |---|---|---|
-| `parser.py`（タイトルパーサ）/ チャンネル定義 | **外部のメタデータプラグイン**（別リポジトリ） | spindle はタイトルの慣習を知らない（D-69） |
-| `models.py` 正規化 | Rust | 置換テーブルは D-43 で 1 本化済み |
+| `parser.py`（タイトルパーサ）/ チャンネル定義 | **外部のメタデータプラグイン**（別リポジトリ） | spindle はタイトルの慣習を知らない（[D-69](../../decisions/D-069.md)） |
+| `models.py` 正規化 | Rust | 置換テーブルは [D-43](../../decisions/D-043.md) で 1 本化済み |
 | `tagger.py` (mutagen) | lofty | |
 | `audio.py` R128 | ebur128 | ffmpeg loudnorm より高精度 |
 | `organizer.py` / `playlist.py` | Rust | m3u8 生成は継続 |
 | `downloader.py` | Rust（yt-dlp を subprocess） | |
-| `sync.py` (ADB) | **移植する**（端末同期として再設計） | §7.11、D-95 |
+| `sync.py` (ADB) | **移植する**（端末同期として再設計） | [§7.11](11-device-delivery.md)、[D-95](../../decisions/D-095.md) |
 
-**メタデータプラグインのプロトコル v1**（`src/import/ytmusic/metadata.rs`、P3-1 / P3-2、D-69）。
+**メタデータプラグインのプロトコル v1**（`src/import/ytmusic/metadata.rs`、P3-1 / P3-2、[D-69](../../decisions/D-069.md)）。
 動画のタイトルからトラックのメタデータ（タイトル・アーティスト・アルバム・category）を決める知識は
 利用者固有（チャンネル名、タイトルの慣習、パターンのルール）なので spindle には置かず、外部コマンドに
 問い合わせる。spindle が知る契約はこのプロトコルだけ。
@@ -41,7 +41,7 @@
                "category": "<統制語彙の名前>" | null,   // null は未分類（_Unsorted）
                "date": "YYYY[-MM[-DD]]" | null,
                "tags": [["ORIGINALARTIST", "…"]] },    // 追加のタグ（キー, 値）
-    "plugin": { "name": "spindle-ytmusic-meta", "version": "v0.1.0-rc.2" } }   // 任意。判定したプラグインの版（D-114）
+    "plugin": { "name": "spindle-ytmusic-meta", "version": "v0.1.0-rc.2" } }   // 任意。判定したプラグインの版（[D-114](../../decisions/D-114.md)）
   { "protocol": 1, "ok": false,
     "reason": "unmatched" | "unknown_channel" | "skip" | "unsupported",   // 未知の値も通す（前方互換）
     "message": "…",    // unmatched / unknown_channel は要対応（メッセージをそのまま見せる）、skip は取り込まない。
@@ -50,21 +50,21 @@
   ```
   `plugin` は**任意**（未知の欄はプラグインが無視する規則と同じく後方互換）。無い・形が違う（name / version が空でない
   文字列でない）ときは「不明」として扱い、応答は不正にしない。spindle は応答の `plugin.version` をサイドカーに残し、
-  Inbox に表示する（再判定、§7.8、D-114）。`spindle-ytmusic-meta` は `--version` と同じ値（git describe）を返す
+  Inbox に表示する（再判定、[§7.8](08-inbox.md)、[D-114](../../decisions/D-114.md)）。`spindle-ytmusic-meta` は `--version` と同じ値（git describe）を返す
 - **spindle 側の写像**: `track` → タグ（TITLE / ARTIST 多値 / ALBUM / ALBUMARTIST / DATE / TRACKNUMBER +
   `tags`）と `pathgen::TrackFields`（category / albumartist / artist（先頭）/ album / title / track_no / year）。
   `category` は `categories` に同じ canonical key の語彙が無ければ追加する（プラグインの定義が正。
-  初回起動の空 DB でも動く）。トラック番号と配置は Inbox が行う（下記、§7.8、D-70）
+  初回起動の空 DB でも動く）。トラック番号と配置は Inbox が行う（下記、[§7.8](08-inbox.md)、[D-70](../../decisions/D-070.md)）
 - 参照実装: `AkashiSN/spindle-ytmusic-meta`（private。ルール TOML + フィクスチャ + チャンネル定義を同梱した
   Rust のバイナリ。新パターンは Claude がそのリポジトリでルールとフィクスチャを 1 件ずつ足す運用）。
-  イメージには同梱せず、static バイナリをホストに置いて compose でマウントする（§14、D-70）
+  イメージには同梱せず、static バイナリをホストに置いて compose でマウントする（[§14](../14-deploy.md)、[D-70](../../decisions/D-070.md)）
 
-**ダウンローダ**（`src/import/ytmusic/downloader.rs`、`ytdl` ジョブ、P3-3、D-70）。Library には触らず、
-**Inbox に置くところまで**。配置・登録・後続ジョブは Inbox（§7.8）が担い、プラグインが判定したものも
+**ダウンローダ**（`src/import/ytmusic/downloader.rs`、`ytdl` ジョブ、P3-3、[D-70](../../decisions/D-070.md)）。Library には触らず、
+**Inbox に置くところまで**。配置・登録・後続ジョブは Inbox（[§7.8](08-inbox.md)）が担い、プラグインが判定したものも
 人が一度見てから Library に入る。
 
 - **入口**: `POST /api/ytmusic/download { urls }` が URL ごとに `ytdl` ジョブ（並列 1、dedup `ytdl:<url>`）を
-  投入。YouTube 画面（1 行 1 URL。§12.6）から呼ぶ
+  投入。YouTube 画面（1 行 1 URL。[§12.6](../12-ui/06-other-screens.md)）から呼ぶ
 - **手順**（ジョブ 1 件 = URL 1 件。作業領域は `[paths].data/tmp/ytdl/<job_id>/`。全部引数配列、`--` の後に URL）
   1. `yt-dlp --dump-single-json --flat-playlist --no-download -- <url>`（120 秒）。`_type` が playlist なら
      `entries` の `url` ごとに `ytdl` を投入して終わり（展開だけ）。動画なら `id` / `webpage_url` / `uploader`
@@ -76,7 +76,7 @@
      `Inbox/youtube/_unmatched/<channel>/`（受け皿）。プラグインの故障（`ProviderError`）→ `Fatal`。
      ここで Inbox のファイル名（8.）まで決まる
   3. 取り込み済みチェック: `SOURCE_URL = webpage_url` が Library（`track_tags`）にあれば**やることが無い**ので
-     `done`（note に「取り込み済み（Library）: <パス>」。失敗ではない。P4-18、D-81）。Inbox（`inbox_files.tags`）にあり、それが自分の宛先そのもの
+     `done`（note に「取り込み済み（Library）: <パス>」。失敗ではない。P4-18、[D-81](../../decisions/D-081.md)）。Inbox（`inbox_files.tags`）にあり、それが自分の宛先そのもの
      （`rel_path_key` で比べる）なら「置いた後に落ちて走査が先に拾った」再実行の可能性があるので、
      **実ファイルの `SOURCE_URL` を読み直して**同じならダウンロードせずに 8. の仕上げ（サイドカーと投入）
      だけ済ませて `done`。違えば `Fatal`（同名で別の内容）、ファイルが消えていれば普通に置き直す
@@ -102,23 +102,23 @@
                                  "verdict": "ok" | "unmatched" | "unknown_channel" | "skip" | "<未知の reason>",
                                  "message": "…" | null,
                                  "subscription_id": 3, "position": 17,   // 購読由来のときだけ（P4-16）
-                                 "item": { … },                // プラグインへ渡した Item（再判定の材料。D-114）
+                                 "item": { … },                // プラグインへ渡した Item（再判定の材料。[D-114](../../decisions/D-114.md)）
                                  "plugin_version": "v0.1.0-rc.2" | null,   // 判定したプラグインの版（Response の plugin.version）
                                  "judged_at": 1760000000,      // 判定した時刻（UNIX epoch 秒）
                                  "plugin_tags": ["ORIGINALARTIST"],   // ok のときにプラグインが書いた追加タグのキー（大文字）
                                  "rejudge_error": "…" } } }    // 直近の再判定がこの曲で失敗した理由（成功で消す）
   ```
   `item` 以降の 4 欄は任意（無いサイドカーも読める。`version` は 1 のまま）。ダウンローダが初回の判定で `item` /
-  `plugin_version` / `judged_at` / `plugin_tags` を書き、再判定（§7.8）が書き換える
+  `plugin_version` / `judged_at` / `plugin_tags` を書き、再判定（[§7.8](08-inbox.md)）が書き換える
 - **失敗の区分**: `Fatal`（再試行なし）は webm の音声なし・プラグインの故障・対応していない URL・宛先の
   同名で別の内容（取り込み済みは失敗でなく `done` + note）。それ以外（yt-dlp / ffmpeg の非ゼロ終了、I/O、仕上げ）は `Failed` で指数
   バックオフ。作業領域はどの終わり方でも消す。**再実行は冪等**: Archive は同じ id なら採用、Inbox は
   `SOURCE_URL` で自分の成果物を見分けて続きから
 - `POST /api/ytmusic/download` の URL は http / https でホストがあり空白・制御文字を含まないものだけ受ける
   （ホストは限定しない。対応していなければジョブが `Fatal` で伝える）
-- yt-dlp は YouTube の抽出に JS ランタイムを要求する版があるため、runtime イメージに deno を同梱する（§14）
+- yt-dlp は YouTube の抽出に JS ランタイムを要求する版があるため、runtime イメージに deno を同梱する（[§14](../14-deploy.md)）
 
-**再生リストの購読と同期**（`playlist_subscriptions`、`playlist_sync` ジョブ、P4-16、D-78）。URL を貼る
+**再生リストの購読と同期**（`playlist_subscriptions`、`playlist_sync` ジョブ、P4-16、[D-78](../../decisions/D-078.md)）。URL を貼る
 運用をなくす。再生リスト 1 本 → Library の album 1 つ（追記先）。`SOURCE_URL`（P4-14 で補填、ytdl が
 書く）で「再生リストのどこまで持っているか」が分かる。
 
@@ -127,7 +127,7 @@
   `list_id`（URL の `list=`。YouTube のホストだけ。UNIQUE）、`albumartist` / `album` / `category`（追記先の初期値と表示用）、`album_id`
   （**追記先の同一性**。登録時は NULL。同期か配置が `import::inbox::destination_of`（Inbox の追記先と
   同じ規則）で引けたときに CAS（`album_id IS NULL` のときだけ）で束ねる。album 全体の移動は id を
-  維持する（D-32）ので以後は album 行の値が正。album が消えれば SET NULL で再解決。albumartist /
+  維持する（[D-32](../../decisions/D-032.md)）ので以後は album 行の値が正。album が消えれば SET NULL で再解決。albumartist /
   album / category を PATCH で変えると NULL に戻す）、`align`（番号揃えをするか。既定 on）、`enabled`
   （定期と承認の後続の対象か。手動の同期は enabled に関わらず受ける）、`max_enqueue`（1 回の同期で
   投入する上限。既定 50。誤登録した巨大なリストで数百本落とさない）。同じ追記先の購読は 1 つだけ
@@ -193,7 +193,7 @@
   行を揃えて隙間を空けている。承認画面の初期値がそのまま正しい番号になり、塞がっていれば承認の既存検査
   （400）で人が直す）。off なら書かず Inbox が max+1 を振る。購読が消えていれば通常の ytdl として振る舞う（skip も通常どおり。
   購読の有無はプラグインを呼ぶ前に引く）
-- **承認はそのまま**（D-70。判断は Inbox で人が行う）。配置（`place_item`）はサイドカーを消す前に取り込みの
+- **承認はそのまま**（[D-70](../../decisions/D-070.md)。判断は Inbox で人が行う）。配置（`place_item`）はサイドカーを消す前に取り込みの
   `subscription_id` を集め、inbox ジョブが配置後に追記先を束ね（CAS）、latch を立ててから `playlist_sync`
   を投入する（走行中なら Duplicate だが latch は残る）
 - **dispatcher**（常駐、30 秒ごと。`[ytmusic].enabled` のとき）: (a) latch の立った購読を投入（enabled に
@@ -203,4 +203,3 @@
   `last_attempted_at`（成否を問わない開始時刻）から interval 経った購読を投入（最終 retry が failed に
   なっても interval までは新しいジョブを作らない）
 - yt-dlp を定期的に叩くので、ブロック時の `ytdlp_args`（P4-13）と yt-dlp の更新（P4-12）が前提
-

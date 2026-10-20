@@ -63,7 +63,7 @@ fn spec_config_block_matches_example() {
     // SPEC §13 の toml ブロックと deploy/config.example.toml は「一致させる」規約。
     // 構造（キー集合と値）が一致することを固定する。コメントと空白は無視。
     let spec = include_str!("../docs/spec/13-config.md");
-    let start = spec.find("## 13. 設定").expect("SPEC §13 が存在すること");
+    let start = spec.find("# 13. 設定").expect("SPEC §13 が存在すること");
     let block = &spec[start..];
     let begin = block.find("```toml").expect("§13 に toml ブロック") + "```toml".len();
     let end = block[begin..].find("```").expect("toml ブロックの終端") + begin;

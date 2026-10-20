@@ -1,4 +1,4 @@
-### 7.1 スキャン
+# 7.1 スキャン
 
 走査は 4 相。同一性の判定は inventory 全体が揃ってから行う（走査途中では「移動元が消えた」
 を判定できない）。DB への書き込みは最終相で単一 writer トランザクションにまとめる。
@@ -25,7 +25,7 @@ Phase 4  commit:     1 トランザクションで
                      FTS はトリガで追随
 ```
 
-**アルバムの照合**（ディレクトリ rename で album id を失わないため。D-32）:
+**アルバムの照合**（ディレクトリ rename で album id を失わないため。[D-32](../../decisions/D-032.md)）:
 
 ```
 ディレクトリ D に今回見つかったトラック集合 T(D) について
@@ -40,24 +40,24 @@ Phase 4  commit:     1 トランザクションで
   albums.missing_since を立てる（行は消さない。GC が回収）
 ```
 
-- 初回フルスキャンは並列度 = CPU コア数。以降は最速パス（§6）で大半を飛ばす
+- 初回フルスキャンは並列度 = CPU コア数。以降は最速パス（[§6](../06-data-model.md)）で大半を飛ばす
 - 外部（foobar2000 等）による書き換えを検出したら DB を上書きする。
   **ファイルが常に勝つ**（原則1）
 - **例外: ファイル反映待ちのトラック（`edit_ops.result = 'pending'` がある）は、
   pending の op が所有する論理フィールドを再評価しない。** 一括編集は DB を先に更新し、
-  ファイルへの反映は非同期なので（§7.5）、この窓で「ファイルが勝つ」を適用すると
+  ファイルへの反映は非同期なので（[§7.5](05-tagwrite.md)）、この窓で「ファイルが勝つ」を適用すると
   編集が DB から巻き戻され、後続の tagwrite と食い違う。
   ただし**物理的な所在は pending 中も常に追随する**: `(dev, inode)` で見つけた
   ファイルの `rel_path` / `size` / `mtime_ns` / `ctime_ns` は更新する。外部 rename は inode も
   mtime も変えないので、これを止めると tagwrite が旧パスを開けなくなる。
   抑止するのは `tags` op ならタグとキャッシュ列・`tag_version`、`rename` op なら
   `rel_path`（外部 rename と衝突したら op を `skipped_conflict` にし、同じトランザクションで
-  `rel_path` を実在パスへ追随させる。D-43）だけ。
+  `rel_path` を実在パスへ追随させる。[D-43](../../decisions/D-043.md)）だけ。
   外部 rename の**宛先が別の行（missing 行を含む）に占有されていた**場合は、Phase 4 で
   その行の missing 確定と key の入れ替えを同じトランザクションで行う
 - 走査対象は Library のみ。Derived / Archive はスキャンしない
 
-**アートワーク**（Phase 5、commit の後。D-49）:
+**アートワーク**（Phase 5、commit の後。[D-49](../../decisions/D-049.md)）:
 
 - album のアートワークは、ディレクトリの**同梱カバー画像**（`cover` / `folder` / `front` ×
   `jpg` / `jpeg` / `png` / `webp`。名前 → 拡張子の優先順、大文字小文字は区別しない）があれば
@@ -75,7 +75,6 @@ Phase 4  commit:     1 トランザクションで
   ときは埋め込みへ倒し、stat は記録する（変わるまで読み直さない）
 - Phase 4 の commit 後なので、Phase 5 の cancel / 失敗は run の状態（completed）と missing の確定を
   戻さない。予約が残るので次のスキャンで続きを行う
-- **トラック自身の画像**（D-61）: Phase 3 が各トラックの埋め込み画像（front cover 優先）を読んで
+- **トラック自身の画像**（[D-61](../../decisions/D-061.md)）: Phase 3 が各トラックの埋め込み画像（front cover 優先）を読んで
   キャッシュへ置き、Phase 4 が `tracks.artwork_id` に記録する（無ければ NULL）。tagwrite の書き戻しも
   同じ。変更なしの行は読まないので、既存行は deep scan で埋まる
-

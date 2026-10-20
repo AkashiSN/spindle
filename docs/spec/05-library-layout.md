@@ -1,4 +1,4 @@
-## 5. ライブラリレイアウト
+# 5. ライブラリレイアウト
 
 ```
 /mnt/ssd/media/                        （実機のプールは ssd / hdd。D-45）
@@ -32,7 +32,7 @@
 └── config.toml
 ```
 
-### パステンプレート
+## パステンプレート
 
 ```toml
 [layout]
@@ -48,12 +48,12 @@ unsorted    = "_Unsorted/{albumartist}/{album}/{track:02}. {title}"
   持たないリリースは元の `{album}` のまま（通常版と Hi-Res 版のように片方だけが EDITION を持つ同名の組は、持つ
   側だけが分かれる。edition の無いリリースが 2 つ以上、または edition が同じなら conflict）。edition は
   album の構成トラックの `EDITION` タグの最頻値（`albums.edition`。スキャナ・Inbox の配置が入れ、変化の無い
-  既存の album は NULL のときだけ次のスキャンで埋める。D-43 追記）
+  既存の album は NULL のときだけ次のスキャンで埋める。[D-43](../decisions/D-043.md) 追記）
 - **衝突 = マージではない。** 配置前に MusicBrainz Release ID（無ければ album 行）で
   同一リリース判定を行い、異なる場合は必ず別ディレクトリにする。DiscID は 1 枚ごとの値なので
-  リリースの鍵にしない（D-67 追記 3）
+  リリースの鍵にしない（[D-67](../decisions/D-067.md) 追記 3）
 
-### ファイル名正規化
+## ファイル名正規化
 
 ytmusic の foo_fileops 互換置換テーブルを継承し、以下を追加:
 
@@ -63,7 +63,7 @@ ytmusic の foo_fileops 互換置換テーブルを継承し、以下を追加:
 ```
 
 - タグ値は NFC 正規化のみ（原文字を保持）、ファイル名にのみ置換テーブルを適用
-- 表に無い禁止文字 `/` `\` `|` `"` も同じ流儀で全角化（`／` `＼` `｜` `＂`）、制御文字は除去（D-43）
+- 表に無い禁止文字 `/` `\` `|` `"` も同じ流儀で全角化（`／` `＼` `｜` `＂`）、制御文字は除去（[D-43](../decisions/D-043.md)）
 - SMB 制約: 末尾のドット・スペース禁止（削る）、予約名 (CON, PRN, AUX, NUL, COM1-9, LPT1-9) 回避
   （`_` を後置: `CON` → `CON_`）。空になった要素は `_`
 - Android 側 exFAT 制約: パス長上限、`|` `"` 禁止
@@ -71,11 +71,11 @@ ytmusic の foo_fileops 互換置換テーブルを継承し、以下を追加:
   パス全体は Windows / Android 互換のため **240 文字（UTF-16 単位）**を上限とし、
   超える場合はタイトル部を省略記号付きで切り詰める
 - 値が無いときのフォールバック: `albumartist` → `artist` → `Unknown Artist`、`album` →
-  `Unknown Album`、`title` → 現在のファイル名、`track` → 0、`disc` → 1（D-43）
+  `Unknown Album`、`title` → 現在のファイル名、`track` → 0、`disc` → 1（[D-43](../decisions/D-043.md)）
 - テンプレートの選択: category が無ければ `unsorted`、複数ディスク（`disc_count > 1` または
   構成トラックの `disc_no` の最大が 2 以上）なら `multi_disc`、それ以外は `single_disc`
 
-### パスの表現と境界
+## パスの表現と境界
 
 DB・API・テンプレート展開・プレイリスト出力で扱うパスはすべて **root（Library / Derived /
 Archive / Inbox / Playlists のいずれか）からの相対パス**で、次を満たす文字列だけを受け付ける。
@@ -97,16 +97,16 @@ Archive / Inbox / Playlists のいずれか）からの相対パス**で、次�
 
 ファイルを開くときは**パス文字列を結合して open しない**。root の dirfd を起点に
 `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`（`rustix`）で開く。canonicalize
-してから prefix を比較する方式は symlink の差し替え（TOCTOU）を防げない（D-31）。
+してから prefix を比較する方式は symlink の差し替え（TOCTOU）を防げない（[D-31](../decisions/D-031.md)）。
 本番は Linux 5.6+ を前提とし、`openat2` が使えなければ**起動時に失敗**する（fail-fast）。
 非 Linux の開発機では実ファイルを触る結合テストを skip し、Linux の CI で走らせる。
 `canonicalize` + prefix 比較へのフォールバックは設けない。
 
 - スキャナは symlink を**辿らない**（ディレクトリもファイルも）。見つけたら対象外として
   一覧に出す。hardlink（`nlink > 1`）は inode も md5 も同一性に使わず、`rel_path_key` だけで
-  解決して警告バッジを出す（D-26）
+  解決して警告バッジを出す（[D-26](../decisions/D-026.md)）
 - SMB / exFAT 制約に反する名前（禁止文字・末尾ドット/スペース・予約名）は**スキャナが
-  対象外にする**。したがって移行前の preflight でもブロッカーにする（§14、P0-14）
+  対象外にする**。したがって移行前の preflight でもブロッカーにする（[§14](14-deploy.md)、P0-14）
 - 書き込みの一時ファイルは**対象と同じディレクトリ**に `.spindle-tmp-<random>` で
   `O_EXCL` 作成し、fsync → rename。取り残された `.spindle-tmp-*` はスキャンが回収する
 - 外部コマンドは `sh -c` を使わず引数配列で起動する。パスは対応するツールでは `--` の後、
@@ -114,14 +114,14 @@ Archive / Inbox / Playlists のいずれか）からの相対パス**で、次�
   stdin / stdout で渡す。タイムアウト・終了コード検査・stderr のログ出力・
   プロセスグループごとの kill を必須にする（規約）
 
-### Category
+## Category
 
 - **パス決定に使う `category` と、ファイルに書く `GENRE` タグは別フィールド**
   - GENRE は多値を取り得るがパスは単一値
   - MusicBrainz 由来のジャンル文字列は表記揺れが激しい
   - ジャンルは後から変わる。パス直結だと数千ファイルが動く
 - `categories` テーブルで統制語彙として管理、`genre_category_map` で自動推定
-- **Library 直下のディレクトリ名はスキャナが自動で語彙にする**（D-92）。音声を含む album ディレクトリ
+- **Library 直下のディレクトリ名はスキャナが自動で語彙にする**（[D-92](../decisions/D-092.md)）。音声を含む album ディレクトリ
   （直下 + 1 段以上。`Anime/<albumartist>/<album>`）の親になっている直下の名前を、canonical key で語彙に
   無ければ登録し、その album の category にする。`_Unsorted`（`[layout].unsorted` の先頭）と、直下の
   ディレクトリそのもの・root 直下に置かれた曲は対象外。category が NULL のまま残っている album（語彙が
@@ -132,6 +132,3 @@ Archive / Inbox / Playlists のいずれか）からの相対パス**で、次�
   album の category はディレクトリ名 → GENRE → `genre_category_map` の順
 - 語彙にマッチしないものは `_Unsorted/` に配置し、取り込みを止めない
 - ytmusic 由来のレーベル軸カテゴリ（神椿Studio 等）も同じ語彙表に混在させてよい
-
----
-

@@ -1,4 +1,4 @@
-### 7.10 偽ハイレゾ検出（任意）
+# 7.10 偽ハイレゾ検出（任意）
 
 配信で買ったハイレゾ音源には、CD 由来の AccurateRip / CTDB のような品質の裏付けが無い
 （`verification` は `unverifiable` のまま）。44.1 kHz / 16 bit のマスターをアップサンプリング・
@@ -6,7 +6,7 @@
 アルバム直下の 16/44 が別トラックとして両方入っている。どちらを残すかの判断材料として、
 可逆かつ **`sample_rate > 48000` または `bit_depth > 16`** のトラックを解析し、結果を表示と
 絞り込みに出す。**判定を消費する自動処理は無い**（Derived・配布ビュー・RG・リネームは判定に
-依らない。D-71）。非可逆由来の可逆（44.1 kHz の FLAC が 16 kHz で切れている等）は対象外。
+依らない。[D-71](../../decisions/D-071.md)）。非可逆由来の可逆（44.1 kHz の FLAC が 16 kHz で切れている等）は対象外。
 
 ```
 hirescheck ジョブ（読むだけ。track_id + audio_version、並列 = max(1, CPU コア数 / 2)）
@@ -73,4 +73,3 @@ DSL は `hirescheck`（文字列）、`cutoff`（数値、Hz）、`cliff`（数�
 開いた FD の fstat が行と一致しない・missing なら何も書かず `Outcome::Done` で終える（flaccheck と
 同じ。API の `skipped` は投入時に対象外だった数で、ジョブの終端とは別）。次のスキャンで版が進めば
 再投入される。`record` は `WHERE audio_version = ?` で、検査中に版が進んでいれば書かない。
-

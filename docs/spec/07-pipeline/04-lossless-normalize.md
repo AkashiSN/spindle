@@ -1,6 +1,6 @@
-### 7.4 ロスレス正規化（WAV / ALAC / AIFF → FLAC）
+# 7.4 ロスレス正規化（WAV / ALAC / AIFF → FLAC）
 
-Library のロスレスは FLAC に統一する（D-45）。移行で取り込んだ ALAC も、取り込まれた WAV /
+Library のロスレスは FLAC に統一する（[D-45](../../decisions/D-045.md)）。移行で取り込んだ ALAC も、取り込まれた WAV /
 AIFF も、同じ機構で FLAC にする。
 
 ```
@@ -44,11 +44,10 @@ WAV は RIFF INFO / ID3 のどちらを使うかがソフトごとに異なり�
 Library へ戻せる: 元ファイルは Archive から Library へ**コピー**で戻し（Archive の実体は残る。
 state='restored'）、Library にあった FLAC は Archive へ move して台帳に `reason='restore'` の行を
 足す（GC の対象）。やり直し（逆バッチの revert）はその逆で、同じパスの台帳行は作り直さず `held` に
-戻す。復元元が GC 済みの op は `skipped_conflict`（D-46）。
+戻す。復元元が GC 済みの op は `skipped_conflict`（[D-46](../../decisions/D-046.md)）。
 編集履歴は revert / redo で状態が動くので GC の台帳には使わない。
 Archive の「追記のみ」の例外はこの GC だけ。
 
 PCM MD5 の一致が保証するのは**音声サンプルの同一性だけ**で、WAV の RIFF INFO /
 ID3 / 未知チャンク / コンテナのバイト列は FLAC から再生成できない。保持期間後に
-コンテナを不可逆に捨てるのは意図した決定（D-10）。
-
+コンテナを不可逆に捨てるのは意図した決定（[D-10](../../decisions/D-010.md)）。

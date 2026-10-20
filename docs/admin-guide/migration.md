@@ -1,9 +1,9 @@
 # 移行手順
 
 旧ライブラリ（`ssd/musics`）から spindle のデータセット構成へ移す手順。振り分けの判断は
-[設計判断](../decisions/README.md) D-45、旧構成の実態もそこに書いてある。
+[設計判断](../decisions/README.md) [D-45](../decisions/D-045.md)、旧構成の実態もそこに書いてある。
 **`casesensitivity` と `normalization` はデータセット作成時のみ指定可能**で後から変更できない
-ため、既存データセットの `zfs rename` による流用はしない（D-19）。
+ため、既存データセットの `zfs rename` による流用はしない（[D-19](../decisions/D-019.md)）。
 
 **運用方針**: spindle が完成するまで `ssd/musics` が正のライブラリで、日常の追加もそちらに行う。
 2026-09-16 の移行は本手順のリハーサルで、`ssd/media` / `hdd/media/Archive` / `ssd/apps/spindle` は
@@ -41,7 +41,7 @@ sudo cut -f1,2 /tmp/plan/skip.tsv | sort | uniq -c   # 移さないものの理�
 `insensitive` + `formD` では、比較キーが一致する 2 ファイルは共存できない。判定は
 「NFD 正規化 → casefold」した結果の一致で行う。ブロッカーがあれば `--plan` のリネーム案を
 **目視のうえ**実行する（中身が同一の重複ならリネームではなく削除が正しい）。symlink は
-実体に置き換え、hardlink は片方を実コピーにするか削除する（D-26）。
+実体に置き換え、hardlink は片方を実コピーにするか削除する（[D-26](../decisions/D-026.md)）。
 
 `migrate_plan.py` は `Opus/` と `Original/` の 1:1 対応を前提に、原本の形式で振り分ける
 （ALAC → Library、webm → その `.opus` が Library で webm は Archive、mp3 → Library、
@@ -110,7 +110,7 @@ sudo chown -R 1000:1000 /mnt/ssd/media /mnt/hdd/media /mnt/ssd/apps/spindle
 ```
 
 `config.toml` は `deploy/config.example.toml` を元にする。`[encode.derived.aac]` を最初から有効にして
-よい（aac は RG の解析が済んだ行から作られる。§4）。プラグインはイメージに入っていない（D-70）。
+よい（aac は RG の解析が済んだ行から作られる。§4）。プラグインはイメージに入っていない（[D-70](../decisions/D-070.md)）。
 `[ytmusic].ytdlp_args` に `["--extractor-args", "youtube:lang=ja"]` を入れる（無いと翻訳タイトルのある動画は英語の
 タイトルとチャンネル名が返り、日本語の曲名が取れない）。
 
@@ -120,7 +120,7 @@ sudo chown -R 1000:1000 /mnt/ssd/media /mnt/hdd/media /mnt/ssd/apps/spindle
 **ACL は rsync で引き継げない。** TrueNAS の SMB データセットは NFSv4 ACL を使うが、
 `rsync -A` が扱うのは POSIX ACL であり互換がない。コピー後に TrueNAS の ACL エディタで
 新データセットにプリセットを適用し直す（SMB ユーザとコンテナの `1000:1000` の両方が書ける形）。
-1 回しか使わないのでスクリプト化はしない（D-72 と同日に決定）。手順:
+1 回しか使わないのでスクリプト化はしない（[D-72](../decisions/D-072.md) と同日に決定）。手順:
 
 1. Datasets → `ssd/media` → Permissions → Edit（`hdd/media` も同じ）
 2. Owner / Group を `1000` / `1000`、Preset は **Restricted** を基点に、`owner@` と `group@` に
@@ -172,9 +172,9 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
 リリースまで `ssd/musics` は正のライブラリとして使い続ける（`readonly` は外してよい。
 `@pre-migration` スナップショットは残す）。リリース時は次の順で作り直す:
 
-0. **マイグレーションをもう一度 `0001_init.sql` へ畳む**（リリースのコミットで。D-88 追記。2026-09-26 実施済み）。D-88 の後に
+0. **マイグレーションをもう一度 `0001_init.sql` へ畳む**（リリースのコミットで。[D-88](../decisions/D-088.md) 追記。2026-09-26 実施済み）。[D-88](../decisions/D-088.md) の後に
    足した `0002`〜（2026-09-26 時点で `0002_inbox_discard` / `0003_inbox_cover` / `0004_albums_category_null_index`）を
-   `0001_init.sql` に統合し、空 DB へ流した最終スキーマが畳む前と一致すること（D-88 と同じ比べ方）を確かめる。
+   `0001_init.sql` に統合し、空 DB へ流した最終スキーマが畳む前と一致すること（[D-88](../decisions/D-088.md) と同じ比べ方）を確かめる。
    リハーサル環境の DB は版が新しすぎて開けなくなるが、次の 1 で消すので構わない。これを入れたイメージで
    最初の `vX.Y.Z` を切り、以下はそのイメージで行う。**タグを切った後は二度と畳まない**
 1. リハーサル環境を消す: spindle を止め、`ssd/media`、`hdd/media`、`ssd/apps/spindle` を
@@ -199,8 +199,8 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
       （手作業は要らない。前回は追加前に走らせたため残っていた）
    3. YouTube 画面で 9 本の再生リストを購読に登録（アルバムアーティスト / アルバム = 各 `〜のお歌`、
       category = Library の最上位ディレクトリと同じ語彙: `神椿Studio` 5 本 / `深脊界Studio` 3 本 / `Vtuber`
-      （HIMEHINA）。語彙は初回スキャンが Library 直下のディレクトリ名から自動で作るので（D-92）、
-      先に作る必要はない）し、「同期」（P4-16、D-78）。同期は先に既存の行の `TRACKNUMBER` と
+      （HIMEHINA）。語彙は初回スキャンが Library 直下のディレクトリ名から自動で作るので（[D-92](../decisions/D-092.md)）、
+      先に作る必要はない）し、「同期」（P4-16、[D-78](../decisions/D-078.md)）。同期は先に既存の行の `TRACKNUMBER` と
       ファイル名を再生リストの位置に揃え（tags バッチ → rename バッチ。Derived はタグ上書き・移動で追随）、
       `SOURCE_URL` の無いものだけを位置付きで Inbox に投入する → 承認で配置（初期値の番号がそのまま
       位置）→ 配置の後続で自動的にもう一度同期 → 結果が「番号を 0 件揃え」「揃えられない」無しで完了。
@@ -224,7 +224,7 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
       THE IDOLM@STER CINDERELLA MASTER Solo Series の `IM@S CM Solo - 034 速水奏/Hi-Res/` と
       `IM@S CM Solo - 041 大槻唯/Hi-Res/` の各 1 曲に `EDITION=Hi-Res`（一括編集で「フィールドを追加」）。
       付けないと通常版と同じパスになり、リネームのプレビューで「降格に必要な値が無い: edition」になる。
-      付ければ通常版は元の名前、Hi-Res は `… (Hi-Res)` に分かれる（D-43 追記）
+      付ければ通常版は元の名前、Hi-Res は `… (Hi-Res)` に分かれる（[D-43](../decisions/D-043.md) 追記）
       **付けた後に増分スキャンを 1 回走らせてからプレビューする**（album の edition はスキャンの最後に構成トラックの
       `EDITION` から埋まる。タグを書いただけでは album 側が NULL のままで、「同名の別リリースと衝突」が 10 件出る。
       2026-09-26 の再移行で確認）
@@ -232,7 +232,7 @@ diff <({ tr '\0' '\n' < /tmp/plan/library-original.list; tr '\0' '\n' < /tmp/pla
       変わるのは表記の違いだけ: アルバム名の `/` を旧パイプラインは `-`、spindle は `／` にする
       （`FAKE OFF - 天使と悪魔` → `FAKE OFF ／ 天使と悪魔`）、複数枚組のファイル名 `1.01.` → `1-01.`、
       `Anime/THE IDOLM@STER/<albumartist>/…` のような `[layout]` に無い中間の階層が無くなる。
-      **`_Unsorted/` 行きが 0 であること**（category は初回スキャンで直下のフォルダ名から付く。D-92）と、
+      **`_Unsorted/` 行きが 0 であること**（category は初回スキャンで直下のフォルダ名から付く。[D-92](../decisions/D-092.md)）と、
       「パスを生成できない」が 0 であることを確かめてから適用する
    3. 適用後、Derived は移動に追随し、m3u8 の書き出しは自動で書き直される。foobar2000 など外部の
       プレイヤーのライブラリはパスが変わるので読み直しが要る

@@ -76,7 +76,7 @@ TrueNAS の Apps → Discover → Custom App → **Install via YAML** に `deplo
 
 nginx（Nginx Proxy Manager など）を挟むときは、その接続元も `trusted_proxies` に入れる（実機は
 `172.16.100.20`。2026-10-15）。nginx は既定で応答を溜める（`proxy_buffering`）ので、SSE（`/api/events`）が
-届かず、右上の点が赤のまま曲が 1 件も出なくなる（画面は SSE が開いてから一覧を取る。D-36）。spindle は
+届かず、右上の点が赤のまま曲が 1 件も出なくなる（画面は SSE が開いてから一覧を取る。[D-36](../decisions/D-036.md)）。spindle は
 `/api/events` の応答に `X-Accel-Buffering: no` を付けてこれを避けている。それより古い版や、ヘッダを捨てる
 プロキシでは、プロキシ側で `proxy_buffering off;` にする
 
@@ -88,7 +88,7 @@ nginx（Nginx Proxy Manager など）を挟むときは、その接続元も `tr
 
 ## バックアップ
 
-DB（`/data/spindle.db`）は原則キャッシュで、ファイルから再構築できる（SPEC §3）。
+DB（`/data/spindle.db`）は原則キャッシュで、ファイルから再構築できる（[SPEC §3](../spec/03-principles.md)）。
 ただし **プレイリスト / 編集履歴 / 検証結果 / ジョブ履歴** は DB にしか無い。
 バックアップは任意ではない。
 
@@ -174,7 +174,7 @@ inode）が合えば続きを反映し、合わなければ `skipped_conflict` �
 id を振り直すが、元と同じ id になるとは限らない。端末の写し（Android の manifest、Mac のエージェントの
 state）は `track_id` で曲を指すので、バックアップより後に同期した端末をそのまま同期すると、
 別の曲への更新・移動になる。Mac ではミュージック.app の track の再生回数・レート・追加日が
-別の曲に移る（D-105）。
+別の曲に移る（[D-105](../decisions/D-105.md)）。
 
 だから復元したら、**同期する前に**、バックアップより後に同期した端末（普通はすべて）を引き継ぎし直す。
 端末の行を消しても、端末上のファイルとミュージック.app の track には触らない。
@@ -184,9 +184,9 @@ state）は `track_id` で曲を指すので、バックアップより後に同
    使っていた設定を入れる。送る範囲が分からなければ「全曲」にする（Library にある曲を端末から消すことが無い。
    後から絞れる）
 2. 端末タブで端末を削除し、引き継ぐ
-   - **Android**: 「前の登録の保存先（引き継げる）」から、控えた名前・形式・範囲で引き継ぐ（SPEC §7.11「引き継ぎ」）
+   - **Android**: 「前の登録の保存先（引き継げる）」から、控えた名前・形式・範囲で引き継ぐ（[SPEC §7.11](../spec/07-pipeline/11-device-delivery.md)「引き継ぎ」）
    - **Mac**: 控えた名前・形式・範囲で新しく行を作り、その pair コードで `spindle-agent pair --adopt <url> <code>`
-     を実行する（SPEC §7.11「iPhone」の「引き継ぎ」）
+     を実行する（[SPEC §7.11](../spec/07-pipeline/11-device-delivery.md)「iPhone」の「引き継ぎ」）
 3. 引き継いだ後の最初の差分（Android は端末タブの差分表、Mac は `spindle-agent sync` の表示）を、確定する前に
    確かめる。**予期しない削除があれば確定しない**（Android は同期しない、Mac は `N`）。範囲が狭すぎると、
    引き継いだ曲が削除になり、Mac ではミュージック.app の track ごと消える。範囲を直してから差分を取り直す
@@ -204,7 +204,7 @@ state）は `track_id` で曲を指すので、バックアップより後に同
 
 ## ロスレスの FLAC 化（正規化）
 
-Library の WAV / ALAC / AIFF を FLAC に置き換える（SPEC §7.4、D-45 / D-46）。移行で取り込んだ
+Library の WAV / ALAC / AIFF を FLAC に置き換える（[SPEC §7.4](../spec/07-pipeline/04-lossless-normalize.md)、[D-45](../decisions/D-045.md) / [D-46](../decisions/D-046.md)）。移行で取り込んだ
 ALAC 7,572 本が主対象。UI は未着手なので API を直接叩く。変換は `normalize` ジョブ（並列 2）が
 1 曲ずつ行い、元ファイルは `Archive/` の同じ相対パスへ退避される（`archived_files` 台帳、
 既定 7 日後に GC が回収。それまでは履歴画面の [巻き戻す] で元に戻せる）。

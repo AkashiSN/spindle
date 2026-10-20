@@ -1,4 +1,4 @@
-### 7.2 CD 取り込み
+# 7.2 CD 取り込み
 
 ```
 [ディスク検出]  CDROM_DRIVE_STATUS ioctl を 2 秒間隔ポーリング（`cd/device.rs`）
@@ -65,17 +65,17 @@
 [後続ジョブ投入] rg（album 単位。配置した album は album gain on。D-74）→ transcode(Derived) → thumbnail
 ```
 
-Inbox への配置（`src/cd/place.rs` の `place_disc`、D-67 追記、P2-5）: rip ジョブの最終段。
+Inbox への配置（`src/cd/place.rs` の `place_disc`、[D-67](../../decisions/D-067.md) 追記、P2-5）: rip ジョブの最終段。
 入力は `Toc`、吸い出しを始めたときの `DiscMetadata`（**名前は空でもよい**。`validate` は TOC との
 行の対応・日付・ディスク番号・category だけを見る。必須の検証は Inbox の承認が担う）、オフセット
 適用済みの tmp の PCM、`RipReport`。PCM を `TrackLayout` で切り、raw のまま `flac -N --verify` で
 エンコード（トラックごとの PCM の MD5 と STREAMINFO の MD5 が一致するときだけ成果物）、タグは
-下書きの写像（D-65）+ `TRACKTOTAL` / `MUSICBRAINZ_DISCID`。空のタイトルは `Track NN`、空の名前は
-タグに書かない。`category` はタグに書かず（パス専用。SPEC §5）サイドカーで渡す。
+下書きの写像（[D-65](../../decisions/D-065.md)）+ `TRACKTOTAL` / `MUSICBRAINZ_DISCID`。空のタイトルは `Track NN`、空の名前は
+タグに書かない。`category` はタグに書かず（パス専用。[SPEC §5](../05-library-layout.md)）サイドカーで渡す。
 
 - **組み立ててから公開する。** Inbox 直下の隠しディレクトリ `.spindle-rip-<DiscID>` に `NN.flac`
   （TOC の番号。名前での対応付けの鍵なので承認で変わる値を入れない）、同梱ファイル、サイドカー
-  （`category` と `rip`。§7.8）を置き、`CD/<albumartist - album> [<DiscID>]`（名前が空なら
+  （`category` と `rip`。[§7.8](08-inbox.md)）を置き、`CD/<albumartist - album> [<DiscID>]`（名前が空なら
   `CD/[<DiscID>]`。DiscID は `.` で始まり得るので括弧で包む）へディレクトリごと `RENAME_NOREPLACE`。
   走査は `.` で始まるディレクトリを見ないので、揃う前の盤が取り込みとして見えて承認されることはない。
   公開したら `inbox` ジョブを投入する。複数枚組は DiscID が違うのでディスクごとに別の取り込みになる
@@ -83,7 +83,7 @@ Inbox への配置（`src/cd/place.rs` の `place_disc`、D-67 追記、P2-5）:
   記録が同じファイル名を持てば自分の成果物（公開の後に落ちた再実行）として組み立てを飛ばす。違えば
   衝突。前の実行の組み立ての残骸は消して作り直し、公開が衝突したら組み立てたものを消す
 - `albums` / `tracks` / 検証記録の登録、パスの計画（`[layout]`）、`library` の排他、`rg` / `transcode` の
-  投入は承認後の Inbox の配置（§7.8）が行う
+  投入は承認後の Inbox の配置（[§7.8](08-inbox.md)）が行う
 
 同梱ファイルは 1 枚なら `disc.cue` /
 `disc.toc` / `rip.log`、複数枚組は `disc<N>.cue` / `disc<N>.toc` / `rip<N>.log`。`disc.cue` は
@@ -94,16 +94,16 @@ cdrdao 構文で生成、`rip.log` は先頭行 `spindle rip log v1` の自前�
 意味しないが、多発と照合の不一致が併発した）。1 回でもあれば表の下に合計と
 意味を、試行ごとの合計（`RipReport.attempt_slips`）を「試行ごとのずれ」に出す。照合が通らずずれがある取り込みは、
 Inbox の承認画面の警告にも出る（P2-5 の調査。TASKS）。スキャナはこの rip.log のあるディレクトリで新規に登録する行を
-`cd_rip` にする（DB を消しても出自が戻る。検証は §7.3 で付け直す）。
+`cd_rip` にする（DB を消しても出自が戻る。検証は [§7.3](03-retro-verify.md) で付け直す）。
 
 同梱ファイル（cover / disc.cue / disc.toc / rip.log）は album 全体の一括リネームに追随する: rename
 ジョブが phase 2 の後、commit トランザクションの中で既知の名前のファイルを新ディレクトリへ移し、空になった
-旧ディレクトリを消す（D-67。`edits` には記録せず、巻き戻しは逆向きの移動で戻る）。
+旧ディレクトリを消す（[D-67](../../decisions/D-067.md)。`edits` には記録せず、巻き戻しは逆向きの移動で戻る）。
 
 不一致時の既定動作: 自動再リップ（最大2回）→ CTDB 修復データ適用 →
 それでも不一致なら `mismatch` フラグ付きで取り込み、UI で要確認表示。
 
-CTDB の修復（`src/cd/repair.rs`、D-66）: ディスクの 16 bit 語を 11760 語ずつの行に並べ、列ごとに
+CTDB の修復（`src/cd/repair.rs`、[D-66](../../decisions/D-066.md)）: ディスクの 16 bit 語を 11760 語ずつの行に並べ、列ごとに
 GF(2^16) の Reed-Solomon 符号語とみなす（データ行は先頭 1 行と末尾 1 行 + 端数を除く。CTDB の
 ディスク CRC の範囲と同じ）。1 回目の走査でシンドローム表（`SyndromeSampler` → `SyndromeTable`。
 80 分で 3〜5 秒）を作り、エントリの `syndrome`（列 0）でオフセットを探す（`find_offset`、±2939）。
@@ -115,4 +115,3 @@ Range で先頭 npar 面だけ取る）と突き合わせ、列ごとに Berleka
 P2-5 で行う
 
 **ドライブは物理的に1台なので rip キューの並列度は 1 に固定する。**
-

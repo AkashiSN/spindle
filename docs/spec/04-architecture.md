@@ -1,4 +1,4 @@
-## 4. アーキテクチャ
+# 4. アーキテクチャ
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -27,7 +27,7 @@
 └─────────────────────────────────────────────────┘
 ```
 
-### 技術スタック
+## 技術スタック
 
 | 領域 | 選定 | 備考 |
 |---|---|---|
@@ -43,6 +43,3 @@
 | ファイル操作 | rustix | `openat2(RESOLVE_BENEATH \| RESOLVE_NO_SYMLINKS)`、dirfd 基準の open / rename |
 | フロント | React + TypeScript + TanStack Table/Virtual | |
 | 外部バイナリ | cd-paranoia, cdrdao, ffmpeg, yt-dlp, flac | コンテナイメージに同梱 |
-
----
-

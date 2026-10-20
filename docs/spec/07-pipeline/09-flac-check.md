@@ -1,4 +1,4 @@
-### 7.9 FLAC 健全性チェック（移行時 + 任意）
+# 7.9 FLAC 健全性チェック（移行時 + 任意）
 
 ```
 flac -t で検証
@@ -18,7 +18,7 @@ flac -t で検証
 MD5 補填のための書き換えでは `audio_version` を据え置く
 （音声内容が変わらないため Derived の再生成は不要）。inode と mtime は変わるので
 DB の追随は必要。補填は再エンコードではなく STREAMINFO の MD5 16 バイトだけを書き換える
-（P1-5b、D-57 / D-59）。補填は編集バッチ（`edit_ops.kind = 'md5'`、`edits.key = 'audio_md5'`、
+（P1-5b、[D-57](../../decisions/D-057.md) / [D-59](../../decisions/D-059.md)）。補填は編集バッチ（`edit_ops.kind = 'md5'`、`edits.key = 'audio_md5'`、
 値は hex で全ゼロ = 未設定。`new_value` は反映時に計算値を書く）として記録し、tagwrite ジョブが
 tmp + rename で反映する。巻き戻しは全ゼロを書き戻す（`audio_md5` は NULL、`flac_check` は
 `md5_missing` に戻る）。
@@ -27,6 +27,3 @@ tmp + rename で反映する。巻き戻しは全ゼロを書き戻す（`audio_
 `decode_error`）に検査時の `audio_version` 付きで記録する。版が進めば結果は古い扱いになり、
 `[normalize].flac_verify_on_import` ならスキャン完了時に結果の無い FLAC を自動で検査する。
 手動は `POST /api/flaccheck { selection }`。一覧の固定フィルタ `flac_unchecked` / `flac_error`。
-
----
-
