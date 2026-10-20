@@ -502,7 +502,7 @@ pub async fn put_playlists(
     }
 }
 
-/// 端末のフィールドを使うスマートプレイリストは端末に載せられない（③ 循環の禁止）
+/// 端末のフィールドを使うスマートプレイリストは端末に載せられない（SPEC §7.11「循環の禁止」）
 pub fn cycle(playlist_id: i64) -> Response {
     error_response_with_message(
         StatusCode::BAD_REQUEST,
@@ -931,7 +931,7 @@ async fn is_adoptable_store(state: &AppState, rt: &AdbRuntime, serial: &str, vol
     }
 }
 
-/// 接続中で未登録の端末と、`device` のものは保存先の候補のボリューム（仕様 ⑤「登録」1〜2）
+/// 接続中で未登録の端末と、`device` のものは保存先の候補のボリューム（SPEC §7.11 Android「登録」1〜2）
 pub async fn unregistered(State(state): State<AppState>) -> Result<Response, ApiError> {
     let Some(rt) = state.adb.clone() else {
         return Ok(adb_disabled());
@@ -1009,7 +1009,7 @@ fn not_empty(rt: &AdbRuntime, volume: &str) -> Response {
     )
 }
 
-/// adb の端末の登録（仕様 ⑤「登録」）: 接続を確かめ、保存先が空か前の登録の失敗の残りだけなら
+/// adb の端末の登録（SPEC §7.11 Android「登録」）: 接続を確かめ、保存先が空か前の登録の失敗の残りだけなら
 /// 行を作って端末に manifest を作り、差分の計算（`device_scan`）を投入する。端末の操作に失敗したら
 /// 行を残さない
 async fn create_adb(
@@ -1375,7 +1375,7 @@ enum SyncResult {
     NotFound,
 }
 
-/// 計画を確定して同期を投入する（仕様 ③「計画トークン」）。確定と投入は 1 つのトランザクション
+/// 計画を確定して同期を投入する（SPEC §7.11「計画トークン」）。確定と投入は 1 つのトランザクション
 pub async fn sync(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -1498,7 +1498,7 @@ pub struct AbandonBody {
     pub force: bool,
 }
 
-/// open な計画を破棄する（仕様 ③「計画の終端」）。端末で回復を済ませ（封印済みバッチの `vacating` 以降は
+/// open な計画を破棄する（SPEC §7.11「計画の終端」）。端末で回復を済ませ（封印済みバッチの `vacating` 以降は
 /// 前進で完遂、`prepared` 以前は破棄）、キャッシュを置き換えてから計画を閉じる。同期のジョブと
 /// 直列化するため、端末のロックを持ったまま閉じる。`force` なら端末につながない（[`force_abandon`]）
 pub async fn abandon(

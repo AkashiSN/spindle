@@ -1,4 +1,4 @@
-//! 0002_devices の性質（仕様 ②）。空 DB にマイグレーションを流して確かめる
+//! 0002_devices の性質（SPEC §6「端末への配信の表」）。空 DB にマイグレーションを流して確かめる
 
 use rusqlite::{params, Connection};
 use spindle::db::jobs::JobType;

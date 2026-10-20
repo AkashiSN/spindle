@@ -1,4 +1,4 @@
-//! 端末の root 配下の操作（仕様 ⑤）。本物は `AdbFs`（後続タスク）、テストは偽の端末 FS。
+//! 端末の root 配下の操作（SPEC §7.11 Android）。本物は `AdbFs`（後続タスク）、テストは偽の端末 FS。
 //! パスはすべて root 相対で、呼び出し側が `RelPath` として検証したもの
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

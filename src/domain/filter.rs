@@ -51,7 +51,7 @@ pub struct Filter {
     /// 検索語。`FTS_MIN_CHARS` 以上なら FTS5 trigram、未満なら LIKE
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
-    /// 端末に未反映（端末 id。追加・更新・移動。④ C）
+    /// 端末に未反映（端末 id。追加・更新・移動。D-95 の可視化 C）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_pending: Option<i64>,
     /// `device_pending` と DSL の端末フィールドを引く集合。JSON には出さず、API が

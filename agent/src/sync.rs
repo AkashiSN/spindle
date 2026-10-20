@@ -1,4 +1,4 @@
-//! `sync` の段取り（仕様 ⑥「回復の順序」、D-100 判断 5）と `pair` / `resolve` / `abandon` / `status`。
+//! `sync` の段取り（SPEC §7.11 iPhone「回復の順序」、D-100 判断 5）と `pair` / `resolve` / `abandon` / `status`。
 //! 各コマンドは `<state_dir>/lock` を取り、state.json を読んで `Ctx` を作ってからエンジンを呼ぶ
 
 use std::ffi::{OsStr, OsString};

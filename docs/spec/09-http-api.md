@@ -198,7 +198,7 @@ GET    /api/cd/status                             { state: unknown | no_drive | 
                                                   （型番はディスクが無くても読む。D-83 追記 2）}
                                                   （P2-1。ポーラの状態で、ドライブは叩かない。TOC は下の lookup に渡す
                                                   文字列と同じ形。ドライブ未配線なら 503 cd_unavailable）
-POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?, catno?, barcode?, refresh? }。TOC 文字列（CTDB 形式 0:13915:…:leadout か
+POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?, catno?, barcode?, refresh?, widen? }。TOC 文字列（CTDB 形式 0:13915:…:leadout か
                                                   MusicBrainz 形式 1 12 leadout+150 offset+150…）から各種 DiscID を出し、
                                                   MusicBrainz に照会（P2-3、D-21 / D-64）。isrcs / mcn は status が読んだもの
                                                   （null は捨てる）、release は貼ったリリース URL か MBID。catno / barcode は
@@ -208,8 +208,10 @@ POST   /api/cd/lookup                             { toc, isrcs?, mcn?, release?,
                                                   matched_by: [catno | discid | release | isrc | barcode | toc] を強い順に持ち、その順に並ぶ。
                                                   media: [{ position, format, track_count }]（リリース全体の収録構成）],
                                                   notes: [候補に入れられなかった理由], tracks: [{ number, length_ms }]（TOC の
-                                                  音声トラック。手入力フォームの行。D-65）}。同じ入力の照会結果は
-                                                  10 分覚えていて MusicBrainz を引き直さない（D-64 追記 3）。
+                                                  音声トラック。手入力フォームの行。D-65）, stage: discid | ids | toc（止まった段）, can_widen（stage が ids の
+                                                  ときだけ真）}。widen: true は段を打ち切らずに TOC 近似まで引く（discid で
+                                                  止まったときは無視。§7.2、D-64 追記 4）。同じ入力の照会結果は
+                                                  10 分覚えていて MusicBrainz を引き直さない（D-64 追記 3。widen は鍵に入る）。
                                                   refresh: true で捨てて引き直す（画面の「MusicBrainz に照会」）。
                                                   400 bad_request（TOC・ISRC・MCN・品番・JAN の形）、502 lookup_failed（届かない・応答が壊れている）、
                                                   503 musicbrainz_unavailable（再試行しても 503 の負荷制限、または未構成）
@@ -221,7 +223,10 @@ POST   /api/cd/library                            { toc, release_id? }。いま�
                                                   （AlbumRef = { album_id, rel_dir, album, albumartist }。複数あれば id の
                                                   小さいもの。disc が当たれば release は引かない）。400 bad_request（TOC）
 GET    /api/cd/cover/{release_id}                 候補のジャケット。Cover Art Archive の front（500px）の中継（D-82）。
-                                                  画像の無い盤は 404、上流の失敗は 502 lookup_failed、未構成は 503 coverart_unavailable
+                                                  画像の無い盤は 404、上流の失敗は 502 lookup_failed、未構成は 503 coverart_unavailable。
+                                                  release_id が MBID（8-4-4-4-12）でなければ 400。200 は上流の image/* をそのまま
+                                                  `Cache-Control: private, max-age=600` と `X-Content-Type-Options: nosniff` 付きで返す
+                                                  （サーバ側のキャッシュは無い）
 GET    /api/cd/release-group/{id}/releases        リリースグループの版（D-93）。MusicBrainz の browse
                                                   （ws/2/release?release-group=…&inc=media+labels、先頭 100 件）→ 200 { releases:
                                                   [{ release_id, title, disambiguation, date, country, status, formats: [媒体の形式],
@@ -250,10 +255,16 @@ GET    /api/logs?kind=all|retro|rip&album_id=&limit=&cursor=
                                                   1..=200・省略 50、`cursor` は不透明（offset）。実行は照合なら
                                                   (album_id, source, job_id)、`job_id` が無い吸い出しなら (album_id, source,
                                                   verified_at) でまとめ、key は `retro-<album>-j<job>` / `rip-<album>-t<verified_at>`。
-                                                  `log` は latest | superseded | none（照合ログは album ごとに最新 1 回分）
-GET    /api/logs/{key}/text?disc=N                ログ本文（text/plain）。root の dirfd から O_NONBLOCK で開き、通常ファイル以外
+                                                  `log` は latest | superseded | none（照合ログは album ごとに最新 1 回分）。
+                                                  各項目は { key, album_id, albumartist, album, source, job_id, verified_at（まとめた中の最大）,
+                                                  discs: [{ disc_no, method, result }]（手法 × ディスクの内訳）, log }。不正な kind は 400
+GET    /api/logs/{key}/text?disc=N                ログ本文（text/plain; charset=utf-8。UTF-8 でなければ置換文字）。照合は
+                                                  `[paths].data/verify/<album_id>.log`（`superseded` は 404）、吸い出しは
+                                                  その album・disc の active な曲の親ディレクトリ + `log_path` のファイル名
+                                                  （`rip.log` / `rip<N>.log` 以外は 404。disc 省略は最初のディスク）。
+                                                  root の dirfd から O_NONBLOCK で開き、通常ファイル以外
                                                   （ディレクトリ・FIFO）と ENOTDIR は 404 `log_not_found`、1 MiB 超は 413
-                                                  `log_too_large`、key が不正なら 400、`data/verify` を開けなければ 503
+                                                  `log_too_large`、key が不正なら 400、`data/verify`（吸い出しは Library）を開けなければ 503
                                                   `logs_unavailable`（D-106）
 POST   /api/scan                                  {"kind": "incremental" | "deep"}。scan ジョブを投入
 GET    /api/gc/preview                            GC の dry-run（区分ごとの件数・バイト数・先頭 50 件、`jobs: { done, failed }` は掃除するジョブ行の数、`plans` は消す終端した計画の数。何も消さない。D-56、D-102）
@@ -265,16 +276,23 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   subscriptions: [{ id, album, synced_at, moved, renamed, tags_batch_id,
                                                   rename_batch_id }] }   # P4-18 / P4-19 / P4-22 / D-90
                                                   （§7.8、D-68。destination と source は D-70: source は spindle-inbox.json の
-                                                  項 { source, url, channel, verdict, message, subscription_id?, position? } | null。
+                                                  項 { source, url, channel, verdict, message, subscription_id?, position?, item?, plugin_version?,
+                                                  judged_at?, plugin_tags?, rejudge_error? } | null。item 以降は再判定の記録（§7.7、D-114）。
                                                   destination.numbers は宛先の既存の番号 [[disc, track], …]（昇順）。subscriptions は
                                                   取り込みのトラックが参照する購読の直近の同期の要約（last_result の align から。1 回で読む））
                                                   承認済み（approved / placing / placed）の件には stages: [{ key, label, status: done | running |
-                                                  todo | na, done, total }]（配置 → RG → 系統 → 端末の段。§12.6、P5-2）
+                                                  todo | na, done, total }]（配置 → RG → 系統 → 端末の段。§12.6、P5-2）。
+                                                  rip は CD の件の照会の材料 { toc, isrcs, mcn } | null（P4-21）、rip_files は件のディレクトリに
+                                                  ある吸い出しのテキストの名前（`rip*.log` / `disc*.cue` / `disc*.toc`。D-106）
 GET    /api/inbox/:id/files/:name                 取り込みの吸い出しファイル本文（`rip*.log` / `disc*.cue` / `disc*.toc` だけ。
-                                                  `GET /api/inbox` の各項目の `rip_files` が名前の一覧。D-106）
+                                                  `GET /api/inbox` の各項目の `rip_files` が名前の一覧。D-106）。Inbox の root の dirfd から
+                                                  件の `rel_dir` を `openat2` で辿る。許可外の名前・件が無い・ファイルが無いは 404
+                                                  `log_not_found`、1 MiB 超は 413 `log_too_large`（ログ本文と同じ）
 GET    /api/inbox/:id/artwork/:hash               取り込みのファイルの埋め込み画像（PICTURE の sha256 で実体を照合してから ETag / 304。
                                                   原寸、MIME は sniff、immutable。取り込みに無い / 実体消失 / 不一致は 404。状態非依存。
                                                   セッション必須。§7.8、P4-4）
+GET    /api/inbox/summary                         上部バーのバッジ用 { pending, failed }（状態ごとの件数の固定 SQL だけ。一覧は読まない。
+                                                  `[paths].inbox` が無ければ 503 `inbox_unavailable`。§12.1、スマホ版の購読タブ §12.7）
 POST   /api/inbox/scan                            inbox ジョブを投入（202 + job_id。queued / running があれば 409 duplicate）
 POST   /api/inbox/:id/approve                     { category, albumartist, album, date, album_gain?, tracks: [{ rel_path, disc_no,
                                                   track_no, title, artist, keep_artists?, tags?, picture? }] }。検証に通らなければ 400、pending / failed 以外は 409 → approved +
@@ -465,7 +483,8 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
 // DELETE /api/jobs?state=failed → 200 { "deleted": N }。state=failed 以外は 400 { "error": "invalid_state" }
 
 // SSE /api/events   event 種別: job | batch | library | resync | device_progress
-//   job:     { "id", "state", "progress", "done", "total" }
+//   job:     { "id", "state", "progress", "done", "total", "detail"? }
+//            detail は種別ごとの進捗の詳細（SSE にだけ流し DB には書かない。rip は RipProgress。§7.2）
 //   batch:   { "id", "state", "applied", "conflict", "failed" }
 //   library: { "scan_run_id", "kind": "ids", "track_ids": [ … ] }   // 変更が 200 行以下
 //            { "scan_run_id", "kind": "bulk" }                     // それ以上。ページを無効化

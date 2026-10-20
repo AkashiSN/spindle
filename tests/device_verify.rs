@@ -1,4 +1,4 @@
-//! 内容の検証（仕様 ⑤「内容の検証」）
+//! 内容の検証（SPEC §7.11 Android「内容の検証」）
 
 mod device_support;
 

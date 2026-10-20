@@ -1,5 +1,5 @@
 //! spindle-agent: spindle の端末（iPhone）の写しを Mac のミュージック.app へ反映する
-//! （docs/superpowers/specs/2026-09-29-device-delivery-design.md ⑥、D-95・D-99・D-100）。
+//! （SPEC §7.11「iPhone（Mac の spindle-agent）」、D-95・D-99・D-100）。
 //! 外界は `Music`（ミュージック.app）・`Server`（spindle の `/api/agent/*`）・`Secrets`（トークン）の
 //! trait に閉じ込め、ローカルの root と state.json は本物のファイルシステムで扱う
 

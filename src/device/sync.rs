@@ -1,4 +1,4 @@
-//! 保存した計画の実行（`device_sync` ジョブの本体。仕様 ⑤「同期」）。
+//! 保存した計画の実行（`device_sync` ジョブの本体。SPEC §7.11 Android「同期」）。
 //! 呼び出し側は先に回復（`recover`）し、その結果で差分を取り直して計画の部分集合（`plan::runnable`）を
 //! 作ってから渡す。順序は 削除 → パス変更のバッチ → 更新 → 追加 → プレイリスト（先に空きを作る）。
 //! 各操作は意図を耐久化してから副作用を起こす。`vacating` より前の書き込みの直前にキャンセルと
@@ -65,7 +65,7 @@ pub struct SourceEntry {
     pub hash: SourceHash,
 }
 
-/// Library / Derived の root から `openat2` で開く送る元（仕様 ③「配信時の照合」）
+/// Library / Derived の root から `openat2` で開く送る元（SPEC §7.11「配信時の照合」）
 pub struct RootSources {
     library: Arc<RootDir>,
     derived: Arc<RootDir>,
@@ -768,7 +768,7 @@ impl<F: DeviceFs, S: Sources, C: Control> Exec<'_, F, S, C> {
         Ok(())
     }
 
-    /// パス変更を 1 つのバッチで進める（仕様 ⑤「パス変更は大域的な 2 段」）。
+    /// パス変更を 1 つのバッチで進める（SPEC §7.11 Android「パス変更は大域的な 2 段」）。
     /// 記録 → prepared（更新 + 移動の新しい内容を `new` へ）→ vacating → vacated → placing → done。
     /// 行き先を管理外のファイルが占めるメンバーは、封印の前にその成分ごと外す（上書きしない）。
     /// 準備で失敗したメンバーがいれば、その曲を含む成分を全員外し、旧バッチを `batch_abort`

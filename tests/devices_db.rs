@@ -1,4 +1,4 @@
-//! 端末配信の DB 層（仕様 ②③）。`:memory:` に全マイグレーションを流して確かめる
+//! 端末配信の DB 層（SPEC §6「端末への配信の表」③）。`:memory:` に全マイグレーションを流して確かめる
 
 use rusqlite::{params, Connection};
 use spindle::config::{DerivedConfig, OpusVariantConfig};
@@ -391,7 +391,7 @@ fn materialize_rolls_back_evaluated_at_when_item_rewrite_fails() {
     );
 }
 
-/// 仕様 ③「送る元のハッシュ」: ハッシュ行の identity が `tracks` の現在の物理同一性
+/// SPEC §7.11「送る元のハッシュ」: ハッシュ行の identity が `tracks` の現在の物理同一性
 /// (inode, size, mtime_ns, ctime_ns。dev は見ない。D-62) とずれていれば、外部がファイルを
 /// 書き換えた可能性があるので使わず、再ハッシュを要求する
 #[test]

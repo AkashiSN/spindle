@@ -95,7 +95,7 @@ export function volumeLabel(v: AdbVolume): string {
   return v.volume === 'emulated' ? '内部共有ストレージ' : `SD カード（${v.volume}）`
 }
 
-/** 通常の登録先にできるか（空か存在しないときだけ。仕様 ⑤「登録」4） */
+/** 通常の登録先にできるか（空か存在しないときだけ。SPEC §7.11 Android「登録」4） */
 export function volumeUsable(v: AdbVolume): boolean {
   return v.state === 'missing' || v.state === 'empty'
 }

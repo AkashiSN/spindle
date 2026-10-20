@@ -1,4 +1,4 @@
-//! 端末側の正本の読み書きと耐久化の順序（仕様 ⑤「耐久化の順序」）。
+//! 端末側の正本の読み書きと耐久化の順序（SPEC §7.11 Android「耐久化の順序」）。
 //! - ジャーナルの追記: 追記 → `sync`。意図の `sync` が返ってから副作用を起こす
 //! - ファイルの置き換え: 同じディレクトリの tmp に書く → `sync` → `mv -f` → `sync`
 //! - 圧縮: manifest を書き直して確定させてから、ジャーナルを空にする（逆だと回復できない）
@@ -103,7 +103,7 @@ pub async fn compact<F: DeviceFs>(fs: &F, m: &DeviceManifest) -> Result<(), Stor
     Ok(())
 }
 
-/// 登録（仕様 ⑤「登録」4）: root が空か存在しないときだけ manifest を作る
+/// 登録（SPEC §7.11 Android「登録」4）: root が空か存在しないときだけ manifest を作る
 pub async fn initialize<F: DeviceFs>(
     fs: &F,
     device_uuid: &str,

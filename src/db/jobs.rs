@@ -1039,7 +1039,7 @@ pub fn mark_failed_fatally(conn: &Connection, id: i64, error: &str, now: i64) ->
     Ok(changed > 0)
 }
 
-/// 端末が繋がったとき、待機中の同期と検証を前倒しする（仕様 ⑤「同期」: 未接続で 300 秒後に置いたものを
+/// 端末が繋がったとき、待機中の同期と検証を前倒しする（SPEC §7.11 Android「同期」: 未接続で 300 秒後に置いたものを
 /// `track-devices` が接続を見たら `run_after = now` にする）。変えたジョブの id を返す
 pub fn wake_device_jobs(conn: &Connection, device_id: i64, now: i64) -> Result<Vec<i64>> {
     let mut st = conn.prepare(

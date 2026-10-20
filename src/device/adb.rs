@@ -1,4 +1,4 @@
-//! adb による [`DeviceFs`]（仕様 ⑤「接続の構成」）。`adb -s <serial> shell <script>` を引数配列で
+//! adb による [`DeviceFs`]（SPEC §7.11 Android「接続の構成」）。`adb -s <serial> shell <script>` を引数配列で
 //! 呼ぶ（ローカルでは `sh -c` を使わない）。端末側のスクリプトに埋め込むパスは `sh_quote` だけを通す。
 //! サブコマンドは shell v2 の `shell` だけ: pty を割り当てない限り stdin / stdout がバイナリ安全で、
 //! 終了コードも返る（`exec-in` / `exec-out` は終了コードを返さない。D-95 の P5-3a 追記）。
@@ -231,7 +231,7 @@ fn base_command(cfg: &AdbConfig, serial: &str, timeout: Duration) -> ExternalCom
         .timeout(timeout)
 }
 
-/// 登録の候補になるボリューム（仕様 ⑤「登録」2）
+/// 登録の候補になるボリューム（SPEC §7.11 Android「登録」2）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeInfo {
     /// `emulated` か SD の UUID

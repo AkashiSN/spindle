@@ -1,5 +1,5 @@
 //! `pair --adopt`: サーバの DB 全損のあと、この Mac の保存先を新しい登録へ引き継ぐ
-//! （docs/superpowers/specs/2026-10-13-p5-8-agent-adopt-design.md 2）。
+//! （SPEC §7.11「iPhone」の「引き継ぎ」、D-104）。
 //! pair で行の uuid を前の登録へ差し替え、`adopt_pending` を保存してから `adopt` で id を付け替える。
 //! その間で落ちたら、次の `sync`（または `pair --adopt` のやり直し）が `finish` で続きを行う。
 //! 付け替えで外れた曲・プレイリストは state から外すだけで、ファイルもミュージック.app の項目も消さない

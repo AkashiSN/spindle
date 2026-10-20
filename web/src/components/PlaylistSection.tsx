@@ -53,7 +53,7 @@ export function PlaylistSection({
   /** 直近の操作結果（App が持つ。追加・除外は表側からも起きる） */
   notice: string | null
   onNotice: (text: string | null) => void
-  /** 端末の一覧（チップと「端末へ送る」。仕様 ④ 選曲の近道） */
+  /** 端末の一覧（チップと「端末へ送る」。SPEC §12.6「端末」の選曲の近道） */
   devices: Device[]
   /** 「端末へ送る」の印を付け外しする（結果は App が notice に出す） */
   onToggleDevice: (device: Device, playlistId: number) => void

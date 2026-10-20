@@ -29,7 +29,7 @@
 | 外部メタデータ | MusicBrainz だけ。候補から写す範囲は選べる（CD 画面の既定は「全部写す」。[D-72](../decisions/D-072.md) 追記 2）。Discogs / VGMdb は作らない | 表記揺れが激しく値は結局手で直す。外部の価値は盤の識別（[D-72](../decisions/D-072.md)） |
 | `.fpl` | 非対応（確定） | .m3u8 とクエリ文字列で足りる。非公開バイナリで 1.x / 2.x が違う（[D-72](../decisions/D-072.md)） |
 | album gain | album ごとの属性（既定 off、CD 取り込みは on、承認画面で選ぶ）。RG の一致判定は完全一致のまま | 育つコレクションに曲を足すたびに全曲の再解析と書き換えになる。運用はシャッフルが主（[D-74](../decisions/D-074.md)） |
-| ACL の再適用 | 移行後に TrueNAS の ACL エディタで手動（[移行手順](../admin-guide/migration.md) [§2](02-glossary.md) のチェックリスト） | rsync は NFSv4 ACL を引き継げない。1 回しか使わないのでスクリプト化しない |
+| ACL の再適用 | 移行後に TrueNAS の ACL エディタで手動（[移行手順](../admin-guide/migration.md) §2 のチェックリスト） | rsync は NFSv4 ACL を引き継げない。1 回しか使わないのでスクリプト化しない |
 | 端末への配信 | spindle の管轄に入れる。Android は ADB 直結（host ネットワークの adb サイドカーが Unix ソケットで待ち受ける）、iPhone は Mac の `spindle-agent` がミュージック.app を中継し Finder 同期に任せる。端末ごとのマニフェストを毎回計算し、差分を確かめて確定した計画だけを実行する（自動では送らない）。端末の写しは Library から再生成できる複製なので物理削除と `edit_batches` の対象外を明示の例外にする（[§7.11](07-pipeline/11-device-delivery.md)、[D-95](../decisions/D-095.md) / [D-98](../decisions/D-098.md)〜[D-101](../decisions/D-101.md)） | 端末に何が入っていて何が古いかが spindle から見えなかった。Linux から純正ミュージックへ直接書く手段が無い。配信ツリーの実体化は Derived と同量をもう一度持つ。差分の確認はユーザが選んだ |
 
 ## 残課題
@@ -43,7 +43,7 @@
 - [x] `HAS` 等の演算子の foobar 実機との挙動突き合わせ（2026-09-19。部分一致で一致。[D-55](../decisions/D-055.md)）
 - [x] 偽ハイレゾ検出のしきい値設計（2026-09-20。カットオフ ≤ 25 kHz かつ（崖 ≥ 10 dB または ≤ 22.5 kHz）/ 実効 ≤ 16 bit。
       実機 124 本で較正。計測値も保存。[§7.10](07-pipeline/10-fake-hires.md)、[D-71](../decisions/D-071.md)）
-- [x] 移行後の NFSv4 ACL 再適用（2026-09-20。UI で手動。[移行手順](../admin-guide/migration.md) [§2](02-glossary.md) のチェックリスト）
+- [x] 移行後の NFSv4 ACL 再適用（2026-09-20。UI で手動。[移行手順](../admin-guide/migration.md) §2 のチェックリスト）
 - [x] CPU 系ジョブ（rg / transcode / flaccheck / hirescheck）に共通の並列予算（2026-09-20。共通 Semaphore =
       コア数を P4 で実装。[D-73](../decisions/D-073.md)）
 - [x] Inbox のポーリング間隔（2026-09-19。`[inbox].poll_interval_secs` 既定 60 秒 + 手動。[D-68](../decisions/D-068.md)）

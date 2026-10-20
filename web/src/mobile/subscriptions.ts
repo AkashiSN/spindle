@@ -1,5 +1,5 @@
 // スマホ版の購読タブの純粋ロジック: 同期の相（ダウンロードが全部終わるまで running）、件数、カードの 1 行、
-// 曲ごとの行。「完了」は投入した ytdl がすべて終わった時点（設計書「購読」）
+// 曲ごとの行。「完了」は投入した ytdl がすべて終わった時点（SPEC §12.7「購読」、D-115）
 
 import type { Job, Subscription, SyncResult, UnavailableKind } from '../api/types'
 import { noteHeadline } from '../lib/jobs'

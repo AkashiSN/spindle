@@ -1,4 +1,4 @@
-// ライブラリの左サイドバーのプレイリストの行から、端末の選曲（device_playlists）を触る（仕様 ④「選曲の近道」）
+// ライブラリの左サイドバーのプレイリストの行から、端末の選曲（device_playlists）を触る（SPEC §12.6「端末」「選曲の近道」）
 
 import type { Device } from '../api/types'
 

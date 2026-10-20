@@ -1,4 +1,4 @@
-//! 回復（仕様 ⑥「回復」、D-100）。前回の実行が途中で止まった `pending_ops` を先頭から 1 件ずつ片付ける。
+//! 回復（SPEC §7.11 iPhone「回復」、D-100）。前回の実行が途中で止まった `pending_ops` を先頭から 1 件ずつ片付ける。
 //! 片付けと pending からの除去は 1 回の保存で行う。ここで扱うのは曲の追加・更新・削除とプレイリスト
 //! （パス変更のバッチは先に `batch::recover_batches` が片付ける）
 
@@ -20,7 +20,7 @@ use crate::state::{Candidate, OpPhase, PendingKind, PendingOp};
 use crate::{Error, Result};
 
 pub fn recover<M: Music, S: Server>(cx: &mut Ctx<'_, M, S>) -> Result<()> {
-    // バッチの途中は track の location が `.moving/` を指すので、先に片付ける（仕様 ⑥「回復の順序」）
+    // バッチの途中は track の location が `.moving/` を指すので、先に片付ける（SPEC §7.11 iPhone「回復の順序」）
     crate::batch::recover_batches(cx)?;
     remove_orphaned_moving(cx)?;
     let ops = cx.state.pending_ops.clone();

@@ -1,4 +1,4 @@
-//! 確定した計画と再開（仕様 ③「開始済みの計画の再開」）
+//! 確定した計画と再開（SPEC §7.11「開始済みの計画の再開」）
 
 use spindle::device::plan::*;
 use spindle::domain::device::*;

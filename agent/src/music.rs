@@ -1,4 +1,4 @@
-//! ミュージック.app の操作（仕様 ⑥）。本物は `osascript` で JXA を実行する（P5-4c）。
+//! ミュージック.app の操作（SPEC §7.11 iPhone）。本物は `osascript` で JXA を実行する（P5-4c）。
 //! 実装の契約: 外部プロセスはタイムアウトと終了コードの検査を伴い、stderr をログに出す。
 //! 名前の比較は `canonical_key`。persistent ID は 16 進の文字列で扱う
 

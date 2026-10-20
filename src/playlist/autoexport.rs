@@ -162,7 +162,7 @@ fn triggers(ev: &Event) -> bool {
 
 /// 端末の差分に「評価待ち」を出す合図になるイベント（[`triggers`] の部分集合）。
 /// 端末の選曲に載るプレイリストは端末のフィールド（`on_device` / `device_pending`）を使えない
-/// （③ 循環の禁止）ので、端末の状態だけを変えるジョブ（`source_hash`）や、ルールが引く値を変えない
+/// （SPEC §7.11「循環の禁止」）ので、端末の状態だけを変えるジョブ（`source_hash`）や、ルールが引く値を変えない
 /// ジョブ（`thumbnail`）の完了では立てない。再評価そのもの（[`triggers`]）はこれまでどおり走る
 /// （`device_pending` を使うプレイリストは source_hash の完了で結果が変わる）
 fn marks_reevaluation(ev: &Event) -> bool {
@@ -183,7 +183,7 @@ fn marks_reevaluation(ev: &Event) -> bool {
     }
 }
 
-/// スマートプレイリストの再評価待ち（仕様 ③「評価待ち」）。D-54 の常駐タスクは全件をまとめて評価するので
+/// スマートプレイリストの再評価待ち（SPEC §7.11「評価待ち」）。D-54 の常駐タスクは全件をまとめて評価するので
 /// 1 ビットで持つ。永続化しない（起動時は dirty から始める）
 #[derive(Debug, Default)]
 pub struct ReevalFlag(std::sync::atomic::AtomicBool);

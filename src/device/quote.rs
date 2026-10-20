@@ -1,4 +1,4 @@
-//! 端末側のシェルへ渡す文字列の検査とクォート（仕様 ⑤「接続の構成」）。
+//! 端末側のシェルへ渡す文字列の検査とクォート（SPEC §7.11 Android「接続の構成」）。
 //! 端末側に渡すパス・root は必ず [`sh_quote`] を通す（クォートはここ 1 か所だけで行う）
 
 use crate::domain::relpath::RelPath;
@@ -40,7 +40,7 @@ pub fn valid_serial(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
 }
 
-/// 登録で使う root（ボリューム内の相対パス。仕様 ⑤「登録」2）
+/// 登録で使う root（ボリューム内の相対パス。SPEC §7.11 Android「登録」2）
 pub const DEFAULT_ROOT: &str = "Music/spindle";
 
 /// 内部共有ストレージを表すボリューム名
