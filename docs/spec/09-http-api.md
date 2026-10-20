@@ -517,7 +517,7 @@ POST   /api/history/:batch/cancel                 反映中バッチのキャン
   "generation": 5,
   "connected": true,             // adb: 監視が見た状態が device か（adb 無効なら false）。agent は null
   "adb_state": "device",         // adb の生の状態（unauthorized / offline …）。見えていない・agent は null
-  "adb_volume": "E1C6-6113", "adb_root": "Music/spindle",   // agent は null
+  "adb_volume": "1A2B-3C4D", "adb_root": "Music/spindle",   // agent は null
   "counts": { "add": 3, "update": 0, "move": 1, "delete": 0, "waiting": 12, "error": 0, "synced": 210 },
                                  // 曲ごとの状態の件数。更新 + 移動は move に数える。ナビの黄色い件数は
                                  // add + update + move + delete + error の全端末の合計（待ちは含めない）
