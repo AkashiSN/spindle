@@ -1,0 +1,143 @@
+## 13. 設定
+
+```toml
+[server]
+listen = "0.0.0.0:8080"         # 待ち受けアドレス。省略時はこの値。ポート公開は compose 側で行う
+
+[paths]
+library   = "/library"
+derived   = "/derived"
+archive   = "/archive"
+inbox     = "/inbox"
+playlists = "/playlists"
+data      = "/data"
+
+[layout]
+multi_disc  = "{category}/{albumartist}/{album}/{disc}-{track:02}. {title}"
+single_disc = "{category}/{albumartist}/{album}/{track:02}. {title}"
+unsorted    = "_Unsorted/{albumartist}/{album}/{track:02}. {title}"
+
+[rip]
+device = "/dev/sr0"
+drive_offset = "auto"           # auto | 整数
+retry_on_mismatch = 2
+prefer_ctdb = true
+
+[encode]
+flac_compression = 8
+
+[encode.derived.opus]          # Derived の opus 系統（§7.6、D-75）。Android の同期・Web 再生・配布ビュー
+enabled = true
+bitrate = 256                  # opusenc --vbr --music --bitrate（D-9 追記）
+
+[encode.derived.aac]           # Derived の aac 系統（§7.6、D-75）。Mac のミュージック.app へ取り込む Apple 向け
+enabled = true                 # 節を省略すると false（RG 全件解析 → 有効化の順序のため）
+bitrate = 256                  # ffmpeg -c:a aac -b:a
+lossy_sources = true           # 非可逆原本も AAC へ（D-8 の例外。aac 原本も再エンコード）
+multi_value_separator = " & "  # 多値フィールドの結合
+
+[replaygain]
+reference_lufs = -18.0          # 内部表現。Opus のみ書き出し時に -23 へ変換
+write_tags = true
+
+[normalize]
+wav_to_flac = true
+flac_verify_on_import = true
+flac_fix_missing_md5 = true
+flac_recompress_all = false     # 圧縮レベル統一のための一括再エンコードはしない
+
+[scan]
+deep_interval_days = 30         # tag_hash / audio_md5 を全件再計算する deep scan の間隔。0 で自動実行なし
+
+[inbox]
+poll_interval_secs = 60         # Inbox の確認間隔（秒。変化があったときだけ走査を投入）。0 で自動なし（UI の「今すぐ確認」だけ）
+
+[gc]
+retention_days = 7              # missing_since / 退避 WAV / Derived 孤児 / 却下して削除した Inbox の取り込みを物理削除するまでの日数（終端した同期の計画の回収にも使う）
+jobs_done_days = 7              # 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない
+jobs_failed_days = 30           # failed のジョブ行を消すまでの日数。0 で消さない
+
+[auth]                          # 認証は常に有効（無効化する設定は無い）
+                                # 初期パスワードは環境変数 SPINDLE_INITIAL_PASSWORD（初回起動時のみ）
+session_days = 30
+trusted_cidrs = []              # 例: ["192.168.1.0/24"]。stream / artwork / tracks/:id / playlist export だけ認証スキップ
+trusted_proxies = []            # ここからの X-Forwarded-* だけを信用する
+
+[backup]
+interval_hours = 24
+retention_generations = 14
+
+[export]
+autoexport_debounce_sec = 30
+fb2k_prefix = "\\\\TRUENAS\\music\\"
+
+[musicbrainz]
+user_agent = "spindle/0.1 (contact@example.com)"
+rate_limit_per_sec = 1
+url = "https://musicbrainz.org/ws/2/"   # 省略可。テストと自前ミラー用
+address_family = "auto"                 # auto | ipv6 | ipv4。片方の経路が塞がれている環境で選ぶ
+cover_art_url = "https://coverartarchive.org/"   # 省略可。候補のジャケット（D-82）
+
+[verify]                       # 遡及照合 / リップ検証の照会先。UA は musicbrainz.user_agent を共用
+accuraterip_url = "http://www.accuraterip.com/accuraterip/"
+ctdb_url = "http://db.cuetools.net/lookup2.php"
+
+[ytmusic]
+enabled = true
+metadata_command = ["/usr/local/bin/spindle-ytmusic-meta", "metadata"]   # メタデータプラグイン（D-69）。引数配列
+metadata_timeout_secs = 30
+download_timeout_secs = 900    # yt-dlp のダウンロード 1 件の上限（D-70）
+# yt-dlp に毎回付ける追加引数（省略時は無し）。UA / Referer は付けない。
+# youtube:lang=ja: 言語を指定しないと、投稿者が翻訳タイトルを付けた動画は英語のタイトルが返り、日本語の曲名が
+# 取れない（メタデータプラグインのルールにも合わない）。チャンネル名も言語で変わる
+ytdlp_args = ["--extractor-args", "youtube:lang=ja"]
+# YouTube に弾かれるときは extractor-args を足す（同じキーは ; で並べる）か cookies を渡す
+# ytdlp_args = ["--extractor-args", "youtube:lang=ja;player_client=web_safari"]
+# ytdlp_args = ["--extractor-args", "youtube:lang=ja", "--cookies", "/data/cookies.txt"]
+sync_interval_hours = 0        # 再生リストの購読を定期同期する間隔（時間）。0 = 手動と承認の後続だけ（D-78）
+
+[hires]                        # 偽ハイレゾ検出（D-71）
+check_on_import = true         # スキャン完了時に未検査の対象（可逆かつ >48 kHz または >16 bit）を自動投入
+cutoff_hz = 25000              # カットオフがこれ以下なら「上げただけ」の疑い（44.1k の 22.05 kHz と 48k の 24 kHz を余裕込みで拾う）
+cliff_db = 10.0                # カットオフ前後 1 kHz の落差がこれ以上なら SRC の崖とみなす（実 SRC は 12〜21 dB）
+hard_cutoff_hz = 22500         # カットオフがこれ以下なら崖に関わらず「上げただけ」（44.1k の Nyquist + 余裕）
+
+[bin]
+ffmpeg = "ffmpeg"
+flac = "flac"
+opusenc = "opusenc"
+cdparanoia = "cd-paranoia"
+cdrdao = "cdrdao"
+ytdlp = "yt-dlp"
+adb = "adb"
+
+[devices]
+# adb サイドカー（deploy/compose.yaml の adb サービス）のソケット。空なら Android の同期を無効にする（D-98）
+adb_server = "localfilesystem:/run/adb/adb.sock"
+adb_timeout_secs = 60
+adb_transfer_timeout_secs = 3600
+```
+
+実体は `deploy/config.example.toml`。両者は一致させる。
+
+端末への配信（§7.11）の設定（P5-3b、D-98）:
+
+- `[bin].adb`: adb クライアント。イメージに platform-tools の adb（版と sha256 を固定）を同梱し、compose の adb
+  サイドカーも同じイメージの adb をサーバとして使う（クライアントとサーバの版を揃える）。省略時は `adb`、空と前後の
+  空白は起動時に拒否する。子プロセスには `HOME=<data>/adb` を渡す（`$HOME/.android` を作れないと adb が止まる）
+- `[devices].adb_server`: adb サーバの場所（`ADB_SERVER_SOCKET`）。`localfilesystem:/絶対パス`（サイドカーの
+  Unix ソケット。既定の構成）か `tcp:ホスト:ポート`。**空（節ごと省略を含む）なら Android の同期を無効**にし、
+  ADB を使う操作（作成・未登録の一覧・同期・再開・通常の破棄・検証）は 503 `adb_disabled`（強制破棄と端末の削除、
+  iPhone、PATCH / PUT playlists / 差分 / 見積りは動く）。前後の空白は起動時に拒否する
+- `[devices].adb_timeout_secs`: 1 回で終わる adb のコマンド（状態の確認・manifest の読み書き・1 曲の
+  `sha256sum` など）の上限（秒。既定 60、1 以上）
+- `[devices].adb_transfer_timeout_secs`: 1 曲の転送と、端末上の全ファイルの一覧（数千件の `stat` で長く
+  かかる）の上限（秒。既定 3600、1 以上）
+
+`[bin].cdparanoia` の `cd-paranoia` は libcdio 版（Debian パッケージ cd-paranoia）で、xiph の `cdparanoia` ではない。
+
+iPhone（Mac の `spindle-agent`）はサーバ側の設定を持たない（エージェントは pair のときに spindle の URL を
+受け取る。§7.11、`agent/README.md`）。
+
+---
+
