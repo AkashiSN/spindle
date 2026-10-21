@@ -72,7 +72,7 @@ describe('選んでいる端末', () => {
 const base: Device = {
   id: 1, name: 'Xperia', transport: 'adb', variant: 'opus', selection: 'all', generation: 1,
   connected: true, counts: counts({ add: 1 }), last_synced_at: null, playlist_ids: [], playlist_states: [], open_plan: false,
-  adb_state: 'device', adb_volume: 'E1C6-6113', adb_root: 'Music/spindle', plan_open: false, sync_job: null,
+  adb_state: 'device', adb_volume: '1A2B-3C4D', adb_root: 'Music/spindle', plan_open: false, sync_job: null,
 }
 
 describe('connectionNote', () => {
@@ -88,7 +88,7 @@ describe('connectionNote', () => {
 describe('volumeLabel / volumeUsable', () => {
   it('内部と SD を分け、空でない保存先は選べない', () => {
     expect(volumeLabel({ volume: 'emulated', path: '/storage/emulated/0/Music/spindle', free: 1, state: 'missing' })).toBe('内部共有ストレージ')
-    expect(volumeLabel({ volume: 'E1C6-6113', path: '/storage/E1C6-6113/Music/spindle', free: 1, state: 'empty' })).toBe('SD カード（E1C6-6113）')
+    expect(volumeLabel({ volume: '1A2B-3C4D', path: '/storage/1A2B-3C4D/Music/spindle', free: 1, state: 'empty' })).toBe('SD カード（1A2B-3C4D）')
     expect(volumeUsable({ volume: 'emulated', path: '', free: 1, state: 'nonempty' })).toBe(false)
     expect(volumeUsable({ volume: 'emulated', path: '', free: 1, state: 'empty' })).toBe(true)
   })
