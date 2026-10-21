@@ -681,9 +681,9 @@ fn probe_volumes_lists_internal_and_card_with_state() {
         let dir = tempfile::tempdir().unwrap();
         let storage = dir.path().join("storage");
         std::fs::create_dir_all(storage.join("emulated/0/Music/spindle")).unwrap();
-        std::fs::create_dir_all(storage.join("E1C6-6113/Music/spindle/.spindle")).unwrap();
+        std::fs::create_dir_all(storage.join("1A2B-3C4D/Music/spindle/.spindle")).unwrap();
         std::fs::write(
-            storage.join("E1C6-6113/Music/spindle/.spindle/manifest.json"),
+            storage.join("1A2B-3C4D/Music/spindle/.spindle/manifest.json"),
             b"{}",
         )
         .unwrap();
@@ -709,7 +709,7 @@ fn probe_volumes_lists_internal_and_card_with_state() {
             got,
             vec![
                 ("emulated", DirState::Empty),
-                ("E1C6-6113", DirState::NonEmpty)
+                ("1A2B-3C4D", DirState::NonEmpty)
             ]
         );
         assert!(v.iter().all(|x| x.free > 0));
