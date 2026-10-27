@@ -45,7 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # yt-dlp は apt 版が古いため単体バイナリを取得する。version を固定し、更新は
 # イメージの再ビルドで行う（P3-3 の ytdl ジョブが使う。無くても起動は通り、起動時診断で警告する）
 # renovate: datasource=github-releases depName=yt-dlp/yt-dlp
-ARG YTDLP_VERSION=2026.08.19
+ARG YTDLP_VERSION=2026.10.26
 ADD --chmod=755 https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_linux /usr/local/bin/yt-dlp
 COPY --from=deno /deno /usr/local/bin/deno
 # adb クライアント（spindle が使う）とサーバ（compose の adb サービスが同じイメージで起動する）
