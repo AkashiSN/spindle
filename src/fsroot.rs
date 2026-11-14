@@ -395,8 +395,7 @@ mod linux {
     }
 
     fn list_xattr_names(file: &File) -> Result<Vec<String>, Errno> {
-        let mut empty: [u8; 0] = [];
-        let needed = rustix::fs::flistxattr(file, &mut empty[..])?;
+        let needed = rustix::fs::flistxattr_query(file)?;
         if needed == 0 {
             return Ok(Vec::new());
         }
@@ -410,8 +409,7 @@ mod linux {
     }
 
     fn get_xattr(file: &File, name: &str) -> Result<Vec<u8>, Errno> {
-        let mut empty: [u8; 0] = [];
-        let needed = rustix::fs::fgetxattr(file, name, &mut empty[..])?;
+        let needed = rustix::fs::fgetxattr_query(file, name)?;
         let mut buf = vec![0u8; needed];
         let n = rustix::fs::fgetxattr(file, name, &mut buf[..])?;
         buf.truncate(n);
