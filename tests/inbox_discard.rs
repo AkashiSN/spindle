@@ -147,6 +147,19 @@ async fn seeded() -> (Env, i64) {
 }
 
 #[tokio::test]
+async fn discard_removes_booklet_pdf() {
+    let env = Env::new();
+    env.wav("youtube/B/Bのお歌/01 x.wav", 1);
+    env.file("youtube/B/Bのお歌/booklet.pdf", b"%PDF");
+    env.scan(env.t0 - 10).await;
+    let id = env.item_id("youtube/B/Bのお歌").await;
+    env.reject_and_discard(id, env.t0).await;
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (1, 1, 0));
+    assert!(!exists(&env.path("youtube/B/Bのお歌/booklet.pdf")));
+    assert!(!exists(&env.path("youtube/B/Bのお歌")));
+}
+
+#[tokio::test]
 async fn discarded_item_is_deleted_only_after_the_retention() {
     let (env, id) = seeded().await;
     env.reject_and_discard(id, env.t0).await;
