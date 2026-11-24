@@ -7,8 +7,12 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-24
+
 ### Changed
 
+- 同梱の yt-dlp を 2026.11.23 に上げた
+- 依存を更新した。rusqlite 0.43（同梱の SQLite も新しくなる）、Web のビルドを Node 26 と TypeScript 7 に移した
 - ドキュメントを読者別（`docs/user-guide/` `docs/admin-guide/` `docs/spec/` `docs/decisions/`）に再編し、
   仕様は章ごと、設計判断は 1 判断 1 ファイルに分けた。README・CONTRIBUTING・CHANGELOG・LICENSE を足した
 
@@ -141,7 +145,8 @@
 - YouTube（ytmusic）統合: 再生リストの購読と同期、タイトル解析、Inbox への取り込み（P3、P4）
 - 認証（argon2id、CSRF 検査）、DB の自動バックアップ、GHCR へのイメージ配布（P0、P4-12）
 
-[Unreleased]: https://github.com/AkashiSN/spindle/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/AkashiSN/spindle/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/AkashiSN/spindle/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/AkashiSN/spindle/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AkashiSN/spindle/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/AkashiSN/spindle/compare/v0.4.3...v0.4.4
