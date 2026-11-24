@@ -274,3 +274,51 @@ fn roots_open_every_configured_root_and_fail_on_missing_one() {
     fs::remove_dir(dir.path().join("inbox")).unwrap();
     assert!(Roots::open(&mk(dir.path())).is_err());
 }
+
+// ---------------------------------------------------------------- 追記用オープン・空き容量
+
+#[test]
+fn create_truncate_then_append() {
+    let (d, root) = tree();
+    let mut f = root.create_truncate(&rp("Album/up.part")).unwrap();
+    f.write_all(b"hello").unwrap();
+    drop(f);
+    let mut a = root.open_append(&rp("Album/up.part")).unwrap();
+    a.write_all(b" world").unwrap();
+    drop(a);
+    assert_eq!(
+        fs::read(d.path().join("Album/up.part")).unwrap(),
+        b"hello world"
+    );
+    // 再度 create_truncate すると空に戻る
+    drop(root.create_truncate(&rp("Album/up.part")).unwrap());
+    assert_eq!(fs::read(d.path().join("Album/up.part")).unwrap(), b"");
+    let mode = fs::metadata(d.path().join("Album/up.part")).unwrap().mode() & 0o777;
+    assert_eq!(mode & 0o600, 0o600);
+}
+
+#[test]
+fn create_truncate_rejects_symlink_parent() {
+    let (d, root) = tree();
+    symlink("Album", d.path().join("Alias")).unwrap();
+    assert!(matches!(
+        root.create_truncate(&rp("Alias/up.part")),
+        Err(FsError::Symlink)
+    ));
+    assert!(!d.path().join("Album/up.part").exists());
+}
+
+#[test]
+fn open_append_missing_is_not_found() {
+    let (_d, root) = tree();
+    assert!(matches!(
+        root.open_append(&rp("Album/none.part")),
+        Err(FsError::NotFound)
+    ));
+}
+
+#[test]
+fn free_bytes_positive() {
+    let (_d, root) = tree();
+    assert!(root.free_bytes().unwrap() > 0);
+}

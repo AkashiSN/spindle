@@ -182,13 +182,18 @@ mod linux {
         }
 
         fn open_at(&self, rel: &str, flags: OFlags) -> Result<OwnedFd, FsError> {
+            self.open_at_mode(rel, flags, Mode::empty())
+        }
+
+        /// [`open_at`](Self::open_at) に作成時の mode を足したもの（`O_CREAT` 用）
+        fn open_at_mode(&self, rel: &str, flags: OFlags, mode: Mode) -> Result<OwnedFd, FsError> {
             Ok(rustix::fs::openat2(
                 &self.fd,
                 rel,
                 // O_NOFOLLOW は付けない。O_PATH と組むと末尾の symlink 自体が開けてしまう。
                 // 末尾を含む全段の symlink 拒否は RESOLVE_NO_SYMLINKS（ELOOP）に任せる
                 flags | OFlags::CLOEXEC,
-                Mode::empty(),
+                mode,
                 RESOLVE,
             )?)
         }
@@ -211,6 +216,29 @@ mod linux {
         pub fn open_file_nonblocking(&self, rel: &RelPath) -> Result<File, FsError> {
             let fd = self.open_at(rel.as_str(), OFlags::RDONLY | OFlags::NONBLOCK)?;
             Ok(File::from(fd))
+        }
+
+        /// 書き込み用に作って開く（`O_WRONLY | O_CREAT | O_TRUNC`、0o644）。既存なら空にする。
+        /// 途中・末尾の symlink は [`FsError::Symlink`]
+        pub fn create_truncate(&self, rel: &RelPath) -> Result<File, FsError> {
+            let fd = self.open_at_mode(
+                rel.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
+                Mode::from_raw_mode(0o644),
+            )?;
+            Ok(File::from(fd))
+        }
+
+        /// 追記用に開く（`O_WRONLY | O_APPEND`）。無ければ作らず [`FsError::NotFound`]
+        pub fn open_append(&self, rel: &RelPath) -> Result<File, FsError> {
+            let fd = self.open_at(rel.as_str(), OFlags::WRONLY | OFlags::APPEND)?;
+            Ok(File::from(fd))
+        }
+
+        /// root のあるファイルシステムの空き容量（`f_bavail * f_frsize`、特権なしで使える分）
+        pub fn free_bytes(&self) -> Result<u64, FsError> {
+            let st = rustix::fs::fstatvfs(&self.fd)?;
+            Ok(st.f_bavail.saturating_mul(st.f_frsize))
         }
 
         /// symlink を辿らない stat。末尾が symlink なら symlink 自身の属性を返す
@@ -451,6 +479,18 @@ mod stub {
         }
 
         pub fn open_file_nonblocking(&self, _rel: &RelPath) -> Result<File, FsError> {
+            Err(FsError::Openat2Unsupported)
+        }
+
+        pub fn create_truncate(&self, _rel: &RelPath) -> Result<File, FsError> {
+            Err(FsError::Openat2Unsupported)
+        }
+
+        pub fn open_append(&self, _rel: &RelPath) -> Result<File, FsError> {
+            Err(FsError::Openat2Unsupported)
+        }
+
+        pub fn free_bytes(&self) -> Result<u64, FsError> {
             Err(FsError::Openat2Unsupported)
         }
 
