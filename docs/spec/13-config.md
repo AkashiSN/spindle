@@ -52,6 +52,12 @@ deep_interval_days = 30         # tag_hash / audio_md5 を全件再計算する 
 [inbox]
 poll_interval_secs = 60         # Inbox の確認間隔（秒。変化があったときだけ走査を投入）。0 で自動なし（UI の「今すぐ確認」だけ）
 
+[upload]
+max_file_bytes = 8589934592     # 1 ファイルの上限（8 GiB）
+max_upload_bytes = 34359738368  # 1 アップロード全体の上限（32 GiB。送ったもの + zip を展開した量 + GC 待ち）
+max_zip_entries = 10000         # 1 つの zip のエントリ数の上限
+stale_days = 30                 # 公開も破棄もされず最後の操作からこの日数たったアップロードは GC が破棄扱いにする
+
 [gc]
 retention_days = 7              # missing_since / 退避 WAV / Derived 孤児 / 却下して削除した Inbox の取り込みを物理削除するまでの日数（終端した同期の計画の回収にも使う）
 jobs_done_days = 7              # 終端のジョブ行（done / cancelled）を消すまでの日数。0 で消さない

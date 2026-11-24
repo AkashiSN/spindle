@@ -798,3 +798,24 @@ fn bin_adb_defaults_when_omitted() {
     let cfg = Config::parse(&toml::to_string(&root).unwrap()).unwrap();
     assert_eq!(cfg.bin.adb, "adb");
 }
+
+#[test]
+fn upload_config_defaults() {
+    // 節が無ければ既定値（8 GiB / 32 GiB / 10000 / 30 日）
+    let mut root: toml::Table = toml::from_str(EXAMPLE).unwrap();
+    root.remove("upload");
+    let cfg = Config::parse(&toml::to_string(&root).unwrap()).unwrap();
+    assert_eq!(cfg.upload.max_file_bytes, 8 << 30);
+    assert_eq!(cfg.upload.max_upload_bytes, 32 << 30);
+    assert_eq!(cfg.upload.max_zip_entries, 10_000);
+    assert_eq!(cfg.upload.stale_days, 30);
+    // 例の設定も同じ既定値を書いている
+    let cfg = Config::parse(EXAMPLE).unwrap();
+    assert_eq!(cfg.upload.max_file_bytes, 8 << 30);
+    assert_eq!(cfg.upload.stale_days, 30);
+    // 個別のキーだけ上書きでき、知らないキーは拒否
+    let cfg = Config::parse(&with_override("upload", "stale_days = 7")).unwrap();
+    assert_eq!(cfg.upload.stale_days, 7);
+    assert_eq!(cfg.upload.max_zip_entries, 10_000);
+    assert!(Config::parse(&with_override("upload", "max_bytes = 5")).is_err());
+}
