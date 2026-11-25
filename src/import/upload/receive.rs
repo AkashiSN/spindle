@@ -199,7 +199,7 @@ pub fn receive_chunk(
             .origins
             .iter_mut()
             .find(|o| o.id == origin)
-            .ok_or(UploadError::NotFound)?;
+            .ok_or(UploadError::OriginNotFound)?;
         if o.complete {
             if bytes.is_empty() && offset == o.total {
                 return Ok(ChunkResult {
@@ -471,7 +471,10 @@ mod tests {
             Err(UploadError::Limit(_))
         ));
         // 無い origin は NotFound
-        assert!(matches!(env.put("o9", 0, b"x"), Err(UploadError::NotFound)));
+        assert!(matches!(
+            env.put("o9", 0, b"x"),
+            Err(UploadError::OriginNotFound)
+        ));
     }
 
     #[test]

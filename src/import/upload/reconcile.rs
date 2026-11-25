@@ -5,7 +5,7 @@
 //!
 //! - 捨てたアップロード（`discarded_at`）は見ない
 //! - 受け取り終えて未展開（`generation == 0`）で失敗していない zip（外した・壊れたものを除く）→ 展開
-//! - 公開を要求済み（計画あり）で `inbox_enqueued_at` が無い → 公開。全件公開済みでも同じ:
+//! - 公開を要求済み（計画あり）で `inbox_enqueued_at` も `publish_error` も無い → 公開。全件公開済みでも同じ:
 //!   公開ジョブは全件公開済みなら走査の確保へ進み、走っている inbox と重なれば自分で再試行するので、
 //!   照合が次に走らなくても走査は確保される
 
@@ -37,7 +37,8 @@ fn wanted(id: &UploadId, m: &Manifest) -> Vec<NewJob> {
         })
         .map(|o| new_unpack_job(id, &o.id, false))
         .collect();
-    if m.publish.is_some() && m.inbox_enqueued_at.is_none() {
+    // やり直しても変わらない失敗で止まった公開は、人が押し直すまで投入しない
+    if m.publish.is_some() && m.inbox_enqueued_at.is_none() && m.publish_error.is_none() {
         out.push(new_publish_job(id));
     }
     out
@@ -49,6 +50,15 @@ pub async fn reconcile(
     inbox: Arc<RootDir>,
     locks: &UploadLocks,
 ) -> Result<usize, UploadError> {
+    Ok(reconcile_jobs(db, inbox, locks).await?.len())
+}
+
+/// [`reconcile`] と同じで、新しく投入したジョブの id を返す（API がワーカーを起こしイベントを流す）
+pub async fn reconcile_jobs(
+    db: &Db,
+    inbox: Arc<RootDir>,
+    locks: &UploadLocks,
+) -> Result<Vec<i64>, UploadError> {
     let locks = locks.clone();
     // マニフェストの鍵は std の Mutex なので、読むのはブロッキングのスレッドで
     let jobs = tokio::task::spawn_blocking(move || -> Result<Vec<NewJob>, UploadError> {
@@ -72,19 +82,19 @@ pub async fn reconcile(
     .await
     .map_err(|e| UploadError::Io(std::io::Error::other(e)))??;
     if jobs.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let inserted = db
         .write(move |c| {
             let now = now_epoch();
-            let mut n = 0;
+            let mut ids = Vec::new();
             for job in &jobs {
                 if let EnqueueResult::Inserted(id) = dbjobs::enqueue(c, job, now)? {
                     tracing::info!(job_id = id, payload = %job.payload, "照合で upload ジョブを投入し直した");
-                    n += 1;
+                    ids.push(id);
                 }
             }
-            Ok(n)
+            Ok(ids)
         })
         .await?;
     Ok(inserted)

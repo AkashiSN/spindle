@@ -143,10 +143,30 @@ fn text<'a>(payload: &'a serde_json::Value, key: &str) -> Result<&'a str, JobErr
 /// アップロードの失敗をジョブの失敗へ。アップロードが無い・状態が合わないものは再試行しても変わらない
 fn job_error(e: UploadError) -> JobError {
     match e {
-        UploadError::NotFound | UploadError::BadPath(_) | UploadError::Conflict(_) => {
-            JobError::Fatal(anyhow::anyhow!("{e}"))
-        }
+        UploadError::NotFound
+        | UploadError::OriginNotFound
+        | UploadError::BadPath(_)
+        | UploadError::Conflict(_) => JobError::Fatal(anyhow::anyhow!("{e}")),
         e => JobError::Failed(anyhow::anyhow!("{e}")),
+    }
+}
+
+/// やり直しても変わらない公開の失敗（[`job_error`] が Fatal にするもの。アップロードが無いものを除く）を
+/// マニフェストの `publish_error` に残す。照合はこれがあると公開を投入し直さない（一覧の取得のたびに
+/// 失敗するジョブを作らない）。押し直し（`POST /api/uploads/:id/publish`）が消して投入し直す
+fn record_publish_error(inbox: &RootDir, locks: &UploadLocks, id: &UploadId, e: &UploadError) {
+    if !matches!(
+        e,
+        UploadError::OriginNotFound | UploadError::BadPath(_) | UploadError::Conflict(_)
+    ) {
+        return;
+    }
+    let reason = e.to_string();
+    if let Err(err) = with_manifest(inbox, locks, id, |m| {
+        m.publish_error = Some(reason);
+        Ok(())
+    }) {
+        tracing::warn!(upload = id.as_str(), error = %err, "公開の失敗をマニフェストに残せない");
     }
 }
 
@@ -214,7 +234,13 @@ impl UploadHandler {
         // 既に走査を確保した後の再実行（照合との行き違い）は、走査を重ねて投入しない
         let (secured_before, report) = blocking(move || {
             let secured = with_manifest(&inbox, &locks, &pid, |m| Ok(m.inbox_enqueued_at))?;
-            let report = publish(&inbox, &locks, &pid, now_epoch(), &cancel, &*fault)?;
+            let report = match publish(&inbox, &locks, &pid, now_epoch(), &cancel, &*fault) {
+                Ok(r) => r,
+                Err(e) => {
+                    record_publish_error(&inbox, &locks, &pid, &e);
+                    return Err(e);
+                }
+            };
             Ok((secured.is_some(), report))
         })
         .await?;

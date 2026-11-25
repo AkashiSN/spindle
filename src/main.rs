@@ -559,9 +559,11 @@ async fn main() -> anyhow::Result<()> {
     let inbox_watch = Arc::new(inbox_job::WatchStatus::default());
     // inbox ジョブに Cover Art Archive を渡すので、取りきれなかった表の画像の候補でも投入する（D-91）
     inbox_watch.enable_covers();
+    let upload_cfg = state.config.upload.clone();
     state = state
         .with_inbox(Arc::clone(&inbox_root))
-        .with_inbox_watch(Arc::clone(&inbox_watch));
+        .with_inbox_watch(Arc::clone(&inbox_watch))
+        .with_uploads(upload_locks.clone(), upload_cfg);
     registry.register(
         JobType::Inbox,
         Arc::new(InboxHandler::new(PlaceItemEnv {

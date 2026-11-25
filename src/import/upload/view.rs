@@ -7,8 +7,14 @@
 //! - チェックのキー: 件は [`Group::key`]、ファイルは [`Member::staged`]（ステージング内の相対パス。
 //!   `files/o3`、`x/o2/g1/Disc 1/01.flac`）。マニフェストの `included_*` / `excluded_*` も同じキー
 //! - 件の状態は強い順（[`Status`] の列挙順）に当たったものをすべて `statuses` に並べ、先頭を `status` に出す
+//! - 凍結した後（`publish` がある）はファイルが `publish/<n>/` へ移っていくので、ステージングは読まず
+//!   凍結した計画（件ごとの段階と宛先）だけを出す
+//! - 一覧・単体の取得は画面が 2 秒ごとに呼ぶので、[`StagedReadCache`] で変わっていないファイルの
+//!   タグと指紋を読み直さない（`(inode, size, mtime)` が同じなら同じ中身とみなす）
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use serde::Serialize;
 
@@ -17,13 +23,14 @@ use crate::db::scans::Fingerprint;
 use crate::domain::pathgen::sanitize_component;
 use crate::domain::relpath::RelPath;
 use crate::domain::tags::read_audio_file;
-use crate::fsroot::{FileKind, FsError, RootDir};
+use crate::fsroot::{fstat, FileKind, FsError, RootDir};
 use crate::import::inbox::{destination_of, library_rows_with_audio};
 use crate::import::scanner::read_fingerprint_fd;
 
 use super::group::{group, Group, Grouping, Member, StagedFile};
 use super::manifest::{
-    classify, FileClass, Manifest, Origin, Rejected, Stage, UploadError, UploadId, ZipError,
+    classify, FileClass, Manifest, Origin, PublishPlan, Rejected, Stage, UploadError, UploadId,
+    ZipError,
 };
 
 /// 公開先の Inbox の最上位
@@ -73,6 +80,8 @@ pub struct UploadView {
     pub unassigned_companions: Vec<String>,
     pub publish: Option<PublishView>,
     pub publish_requested_at: Option<i64>,
+    /// 公開がやり直しても変わらない失敗で止まった理由（「Inbox へ置く」を押し直すと消えて投入し直す）
+    pub publish_error: Option<String>,
     pub discarded_at: Option<i64>,
 }
 
@@ -143,6 +152,12 @@ pub struct PublishGroupView {
     pub key: String,
     pub albumartist: String,
     pub album: Option<String>,
+    /// 置く曲の数
+    pub track_count: usize,
+    /// 置く同梱ファイルの数
+    pub companion_count: usize,
+    /// 基本の置き場所（埋まっていれば公開で ` (2)` などになる。決まった宛先は `stage` の `dest`）
+    pub base_dest: String,
     /// `{"stage": "publishing", "dest": "upload/…"}` の形で平らに出す
     #[serde(flatten)]
     pub stage: Stage,
@@ -167,6 +182,72 @@ pub struct GroupDecision {
 
 fn basename(display: &str) -> &str {
     display.rsplit('/').next().unwrap_or(display)
+}
+
+/// [`read_staged_cached`] の読み取りの覚え（メモリだけ。`AppState` が 1 つを持つ）。
+/// キーは `(アップロード ID, ステージング内のパス)`。実体の `(inode, size, mtime)` が覚えたときと
+/// 同じならタグと指紋を読み直さない。捨てた・一覧に無いアップロードの項は呼び出し側が
+/// [`StagedReadCache::forget`] / [`StagedReadCache::retain_uploads`] で落とし、アップロードの中で
+/// 読まなくなったファイルの項は読み取りのたびに落とす
+#[derive(Debug, Default)]
+pub struct StagedReadCache {
+    entries: Mutex<HashMap<(String, String), CachedRead>>,
+    /// 実際にタグと指紋を読んだ回数（テストと観測用）
+    reads: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedRead {
+    inode: u64,
+    size: u64,
+    mtime_ns: i64,
+    /// 読む前の種類と display（origin の名前が変わったら覚えを使わない）
+    class: FileClass,
+    display: String,
+    file: StagedFile,
+    fp: Option<Fingerprint>,
+}
+
+impl StagedReadCache {
+    fn lock(&self) -> MutexGuard<'_, HashMap<(String, String), CachedRead>> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// これまでに実際にタグと指紋を読んだ回数
+    pub fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    /// 覚えている項の数
+    pub fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// アップロード `upload_id` の項をすべて落とす（捨てた・凍結した）
+    pub fn forget(&self, upload_id: &str) {
+        self.lock().retain(|(u, _), _| u != upload_id);
+    }
+
+    /// `keep` に無いアップロードの項を落とす（一覧に出ないもの）
+    pub fn retain_uploads(&self, keep: &HashSet<String>) {
+        self.lock().retain(|(u, _), _| keep.contains(u));
+    }
+
+    /// アップロード `upload_id` の項のうち、`touched` に無いステージング内のパスを落とす
+    fn prune(&self, upload_id: &str, touched: &HashSet<String>) {
+        self.lock()
+            .retain(|(u, staged), _| u != upload_id || touched.contains(staged));
+    }
+}
+
+/// 読み取りの覚えの文脈（[`read_staged_cached`] の中だけ）
+struct CacheCtx<'a> {
+    cache: &'a StagedReadCache,
+    touched: HashSet<String>,
 }
 
 /// 件の置き場所の基本の名前（` (2)` などを付ける前）。アルバム名があれば
@@ -229,6 +310,41 @@ pub fn read_staged(
     inbox: &RootDir,
     m: &Manifest,
 ) -> Result<(Vec<StagedFile>, HashMap<String, Fingerprint>), UploadError> {
+    read_staged_with(inbox, m, None)
+}
+
+/// [`read_staged`] と同じで、変わっていないファイルは `cache` の覚えを使う
+pub fn read_staged_cached(
+    inbox: &RootDir,
+    m: &Manifest,
+    cache: &StagedReadCache,
+) -> Result<(Vec<StagedFile>, HashMap<String, Fingerprint>), UploadError> {
+    read_staged_with(inbox, m, Some(cache))
+}
+
+type Staged = (Vec<StagedFile>, HashMap<String, Fingerprint>);
+
+fn read_staged_with(
+    inbox: &RootDir,
+    m: &Manifest,
+    cache: Option<&StagedReadCache>,
+) -> Result<Staged, UploadError> {
+    let mut ctx = cache.map(|cache| CacheCtx {
+        cache,
+        touched: HashSet::new(),
+    });
+    let out = read_staged_inner(inbox, m, ctx.as_mut())?;
+    if let Some(ctx) = ctx {
+        ctx.cache.prune(&m.id, &ctx.touched);
+    }
+    Ok(out)
+}
+
+fn read_staged_inner(
+    inbox: &RootDir,
+    m: &Manifest,
+    mut cache: Option<&mut CacheCtx<'_>>,
+) -> Result<Staged, UploadError> {
     let id = UploadId::parse(&m.id)?;
     let mut files = Vec::new();
     let mut fps = HashMap::new();
@@ -259,7 +375,16 @@ pub fn read_staged(
                     continue;
                 }
                 let class = classify(&inner);
-                if let Some(f) = read_one(inbox, &id, o, &staged, display, class, &mut fps)? {
+                if let Some(f) = read_one(
+                    inbox,
+                    &id,
+                    o,
+                    &staged,
+                    display,
+                    class,
+                    &mut fps,
+                    cache.as_deref_mut(),
+                )? {
                     files.push(f);
                 }
             }
@@ -273,6 +398,7 @@ pub fn read_staged(
                 o.client_path.clone(),
                 o.class,
                 &mut fps,
+                cache.as_deref_mut(),
             )? {
                 files.push(f);
             }
@@ -322,6 +448,7 @@ fn walk(
 }
 
 /// 1 ファイルを読む。実体が消えていれば `None`
+#[allow(clippy::too_many_arguments)]
 fn read_one(
     inbox: &RootDir,
     id: &UploadId,
@@ -330,6 +457,7 @@ fn read_one(
     display: String,
     class: FileClass,
     fps: &mut HashMap<String, Fingerprint>,
+    mut cache: Option<&mut CacheCtx<'_>>,
 ) -> Result<Option<StagedFile>, UploadError> {
     let mut f = StagedFile {
         staged: staged.as_str().to_string(),
@@ -356,6 +484,34 @@ fn read_one(
             return Ok(Some(unreadable(o, staged, f.display, &e.to_string())));
         }
     };
+    // 覚えがあり実体が変わっていなければ、タグと指紋を読み直さない
+    let key = (id.as_str().to_string(), f.staged.clone());
+    let st = match cache.as_ref().map(|_| fstat(&file)) {
+        Some(Ok(st)) => Some(st),
+        Some(Err(e)) => {
+            tracing::debug!(upload = id.as_str(), path = %staged, error = %e, "ステージングのファイルの stat を取れない");
+            None
+        }
+        None => None,
+    };
+    if let (Some(ctx), Some(st)) = (cache.as_deref_mut(), st.as_ref()) {
+        ctx.touched.insert(f.staged.clone());
+        let hit = ctx.cache.lock().get(&key).and_then(|c| {
+            (c.inode == st.inode
+                && c.size == st.size
+                && c.mtime_ns == st.mtime_ns
+                && c.class == class
+                && c.display == f.display)
+                .then(|| (c.file.clone(), c.fp))
+        });
+        if let Some((file, fp)) = hit {
+            if let Some(fp) = fp {
+                fps.insert(file.staged.clone(), fp);
+            }
+            return Ok(Some(file));
+        }
+    }
+    let original_display = f.display.clone();
     // ステージングの名前（`files/o3`）には拡張子が無いので、拡張子は元の名前から取る
     let name = RelPath::parse(basename(&f.display)).unwrap_or_else(|_| staged.clone());
     let ext = name
@@ -366,10 +522,13 @@ fn read_one(
         Ok(d) => d,
         Err(e) => return Ok(Some(unreadable(o, staged, f.display, &e.to_string()))),
     };
+    let mut fp = None;
     match read_audio_file(dup, ext.as_deref()) {
         Ok(af) => {
             // タグと同じ実体（FD）で指紋を取る（Inbox の走査と同じ計算）
-            fps.insert(f.staged.clone(), read_fingerprint_fd(&file, &name, &af));
+            let got = read_fingerprint_fd(&file, &name, &af);
+            fps.insert(f.staged.clone(), got);
+            fp = Some(got);
             f.tags = af.tags.items().to_vec();
             f.codec = Some(af.codec.as_str().to_string());
             f.lossless = af.lossless;
@@ -381,6 +540,21 @@ fn read_one(
             f.class = FileClass::Ignored;
             f.display = format!("{}（読めない: {e}）", f.display);
         }
+    }
+    if let (Some(ctx), Some(st)) = (cache, st) {
+        ctx.cache.reads.fetch_add(1, Ordering::Relaxed);
+        ctx.cache.lock().insert(
+            key,
+            CachedRead {
+                inode: st.inode,
+                size: st.size,
+                mtime_ns: st.mtime_ns,
+                class,
+                display: original_display,
+                file: f.clone(),
+                fp,
+            },
+        );
     }
     Ok(Some(f))
 }
@@ -483,7 +657,58 @@ pub fn build_view(
     cfg: &UploadConfig,
     busy: bool,
 ) -> Result<UploadView, UploadError> {
-    let (files, fps) = read_staged(inbox, m)?;
+    build_view_with(conn, layout, inbox, m, cfg, busy, None)
+}
+
+/// [`build_view`] と同じで、変わっていないファイルは `cache` の覚えを使う（API の一覧・単体の取得）
+#[allow(clippy::too_many_arguments)]
+pub fn build_view_cached(
+    conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    inbox: &RootDir,
+    m: &Manifest,
+    cfg: &UploadConfig,
+    busy: bool,
+    cache: &StagedReadCache,
+) -> Result<UploadView, UploadError> {
+    build_view_with(conn, layout, inbox, m, cfg, busy, Some(cache))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_view_with(
+    conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    inbox: &RootDir,
+    m: &Manifest,
+    cfg: &UploadConfig,
+    busy: bool,
+    cache: Option<&StagedReadCache>,
+) -> Result<UploadView, UploadError> {
+    let mut view = UploadView {
+        id: m.id.clone(),
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        expires_at: m
+            .updated_at
+            .saturating_add(i64::from(cfg.stale_days) * DAY_SECS),
+        origins: m.origins.iter().map(origin_view).collect(),
+        busy,
+        groups: Vec::new(),
+        ignored: Vec::new(),
+        unassigned_companions: Vec::new(),
+        publish: m.publish.as_ref().map(publish_view),
+        publish_requested_at: m.publish_requested_at,
+        publish_error: m.publish_error.clone(),
+        discarded_at: m.discarded_at,
+    };
+    // 凍結した後はメンバーが publish/<n>/ へ移っていく: ステージングは読まず計画だけを出す
+    if m.publish.is_some() {
+        if let Some(cache) = cache {
+            cache.forget(&m.id);
+        }
+        return Ok(view);
+    }
+    let (files, fps) = read_staged_with(inbox, m, cache)?;
     let grouping = group(&files, m);
     let by_staged: HashMap<&str, &StagedFile> =
         files.iter().map(|f| (f.staged.as_str(), f)).collect();
@@ -529,34 +754,39 @@ pub fn build_view(
         });
     }
 
-    Ok(UploadView {
-        id: m.id.clone(),
-        created_at: m.created_at,
-        updated_at: m.updated_at,
-        expires_at: m
-            .updated_at
-            .saturating_add(i64::from(cfg.stale_days) * DAY_SECS),
-        origins: m.origins.iter().map(origin_view).collect(),
-        busy,
-        groups,
-        ignored: grouping.ignored,
-        unassigned_companions: grouping.unassigned_companions,
-        publish: m.publish.as_ref().map(|p| PublishView {
-            frozen_at: p.frozen_at,
-            groups: p
-                .groups
-                .iter()
-                .map(|g| PublishGroupView {
+    view.groups = groups;
+    view.ignored = grouping.ignored;
+    view.unassigned_companions = grouping.unassigned_companions;
+    Ok(view)
+}
+
+/// 凍結した計画の表示（件ごとの段階・宛先・置く数）。ステージングは読まない
+fn publish_view(p: &PublishPlan) -> PublishView {
+    PublishView {
+        frozen_at: p.frozen_at,
+        groups: p
+            .groups
+            .iter()
+            .map(|g| {
+                let tracks = g
+                    .members
+                    .iter()
+                    .filter(|mem| classify(&mem.name) == FileClass::Audio)
+                    .count();
+                PublishGroupView {
                     key: g.key.clone(),
                     albumartist: g.albumartist.clone(),
                     album: g.album.clone(),
+                    track_count: tracks,
+                    companion_count: g.members.len() - tracks,
+                    base_dest: dest_of(&g.albumartist, g.album.as_deref(), &g.origin_label)
+                        .map(|d| d.as_str().to_string())
+                        .unwrap_or_default(),
                     stage: g.stage.clone(),
-                })
-                .collect(),
-        }),
-        publish_requested_at: m.publish_requested_at,
-        discarded_at: m.discarded_at,
-    })
+                }
+            })
+            .collect(),
+    }
 }
 
 /// 件に当たる状態をすべて強い順に。何も当たらなければ `[New]`
@@ -662,7 +892,7 @@ fn format_of(g: &Group, by_staged: &HashMap<&str, &StagedFile>) -> String {
     }
 }
 
-fn origin_view(o: &Origin) -> OriginView {
+pub fn origin_view(o: &Origin) -> OriginView {
     OriginView {
         id: o.id.clone(),
         client_path: o.client_path.clone(),

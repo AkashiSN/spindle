@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
-use crate::config::Config;
+use crate::config::{Config, UploadConfig};
 use crate::db::Db;
 use crate::domain::selection::SelectionStore;
 use crate::edit::Editor;
 use crate::fsroot::RootDir;
 use crate::gc::GcRoots;
+use crate::import::upload::{StagedReadCache, UploadLocks};
 use crate::jobs::Jobs;
 use crate::media::artwork::ArtworkStore;
 use crate::playlist::autoexport::ReevalFlag;
@@ -64,6 +65,17 @@ pub struct AppState {
     pub adb_version: Option<Arc<str>>,
     /// 照合ログの置き場（`[paths].data/verify`。D-63、D-106）。無いと照合ログの本文は 503
     pub verify_logs: Option<Arc<RootDir>>,
+    /// ブラウザからのアップロード（鍵・上限・読み取りの覚え）。`inbox` と両方無いと `/api/uploads` は 503
+    pub uploads: Option<Arc<UploadsState>>,
+}
+
+/// アップロードの API が共有するもの
+pub struct UploadsState {
+    /// main が作った 1 つの鍵の表の clone（upload ジョブ・GC と同じ表を指す。別に作らない）
+    pub locks: UploadLocks,
+    pub cfg: UploadConfig,
+    /// ③ の表示のタグと指紋の覚え（画面が 2 秒ごとに取り直しても読み直さない）
+    pub cache: StagedReadCache,
 }
 
 /// ドライブとその監視状態の組
@@ -102,7 +114,18 @@ impl AppState {
             adb: None,
             adb_version: None,
             verify_logs: None,
+            uploads: None,
         }
+    }
+
+    /// アップロードの API を有効にする。`locks` は upload ジョブと共有する 1 つの表の clone を渡す
+    pub fn with_uploads(mut self, locks: UploadLocks, cfg: UploadConfig) -> Self {
+        self.uploads = Some(Arc::new(UploadsState {
+            locks,
+            cfg,
+            cache: StagedReadCache::default(),
+        }));
+        self
     }
 
     pub fn with_verify_logs(mut self, dir: Arc<RootDir>) -> Self {

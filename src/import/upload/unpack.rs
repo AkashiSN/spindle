@@ -148,7 +148,7 @@ fn begin(
             .origins
             .iter_mut()
             .find(|o| o.id == origin)
-            .ok_or(UploadError::NotFound)?;
+            .ok_or(UploadError::OriginNotFound)?;
         if o.class != FileClass::Zip {
             return Err(UploadError::Conflict(format!("{origin} は zip でない")));
         }
@@ -226,7 +226,7 @@ fn finish(
             .origins
             .iter_mut()
             .find(|o| o.id == origin)
-            .ok_or(UploadError::NotFound)?;
+            .ok_or(UploadError::OriginNotFound)?;
         let z = o.zip.get_or_insert_with(ZipState::default);
         if z.unpacking != Some(generation) {
             // 別の実行がこの世代を止まったものとして捨てた。予算の項を実際の量に直すだけ

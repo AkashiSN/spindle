@@ -34,6 +34,7 @@ pub mod stream;
 pub mod subscriptions;
 pub mod tags;
 pub mod tracks;
+pub mod upload;
 pub mod verify;
 pub mod ytmusic;
 
@@ -158,6 +159,27 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox/{id}/artwork/{hash}", get(inbox::artwork))
         .route("/inbox/{id}/files/{name}", get(inbox::file))
         .route("/inbox/{id}/preview", post(inbox::preview))
+        .route("/uploads", get(upload::list).post(upload::create))
+        .route(
+            "/uploads/broken/{dir}",
+            axum::routing::delete(upload::discard_broken),
+        )
+        .route(
+            "/uploads/{id}",
+            get(upload::get_one)
+                .patch(upload::patch)
+                .delete(upload::discard),
+        )
+        .route("/uploads/{id}/origins", post(upload::begin))
+        .route(
+            "/uploads/{id}/origins/{origin}",
+            put(upload::chunk).layer(DefaultBodyLimit::max(upload::CHUNK_LIMIT)),
+        )
+        .route(
+            "/uploads/{id}/origins/{origin}/unpack",
+            post(upload::retry_unpack),
+        )
+        .route("/uploads/{id}/publish", post(upload::publish))
         .route("/ytmusic/download", post(ytmusic::download))
         .route("/ytmusic/lookup", post(ytmusic::lookup))
         .route("/ytmusic/playlist", post(ytmusic::playlist))

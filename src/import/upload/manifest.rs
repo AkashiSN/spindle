@@ -28,6 +28,8 @@ pub const AUDIO_EXTS: [&str; 7] = ["flac", "wav", "m4a", "aif", "aiff", "mp3", "
 const ZIP_EXT: &str = "zip";
 /// アップロード ID の hex の桁数
 const ID_HEX_LEN: usize = 16;
+/// 壊れたステージングに付ける「捨てる」印（中身は空。GC が印を見て消す）
+pub const DISCARD_MARK: &str = ".spindle-discard";
 /// ステージングの中の固定のディレクトリ
 const FILES_DIR: &str = "files";
 const ZIPS_DIR: &str = "zips";
@@ -43,6 +45,9 @@ pub enum UploadError {
     Exists(String),
     #[error("アップロードが見つからない")]
     NotFound,
+    /// アップロードはあるが、指定の origin が無い
+    #[error("送ったファイル（origin）が見つからない")]
+    OriginNotFound,
     #[error("上限を超える: {0}")]
     Limit(String),
     #[error("空き容量が足りない")]
@@ -208,6 +213,10 @@ pub struct Manifest {
     pub inbox_enqueued_at: Option<i64>,
     #[serde(default)]
     pub discarded_at: Option<i64>,
+    /// 公開ジョブがやり直しても変わらない失敗で止まった理由（照合は投入し直さない。
+    /// 「Inbox へ置く」の押し直しが消して投入し直す）
+    #[serde(default)]
+    pub publish_error: Option<String>,
     /// GC に消させるステージング内のディレクトリ（消えるまで予算に数える）
     #[serde(default)]
     pub garbage: Vec<Garbage>,
@@ -389,6 +398,12 @@ pub enum Listed {
 pub struct UploadLocks(Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>);
 
 impl UploadLocks {
+    /// 表の項の数（テスト用: 無い id で表が太らないことを確かめる）
+    #[doc(hidden)]
+    pub fn entries(&self) -> usize {
+        lock(&self.0).len()
+    }
+
     fn entry(&self, id: &UploadId) -> Arc<Mutex<()>> {
         let mut map = lock(&self.0);
         map.entry(id.as_str().to_string()).or_default().clone()
@@ -511,6 +526,7 @@ pub fn create_upload(inbox: &RootDir, now: i64) -> Result<Manifest, UploadError>
             publish_requested_at: None,
             inbox_enqueued_at: None,
             discarded_at: None,
+            publish_error: None,
             garbage: Vec::new(),
         };
         write_manifest(inbox, &id, &m)?;
@@ -518,6 +534,47 @@ pub fn create_upload(inbox: &RootDir, now: i64) -> Result<Manifest, UploadError>
         return Ok(m);
     }
     Err(UploadError::Exists("アップロード ID".into()))
+}
+
+/// ステージングのディレクトリがあるか（鍵の表に項を作る前に確かめる。無ければ [`UploadError::NotFound`]）
+pub fn ensure_staging(inbox: &RootDir, id: &UploadId) -> Result<(), UploadError> {
+    match inbox.stat(&id.staging_dir()) {
+        Ok(st) if st.kind == FileKind::Dir => Ok(()),
+        Ok(_) | Err(FsError::NotFound) => Err(UploadError::NotFound),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// ステージングに [`DISCARD_MARK`] があるか
+pub fn has_discard_mark(inbox: &RootDir, dir: &RelPath) -> Result<bool, UploadError> {
+    match inbox.stat(&dir.join(DISCARD_MARK)?) {
+        Ok(_) => Ok(true),
+        Err(FsError::NotFound) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// 壊れたステージング（マニフェストが無い・読めない）に捨てる印を付ける（消すのは GC）。
+/// 読めるマニフェストのあるものは `Conflict("not_broken")`、無いものは `NotFound`
+pub fn mark_broken_discarded(
+    inbox: &RootDir,
+    locks: &UploadLocks,
+    id: &UploadId,
+) -> Result<(), UploadError> {
+    ensure_staging(inbox, id)?;
+    with_upload_lock(locks, id, || {
+        match read_manifest(inbox, id) {
+            Ok(_) => return Err(UploadError::Conflict("not_broken".into())),
+            Err(UploadError::NotFound) => return Err(UploadError::NotFound),
+            Err(_) => {}
+        }
+        let dir = id.staging_dir();
+        inbox
+            .create_truncate(&dir.join(DISCARD_MARK)?)?
+            .sync_all()?;
+        inbox.fsync_dir(Some(&dir))?;
+        Ok(())
+    })
 }
 
 /// Inbox 直下のステージングをすべて読む。読めないものは [`Listed::Broken`] で返す（消さない）
@@ -644,6 +701,7 @@ mod tests {
             m.publish_requested_at = Some(6);
             m.inbox_enqueued_at = Some(7);
             m.discarded_at = Some(8);
+            m.publish_error = Some("公開するファイルが無い".into());
             m.garbage = vec![Garbage {
                 path: "x/o2/g2".into(),
                 bytes: 9,
@@ -676,6 +734,7 @@ mod tests {
         assert_eq!(parsed.origins[0].received, 0);
         assert!(parsed.garbage.is_empty());
         assert!(parsed.inbox_enqueued_at.is_none());
+        assert!(parsed.publish_error.is_none());
 
         // version != 1 は拒否
         let mut v2 = minimal.clone();

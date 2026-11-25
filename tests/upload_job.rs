@@ -742,3 +742,31 @@ async fn reconcile_hands_off_to_publish_job_when_inbox_running() {
     assert!(env.inbox_item("upload/Artist/X").is_some(), "件が出る");
     assert!(env.manifest().inbox_enqueued_at.is_some());
 }
+
+#[tokio::test]
+async fn publish_conflict_records_error_and_reconcile_skips() {
+    let env = Env::new();
+    env.two_groups();
+    env.freeze();
+    // 凍結した計画のメンバーが外から消えた: 公開はやり直しても変わらない失敗（Conflict）で止まる
+    let from = env.manifest().publish.unwrap().groups[0].members[0]
+        .from
+        .clone();
+    std::fs::remove_file(
+        env.inbox_path()
+            .join(env.id.staging_dir().as_str())
+            .join(&from),
+    )
+    .unwrap();
+    env.start(Some(env.handler()), None);
+    let job = env.enqueue(new_publish_job(&env.id));
+    let done = env.wait_terminal(job).await;
+    assert_eq!(done.state, JobState::Failed, "{:?}", done.note);
+    let m = env.manifest();
+    let err = m.publish_error.expect("公開の失敗がマニフェストに残る");
+    assert!(err.contains("公開するファイルが無い"), "{err}");
+    assert!(m.inbox_enqueued_at.is_none());
+    // 照合は失敗で止まった公開を投入し直さない（一覧の取得のたびに失敗するジョブを作らない）
+    assert_eq!(env.reconcile().await, 0);
+    assert_eq!(env.jobs_of(JobType::Upload).len(), 1);
+}
