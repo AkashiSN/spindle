@@ -507,3 +507,99 @@ export type TrackDeviceState =
   | { device_id: number; state: 'waiting'; reason: string; has_copy: boolean }
   | { device_id: number; state: 'error'; reason: string; has_copy: boolean }
   | { device_id: number; state: 'removing' }
+
+// ── ブラウザからのアップロード（src/import/upload/view.rs・src/api/upload.rs と 1 対 1） ──
+
+/** 送ったもの・ステージングのファイルの種類 */
+export type UploadFileClass = 'audio' | 'zip' | 'companion' | 'ignored'
+/** 件の状態（強い順。serde tag = kind） */
+export type UploadStatus =
+  | { kind: 'library_duplicate'; paths: string[] }
+  | { kind: 'inbox_exists'; dir: string }
+  | { kind: 'append_to'; album: string; track_count: number }
+  | { kind: 'needs_name' }
+  | { kind: 'new' }
+export type UploadRejected = { entry: string; reason: string }
+export type UploadZipError = { reason: string; retryable: boolean }
+export type UploadZipView = {
+  /** 成功した世代（0 = 未展開） */
+  generation: number
+  unpacking: boolean
+  rejected: UploadRejected[]
+  error: UploadZipError | null
+}
+export type UploadOriginView = {
+  id: string
+  client_path: string
+  class: UploadFileClass
+  total: number
+  received: number
+  complete: boolean
+  removed: boolean
+  damaged: boolean
+  zip: UploadZipView | null
+}
+export type UploadMemberView = {
+  /** ファイルのチェックのキー */
+  staged: string
+  display: string
+  publish_name: string
+  renamed: boolean
+  included: boolean
+  library_match: string | null
+}
+export type UploadGroupView = {
+  key: string
+  albumartist: string
+  album: string | null
+  included: boolean
+  selectable: boolean
+  track_count: number
+  format: string
+  status: UploadStatus
+  statuses: UploadStatus[]
+  tracks: UploadMemberView[]
+  companions: UploadMemberView[]
+}
+/** 凍結した件の段階（serde tag = stage。PublishGroupView に平らに入る） */
+export type UploadStage =
+  | { stage: 'planned' }
+  | { stage: 'assembled' }
+  | { stage: 'publishing'; dest: string }
+  | { stage: 'published'; dest: string }
+export type UploadPublishGroupView = {
+  key: string
+  albumartist: string
+  album: string | null
+  track_count: number
+  companion_count: number
+  base_dest: string
+} & UploadStage
+export type UploadPublishView = { frozen_at: number; groups: UploadPublishGroupView[] }
+/** ③ のいまの選択（PATCH は与えた項目を置き換えるので、これを元に足し引きして送る） */
+export type UploadChoices = {
+  merges: string[][]
+  excluded_files: string[]
+  excluded_groups: string[]
+  included_files: string[]
+  included_groups: string[]
+}
+export type UploadView = {
+  id: string
+  created_at: number
+  updated_at: number
+  expires_at: number
+  origins: UploadOriginView[]
+  busy: boolean
+  groups: UploadGroupView[]
+  ignored: string[]
+  unassigned_companions: string[]
+  publish: UploadPublishView | null
+  publish_requested_at: number | null
+  publish_error: string | null
+  discarded_at: number | null
+  choices: UploadChoices
+}
+export type UploadBrokenView = { dir: string; mtime_ns: number; reason: string }
+export type UploadList = { items: UploadView[]; broken: UploadBrokenView[] }
+export type UploadPatch = Partial<UploadChoices> & { removed_origins?: string[] }

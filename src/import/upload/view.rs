@@ -83,6 +83,19 @@ pub struct UploadView {
     /// 公開がやり直しても変わらない失敗で止まった理由（「Inbox へ置く」を押し直すと消えて投入し直す）
     pub publish_error: Option<String>,
     pub discarded_at: Option<i64>,
+    /// ③ のいまの選択（マニフェストの写し）。`PATCH` は与えた項目を置き換えるので、画面はこれを
+    /// 元に足し引きして送る
+    pub choices: ChoicesView,
+}
+
+/// ③ の選択（マニフェストの `merges` / `excluded_*` / `included_*` の写し）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChoicesView {
+    pub merges: Vec<Vec<String>>,
+    pub excluded_files: Vec<String>,
+    pub excluded_groups: Vec<String>,
+    pub included_files: Vec<String>,
+    pub included_groups: Vec<String>,
 }
 
 /// 送ったもの 1 つ（② の行）
@@ -700,6 +713,13 @@ fn build_view_with(
         publish_requested_at: m.publish_requested_at,
         publish_error: m.publish_error.clone(),
         discarded_at: m.discarded_at,
+        choices: ChoicesView {
+            merges: m.merges.clone(),
+            excluded_files: m.excluded_files.clone(),
+            excluded_groups: m.excluded_groups.clone(),
+            included_files: m.included_files.clone(),
+            included_groups: m.included_groups.clone(),
+        },
     };
     // 凍結した後はメンバーが publish/<n>/ へ移っていく: ステージングは読まず計画だけを出す
     if m.publish.is_some() {

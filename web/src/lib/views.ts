@@ -1,8 +1,8 @@
-export type View = 'tracks' | 'albums' | 'inbox' | 'cd' | 'youtube' | 'devices' | 'jobs' | 'records' | 'settings'
+export type View = 'tracks' | 'albums' | 'inbox' | 'cd' | 'youtube' | 'upload' | 'devices' | 'jobs' | 'records' | 'settings'
 
 /**
  * 上部バーに並べる画面（SPEC §12.1、P4-20）。「ライブラリ」が日常の入口でホームなので先頭に置き、
- * 取り込みタブ（CD / YouTube）の右に Inbox を置く。取り込むと Inbox に赤い数字が増えるので、
+ * 取り込みタブ（CD / YouTube / アップロード）の右に Inbox を置く。取り込むと Inbox に赤い数字が増えるので、
  * 次に見る場所が分かる（タブ自体は ものが流れる順には並べない）
  */
 export const VIEWS: Array<[View, string]> = [
@@ -10,6 +10,8 @@ export const VIEWS: Array<[View, string]> = [
   ['albums', 'アルバム'],
   ['cd', 'CD'],
   ['youtube', 'YouTube'],
+  // ブラウザからのアップロード（購入音源。設計 2026-11-25-upload §4.1）。スマホ版には出さない
+  ['upload', 'アップロード'],
   ['inbox', 'Inbox'],
   // 取り込みの流れの終点（SPEC §12.6「端末」）。端末に未反映の件数を黄色で出す
   ['devices', '端末'],
@@ -24,7 +26,7 @@ export const MENU_VIEWS: Array<[View, string]> = [
 
 /**
  * 左カラム（ツリー + アルバムアート）を出す画面。ツリーは表の絞り込み（scope）を差し替えるものなので、
- * 表のある画面だけに出す。CD / YouTube / Inbox / 端末 / ジョブ / 記録 / 設定では何にも効かないので畳む
+ * 表のある画面だけに出す。CD / YouTube / アップロード / Inbox / 端末 / ジョブ / 記録 / 設定では何にも効かないので畳む
  */
 export const SIDEBAR_VIEWS: ReadonlySet<View> = new Set<View>(['tracks', 'albums'])
 

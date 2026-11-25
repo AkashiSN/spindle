@@ -693,6 +693,9 @@ async fn patch_merge_changes_groups() {
     let groups = v["groups"].as_array().unwrap();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0]["track_count"], 2);
+    // 画面が PATCH で置き換える元の値を持てるように、いまの選択を表示に出す
+    assert_eq!(v["choices"]["merges"], json!([keys]));
+    assert_eq!(v["choices"]["excluded_files"], json!([]));
     let m = app.manifest(&id);
     assert_eq!(m.merges.len(), 1);
     assert!(m.updated_at > 1, "利用者の操作として updated_at を進める");

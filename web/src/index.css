@@ -3555,3 +3555,67 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 .inbox-exclude-cell {
   text-align: center;
 }
+/* アップロード画面（設計 2026-11-25-upload §4.2）。段・帯・一覧は YouTube 画面のものを使う */
+.upload-resume {
+  margin-bottom: 8px;
+}
+.upload-drop {
+  border: 2px dashed var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  text-align: center;
+  max-width: 720px;
+}
+.upload-drop p {
+  margin: 4px 0;
+}
+.upload-drop.over {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.upload-drop.disabled {
+  opacity: 0.6;
+}
+.upload-sends td.path,
+.upload-groups td.path {
+  word-break: break-all;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+}
+.upload-sends td.upload-bar {
+  width: 40%;
+  min-width: 120px;
+}
+.upload-groups .upload-check {
+  width: 22px;
+}
+.upload-tri {
+  padding: 0 2px;
+}
+.upload-members {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 4px;
+}
+.upload-members li.upload-dup {
+  color: var(--error);
+}
+.upload-ops {
+  margin-top: 8px;
+}
+.badge.up-ok {
+  background: var(--badge-green-bg);
+  color: var(--badge-green-fg);
+}
+.badge.up-info {
+  background: var(--accent-bg);
+  color: var(--fg);
+}
+.badge.up-warn {
+  background: var(--badge-amber-bg);
+  color: var(--badge-amber-fg);
+}
+.badge.up-ng {
+  background: var(--badge-red-bg);
+  color: var(--badge-red-fg);
+}
