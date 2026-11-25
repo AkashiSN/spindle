@@ -16,9 +16,13 @@
 │   ├── youtube/<id>.webm              YouTube の原本（id 名。DB に行は作らない。D-70）
 │   └── （FLAC 正規化で退避した WAV / ALAC / AIFF もここ。GC まで保持）
 ├── Inbox/                             [dataset] snapshot: なし
-│   ├── （承認前の一時領域。ハイレゾ購入分などをここへ置く）
-│   └── youtube/<AlbumArtist>/<Album>/ ytdl ジョブが置く（判定できないものは youtube/_unmatched/<channel>/。
-│       spindle-inbox.json を同梱。D-70）
+│   ├── （承認前の一時領域。ハイレゾ購入分などは「アップロード」画面から置く）
+│   ├── youtube/<AlbumArtist>/<Album>/ ytdl ジョブが置く（判定できないものは youtube/_unmatched/<channel>/。
+│   │   spindle-inbox.json を同梱。D-70）
+│   ├── upload/<AlbumArtist>/<Album>/  ブラウザからのアップロードの公開先（アルバム名なしは upload/_untitled/<元の名前>/、
+│   │   既にあれば「 (2)」を付ける。spindle-inbox.json を同梱。§7.12、D-116）
+│   └── .spindle-upload-<id>/          アップロードのステージング（upload.json が状態の正。走査は . で始まる名前を
+│       飛ばすので件に見えない。GC が消す。§7.12）
 └── Playlists/
     ├── m3u8/                          旧ライブラリから移した m3u8（取り込み元）
     └── <profile>/<name>.m3u8          書き出し（internal / android / foobar。D-53）

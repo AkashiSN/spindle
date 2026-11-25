@@ -96,7 +96,8 @@ cdrdao 構文で生成、`rip.log` は先頭行 `spindle rip log v1` の自前�
 Inbox の承認画面の警告にも出る（P2-5 の調査。TASKS）。スキャナはこの rip.log のあるディレクトリで新規に登録する行を
 `cd_rip` にする（DB を消しても出自が戻る。検証は [§7.3](03-retro-verify.md) で付け直す）。
 
-同梱ファイル（cover / disc.cue / disc.toc / rip.log）は album 全体の一括リネームに追随する: rename
+同梱ファイル（cover / disc.cue / disc.toc / rip.log と、PDF・追加の画像。`is_companion_name`。[D-116](../../decisions/D-116.md)）は
+album 全体の一括リネームに追随する: rename
 ジョブが phase 2 の後、commit トランザクションの中で既知の名前のファイルを新ディレクトリへ移し、空になった
 旧ディレクトリを消す（[D-67](../../decisions/D-067.md)。`edits` には記録せず、巻き戻しは逆向きの移動で戻る）。
 

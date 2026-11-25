@@ -283,7 +283,9 @@ GET    /api/inbox                                 承認キュー { "items": [{ 
                                                   承認済み（approved / placing / placed）の件には stages: [{ key, label, status: done | running |
                                                   todo | na, done, total }]（配置 → RG → 系統 → 端末の段。§12.6、P5-2）。
                                                   rip は CD の件の照会の材料 { toc, isrcs, mcn } | null（P4-21）、rip_files は件のディレクトリに
-                                                  ある吸い出しのテキストの名前（`rip*.log` / `disc*.cue` / `disc*.toc`。D-106）
+                                                  ある吸い出しのテキストの名前（`rip*.log` / `disc*.cue` / `disc*.toc`。D-106）。upload はアップロードで置いた件の
+                                                  記録 { upload_id, group_key, uploaded_at, origins } | null、companions は件のディレクトリ直下の
+                                                  同梱ファイルの名前（§7.12、D-116）
 GET    /api/inbox/:id/files/:name                 取り込みの吸い出しファイル本文（`rip*.log` / `disc*.cue` / `disc*.toc` だけ。
                                                   `GET /api/inbox` の各項目の `rip_files` が名前の一覧。D-106）。Inbox の root の dirfd から
                                                   件の `rel_dir` を `openat2` で辿る。許可外の名前・件が無い・ファイルが無いは 404
@@ -308,6 +310,43 @@ POST   /api/inbox/:id/rejudge                     pending の件の YouTube 由�
 POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻す（approved / rejected / failed から）。件の再判定ジョブが
                                                   queued / running なら 409 `rejudging`（approve と同じ）
 POST   /api/inbox/:id/discard, /undiscard         却下した取り込みを破棄待ちにする / 取り消す（rejected だけ。消すのは GC。D-90）
+POST   /api/uploads                               ブラウザからのアップロードを作る → 201 UploadView（§7.12、D-116。以下 uploads は
+                                                  `[paths].inbox` が無ければ 503 `inbox_unavailable`）
+GET    /api/uploads                               → { items: [UploadView]（捨てていないもの。新しい順）, broken: [{ dir, mtime_ns, reason }]
+                                                  （マニフェストの無い・読めない、または表示を作れないステージング。捨てる印の付いたものは
+                                                  出さない） }。先に照合（取りこぼした展開・公開の投入）と実体合わせを走らせる
+GET    /api/uploads/:id                           → UploadView | 404（捨てたもの。公開して捨てた扱いになったものは結果を見せるため返す）。
+                                                  照合と実体合わせは一覧と同じ
+POST   /api/uploads/:id/origins                   { path, total } → 201 { origin: OriginView }。同じパスの未完の origin は作り直して返す。
+                                                  400 `bad_path` | 409 `exists`（受け取り終えた同じパス）| 413 `limit` | 507 `no_space` |
+                                                  409 `busy`（公開を要求した後・捨てた後）
+PUT    /api/uploads/:id/origins/:origin?offset=   本文はチャンクの生バイト（上限 40 MiB。超えると axum の 413 で本文は JSON とは限らない）
+                                                  → { received, complete }。409 { error: "offset", received }（`.part` の実際の大きさと
+                                                  違う）| 413 `limit` | 507 `no_space` | 404 `not_found` / `origin_not_found` | 409 `busy`。
+                                                  受け取り終えた zip は展開ジョブを投入する
+POST   /api/uploads/:id/origins/:origin/unpack    やり直せる失敗の zip を展開し直す → 202 { job_id } | 409 `not_retryable` | 409 `busy`
+PATCH  /api/uploads/:id                           { merges?, excluded_files?, excluded_groups?, included_files?, included_groups?,
+                                                  removed_origins? } → UploadView。与えた項目を置き換える（`removed_origins` は足すだけ）。
+                                                  展開・公開のジョブが active・公開を要求した後・捨てた後は 409 `busy`
+POST   /api/uploads/:id/publish                   公開計画を凍結して公開ジョブを投入 → 202 { job_id }（冪等。押し直しは `publish_error` を消して
+                                                  投入し直す）。409 `incomplete`（送信・展開が終わっていない、展開に失敗した zip がある）|
+                                                  409 `empty`（入れる件が無い）
+DELETE /api/uploads/:id                           捨てる（`discarded_at`。消すのは GC）→ 204。展開・公開のジョブが active・公開を要求した後は
+                                                  409 `busy`（`publish_error` があり upload ジョブが動いていなければ捨てられる）
+DELETE /api/uploads/broken/:dir                   壊れたステージング（`.spindle-upload-<hex>`）に捨てる印を付ける → 204 | 400 `bad_path` |
+                                                  409 `not_broken`（マニフェストが読める。`DELETE /api/uploads/:id` で捨てる）
+// UploadView = { id, created_at, updated_at, expires_at（放置で破棄扱いになる時刻）, busy, origins: [OriginView],
+//                groups: [{ key, albumartist, album, included, selectable, track_count, format, status, statuses,
+//                           tracks: [MemberView], companions: [MemberView] }],
+//                ignored: [string], unassigned_companions: [string], publish: { frozen_at, groups: [{ key, albumartist, album,
+//                track_count, companion_count, base_dest, stage, dest? }] } | null（stage は planned | assembled | publishing | published、
+//                dest は publishing / published のときの宛先）, publish_requested_at, publish_error,
+//                discarded_at, choices: { merges, excluded_files, excluded_groups, included_files, included_groups } }
+// OriginView = { id, client_path, class: audio | zip | companion | ignored, total, received, complete, removed, damaged,
+//                zip: { generation, unpacking, rejected: [{ entry, reason }], error: { reason, retryable } | null } | null }
+// MemberView = { staged, display, publish_name, renamed, included, library_match }
+// status = { kind: library_duplicate, paths } | { kind: inbox_exists, dir } | { kind: append_to, album, track_count }
+//          | { kind: needs_name } | { kind: new }。track_count は入れる曲の数、format は `FLAC 96k/24`（混在は `… ほか`）
 POST   /api/ytmusic/download                      { urls: [string] }（1 件以上、各 1〜2048 文字）。URL ごとに ytdl ジョブを投入
 POST   /api/ytmusic/lookup                        { urls: [string] }（200 件まで）→ { items: [{ url, kind: video|playlist|other|invalid,
                                                    video_url?, located?: { location: library|inbox, path }, list_id?, subscription?: { id, albumartist, album } }] }

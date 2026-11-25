@@ -112,7 +112,8 @@ FTS の更新トリガは索引対象列の `UPDATE OF` にだけ張る。`seen_
 `missing_since` による論理削除。SMB 一時切断やスキャン中のマウント欠落で行を物理削除すると、
 プレイリストと編集履歴が巻き添えになる。既定 7 日経過後に GC（`gc` ジョブ。missing トラック・
 アルバムの行、`Archive/` の退避ファイル、Derived の孤児、アートワークの孤児、却下して「削除」した
-Inbox の取り込みのファイル（[D-90](../decisions/D-090.md)）を回収する。
+Inbox の取り込みのファイル（[D-90](../decisions/D-090.md)）、捨てた・放置したブラウザのアップロードのステージングと古い展開の世代
+（区分 G。[§7.12](07-pipeline/12-upload.md)、[D-116](../decisions/D-116.md)）を回収する。
 1 日 1 回自動、`POST /api/gc` で手動、`GET /api/gc/preview` が dry-run。[D-56](../decisions/D-056.md)）。GC は保持期間を過ぎた
 終端の**ジョブ行**も消す（done / cancelled は `[gc].jobs_done_days`、failed は `jobs_failed_days`。0 で
 消さない。P4-18、[D-81](../decisions/D-081.md)）。端末の同期の計画（`device_sync_plans`）も、終端（`completed` / `abandoned`）して

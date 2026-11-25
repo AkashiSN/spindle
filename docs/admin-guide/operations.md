@@ -55,6 +55,12 @@ nginx（Nginx Proxy Manager など）を挟むときは、その接続元も `tr
 `/api/events` の応答に `X-Accel-Buffering: no` を付けてこれを避けている。それより古い版や、ヘッダを捨てる
 プロキシでは、プロキシ側で `proxy_buffering off;` にする
 
+アップロード画面（購入音源。[操作手順](../user-guide/README.md) §11.4）はファイルを 32 MiB ずつに分けて送り、spindle は 1 リクエストの
+本文を 40 MiB まで受ける。Cloudflare Tunnel（無料プランは 1 リクエスト 100 MB まで）はこのままで通る。間に挟むプロキシの本文
+サイズの上限は 40 MiB 以上にしておく。nginx の `client_max_body_size` の既定は 1 MB なので、Nginx Proxy Manager の proxy host
+の Advanced などで値を確かめ、足りなければ `client_max_body_size 64m;` のように上げる。上限に当たると送信が 413 で失敗し、② に
+「再送」が出る（[§7.12](../spec/07-pipeline/12-upload.md)、[D-116](../decisions/D-116.md)）
+
 ### YouTube の取り込みが失敗し始めたら
 
 まずイメージを更新する（yt-dlp が古いと YouTube の抽出が壊れる。新版は Renovate が PR にし、マージ

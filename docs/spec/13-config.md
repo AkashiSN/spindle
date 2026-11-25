@@ -126,6 +126,17 @@ adb_transfer_timeout_secs = 3600
 
 実体は `deploy/config.example.toml`。両者は一致させる。
 
+ブラウザからのアップロード（[§7.12](07-pipeline/12-upload.md)、[D-116](../decisions/D-116.md)）の設定:
+
+- `[upload].max_file_bytes`: 1 ファイルの宣言サイズの上限（バイト。既定 8 GiB）。超えると origin を作る段で 413 `limit`
+- `[upload].max_upload_bytes`: 1 アップロード全体の上限（バイト。既定 32 GiB）。数えるのは送ったものの宣言サイズ（受信中・外した・
+  壊れたものも実体が残る間は含める）+ zip を展開した量 + GC 待ちの古い展開の世代。zip は本体と展開した中身で 2 倍使うので、
+  zip のアルバムはおよそこの半分まで
+- `[upload].max_zip_entries`: 1 つの zip のエントリ数の上限（既定 10000）。超える zip は全体を展開の失敗にする
+- `[upload].stale_days`: 公開も破棄もされず最後の操作からこの日数たったアップロードを GC が破棄扱いにする（既定 30）。物理削除は
+  その後 `[gc].retention_days` 経ってから
+- 節ごと省略してよい（すべて既定値）。チャンクの大きさ（web 32 MiB）とサーバの 1 リクエストの上限（40 MiB）は設定にしない
+
 端末への配信（[§7.11](07-pipeline/11-device-delivery.md)）の設定（P5-3b、[D-98](../decisions/D-098.md)）:
 
 - `[bin].adb`: adb クライアント。イメージに platform-tools の adb（版と sha256 を固定）を同梱し、compose の adb

@@ -63,6 +63,9 @@ src/
 │   │                    リリースキー再検証、行の登録 / 採用。D-67 / D-68）
 │   ├── inbox.rs         Inbox の走査（取り込み = ディレクトリ）、タグからの下書き、承認の検証、承認済みの配置
 │   │                    （補正をタグに書いて pathgen::plan の宛先へ。source_type = download。D-68）
+│   ├── upload/          ブラウザからのアップロード（§7.12、D-116）: manifest.rs（upload.json とアップロードごとの鍵）、
+│   │                    receive.rs（チャンク・実体合わせ）、budget.rs、unpack.rs（zip の世代展開）、group.rs（件への分け方。
+│   │                    純粋）、view.rs（③ の表示・状態・読み取りの覚え）、publish.rs（凍結と段階的な公開）、reconcile.rs（照合）
 │   └── ytmusic/         metadata.rs（メタデータプラグインのプロトコル v1 と呼び出し。D-69）、
 │                        downloader.rs（yt-dlp の dump / download、remux、タグ、Archive、Inbox への配置と
 │                        spindle-inbox.json。D-70）、sidecar.rs（spindle-inbox.json の読み書き。Inbox と共有）、
@@ -85,9 +88,11 @@ src/
 │   ├── queue.rs  worker.rs  recovery.rs  scheduler.rs（backup / gc の周期投入。inbox は handlers/inbox.rs、
 │   │                        購読の dispatcher は handlers/playlist_sync.rs）
 │   └── handlers/        種別ごと（playlist_sync.rs = 購読の同期: 列挙 → 追記先 → 揃え → 投入。D-78。
-│                        device.rs = device_scan / device_sync / device_verify、source_hash.rs。§7.11）
+│                        device.rs = device_scan / device_sync / device_verify、source_hash.rs。§7.11。
+│                        upload.rs = zip の展開 / Inbox への公開。§7.12）
 ├── gc/
-│   └── mod.rs           物理削除の唯一の経路。plan（判定・dry-run）と execute_*（6 区分。D-56 / D-90）
+│   ├── mod.rs           物理削除の唯一の経路。plan（判定・dry-run）と execute_*（A〜G の 7 区分。D-56 / D-90 / D-116）
+│   └── upload.rs        区分 G: アップロードのステージング（§7.12、D-116）
 ├── playlist/
 │   ├── dsl.rs           pest 文法 → AST
 │   ├── compile.rs       AST → パラメータ化 SQL
@@ -95,7 +100,7 @@ src/
 │   └── export.rs        m3u8 / pls / パスマッピング
 ├── api/
 │   ├── mod.rs  tracks.rs  albums.rs  categories.rs  selection.rs  batch.rs  rename.rs  normalize.rs
-│   │   history.rs  stream.rs  cd.rs  inbox.rs  events.rs  ytmusic.rs  subscriptions.rs
+│   │   history.rs  stream.rs  cd.rs  inbox.rs  events.rs  ytmusic.rs  subscriptions.rs  upload.rs
 │   ├── auth.rs          argon2id / セッション Cookie / CSRF / trusted_cidrs のミドルウェア
 │   ├── devices.rs       端末 API（UI 向け。`/api/devices*`）
 │   ├── agent.rs         エージェント API（`/api/agent/*`）と Bearer のミドルウェア（auth::guard の外。D-99）
