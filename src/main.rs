@@ -16,6 +16,7 @@ use spindle::fsroot::{RootDir, Roots};
 use spindle::gc::GcRoots;
 use spindle::import::inbox::PlaceItemEnv;
 use spindle::import::scanner::Scanner;
+use spindle::import::upload::{self as upload, UploadLocks};
 use spindle::import::ytmusic::downloader::DownloaderEnv;
 use spindle::import::ytmusic::MetadataProvider;
 use spindle::jobs::handlers::backup::{self, BackupHandler};
@@ -35,6 +36,7 @@ use spindle::jobs::handlers::source_hash::SourceHashHandler;
 use spindle::jobs::handlers::tagwrite::TagwriteHandler;
 use spindle::jobs::handlers::thumbnail::ThumbnailHandler;
 use spindle::jobs::handlers::transcode::{self, TranscodeHandler};
+use spindle::jobs::handlers::upload::UploadHandler;
 use spindle::jobs::handlers::verify::VerifyHandler;
 use spindle::jobs::handlers::ytdl::YtdlHandler;
 use spindle::jobs::{self, EnqueueResult, JobType, Registry};
@@ -99,6 +101,9 @@ async fn main() -> anyhow::Result<()> {
     let derived_root = Arc::new(roots.derived);
     let playlists_root = Arc::new(roots.playlists);
     let inbox_root = Arc::new(roots.inbox);
+    // アップロードごとの鍵（マニフェストの直列化）。プロセスで 1 つだけ作り、upload ジョブ・API・GC が
+    // clone を共有する（別に作ると直列化が効かない）
+    let upload_locks = UploadLocks::default();
 
     let db_path = config.paths.data.join(DB_FILE_NAME);
     let db = {
@@ -131,6 +136,13 @@ async fn main() -> anyhow::Result<()> {
         locks_cleared = recovered.locks_cleared,
         "ジョブをリカバリした"
     );
+    // アップロードの照合（設計 §5.3）: マニフェストから取りこぼした展開・公開を投入し直す。
+    // リカバリの後・ワーカー起動の前。失敗しても起動は続ける（一覧の取得でも走る）
+    match upload::reconcile(&db, Arc::clone(&inbox_root), &upload_locks).await {
+        Ok(0) => {}
+        Ok(n) => info!(enqueued = n, "アップロードの取りこぼしを投入し直した"),
+        Err(e) => warn!(error = %e, "アップロードの照合に失敗"),
+    }
 
     // Derived の系統設定は config を正とし、起動時に derived_variants へ写す（D-75）
     {
@@ -565,6 +577,15 @@ async fn main() -> anyhow::Result<()> {
             before_artwork: None,
             coverart: Some(Arc::clone(&caa)),
         })),
+    );
+    // ブラウザからのアップロード（zip の展開 / Inbox への公開）。鍵は上で作った 1 つを共有する
+    registry.register(
+        JobType::Upload,
+        Arc::new(UploadHandler::new(
+            Arc::clone(&inbox_root),
+            upload_locks.clone(),
+            state.config.upload.clone(),
+        )),
     );
     // YouTube のダウンロード（P3-3、D-70）。Inbox に置くところまで。無効なら登録しない（API は 404）
     if state.config.ytmusic.enabled {

@@ -19,5 +19,6 @@ pub mod source_hash;
 pub mod tagwrite;
 pub mod thumbnail;
 pub mod transcode;
+pub mod upload;
 pub mod verify;
 pub mod ytdl;
