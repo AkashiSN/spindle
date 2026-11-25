@@ -264,6 +264,42 @@ export function serialQueue(): <T>(task: () => Promise<T>) => Promise<T> {
   }
 }
 
+/**
+ * 開いているアップロードへの変更（③ の PATCH・まとめる・外す・展開し直し・「Inbox へ置く」・捨てる）を 1 列に並べる。
+ * 公開の要求が先に積んだ PATCH を追い越すと、古い選択のまま計画が凍結されるので、すべてここを通す。
+ * 対象の id は積んだときに決める。走る時点で `id` がもう開いているものでなければ走らせず `undefined` を返す。
+ * 仕事には `live()`（`id` がまだ開いているものか）を渡す。応答を反映する前に確かめ、切り替えた後の応答で
+ * 別のアップロードの表示を上書きしない。`onPending` は積んで終わっていない数が変わるたびに呼ぶ
+ */
+export interface MutationQueue {
+  run: <T>(id: string, task: (live: () => boolean) => Promise<T>) => Promise<T | undefined>
+  pending: () => number
+}
+
+/** `current` は開いているアップロードの id を持つもの（hook の ref をそのまま渡す） */
+export function mutationQueue(current: { readonly current: string | null }, onPending: (n: number) => void = () => {}): MutationQueue {
+  const serial = serialQueue()
+  let pending = 0
+  const settle = (d: number) => {
+    pending += d
+    onPending(pending)
+  }
+  return {
+    run: <T>(id: string, task: (live: () => boolean) => Promise<T>) => {
+      settle(1)
+      return serial(async (): Promise<T | undefined> => {
+        try {
+          if (current.current !== id) return undefined
+          return await task(() => current.current === id)
+        } finally {
+          settle(-1)
+        }
+      })
+    },
+    pending: () => pending,
+  }
+}
+
 /** いまの表示で、ファイル `staged` のチェックを切り替える本文（見つからなければ null） */
 export function toggleFileIn(v: UploadView, staged: string): UploadPatch | null {
   for (const g of v.groups) {

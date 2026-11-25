@@ -13,8 +13,9 @@ import {
   completedOrigin,
   inProgress,
   mergeSelected,
+  mutationQueue,
+  type MutationQueue,
   PARALLEL_SENDS,
-  serialQueue,
   shouldSend,
   uploadErrorMessage,
   viewSequence,
@@ -40,8 +41,8 @@ export interface UploadState {
   list: UploadList | null
   sends: SendItem[]
   sending: boolean
-  /** 「Inbox へ置く」の要求中 */
-  publishPending: boolean
+  /** 開いているアップロードへの変更（③・公開・捨てるなど）を送っている途中（終わるまで公開・切り替えを押せない） */
+  mutating: boolean
   error: string | null
   clearError: () => void
   /** ファイル（`path` はドロップで辿った相対パス）を足して送り始める */
@@ -55,7 +56,7 @@ export interface UploadState {
   /** 開いているものを閉じて、新しく送れるようにする */
   startNew: () => void
   refresh: () => void
-  /** ③ の変更。本文は前の変更の応答を反映した後の表示から作る（PATCH は項目を置き換えるので直列にする） */
+  /** ③ の変更。本文は前の変更の応答を反映した後の表示から作る（PATCH は項目を置き換えるので、他の変更と 1 列にする） */
   patch: (build: (v: UploadView) => UploadPatch | null) => Promise<void>
   merge: (keys: string[]) => Promise<void>
   publish: () => Promise<void>
@@ -123,7 +124,8 @@ export function useUpload(enabled: boolean): UploadState {
   const [view, setView] = useState<UploadView | null>(null)
   const [list, setList] = useState<UploadList | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [publishPending, setPublishPending] = useState(false)
+  // 開いているアップロードへの変更を積んで、まだ終わっていない数
+  const [pendingMutations, setPendingMutations] = useState(0)
   // 送信キューは送信の処理が読み書きするので ref に持ち、描画には写しを渡す
   const sendsRef = useRef<SendItem[]>([])
   const [sends, setSends] = useState<SendItem[]>([])
@@ -138,11 +140,16 @@ export function useUpload(enabled: boolean): UploadState {
     abortRef.current = c
     return () => c.abort()
   }, [])
-  // ③ の変更を 1 つずつ送る
-  const patchQueue = useRef(serialQueue())
   const setId = useCallback((id: string | null) => {
     idRef.current = id
     setCurrentId(id)
+  }, [])
+  // 開いているアップロードへの変更（③・公開・捨てるなど）を 1 列に送る。対象は積んだときの id
+  // （描画中に ref を読まないよう、最初に使うときに作る）
+  const mutationsRef = useRef<MutationQueue | null>(null)
+  const mutations = useCallback((): MutationQueue => {
+    if (mutationsRef.current == null) mutationsRef.current = mutationQueue(idRef, setPendingMutations)
+    return mutationsRef.current
   }, [])
   const viewRef = useRef<UploadView | null>(null)
   const nextN = useRef(1)
@@ -154,9 +161,10 @@ export function useUpload(enabled: boolean): UploadState {
   }, [])
   // 取り直しの応答の順序: 変更の応答を反映した後に、それより前に送った GET の応答で戻さない
   const seqRef = useRef(viewSequence())
-  /** 変更の応答（の表示）を反映する */
+  /** アップロード `id` への変更の応答（の表示）を反映する。もう開いているものでなければ捨てる */
   const applyMutation = useCallback(
-    (v?: UploadView) => {
+    (id: string, v?: UploadView) => {
+      if (idRef.current !== id || (v !== undefined && v.id !== id)) return
       seqRef.current.mutated()
       if (v !== undefined) setCurrent(v)
     },
@@ -335,7 +343,7 @@ export function useUpload(enabled: boolean): UploadState {
     const v = r.body as UploadView
     sendsRef.current = []
     setId(v.id)
-    applyMutation(v)
+    applyMutation(v.id, v)
     return v.id
   }, [applyMutation, setId])
 
@@ -407,6 +415,10 @@ export function useUpload(enabled: boolean): UploadState {
         setError('送信中は別のアップロードを開けない')
         return
       }
+      if (mutations().pending() > 0) {
+        setError('変更を送っている間は別のアップロードを開けない')
+        return
+      }
       sendsRef.current = []
       bump()
       setId(id)
@@ -415,21 +427,25 @@ export function useUpload(enabled: boolean): UploadState {
       void fetchView()
       fetchList()
     },
-    [bump, setId, setCurrent, fetchView, fetchList],
+    [mutations, bump, setId, setCurrent, fetchView, fetchList],
   )
 
   const startNew = useCallback(() => {
     if (sendsRef.current.some((s) => s.state === 'queued' || s.state === 'sending')) return
+    if (mutations().pending() > 0) {
+      setError('変更を送っている間は別に送り始められない')
+      return
+    }
     sendsRef.current = []
     bump()
     setId(null)
     setCurrent(null)
     fetchList()
-  }, [bump, setId, setCurrent, fetchList])
+  }, [mutations, bump, setId, setCurrent, fetchList])
 
-  /** 変更系の共通: 失敗は文言に、成功は取り直す */
+  /** 変更系の共通（`id` は変更するアップロード）: 失敗は文言に、成功は取り直す */
   const mutate = useCallback(
-    async (path: string, init: RequestInit, applyView = false): Promise<boolean> => {
+    async (id: string, path: string, init: RequestInit, applyView = false): Promise<boolean> => {
       setError(null)
       try {
         const r = await request(path, init)
@@ -438,9 +454,9 @@ export function useUpload(enabled: boolean): UploadState {
           await fetchView()
           return false
         }
-        if (applyView && r.body != null) applyMutation(r.body as UploadView)
+        if (applyView && r.body != null) applyMutation(id, r.body as UploadView)
         else {
-          applyMutation()
+          applyMutation(id)
           await fetchView()
         }
         return true
@@ -452,17 +468,27 @@ export function useUpload(enabled: boolean): UploadState {
     [fetchView, applyMutation],
   )
 
+  /** 開いているアップロードへの変更を 1 列に積む（開いていなければ何もしない） */
+  const enqueue = useCallback(
+    <T,>(task: (id: string) => Promise<T>): Promise<T | undefined> => {
+      const id = idRef.current
+      if (id == null) return Promise.resolve(undefined)
+      return mutations().run(id, () => task(id))
+    },
+    [mutations],
+  )
+
   const patch = useCallback(
-    (build: (v: UploadView) => UploadPatch | null) =>
-      patchQueue.current(async () => {
-        const id = idRef.current
+    async (build: (v: UploadView) => UploadPatch | null) => {
+      await enqueue(async (id) => {
         const v = viewRef.current
-        if (id == null || v == null || v.id !== id) return
+        if (v == null || v.id !== id) return
         const body = build(v)
         if (body == null) return
-        await mutate(`/api/uploads/${id}`, { method: 'PATCH', body: JSON.stringify(body) }, true)
-      }),
-    [mutate],
+        await mutate(id, `/api/uploads/${id}`, { method: 'PATCH', body: JSON.stringify(body) }, true)
+      })
+    },
+    [enqueue, mutate],
   )
 
   const merge = useCallback(
@@ -472,30 +498,36 @@ export function useUpload(enabled: boolean): UploadState {
     [patch],
   )
 
+  // 先に積んだ ③ の変更の応答を反映してから送る（追い越すと古い選択のまま凍結される）。
+  // 要求から取り直しまでは `mutating` が押せなくし、その後は表示（公開を要求済み）が押せなくする
   const publish = useCallback(async () => {
-    const id = idRef.current
-    if (id == null) return
-    // 要求から取り直しまでは押せない。その後は表示（公開を要求済み）が押せなくする
-    setPublishPending(true)
-    await mutate(`/api/uploads/${id}/publish`, { method: 'POST' })
-    setPublishPending(false)
-  }, [mutate])
+    await enqueue((id) => mutate(id, `/api/uploads/${id}/publish`, { method: 'POST' }))
+  }, [enqueue, mutate])
 
   const discard = useCallback(
     async (target?: string) => {
-      const id = target ?? idRef.current
-      if (id == null) return false
-      const ok = await mutate(`/api/uploads/${id}`, { method: 'DELETE' })
-      if (ok && id === idRef.current) {
-        sendsRef.current = []
-        bump()
-        setId(null)
-        setCurrent(null)
+      let ok: boolean
+      if (target == null || target === idRef.current) {
+        // 開いているもの: 先に積んだ変更の後に捨てる
+        ok =
+          (await enqueue(async (id) => {
+            const done = await mutate(id, `/api/uploads/${id}`, { method: 'DELETE' })
+            if (done && id === idRef.current) {
+              sendsRef.current = []
+              bump()
+              setId(null)
+              setCurrent(null)
+            }
+            return done
+          })) ?? false
+      } else {
+        // 前回の続き（開いていないもの）は列に並べない
+        ok = await mutate(target, `/api/uploads/${target}`, { method: 'DELETE' })
       }
       fetchList()
       return ok
     },
-    [mutate, bump, setId, setCurrent, fetchList],
+    [enqueue, mutate, bump, setId, setCurrent, fetchList],
   )
 
   const discardBroken = useCallback(
@@ -529,11 +561,9 @@ export function useUpload(enabled: boolean): UploadState {
 
   const retryUnpack = useCallback(
     async (originId: string) => {
-      const id = idRef.current
-      if (id == null) return
-      await mutate(`/api/uploads/${id}/origins/${originId}/unpack`, { method: 'POST' })
+      await enqueue((id) => mutate(id, `/api/uploads/${id}/origins/${originId}/unpack`, { method: 'POST' }))
     },
-    [mutate],
+    [enqueue, mutate],
   )
 
   const clearError = useCallback(() => setError(null), [])
@@ -549,7 +579,7 @@ export function useUpload(enabled: boolean): UploadState {
     list: shownList,
     sends,
     sending,
-    publishPending,
+    mutating: pendingMutations > 0,
     error,
     clearError,
     addFiles,

@@ -47,7 +47,13 @@ export function UploadView({
         <h1>アップロード</h1>
         <span className="spacer" />
         {view != null && !upload.sending && (
-          <button type="button" className="ghost" onClick={upload.startNew} title="開いているものは前回の続きに残る">
+          <button
+            type="button"
+            className="ghost"
+            disabled={upload.mutating}
+            onClick={upload.startNew}
+            title="開いているものは前回の続きに残る"
+          >
             別に送る
           </button>
         )}
@@ -146,7 +152,7 @@ function ResumeBanners({ upload }: { upload: UploadState }) {
       {items.map((v) => (
         <p key={v.id} className="yt-banner small">
           {resumeBanner([v])}{' '}
-          <button type="button" className="ghost" disabled={upload.sending} onClick={() => upload.open(v.id)}>
+          <button type="button" className="ghost" disabled={upload.sending || upload.mutating} onClick={() => upload.open(v.id)}>
             続きを開く
           </button>{' '}
           <button
@@ -530,7 +536,7 @@ function PublishStep({ v, upload }: { v: View; upload: UploadState }) {
         <button
           type="button"
           className="primary"
-          disabled={!can.ok || upload.publishPending || running}
+          disabled={!can.ok || upload.mutating || running}
           onClick={() => void upload.publish()}
         >
           {v.publish_error != null ? 'もう一度置く' : running ? '置いている…' : publishLabel(v)}

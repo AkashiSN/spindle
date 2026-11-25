@@ -18,6 +18,7 @@ import {
   publishLabel,
   resumeBanner,
   resumeCandidates,
+  mutationQueue,
   serialQueue,
   shouldSend,
   statusLabel,
@@ -431,6 +432,83 @@ describe('serialQueue + toggleFileIn / toggleGroupIn', () => {
     expect(toggleFileIn(v, 'nope')).toBeNull()
     expect(toggleGroupIn(v, 'g')).toBeNull()
     expect(toggleGroupIn(v, 'nope')).toBeNull()
+  })
+})
+
+describe('mutationQueue', () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>((r) => (resolve = r))
+    return { promise, resolve }
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 0))
+
+  it('応答待ちの PATCH の後に押した「Inbox へ置く」は、PATCH の応答を反映してから送る', async () => {
+    const current: { current: string | null } = { current: 'A' }
+    const counts: number[] = []
+    const q = mutationQueue(current, (n) => counts.push(n))
+    const log: string[] = []
+    const patchRes = deferred<string>()
+    let shown = 'old'
+    const p = q.run('A', async (live) => {
+      log.push('patch sent')
+      const v = await patchRes.promise
+      if (live()) {
+        shown = v
+        log.push('patch applied')
+      }
+    })
+    const pub = q.run('A', async () => {
+      log.push(`publish sent (shown=${shown})`)
+    })
+    await tick()
+    expect(log).toEqual(['patch sent'])
+    expect(q.pending()).toBe(2)
+    patchRes.resolve('new')
+    await Promise.all([p, pub])
+    expect(log).toEqual(['patch sent', 'patch applied', 'publish sent (shown=new)'])
+    expect(q.pending()).toBe(0)
+    expect(counts).toEqual([1, 2, 1, 0])
+    current.current = null
+  })
+
+  it('PATCH の応答待ちの間に切り替えると、応答は反映せず、残りの変更も送らない', async () => {
+    const current: { current: string | null } = { current: 'A' }
+    const q = mutationQueue(current)
+    const res = deferred<string>()
+    const sent: string[] = []
+    let shown = 'B の表示'
+    const first = q.run('A', async (live) => {
+      sent.push('patch A1')
+      const v = await res.promise
+      if (live()) shown = v
+      return 'ran'
+    })
+    const second = q.run('A', async () => {
+      sent.push('publish A')
+      return 'ran'
+    })
+    await tick()
+    current.current = 'B'
+    res.resolve('A の応答')
+    expect(await first).toBe('ran')
+    expect(await second).toBeUndefined()
+    expect(sent).toEqual(['patch A1'])
+    expect(shown).toBe('B の表示')
+    expect(q.pending()).toBe(0)
+    // 切り替えた先へ積んだものは走る
+    expect(await q.run('B', async (live) => live())).toBe(true)
+  })
+
+  it('失敗した変更の後も次を走らせ、数を戻す', async () => {
+    const q = mutationQueue({ current: 'A' })
+    const a = q.run('A', async () => {
+      throw new Error('x')
+    })
+    const b = q.run('A', async () => 2)
+    await expect(a).rejects.toThrow('x')
+    expect(await b).toBe(2)
+    expect(q.pending()).toBe(0)
   })
 })
 
