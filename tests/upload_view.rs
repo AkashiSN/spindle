@@ -579,3 +579,74 @@ fn garbage_generation_not_read() {
         .unwrap();
     assert!(!p.complete);
 }
+
+#[test]
+fn current_generation_in_garbage_or_unpacking_not_read() {
+    let env = Env::new();
+    let a = env.wav("01.wav", 1, Some("Zipped"), 1);
+    let o = env.send("mora.zip", &zip_of(&[("01.wav", &a)]));
+    unpack(
+        &env.inbox,
+        &env.locks,
+        &env.id,
+        &o,
+        false,
+        &env.cfg,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
+    assert_eq!(read_staged(&env.inbox, &env.manifest()).unwrap().0.len(), 1);
+
+    // 成功した世代そのものが garbage に載っている
+    env.edit(|m| {
+        m.garbage.push(Garbage {
+            path: format!("x/{o}/g1"),
+            bytes: 1,
+            added_at: NOW,
+        })
+    });
+    assert!(read_staged(&env.inbox, &env.manifest())
+        .unwrap()
+        .0
+        .is_empty());
+
+    // 成功した世代が展開中とされている
+    env.edit(|m| {
+        m.garbage.clear();
+        m.origins[0].zip.as_mut().unwrap().unpacking = Some(1);
+    });
+    assert!(read_staged(&env.inbox, &env.manifest())
+        .unwrap()
+        .0
+        .is_empty());
+    assert!(env.view().groups.is_empty());
+}
+
+#[test]
+fn fs_error_on_one_file_is_ignored_with_reason() {
+    let env = Env::new();
+    let a = env.wav("01.wav", 1, Some("Ok"), 1);
+    let b = env.wav("02.wav", 2, Some("Ok"), 2);
+    env.send("Ok/01.wav", &a);
+    let o2 = env.send("Ok/02.wav", &b);
+    // files/o2 を symlink に差し替える（RESOLVE_NO_SYMLINKS で NotFound 以外の失敗になる）
+    let staging = env
+        .dir
+        .path()
+        .join("Inbox")
+        .join(env.id.staging_dir().as_str());
+    let p = staging.join("files").join(&o2);
+    std::fs::remove_file(&p).unwrap();
+    std::os::unix::fs::symlink(staging.join("files/o1"), &p).unwrap();
+
+    let v = env.view();
+    assert_eq!(v.groups.len(), 1);
+    assert_eq!(v.groups[0].tracks.len(), 1);
+    assert!(
+        v.ignored
+            .iter()
+            .any(|s| s.starts_with("Ok/02.wav（読めない: ")),
+        "{:?}",
+        v.ignored
+    );
+}

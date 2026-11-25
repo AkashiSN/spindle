@@ -31,6 +31,8 @@ pub const PUBLISH_ROOT: &str = "upload";
 /// アルバム名の無い件の置き場所（`upload/_untitled/<origin_label>`）
 pub const UNTITLED_DIR: &str = "_untitled";
 const DAY_SECS: i64 = 86_400;
+/// 置き場所の 1 要素のバイト数の上限（RelPath の 255 より小さく、` (N)` を足せる）
+pub const DEST_COMPONENT_MAX: usize = 200;
 
 /// 件の状態（強い順 = 列挙順）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -174,15 +176,38 @@ pub fn base_dest(group: &Group) -> Result<RelPath, UploadError> {
     let path = match &group.album {
         Some(album) => format!(
             "{PUBLISH_ROOT}/{}/{}",
-            sanitize_component(&group.albumartist),
-            sanitize_component(album)
+            dest_component(&group.albumartist),
+            dest_component(album)
         ),
         None => format!(
             "{PUBLISH_ROOT}/{UNTITLED_DIR}/{}",
-            sanitize_component(&group.origin_label)
+            dest_component(&group.origin_label)
         ),
     };
     Ok(RelPath::parse(&path)?)
+}
+
+/// 置き場所の 1 要素: `sanitize_component` の後、`.` で始まれば `_` を前に付け（Inbox の走査は
+/// `.` で始まる名前を飛ばす）、[`DEST_COMPONENT_MAX`] バイト以下に文字境界で切る（公開が ` (2)` を
+/// 足す余地を残す）。切った後の末尾の `.`・空白は落とし、空になれば `_`
+fn dest_component(s: &str) -> String {
+    let mut c = sanitize_component(s);
+    if c.starts_with('.') {
+        c.insert(0, '_');
+    }
+    if c.len() > DEST_COMPONENT_MAX {
+        let mut cut = DEST_COMPONENT_MAX;
+        while !c.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        c.truncate(cut);
+        let kept = c.trim_end_matches(['.', ' ']).len();
+        c.truncate(kept);
+    }
+    if c.is_empty() {
+        c.push('_');
+    }
+    c
 }
 
 /// ステージングの読める中身を読む（タグと音声の指紋。指紋は [`Member::staged`] で引く）。
@@ -210,8 +235,16 @@ pub fn read_staged(
             let mut found = Vec::new();
             walk(inbox, &id, &gdir, "", &mut found)?;
             found.sort();
-            for (staged, inner) in found {
-                let display = format!("{}/{inner}", o.client_path);
+            for (staged, inner, error) in found {
+                let display = if inner.is_empty() {
+                    o.client_path.clone()
+                } else {
+                    format!("{}/{inner}", o.client_path)
+                };
+                if let Some(reason) = error {
+                    files.push(unreadable(o, &staged, display, &reason));
+                    continue;
+                }
                 let class = classify(&inner);
                 if let Some(f) = read_one(inbox, &id, o, &staged, display, class, &mut fps)? {
                     files.push(f);
@@ -235,13 +268,14 @@ pub fn read_staged(
     Ok((files, fps))
 }
 
-/// 世代の中のファイルを集める（`(ステージング内のパス, 世代内のパス)`）。ディレクトリが無ければ空
+/// 世代の中のファイルを集める（`(ステージング内のパス, 世代内のパス, 読めない理由)`）。
+/// ディレクトリが無ければ空。読めないディレクトリはその 1 項を理由付きで返す（表示全体は落とさない）
 fn walk(
     inbox: &RootDir,
     id: &UploadId,
     dir: &RelPath,
     prefix: &str,
-    out: &mut Vec<(RelPath, String)>,
+    out: &mut Vec<(RelPath, String, Option<String>)>,
 ) -> Result<(), UploadError> {
     let entries = match inbox.read_dir(Some(&id.staged(dir)?)) {
         Ok(e) => e,
@@ -249,7 +283,11 @@ fn walk(
             tracing::warn!(upload = id.as_str(), dir = %dir, "展開した世代が無い");
             return Ok(());
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => {
+            tracing::warn!(upload = id.as_str(), dir = %dir, error = %e, "展開したディレクトリを読めない");
+            out.push((dir.clone(), prefix.to_string(), Some(e.to_string())));
+            return Ok(());
+        }
     };
     for e in entries {
         let Some(name) = e.name.to_str() else {
@@ -263,7 +301,7 @@ fn walk(
         };
         match e.kind {
             FileKind::Dir => walk(inbox, id, &child, &inner, out)?,
-            FileKind::File => out.push((child, inner)),
+            FileKind::File => out.push((child, inner, None)),
             FileKind::Symlink | FileKind::Other => {}
         }
     }
@@ -300,7 +338,10 @@ fn read_one(
             tracing::warn!(upload = id.as_str(), path = %staged, "ステージングのファイルが無い");
             return Ok(None);
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => {
+            tracing::warn!(upload = id.as_str(), path = %staged, error = %e, "ステージングのファイルを開けない");
+            return Ok(Some(unreadable(o, staged, f.display, &e.to_string())));
+        }
     };
     // ステージングの名前（`files/o3`）には拡張子が無いので、拡張子は元の名前から取る
     let name = RelPath::parse(basename(&f.display)).unwrap_or_else(|_| staged.clone());
@@ -308,7 +349,11 @@ fn read_one(
         .file_name()
         .rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase());
-    match read_audio_file(file.try_clone()?, ext.as_deref()) {
+    let dup = match file.try_clone() {
+        Ok(d) => d,
+        Err(e) => return Ok(Some(unreadable(o, staged, f.display, &e.to_string()))),
+    };
+    match read_audio_file(dup, ext.as_deref()) {
         Ok(af) => {
             // タグと同じ実体（FD）で指紋を取る（Inbox の走査と同じ計算）
             fps.insert(f.staged.clone(), read_fingerprint_fd(&file, &name, &af));
@@ -325,6 +370,21 @@ fn read_one(
         }
     }
     Ok(Some(f))
+}
+
+/// 読めないファイル（取り込まないへ理由付きで出す）
+fn unreadable(o: &Origin, staged: &RelPath, display: String, reason: &str) -> StagedFile {
+    StagedFile {
+        staged: staged.as_str().to_string(),
+        origin: o.id.clone(),
+        display: format!("{display}（読めない: {reason}）"),
+        class: FileClass::Ignored,
+        tags: Vec::new(),
+        codec: None,
+        lossless: false,
+        sample_rate: None,
+        bit_depth: None,
+    }
 }
 
 /// 件と曲の included を決める（純粋）。曲: 既定 true、ライブラリと一致する曲は既定 false。
@@ -640,5 +700,42 @@ mod tests {
         assert_eq!(base_dest(&g).unwrap().as_str(), "upload/A／B/Best？");
         let g = Group { album: None, ..g };
         assert_eq!(base_dest(&g).unwrap().as_str(), "upload/_untitled/mora");
+    }
+
+    fn named(albumartist: &str, album: Option<&str>, label: &str) -> Group {
+        Group {
+            key: "k".into(),
+            albumartist: albumartist.into(),
+            album: album.map(str::to_string),
+            origin_label: label.into(),
+            origins: vec![],
+            tracks: vec![],
+            companions: vec![],
+        }
+    }
+
+    #[test]
+    fn base_dest_does_not_make_hidden_names() {
+        let g = named("Artist", Some(".hack"), "x");
+        assert_eq!(base_dest(&g).unwrap().as_str(), "upload/Artist/_.hack");
+        let g = named("Artist", None, ".secret");
+        assert_eq!(base_dest(&g).unwrap().as_str(), "upload/_untitled/_.secret");
+    }
+
+    #[test]
+    fn base_dest_cuts_long_components() {
+        // 3 バイト文字 100 個 = 300 バイト
+        let long = "あ".repeat(100);
+        let g = named("Artist", Some(&long), "x");
+        let dest = base_dest(&g).unwrap();
+        let last = dest.file_name();
+        assert!(last.len() <= DEST_COMPONENT_MAX, "{}", last.len());
+        assert!(last.chars().all(|c| c == 'あ'));
+        assert!(RelPath::parse(dest.as_str()).is_ok());
+        // 切った後の末尾のドット・空白は落とす（200 バイト目の手前が空白）
+        let s = format!("{}  {}", "a".repeat(198), "b".repeat(50));
+        let c = dest_component(&s);
+        assert_eq!(c, "a".repeat(198));
+        assert_eq!(dest_component("..."), "_");
     }
 }
