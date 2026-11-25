@@ -18,7 +18,7 @@ use crate::jobs::handlers::upload::{new_publish_job, new_unpack_job};
 use crate::jobs::{EnqueueResult, NewJob};
 
 use super::manifest::{
-    list_uploads, with_manifest, FileClass, Listed, Manifest, UploadError, UploadId, UploadLocks,
+    list_uploads, with_manifest, Listed, Manifest, UploadError, UploadId, UploadLocks,
 };
 
 /// マニフェスト 1 つから、あるべきジョブを並べる
@@ -29,12 +29,7 @@ fn wanted(id: &UploadId, m: &Manifest) -> Vec<NewJob> {
     let mut out: Vec<NewJob> = m
         .origins
         .iter()
-        .filter(|o| o.class == FileClass::Zip && o.complete && !o.removed && !o.damaged)
-        .filter(|o| {
-            o.zip
-                .as_ref()
-                .is_none_or(|z| z.generation == 0 && z.error.is_none())
-        })
+        .filter(|o| o.needs_unpack())
         .map(|o| new_unpack_job(id, &o.id, false))
         .collect();
     // やり直しても変わらない失敗で止まった公開は、人が押し直すまで投入しない

@@ -279,6 +279,19 @@ impl Origin {
             .join(&format!("g{generation}"))?)
     }
 
+    /// 受け取り終えて未展開（`generation == 0`）で失敗していない zip（外した・壊れたものを除く）。
+    /// 展開を投入すべきもの（チャンクの完了と照合が同じ判定を使う）
+    pub fn needs_unpack(&self) -> bool {
+        self.class == FileClass::Zip
+            && self.complete
+            && !self.removed
+            && !self.damaged
+            && self
+                .zip
+                .as_ref()
+                .is_none_or(|z| z.generation == 0 && z.error.is_none())
+    }
+
     fn under(&self, dir: &str, name: &str) -> Result<RelPath, UploadError> {
         if !is_origin_id(&self.id) {
             return Err(UploadError::BadPath(format!(

@@ -224,27 +224,52 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, Fail> {
                     if m.discarded_at.is_some() {
                         continue;
                     }
-                    let id = UploadId::parse(&m.id)?;
-                    let m = match synced(&inbox, &up, &id) {
-                        Ok(m) => m,
-                        // 一覧の後に GC が消した
-                        Err(UploadError::NotFound) => continue,
-                        Err(e) => return Err(e),
+                    let id = match UploadId::parse(&m.id) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            tracing::warn!(upload = m.id.as_str(), error = %e, "アップロードの ID が不正");
+                            continue;
+                        }
                     };
-                    if m.discarded_at.is_some() {
-                        continue;
+                    // 1 つのアップロードの失敗で一覧全体を落とさない（壊れたものとして出す）
+                    let one = synced(&inbox, &up, &id).and_then(|m| {
+                        if m.discarded_at.is_some() {
+                            return Ok(None);
+                        }
+                        view_of(c, &layout, &inbox, &up, &m).map(Some)
+                    });
+                    match one {
+                        Ok(Some(v)) => {
+                            keep.insert(v.id.clone());
+                            items.push(v);
+                        }
+                        Ok(None) => {}
+                        // 一覧の後に GC が消した
+                        Err(UploadError::NotFound) => {}
+                        Err(e) => {
+                            tracing::warn!(upload = id.as_str(), error = %e, "アップロードの状態を作れない");
+                            let dir = id.staging_dir();
+                            let mtime_ns = inbox.stat(&dir).map(|st| st.mtime_ns).unwrap_or(0);
+                            broken.push(BrokenView {
+                                dir: dir.as_str().to_string(),
+                                mtime_ns,
+                                reason: e.to_string(),
+                            });
+                        }
                     }
-                    keep.insert(m.id.clone());
-                    items.push(view_of(c, &layout, &inbox, &up, &m)?);
                 }
                 Listed::Broken {
                     dir,
                     mtime_ns,
                     reason,
                 } => {
-                    // 捨てる印を付けたものは GC を待つだけなので出さない
-                    if has_discard_mark(&inbox, &dir)? {
-                        continue;
+                    // 捨てる印を付けたものは GC を待つだけなので出さない（確かめられなければ出す）
+                    match has_discard_mark(&inbox, &dir) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(dir = %dir, error = %e, "捨てる印を確かめられない")
+                        }
                     }
                     broken.push(BrokenView {
                         dir: dir.as_str().to_string(),
@@ -273,7 +298,15 @@ pub async fn get_one(
     let layout = state.config.layout.clone();
     let (inbox, up) = (cx.inbox, cx.up);
     let r = with_conn(&state, move |c| {
-        let m = synced(&inbox, &up, &id)?;
+        let m = match synced(&inbox, &up, &id) {
+            Ok(m) => m,
+            Err(UploadError::NotFound) => {
+                // GC が消し終えた: 覚えも落とす
+                up.cache.forget(id.as_str());
+                return Err(UploadError::NotFound);
+            }
+            Err(e) => return Err(e),
+        };
         // 捨てたものは出さない（公開して捨てた扱いになったものは、公開の結果を見せるため出す）
         if m.discarded_at.is_some() && m.publish.is_none() {
             return Err(UploadError::NotFound);
@@ -367,13 +400,9 @@ pub async fn chunk(
         // 受け取り終えた未展開の zip は展開を投入する
         let unpack = r.complete
             && with_manifest(&inbox, &up.locks, &bid, |m| {
-                Ok(m.origins.iter().any(|o| {
-                    o.id == borigin
-                        && o.class == FileClass::Zip
-                        && o.zip
-                            .as_ref()
-                            .is_none_or(|z| z.generation == 0 && z.error.is_none())
-                }))
+                Ok(m.origins
+                    .iter()
+                    .any(|o| o.id == borigin && o.needs_unpack()))
             })?;
         Ok((r, unpack))
     })
@@ -545,12 +574,22 @@ pub async fn discard(
     with_conn(&state, move |c| {
         ensure_staging(&inbox, &id)?;
         with_manifest(&inbox, &up.locks, &id, |m| {
-            if m.discarded_at.is_some() && m.publish_requested_at.is_none() {
+            if m.discarded_at.is_some()
+                && (m.publish_requested_at.is_none() || m.publish_error.is_some())
+            {
                 // 捨て済み（二度押し）
                 return Ok(());
             }
             // ジョブの判定と discarded_at の書き込みは同じ鍵の中（展開・公開と競合しない）
-            ensure_idle(c, &id, m)?;
+            if m.publish_error.is_some() {
+                // 公開がやり直しても変わらない失敗で止まったものは、公開ジョブが動いていなければ
+                // 捨てられる（そうしないと押し直すしかなく、永久に残る）
+                if upload_busy(c, &id)? {
+                    return Err(UploadError::Busy);
+                }
+            } else {
+                ensure_idle(c, &id, m)?;
+            }
             m.discarded_at = Some(now_epoch());
             Ok(())
         })?;

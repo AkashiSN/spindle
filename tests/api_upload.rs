@@ -1081,3 +1081,75 @@ async fn get_does_not_reread_unchanged_files() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(cache.len(), 2);
 }
+
+#[tokio::test]
+async fn delete_allowed_after_publish_error() {
+    let app = App::new().await;
+    let id = app.create().await;
+    app.two_groups(&id).await;
+    let (st, v) = app
+        .json(
+            Method::POST,
+            &format!("/api/uploads/{id}/publish"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    app.edit(&id, |m| {
+        m.publish_error = Some("公開するファイルが無い: x".into())
+    });
+    // 公開ジョブが待っている間は捨てられない
+    assert_eq!(
+        app.delete(&format!("/api/uploads/{id}")).await,
+        StatusCode::CONFLICT
+    );
+    assert!(app.manifest(&id).discarded_at.is_none());
+    // 公開ジョブが失敗で終わった後（active なジョブが無い）は捨てられる
+    let job = v["job_id"].as_i64().unwrap();
+    app.conn()
+        .execute("UPDATE jobs SET state = 'failed' WHERE id = ?1", [job])
+        .unwrap();
+    assert_eq!(
+        app.delete(&format!("/api/uploads/{id}")).await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(app.manifest(&id).discarded_at.is_some());
+    // 二度押しも 204、一覧には出ない、照合は何も投入しない
+    assert_eq!(
+        app.delete(&format!("/api/uploads/{id}")).await,
+        StatusCode::NO_CONTENT
+    );
+    let (_, list) = app.get("/api/uploads").await;
+    assert_eq!(list["items"], json!([]));
+    assert_eq!(app.upload_jobs().len(), 1);
+}
+
+#[tokio::test]
+async fn list_survives_one_bad_upload() {
+    use std::os::unix::fs::PermissionsExt;
+    let app = App::new().await;
+    let good = app.create().await;
+    let bad = app.create().await;
+    // 送信途中の origin があり、files/ を読めない: 実体合わせ（stat）が EACCES で失敗する
+    let origin = app.begin(&bad, "a.wav", 20).await;
+    app.put(&bad, &origin, 0, &[1u8; 10]).await;
+    let files = app.staging(&bad).join("files");
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&files).is_ok() {
+        // root で走っていると権限で失敗させられない
+        std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("権限で失敗させられないので飛ばす");
+        return;
+    }
+    let (st, v) = app.get("/api/uploads").await;
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], good.as_str());
+    let broken = v["broken"].as_array().unwrap();
+    assert_eq!(broken.len(), 1);
+    assert_eq!(broken[0]["dir"], App::uid(&bad).staging_dir().as_str());
+    assert!(!broken[0]["reason"].as_str().unwrap().is_empty());
+    assert!(broken[0]["mtime_ns"].as_i64().unwrap() > 0);
+}

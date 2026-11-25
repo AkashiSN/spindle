@@ -779,9 +779,14 @@ fn publish_view(p: &PublishPlan) -> PublishView {
                     album: g.album.clone(),
                     track_count: tracks,
                     companion_count: g.members.len() - tracks,
-                    base_dest: dest_of(&g.albumartist, g.album.as_deref(), &g.origin_label)
-                        .map(|d| d.as_str().to_string())
-                        .unwrap_or_default(),
+                    base_dest: match dest_of(&g.albumartist, g.album.as_deref(), &g.origin_label)
+                    {
+                        Ok(d) => d.as_str().to_string(),
+                        Err(e) => {
+                            tracing::warn!(key = g.key.as_str(), error = %e, "公開計画の件の置き場所の名前を作れない");
+                            String::new()
+                        }
+                    },
                     stage: g.stage.clone(),
                 }
             })
