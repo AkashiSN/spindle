@@ -636,3 +636,41 @@ fn discarded_or_cancelled_stops_before_each_group() {
     assert_eq!(stages(&env.manifest()), vec![Stage::Planned]);
     assert!(env.upload_tree().is_empty());
 }
+
+#[test]
+fn published_dest_consumed_by_inbox_is_not_reused() {
+    // 別の件が同じ宛先の名前になる（`?` は全角に置き換わる）。先の件を置き終え、Inbox の取り込みが
+    // そのディレクトリを片付けた後に、後の件が宛先を選ぶ
+    let env = Env::new();
+    env.send("A/01.wav", &env.wav("01.wav", 1, Some("X?"), 1));
+    env.send("B/01.wav", &env.wav("02.wav", 2, Some("X？"), 1));
+    env.freeze().unwrap();
+    let seen = std::cell::Cell::new(0);
+    assert!(env
+        .publish_with(&|s| {
+            if s != PublishStep::AfterAssembledWrite {
+                return false;
+            }
+            seen.set(seen.get() + 1);
+            seen.get() == 2
+        })
+        .is_err());
+    let st = stages(&env.manifest());
+    assert_eq!(st.len(), 2);
+    let Stage::Published { dest: first } = &st[0] else {
+        panic!("先の件が置き終わっていない: {st:?}");
+    };
+    assert_eq!(first, "upload/Artist/X？");
+    assert_eq!(st[1], Stage::Assembled);
+    // Inbox の配置が先の件を持っていき、空になった親も片付いた（テストの模擬）
+    std::fs::remove_dir_all(env.inbox_path().join("upload/Artist")).unwrap();
+    let r = env.publish();
+    assert!(r.finished);
+    let mut placed = r.placed.clone();
+    placed.sort();
+    assert_eq!(placed, vec!["upload/Artist/X？", "upload/Artist/X？ (2)"]);
+    assert_eq!(
+        names_in(&env.inbox_path().join("upload/Artist/X？ (2)")),
+        vec!["01.wav", SIDECAR_NAME]
+    );
+}

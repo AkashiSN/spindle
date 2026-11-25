@@ -320,8 +320,8 @@ GET    /api/uploads                               → { items: [UploadView]（�
 GET    /api/uploads/:id                           → UploadView | 404（捨てたもの。公開して捨てた扱いになったものは結果を見せるため返す）。
                                                   照合と実体合わせは一覧と同じ
 POST   /api/uploads/:id/origins                   { path, total } → 201 { origin: OriginView }。同じパスの未完の origin は作り直して返す。
-                                                  400 `bad_path` | 409 `exists`（受け取り終えた同じパス）| 413 `limit` | 507 `no_space` |
-                                                  409 `busy`（公開を要求した後・捨てた後）
+                                                  400 `bad_path`（パス規則違反・32 要素超・1024 バイト超。§7.12）| 409 `exists`（受け取り終えた同じパス）|
+                                                  413 `limit` | 507 `no_space` | 409 `busy`（公開を要求した後・捨てた後）
 PUT    /api/uploads/:id/origins/:origin?offset=   本文はチャンクの生バイト（上限 40 MiB。超えると axum の 413 で本文は JSON とは限らない）
                                                   → { received, complete }。409 { error: "offset", received }（`.part` の実際の大きさと
                                                   違う）| 413 `limit` | 507 `no_space` | 404 `not_found` / `origin_not_found` | 409 `busy`。

@@ -311,14 +311,15 @@ fn advance(
         return Err(UploadError::Conflict("not_frozen".into()));
     };
     let frozen_at = plan.frozen_at;
-    // 他の件が使う宛先（rename 前のもの）は選ばない
+    // 他の件が使う・使った宛先は選ばない。置き終えた件も入れる: Inbox の取り込みが先にその
+    // ディレクトリを片付けていると、ファイルシステムの上では空いて見えるため
     let taken: Vec<String> = plan
         .groups
         .iter()
         .enumerate()
         .filter(|(j, _)| *j != i)
         .filter_map(|(_, g)| match &g.stage {
-            Stage::Publishing { dest } => Some(canonical_key(dest)),
+            Stage::Publishing { dest } | Stage::Published { dest } => Some(canonical_key(dest)),
             _ => None,
         })
         .collect();

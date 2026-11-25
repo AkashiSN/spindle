@@ -1159,6 +1159,76 @@ mod tests {
     }
 
     #[test]
+    fn rejects_too_deep_or_long_entries_individually() {
+        use crate::import::upload::receive::{MAX_PATH_BYTES, MAX_PATH_COMPONENTS};
+        let env = Env::new();
+        let cfg = UploadConfig::default();
+        let depth = |n: usize, leaf: &str| {
+            let mut p = vec!["d"; n - 1];
+            p.push(leaf);
+            p.join("/")
+        };
+        let long = |n: usize| {
+            let head: Vec<String> = (0..4).map(|_| "a".repeat(250)).collect();
+            let head = head.join("/");
+            format!("{head}/{}", "b".repeat(n - head.len() - 6)) + ".flac"
+        };
+        let at_depth = depth(MAX_PATH_COMPONENTS, "x.flac");
+        let over_depth = depth(MAX_PATH_COMPONENTS + 1, "y.flac");
+        let at_len = long(MAX_PATH_BYTES);
+        let over_len = long(MAX_PATH_BYTES + 1);
+        assert_eq!(at_len.len(), MAX_PATH_BYTES);
+        // 上限ちょうどの空ディレクトリをたくさん（名前は末端だけ違う）と、1 段深いものを混ぜる
+        let deep_dirs: Vec<String> = (0..300)
+            .map(|i| depth(MAX_PATH_COMPONENTS, &format!("e{i}")) + "/")
+            .collect();
+        let deeper_dirs: Vec<String> = (0..50)
+            .map(|i| depth(MAX_PATH_COMPONENTS + 1, &format!("f{i}")) + "/")
+            .collect();
+        let mut entries = vec![
+            E::File(&at_depth, b"1".to_vec()),
+            E::File(&over_depth, b"1".to_vec()),
+            E::File(&at_len, b"1".to_vec()),
+            E::File(&over_len, b"1".to_vec()),
+        ];
+        entries.extend(deep_dirs.iter().map(|d| E::Dir(d)));
+        entries.extend(deeper_dirs.iter().map(|d| E::Dir(d)));
+        let zip = build(&entries);
+        let o = env.send("deep.zip", &zip, &cfg);
+        let out = env.run(&o, false, &cfg).unwrap();
+        assert_eq!(
+            out,
+            UnpackOutcome::Done {
+                generation: 1,
+                files: 2,
+                rejected: 52
+            }
+        );
+        let rejected = env.zip(&o).rejected;
+        assert!(rejected.iter().any(|r| r.entry == over_depth));
+        assert!(rejected.iter().any(|r| r.entry == over_len));
+        assert!(rejected
+            .iter()
+            .all(|r| r.reason.contains("要素が") || r.reason.contains("バイトを超える")));
+        assert_eq!(files_under(&env.path("x/o1/g1")), {
+            let mut v = vec![at_depth.clone(), at_len.clone()];
+            v.sort();
+            v
+        });
+        // 作ったディレクトリは上限の深さまでで止まる
+        fn max_depth(dir: &Path, d: usize) -> usize {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.is_dir())
+                .map(|p| max_depth(&p, d + 1))
+                .max()
+                .unwrap_or(d)
+        }
+        assert_eq!(max_depth(&env.path("x/o1/g1"), 0), MAX_PATH_COMPONENTS);
+    }
+
+    #[test]
     fn rejects_entries_and_continues() {
         let env = Env::new();
         let cfg = UploadConfig::default();

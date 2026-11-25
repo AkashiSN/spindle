@@ -53,7 +53,10 @@ Inbox に置く。CD（[§7.2](02-cd-rip.md)）・YouTube（[§7.7](07-ytmusic.m
 - **消さない**: アップロードのコードは unlink / rmdir をしない（`.part` を `offset = 0` で作り直すときの `O_TRUNC` だけは同じ
   ファイルの書き直し）。要らなくなった世代は `garbage`、捨てたものは `discarded_at` に載せ、物理削除は GC に任せる
 - **パス**: ブラウザの相対パスと zip のエントリ名は [§5](../05-library-layout.md) のパス規則（`RelPath::parse`）で検証する。`\`・`..`・
-  絶対パス・制御文字・空要素・`.` で始まる要素は拒否する（`\` を `/` に読み替えない）。書き込みは Inbox の root の dirfd から
+  絶対パス・制御文字・空要素・`.` で始まる要素は拒否する（`\` を `/` に読み替えない）。**パスの上限**: 要素は 255 バイト以下、
+  要素数は 32 以下（`MAX_PATH_COMPONENTS`）、パス全体は 1024 バイト以下（`MAX_PATH_BYTES`）。ブラウザのパスが外れれば 400
+  `bad_path`、zip のエントリならそのエントリだけ拒否する（展開と表示の走査・ディレクトリ作成が際限なく深く・長くならないように。
+  表示の走査は再帰せず明示のスタックで辿る）。書き込みは Inbox の root の dirfd から
   openat2（`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`）。名前の比較は `canonical_key`（casefold + NFD）
 - **分類**（拡張子で決める）: 音声はアップロード専用の許可リスト `flac` `wav` `m4a` `aif` `aiff` `mp3` `opus`（画面の表示と同じ）、
   `zip`、同梱ファイル（`is_companion_name`。下記）、それ以外は「取り込まない」。取り込まないものも受けて保存し、③ の末尾に
@@ -163,7 +166,9 @@ Inbox に置く。CD（[§7.2](02-cd-rip.md)）・YouTube（[§7.7](07-ytmusic.m
   2. `assembled` → **宛先の確定**: 置き場所の基本の名前（アルバム名があれば `upload/<albumartist>/<album>`、無ければ
      `upload/_untitled/<zip 名かフォルダ名かファイル名>`。各要素は `sanitize_component` の後、`.` で始まれば `_` を前に付け、
      200 バイト以下に文字境界で切る。走査が飛ばす隠し名や長すぎる名前にしない）が埋まっていれば ` (2)`, ` (3)` … の最初の空き
-     名を選び、**宛先をマニフェストに書いてから**（`publishing { dest }`）rename する
+     名を選び、**宛先をマニフェストに書いてから**（`publishing { dest }`）rename する。同じ計画の他の件の宛先（`publishing`・
+     `published` の両方）は空いていても選ばない（置き終えた件のディレクトリは Inbox の配置が先に片付けていることがあり、
+     ファイルシステムの上では空いて見える）
   3. `publishing` → **公開**: 宛先の親を作り、`publish/<n>/` を宛先へ `RENAME_NOREPLACE` → 親を fsync → `published { dest }`。
      `publish/<n>/` が無ければ rename は済んでいる（宛先が既に Inbox の配置で消えていてもよい。rename の後・fsync の前に落ちた
      かもしれないので、残っている宛先の親の連なりを fsync してから `published` にする）。宛先が他に取られていれば

@@ -36,7 +36,12 @@ pub enum ChunkStep {
     AfterRename,
 }
 
-/// ブラウザ上の相対パスを検証する。`\` を `/` に読み替えない
+/// 相対パス（ブラウザのパス・zip のエントリ）の要素数の上限（SPEC §7.12「パスの上限」）
+pub const MAX_PATH_COMPONENTS: usize = 32;
+/// 相対パス（ブラウザのパス・zip のエントリ）全体のバイト数の上限（SPEC §7.12「パスの上限」）
+pub const MAX_PATH_BYTES: usize = 1024;
+
+/// ブラウザ上の相対パス（と zip のエントリ名）を検証する。`\` を `/` に読み替えない
 pub fn validate_client_path(raw: &str) -> Result<RelPath, UploadError> {
     let bad = |why: &str| Err(UploadError::BadPath(format!("{why}: {raw:?}")));
     if raw.contains('\\') {
@@ -47,6 +52,16 @@ pub fn validate_client_path(raw: &str) -> Result<RelPath, UploadError> {
     }
     if raw.chars().any(char::is_control) {
         return bad("制御文字を含む");
+    }
+    // 深さと長さに上限を置く（展開・表示の走査とディレクトリ作成が際限なく膨らまないように）
+    if raw.len() > MAX_PATH_BYTES {
+        return Err(UploadError::BadPath(format!(
+            "パスが {MAX_PATH_BYTES} バイトを超える（{} バイト）",
+            raw.len()
+        )));
+    }
+    if raw.split('/').count() > MAX_PATH_COMPONENTS {
+        return bad(&format!("要素が {MAX_PATH_COMPONENTS} 個を超える"));
     }
     for component in raw.split('/') {
         if component.is_empty() {
@@ -551,6 +566,41 @@ mod tests {
             Err(UploadError::BadPath(_))
         ));
         assert!(env.manifest().origins.is_empty());
+    }
+
+    #[test]
+    fn path_depth_and_length_limits() {
+        // 要素数: ちょうど上限は通り、1 つ多いと断る
+        let at_depth = vec!["d"; MAX_PATH_COMPONENTS].join("/");
+        assert!(validate_client_path(&at_depth).is_ok());
+        let over_depth = vec!["d"; MAX_PATH_COMPONENTS + 1].join("/");
+        assert!(matches!(
+            validate_client_path(&over_depth),
+            Err(UploadError::BadPath(_))
+        ));
+        // 全体のバイト数: 要素は 255 以下・要素数も上限内で、全体だけを上限ちょうど / 1 超えにする
+        let total = |n: usize| {
+            let parts: Vec<String> = (0..4).map(|_| "a".repeat(250)).collect();
+            let head = parts.join("/"); // 1003 バイト
+            format!("{head}/{}", "b".repeat(n - head.len() - 1))
+        };
+        let at_len = total(MAX_PATH_BYTES);
+        assert_eq!(at_len.len(), MAX_PATH_BYTES);
+        assert!(validate_client_path(&at_len).is_ok());
+        let over_len = total(MAX_PATH_BYTES + 1);
+        assert!(matches!(
+            validate_client_path(&over_len),
+            Err(UploadError::BadPath(_))
+        ));
+        // 長さの拒否の理由に、長いパス全体を写さない
+        let msg = validate_client_path(&over_len).unwrap_err().to_string();
+        assert!(msg.len() < 200, "{msg}");
+        // begin_origin（ブラウザのパス）も同じ検証を通す
+        let env = Env::new();
+        assert!(matches!(
+            env.begin(&format!("{over_depth}.flac"), 1, &cfg()),
+            Err(UploadError::BadPath(_))
+        ));
     }
 
     #[test]

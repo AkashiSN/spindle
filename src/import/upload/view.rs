@@ -421,7 +421,8 @@ fn read_staged_inner(
 }
 
 /// 世代の中のファイルを集める（`(ステージング内のパス, 世代内のパス, 読めない理由)`）。
-/// ディレクトリが無ければ空。読めないディレクトリはその 1 項を理由付きで返す（表示全体は落とさない）
+/// ディレクトリが無ければ空。読めないディレクトリはその 1 項を理由付きで返す（表示全体は落とさない）。
+/// 深い木でもスタックを使い切らないよう、再帰せず明示のスタックで辿る（順序は呼び出し側が整える）
 fn walk(
     inbox: &RootDir,
     id: &UploadId,
@@ -429,32 +430,35 @@ fn walk(
     prefix: &str,
     out: &mut Vec<(RelPath, String, Option<String>)>,
 ) -> Result<(), UploadError> {
-    let entries = match inbox.read_dir(Some(&id.staged(dir)?)) {
-        Ok(e) => e,
-        Err(FsError::NotFound) => {
-            tracing::warn!(upload = id.as_str(), dir = %dir, "展開した世代が無い");
-            return Ok(());
-        }
-        Err(e) => {
-            tracing::warn!(upload = id.as_str(), dir = %dir, error = %e, "展開したディレクトリを読めない");
-            out.push((dir.clone(), prefix.to_string(), Some(e.to_string())));
-            return Ok(());
-        }
-    };
-    for e in entries {
-        let Some(name) = e.name.to_str() else {
-            continue;
+    let mut stack = vec![(dir.clone(), prefix.to_string())];
+    while let Some((dir, prefix)) = stack.pop() {
+        let entries = match inbox.read_dir(Some(&id.staged(&dir)?)) {
+            Ok(e) => e,
+            Err(FsError::NotFound) => {
+                tracing::warn!(upload = id.as_str(), dir = %dir, "展開した世代が無い");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(upload = id.as_str(), dir = %dir, error = %e, "展開したディレクトリを読めない");
+                out.push((dir.clone(), prefix.clone(), Some(e.to_string())));
+                continue;
+            }
         };
-        let Ok(child) = dir.join(name) else { continue };
-        let inner = if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        match e.kind {
-            FileKind::Dir => walk(inbox, id, &child, &inner, out)?,
-            FileKind::File => out.push((child, inner, None)),
-            FileKind::Symlink | FileKind::Other => {}
+        for e in entries {
+            let Some(name) = e.name.to_str() else {
+                continue;
+            };
+            let Ok(child) = dir.join(name) else { continue };
+            let inner = if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            match e.kind {
+                FileKind::Dir => stack.push((child, inner)),
+                FileKind::File => out.push((child, inner, None)),
+                FileKind::Symlink | FileKind::Other => {}
+            }
         }
     }
     Ok(())
@@ -939,6 +943,31 @@ pub fn origin_view(o: &Origin) -> OriginView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walk_handles_deep_tree() {
+        // 再帰しないので、深い木でもスタックを使い切らずに全ファイルを集める
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox = RootDir::open(tmp.path()).unwrap();
+        let id = UploadId::parse("0123456789abcdef").unwrap();
+        let depth = 400;
+        let deep = vec!["d"; depth].join("/");
+        let gdir = RelPath::parse("unpacked/o1/1").unwrap();
+        let leaf = RelPath::parse(&format!("unpacked/o1/1/{deep}")).unwrap();
+        inbox.create_dir_all(&id.staged(&leaf).unwrap()).unwrap();
+        inbox
+            .create_truncate(&id.staged(&leaf.join("a.flac").unwrap()).unwrap())
+            .unwrap();
+        inbox
+            .create_truncate(&id.staged(&gdir.join("top.flac").unwrap()).unwrap())
+            .unwrap();
+        let mut out = Vec::new();
+        walk(&inbox, &id, &gdir, "", &mut out).unwrap();
+        out.sort();
+        let inner: Vec<&str> = out.iter().map(|(_, i, _)| i.as_str()).collect();
+        assert_eq!(inner, vec![format!("{deep}/a.flac").as_str(), "top.flac"]);
+        assert!(out.iter().all(|(_, _, e)| e.is_none()));
+    }
 
     #[test]
     fn rate_and_format_labels() {
