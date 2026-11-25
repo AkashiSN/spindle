@@ -168,6 +168,15 @@ export function watchLabel(w: InboxWatch | null, formatTime: (epoch: number) => 
   return w.checked_at == null ? `確認: ${every}（まだ）` : `最後に確認: ${formatTime(w.checked_at)}（${every}）`
 }
 
+export type UploadInfo = {
+  upload_id: string
+  group_key: string
+  /** 「Inbox へ置く」を押した時刻（UNIX epoch 秒） */
+  uploaded_at: number
+  /** 元の名前（zip 名・ブラウザ上の相対パス） */
+  origins: string[]
+}
+
 export type InboxItem = {
   id: number
   rel_dir: string
@@ -194,6 +203,10 @@ export type InboxItem = {
   rip?: RipLookup | null
   /** CD 取り込みの吸い出しの記録（ログ・cue・toc。D-106）。無ければ空か未定義 */
   rip_files?: string[]
+  /** ブラウザからのアップロードの記録（アップロードで置いた件だけ）。無ければ null か未定義 */
+  upload?: UploadInfo | null
+  /** 件のディレクトリ直下の同梱ファイル（ブックレット・画像など）。承認でアルバムのフォルダへ一緒に移る */
+  companions?: string[]
   /** 承認済み・配置中・配置済みの件の段（配置 → RG → 系統 → 端末）。旧サーバでは無い */
   stages?: Stage[]
 }
@@ -261,11 +274,12 @@ export function discardLabel(
  * 差し替えで残ったサイドカーは配置したものと限らないので見ない。
  * 表示だけに使う。CD 用の処理（照会・照合）はパスで判定しない
  */
-export function itemSource(item: Pick<InboxItem, 'state' | 'rel_dir' | 'rip' | 'tracks'>): 'CD' | 'YouTube' | '手置き' {
+export function itemSource(item: Pick<InboxItem, 'state' | 'rel_dir' | 'rip' | 'tracks' | 'upload'>): 'CD' | 'YouTube' | 'アップロード' | '手置き' {
   if (item.state === 'placed') {
     const top = item.rel_dir.split('/')[0].toLowerCase()
-    return top === 'cd' ? 'CD' : top === 'youtube' ? 'YouTube' : '手置き'
+    return top === 'cd' ? 'CD' : top === 'youtube' ? 'YouTube' : top === 'upload' ? 'アップロード' : '手置き'
   }
+  if (item.upload != null) return 'アップロード'
   if (item.rip != null) return 'CD'
   if (item.tracks.some((f) => f.source != null)) return 'YouTube'
   return '手置き'

@@ -180,7 +180,7 @@ fn upgrade_from_0001_keeps_jobs_and_children() {
 
     assert_eq!(
         migrations::apply_list(&mut c, &all).unwrap(),
-        vec![2, 3, 4, 5]
+        vec![2, 3, 4, 5, 6]
     );
 
     let count = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };

@@ -96,3 +96,26 @@ export async function parseErrorBody<T>(path: string, init: RequestInit): Promis
   if (res.ok) return { ok: true, body: body as T }
   return { ok: false, status: res.status, body }
 }
+
+/** 生の本文の PUT（アップロードのチャンク）。本文が JSON でない失敗（axum の 413 は text/plain）は body = null。
+ *  401 は他の要求と同じく `onUnauthorized` に通知する */
+export async function putBinary(path: string, blob: Blob, signal?: AbortSignal): Promise<{ ok: true; body: unknown } | { ok: false; status: number; body: unknown }> {
+  const res = await fetch(path, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/octet-stream' },
+    body: blob,
+    signal,
+  })
+  if (res.status === 401) {
+    for (const l of unauthorizedListeners) l()
+  }
+  let body: unknown = null
+  try {
+    body = await res.json()
+  } catch {
+    // JSON でない本文（413 の text/plain など）
+  }
+  if (res.ok) return { ok: true, body }
+  return { ok: false, status: res.status, body }
+}

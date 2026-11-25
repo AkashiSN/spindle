@@ -83,7 +83,8 @@ Inbox/ に配置（ポーリング検出）
   タグだけ `write_tag_changes` で書く（ファイルが正のまま再スキャンしても DB と一致する）→ fsync →
   `RENAME_NOREPLACE` → 読み戻して 1 トランザクション登録（`source_type = 'download'`。宛先 album の
   リリースキー再検証と同パス行の MD5 検証は [§7.2](02-cd-rip.md) の配置と同じ）→ Inbox 側を unlink → 既知の同梱ファイル
-  （cover 画像 / cue / toc / log）も移し、空になった Inbox のディレクトリを消す。コピーに使う FD を
+  （`cd::riplog::is_companion_name`: cover 画像 / cue / toc / log と、ブックレット等の PDF・追加の画像（`jpg` / `jpeg` / `png` /
+  `webp`。[§7.12](12-upload.md)、[D-116](../../decisions/D-116.md)））も件のディレクトリの直下から移し、空になった Inbox のディレクトリを消す。コピーに使う FD を
   fstat して承認時の行（inode / size / mtime / ctime）と照合し、コピーの後にも同じ FD を照合し、置いた
   ファイルの音声の指紋が承認時に読んだものと一致することを確かめる。どれかが外れたら `Changed`（取り込みは
   `pending` に戻して再承認）。衝突・不足は取り込みを `failed` にして理由を残し、この呼び出しで置いたファイルは
@@ -148,7 +149,13 @@ Inbox/ に配置（ポーリング検出）
   `category` を提案の category（語彙に同じ canonical key があるときだけ）に、`files` の `verdict` / `message` /
   `url` / `channel` を各トラックに付ける。走査は音声でないので無視し、配置の成功時に消す（Library へ
   持っていかない）。壊れていれば無いものとして扱い、取り込みの `warnings` に載せる。モジュールは `import/sidecar.rs`
-  （ダウンローダと CD の吸い出しが共有する）
+  （ダウンローダと CD の吸い出しとアップロードが共有する）
+- **アップロードの件**（[§7.12](12-upload.md)、[D-116](../../decisions/D-116.md)）: ブラウザからのアップロードは `Inbox/upload/<albumartist>/<album>/`
+  （アルバム名なしは `upload/_untitled/<元の名前>/`）に件を置き、サイドカーに `upload`（`UploadEntry`: `upload_id`、`group_key`、
+  「Inbox へ置く」を押した時刻 `uploaded_at`、元の名前 `origins`（zip 名・ブラウザ上の相対パス））を書く。`GET /api/inbox` は
+  これを件の `upload` に、件のディレクトリ直下の同梱ファイルの名前を `companions` に返し、承認画面の ① が出どころ
+  「アップロード（日時、元の名前）」と「同梱ファイル（ライブラリのアルバムのフォルダへ一緒に移す）」を出す（出どころの判定は
+  `lib/inbox.ts` の `itemSource`。配置済みの件はパスの最上位 `upload/` で見る）。承認・配置の手順は他の件と同じ
 - **CD の吸い出しの取り込み**（[D-67](../../decisions/D-067.md) 追記、P2-5）: サイドカーの `rip`（`RipEntry`: CTDB 形式の `toc`、吸い出し開始時の
   `metadata`（`DiscMetadata`。名前は空でもよい）、音声トラック順のファイル名 `files`、ドライブが読んだ `isrcs` /
   `mcn`（P4-21。旧サイドカーには無い）、rip.log の名前 `log`、`report`（`RipReport`））を持つ。提案は `album_gain = true`（[D-74](../../decisions/D-074.md)。保存した下書きがあればそちら）。配置は

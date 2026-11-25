@@ -139,16 +139,11 @@ fn companion_names_single_and_multi() {
         "disc2.toc",
         "DISC.CUE",
         "rip.log",
+        "scan.jpg",
     ] {
         assert!(is_companion_name(n), "{n}");
     }
-    for n in [
-        "01 T1.flac",
-        "scan.jpg",
-        "disc.txt",
-        "notes.cue",
-        "disc-2.cue",
-    ] {
+    for n in ["01 T1.flac", "disc.txt", "notes.cue", "disc-2.cue"] {
         assert!(!is_companion_name(n), "{n}");
     }
     assert_eq!(msf(0), "00:00:00");

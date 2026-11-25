@@ -142,13 +142,27 @@ pub fn spawn_watcher_with(
     })
 }
 
+/// テスト用: 走査の後・配置の前に待つフック（走査を終えて実行中の inbox ジョブを作る）
+pub type AfterScanHook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
+
 pub struct InboxHandler {
     env: Arc<PlaceItemEnv>,
+    after_scan: Option<AfterScanHook>,
 }
 
 impl InboxHandler {
     pub fn new(env: PlaceItemEnv) -> Self {
-        Self { env: Arc::new(env) }
+        Self {
+            env: Arc::new(env),
+            after_scan: None,
+        }
+    }
+
+    /// テスト用: 走査の後でフックを待つ（アップロードの公開が走っている走査と重なる状況を作る）
+    #[doc(hidden)]
+    pub fn with_after_scan(mut self, hook: AfterScanHook) -> Self {
+        self.after_scan = Some(hook);
+        self
     }
 
     async fn run_inner(&self, ctx: &JobContext) -> HandlerResult {
@@ -175,6 +189,9 @@ impl InboxHandler {
             read = out.files_read,
             "Inbox を走査した"
         );
+        if let Some(hook) = &self.after_scan {
+            hook().await;
+        }
         let approved = ctx
             .db()
             .read(|c| dbinbox::list_by_state(c, ItemState::Approved))
@@ -340,6 +357,7 @@ impl Handler for InboxHandler {
     fn run(&self, ctx: JobContext) -> BoxFuture<'static, HandlerResult> {
         let this = Self {
             env: Arc::clone(&self.env),
+            after_scan: self.after_scan.clone(),
         };
         Box::pin(async move { this.run_inner(&ctx).await })
     }

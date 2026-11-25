@@ -989,6 +989,12 @@ describe('draftChangeCount（D-86）', () => {
 })
 
 describe('itemSource', () => {
+  it('アップロードの件はアップロード', () => {
+    const upload = { upload_id: 'a', group_key: 'k', uploaded_at: 1, origins: ['A.zip'] }
+    expect(itemSource(item({ upload }))).toBe('アップロード')
+    expect(itemSource(item({ state: 'placed', rel_dir: 'upload/A/X' }))).toBe('アップロード')
+  })
+
   it('未配置はサイドカー（rip / 曲の出どころ）で決める', () => {
     expect(itemSource(item({ rip: { toc: 't', isrcs: [], mcn: null } }))).toBe('CD')
     expect(itemSource(item({ tracks: [{ ...file('d/01.flac'), source: { source: 'youtube', url: null, channel: null, verdict: 'ok', message: null } }] }))).toBe('YouTube')

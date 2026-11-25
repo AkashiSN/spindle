@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
-use crate::cd::riplog::is_rip_text_name;
+use crate::cd::riplog::{is_companion_name, is_rip_text_name};
 use crate::db::inbox::{self as dbinbox, FileRow, Item, ItemState};
 use crate::db::now_epoch;
 use crate::db::scans;
@@ -19,7 +19,7 @@ use crate::fsroot::{FileKind, RootDir};
 use crate::import::inbox::{
     destination, embedded_picture, propose, Destination, InboxDraft, RipLookup, SameTitle,
 };
-use crate::import::sidecar::FileEntry;
+use crate::import::sidecar::{FileEntry, Sidecar, UploadEntry};
 use crate::jobs::handlers::inbox::new_inbox_job;
 use crate::jobs::handlers::inbox_rejudge::{new_inbox_rejudge_job, rejudge_active};
 use crate::jobs::EnqueueResult;
@@ -53,6 +53,10 @@ pub struct ItemView {
     pub stages: Option<Vec<Stage>>,
     /// 件のディレクトリにある吸い出しのテキスト（`rip*.log` / `disc*.cue` / `disc*.toc`。D-106）
     pub rip_files: Vec<String>,
+    /// ブラウザからのアップロードの記録（アップロードで置いた件だけ。承認画面の出どころ。SPEC §12.6「Inbox」）
+    pub upload: Option<UploadEntry>,
+    /// 件のディレクトリ直下の同梱ファイル（ブックレット PDF・画像・吸い出しの記録）。承認でアルバムのフォルダへ一緒に移る
+    pub companions: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -211,6 +215,11 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
                     None
                 };
                 let rip_files = rip_files(&inbox, &item.rel_dir);
+                let upload = RelPath::parse(&item.rel_dir)
+                    .ok()
+                    .and_then(|d| Sidecar::read(&inbox, &d).ok().flatten())
+                    .and_then(|s| s.upload);
+                let companions = companions(&inbox, &item.rel_dir);
                 out.push(ItemView {
                     item,
                     tracks,
@@ -220,6 +229,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
                     rip: p.lookup,
                     stages,
                     rip_files,
+                    upload,
+                    companions,
                 });
             }
             // 件が参照する購読だけ（購読の表は小さいので 1 回で読んで絞る。件ごとに引かない）
@@ -613,6 +624,23 @@ pub async fn file(
     Ok(super::logs::text_response(
         super::logs::read_text_capped(inbox, rel).await?,
     ))
+}
+
+/// 件のディレクトリ直下の同梱ファイルの名前（`is_companion_name`。読めなければ空）
+fn companions(inbox: &RootDir, rel_dir: &str) -> Vec<String> {
+    let Ok(dir) = RelPath::parse(rel_dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = inbox
+        .read_dir(Some(&dir))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.kind == FileKind::File)
+        .filter_map(|e| e.name.into_string().ok())
+        .filter(|n| is_companion_name(n))
+        .collect();
+    names.sort();
+    names
 }
 
 /// 件のディレクトリに置かれている吸い出しのテキストの名前（読めなければ空）

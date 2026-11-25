@@ -17,6 +17,7 @@
 | `inbox` | 1 | 固定 |
 | `ytdl` | 1 | `ytdl:<url>`（playlist の展開・購読の同期で投入する分も同じ。[D-70](../decisions/D-070.md)、[D-78](../decisions/D-078.md)） |
 | `playlist_sync` | 1 | `playlist_sync:<subscription_id>`（列挙 → 番号揃え → ytdl 投入。[§7.7](07-pipeline/07-ytmusic.md)「再生リストの購読と同期」、[D-78](../decisions/D-078.md)） |
+| `upload` | 1 | `upload:<upload_id>:unpack:<origin>`（zip の展開）/ `upload:<upload_id>:publish`（凍結した計画で Inbox へ置く）。状態の正はステージングのマニフェストで、取りこぼしは照合が投入し直す（[§7.12](07-pipeline/12-upload.md)、[D-116](../decisions/D-116.md)） |
 | `inbox_rejudge` | 1 | `inbox_rejudge:<item_id>`（Inbox の件の再判定。`max_attempts` 1。[§7.8](07-pipeline/08-inbox.md)、[D-114](../decisions/D-114.md)） |
 | `source_hash` | 2（CPU 系の共通予算も取る） | `source_hash:<track_id>:<source>`（source = `master` / `opus` / `aac`。送る元の SHA-256。[§7.11](07-pipeline/11-device-delivery.md)、[D-95](../decisions/D-095.md)） |
 | `device_scan` | 2（同じ端末は排他。下記） | `device_scan:<device_id>`（回復してキャッシュを置き換える。未接続なら待たずに終わる。[§7.11](07-pipeline/11-device-delivery.md)） |

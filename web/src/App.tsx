@@ -23,6 +23,7 @@ import { SmartRuleEditor, type RuleDraft } from './components/SmartRuleEditor'
 import { Sidebar, type Scope } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
 import { TrackTable } from './components/TrackTable'
+import { UploadView } from './components/UploadView'
 import { YoutubeView } from './components/YoutubeView'
 import { useAlbums } from './hooks/useAlbums'
 import type { RecordsFocus, RecordsTab } from './lib/records'
@@ -49,6 +50,7 @@ import { jobStateChanged, totalBadge } from './lib/devices'
 import { useTrackDetails } from './hooks/useTrackDetails'
 import { useTracks } from './hooks/useTracks'
 import { useSubscriptions } from './hooks/useSubscriptions'
+import { useUpload } from './hooks/useUpload'
 import { OPENED_WITH_URL, useYoutube } from './hooks/useYoutube'
 import { albumsOfRows } from './lib/albumGain'
 import { PendingCounter, type PendingCount } from './lib/pendingCount'
@@ -101,6 +103,11 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   // YouTube 画面の ④ から Inbox を開いたときに選ぶ件（D-87）
   const [inboxFocus, setInboxFocus] = useState<string | null>(null)
   const clearInboxFocus = useCallback(() => setInboxFocus(null), [])
+  // YouTube の ④ とアップロードの ⑤ から: Inbox を開いてその件を選ぶ（一覧に現れるまで待つ。D-87）
+  const openInboxAt = useCallback((dir?: string) => {
+    setInboxFocus(dir ?? null)
+    setView('inbox')
+  }, [])
   const [scope, setScope] = useState<Scope>({})
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<Sort>(DEFAULT_SORT)
@@ -142,6 +149,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const jobs = useJobSummary(sseOpen)
   const youtube = useYoutube(sseOpen && view === 'youtube')
   const subs = useSubscriptions(sseOpen && view === 'youtube')
+  const upload = useUpload(sseOpen && view === 'upload')
   // 履歴は画面を開いたときに取り、開いている間は batch イベントで取り直す
   const [recordsTab, setRecordsTab] = useState<RecordsTab>('history')
   const history = useHistory(sseOpen && view === 'records' && recordsTab === 'history')
@@ -285,6 +293,8 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       devices.onJob(e)
       youtube.refresh()
       subs.refresh()
+      // upload ジョブ（展開・公開）の進みで ② ③ ⑤ が変わる。job イベントに種別は無いので毎回（hook 側で間引く）
+      upload.refresh()
       if (e.state === 'done' || e.state === 'failed') scheduleRowRefresh()
       // inbox ジョブの完了は件の状態（走査の結果、placed / failed）を変える。job イベントに種別は
       // 無いので、Inbox を開いている間は完了のたびに取り直す（hook 側で 250ms に間引く）
@@ -682,11 +692,10 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             youtube={youtube}
             subs={subs}
             jobs={jobs}
-            onOpenInbox={(dir) => {
-              setInboxFocus(dir ?? null)
-              setView('inbox')
-            }}
+            onOpenInbox={openInboxAt}
           />
+        ) : view === 'upload' ? (
+          <UploadView upload={upload} onOpenInbox={openInboxAt} />
         ) : view === 'devices' ? (
           <DevicesView devices={devices} selectedId={deviceId} onSelect={setDeviceId} playlists={playlists} />
         ) : view === 'jobs' ? (

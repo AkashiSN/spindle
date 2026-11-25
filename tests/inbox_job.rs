@@ -339,6 +339,29 @@ fn draft_for(files: &[(&str, u32, &str)], category: Option<&str>, album: &str) -
 }
 
 #[tokio::test]
+async fn placement_moves_booklet_pdf() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));
+    std::fs::write(lib.inbox_path("AlbumA/booklet.pdf"), b"%PDF").unwrap();
+    lib.conn()
+        .execute("INSERT INTO categories (name) VALUES ('Rock')", [])
+        .unwrap();
+    lib.scan(1000).await;
+    let a = lib.item("AlbumA").unwrap();
+    lib.approve(
+        a.id,
+        &draft_for(&[("AlbumA/01.flac", 1, "One")], Some("Rock"), "Album"),
+    );
+    lib.start(true);
+    assert_eq!(lib.run_job().await, JobState::Done);
+    assert_eq!(
+        std::fs::read(lib.lib_path("Rock/Artist/Album/booklet.pdf")).unwrap(),
+        b"%PDF"
+    );
+    assert!(!lib.inbox_path("AlbumA/booklet.pdf").exists());
+}
+
+#[tokio::test]
 async fn approved_item_is_placed_registered_and_consumed() {
     let lib = Lib::new();
     require_ffmpeg!(lib.add("AlbumA/01.flac", 1, "One", "A", 1));

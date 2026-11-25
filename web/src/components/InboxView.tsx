@@ -372,12 +372,16 @@ function ItemForm({
             {item.tracks.length} ファイル · {codecSummary(item.tracks)}
           </span>
         }
-        hint="Inbox のディレクトリと、そこから読んだこと。出どころ（CD / YouTube / 手置き）で ③ の列と ④ の確認項目が変わる"
+        hint="Inbox のディレクトリと、そこから読んだこと。出どころ（CD / YouTube / アップロード / 手置き）で ③ の列と ④ の確認項目が変わる"
       >
         <dl className="cd-summary">
           <div>
             <dt>出どころ</dt>
-            <dd>{source}</dd>
+            <dd>
+              {source}
+              {item.upload != null &&
+                `（${formatDateTime(item.upload.uploaded_at)}、${item.upload.origins.join(', ')}）`}
+            </dd>
           </div>
           <div>
             <dt>ディレクトリ</dt>
@@ -385,6 +389,15 @@ function ItemForm({
               <code>Inbox/{item.rel_dir}</code>
             </dd>
           </div>
+          {(item.companions?.length ?? 0) > 0 && (
+            <div>
+              <dt>同梱ファイル</dt>
+              <dd>
+                {item.companions!.join(', ')}
+                <span className="muted small">（ライブラリのアルバムのフォルダへ一緒に移す）</span>
+              </dd>
+            </div>
+          )}
           <div>
             <dt>検出</dt>
             <dd>{formatDateTime(item.detected_at)}</dd>

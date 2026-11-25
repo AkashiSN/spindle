@@ -45,6 +45,7 @@ impl Env {
             derived: Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap()),
             artwork: Arc::new(ArtworkStore::new(dir.path().join("thumbs"))),
             inbox: Some(Arc::clone(&inbox)),
+            uploads: None,
         };
         Self {
             // 破棄の要求の時刻。種のファイル（今の実時刻に作る）の ctime が、比較の余裕（1 秒）を含めても
@@ -144,6 +145,19 @@ async fn seeded() -> (Env, i64) {
     env.scan(env.t0 - 10).await;
     let id = env.item_id("youtube/A/Aのお歌").await;
     (env, id)
+}
+
+#[tokio::test]
+async fn discard_removes_booklet_pdf() {
+    let env = Env::new();
+    env.wav("youtube/B/Bのお歌/01 x.wav", 1);
+    env.file("youtube/B/Bのお歌/booklet.pdf", b"%PDF");
+    env.scan(env.t0 - 10).await;
+    let id = env.item_id("youtube/B/Bのお歌").await;
+    env.reject_and_discard(id, env.t0).await;
+    assert_eq!(env.gc(env.t0 + RETENTION).await, (1, 1, 0));
+    assert!(!exists(&env.path("youtube/B/Bのお歌/booklet.pdf")));
+    assert!(!exists(&env.path("youtube/B/Bのお歌")));
 }
 
 #[tokio::test]
@@ -405,6 +419,7 @@ async fn gc_job_deletes_discarded_inbox_items_and_notes_them() {
                 derived: Arc::clone(&env.roots.derived),
                 artwork: Arc::clone(&env.roots.artwork),
                 inbox: env.roots.inbox.clone(),
+                uploads: env.roots.uploads.clone(),
             }),
             1,
         )),

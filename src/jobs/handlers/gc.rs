@@ -77,7 +77,8 @@ impl GcHandler {
             + plan.derived.len()
             + plan.artwork_rows.len()
             + plan.artwork_dirs.len()
-            + plan.inbox.len()) as i64;
+            + plan.inbox.len()
+            + plan.uploads.len()) as i64;
         tracing::info!(
             job_id = ctx.job.id,
             tracks = plan.tracks.len(),
@@ -87,6 +88,7 @@ impl GcHandler {
             artwork_rows = plan.artwork_rows.len(),
             artwork_dirs = plan.artwork_dirs.len(),
             inbox = plan.inbox.len(),
+            uploads = plan.uploads.len(),
             "GC の対象を決めた"
         );
         ctx.progress(0, total).await?;
@@ -117,6 +119,19 @@ impl GcHandler {
         summary.inbox = gc::execute_inbox(&self.db, &self.roots, &plan, &token)
             .await
             .map_err(map_err)?;
+        done += plan.inbox.len() as i64;
+        ctx.progress(done, total).await?;
+        // アップロードのステージング（SPEC §7.12「GC」）。鍵は main が作った 1 つの表の clone
+        summary.uploads = match &self.roots.uploads {
+            Some(u) => gc::execute_uploads(&self.db, &self.roots, &u.locks, &u.cfg, &plan, &token)
+                .await
+                .map_err(map_err)?,
+            None => gc::Counts {
+                planned: plan.uploads.len(),
+                skipped: plan.uploads.len(),
+                ..gc::Counts::default()
+            },
+        };
         ctx.progress(total, total).await?;
         gc::log_summary(&summary);
         // 終端のジョブ行の掃除（自分は running なので残る）

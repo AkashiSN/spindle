@@ -47,10 +47,12 @@ pub enum JobType {
     DeviceVerify,
     /// Inbox の 1 件の再判定（メタデータの取り直し。D-114）
     InboxRejudge,
+    /// ブラウザからのアップロード（zip の展開 / Inbox への公開。op = unpack / publish）
+    Upload,
 }
 
 impl JobType {
-    pub const ALL: [JobType; 22] = [
+    pub const ALL: [JobType; 23] = [
         JobType::Scan,
         JobType::Rip,
         JobType::Verify,
@@ -73,6 +75,7 @@ impl JobType {
         JobType::DeviceSync,
         JobType::DeviceVerify,
         JobType::InboxRejudge,
+        JobType::Upload,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -99,6 +102,7 @@ impl JobType {
             JobType::DeviceSync => "device_sync",
             JobType::DeviceVerify => "device_verify",
             JobType::InboxRejudge => "inbox_rejudge",
+            JobType::Upload => "upload",
         }
     }
 
@@ -145,6 +149,8 @@ impl JobType {
             JobType::DeviceScan | JobType::DeviceSync | JobType::DeviceVerify => 2,
             // 1 件ずつ外部のメタデータを引き直す。Inbox の取り込みと同じく直列
             JobType::InboxRejudge => 1,
+            // 展開と公開はどちらも Inbox のデータセットへの書き込み。1 本ずつ
+            JobType::Upload => 1,
         }
     }
 
@@ -357,6 +363,7 @@ pub fn subject_of(
             id_of("device_id").map(|id| format!("device #{id}"))
         }
         JobType::InboxRejudge => id_of("item_id").map(|id| format!("item #{id}")),
+        JobType::Upload => text_of("upload_id"),
         JobType::Rip | JobType::Inbox | JobType::Gc | JobType::Backup => None,
     }
 }

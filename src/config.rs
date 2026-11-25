@@ -55,6 +55,9 @@ pub struct Config {
     /// Inbox の検出（P2-10、D-68）。省略時は 60 秒
     #[serde(default)]
     pub inbox: InboxConfig,
+    /// ブラウザからのアップロード。省略時は既定値
+    #[serde(default)]
+    pub upload: UploadConfig,
     /// 偽ハイレゾ検出（P3-5、D-71）。省略時は既定値
     #[serde(default)]
     pub hires: HiresConfig,
@@ -281,6 +284,51 @@ impl Default for InboxConfig {
     fn default() -> Self {
         Self {
             poll_interval_secs: default_inbox_poll(),
+        }
+    }
+}
+
+/// ブラウザからのアップロードの上限と放置期限
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UploadConfig {
+    /// 1 ファイルの宣言サイズの上限（バイト）
+    #[serde(default = "default_upload_max_file")]
+    pub max_file_bytes: u64,
+    /// 1 アップロード全体の上限（バイト。宣言サイズ + 展開した量 + GC 待ち）
+    #[serde(default = "default_upload_max_total")]
+    pub max_upload_bytes: u64,
+    /// 1 つの zip のエントリ数の上限
+    #[serde(default = "default_upload_max_zip_entries")]
+    pub max_zip_entries: u64,
+    /// 公開も破棄もされず最後の操作からこの日数たったアップロードを GC が破棄扱いにする
+    #[serde(default = "default_upload_stale_days")]
+    pub stale_days: u32,
+}
+
+fn default_upload_max_file() -> u64 {
+    8 << 30
+}
+
+fn default_upload_max_total() -> u64 {
+    32 << 30
+}
+
+fn default_upload_max_zip_entries() -> u64 {
+    10_000
+}
+
+fn default_upload_stale_days() -> u32 {
+    30
+}
+
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: default_upload_max_file(),
+            max_upload_bytes: default_upload_max_total(),
+            max_zip_entries: default_upload_max_zip_entries(),
+            stale_days: default_upload_stale_days(),
         }
     }
 }

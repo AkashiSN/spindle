@@ -5,4 +5,5 @@ pub mod inbox;
 pub mod placement;
 pub mod scanner;
 pub mod sidecar;
+pub mod upload;
 pub mod ytmusic;

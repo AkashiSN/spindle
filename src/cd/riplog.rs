@@ -221,9 +221,15 @@ pub fn is_rip_text_name(name: &str) -> bool {
 }
 
 /// album 全体の移動に追随させる同梱ファイルか: 同梱カバー画像（`cover_rank`）、`disc*.cue` /
-/// `disc*.toc`、`rip*.log`
+/// `disc*.toc`、`rip*.log`、ブックレット等の `*.pdf` と追加の画像（`jpg` / `jpeg` / `png` / `webp`）
 pub fn is_companion_name(name: &str) -> bool {
     cover_rank(name).is_some()
+        || name.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty()
+                && ["pdf", "jpg", "jpeg", "png", "webp"]
+                    .iter()
+                    .any(|e| ext.eq_ignore_ascii_case(e))
+        })
         || stem_number_ext(name, "disc", ".cue")
         || stem_number_ext(name, "disc", ".toc")
         || is_rip_log_name(name)
@@ -593,6 +599,22 @@ pub fn render_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_includes_booklet_and_images() {
+        for ok in ["Booklet.PDF", "scan01.jpg", "back.png", "x.webp", "a.JPEG"] {
+            assert!(is_companion_name(ok), "{ok}");
+        }
+        for ng in [
+            "readme.txt",
+            "x.flac",
+            "spindle-inbox.json",
+            "pdf",
+            ".pdf.txt",
+        ] {
+            assert!(!is_companion_name(ng), "{ng}");
+        }
+    }
 
     #[test]
     fn rip_text_names_are_logs_cues_and_tocs_only() {

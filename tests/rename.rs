@@ -1319,6 +1319,27 @@ async fn rename_job_for_terminal_batch_is_a_noop() {
 // ---------------------------------------------------------------- 同梱ファイルの追随（D-43 / D-67）
 
 #[tokio::test]
+async fn rename_follows_booklet_pdf() {
+    let lib = Lib::new();
+    require_ffmpeg!(lib.add("A/01.flac", 1, "a"));
+    std::fs::write(lib.path("A/booklet.pdf"), b"%PDF").unwrap();
+    lib.scan().await;
+    let a = lib.track_id("A/01.flac");
+    let prepared = lib
+        .editor
+        .prepare_rename(None, vec![target(a, "X/Y/01.flac")])
+        .await
+        .unwrap();
+    lib.start();
+    assert_eq!(
+        lib.wait_batch_terminal(prepared.batch_id).await,
+        BatchState::Applied
+    );
+    assert_eq!(std::fs::read(lib.path("X/Y/booklet.pdf")).unwrap(), b"%PDF");
+    assert!(!lib.path("A").exists());
+}
+
+#[tokio::test]
 async fn whole_album_move_carries_companion_files_and_leaves_unknown_files() {
     let lib = Lib::new();
     require_ffmpeg!(lib.add("A/01.flac", 1, "a"));

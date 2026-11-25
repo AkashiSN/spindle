@@ -10,6 +10,8 @@ export type GcPreview = {
   derived: GcSection
   artwork_rows: GcSection
   artwork_dirs: GcSection
+  /** アップロードの一時置き場（SPEC §7.12「GC」）。放置の破棄扱いも 1 件に数える */
+  uploads: GcSection
 }
 
 export type ArchiveState = 'held' | 'restored' | 'deleted'
@@ -57,6 +59,7 @@ const GC_LABELS: Array<[GcRow['key'], string, boolean]> = [
   ['derived', 'Derived の孤児', true],
   ['artwork_rows', 'アートワークの行（参照なし）', false],
   ['artwork_dirs', 'サムネイルのディレクトリ（行なし）', true],
+  ['uploads', 'アップロードの一時置き場（捨てた・壊れた・古い展開。放置は破棄扱い）', true],
 ]
 
 export function gcPreviewRows(p: GcPreview): GcRow[] {

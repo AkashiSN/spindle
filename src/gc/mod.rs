@@ -13,7 +13,10 @@
 //! - F Inbox: 却下した件のうち「削除」で破棄待ちにしてから `retention` が経ったもの → 件のファイル
 //!   （[`crate::import::inbox::discard_item_files`]）と行を消す（D-90）
 //!
-//! 実行順は A → B → E(行) を 1 トランザクション → C → D → E(dir) → F。ファイル削除は 1 件ずつ、
+//! - G アップロード: 捨てた・壊れたステージング、`garbage` の古い展開世代を消し、放置したものを
+//!   破棄扱いにする（[`upload`]。SPEC §7.12「GC」）
+//!
+//! 実行順は A → B → E(行) を 1 トランザクション → C → D → E(dir) → F → G。ファイル削除は 1 件ずつ、
 //! 失敗はログして続行し、最後に区分ごとの件数・バイト数を出す
 
 use std::collections::HashSet;
@@ -27,6 +30,9 @@ use crate::domain::relpath::{canonical_key, RelPath};
 use crate::fsroot::{FileKind, FsError, RootDir, Stat, TMP_PREFIX};
 use crate::media::artwork::ArtworkStore;
 
+pub mod upload;
+pub use upload::{execute_uploads, GcUploads, PlannedUpload, UploadBasis, UploadGcReason};
+
 /// Derived の孤児として消すまでの猶予（in-flight の書き込みと手作業で置いた実体の保護）
 pub const ORPHAN_GRACE_SECS: i64 = 24 * 3600;
 
@@ -38,6 +44,8 @@ pub struct GcRoots {
     pub artwork: Arc<ArtworkStore>,
     /// Inbox（`[paths].inbox` が無ければ None。F 区分を飛ばす）
     pub inbox: Option<Arc<RootDir>>,
+    /// アップロードの鍵と `[upload]`（無ければ、または `inbox` が無ければ G 区分を飛ばす）
+    pub uploads: Option<GcUploads>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,6 +124,8 @@ pub struct Plan {
     pub artwork_dirs: Vec<String>,
     /// 破棄待ちで期限の来た Inbox の件（D-90）
     pub inbox: Vec<PlannedInbox>,
+    /// アップロードのステージング（G）
+    pub uploads: Vec<PlannedUpload>,
 }
 
 /// 消すものを決める（読み取りのみ）。`retention_secs` は `[gc].retention_days` を秒にしたもの
@@ -237,6 +247,16 @@ pub async fn plan(
         .cloned()
         .collect();
 
+    // G
+    let uploads = match (&roots.inbox, &roots.uploads) {
+        (Some(inbox), Some(u)) => {
+            let (inbox, cfg) = (Arc::clone(inbox), u.cfg.clone());
+            tokio::task::spawn_blocking(move || upload::plan_uploads(&inbox, &cfg, cutoff, now))
+                .await?
+        }
+        _ => Vec::new(),
+    };
+
     Ok(Plan {
         now,
         cutoff,
@@ -248,6 +268,7 @@ pub async fn plan(
         artwork_rows,
         artwork_dirs,
         inbox,
+        uploads,
     })
 }
 
@@ -377,6 +398,8 @@ pub struct Counts {
     /// 計画後に状態が変わっていて消さなかった
     pub skipped: usize,
     pub failed: usize,
+    /// 消さずに印だけ付けた（G の放置。`deleted` に数えない）
+    pub marked: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -388,6 +411,7 @@ pub struct Summary {
     pub artwork_rows: Counts,
     pub artwork_dirs: Counts,
     pub inbox: Counts,
+    pub uploads: Counts,
 }
 
 impl Summary {
@@ -399,14 +423,19 @@ impl Summary {
             + self.artwork_rows.deleted
             + self.artwork_dirs.deleted
             + self.inbox.deleted
+            + self.uploads.deleted
     }
 
     pub fn total_bytes(&self) -> u64 {
-        self.archived.bytes + self.derived.bytes + self.artwork_dirs.bytes + self.inbox.bytes
+        self.archived.bytes
+            + self.derived.bytes
+            + self.artwork_dirs.bytes
+            + self.inbox.bytes
+            + self.uploads.bytes
     }
 }
 
-fn cancelled(token: &CancellationToken) -> Result<(), GcError> {
+pub(crate) fn cancelled(token: &CancellationToken) -> Result<(), GcError> {
     if token.is_cancelled() {
         Err(GcError::Cancelled)
     } else {
@@ -798,6 +827,14 @@ pub async fn execute_all(
     summary.derived = execute_derived(db, roots, plan, token, job_id).await?;
     summary.artwork_dirs = execute_artwork_dirs(db, roots, plan, token).await?;
     summary.inbox = execute_inbox(db, roots, plan, token).await?;
+    summary.uploads = match &roots.uploads {
+        Some(u) => execute_uploads(db, roots, &u.locks, &u.cfg, plan, token).await?,
+        None => Counts {
+            planned: plan.uploads.len(),
+            skipped: plan.uploads.len(),
+            ..Counts::default()
+        },
+    };
     log_summary(&summary);
     Ok(summary)
 }
@@ -816,14 +853,22 @@ pub fn log_summary(s: &Summary) {
         artwork_bytes = s.artwork_dirs.bytes,
         inbox = s.inbox.deleted,
         inbox_bytes = s.inbox.bytes,
+        uploads = s.uploads.deleted,
+        uploads_bytes = s.uploads.bytes,
+        uploads_marked = s.uploads.marked,
         skipped = s.tracks.skipped
             + s.albums.skipped
             + s.archived.skipped
             + s.derived.skipped
             + s.artwork_rows.skipped
             + s.artwork_dirs.skipped
-            + s.inbox.skipped,
-        failed = s.archived.failed + s.derived.failed + s.artwork_dirs.failed + s.inbox.failed,
+            + s.inbox.skipped
+            + s.uploads.skipped,
+        failed = s.archived.failed
+            + s.derived.failed
+            + s.artwork_dirs.failed
+            + s.inbox.failed
+            + s.uploads.failed,
         "GC を実行した"
     );
 }
@@ -918,6 +963,8 @@ pub struct Preview {
     pub artwork_dirs: PreviewSection,
     /// 破棄待ちで期限の来た Inbox の件（D-90）
     pub inbox: PreviewSection,
+    /// アップロードのステージング（放置の破棄扱いも 1 件に数える。bytes は消す見込み）
+    pub uploads: PreviewSection,
     /// 掃除するジョブ行の数（P4-18）
     pub jobs: PreviewJobs,
     /// 掃除する終端の同期計画の数（P5-6）
@@ -969,6 +1016,11 @@ impl Preview {
             inbox: section(&plan.inbox, plan.inbox.iter().map(|i| i.bytes).sum(), |i| {
                 i.rel_dir.clone()
             }),
+            uploads: section(
+                &plan.uploads,
+                plan.uploads.iter().map(|u| u.bytes).sum(),
+                PlannedUpload::label,
+            ),
             jobs: PreviewJobs::default(),
             plans: 0,
         }

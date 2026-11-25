@@ -552,6 +552,59 @@ async fn youtube_item(app: &App, rel_dir: &str, category: Option<&str>, verdict:
 /// CD の件（サイドカーに `rip`）は、承認画面から MusicBrainz を引き直す材料（TOC・ISRC・MCN）を返す（P4-21）。
 /// CD でない件は null
 #[tokio::test]
+async fn inbox_list_includes_upload_and_companions() {
+    use spindle::import::sidecar::{Sidecar, UploadEntry};
+    let app = App::new().await;
+    let c = app.cookie().await;
+    let dir = spindle::domain::relpath::RelPath::parse("upload/A/X").unwrap();
+    let root = RootDir::open(&app.dir.path().join("Inbox")).unwrap();
+    root.create_dir_all(&dir).unwrap();
+    for name in ["booklet.pdf", "back.jpg", "01.flac", "notes.txt"] {
+        std::fs::write(app.dir.path().join("Inbox/upload/A/X").join(name), b"x").unwrap();
+    }
+    let mut sc = Sidecar::default();
+    sc.upload = Some(UploadEntry {
+        upload_id: "0123456789abcdef".into(),
+        group_key: "k".into(),
+        uploaded_at: 1_700_000_000,
+        origins: vec!["A.zip".into()],
+    });
+    sc.write(&root, &dir).unwrap();
+    let id = app
+        .db
+        .write(|c| {
+            inbox::insert_item(
+                c,
+                "upload/A/X",
+                &spindle::domain::relpath::canonical_key("upload/A/X"),
+                1000,
+            )
+        })
+        .await
+        .unwrap();
+    let (st, body) = app.get(&c, "/api/inbox").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let it = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap()
+        .clone();
+    assert_eq!(it["upload"]["uploaded_at"], 1_700_000_000, "{it}");
+    assert_eq!(
+        it["upload"]["origins"],
+        serde_json::json!(["A.zip"]),
+        "{it}"
+    );
+    assert_eq!(
+        it["companions"],
+        serde_json::json!(["back.jpg", "booklet.pdf"]),
+        "{it}"
+    );
+}
+
+#[tokio::test]
 async fn list_exposes_lookup_inputs_of_a_cd_item() {
     use spindle::import::sidecar::Sidecar;
     let app = App::new().await;
