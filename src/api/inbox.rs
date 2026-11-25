@@ -53,7 +53,7 @@ pub struct ItemView {
     pub stages: Option<Vec<Stage>>,
     /// 件のディレクトリにある吸い出しのテキスト（`rip*.log` / `disc*.cue` / `disc*.toc`。D-106）
     pub rip_files: Vec<String>,
-    /// ブラウザからのアップロードの記録（アップロードで置いた件だけ。承認画面の出どころ。設計 §4.3）
+    /// ブラウザからのアップロードの記録（アップロードで置いた件だけ。承認画面の出どころ。SPEC §12.6「Inbox」）
     pub upload: Option<UploadEntry>,
     /// 件のディレクトリ直下の同梱ファイル（ブックレット PDF・画像・吸い出しの記録）。承認でアルバムのフォルダへ一緒に移る
     pub companions: Vec<String>,

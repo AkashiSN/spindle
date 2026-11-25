@@ -1,4 +1,4 @@
-//! ③ の表示（設計 §4.2・§5.4）: ステージングの読み取り、既定のチェック、件の状態、API が返す
+//! ③ の表示（SPEC §12.6「アップロード」、§7.12「分け方（③）」）: ステージングの読み取り、既定のチェック、件の状態、API が返す
 //! [`UploadView`] の組み立て。
 //!
 //! - 読むのは removed でも damaged でもない、受け取り終えたばらのファイル `files/<origin>` と、
@@ -835,7 +835,7 @@ fn statuses_of(
         paths.dedup();
         out.push(Status::LibraryDuplicate { paths });
     }
-    // Inbox に同じ件: 置き場所が**ディレクトリとして**あるときだけ（音声の一致は見ない。設計 §4.2）
+    // Inbox に同じ件: 置き場所が**ディレクトリとして**あるときだけ（音声の一致は見ない。SPEC §7.12「分け方（③）」、D-116）
     match base_dest(g) {
         Ok(dir) => match inbox.stat(&dir) {
             Ok(st) if st.kind == FileKind::Dir => out.push(Status::InboxExists {

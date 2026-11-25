@@ -173,7 +173,7 @@ pub struct Sidecar {
     /// CD の吸い出しの記録（CD の件だけ）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rip: Option<RipEntry>,
-    /// ブラウザからのアップロードの記録（アップロードで置いた件だけ。設計 §5.5）
+    /// ブラウザからのアップロードの記録（アップロードで置いた件だけ。SPEC §7.12「Inbox へ置く（公開）」）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload: Option<UploadEntry>,
 }

@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         locks_cleared = recovered.locks_cleared,
         "ジョブをリカバリした"
     );
-    // アップロードの照合（設計 §5.3）: マニフェストから取りこぼした展開・公開を投入し直す。
+    // アップロードの照合（SPEC §7.12「照合とジョブ」）: マニフェストから取りこぼした展開・公開を投入し直す。
     // リカバリの後・ワーカー起動の前。失敗しても起動は続ける（一覧の取得でも走る）
     match upload::reconcile(&db, Arc::clone(&inbox_root), &upload_locks).await {
         Ok(0) => {}

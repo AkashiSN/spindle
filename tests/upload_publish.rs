@@ -1,4 +1,4 @@
-//! アップロードの公開計画の凍結と段階的な公開（`import::upload::publish`。設計 §5.5）。
+//! アップロードの公開計画の凍結と段階的な公開（`import::upload::publish`。SPEC §7.12「Inbox へ置く（公開）」）。
 //! 一時ディレクトリの Inbox に本物の送信（`begin_origin` + `receive_chunk`）でファイルを置き、
 //! `freeze` → `publish` で `upload/…` に件ができることと、各地点で止めて再実行しても
 //! 同じ結果に 1 回だけなることを確かめる
@@ -566,8 +566,9 @@ fn published_dir_consumed_by_inbox_counts_as_done() {
         &stages(&env.manifest())[0],
         Stage::Publishing { dest } if dest == "upload/Artist/X"
     ));
-    // Inbox の配置が件を持っていった（テストの模擬）
-    std::fs::remove_dir_all(&dest).unwrap();
+    // Inbox の配置が件を持っていき、空になった親も片付いた（テストの模擬）。公開済みにする前の
+    // 宛先の親の fsync は、残っていないディレクトリを飛ばす
+    std::fs::remove_dir_all(dest.parent().unwrap()).unwrap();
     let r = env.publish();
     assert!(r.finished);
     assert_eq!(

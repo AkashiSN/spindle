@@ -1,4 +1,4 @@
-//! 公開計画の凍結と、Inbox への段階的な公開（設計 §5.5）。
+//! 公開計画の凍結と、Inbox への段階的な公開（SPEC §7.12「Inbox へ置く（公開）」）。
 //!
 //! - [`freeze`] はその時点の分け方（[`decide`] の included な件と曲・同梱ファイル）から計画を作って
 //!   マニフェストに凍結する。以後の ③ の変更は計画に効かない。二度目は何もしない（冪等）
@@ -31,7 +31,9 @@ use super::manifest::{
     UploadError, UploadId, UploadLocks,
 };
 use super::receive::sync_with_disk;
-use super::view::{decide, dest_of, library_matches, read_staged};
+use super::view::{
+    decide, dest_of, library_matches, read_staged, read_staged_cached, StagedReadCache,
+};
 
 /// ステージング内の組み立て用のディレクトリ（`publish/<n>/`）
 const PUBLISH_DIR: &str = "publish";
@@ -100,11 +102,14 @@ fn incomplete(o: &Origin) -> bool {
 
 /// 公開計画を作ってマニフェストに凍結し、`publish_requested_at` を入れる（鍵の中で 1 回だけ）。
 ///
-/// - 既に計画があれば [`FreezeOutcome::AlreadyFrozen`]（冪等。計画は変えない）
-/// - 破棄済みなら [`UploadError::Busy`]
+/// - 既に計画があれば [`FreezeOutcome::AlreadyFrozen`]（冪等。計画は変えない）。ただし捨てた
+///   アップロードで計画の全件を置き終えていなければ [`UploadError::Busy`]（止まった公開を捨てた後に
+///   押し直しで動かさない）
+/// - 計画が無く破棄済みなら [`UploadError::Busy`]
 /// - removed でない origin に送信未完・未展開・失敗した zip・展開中があれば `Conflict("incomplete")`
 /// - included な件が 0 なら `Conflict("empty")`（曲が 1 曲もない件は計画に入れない）
 ///
+/// ステージングのタグは読み直す（読み取りの覚えを使うのは [`freeze_cached`]）。
 /// `layout` と `cfg` は表示（`build_view`）と同じ入力を揃えるために受ける（今の計画には使わない）
 #[allow(clippy::too_many_arguments)]
 pub fn freeze(
@@ -112,12 +117,48 @@ pub fn freeze(
     locks: &UploadLocks,
     id: &UploadId,
     conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    cfg: &UploadConfig,
+    now: i64,
+) -> Result<FreezeOutcome, UploadError> {
+    freeze_with(inbox, locks, id, conn, layout, cfg, now, None)
+}
+
+/// [`freeze`] と同じで、変わっていないファイルは `cache`（API の表示と共有する覚え）を使う
+#[allow(clippy::too_many_arguments)]
+pub fn freeze_cached(
+    inbox: &RootDir,
+    locks: &UploadLocks,
+    id: &UploadId,
+    conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    cfg: &UploadConfig,
+    now: i64,
+    cache: &StagedReadCache,
+) -> Result<FreezeOutcome, UploadError> {
+    freeze_with(inbox, locks, id, conn, layout, cfg, now, Some(cache))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn freeze_with(
+    inbox: &RootDir,
+    locks: &UploadLocks,
+    id: &UploadId,
+    conn: &rusqlite::Connection,
     _layout: &LayoutConfig,
     _cfg: &UploadConfig,
     now: i64,
+    cache: Option<&StagedReadCache>,
 ) -> Result<FreezeOutcome, UploadError> {
     with_manifest(inbox, locks, id, |m| {
-        if m.publish.is_some() {
+        if let Some(plan) = &m.publish {
+            let all_published = plan
+                .groups
+                .iter()
+                .all(|g| matches!(g.stage, Stage::Published { .. }));
+            if m.discarded_at.is_some() && !all_published {
+                return Err(UploadError::Busy);
+            }
             return Ok(FreezeOutcome::AlreadyFrozen);
         }
         if m.discarded_at.is_some() {
@@ -128,7 +169,7 @@ pub fn freeze(
         if m.origins.iter().any(incomplete) {
             return Err(UploadError::Conflict("incomplete".into()));
         }
-        let groups = plan_groups(inbox, conn, m)?;
+        let groups = plan_groups(inbox, conn, m, cache)?;
         if groups.is_empty() {
             return Err(UploadError::Conflict("empty".into()));
         }
@@ -146,8 +187,12 @@ fn plan_groups(
     inbox: &RootDir,
     conn: &rusqlite::Connection,
     m: &Manifest,
+    cache: Option<&StagedReadCache>,
 ) -> Result<Vec<PlannedGroup>, UploadError> {
-    let (files, fps) = read_staged(inbox, m)?;
+    let (files, fps) = match cache {
+        Some(cache) => read_staged_cached(inbox, m, cache)?,
+        None => read_staged(inbox, m)?,
+    };
     let grouping = group(&files, m);
     let matches = library_matches(conn, &grouping, &fps)?;
     let decided = decide(m, &grouping, &matches);
@@ -422,8 +467,15 @@ fn move_to_dest(
                 "組み立て先がディレクトリでない: {work}"
             )))
         }
-        // rename は済んでいる（宛先が Inbox の配置で既に消えていてもよい）
-        Err(FsError::NotFound) => return Ok(true),
+        // rename は済んでいる（宛先が Inbox の配置で既に消えていてもよい）。rename の後・fsync の前に
+        // 落ちたかもしれないので、残っている宛先の親の連なりを fsync してから公開済みにする
+        Err(FsError::NotFound) => {
+            fsync_dest_parents(inbox, dest)?;
+            if let Some(p) = work.parent() {
+                fsync_existing(inbox, Some(&p))?;
+            }
+            return Ok(true);
+        }
         Err(e) => return Err(e.into()),
     }
     let dest = RelPath::parse(dest)?;
@@ -450,4 +502,25 @@ fn move_to_dest(
         inbox.fsync_dir(Some(&p))?;
     }
     Ok(true)
+}
+
+/// 宛先の親から root までのうち、残っているディレクトリを fsync する（Inbox の配置で宛先や親が既に
+/// 消えていてもよい）
+fn fsync_dest_parents(inbox: &RootDir, dest: &str) -> Result<(), UploadError> {
+    let dest = RelPath::parse(dest)?;
+    let mut dir = dest.parent();
+    while let Some(d) = dir {
+        fsync_existing(inbox, Some(&d))?;
+        dir = d.parent();
+    }
+    inbox.fsync_dir(None)?;
+    Ok(())
+}
+
+/// ディレクトリを fsync する。無ければ何もしない
+fn fsync_existing(inbox: &RootDir, dir: Option<&RelPath>) -> Result<(), UploadError> {
+    match inbox.fsync_dir(dir) {
+        Ok(()) | Err(FsError::NotFound) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }

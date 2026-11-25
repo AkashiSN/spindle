@@ -1,4 +1,4 @@
-//! 件（アルバムのまとまり）への分け方（設計 §5.4）。純粋関数で、I/O はしない。
+//! 件（アルバムのまとまり）への分け方（SPEC §7.12「分け方（③）」）。純粋関数で、I/O はしない。
 //!
 //! ステージング内のファイルを、タグ（なければ来た zip / フォルダ）で件に分け、サブフォルダを
 //! 件の直下へ平らに集め（名前がぶつかれば改名）、同梱ファイルを付ける。included / excluded の
@@ -83,12 +83,45 @@ fn parent_dir(display: &str) -> &str {
     display.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
 }
 
-/// 拡張子の前に ` (n)` を入れる
-fn with_counter(name: &str, n: u32) -> String {
-    match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => format!("{stem} ({n}).{ext}"),
-        _ => format!("{name} ({n})"),
+/// ファイル名の上限（バイト。ext4 / ZFS の NAME_MAX）
+const NAME_MAX: usize = 255;
+
+/// `s` の先頭 `max` バイト以内を文字境界で切る
+fn cut(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
     }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// 拡張子の前に ` (n)` を入れる（上限を超えるなら拡張子の前を文字境界で切る）
+fn with_counter(name: &str, n: u32) -> String {
+    let suffix = format!(" ({n})");
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => {
+            let room = NAME_MAX.saturating_sub(suffix.len() + 1 + ext.len());
+            format!("{}{suffix}.{ext}", cut(stem, room))
+        }
+        _ => format!(
+            "{}{suffix}",
+            cut(name, NAME_MAX.saturating_sub(suffix.len()))
+        ),
+    }
+}
+
+/// `<親フォルダ名> - <名前>`。上限を超えるなら親フォルダ名を文字境界で切る（切っても入らなければ None）
+fn with_parent(parent: &str, base: &str) -> Option<String> {
+    const SEP: &str = " - ";
+    let room = NAME_MAX.checked_sub(SEP.len() + base.len())?;
+    let p = cut(parent, room);
+    if p.is_empty() {
+        return None;
+    }
+    Some(format!("{p}{SEP}{base}"))
 }
 
 fn origin_label(client_path: &str) -> String {
@@ -118,8 +151,8 @@ fn unique_name(taken: &mut HashSet<String>, display: &str) -> String {
     let mut candidates = Vec::new();
     if !is_sidecar {
         candidates.push(base.to_string());
-        if let Some(p) = parent_name(display) {
-            candidates.push(format!("{p} - {base}"));
+        if let Some(c) = parent_name(display).and_then(|p| with_parent(p, base)) {
+            candidates.push(c);
         }
     }
     for c in &candidates {
@@ -251,7 +284,11 @@ pub fn group(files: &[StagedFile], m: &Manifest) -> Grouping {
         }
     }
 
-    // 同梱の付け先: 曲と同じ親ディレクトリの件、残りは件が 1 つならそこ
+    // 同梱の付け先（SPEC §7.12「分け方（③）」）:
+    // 1. 曲と同じ親ディレクトリの件（複数なら表の先頭）
+    // 2. 全曲が同梱ファイルのディレクトリの下にある件がちょうど 1 つならその件（要素単位で比べる）
+    // 3. 件が 1 つだけならその件（`Booklet/` が曲のフォルダの隣にある形）
+    // どれにも当たらなければどの件にも付けない
     let dirs: Vec<HashSet<String>> = finals
         .iter()
         .map(|d| {
@@ -267,6 +304,17 @@ pub fn group(files: &[StagedFile], m: &Manifest) -> Grouping {
         let target = dirs
             .iter()
             .position(|s| s.contains(&dir))
+            .or_else(|| {
+                let mut under = dirs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| !s.is_empty() && s.iter().all(|d| is_under(d, &dir)))
+                    .map(|(i, _)| i);
+                match (under.next(), under.next()) {
+                    (Some(i), None) => Some(i),
+                    _ => None,
+                }
+            })
             .or(if finals.len() == 1 { Some(0) } else { None });
         match target {
             Some(g) => comp_of[g].push(ci),
@@ -315,6 +363,16 @@ pub fn group(files: &[StagedFile], m: &Manifest) -> Grouping {
         });
     }
     out
+}
+
+/// `dir`（`canonical_key` 済みのディレクトリ）が `ancestor` か、その下か。要素単位で比べる
+/// （`Album` は `Album 2` の祖先ではない）。`ancestor` が空（最上位）なら常に true
+fn is_under(dir: &str, ancestor: &str) -> bool {
+    ancestor.is_empty()
+        || dir == ancestor
+        || dir
+            .strip_prefix(ancestor)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn resolve(absorbed: &HashMap<usize, usize>, mut i: usize) -> usize {
@@ -526,6 +584,111 @@ mod tests {
         assert_eq!(g.groups[0].companions.len(), 1);
         assert_eq!(g.groups[1].companions.len(), 0);
         assert_eq!(g.unassigned_companions, vec!["m.zip/Scans/x.pdf"]);
+    }
+
+    #[test]
+    fn companion_above_disc_folders_attaches_to_album() {
+        let m = manifest(vec![origin("o1", "m.zip", FileClass::Zip)]);
+        let a = [("ALBUM", "A")];
+        let g = group(
+            &[
+                sf("o1", "m.zip/Album/Disc 1/01.flac", FileClass::Audio, &a),
+                sf("o1", "m.zip/Album/Disc 2/01.flac", FileClass::Audio, &a),
+                sf("o1", "m.zip/Album/cover.jpg", FileClass::Companion, &[]),
+                // 名前が前方一致するだけのフォルダは祖先ではない
+                sf(
+                    "o1",
+                    "m.zip/Album 2/01.flac",
+                    FileClass::Audio,
+                    &[("ALBUM", "B")],
+                ),
+            ],
+            &m,
+        );
+        assert_eq!(g.groups.len(), 2);
+        let album = g
+            .groups
+            .iter()
+            .find(|x| x.album.as_deref() == Some("A"))
+            .unwrap();
+        assert_eq!(album.companions.len(), 1);
+        assert_eq!(album.companions[0].display, "m.zip/Album/cover.jpg");
+        assert!(g.unassigned_companions.is_empty());
+    }
+
+    #[test]
+    fn companion_above_two_groups_is_unassigned() {
+        let m = manifest(vec![origin("o1", "m.zip", FileClass::Zip)]);
+        let g = group(
+            &[
+                sf(
+                    "o1",
+                    "m.zip/Box/A/01.flac",
+                    FileClass::Audio,
+                    &[("ALBUM", "A")],
+                ),
+                sf(
+                    "o1",
+                    "m.zip/Box/B/01.flac",
+                    FileClass::Audio,
+                    &[("ALBUM", "B")],
+                ),
+                sf("o1", "m.zip/Box/cover.jpg", FileClass::Companion, &[]),
+                sf(
+                    "o1",
+                    "m.zip/Other/01.flac",
+                    FileClass::Audio,
+                    &[("ALBUM", "C")],
+                ),
+            ],
+            &m,
+        );
+        assert_eq!(g.groups.len(), 3);
+        assert!(g.groups.iter().all(|x| x.companions.is_empty()));
+        assert_eq!(g.unassigned_companions, vec!["m.zip/Box/cover.jpg"]);
+    }
+
+    #[test]
+    fn top_level_companion_with_many_groups_is_unassigned() {
+        // 最上位の同梱ファイルは全件が当てはまる: 件が 2 つならどちらにも付けない
+        let m = manifest(vec![origin("o1", "m.zip", FileClass::Zip)]);
+        let g = group(
+            &[
+                sf("o1", "A/01.flac", FileClass::Audio, &[("ALBUM", "A")]),
+                sf("o1", "B/01.flac", FileClass::Audio, &[("ALBUM", "B")]),
+                sf("o1", "cover.jpg", FileClass::Companion, &[]),
+            ],
+            &m,
+        );
+        assert_eq!(g.groups.len(), 2);
+        assert!(g.groups.iter().all(|x| x.companions.is_empty()));
+        assert_eq!(g.unassigned_companions, vec!["cover.jpg"]);
+    }
+
+    #[test]
+    fn long_parent_prefix_stays_within_name_max() {
+        let m = manifest(vec![origin("o1", "m.zip", FileClass::Zip)]);
+        let t = [("ALBUMARTIST", "A"), ("ALBUM", "B")];
+        // 3 バイト文字で 240 バイトの親フォルダ名（切る位置が文字の途中に来る）
+        let long = "あ".repeat(80);
+        let second = format!("m.zip/{long}/01 Track.flac");
+        let g = group(
+            &[
+                sf("o1", "m.zip/Disc 1/01 Track.flac", FileClass::Audio, &t),
+                sf("o1", &second, FileClass::Audio, &t),
+            ],
+            &m,
+        );
+        let names = names(&g.groups[0]);
+        assert_eq!(names.len(), 2);
+        let renamed = names.iter().find(|n| **n != "01 Track.flac").unwrap();
+        assert!(renamed.len() <= 255, "{} バイト", renamed.len());
+        assert!(renamed.ends_with(" - 01 Track.flac"), "{renamed}");
+        assert!(renamed.starts_with("あ"));
+        // 長い名前に ` (n)` を付けても上限を超えない
+        let c = with_counter(&format!("{}.flac", "い".repeat(84)), 12);
+        assert!(c.len() <= 255, "{} バイト", c.len());
+        assert!(c.ends_with(" (12).flac"), "{c}");
     }
 
     #[test]

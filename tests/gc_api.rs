@@ -170,7 +170,7 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
     assert_eq!(body["archived"]["bytes"], 5);
     assert_eq!(body["derived"]["count"], 0);
     assert_eq!(body["artwork_dirs"]["count"], 0);
-    // アップロードの区分（設計 §5.8）。Inbox が無ければ 0 件
+    // アップロードの区分（SPEC §7.12「GC」）。Inbox が無ければ 0 件
     assert_eq!(body["uploads"]["count"], 0, "{body}");
     assert_eq!(body["uploads"]["bytes"], 0);
     // ジョブ行の掃除の対象（P4-18）。設定は例の既定（done 7 日 / failed 30 日）

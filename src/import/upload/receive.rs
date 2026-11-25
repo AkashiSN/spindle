@@ -1,4 +1,4 @@
-//! チャンクの受け取り（設計 §5.2）。
+//! チャンクの受け取り（SPEC §7.12「送信」）。
 //!
 //! - 最初に [`begin_origin`] で origin を作り（宣言サイズを予算に算入）、`files/<origin>.part` を作る
 //! - 1 チャンクは [`receive_chunk`]: マニフェストの鍵の中で `.part` の実際の大きさを `offset` と照らし、
@@ -235,8 +235,8 @@ pub fn receive_chunk(
             }
             file
         };
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        file.write_all(bytes).map_err(write_error)?;
+        file.sync_all().map_err(write_error)?;
         if fault(ChunkStep::AfterAppend) {
             return Err(fault_error());
         }
@@ -254,6 +254,14 @@ pub fn receive_chunk(
         m.updated_at = now;
         Ok(out)
     })
+}
+
+/// 追記の失敗を応答へ: 空き容量・クォータの不足は 507 `no_space`（[`UploadError::NoSpace`]）にする
+fn write_error(e: std::io::Error) -> UploadError {
+    match e.kind() {
+        std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => UploadError::NoSpace,
+        _ => UploadError::Io(e),
+    }
 }
 
 /// `total` に達した `.part` を fsync して正式な名前へ `RENAME_NOREPLACE` し、完了にする
@@ -603,6 +611,23 @@ mod tests {
         assert!(matches!(
             env.begin("huge.flac", u64::MAX / 2, &cfg),
             Err(UploadError::NoSpace)
+        ));
+    }
+
+    #[test]
+    fn enospc_during_append_is_no_space() {
+        // ENOSPC（28）・EDQUOT（122）は 507 no_space、他の I/O は内部エラーのまま
+        assert!(matches!(
+            write_error(std::io::Error::from_raw_os_error(28)),
+            UploadError::NoSpace
+        ));
+        assert!(matches!(
+            write_error(std::io::Error::from_raw_os_error(122)),
+            UploadError::NoSpace
+        ));
+        assert!(matches!(
+            write_error(std::io::Error::from_raw_os_error(5)),
+            UploadError::Io(_)
         ));
     }
 

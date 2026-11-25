@@ -1,4 +1,4 @@
-//! アップロードのマニフェスト `upload.json` と、アップロードごとの鍵（設計 §5.1）。
+//! アップロードのマニフェスト `upload.json` と、アップロードごとの鍵（SPEC §7.12「ステージングとマニフェスト」）。
 //!
 //! - ステージングは Inbox 直下の `.spindle-upload-<16hex>/`。Inbox の走査は `.` で始まる名前を
 //!   飛ばすので件に見えない。中身は `upload.json`・`files/`・`zips/`・`x/`（・公開時の `publish/`）
@@ -62,6 +62,9 @@ pub enum UploadError {
     Fs(#[from] FsError),
     #[error("マニフェストが読めない: {0}")]
     Json(#[from] serde_json::Error),
+    /// マニフェストは JSON として読めるが、この版では扱えない（新しい版・ディレクトリと id が合わない）
+    #[error("マニフェストを扱えない: {0}")]
+    Unsupported(String),
     #[error("I/O エラー: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -173,7 +176,7 @@ impl UploadId {
     }
 }
 
-/// アップロードのマニフェスト（`upload.json`）。状態の正（設計 §5.1）
+/// アップロードのマニフェスト（`upload.json`）。状態の正（SPEC §7.12「ステージングとマニフェスト」）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     /// 形式の版。[`MANIFEST_VERSION`] 以外は読まない
@@ -203,7 +206,7 @@ pub struct Manifest {
     /// 初期で外れるものを入れ直した件（キーは `Group::key`）
     #[serde(default)]
     pub included_groups: Vec<String>,
-    /// 凍結した公開計画（§5.5）
+    /// 凍結した公開計画（SPEC §7.12「Inbox へ置く（公開）」）
     #[serde(default)]
     pub publish: Option<PublishPlan>,
     #[serde(default)]
@@ -309,7 +312,7 @@ fn is_origin_id(s: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// zip の展開の状態（§5.3）
+/// zip の展開の状態（SPEC §7.12「zip の展開」）
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZipState {
     /// 成功した世代。0 = 未展開
@@ -347,7 +350,7 @@ pub struct Rejected {
     pub reason: String,
 }
 
-/// 凍結した公開計画（§5.5。振る舞いは公開の実装が持つ）
+/// 凍結した公開計画（SPEC §7.12「Inbox へ置く（公開）」。振る舞いは公開の実装が持つ）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishPlan {
     pub frozen_at: i64,
@@ -403,7 +406,20 @@ pub enum Listed {
         /// ディレクトリの mtime（ナノ秒）
         mtime_ns: i64,
         reason: String,
+        /// GC が消してよいか（[`broken_is_deletable`]。マニフェストが無いか JSON として壊れているときだけ）
+        deletable: bool,
     },
+}
+
+/// 読めないマニフェストのうち、GC が消してよい（捨てる印を付けてよい）ものか。マニフェストが無い・
+/// JSON として壊れているものだけ。読み取りの I/O の失敗（EIO・EACCES など）・新しい版・id の食い違いは
+/// 一時的な障害か新しい spindle の書いたものかもしれないので、一覧に出すだけで消さない
+pub fn broken_is_deletable(e: &UploadError) -> bool {
+    match e {
+        UploadError::Fs(FsError::NotFound) => true,
+        UploadError::Json(j) => j.is_syntax() || j.is_data() || j.is_eof(),
+        _ => false,
+    }
 }
 
 /// アップロードごとの鍵。`AppState`・ジョブハンドラ・GC で 1 つを共有する（clone は同じ表を指す）
@@ -471,7 +487,7 @@ pub fn read_manifest(inbox: &RootDir, id: &UploadId) -> Result<Manifest, UploadE
         .read_to_end(&mut buf)?;
     let m = parse_manifest(&buf)?;
     if m.id != id.as_str() {
-        return Err(json_error(format!(
+        return Err(UploadError::Unsupported(format!(
             "マニフェストの id {:?} がディレクトリと合わない",
             m.id
         )));
@@ -479,12 +495,20 @@ pub fn read_manifest(inbox: &RootDir, id: &UploadId) -> Result<Manifest, UploadE
     Ok(m)
 }
 
-/// マニフェストの JSON を読み、形式を確かめる（版、origin ID の形と重複）
+/// 版だけを先に読む（新しい版の形が今の [`Manifest`] に合わなくても「壊れた」と取り違えない）
+#[derive(Deserialize)]
+struct VersionProbe {
+    version: Option<u32>,
+}
+
+/// マニフェストの JSON を読み、形式を確かめる（版、origin ID の形と重複）。JSON として読めないものは
+/// [`UploadError::Json`]、読めるが対応しない版は [`UploadError::Unsupported`]
 pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, UploadError> {
-    let m: Manifest = serde_json::from_slice(bytes)?;
-    if m.version != MANIFEST_VERSION {
-        return Err(json_error(format!("対応しない版 {}", m.version)));
+    let probe: VersionProbe = serde_json::from_slice(bytes)?;
+    if let Some(v) = probe.version.filter(|v| *v != MANIFEST_VERSION) {
+        return Err(UploadError::Unsupported(format!("対応しない版 {v}")));
     }
+    let m: Manifest = serde_json::from_slice(bytes)?;
     let mut seen = std::collections::HashSet::new();
     for o in &m.origins {
         if !is_origin_id(&o.id) || !seen.insert(o.id.as_str()) {
@@ -567,8 +591,9 @@ pub fn has_discard_mark(inbox: &RootDir, dir: &RelPath) -> Result<bool, UploadEr
     }
 }
 
-/// 壊れたステージング（マニフェストが無い・読めない）に捨てる印を付ける（消すのは GC）。
-/// 読めるマニフェストのあるものは `Conflict("not_broken")`、無いものは `NotFound`
+/// 壊れたステージング（マニフェストが無い・JSON として壊れている）に捨てる印を付ける（消すのは GC）。
+/// 読めるマニフェストのあるものは `Conflict("not_broken")`、GC が消さないもの（読み取りの I/O の失敗・
+/// 新しい版など。[`broken_is_deletable`]）は `Conflict("not_deletable")`、ステージングが無いものは `NotFound`
 pub fn mark_broken_discarded(
     inbox: &RootDir,
     locks: &UploadLocks,
@@ -579,6 +604,9 @@ pub fn mark_broken_discarded(
         match read_manifest(inbox, id) {
             Ok(_) => return Err(UploadError::Conflict("not_broken".into())),
             Err(UploadError::NotFound) => return Err(UploadError::NotFound),
+            Err(e) if !broken_is_deletable(&e) => {
+                return Err(UploadError::Conflict("not_deletable".into()))
+            }
             Err(_) => {}
         }
         let dir = id.staging_dir();
@@ -614,6 +642,7 @@ pub fn list_uploads(inbox: &RootDir) -> Result<Vec<Listed>, UploadError> {
                 out.push(Listed::Broken {
                     dir,
                     mtime_ns,
+                    deletable: broken_is_deletable(&e),
                     reason: e.to_string(),
                 });
             }
@@ -856,9 +885,12 @@ mod tests {
                     dir,
                     mtime_ns,
                     reason,
+                    deletable,
                 } => {
                     assert!(*mtime_ns > 0);
                     assert!(!reason.is_empty());
+                    // 無い・JSON として壊れているものは GC が消してよい
+                    assert!(*deletable, "{reason}");
                     broken.push(dir.clone());
                 }
             }
@@ -866,6 +898,49 @@ mod tests {
         assert_eq!(oks, 1);
         broken.sort();
         assert_eq!(broken, vec![missing.staging_dir(), garbled.staging_dir()]);
+    }
+
+    #[test]
+    fn unsupported_manifest_is_broken_but_not_deletable() {
+        let (dir, inbox) = inbox();
+        let locks = UploadLocks::default();
+        // 新しい版（今の形に合わないフィールドがあっても「壊れた」と取り違えない）
+        let future = UploadId::parse("00000000000000cc").unwrap();
+        let fdir = dir.path().join(future.staging_dir().as_str());
+        std::fs::create_dir(&fdir).unwrap();
+        std::fs::write(
+            fdir.join(MANIFEST_NAME),
+            br#"{"version":2,"id":"00000000000000cc","origins":"new shape"}"#,
+        )
+        .unwrap();
+        // ディレクトリと id が合わない
+        let other = UploadId::parse("00000000000000dd").unwrap();
+        let odir = dir.path().join(other.staging_dir().as_str());
+        std::fs::create_dir(&odir).unwrap();
+        std::fs::write(
+            odir.join(MANIFEST_NAME),
+            br#"{"version":1,"id":"00000000000000ee","created_at":0,"updated_at":0}"#,
+        )
+        .unwrap();
+
+        let listed = list_uploads(&inbox).unwrap();
+        assert_eq!(listed.len(), 2);
+        for l in &listed {
+            match l {
+                Listed::Broken {
+                    deletable, reason, ..
+                } => assert!(!*deletable, "{reason}"),
+                Listed::Ok(m) => panic!("読めてしまった: {}", m.id),
+            }
+        }
+        // 捨てる印も付けない（GC が消さないので、印を付けても片付かない）
+        for id in [&future, &other] {
+            assert!(matches!(
+                mark_broken_discarded(&inbox, &locks, id),
+                Err(UploadError::Conflict(c)) if c == "not_deletable"
+            ));
+        }
+        assert!(!has_discard_mark(&inbox, &future.staging_dir()).unwrap());
     }
 
     #[test]

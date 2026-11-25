@@ -1,4 +1,4 @@
-//! GC のアップロード区分（設計 docs/development/2026-11-25-upload-design.md §5.8）。
+//! GC のアップロード区分（SPEC §7.12「GC」）。
 //! 捨てた・壊れたステージングの削除、`garbage` の古い展開世代の削除、放置の破棄扱い、
 //! 計画の後に根拠が変わったら何もしないことを固定する
 
@@ -263,6 +263,98 @@ async fn gc_removes_old_broken_staging() {
     assert!(!marked.exists());
     assert!(young.join("files/o1").exists());
     assert!(other.join("a").exists());
+}
+
+#[tokio::test]
+async fn gc_keeps_unreadable_or_unsupported_manifest() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    let inbox = env.dir.path().join("Inbox");
+    // 読めない（EACCES）マニフェスト
+    let denied = inbox.join(".spindle-upload-00000000000000a1");
+    put(&denied.join("files/o1"), b"1234");
+    put(&denied.join("upload.json"), b"{}");
+    std::fs::set_permissions(
+        denied.join("upload.json"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    // root は権限を無視して読めるので、その環境では EACCES を作れない
+    let can_deny = std::fs::read(denied.join("upload.json")).is_err();
+    set_age(&denied, 8 * DAY);
+    // 新しい版のマニフェスト
+    let future = inbox.join(".spindle-upload-00000000000000a2");
+    put(&future.join("files/o1"), b"1234");
+    put(
+        &future.join("upload.json"),
+        br#"{"version":2,"id":"00000000000000a2","origins":{"new":"shape"}}"#,
+    );
+    set_age(&future, 8 * DAY);
+    // 比べ: JSON として壊れたもの（印なし）と、マニフェストの無いものは消える
+    let garbled = inbox.join(".spindle-upload-00000000000000a3");
+    put(&garbled.join("upload.json"), b"{broken");
+    set_age(&garbled, 8 * DAY);
+    let missing = inbox.join(".spindle-upload-00000000000000a4");
+    put(&missing.join("files/o1"), b"1");
+    set_age(&missing, 8 * DAY);
+
+    let plan = env.plan().await;
+    let mut got = reasons(&plan);
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        got,
+        vec![
+            (
+                ".spindle-upload-00000000000000a3".to_owned(),
+                UploadGcReason::Broken
+            ),
+            (
+                ".spindle-upload-00000000000000a4".to_owned(),
+                UploadGcReason::Broken
+            ),
+        ]
+    );
+    let c = env.execute(&plan).await;
+    assert_eq!(c.deleted, 2, "{c:?}");
+    assert!(!garbled.exists());
+    assert!(!missing.exists());
+    assert!(future.join("upload.json").exists());
+    assert!(future.join("files/o1").exists());
+    if can_deny {
+        assert!(denied.join("files/o1").exists());
+    }
+    assert!(denied.join("upload.json").exists());
+    std::fs::set_permissions(
+        denied.join("upload.json"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn gc_broken_execute_rechecks_deletable() {
+    let env = Env::new();
+    let inbox = env.dir.path().join("Inbox");
+    // 計画の時はマニフェストが無く、実行の前に新しい版のマニフェストが現れた（mtime は戻す）
+    let dir = inbox.join(".spindle-upload-00000000000000b1");
+    put(&dir.join("files/o1"), b"1");
+    set_age(&dir, 8 * DAY);
+    let plan = env.plan().await;
+    assert_eq!(plan.uploads.len(), 1, "{:?}", plan.uploads);
+    let mtime = std::fs::metadata(&dir).unwrap().modified().unwrap();
+    put(
+        &dir.join("upload.json"),
+        br#"{"version":2,"id":"00000000000000b1"}"#,
+    );
+    std::fs::File::open(&dir)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+
+    let c = env.execute(&plan).await;
+    assert_eq!(c.deleted, 0, "{c:?}");
+    assert_eq!(c.skipped, 1);
+    assert!(dir.join("upload.json").exists());
 }
 
 #[tokio::test]

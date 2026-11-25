@@ -121,7 +121,7 @@ impl GcHandler {
             .map_err(map_err)?;
         done += plan.inbox.len() as i64;
         ctx.progress(done, total).await?;
-        // アップロードのステージング（設計 §5.8）。鍵は main が作った 1 つの表の clone
+        // アップロードのステージング（SPEC §7.12「GC」）。鍵は main が作った 1 つの表の clone
         summary.uploads = match &self.roots.uploads {
             Some(u) => gc::execute_uploads(&self.db, &self.roots, &u.locks, &u.cfg, &plan, &token)
                 .await

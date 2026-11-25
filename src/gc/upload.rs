@@ -1,9 +1,10 @@
-//! G アップロード（設計 docs/development/2026-11-25-upload-design.md §5.8）。ステージング
-//! `.spindle-upload-<id>/` を物理削除するのはここだけ。
+//! G アップロード（SPEC §7.12「GC」、D-116）。ステージング `.spindle-upload-<id>/` を物理削除する
+//! のはここだけ。
 //!
 //! - (a) [`UploadGcReason::Discarded`]: `discarded_at` から `retention` 経ったもの → ステージングごと消す
-//! - (b) [`UploadGcReason::Broken`]: マニフェストの無い・読めないもの（捨てる印の有無を問わない）で
-//!   ディレクトリの mtime から `retention` 経ったもの → ステージングごと消す
+//! - (b) [`UploadGcReason::Broken`]: マニフェストが無いか JSON として壊れているもの（捨てる印の有無を
+//!   問わない。[`broken_is_deletable`]）で、ディレクトリの mtime から `retention` 経ったもの → ステージング
+//!   ごと消す。読み取りの I/O の失敗・新しい版・id の食い違いは一覧に出すだけで消さない
 //! - (c) [`UploadGcReason::Garbage`]: 生きているアップロードの `garbage` の項で、実体の mtime から
 //!   `retention` 経ったもの（展開中の世代は除く） → その下を消して項を外す
 //! - (d) [`UploadGcReason::MarkStale`]: 公開も破棄もされず `updated_at` から `[upload].stale_days`
@@ -24,8 +25,8 @@ use crate::db::{now_epoch, Db};
 use crate::domain::relpath::RelPath;
 use crate::fsroot::{FileKind, FsError, RootDir};
 use crate::import::upload::{
-    list_uploads, read_manifest, with_manifest, with_upload_lock, Listed, Manifest, UploadError,
-    UploadId, UploadLocks, MANIFEST_NAME,
+    broken_is_deletable, list_uploads, read_manifest, with_manifest, with_upload_lock, Listed,
+    Manifest, UploadError, UploadId, UploadLocks, MANIFEST_NAME,
 };
 
 const DAY_SECS: i64 = 86_400;
@@ -44,7 +45,7 @@ pub struct GcUploads {
 pub enum UploadGcReason {
     /// 捨てた（公開後の残りを含む）ステージングを消す
     Discarded,
-    /// マニフェストの無い・読めないステージングを消す
+    /// マニフェストが無いか JSON として壊れているステージングを消す
     Broken,
     /// `garbage` の項（ステージング相対のパス）を消して外す
     Garbage { path: String },
@@ -106,7 +107,16 @@ pub(super) fn plan_uploads(
     let mut out = Vec::new();
     for item in listed {
         match item {
-            Listed::Broken { dir, mtime_ns, .. } => {
+            Listed::Broken {
+                dir,
+                mtime_ns,
+                deletable,
+                reason,
+            } => {
+                if !deletable {
+                    tracing::warn!(dir = %dir, reason, "読めないマニフェストのステージングは消さずに残す");
+                    continue;
+                }
                 if mtime_ns <= cutoff_ns {
                     out.push(PlannedUpload {
                         dir: dir.as_str().to_owned(),
@@ -384,6 +394,9 @@ fn execute_one(
             match read_manifest(inbox, &id) {
                 Ok(_) => return Ok(Outcome::Skipped("マニフェストが読めるようになった")),
                 Err(UploadError::NotFound) => return Ok(Outcome::Skipped("既に無い")),
+                Err(e) if !broken_is_deletable(&e) => {
+                    return Ok(Outcome::Skipped("消してよい壊れ方でなくなった"))
+                }
                 Err(_) => {}
             }
             remove_staging(inbox, &id, basis)

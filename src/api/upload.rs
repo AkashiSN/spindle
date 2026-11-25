@@ -1,4 +1,4 @@
-//! ブラウザからのアップロード（設計 docs/development/2026-11-25-upload-design.md §5.2・§5.5・§5.7）。
+//! ブラウザからのアップロード（SPEC §7.12、API は SPEC §9）。
 //!
 //! - `POST /api/uploads` 作る / `GET /api/uploads`・`GET /api/uploads/:id` 状態（先に照合と
 //!   `sync_with_disk` を走らせ、実体に合わせた結果をマニフェストに書く）
@@ -25,10 +25,10 @@ use serde::{Deserialize, Serialize};
 use crate::db::now_epoch;
 use crate::fsroot::RootDir;
 use crate::import::upload::{
-    begin_origin, build_view_cached, create_upload, ensure_staging, freeze, has_discard_mark,
-    list_uploads, mark_broken_discarded, origin_view, receive_chunk, reconcile_jobs,
-    sync_with_disk, with_manifest, FileClass, Listed, Manifest, OriginView, UploadError, UploadId,
-    UploadView,
+    begin_origin, build_view_cached, create_upload, ensure_staging, freeze_cached,
+    has_discard_mark, list_uploads, mark_broken_discarded, origin_view, receive_chunk,
+    reconcile_jobs, sync_with_disk, with_manifest, FileClass, Listed, Manifest, OriginView,
+    UploadError, UploadId, UploadView,
 };
 use crate::jobs::handlers::upload::{new_publish_job, new_unpack_job, upload_busy};
 use crate::jobs::EnqueueResult;
@@ -110,6 +110,7 @@ fn upload_error(e: UploadError) -> Response {
             "empty" => error_response(StatusCode::CONFLICT, "empty"),
             "not_frozen" => error_response(StatusCode::CONFLICT, "not_frozen"),
             "not_broken" => error_response(StatusCode::CONFLICT, "not_broken"),
+            "not_deletable" => error_response(StatusCode::CONFLICT, "not_deletable"),
             "not_retryable" => error_response(StatusCode::CONFLICT, "not_retryable"),
             _ => error_response_with_message(StatusCode::CONFLICT, "conflict", code),
         },
@@ -201,6 +202,9 @@ pub struct BrokenView {
     pub dir: String,
     pub mtime_ns: i64,
     pub reason: String,
+    /// 捨てられるか（マニフェストが無いか JSON として壊れている）。false は読み取りの I/O の失敗・
+    /// 新しい版などで、GC も消さない（管理者が確かめる）
+    pub deletable: bool,
 }
 
 #[derive(Serialize)]
@@ -254,6 +258,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, Fail> {
                                 dir: dir.as_str().to_string(),
                                 mtime_ns,
                                 reason: e.to_string(),
+                                // マニフェストは読める: 画面は DELETE /api/uploads/:id で捨てる
+                                deletable: true,
                             });
                         }
                     }
@@ -262,6 +268,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, Fail> {
                     dir,
                     mtime_ns,
                     reason,
+                    deletable,
                 } => {
                     // 捨てる印を付けたものは GC を待つだけなので出さない（確かめられなければ出す）
                     match has_discard_mark(&inbox, &dir) {
@@ -275,6 +282,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, Fail> {
                         dir: dir.as_str().to_string(),
                         mtime_ns,
                         reason,
+                        deletable,
                     });
                 }
             }
@@ -552,7 +560,17 @@ pub async fn publish(
     with_conn(&state, move |c| {
         ensure_staging(&inbox, &bid)?;
         // 凍結（既に凍結してあれば何もしない）。押し直しは止まった公開の失敗を消して投入し直す
-        freeze(&inbox, &up.locks, &bid, c, &layout, &up.cfg, now_epoch())?;
+        // 捨てた後に置き終えていない計画は 409 busy（止まった失敗も消さない）
+        freeze_cached(
+            &inbox,
+            &up.locks,
+            &bid,
+            c,
+            &layout,
+            &up.cfg,
+            now_epoch(),
+            &up.cache,
+        )?;
         with_manifest(&inbox, &up.locks, &bid, |m| {
             m.publish_error = None;
             Ok(())

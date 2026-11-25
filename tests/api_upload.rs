@@ -1,4 +1,4 @@
-//! アップロードの HTTP API（`/api/uploads`。設計 §4.2・§5.2・§5.5・§5.7）。
+//! アップロードの HTTP API（`/api/uploads`。SPEC §9、§7.12）。
 //! 一時ディレクトリの Inbox と本物のルータで、送信・分け方・公開・捨てるを通しで確かめる。
 //! jobs 行を直接 running にはしない（D-76）: 展開中は「queued のジョブがある」で作る
 
@@ -958,6 +958,7 @@ async fn broken_listed_and_marked() {
     assert_eq!(broken[0]["dir"], dir);
     assert!(broken[0]["mtime_ns"].as_i64().unwrap() > 0);
     assert!(!broken[0]["reason"].as_str().unwrap().is_empty());
+    assert_eq!(broken[0]["deletable"], true);
     assert_eq!(v["items"].as_array().unwrap().len(), 1);
 
     assert_eq!(
@@ -989,6 +990,33 @@ async fn broken_listed_and_marked() {
             .await,
         StatusCode::NOT_FOUND
     );
+
+    // 新しい版のマニフェストは一覧に出すが捨てられない（GC も消さない）
+    let future = ".spindle-upload-00000000000000cc";
+    let fdir = app.dir.path().join("Inbox").join(future);
+    std::fs::create_dir(&fdir).unwrap();
+    std::fs::write(
+        fdir.join("upload.json"),
+        br#"{"version":2,"id":"00000000000000cc"}"#,
+    )
+    .unwrap();
+    let (_, v) = app.get("/api/uploads").await;
+    let broken = v["broken"].as_array().unwrap();
+    assert_eq!(broken.len(), 1, "{v}");
+    assert_eq!(broken[0]["dir"], future);
+    assert_eq!(broken[0]["deletable"], false);
+    let (st, v) = app
+        .call(
+            Method::DELETE,
+            &format!("/api/uploads/broken/{future}"),
+            "same-origin",
+            None,
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(v["error"], "not_deletable");
+    assert!(!fdir.join(DISCARD_MARK).exists());
 }
 
 #[tokio::test]
@@ -1155,4 +1183,79 @@ async fn list_survives_one_bad_upload() {
     assert_eq!(broken[0]["dir"], App::uid(&bad).staging_dir().as_str());
     assert!(!broken[0]["reason"].as_str().unwrap().is_empty());
     assert!(broken[0]["mtime_ns"].as_i64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn publish_dead_end_on_file_in_dest_path_records_error_and_allows_delete() {
+    let app = App::new().await;
+    let id = app.create().await;
+    app.two_groups(&id).await;
+    // 置き場所の途中（Inbox/upload/<albumartist>）が通常ファイル: やり直しても変わらない
+    std::fs::create_dir_all(app.dir.path().join("Inbox/upload")).unwrap();
+    std::fs::write(app.dir.path().join("Inbox/upload/Artist"), b"not a dir").unwrap();
+    app.start_worker();
+    let (st, v) = app
+        .json(
+            Method::POST,
+            &format!("/api/uploads/{id}/publish"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let done = app.wait_terminal(v["job_id"].as_i64().unwrap()).await;
+    assert_eq!(done.state, JobState::Failed, "{:?}", done.note);
+    let err = app
+        .manifest(&id)
+        .publish_error
+        .expect("publish_error が残る");
+    assert!(!err.is_empty());
+    // 画面に理由が出て、照合は投入し直さない
+    let (st, view) = app.get(&format!("/api/uploads/{id}")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(view["publish_error"], err.as_str());
+    app.get("/api/uploads").await;
+    assert_eq!(app.upload_jobs().len(), 1);
+    // 捨てられる
+    assert_eq!(
+        app.delete(&format!("/api/uploads/{id}")).await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(app.manifest(&id).discarded_at.is_some());
+    // 捨てた後の押し直しは 409 busy（失敗を消さず、投入もしない）
+    let (st, v) = app
+        .json(
+            Method::POST,
+            &format!("/api/uploads/{id}/publish"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"], "busy");
+    assert_eq!(
+        app.manifest(&id).publish_error.as_deref(),
+        Some(err.as_str())
+    );
+    assert_eq!(app.upload_jobs().len(), 1);
+}
+
+/// 凍結（POST publish）も表示と同じ読み取りの覚えを使い、変わっていないファイルを読み直さない
+#[tokio::test]
+async fn publish_freeze_uses_read_cache() {
+    let app = App::new().await;
+    let id = app.create().await;
+    app.two_groups(&id).await;
+    let cache = &app.state.uploads.as_ref().unwrap().cache;
+    app.get(&format!("/api/uploads/{id}")).await;
+    let reads = cache.reads();
+    assert_eq!(reads, 3);
+    let (st, v) = app
+        .json(
+            Method::POST,
+            &format!("/api/uploads/{id}/publish"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(cache.reads(), reads, "凍結で読み直さない");
+    assert_eq!(app.manifest(&id).publish.unwrap().groups.len(), 2);
 }

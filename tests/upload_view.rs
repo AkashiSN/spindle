@@ -1,4 +1,4 @@
-//! アップロードの件の状態の判定と表示用の組み立て（`import::upload::view`。設計 §4.2・§5.4）。
+//! アップロードの件の状態の判定と表示用の組み立て（`import::upload::view`。SPEC §7.12「分け方（③）」）。
 //! 一時ディレクトリの Inbox に本物の送信（`begin_origin` + `receive_chunk`）でファイルを置き、
 //! DB は `:memory:` にマイグレーションを流して tracks / albums を直接入れる
 

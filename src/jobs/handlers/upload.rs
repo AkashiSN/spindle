@@ -1,4 +1,5 @@
-//! `upload` ジョブ（ブラウザからのアップロード。設計 §5.3 / §5.5 / §5.7）。並列 1。
+//! `upload` ジョブ（ブラウザからのアップロード。SPEC §7.12「zip の展開」「Inbox へ置く（公開）」
+//! 「照合とジョブ」）。並列 1。
 //! payload は `{ "upload_id", "op": "unpack", "origin", "retry" }` か `{ "upload_id", "op": "publish" }`。
 //!
 //! - unpack: zip の origin を新しい世代へ展開する（`import::upload::unpack`）。成功した zip の再実行は
@@ -16,7 +17,7 @@ use rusqlite::Connection;
 use crate::config::UploadConfig;
 use crate::db::jobs as dbjobs;
 use crate::db::now_epoch;
-use crate::fsroot::RootDir;
+use crate::fsroot::{FsError, RootDir};
 use crate::import::upload::{
     publish, unpack, with_manifest, PublishReport, PublishStep, UnpackOutcome, UploadError,
     UploadId, UploadLocks,
@@ -140,8 +141,23 @@ fn text<'a>(payload: &'a serde_json::Value, key: &str) -> Result<&'a str, JobErr
         .ok_or_else(|| JobError::Fatal(anyhow::anyhow!("payload に {key} が無い")))
 }
 
-/// アップロードの失敗をジョブの失敗へ。アップロードが無い・状態が合わないものは再試行しても変わらない
+/// パスの途中がディレクトリでない（ENOTDIR。Inbox の `upload/<albumartist>` が通常ファイルなど）。
+/// 人が Inbox を直すまでやり直しても変わらない
+fn not_a_directory(e: &UploadError) -> bool {
+    match e {
+        UploadError::Fs(FsError::Io(io)) | UploadError::Io(io) => {
+            io.kind() == std::io::ErrorKind::NotADirectory
+        }
+        _ => false,
+    }
+}
+
+/// アップロードの失敗をジョブの失敗へ。アップロードが無い・状態が合わない・パスの途中がディレクトリで
+/// ないものは再試行しても変わらない
 fn job_error(e: UploadError) -> JobError {
+    if not_a_directory(&e) {
+        return JobError::Fatal(anyhow::anyhow!("{e}"));
+    }
     match e {
         UploadError::NotFound
         | UploadError::OriginNotFound
@@ -151,14 +167,32 @@ fn job_error(e: UploadError) -> JobError {
     }
 }
 
-/// やり直しても変わらない公開の失敗（[`job_error`] が Fatal にするもの。アップロードが無いものを除く）を
-/// マニフェストの `publish_error` に残す。照合はこれがあると公開を投入し直さない（一覧の取得のたびに
-/// 失敗するジョブを作らない）。押し直し（`POST /api/uploads/:id/publish`）が消して投入し直す
-fn record_publish_error(inbox: &RootDir, locks: &UploadLocks, id: &UploadId, e: &UploadError) {
-    if !matches!(
-        e,
-        UploadError::OriginNotFound | UploadError::BadPath(_) | UploadError::Conflict(_)
-    ) {
+/// 公開の失敗を `publish_error` に残すか。やり直しても変わらない失敗（[`job_error`] が Fatal にするもの。
+/// アップロードが無いものを除く）と、最後の試行（`final_attempt`。これで `failed` になり、もう走らない）の
+/// 失敗は残す。残さないと照合は投入し直さず画面も捨てられないまま、行き止まりになる
+fn records_publish_error(e: &UploadError, final_attempt: bool) -> bool {
+    if matches!(e, UploadError::NotFound) {
+        return false;
+    }
+    final_attempt
+        || not_a_directory(e)
+        || matches!(
+            e,
+            UploadError::OriginNotFound | UploadError::BadPath(_) | UploadError::Conflict(_)
+        )
+}
+
+/// [`records_publish_error`] に当たる公開の失敗をマニフェストの `publish_error` に残す。照合はこれが
+/// あると公開を投入し直さない（一覧の取得のたびに失敗するジョブを作らない）。画面は理由を出し、
+/// ジョブが終われば捨てられる。押し直し（`POST /api/uploads/:id/publish`）が消して投入し直す
+fn record_publish_error(
+    inbox: &RootDir,
+    locks: &UploadLocks,
+    id: &UploadId,
+    e: &UploadError,
+    final_attempt: bool,
+) {
+    if !records_publish_error(e, final_attempt) {
         return;
     }
     let reason = e.to_string();
@@ -231,13 +265,15 @@ impl UploadHandler {
         let token = ctx.cancel_token();
         let cancel = token.clone();
         let pid = id.clone();
+        // この試行が失敗すると `failed` になる（worker は attempts + 1 >= max_attempts で打ち切る）
+        let final_attempt = ctx.job.attempts.saturating_add(1) >= ctx.job.max_attempts;
         // 既に走査を確保した後の再実行（照合との行き違い）は、走査を重ねて投入しない
         let (secured_before, report) = blocking(move || {
             let secured = with_manifest(&inbox, &locks, &pid, |m| Ok(m.inbox_enqueued_at))?;
             let report = match publish(&inbox, &locks, &pid, now_epoch(), &cancel, &*fault) {
                 Ok(r) => r,
                 Err(e) => {
-                    record_publish_error(&inbox, &locks, &pid, &e);
+                    record_publish_error(&inbox, &locks, &pid, &e, final_attempt);
                     return Err(e);
                 }
             };
@@ -312,5 +348,38 @@ impl Handler for UploadHandler {
             fault: Arc::clone(&self.fault),
         };
         Box::pin(async move { this.run_inner(&ctx).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn io(kind: std::io::ErrorKind) -> UploadError {
+        UploadError::Fs(FsError::Io(std::io::Error::from(kind)))
+    }
+
+    #[test]
+    fn publish_error_recorded_on_final_attempt_or_permanent_failure() {
+        // 一時的に見える I/O の失敗は、最後の試行のときだけ残す
+        let eio = io(std::io::ErrorKind::Other);
+        assert!(!records_publish_error(&eio, false));
+        assert!(records_publish_error(&eio, true));
+        assert!(matches!(job_error(eio), JobError::Failed(_)));
+        // パスの途中がファイル（ENOTDIR）はやり直しても変わらない
+        let enotdir = UploadError::Fs(FsError::Io(std::io::Error::from_raw_os_error(20)));
+        assert!(records_publish_error(&enotdir, false));
+        assert!(matches!(job_error(enotdir), JobError::Fatal(_)));
+        assert!(records_publish_error(
+            &io(std::io::ErrorKind::NotADirectory),
+            false
+        ));
+        // 状態が合わないものは従来どおり
+        assert!(records_publish_error(
+            &UploadError::Conflict("x".into()),
+            false
+        ));
+        // アップロードが無いものは残す先が無い
+        assert!(!records_publish_error(&UploadError::NotFound, true));
     }
 }
