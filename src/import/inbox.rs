@@ -1450,42 +1450,64 @@ struct SelfCandidate {
     keys: HashSet<String>,
 }
 
+/// 同じ音声（フィンガープリント一致）の active なライブラリの行 1 つ（album の無い行は含めない）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AudioMatch {
+    pub rel_path: String,
+    pub rel_path_key: String,
+    pub album_id: i64,
+    pub mb_release_id: Option<String>,
+}
+
+/// フィンガープリントが一致する active な行を引く（`audio_md5` / `audio_fp`。計算できていない
+/// フィンガープリントは何にも一致しない）。Inbox の再実行の判定とアップロードの重複表示で共有する
+pub(crate) fn library_rows_with_audio(
+    conn: &rusqlite::Connection,
+    fp: &Fingerprint,
+) -> Result<Vec<AudioMatch>, DbError> {
+    let (md5, afp): (Option<Vec<u8>>, Option<Vec<u8>>) = match fp {
+        Fingerprint::Md5(Some(m)) => (Some(m.to_vec()), None),
+        Fingerprint::Fp(Some(f)) => (None, Some(f.to_vec())),
+        _ => return Ok(Vec::new()),
+    };
+    let mut st = conn.prepare_cached(
+        "SELECT t.rel_path, t.rel_path_key, t.album_id, a.mb_release_id
+           FROM tracks t JOIN albums a ON a.id = t.album_id
+          WHERE t.missing_since IS NULL AND ((?1 IS NOT NULL AND t.audio_md5 = ?1)
+                                           OR (?2 IS NOT NULL AND t.audio_fp = ?2))",
+    )?;
+    let rows = st
+        .query_map(rusqlite::params![md5, afp], |r| {
+            Ok(AudioMatch {
+                rel_path: r.get(0)?,
+                rel_path_key: r.get(1)?,
+                album_id: r.get(2)?,
+                mb_release_id: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// 同じ音声（フィンガープリント一致）の active な行を album ごとに集める（album の無い行は数えない）
 fn self_candidates(
     conn: &rusqlite::Connection,
     sources: &[Source],
 ) -> Result<Vec<SelfCandidate>, InboxError> {
     let mut out: Vec<SelfCandidate> = Vec::new();
-    let mut st = conn.prepare_cached(
-        "SELECT t.rel_path_key, t.album_id, a.mb_release_id
-           FROM tracks t JOIN albums a ON a.id = t.album_id
-          WHERE t.missing_since IS NULL AND ((?1 IS NOT NULL AND t.audio_md5 = ?1)
-                                           OR (?2 IS NOT NULL AND t.audio_fp = ?2))",
-    )?;
     for src in sources {
-        let (md5, afp): (Option<Vec<u8>>, Option<Vec<u8>>) = match src.fp {
-            Fingerprint::Md5(Some(m)) => (Some(m.to_vec()), None),
-            Fingerprint::Fp(Some(f)) => (None, Some(f.to_vec())),
-            _ => continue,
-        };
-        let rows = st
-            .query_map(rusqlite::params![md5, afp], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (key, album_id, mb) in rows {
-            match out.iter_mut().find(|c| c.album_id == album_id) {
+        for row in library_rows_with_audio(conn, &src.fp)? {
+            match out.iter_mut().find(|c| c.album_id == row.album_id) {
                 Some(c) => {
-                    c.keys.insert(key);
+                    c.keys.insert(row.rel_path_key);
                 }
                 None => out.push(SelfCandidate {
-                    album_id,
-                    release: crate::import::placement::release_key(album_id, mb.as_deref()),
-                    keys: HashSet::from([key]),
+                    album_id: row.album_id,
+                    release: crate::import::placement::release_key(
+                        row.album_id,
+                        row.mb_release_id.as_deref(),
+                    ),
+                    keys: HashSet::from([row.rel_path_key]),
                 }),
             }
         }

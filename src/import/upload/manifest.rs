@@ -59,6 +59,10 @@ pub enum UploadError {
     Json(#[from] serde_json::Error),
     #[error("I/O エラー: {0}")]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Db(#[from] crate::db::DbError),
+    #[error(transparent)]
+    Inbox(#[from] Box<crate::import::inbox::InboxError>),
 }
 
 impl From<RelPathError> for UploadError {
@@ -180,16 +184,16 @@ pub struct Manifest {
     /// ③ でまとめた件のキーの組
     #[serde(default)]
     pub merges: Vec<Vec<String>>,
-    /// ③ で外したファイル
+    /// ③ で外したファイル（キーは `Member::staged` = ステージング内の相対パス）
     #[serde(default)]
     pub excluded_files: Vec<String>,
-    /// ③ で外した件
+    /// ③ で外した件（キーは `Group::key`）
     #[serde(default)]
     pub excluded_groups: Vec<String>,
-    /// 初期で外れるものを入れ直したファイル
+    /// 初期で外れるものを入れ直したファイル（キーは `Member::staged`）
     #[serde(default)]
     pub included_files: Vec<String>,
-    /// 初期で外れるものを入れ直した件
+    /// 初期で外れるものを入れ直した件（キーは `Group::key`）
     #[serde(default)]
     pub included_groups: Vec<String>,
     /// 凍結した公開計画（§5.5）
