@@ -4,11 +4,13 @@
 //! その中のマニフェスト `upload.json`（[`manifest`]）。DB に表は作らない（不変条件 1）。
 
 pub mod budget;
+pub mod group;
 pub mod manifest;
 pub mod receive;
 pub mod unpack;
 
 pub use budget::*;
+pub use group::*;
 pub use manifest::*;
 pub use receive::*;
 pub use unpack::*;
