@@ -10,9 +10,7 @@ import {
   ACCEPT_EXTS,
   canDiscard,
   canPublish,
-  fileTogglePatch,
   groupLabel,
-  groupTogglePatch,
   originState,
   publishedDirs,
   publishing,
@@ -21,6 +19,9 @@ import {
   resumeCandidates,
   statusLabel,
   statusTone,
+  toggleFileIn,
+  toggleGroupIn,
+  unpackPending,
   type Tone,
 } from '../lib/upload'
 import { Step } from './Step'
@@ -71,14 +72,18 @@ export function UploadView({
         done={view != null && view.origins.length > 0}
         hint="選んだ（ドロップした）時点で送り始める。送信中や ③ を見ている間も足せる（同じアップロードに足して ③ を取り直す）"
       >
-        <DropZone upload={upload} disabled={frozen && !allPlaced && view?.publish_error == null} />
+        <DropZone
+          upload={upload}
+          disabled={frozen && !allPlaced}
+          why={view?.publish_error != null ? '置き直すか捨ててから送る' : 'Inbox へ置いている間は足せない'}
+        />
       </Step>
 
       <Step
         no={2}
         title="送信"
         wait={view == null || view.origins.length === 0}
-        done={view != null && view.origins.length > 0 && !upload.sending && canPublish(view, false).reason !== 'zip を展開中'}
+        done={view != null && view.origins.length > 0 && !upload.sending && !unpackPending(view)}
         aside={upload.sending ? '送信中' : undefined}
       >
         <SendTable upload={upload} frozen={frozen} />
@@ -175,7 +180,7 @@ function ResumeBanners({ upload }: { upload: UploadState }) {
   )
 }
 
-function DropZone({ upload, disabled }: { upload: UploadState; disabled: boolean }) {
+function DropZone({ upload, disabled, why }: { upload: UploadState; disabled: boolean; why: string }) {
   const [over, setOver] = useState(false)
   const files = useRef<HTMLInputElement>(null)
   const folder = useRef<HTMLInputElement>(null)
@@ -213,7 +218,7 @@ function DropZone({ upload, disabled }: { upload: UploadState; disabled: boolean
         </button>
       </p>
       <p className="muted small">FLAC / WAV / ALAC / AIFF / MP3 / AAC(m4a) / Opus、zip（中のフォルダもそのまま）</p>
-      {disabled && <p className="muted small">Inbox へ置いている間は足せない</p>}
+      {disabled && <p className="muted small">{why}</p>}
       <input ref={files} type="file" multiple accept={ACCEPT} hidden onChange={(e) => pick(e.currentTarget)} />
       <input ref={folder} type="file" multiple hidden onChange={(e) => pick(e.currentTarget)} />
     </div>
@@ -365,7 +370,7 @@ function GroupTable({ v, upload }: { v: View; upload: UploadState }) {
                     checked={g.included}
                     disabled={locked || !g.selectable}
                     title={g.selectable ? undefined : '曲が 1 曲もチェックされていない'}
-                    onChange={() => void upload.patch(groupTogglePatch(v.choices, g))}
+                    onChange={() => void upload.patch((cur) => toggleGroupIn(cur, g.key))}
                   />
                 </td>
                 <td>
@@ -380,7 +385,7 @@ function GroupTable({ v, upload }: { v: View; upload: UploadState }) {
                   <Pill tone={statusTone(g.status)}>{statusLabel(g.status)}</Pill>
                 </td>
               </tr>
-              {open.has(g.key) && <GroupDetail g={g} v={v} upload={upload} locked={locked} />}
+              {open.has(g.key) && <GroupDetail g={g} upload={upload} locked={locked} />}
             </Fragment>
           ))}
           {v.unassigned_companions.length > 0 && (
@@ -414,13 +419,11 @@ function GroupTable({ v, upload }: { v: View; upload: UploadState }) {
 function MemberLine({
   m,
   isTrack,
-  v,
   upload,
   locked,
 }: {
   m: UploadMemberView
   isTrack: boolean
-  v: View
   upload: UploadState
   locked: boolean
 }) {
@@ -432,7 +435,7 @@ function MemberLine({
           type="checkbox"
           checked={m.included}
           disabled={locked}
-          onChange={() => void upload.patch(fileTogglePatch(v.choices, m, isTrack))}
+          onChange={() => void upload.patch((cur) => toggleFileIn(cur, m.staged))}
         />{' '}
         {isTrack ? '' : '同梱: '}
         {m.renamed ? `${name} → ${m.publish_name}` : name}
@@ -442,7 +445,7 @@ function MemberLine({
   )
 }
 
-function GroupDetail({ g, v, upload, locked }: { g: UploadGroupView; v: View; upload: UploadState; locked: boolean }) {
+function GroupDetail({ g, upload, locked }: { g: UploadGroupView; upload: UploadState; locked: boolean }) {
   const more = g.statuses.slice(1)
   return (
     <tr className="upload-files">
@@ -459,10 +462,10 @@ function GroupDetail({ g, v, upload, locked }: { g: UploadGroupView; v: View; up
         )}
         <ul className="upload-members">
           {g.tracks.map((m) => (
-            <MemberLine key={m.staged} m={m} isTrack v={v} upload={upload} locked={locked} />
+            <MemberLine key={m.staged} m={m} isTrack upload={upload} locked={locked} />
           ))}
           {g.companions.map((m) => (
-            <MemberLine key={m.staged} m={m} isTrack={false} v={v} upload={upload} locked={locked} />
+            <MemberLine key={m.staged} m={m} isTrack={false} upload={upload} locked={locked} />
           ))}
         </ul>
       </td>

@@ -198,7 +198,7 @@ export function publishing(v: UploadView): boolean {
 
 /** 送ったものが動いている途中か（展開・公開。画面はこの間 2 秒ごとに取り直す） */
 export function inProgress(v: UploadView): boolean {
-  return v.busy || publishing(v) || v.origins.filter(live).some(zipPending)
+  return v.busy || publishing(v) || unpackPending(v)
 }
 
 /** 前回の続きに出すもの（新しい順。送ったものが何も無いものは出さない） */
@@ -239,4 +239,50 @@ export function uploadErrorMessage(status: number, body: unknown): string {
   if (b.error === 'limit') return `上限を超える: ${b.message ?? ''}`
   if (status === 413) return '1 回に送れる大きさを超えた（HTTP 413）'
   return operationErrorMessage(status, body)
+}
+
+/** ② の zip に展開待ち・展開中のものがある */
+export function unpackPending(v: UploadView): boolean {
+  return v.origins.filter(live).some(zipPending)
+}
+
+/** 前の仕事が終わってから次を走らせる（失敗しても次へ進む）。③ の PATCH は項目を置き換えるので、
+ *  本文は前の応答を反映した後に作る必要がある */
+export function serialQueue(): <T>(task: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve()
+  return <T>(task: () => Promise<T>) => {
+    const run = tail.then(task, task)
+    tail = run.catch(() => undefined)
+    return run
+  }
+}
+
+/** いまの表示で、ファイル `staged` のチェックを切り替える本文（見つからなければ null） */
+export function toggleFileIn(v: UploadView, staged: string): UploadPatch | null {
+  for (const g of v.groups) {
+    const t = g.tracks.find((m) => m.staged === staged)
+    if (t != null) return fileTogglePatch(v.choices, t, true)
+    const c = g.companions.find((m) => m.staged === staged)
+    if (c != null) return fileTogglePatch(v.choices, c, false)
+  }
+  return null
+}
+
+/** いまの表示で、件 `key` のチェックを切り替える本文（見つからない・チェックできなければ null） */
+export function toggleGroupIn(v: UploadView, key: string): UploadPatch | null {
+  const g = v.groups.find((x) => x.key === key)
+  if (g == null || !g.selectable) return null
+  return groupTogglePatch(v.choices, g)
+}
+
+/** 受け取り終えた（外していない・壊れていない）同じパスの origin */
+export function completedOrigin(v: UploadView | null, path: string): UploadOriginView | null {
+  return v?.origins.find((o) => live(o) && o.complete && o.client_path === path) ?? null
+}
+
+/** 同じタブで送った（送っている）ファイルを、同じパスで足し直せるか: その origin を外した・壊れた */
+export function canResend(send: { originId: string | null }, v: UploadView | null): boolean {
+  if (send.originId == null || v == null) return false
+  const o = v.origins.find((x) => x.id === send.originId)
+  return o != null && (o.removed || o.damaged)
 }

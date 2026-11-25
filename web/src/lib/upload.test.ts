@@ -5,6 +5,8 @@ import {
   CHUNK_BYTES,
   canDiscard,
   canPublish,
+  canResend,
+  completedOrigin,
   chunkRanges,
   clientPath,
   fileTogglePatch,
@@ -16,11 +18,16 @@ import {
   publishLabel,
   resumeBanner,
   resumeCandidates,
+  serialQueue,
   shouldSend,
   statusLabel,
   statusTone,
+  toggleFileIn,
+  toggleGroupIn,
+  unpackPending,
   uploadErrorMessage,
 } from './upload'
+import type { UploadPatch } from '../api/types'
 
 const MiB = 1024 * 1024
 
@@ -354,5 +361,94 @@ describe('uploadErrorMessage', () => {
     expect(uploadErrorMessage(413, { error: 'limit', message: '1 ファイルの上限' })).toBe('上限を超える: 1 ファイルの上限')
     expect(uploadErrorMessage(413, null)).toBe('1 回に送れる大きさを超えた（HTTP 413）')
     expect(uploadErrorMessage(500, { error: 'x', message: 'y' })).toBe('y')
+  })
+})
+
+describe('serialQueue + toggleFileIn / toggleGroupIn', () => {
+  // サーバの PATCH の模擬: 与えた項目を置き換え、included をマニフェストから決め直す
+  function server(v: UploadView, body: UploadPatch): UploadView {
+    const choices = { ...v.choices, ...body }
+    const groups = v.groups.map((g) => ({
+      ...g,
+      included: !choices.excluded_groups.includes(g.key),
+      tracks: g.tracks.map((t) => ({
+        ...t,
+        included: !choices.excluded_files.includes(t.staged) && (t.library_match == null || choices.included_files.includes(t.staged)),
+      })),
+    }))
+    return { ...v, choices, groups }
+  }
+
+  it('続けて押した 2 つの切り替えが両方残る（本文は前の応答の後の表示から作る）', async () => {
+    let current = view({
+      groups: [group({ key: 'g', tracks: [member({ staged: 'f1' }), member({ staged: 'f2' })], track_count: 2 })],
+    })
+    const run = serialQueue()
+    const patch = (build: (v: UploadView) => UploadPatch | null) =>
+      run(async () => {
+        const body = build(current)
+        if (body == null) return
+        await new Promise((r) => setTimeout(r, 5))
+        current = server(current, body)
+      })
+    await Promise.all([patch((v) => toggleFileIn(v, 'f1')), patch((v) => toggleFileIn(v, 'f2')), patch((v) => toggleGroupIn(v, 'g'))])
+    expect(current.choices.excluded_files).toEqual(['f1', 'f2'])
+    expect(current.choices.excluded_groups).toEqual(['g'])
+  })
+
+  it('同じファイルを 2 度押すと元に戻る', async () => {
+    let current = view({ groups: [group({ tracks: [member({ staged: 'f1' })] })] })
+    const run = serialQueue()
+    const toggle = () =>
+      run(async () => {
+        const body = toggleFileIn(current, 'f1')
+        if (body != null) current = server(current, body)
+      })
+    await Promise.all([toggle(), toggle()])
+    expect(current.choices.excluded_files).toEqual([])
+    expect(current.groups[0]?.tracks[0]?.included).toBe(true)
+  })
+
+  it('失敗した仕事の後も次を走らせる', async () => {
+    const run = serialQueue()
+    const order: number[] = []
+    const a = run(async () => {
+      order.push(1)
+      throw new Error('x')
+    })
+    const b = run(async () => {
+      order.push(2)
+    })
+    await expect(a).rejects.toThrow('x')
+    await b
+    expect(order).toEqual([1, 2])
+  })
+
+  it('見つからない・チェックできない件は null', () => {
+    const v = view({ groups: [group({ key: 'g', selectable: false })] })
+    expect(toggleFileIn(v, 'nope')).toBeNull()
+    expect(toggleGroupIn(v, 'g')).toBeNull()
+    expect(toggleGroupIn(v, 'nope')).toBeNull()
+  })
+})
+
+describe('canResend / completedOrigin / unpackPending', () => {
+  it('外した・壊れた origin のファイルは足し直せる', () => {
+    const v = view({ origins: [origin({ id: 'o1', removed: true }), origin({ id: 'o2', damaged: true }), origin({ id: 'o3' })] })
+    expect(canResend({ originId: 'o1' }, v)).toBe(true)
+    expect(canResend({ originId: 'o2' }, v)).toBe(true)
+    expect(canResend({ originId: 'o3' }, v)).toBe(false)
+    expect(canResend({ originId: null }, v)).toBe(false)
+  })
+  it('受け取り終えた同じパスの origin', () => {
+    const v = view({ origins: [origin({ id: 'o1', client_path: 'a.flac', removed: true }), origin({ id: 'o2', client_path: 'a.flac' })] })
+    expect(completedOrigin(v, 'a.flac')?.id).toBe('o2')
+    expect(completedOrigin(v, 'b.flac')).toBeNull()
+    expect(completedOrigin(view({ origins: [origin({ client_path: 'a.flac', complete: false })] }), 'a.flac')).toBeNull()
+  })
+  it('展開待ち・展開中の zip', () => {
+    const z = origin({ class: 'zip', zip: { generation: 0, unpacking: true, rejected: [], error: null } })
+    expect(unpackPending(view({ origins: [z] }))).toBe(true)
+    expect(unpackPending(view({ origins: [{ ...z, zip: { generation: 1, unpacking: false, rejected: [], error: null } }] }))).toBe(false)
   })
 })

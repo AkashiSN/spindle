@@ -7,11 +7,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch, parseErrorBody } from '../api/client'
 import type { UploadList, UploadOriginView, UploadPatch, UploadView } from '../api/types'
 import {
+  canResend,
   chunkRanges,
   clientPath,
+  completedOrigin,
   inProgress,
   mergeSelected,
   PARALLEL_SENDS,
+  serialQueue,
   shouldSend,
   uploadErrorMessage,
 } from '../lib/upload'
@@ -51,7 +54,8 @@ export interface UploadState {
   /** 開いているものを閉じて、新しく送れるようにする */
   startNew: () => void
   refresh: () => void
-  patch: (body: UploadPatch) => Promise<void>
+  /** ③ の変更。本文は前の変更の応答を反映した後の表示から作る（PATCH は項目を置き換えるので直列にする） */
+  patch: (build: (v: UploadView) => UploadPatch | null) => Promise<void>
   merge: (keys: string[]) => Promise<void>
   publish: () => Promise<void>
   discard: (id?: string) => Promise<boolean>
@@ -68,12 +72,13 @@ type Fail = { status: number; body: unknown }
 const request = (path: string, init: RequestInit) => parseErrorBody<unknown>(path, init)
 
 /** 1 チャンクの PUT（生の本文） */
-async function putChunk(path: string, blob: Blob): Promise<{ ok: true; body: { received: number; complete: boolean } } | ({ ok: false } & Fail)> {
+async function putChunk(path: string, blob: Blob, signal: AbortSignal): Promise<{ ok: true; body: { received: number; complete: boolean } } | ({ ok: false } & Fail)> {
   const res = await fetch(path, {
     method: 'PUT',
     credentials: 'same-origin',
     headers: { Accept: 'application/json', 'Content-Type': 'application/octet-stream' },
     body: blob,
+    signal,
   })
   let body: unknown = null
   try {
@@ -118,6 +123,10 @@ async function walkEntry(e: FileSystemEntry, out: Array<{ file: File; path?: str
   }
 }
 
+/** 失敗の本文のコード */
+const r409 = (r: { status: number; body: unknown }) =>
+  r.status === 409 ? ((r.body as { error?: string } | null)?.error ?? null) : null
+
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 /** `enabled` はアップロード画面を表示中か（表示中だけ一覧を取り、周期で取り直す） */
@@ -133,6 +142,15 @@ export function useUpload(enabled: boolean): UploadState {
   // 開いているアップロードの id（送信の処理は ref を、描画は state を読む）
   const idRef = useRef<string | null>(null)
   const [currentId, setCurrentId] = useState<string | null>(null)
+  // 送信は画面を閉じても（hook が消えても）走り続けないよう、外れたら止める
+  const abortRef = useRef<AbortController>(new AbortController())
+  useEffect(() => {
+    const c = new AbortController()
+    abortRef.current = c
+    return () => c.abort()
+  }, [])
+  // ③ の変更を 1 つずつ送る
+  const patchQueue = useRef(serialQueue())
   const setId = useCallback((id: string | null) => {
     idRef.current = id
     setCurrentId(id)
@@ -155,8 +173,12 @@ export function useUpload(enabled: boolean): UploadState {
   const fetchView = useCallback(async () => {
     const id = idRef.current
     if (id == null) return
-    const r = await request(`/api/uploads/${id}`, { method: 'GET' })
-    if (idRef.current !== id) return
+    // 周期・送信の後から投げっぱなしで呼ぶので、通信の失敗もここで文言にする
+    const r = await request(`/api/uploads/${id}`, { method: 'GET' }).catch((e: unknown) => {
+      setError(errText(e))
+      return null
+    })
+    if (r == null || idRef.current !== id) return
     if (r.ok) {
       setCurrent(r.body as UploadView)
     } else if (r.status === 404) {
@@ -218,11 +240,22 @@ export function useUpload(enabled: boolean): UploadState {
   const sendOne = useCallback(
     async (s: SendItem, id: string) => {
       update(s.n, { state: 'sending', sent: 0, error: null })
+      const signal = abortRef.current.signal
       const b = await request(`/api/uploads/${id}/origins`, {
         method: 'POST',
         body: JSON.stringify({ path: s.path, total: s.total }),
+        signal,
       })
       if (!b.ok) {
+        if (r409(b) === 'exists') {
+          // 最後のチャンクの応答を取りこぼして「再送」した: サーバに受け取り終えたものがあれば済み
+          await fetchView()
+          const done = completedOrigin(viewRef.current, s.path)
+          if (done != null) {
+            update(s.n, { state: 'done', sent: s.total, originId: done.id })
+            return
+          }
+        }
         update(s.n, { state: 'error', error: uploadErrorMessage(b.status, b.body) })
         return
       }
@@ -235,7 +268,7 @@ export function useUpload(enabled: boolean): UploadState {
         const [rs, re] = chunkRanges(s.total - offset)[0] ?? [0, 0]
         const start = offset + rs
         const end = offset + re
-        const r = await putChunk(`/api/uploads/${id}/origins/${origin.id}?offset=${start}`, s.file.slice(start, end))
+        const r = await putChunk(`/api/uploads/${id}/origins/${origin.id}?offset=${start}`, s.file.slice(start, end), signal)
         const before = offset
         if (r.ok) {
           if (r.body.complete) {
@@ -261,7 +294,7 @@ export function useUpload(enabled: boolean): UploadState {
         update(s.n, { sent: offset })
       }
     },
-    [update],
+    [update, fetchView],
   )
 
   /** キューから同時 2 つまで送る（送り終えるたびに次を取る。自分を呼ぶので ref 経由） */
@@ -318,9 +351,9 @@ export function useUpload(enabled: boolean): UploadState {
         for (const { file, path } of picked) {
           // 同じパスを送っている・送り終えたものは足さない（失敗したものは送り直す）
           const same = sendsRef.current.find((s) => s.path === path)
-          if (same != null && same.state !== 'error') continue
+          if (same != null && same.state !== 'error' && !canResend(same, viewRef.current)) continue
           if (same != null) {
-            Object.assign(same, { file, total: file.size, sent: 0, state: 'queued', error: null })
+            Object.assign(same, { file, total: file.size, sent: 0, originId: null, state: 'queued', error: null })
             continue
           }
           sendsRef.current.push({
@@ -415,19 +448,21 @@ export function useUpload(enabled: boolean): UploadState {
   )
 
   const patch = useCallback(
-    async (body: UploadPatch) => {
-      const id = idRef.current
-      if (id == null) return
-      await mutate(`/api/uploads/${id}`, { method: 'PATCH', body: JSON.stringify(body) }, true)
-    },
+    (build: (v: UploadView) => UploadPatch | null) =>
+      patchQueue.current(async () => {
+        const id = idRef.current
+        const v = viewRef.current
+        if (id == null || v == null || v.id !== id) return
+        const body = build(v)
+        if (body == null) return
+        await mutate(`/api/uploads/${id}`, { method: 'PATCH', body: JSON.stringify(body) }, true)
+      }),
     [mutate],
   )
 
   const merge = useCallback(
     async (keys: string[]) => {
-      const v = viewRef.current
-      if (v == null) return
-      await patch({ merges: mergeSelected(v, keys) })
+      await patch((v) => ({ merges: mergeSelected(v, keys) }))
     },
     [patch],
   )
@@ -482,7 +517,7 @@ export function useUpload(enabled: boolean): UploadState {
 
   const removeOrigin = useCallback(
     async (originId: string) => {
-      await patch({ removed_origins: [originId] })
+      await patch(() => ({ removed_origins: [originId] }))
     },
     [patch],
   )
