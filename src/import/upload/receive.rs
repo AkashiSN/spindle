@@ -176,7 +176,11 @@ pub fn begin_origin(
     })
 }
 
-/// チャンク 1 つを受け取る
+/// チャンク 1 つを受け取る。
+///
+/// `offset == total` の空の PUT は「受け取り終えた」ことの確かめとして受ける: 追記の後・rename の前に
+/// 落ちて `.part` が `total` に達したままの origin は先頭の [`sync_with_disk`] が正式な名前へ進めるので、
+/// 空の PUT はそのまま `complete: true` を返す（完了済みへの中身のある PUT は `Conflict`）
 #[allow(clippy::too_many_arguments)]
 pub fn receive_chunk(
     inbox: &RootDir,
@@ -197,6 +201,12 @@ pub fn receive_chunk(
             .find(|o| o.id == origin)
             .ok_or(UploadError::NotFound)?;
         if o.complete {
+            if bytes.is_empty() && offset == o.total {
+                return Ok(ChunkResult {
+                    received: o.total,
+                    complete: true,
+                });
+            }
             return Err(UploadError::Conflict("受け取り済み".into()));
         }
         if o.damaged {
@@ -235,16 +245,7 @@ pub fn receive_chunk(
         o.received = size;
 
         if size == o.total {
-            let dest = id.staged(&final_path(o)?)?;
-            inbox.rename_noreplace(&part, &dest)?;
-            fsync_parent(inbox, &dest)?;
-            if part.parent() != dest.parent() {
-                fsync_parent(inbox, &part)?;
-            }
-            if fault(ChunkStep::AfterRename) {
-                return Err(fault_error());
-            }
-            o.complete = true;
+            complete_part(inbox, id, o, fault)?;
         }
         let out = ChunkResult {
             received: size,
@@ -253,6 +254,30 @@ pub fn receive_chunk(
         m.updated_at = now;
         Ok(out)
     })
+}
+
+/// `total` に達した `.part` を fsync して正式な名前へ `RENAME_NOREPLACE` し、完了にする
+/// （[`receive_chunk`] の最後のチャンクと、追記の後・rename の前に落ちたときの [`sync_with_disk`] が共有する）
+fn complete_part(
+    inbox: &RootDir,
+    id: &UploadId,
+    o: &mut Origin,
+    fault: &dyn Fn(ChunkStep) -> bool,
+) -> Result<(), UploadError> {
+    let part = id.staged(&o.part_path()?)?;
+    let dest = id.staged(&final_path(o)?)?;
+    inbox.open_file(&part)?.sync_all()?;
+    inbox.rename_noreplace(&part, &dest)?;
+    fsync_parent(inbox, &dest)?;
+    if part.parent() != dest.parent() {
+        fsync_parent(inbox, &part)?;
+    }
+    if fault(ChunkStep::AfterRename) {
+        return Err(fault_error());
+    }
+    o.received = o.total;
+    o.complete = true;
+    Ok(())
 }
 
 /// 実体の有無と大きさ
@@ -274,7 +299,7 @@ fn probe(inbox: &RootDir, rel: &RelPath) -> Result<Present, UploadError> {
 
 /// 未完の origin を実体に合わせる（呼び出し側が鍵を持つ）。変えたら true。
 ///
-/// `.part` だけがあれば `received` をその大きさに、`.part` が無く正式な名前の大きさが `total` なら
+/// `.part` だけがあり `total` に達していれば正式な名前へ進めて完了に、足りなければ `received` をその大きさに、`.part` が無く正式な名前の大きさが `total` なら
 /// 完了に進める（rename の後・マニフェストを書く前に落ちた場合）。それ以外の食い違いは `damaged`
 /// にする（実体はどちらも残し、GC がステージングごと消す）
 pub fn sync_with_disk(inbox: &RootDir, m: &mut Manifest) -> Result<bool, UploadError> {
@@ -288,7 +313,12 @@ pub fn sync_with_disk(inbox: &RootDir, m: &mut Manifest) -> Result<bool, UploadE
         let part = probe(inbox, &id.staged(&o.part_path()?)?)?;
         let done = probe(inbox, &id.staged(&final_path(o)?)?)?;
         match (part, done) {
-            (Present::File(size), Present::Missing) if size <= o.total => {
+            // 追記の後・rename の前に落ちた: サーバが完了まで進める（クライアントには送るものが無い）
+            (Present::File(size), Present::Missing) if size == o.total => {
+                complete_part(inbox, &id, o, &|_| false)?;
+                changed = true;
+            }
+            (Present::File(size), Present::Missing) if size < o.total => {
                 if o.received != size {
                     o.received = size;
                     changed = true;
@@ -477,8 +507,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_paths() {
-        let long = "a".repeat(256);
-        let long_path = format!("Album/{long}.flac");
+        let long_path = format!("Album/{}", "a".repeat(256));
         for bad in [
             "../a.flac",
             "/a.flac",
@@ -744,6 +773,65 @@ mod tests {
         }
         assert!(env.put("o1", 4, b"ef").unwrap().complete);
         assert_eq!(std::fs::read(env.path("files/o1")).unwrap(), b"abcdef");
+    }
+
+    #[test]
+    fn crash_after_final_append_completes_on_sync() {
+        let env = Env::new();
+        env.begin("m.zip", 4, &cfg()).unwrap();
+        env.put("o1", 0, b"PK").unwrap();
+        let r = receive_chunk(&env.inbox, &env.locks, &env.id, "o1", 2, b"..", 20, &|s| {
+            s == ChunkStep::AfterAppend
+        });
+        assert!(matches!(r, Err(UploadError::Io(_))));
+        let o = env.origin("o1");
+        assert!(!o.complete);
+        assert_eq!(
+            std::fs::metadata(env.path("files/o1.part")).unwrap().len(),
+            4
+        );
+        assert!(env.sync());
+        let o = env.origin("o1");
+        assert!(o.complete);
+        assert!(!o.damaged);
+        assert_eq!(o.received, 4);
+        assert_eq!(std::fs::read(env.path("zips/o1.zip")).unwrap(), b"PK..");
+        assert!(!env.path("files/o1.part").exists());
+        assert!(!env.sync(), "2 回目は何も変えない");
+    }
+
+    #[test]
+    fn empty_put_at_total_completes() {
+        let env = Env::new();
+        env.begin("a.flac", 4, &cfg()).unwrap();
+        env.put("o1", 0, b"ab").unwrap();
+        // 最後のチャンクの追記の後・rename の前に落ちた
+        let r = receive_chunk(&env.inbox, &env.locks, &env.id, "o1", 2, b"cd", 20, &|s| {
+            s == ChunkStep::AfterAppend
+        });
+        assert!(r.is_err());
+        // 再開したクライアントは received == total を見て空の PUT で確かめる
+        let r = env.put("o1", 4, b"").unwrap();
+        assert_eq!(
+            r,
+            ChunkResult {
+                received: 4,
+                complete: true
+            }
+        );
+        assert_eq!(std::fs::read(env.path("files/o1")).unwrap(), b"abcd");
+        assert!(!env.path("files/o1.part").exists());
+        // 2 度目の空の PUT も同じ答え、中身のある PUT は Conflict
+        assert!(env.put("o1", 4, b"").unwrap().complete);
+        assert!(matches!(
+            env.put("o1", 2, b"cd"),
+            Err(UploadError::Conflict(_))
+        ));
+
+        // 0 バイトのファイルは offset 0 の空の PUT で完了する
+        env.begin("empty.pdf", 0, &cfg()).unwrap();
+        assert!(env.put("o2", 0, b"").unwrap().complete);
+        assert_eq!(std::fs::metadata(env.path("files/o2")).unwrap().len(), 0);
     }
 
     #[test]
