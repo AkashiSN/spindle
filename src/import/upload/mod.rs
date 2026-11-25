@@ -6,7 +6,9 @@
 pub mod budget;
 pub mod manifest;
 pub mod receive;
+pub mod unpack;
 
 pub use budget::*;
 pub use manifest::*;
 pub use receive::*;
+pub use unpack::*;
