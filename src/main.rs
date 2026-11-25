@@ -356,6 +356,11 @@ async fn main() -> anyhow::Result<()> {
         derived: Arc::clone(&derived_root),
         artwork: Arc::clone(&artwork),
         inbox: Some(Arc::clone(&inbox_root)),
+        // main が作った 1 つの鍵の表の clone（API・upload ジョブと同じ表）
+        uploads: Some(spindle::gc::GcUploads {
+            locks: upload_locks.clone(),
+            cfg: state.config.upload.clone(),
+        }),
     });
     state = state.with_gc(Arc::clone(&gc_roots));
     // MusicBrainz の照会（P2-3）。UA 必須・1 req/s

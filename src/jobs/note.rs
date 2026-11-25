@@ -24,14 +24,14 @@ pub fn human_bytes(n: u64) -> String {
 
 pub fn gc_note(s: &Summary, jobs: (usize, usize), plans: usize) -> String {
     let total = s.total_deleted();
-    if total == 0 && jobs == (0, 0) && plans == 0 {
+    if total == 0 && s.uploads.marked == 0 && jobs == (0, 0) && plans == 0 {
         return "消すものは無かった".to_owned();
     }
     let mut lines = vec![format!(
         "{total} 件・{} を削除",
         human_bytes(s.total_bytes())
     )];
-    let rows: [(&str, &crate::gc::Counts, bool); 7] = [
+    let rows: [(&str, &crate::gc::Counts, bool); 8] = [
         ("欠落トラック", &s.tracks, false),
         ("空のアルバム", &s.albums, false),
         ("退避ファイル", &s.archived, true),
@@ -39,6 +39,7 @@ pub fn gc_note(s: &Summary, jobs: (usize, usize), plans: usize) -> String {
         ("アートワークの行", &s.artwork_rows, false),
         ("サムネイル", &s.artwork_dirs, true),
         ("Inbox", &s.inbox, true),
+        ("アップロード", &s.uploads, true),
     ];
     let (mut skipped, mut failed) = (0, 0);
     for (label, c, bytes) in rows {
@@ -52,6 +53,12 @@ pub fn gc_note(s: &Summary, jobs: (usize, usize), plans: usize) -> String {
         } else {
             format!("{label} {}", c.deleted)
         });
+    }
+    if s.uploads.marked > 0 {
+        lines.push(format!(
+            "放置したアップロードを破棄扱い {}",
+            s.uploads.marked
+        ));
     }
     if skipped + failed > 0 {
         lines.push(format!("見送り {skipped} / 失敗 {failed}"));
@@ -145,6 +152,33 @@ mod tests {
         assert!(lines.contains(&"退避ファイル 3（2.0 KB）"));
         assert!(lines.contains(&"ジョブ行 完了 5"));
         assert!(!n.contains("Derived"), "0 件の種類は出さない: {n}");
+    }
+
+    #[test]
+    fn gc_note_lists_uploads_and_stale_marks() {
+        let s = Summary {
+            uploads: Counts {
+                deleted: 2,
+                bytes: 4096,
+                marked: 1,
+                ..Counts::default()
+            },
+            ..Summary::default()
+        };
+        let n = gc_note(&s, (0, 0), 0);
+        let lines: Vec<&str> = n.lines().collect();
+        assert_eq!(lines[0], "2 件・4.0 KB を削除");
+        assert!(lines.contains(&"アップロード 2（4.0 KB）"), "{n}");
+        assert!(lines.contains(&"放置したアップロードを破棄扱い 1"), "{n}");
+        // 印を付けただけでも「無かった」にしない
+        let only_marked = Summary {
+            uploads: Counts {
+                marked: 1,
+                ..Counts::default()
+            },
+            ..Summary::default()
+        };
+        assert_ne!(gc_note(&only_marked, (0, 0), 0), "消すものは無かった");
     }
 
     #[test]

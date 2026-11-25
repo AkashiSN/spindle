@@ -22,11 +22,13 @@ describe('gcPreviewRows', () => {
       derived: section(3, 3 * 1024 * 1024, ['d1', 'd2', 'd3']),
       artwork_rows: section(0, 0, []),
       artwork_dirs: section(1, 10, ['thumbs/ab']),
+      uploads: section(1, 4096, ['.spindle-upload-0123456789abcdef']),
     })
-    expect(rows.map((r) => r.key)).toEqual(['tracks', 'albums', 'archived', 'derived', 'artwork_rows', 'artwork_dirs'])
+    expect(rows.map((r) => r.key)).toEqual(['tracks', 'albums', 'archived', 'derived', 'artwork_rows', 'artwork_dirs', 'uploads'])
     expect(rows[0]).toEqual({ key: 'tracks', label: '欠落トラック（行の削除）', count: 2, bytes: null, sample: ['a', 'b'] })
     expect(rows[2]).toEqual({ key: 'archived', label: '退避ファイル（期限切れ）', count: 1, bytes: 2048, sample: ['x.wav'] })
     expect(rows[3]!.bytes).toBe(3 * 1024 * 1024)
+    expect(rows[6]!.bytes).toBe(4096)
   })
 })
 

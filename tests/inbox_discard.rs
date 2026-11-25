@@ -45,6 +45,7 @@ impl Env {
             derived: Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap()),
             artwork: Arc::new(ArtworkStore::new(dir.path().join("thumbs"))),
             inbox: Some(Arc::clone(&inbox)),
+            uploads: None,
         };
         Self {
             // 破棄の要求の時刻。種のファイル（今の実時刻に作る）の ctime が、比較の余裕（1 秒）を含めても
@@ -418,6 +419,7 @@ async fn gc_job_deletes_discarded_inbox_items_and_notes_them() {
                 derived: Arc::clone(&env.roots.derived),
                 artwork: Arc::clone(&env.roots.artwork),
                 inbox: env.roots.inbox.clone(),
+                uploads: env.roots.uploads.clone(),
             }),
             1,
         )),

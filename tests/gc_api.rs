@@ -49,6 +49,7 @@ async fn build(with_gc: bool) -> App {
             derived: Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap()),
             artwork: Arc::new(ArtworkStore::new(dir.path().join("thumbs"))),
             inbox: None,
+            uploads: None,
         }));
     }
     App {
@@ -169,6 +170,9 @@ async fn preview_reports_counts_without_deleting_and_post_enqueues_once() {
     assert_eq!(body["archived"]["bytes"], 5);
     assert_eq!(body["derived"]["count"], 0);
     assert_eq!(body["artwork_dirs"]["count"], 0);
+    // アップロードの区分（設計 §5.8）。Inbox が無ければ 0 件
+    assert_eq!(body["uploads"]["count"], 0, "{body}");
+    assert_eq!(body["uploads"]["bytes"], 0);
     // ジョブ行の掃除の対象（P4-18）。設定は例の既定（done 7 日 / failed 30 日）
     assert_eq!(body["jobs"]["done"], 1, "{body}");
     assert_eq!(body["jobs"]["failed"], 0);

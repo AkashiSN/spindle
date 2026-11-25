@@ -59,6 +59,7 @@ impl Env {
             derived: Arc::new(RootDir::open(&dir.path().join("Derived")).unwrap()),
             artwork: Arc::new(ArtworkStore::new(dir.path().join("thumbs"))),
             inbox: Some(Arc::new(RootDir::open(&dir.path().join("Inbox")).unwrap())),
+            uploads: None,
         });
         Self {
             dir,
