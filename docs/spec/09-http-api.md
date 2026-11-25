@@ -312,9 +312,11 @@ POST   /api/inbox/:id/reject, /reopen             rejected へ / pending へ戻�
 POST   /api/inbox/:id/discard, /undiscard         却下した取り込みを破棄待ちにする / 取り消す（rejected だけ。消すのは GC。D-90）
 POST   /api/uploads                               ブラウザからのアップロードを作る → 201 UploadView（§7.12、D-116。以下 uploads は
                                                   `[paths].inbox` が無ければ 503 `inbox_unavailable`）
-GET    /api/uploads                               → { items: [UploadView]（捨てていないもの。新しい順）, broken: [{ dir, mtime_ns, reason }]
-                                                  （マニフェストの無い・読めない、または表示を作れないステージング。捨てる印の付いたものは
-                                                  出さない） }。先に照合（取りこぼした展開・公開の投入）と実体合わせを走らせる
+GET    /api/uploads                               → { items: [UploadView]（捨てていないもの。新しい順）, broken: [{ dir, mtime_ns, reason,
+                                                  deletable }]（マニフェストの無い・読めない、または表示を作れないステージング。捨てる印の
+                                                  付いたものは出さない。`deletable` が false のもの（読み取りの I/O の失敗・新しい版・id の
+                                                  食い違い）は捨てられず GC も消さない） }。先に照合（取りこぼした展開・公開の投入）と
+                                                  実体合わせを走らせる
 GET    /api/uploads/:id                           → UploadView | 404（捨てたもの。公開して捨てた扱いになったものは結果を見せるため返す）。
                                                   照合と実体合わせは一覧と同じ
 POST   /api/uploads/:id/origins                   { path, total } → 201 { origin: OriginView }。同じパスの未完の origin は作り直して返す。
@@ -330,11 +332,15 @@ PATCH  /api/uploads/:id                           { merges?, excluded_files?, ex
                                                   展開・公開のジョブが active・公開を要求した後・捨てた後は 409 `busy`
 POST   /api/uploads/:id/publish                   公開計画を凍結して公開ジョブを投入 → 202 { job_id }（冪等。押し直しは `publish_error` を消して
                                                   投入し直す）。409 `incomplete`（送信・展開が終わっていない、展開に失敗した zip がある）|
-                                                  409 `empty`（入れる件が無い）
+                                                  409 `empty`（入れる件が無い）| 409 `busy`（計画の無いまま捨てたもの、または捨てた後で
+                                                  計画を置き終えていないもの。`publish_error` も消さない）。`not_frozen`（計画が無い）は
+                                                  公開ジョブの内部の検査で、この API は返さない（凍結してから投入する）
 DELETE /api/uploads/:id                           捨てる（`discarded_at`。消すのは GC）→ 204。展開・公開のジョブが active・公開を要求した後は
                                                   409 `busy`（`publish_error` があり upload ジョブが動いていなければ捨てられる）
 DELETE /api/uploads/broken/:dir                   壊れたステージング（`.spindle-upload-<hex>`）に捨てる印を付ける → 204 | 400 `bad_path` |
-                                                  409 `not_broken`（マニフェストが読める。`DELETE /api/uploads/:id` で捨てる）
+                                                  409 `not_broken`（マニフェストが読める。`DELETE /api/uploads/:id` で捨てる）|
+                                                  409 `not_deletable`（マニフェストを読めないが無いわけでも JSON として壊れているわけでもない。
+                                                  読み取りの I/O の失敗・新しい版・id の食い違い。GC も消さないので管理者が確かめる）
 // UploadView = { id, created_at, updated_at, expires_at（放置で破棄扱いになる時刻）, busy, origins: [OriginView],
 //                groups: [{ key, albumartist, album, included, selectable, track_count, format, status, statuses,
 //                           tracks: [MemberView], companions: [MemberView] }],
