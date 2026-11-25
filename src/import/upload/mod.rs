@@ -6,6 +6,7 @@
 pub mod budget;
 pub mod group;
 pub mod manifest;
+pub mod publish;
 pub mod receive;
 pub mod unpack;
 pub mod view;
@@ -13,6 +14,7 @@ pub mod view;
 pub use budget::*;
 pub use group::*;
 pub use manifest::*;
+pub use publish::*;
 pub use receive::*;
 pub use unpack::*;
 pub use view::*;

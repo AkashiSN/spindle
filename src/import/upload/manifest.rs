@@ -63,6 +63,8 @@ pub enum UploadError {
     Db(#[from] crate::db::DbError),
     #[error(transparent)]
     Inbox(#[from] Box<crate::import::inbox::InboxError>),
+    #[error(transparent)]
+    Sidecar(#[from] crate::import::sidecar::SidecarError),
 }
 
 impl From<RelPathError> for UploadError {

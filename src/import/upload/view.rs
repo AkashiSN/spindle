@@ -173,15 +173,28 @@ fn basename(display: &str) -> &str {
 /// `upload/<albumartist>/<album>`、無ければ `upload/_untitled/<origin_label>`（各要素は
 /// `sanitize_component`）。状態の判定と公開で同じものを使う
 pub fn base_dest(group: &Group) -> Result<RelPath, UploadError> {
-    let path = match &group.album {
+    dest_of(
+        &group.albumartist,
+        group.album.as_deref(),
+        &group.origin_label,
+    )
+}
+
+/// [`base_dest`] の中身（凍結した計画の件からも引けるように値で受ける）
+pub(crate) fn dest_of(
+    albumartist: &str,
+    album: Option<&str>,
+    origin_label: &str,
+) -> Result<RelPath, UploadError> {
+    let path = match album {
         Some(album) => format!(
             "{PUBLISH_ROOT}/{}/{}",
-            dest_component(&group.albumartist),
+            dest_component(albumartist),
             dest_component(album)
         ),
         None => format!(
             "{PUBLISH_ROOT}/{UNTITLED_DIR}/{}",
-            dest_component(&group.origin_label)
+            dest_component(origin_label)
         ),
     };
     Ok(RelPath::parse(&path)?)
@@ -436,20 +449,13 @@ pub fn decide(
     Decided { groups }
 }
 
-/// ③ の表示を組み立てる。`busy` は呼び出し側がジョブから判定する
-pub fn build_view(
+/// 件の曲ごとに、同じ音声のライブラリの active な行のパス（整列・重複なし。無い曲は入れない）。
+/// [`decide`] の入力（表示と公開の凍結で同じものを使う）
+pub(crate) fn library_matches(
     conn: &rusqlite::Connection,
-    layout: &LayoutConfig,
-    inbox: &RootDir,
-    m: &Manifest,
-    cfg: &UploadConfig,
-    busy: bool,
-) -> Result<UploadView, UploadError> {
-    let (files, fps) = read_staged(inbox, m)?;
-    let grouping = group(&files, m);
-    let by_staged: HashMap<&str, &StagedFile> =
-        files.iter().map(|f| (f.staged.as_str(), f)).collect();
-
+    grouping: &Grouping,
+    fps: &HashMap<String, Fingerprint>,
+) -> Result<HashMap<String, Vec<String>>, UploadError> {
     let mut matches: HashMap<String, Vec<String>> = HashMap::new();
     for t in grouping.groups.iter().flat_map(|g| &g.tracks) {
         let Some(fp) = fps.get(&t.staged) else {
@@ -465,6 +471,24 @@ pub fn build_view(
             matches.insert(t.staged.clone(), paths);
         }
     }
+    Ok(matches)
+}
+
+/// ③ の表示を組み立てる。`busy` は呼び出し側がジョブから判定する
+pub fn build_view(
+    conn: &rusqlite::Connection,
+    layout: &LayoutConfig,
+    inbox: &RootDir,
+    m: &Manifest,
+    cfg: &UploadConfig,
+    busy: bool,
+) -> Result<UploadView, UploadError> {
+    let (files, fps) = read_staged(inbox, m)?;
+    let grouping = group(&files, m);
+    let by_staged: HashMap<&str, &StagedFile> =
+        files.iter().map(|f| (f.staged.as_str(), f)).collect();
+
+    let matches = library_matches(conn, &grouping, &fps)?;
     let decided = decide(m, &grouping, &matches);
 
     let mut groups = Vec::with_capacity(grouping.groups.len());

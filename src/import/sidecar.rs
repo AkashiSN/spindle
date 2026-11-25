@@ -173,6 +173,22 @@ pub struct Sidecar {
     /// CD の吸い出しの記録（CD の件だけ）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rip: Option<RipEntry>,
+    /// ブラウザからのアップロードの記録（アップロードで置いた件だけ。設計 §5.5）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<UploadEntry>,
+}
+
+/// アップロードで置いた件の記録（承認画面の出どころ「アップロード（日時、元の名前）」に使う）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadEntry {
+    /// アップロード ID（16 桁の hex）
+    pub upload_id: String,
+    /// 件のキー（`Group::key`）
+    pub group_key: String,
+    /// 公開計画を凍結した時刻（「Inbox へ置く」を押した時刻。UNIX epoch 秒）
+    pub uploaded_at: i64,
+    /// 件のメンバーの元の名前（ブラウザ上の相対パスか zip 名。重複なし、出現順）
+    pub origins: Vec<String>,
 }
 
 fn version_default() -> u32 {
