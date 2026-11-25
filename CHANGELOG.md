@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-25
+
 ### Added
 
 - 購入音源をブラウザから送る「アップロード」画面。zip・音声ファイル・フォルダを受け、タグでアルバムごとの件に分け、
@@ -155,7 +157,8 @@
 - YouTube（ytmusic）統合: 再生リストの購読と同期、タイトル解析、Inbox への取り込み（P3、P4）
 - 認証（argon2id、CSRF 検査）、DB の自動バックアップ、GHCR へのイメージ配布（P0、P4-12）
 
-[Unreleased]: https://github.com/AkashiSN/spindle/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/AkashiSN/spindle/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/AkashiSN/spindle/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/AkashiSN/spindle/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/AkashiSN/spindle/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AkashiSN/spindle/compare/v0.4.4...v0.5.0
