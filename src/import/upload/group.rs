@@ -91,13 +91,13 @@ fn with_counter(name: &str, n: u32) -> String {
     }
 }
 
-fn origin_label(client_path: &str, class: FileClass) -> String {
+fn origin_label(client_path: &str) -> String {
     let first = client_path.split('/').next().unwrap_or(client_path);
     if client_path.contains('/') {
         return first.to_string();
     }
-    match (class, first.rsplit_once('.')) {
-        (_, Some((stem, _))) if !stem.is_empty() => stem.to_string(),
+    match first.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem.to_string(),
         _ => first.to_string(),
     }
 }
@@ -150,7 +150,7 @@ pub fn group(files: &[StagedFile], m: &Manifest) -> Grouping {
     let mut companions: Vec<&StagedFile> = Vec::new();
 
     // 件のキーを決め、曲を振り分ける（merge は後で畳む）
-    for f in &sorted {
+    for (si, f) in sorted.iter().enumerate() {
         match f.class {
             FileClass::Audio => {}
             FileClass::Companion => {
@@ -185,7 +185,7 @@ pub fn group(files: &[StagedFile], m: &Manifest) -> Grouping {
         };
         let label = match (&album, client_path) {
             (Some(a), _) => a.clone(),
-            (None, Some(p)) => origin_label(p, origin_class.unwrap_or(FileClass::Audio)),
+            (None, Some(p)) => origin_label(p),
             (None, None) => basename(&f.display).to_string(),
         };
         let idx = *by_key.entry(key.clone()).or_insert_with(|| {
@@ -204,7 +204,7 @@ pub fn group(files: &[StagedFile], m: &Manifest) -> Grouping {
                 drafts[idx].origins.push(p.to_string());
             }
         }
-        drafts[idx].tracks.push(files_index(&sorted, f));
+        drafts[idx].tracks.push(si);
     }
 
     // merges: 各組の存在するキーを最初の件へ畳む
@@ -224,8 +224,7 @@ pub fn group(files: &[StagedFile], m: &Manifest) -> Grouping {
     let mut finals: Vec<Draft> = Vec::new();
     let mut slot: HashMap<usize, usize> = HashMap::new();
     for (i, draft) in drafts.iter().enumerate() {
-        let head = resolve(&absorbed, i);
-        if head == i {
+        if resolve(&absorbed, i) == i {
             slot.insert(i, finals.len());
             finals.push(Draft {
                 key: draft.key.clone(),
@@ -235,7 +234,14 @@ pub fn group(files: &[StagedFile], m: &Manifest) -> Grouping {
                 origins: draft.origins.clone(),
                 tracks: draft.tracks.clone(),
             });
-        } else if let Some(&s) = slot.get(&head) {
+        }
+    }
+    for (i, draft) in drafts.iter().enumerate() {
+        let head = resolve(&absorbed, i);
+        if head == i {
+            continue;
+        }
+        if let Some(&s) = slot.get(&head) {
             for o in &draft.origins {
                 if !finals[s].origins.contains(o) {
                     finals[s].origins.push(o.clone());
@@ -246,21 +252,21 @@ pub fn group(files: &[StagedFile], m: &Manifest) -> Grouping {
     }
 
     // 同梱の付け先: 曲と同じ親ディレクトリの件、残りは件が 1 つならそこ
-    let dirs: Vec<HashSet<&str>> = finals
+    let dirs: Vec<HashSet<String>> = finals
         .iter()
         .map(|d| {
             d.tracks
                 .iter()
-                .map(|&t| parent_dir(&sorted[t].display))
+                .map(|&t| canonical_key(parent_dir(&sorted[t].display)))
                 .collect()
         })
         .collect();
     let mut comp_of: Vec<Vec<usize>> = vec![Vec::new(); finals.len()];
     for (ci, c) in companions.iter().enumerate() {
-        let dir = parent_dir(&c.display);
+        let dir = canonical_key(parent_dir(&c.display));
         let target = dirs
             .iter()
-            .position(|s| s.contains(dir))
+            .position(|s| s.contains(&dir))
             .or(if finals.len() == 1 { Some(0) } else { None });
         match target {
             Some(g) => comp_of[g].push(ci),
@@ -316,10 +322,6 @@ fn resolve(absorbed: &HashMap<usize, usize>, mut i: usize) -> usize {
         i = n;
     }
     i
-}
-
-fn files_index(sorted: &[&StagedFile], f: &StagedFile) -> usize {
-    sorted.iter().position(|s| std::ptr::eq(*s, f)).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -572,5 +574,57 @@ mod tests {
             names(&g.groups[0]),
             vec!["01.flac", "Disc - 01.flac", "Disc - 01 (2).flac"]
         );
+    }
+
+    #[test]
+    fn merge_head_after_absorbed_keeps_all_tracks() {
+        let mut m = manifest(vec![
+            origin("o1", "a.flac", FileClass::Audio),
+            origin("o2", "b.flac", FileClass::Audio),
+        ]);
+        m.merges = vec![vec!["file:o2".into(), "file:o1".into()]];
+        let g = group(
+            &[
+                sf("o1", "a.flac", FileClass::Audio, &[]),
+                sf("o2", "b.flac", FileClass::Audio, &[]),
+            ],
+            &m,
+        );
+        assert_eq!(g.groups.len(), 1);
+        assert_eq!(g.groups[0].key, "file:o2");
+        assert_eq!(g.groups[0].tracks.len(), 2);
+        assert_eq!(g.groups[0].origins.len(), 2);
+    }
+
+    #[test]
+    fn track_and_companion_names_collide() {
+        let m = manifest(vec![origin("o1", "m.zip", FileClass::Zip)]);
+        let g = group(
+            &[
+                sf("o1", "m.zip/x.flac", FileClass::Audio, &[("ALBUM", "A")]),
+                sf("o1", "m.zip/X.FLAC", FileClass::Companion, &[]),
+            ],
+            &m,
+        );
+        let mut n = names(&g.groups[0]);
+        n.sort();
+        assert_eq!(n, vec!["X.FLAC", "m.zip - x.flac"]);
+    }
+
+    #[test]
+    fn case_variant_album_is_one_group() {
+        let m = manifest(vec![
+            origin("o1", "a.flac", FileClass::Audio),
+            origin("o2", "b.flac", FileClass::Audio),
+        ]);
+        let g = group(
+            &[
+                sf("o1", "a.flac", FileClass::Audio, &[("ALBUM", "Bar")]),
+                sf("o2", "b.flac", FileClass::Audio, &[("ALBUM", "bar")]),
+            ],
+            &m,
+        );
+        assert_eq!(g.groups.len(), 1);
+        assert_eq!(g.groups[0].album.as_deref(), Some("Bar"));
     }
 }
