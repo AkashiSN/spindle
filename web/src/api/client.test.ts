@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiFetch, apiPost } from './client'
+import { ApiError, apiFetch, apiPost, onUnauthorized, putBinary } from './client'
 
 function respond(status: number, body: string, headers: Record<string, string> = {}) {
   return new Response(body, { status, headers })
@@ -29,5 +29,24 @@ describe('apiFetch', () => {
     expect(err).toBeInstanceOf(ApiError)
     expect((err as ApiError).code).toBe('not_cancellable')
     expect((err as ApiError).status).toBe(409)
+  })
+})
+
+describe('putBinary', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('401 は他の要求と同じくセッション切れとして通知する', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => respond(401, '{"error":"unauthorized"}')))
+    const seen = vi.fn()
+    const off = onUnauthorized(seen)
+    const r = await putBinary('/api/uploads/x/origins/o1?offset=0', new Blob(['a']))
+    off()
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(r).toEqual({ ok: false, status: 401, body: { error: 'unauthorized' } })
+  })
+
+  it('JSON でない失敗の本文は null', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => respond(413, 'Payload Too Large')))
+    await expect(putBinary('/p', new Blob(['a']))).resolves.toEqual({ ok: false, status: 413, body: null })
   })
 })

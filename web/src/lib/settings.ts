@@ -10,7 +10,7 @@ export type GcPreview = {
   derived: GcSection
   artwork_rows: GcSection
   artwork_dirs: GcSection
-  /** アップロードの一時置き場（設計 §5.8）。放置の破棄扱いも 1 件に数える */
+  /** アップロードの一時置き場（SPEC §7.12「GC」）。放置の破棄扱いも 1 件に数える */
   uploads: GcSection
 }
 

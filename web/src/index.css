@@ -3555,7 +3555,7 @@ table.inbox-tracks tbody tr:hover td.inbox-cell-changed {
 .inbox-exclude-cell {
   text-align: center;
 }
-/* アップロード画面（設計 2026-11-25-upload §4.2）。段・帯・一覧は YouTube 画面のものを使う */
+/* アップロード画面（SPEC §12.6「アップロード」）。段・帯・一覧は YouTube 画面のものを使う */
 .upload-resume {
   margin-bottom: 8px;
 }

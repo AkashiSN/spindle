@@ -600,6 +600,7 @@ export type UploadView = {
   discarded_at: number | null
   choices: UploadChoices
 }
-export type UploadBrokenView = { dir: string; mtime_ns: number; reason: string }
+/** `deletable` が false のもの（読み取りの失敗・新しい版）は捨てられず、GC も消さない */
+export type UploadBrokenView = { dir: string; mtime_ns: number; reason: string; deletable: boolean }
 export type UploadList = { items: UploadView[]; broken: UploadBrokenView[] }
 export type UploadPatch = Partial<UploadChoices> & { removed_origins?: string[] }

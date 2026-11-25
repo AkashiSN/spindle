@@ -1,5 +1,6 @@
-// アップロード画面の純粋ロジック（設計 docs/development/2026-11-25-upload-design.md §4.2・§5.2）。
-// 送信の区切り、③ の状態の文言と色、④ の押せる条件、③ の選択の PATCH 本文、前回の続きの帯
+// アップロード画面の純粋ロジック（SPEC §12.6「アップロード」、§7.12「送信」）。
+// 送信の区切り、③ の状態の文言と色、④ の押せる条件、③ の選択の PATCH 本文、前回の続きの帯、
+// 取り直しの応答の順序
 
 import type {
   UploadChoices,
@@ -108,7 +109,7 @@ function zipPending(o: UploadOriginView): boolean {
 }
 
 /**
- * 「Inbox へ置く」を押せるか（サーバの凍結の条件と同じ順。§4.2 ④）。凍結した後は、止まった失敗が
+ * 「Inbox へ置く」を押せるか（サーバの凍結の条件と同じ順。SPEC §12.6 ④）。凍結した後は、止まった失敗が
  * あってジョブが動いていないときだけ押し直せる（理由は出さない。④ が凍結後の表示に変わる）
  */
 export function canPublish(v: UploadView, sending: boolean): { ok: boolean; reason: string | null } {
@@ -212,12 +213,17 @@ function shortDateTime(epoch: number): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-/** 前回の続きの帯の文言（いちばん新しいもの。画面は 1 件ずつ `[v]` で呼ぶ） */
+function shortDate(epoch: number): string {
+  const d = new Date(epoch * 1000)
+  return `${d.getMonth() + 1}/${d.getDate()}`
+}
+
+/** 前回の続きの帯の文言（いちばん新しいもの。画面は 1 件ずつ `[v]` で呼ぶ）。放置で捨てる期限（`expires_at`）の日付を添える */
 export function resumeBanner(items: UploadView[]): string | null {
   const v = resumeCandidates(items)[0]
   if (v == null) return null
   const c = planCounts(v)
-  return `前回の送信で Inbox へまだ置いていないものがあります（${shortDateTime(v.created_at)}、${c.groups} 件 ${c.tracks} 曲）`
+  return `前回の送信で Inbox へまだ置いていないものがあります（${shortDateTime(v.created_at)}、${c.groups} 件 ${c.tracks} 曲。${shortDate(v.expires_at)} まで残す）`
 }
 
 const KNOWN: Record<string, string> = {
@@ -227,6 +233,7 @@ const KNOWN: Record<string, string> = {
   exists: '同じ名前のファイルはもう送ってある',
   no_space: 'Inbox の空き容量が足りない',
   not_retryable: 'この zip は展開し直せない',
+  not_deletable: 'マニフェストを読めないだけかもしれないので捨てない（管理者が確かめる）',
   not_found: 'アップロードが見つからない（捨てたか、期限が切れた）',
   origin_not_found: '送ったファイルが見つからない',
   inbox_unavailable: 'Inbox が設定されていない',
@@ -285,4 +292,31 @@ export function canResend(send: { originId: string | null }, v: UploadView | nul
   if (send.originId == null || v == null) return false
   const o = v.origins.find((x) => x.id === send.originId)
   return o != null && (o.removed || o.damaged)
+}
+
+/**
+ * 単体の取り直し（GET）の応答の順序。要求を送るときに `send()` で番号を取り、応答を反映する前に
+ * `accept(n)` で確かめる。変更（PATCH・送信など）の応答を反映したら `mutated()` で番号を進め、それより
+ * 前に送った GET の応答は捨てる（変更の前の状態で上書きしない）。GET 同士も古い番号の応答は捨てる
+ */
+export interface ViewSequence {
+  send: () => number
+  mutated: () => void
+  accept: (seq: number) => boolean
+}
+
+export function viewSequence(): ViewSequence {
+  let counter = 0
+  let applied = 0
+  return {
+    send: () => ++counter,
+    mutated: () => {
+      applied = ++counter
+    },
+    accept: (seq) => {
+      if (seq <= applied) return false
+      applied = seq
+      return true
+    },
+  }
 }

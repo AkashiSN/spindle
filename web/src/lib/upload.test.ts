@@ -26,6 +26,7 @@ import {
   toggleGroupIn,
   unpackPending,
   uploadErrorMessage,
+  viewSequence,
 } from './upload'
 import type { UploadPatch } from '../api/types'
 
@@ -337,13 +338,14 @@ describe('resumeBanner / resumeCandidates', () => {
   it('無ければ null', () => {
     expect(resumeBanner([])).toBeNull()
   })
-  it('日時と件・曲の数', () => {
+  it('日時と件・曲の数、残す期限', () => {
     const t = new Date(2026, 10, 24, 22, 10).getTime() / 1000
     const v = view({
       created_at: t,
+      expires_at: new Date(2026, 11, 24, 22, 10).getTime() / 1000,
       groups: [group({ key: 'a' }), group({ key: 'b', track_count: 1 }), group({ key: 'c', track_count: 1 }), group({ key: 'd', included: false })],
     })
-    expect(resumeBanner([v])).toBe('前回の送信で Inbox へまだ置いていないものがあります（11/24 22:10、3 件 3 曲）')
+    expect(resumeBanner([v])).toBe('前回の送信で Inbox へまだ置いていないものがあります（11/24 22:10、3 件 3 曲。12/24 まで残す）')
   })
   it('新しい順に並べ、送ったものが何も無いものは出さない', () => {
     const a = view({ id: 'a', created_at: 10 })
@@ -450,5 +452,38 @@ describe('canResend / completedOrigin / unpackPending', () => {
     const z = origin({ class: 'zip', zip: { generation: 0, unpacking: true, rejected: [], error: null } })
     expect(unpackPending(view({ origins: [z] }))).toBe(true)
     expect(unpackPending(view({ origins: [{ ...z, zip: { generation: 1, unpacking: false, rejected: [], error: null } }] }))).toBe(false)
+  })
+})
+
+describe('viewSequence', () => {
+  it('変更の応答を反映した後は、それより前に送った GET の応答を捨てる', () => {
+    const seq = viewSequence()
+    const poll = seq.send() // 周期の GET を送った
+    seq.mutated() // PATCH の応答を反映した
+    expect(seq.accept(poll)).toBe(false) // 遅れて届いた古い GET は捨てる
+    const after = seq.send()
+    expect(seq.accept(after)).toBe(true)
+  })
+  it('変更の応答の前に送り、後に届いた GET も捨てる（変更の前の状態かもしれない）', () => {
+    const seq = viewSequence()
+    const poll = seq.send()
+    const later = seq.send()
+    seq.mutated()
+    expect(seq.accept(later)).toBe(false)
+    expect(seq.accept(poll)).toBe(false)
+  })
+  it('GET 同士は新しい番号の応答が先に届いたら古いものを捨てる', () => {
+    const seq = viewSequence()
+    const a = seq.send()
+    const b = seq.send()
+    expect(seq.accept(b)).toBe(true)
+    expect(seq.accept(a)).toBe(false)
+  })
+  it('変更が無ければ順に届いた GET はすべて反映する', () => {
+    const seq = viewSequence()
+    const a = seq.send()
+    expect(seq.accept(a)).toBe(true)
+    const b = seq.send()
+    expect(seq.accept(b)).toBe(true)
   })
 })

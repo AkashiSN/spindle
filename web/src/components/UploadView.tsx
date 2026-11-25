@@ -1,4 +1,4 @@
-// アップロード画面（設計 docs/development/2026-11-25-upload-design.md §4.2）。番号付きの段:
+// アップロード画面（SPEC §12.6「アップロード」）。番号付きの段:
 // ① ファイルを選ぶ（選んだ時点で送る）→ ② 送信（ファイルごとの進捗・zip の展開）→ ③ Inbox での分け方
 // （件の表とチェック・まとめる）→ ④ Inbox へ置く → ⑤ Inbox で承認（置いた件を開く）。上に前回の続きの帯
 
@@ -165,15 +165,19 @@ function ResumeBanners({ upload }: { upload: UploadState }) {
       {list.broken.map((b) => (
         <p key={b.dir} className="yt-banner warn small">
           壊れたアップロード <span className="path">{b.dir}</span>（{b.reason}）{' '}
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => {
-              if (window.confirm('壊れたアップロードを捨てますか？')) void upload.discardBroken(b.dir)
-            }}
-          >
-            捨てる
-          </button>
+          {b.deletable ? (
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                if (window.confirm('壊れたアップロードを捨てますか？')) void upload.discardBroken(b.dir)
+              }}
+            >
+              捨てる
+            </button>
+          ) : (
+            '自動では消さない（管理者が確かめる）'
+          )}
         </p>
       ))}
     </div>

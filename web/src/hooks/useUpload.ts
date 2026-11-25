@@ -1,10 +1,10 @@
-// アップロード画面の状態（設計 docs/development/2026-11-25-upload-design.md §4.2・§5.2）。
+// アップロード画面の状態（SPEC §12.6「アップロード」、§7.12「送信」）。
 // 開いているアップロード 1 つと、その送信キュー（同時 2、32 MiB ずつ PUT）、前回の続きの一覧。
 // 送信は画面を切り替えても続く（hook は App が持つ）。取り直しは SSE の job イベントと、画面を開いていて
 // 何かが動いている間の 2 秒ごと
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { apiFetch, parseErrorBody } from '../api/client'
+import { apiFetch, parseErrorBody, putBinary } from '../api/client'
 import type { UploadList, UploadOriginView, UploadPatch, UploadView } from '../api/types'
 import {
   canResend,
@@ -17,6 +17,7 @@ import {
   serialQueue,
   shouldSend,
   uploadErrorMessage,
+  viewSequence,
 } from '../lib/upload'
 
 /** 送信キューの 1 項（このタブで選んだファイル。ブラウザを閉じると消える） */
@@ -71,23 +72,11 @@ type Fail = { status: number; body: unknown }
 /** JSON の要求。本文が JSON でない失敗（axum の 413 は text/plain）は body = null */
 const request = (path: string, init: RequestInit) => parseErrorBody<unknown>(path, init)
 
-/** 1 チャンクの PUT（生の本文） */
+/** 1 チャンクの PUT（生の本文。401 はクライアントがログイン画面へ切り替える） */
 async function putChunk(path: string, blob: Blob, signal: AbortSignal): Promise<{ ok: true; body: { received: number; complete: boolean } } | ({ ok: false } & Fail)> {
-  const res = await fetch(path, {
-    method: 'PUT',
-    credentials: 'same-origin',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/octet-stream' },
-    body: blob,
-    signal,
-  })
-  let body: unknown = null
-  try {
-    body = await res.json()
-  } catch {
-    // JSON でない本文（413 の text/plain など）
-  }
-  if (res.ok) return { ok: true, body: body as { received: number; complete: boolean } }
-  return { ok: false, status: res.status, body }
+  const r = await putBinary(path, blob, signal)
+  if (r.ok) return { ok: true, body: r.body as { received: number; complete: boolean } }
+  return r
 }
 
 /** ドロップの項目を辿ってファイルと相対パスを集める（`webkitGetAsEntry` は同期で呼ぶ必要がある） */
@@ -163,6 +152,16 @@ export function useUpload(enabled: boolean): UploadState {
     viewRef.current = v
     setView(v)
   }, [])
+  // 取り直しの応答の順序: 変更の応答を反映した後に、それより前に送った GET の応答で戻さない
+  const seqRef = useRef(viewSequence())
+  /** 変更の応答（の表示）を反映する */
+  const applyMutation = useCallback(
+    (v?: UploadView) => {
+      seqRef.current.mutated()
+      if (v !== undefined) setCurrent(v)
+    },
+    [setCurrent],
+  )
 
   const fetchList = useCallback(() => {
     apiFetch<UploadList>('/api/uploads')
@@ -174,12 +173,15 @@ export function useUpload(enabled: boolean): UploadState {
     const id = idRef.current
     if (id == null) return
     // 周期・送信の後から投げっぱなしで呼ぶので、通信の失敗もここで文言にする
+    const seq = seqRef.current.send()
     const r = await request(`/api/uploads/${id}`, { method: 'GET' }).catch((e: unknown) => {
       setError(errText(e))
       return null
     })
     if (r == null || idRef.current !== id) return
     if (r.ok) {
+      // 変更の応答より古い（か、後に送った GET が先に届いた）応答は捨てる
+      if (!seqRef.current.accept(seq)) return
       setCurrent(r.body as UploadView)
     } else if (r.status === 404) {
       // 捨てた・GC が消した
@@ -333,9 +335,9 @@ export function useUpload(enabled: boolean): UploadState {
     const v = r.body as UploadView
     sendsRef.current = []
     setId(v.id)
-    setCurrent(v)
+    applyMutation(v)
     return v.id
-  }, [setCurrent, setId])
+  }, [applyMutation, setId])
 
   const creating = useRef<Promise<string | null> | null>(null)
   const addFiles = useCallback(
@@ -436,15 +438,18 @@ export function useUpload(enabled: boolean): UploadState {
           await fetchView()
           return false
         }
-        if (applyView && r.body != null) setCurrent(r.body as UploadView)
-        else await fetchView()
+        if (applyView && r.body != null) applyMutation(r.body as UploadView)
+        else {
+          applyMutation()
+          await fetchView()
+        }
         return true
       } catch (e) {
         setError(errText(e))
         return false
       }
     },
-    [fetchView, setCurrent],
+    [fetchView, applyMutation],
   )
 
   const patch = useCallback(
